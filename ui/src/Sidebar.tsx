@@ -1,3 +1,4 @@
+import { BacklogButton } from './Backlog'
 import { needsYou, isDone } from './paneState'
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { Archive, ArchiveRestore, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, Search, Settings, Terminal, Trash2, X } from 'lucide-react'
@@ -189,6 +190,7 @@ interface Props {
   onRestoreTab: (pane: Pane) => void
   onPastChat: (chat: PastChat) => void
   onSettings: () => void
+  onBacklog: () => void
   onClose?: () => void
   // Panes shown in the desktop workspace, in slot order: their rows show the slot key (⌥1 to ⌥4).
   slots?: string[]
@@ -209,7 +211,7 @@ interface Props {
   onAddPane?: (session: Session) => void
 }
 
-export function Sidebar({ api, sessions, selected, prefs, update, loading, error, onRetry, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onClose, slots, drag, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
+export function Sidebar({ api, sessions, selected, prefs, update, loading, error, onRetry, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, onClose, slots, drag, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -355,6 +357,7 @@ export function Sidebar({ api, sessions, selected, prefs, update, loading, error
     <label className="sidebar-search"><Search size={16} aria-hidden="true" /><input type="search" placeholder="Search" aria-label="Search sessions" aria-keyshortcuts={onCommandMenu ? undefined : 'Control+K Meta+K'} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={searchKeys} />{onCommandMenu
       ? <button type="button" className="search-key" aria-label="Command menu" aria-keyshortcuts="Control+K Meta+K" title="Go to a pane or run a command" onClick={onCommandMenu}>{shortcutLabel}</button>
       : <kbd className="search-key" aria-hidden="true">{shortcutLabel}</kbd>}</label>
+    <BacklogButton api={api} onOpen={onBacklog} />
     <nav className="session-groups" aria-label="Sessions">
       {error && <div className="sidebar-error" role="alert">{error}<button onClick={onRetry}>Retry</button></div>}
       {openingChat && <div className="past-opening" role="status">Opening {openingChat}…</div>}

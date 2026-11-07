@@ -3,7 +3,7 @@
 Claude Code's SessionStart hook.
 
   project_launch.py claude [args...]   run claude, with the project folder and the hook when the session has a project
-  project_launch.py codex [args...]    run codex, with the project text as developer_instructions
+  project_launch.py codex [args...]    run codex, with the backlog folder and the project text as developer_instructions
   project_launch.py hook <id>          Claude Code SessionStart hook: print the project text as additionalContext
 
 ~/.local/bin/tether-claude and tether-codex call this. Any failure runs the plain agent with the same args, and the
@@ -100,15 +100,19 @@ def codex_args(pid, args):
     if any(arg in CODEX_PLAIN or 'developer_instructions' in arg for arg in args) or codex_has_own_instructions():
         return args
     text = ''
+    folder_args = []
     if pid:
+        import backlog
         import projects
         text = projects.render(pid, 'codex')
         record_revision(pid)
+        backlog.folder().mkdir(mode=0o700, parents=True, exist_ok=True)
+        folder_args = ['--add-dir', str(backlog.folder())]  # the sandbox blocks the backlog command's writes without it
     if os.environ.get('TETHER_CDP_URL'):
         from agent_browser_cli import note
         text = text + '\n\n' + note() if text else note()
         args = [*codex_browser_env_args(), *args]
-    return ['-c', 'developer_instructions=' + toml_string(text), *args] if text else args
+    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args] if text else args
 
 
 def codex_browser_env_args():

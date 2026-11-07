@@ -131,7 +131,7 @@ export function ProjectSheet({ api, session, mark, pin, onChanged, onClose }: { 
           <button type="button" className="secondary" disabled={pending} onClick={async () => { if (await post('pin', { path: pinPath, mode: 'copy' })) setPinPath(undefined) }}>Pin a copy</button>
           <button type="button" className="primary" autoFocus disabled={pending} onClick={async () => { if (await post('pin', { path: pinPath, mode: 'link' })) setPinPath(undefined) }}>Pin a link</button></div>
       </div>}
-      {!project.instructions.trim() && !project.pins.length && !project.notes.length && !pinPath && <p className="hint">Agents here get only a short line about the notes folder. Add instructions or pin a file to give them more.</p>}
+      {!project.instructions.trim() && !project.pins.length && !project.notes.length && !pinPath && <p className="hint">Agents here get only Tether's standard guide. Add instructions or pin a file to give them more.</p>}
 
       <section className="settings-group" aria-labelledby="project-instructions"><h3 id="project-instructions">Instructions</h3>
         <label htmlFor="project-text" className="visually-hidden">Instructions for every agent in this session</label>

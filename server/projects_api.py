@@ -4,6 +4,7 @@ import json
 import subprocess
 from urllib.parse import parse_qs, urlsplit
 
+import backlog
 import projects
 
 PREFIX = '/mobile/api/projects/'
@@ -39,6 +40,8 @@ def get(handler, run=subprocess.run, home=None):
             return projects.marks(run, home)
         if name == 'note':
             return projects.read_note(query.get('project'), query.get('name'))
+        if name == 'backlog':
+            return backlog.read()
         raise projects.ProjectError(404, 'Not found')
     _answer(handler, work)
 
@@ -53,6 +56,8 @@ def post(handler, home=None):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise ValueError('Invalid request.')
+        if name == 'backlog':  # one list for the app, with no project id or revision
+            return backlog.save(body.get('text'), body.get('version'))
         pid = body.get('project')
         projects.bundle(pid)  # checks the id
         revision = body.get('revision')

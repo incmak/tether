@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import paths
+import backlog
 import project_launch
 import projects
 from agent_browser_cli import note
@@ -53,12 +54,14 @@ class UnitTests(unittest.TestCase):
 
     def test_codex_gets_the_notes_part_even_for_an_empty_project(self):
         args = project_launch.codex_args(PID, ['resume', '--last'])
-        self.assertEqual((args[0], args[2:]), ('-c', ['resume', '--last']))
+        folder = str(backlog.folder())
+        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, 'resume', '--last']))
+        self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
         projects.set_instructions(PID, 'Use "pnpm".\nNo emoji 🙂', 0)
         args = project_launch.codex_args(PID, ['resume', '--last'])
         self.assertEqual(args[0], '-c')
-        self.assertEqual(args[2:], ['resume', '--last'])
+        self.assertEqual(args[2:], ['--add-dir', folder, 'resume', '--last'])
         key, _, value = args[1].partition('=')
         self.assertEqual(key, 'developer_instructions')
         self.assertIn('Use "pnpm".', tomllib.loads('v = ' + value)['v'])
@@ -192,7 +195,8 @@ class WrapperTests(unittest.TestCase):
         pane = self.tmux('display-message', '-p', '-t', 'proj', '#{@project_rev}').stdout.strip()
         self.assertEqual(pane, f'{pid}:0')
         argv = self.run_in_pane(f'{launcher} codex resume --last')
-        self.assertEqual((argv[1], argv[3:]), ('-c', ['resume', '--last', '1']))  # the Notes part, even with no instructions
+        folder = str(self.temp / 'tether/backlog')
+        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, 'resume', '--last', '1']))  # the Notes part, even with no instructions
         with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
             projects.set_instructions(pid, 'Use pnpm.', 0)
         argv = self.run_in_pane(f'{launcher} codex resume --last')

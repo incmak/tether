@@ -364,6 +364,11 @@ def render(pid, agent='claude', home=None):
                  '`send --pane %N "text"` (`-` reads stdin) steers a tab you started. '
                  '`wait --pane %N [--timeout SECONDS]` (max 600) prints JSON with its last reply when its turn ends. '
                  'Exit: 0 finished, 3 timeout (it keeps working), 4 helper gone, 5 needs_input with the prompt, 6 no_turn (no new turn after 60 s; the message may be lost).\n')
+    backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
+    parts.append(f'\n## Backlog\nThe user keeps one backlog across all sessions. Change it only with this command, never by editing its file: '
+                 f'`{backlog} list`, `add --agent claude|codex "text"`, `detail "part of item" "text"`, `done "part of item"`. '
+                 '`list` shows the user\'s inbox and this project\'s open items. Add real follow-up work outside your task without asking. '
+                 'Fill in or work on an item only when the user points you to it.\n')
     parts.append(f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
                  '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
     if found:
