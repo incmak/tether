@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Check, Menu, Plus, Terminal } from 'lucide-react'
 import type { Api, Pane } from './api'
@@ -11,6 +11,7 @@ import { KIND_LABEL } from './needs'
 import { WorktreeMark } from './Worktree'
 import { AgentIcon, agentNames, chatTitle, sessionName, shownIndex } from './Sidebar'
 import './Home.css'
+import { Briefing, Desk, PROTOTYPE, PrototypeSwitcher, Timeline, readVariant } from './HomePrototype'
 
 // Home answers one question: what do my agents need, across every session? Needs you, Working and Done.
 // Needs you cards carry the answer buttons. The other two groups stay quiet rows, so the eye goes to what waits.
@@ -29,13 +30,13 @@ const groupId = (key: GroupKey) => `home-group-${key}`
 const focusRow = (id: string) => document.querySelector<HTMLButtonElement>(`.home [data-pane="${CSS.escape(id)}"] .home-open`)?.focus()
 
 /** The time on a card. The first value comes from the layout effect, and Home's one interval keeps it current. */
-function Timer({ kind, at }: { kind: string; at: number }) {
+export function Timer({ kind, at }: { kind: string; at: number }) {
   const ref = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => { if (ref.current) ref.current.textContent = cardTime({ kind, at }, Date.now() / 1000) }, [kind, at])
   return at ? <span ref={ref} className="home-time" data-at={at} data-kind={kind} /> : null
 }
 
-function cardNames(card: HomeCard) {
+export function cardNames(card: HomeCard) {
   const { pane } = card
   const session = card.session?.name ?? sessionName(pane)
   const name = chatTitle(pane, { name: session })
@@ -90,6 +91,7 @@ export function Home({ api, groups, hasAgents, loaded, loading, error, onRetry, 
   const sessionCount = new Set(cards.map(card => card.session?.id ?? card.pane.id)).size
   const rows = () => [...(root.current?.querySelectorAll<HTMLButtonElement>('.home-open') ?? [])]
   const { busy, errors, answer, fail, onAnswerKey } = useAnswers({ api, items: groups.needs, active: true, onUpdate, focusRow })
+  const [variant, setVariant] = useState(() => PROTOTYPE ? readVariant() : 'board')
 
   // One clock for every card: it writes only the text that changed, with no React render and no server poll.
   useEffect(() => {
@@ -136,7 +138,16 @@ export function Home({ api, groups, hasAgents, loaded, loading, error, onRetry, 
   if (!loaded && !loading) return <Blank title="Tether cannot reach the server" text={error || 'The session list did not load.'} onMenu={onMenu}><button type="button" className="secondary home-blank-action" onClick={onRetry}>Try again</button></Blank>
   if (loaded && !hasAgents) return <Blank title="Space for your next task." text="No agent is running. Open a session, or start something new." onMenu={onMenu}><button type="button" className="primary home-blank-action" onClick={onNew}><Plus size={18} />New session</button></Blank>
 
+  if (PROTOTYPE && variant !== 'board' && loaded) {
+    const props = { api, groups, busy, errors, answer, fail, onAnswerKey, onOpen, onMarkRead, onNew, onMenu }
+    return <section className="home" ref={root} aria-label="Home">
+      {variant === 'desk' ? <Desk {...props} /> : variant === 'timeline' ? <Timeline {...props} /> : <Briefing {...props} />}
+      <PrototypeSwitcher current={variant} onChange={setVariant} />
+    </section>
+  }
+
   return <section className="home" ref={root} aria-label="Home" onFocus={onFocus}>
+    {PROTOTYPE && <PrototypeSwitcher current={variant} onChange={setVariant} />}
     <div className="home-inner">
       <header className="home-head">
         <button type="button" className="icon-button mobile-menu" aria-label="Open sessions" onClick={onMenu}><Menu /></button>
