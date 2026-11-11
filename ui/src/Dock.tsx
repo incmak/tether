@@ -12,6 +12,9 @@ import { Linked, PanelText, PanelPre, CopyButton, Markdown } from './Messages'
 import { Elapsed } from './Notices'
 import { LoginLink } from './LoginLink'
 import { AskForm, Box, ChoiceList, ChoiceMeta } from './ChoiceExtras'
+import { askKind, planParts, questionTitle, splitApproval, waited } from './askCard'
+import { useNow } from './attention'
+import './AskCard.css'
 import './InfoPanel.css'
 
 
@@ -49,7 +52,8 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
   </div>
 }
 
-export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onAsk, onAskEngage, onType, onFocusReply, permissionsTab }: { plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
+// since: when this tab started to wait on the person (unix seconds), from the attention list. Absent: the card shows no wait.
+export function ChoiceDock({ approval, attention, plan, agent, disabled, since, onChoose, onKey, onAction, onAsk, onAskEngage, onType, onFocusReply, permissionsTab }: { plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; since?: number | null; permissionsTab?: string | null
   onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
@@ -84,6 +88,15 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const keys = ask ? [...Array.from({ length: Math.min(9, Math.max(...ask.map(item => item.options.length)) + 2) }, (_, at) => String(at + 1)), ...(ask.length > 1 ? ['Left', 'Tab'] : [])] : ['1', '2', '3']
   const title = plan ? 'Review plan' : bridge ? `${agent} asks` : info ? `${agent} · ${info.title || 'panel'}` : login ? `${agent} sign-in` : approval ? `${agent} needs your permission` : perms ? `${agent} · Permissions` : panel ? `${agent} panel` : picker ? `${agent} · ${picker.title || 'Choose an item'}` : options.length || ask ? `${agent} asks` : `${agent} is waiting for you`
   const text = approval ? approval.text : attention?.question || attention?.text || ''
+  // The card's top: how long the ask has waited and the request in one line. The chip above the card names the kind (Chat.tsx).
+  const now = useNow()
+  const cardKind = askKind(!!plan, !!approval, attention)
+  const parts = approval && !plan ? splitApproval(approval.text) : null
+  const planView = plan ? planParts(plan.text) : null
+  const asked = cardKind === 'question' && !approval && !bridge && options.length ? questionTitle(text) : ''
+  const cardTitle = planView?.title || parts?.title || asked
+  // One clear button for a permission: the first Yes. A plan gets none: it needs reading first.
+  const primary = !plan && approval ? options.find(option => /^yes\b/i.test(option.text))?.id : undefined
   const root = useRef<HTMLElement>(null)
   // The message box of this pane: the desktop workspace can show several.
   const focusBox = () => { if (onFocusReply) onFocusReply(); else root.current?.closest('.chat-panel')?.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus() }
@@ -97,7 +110,9 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   return <section ref={root} className={`choice-dock ${plan ? 'plan-review' : ''} open`} aria-label={title}>
     <div className="choice-head"><span className="choice-mark" />{title}</div>
     <>
-      {bridge ? <AskForm ask={bridge} disabled={disabled} onAnswer={answers => onAsk!(bridge, answers)} onEngage={onAskEngage && (() => onAskEngage(bridge))} /> : plan ? <div className="plan-text assistant-message" tabIndex={0} aria-label="Plan"><TextMessagePartProvider text={plan.text}><Markdown /></TextMessagePartProvider></div> : info ? <InfoPanel info={info} disabled={disabled} onAction={onAction} /> : perms ? <PermissionsPanel dialog={perms} disabled={disabled} want={permissionsTab} onKey={async key => { await onKey(key) }} /> : panel ? <PanelPre text={text} /> : picker ? <div className="picker-card">
+      {cardKind && !!since && <p className="ask-waited">{waited(since, now)}</p>}
+      {cardTitle && <p className="ask-title">{asked ? <Linked text={cardTitle} /> : cardTitle}</p>}
+      {bridge ? <AskForm ask={bridge} disabled={disabled} onAnswer={answers => onAsk!(bridge, answers)} onEngage={onAskEngage && (() => onAskEngage(bridge))} /> : plan ? <div className="plan-text assistant-message" tabIndex={0} aria-label="Plan"><TextMessagePartProvider text={planView?.body ?? plan.text}><Markdown /></TextMessagePartProvider></div> : info ? <InfoPanel info={info} disabled={disabled} onAction={onAction} /> : perms ? <PermissionsPanel dialog={perms} disabled={disabled} want={permissionsTab} onKey={async key => { await onKey(key) }} /> : panel ? <PanelPre text={text} /> : picker ? <div className="picker-card">
         {picker.subtitle && <p className="picker-subtitle">{picker.subtitle}</p>}
         {choice && <ChoiceMeta choice={choice} />}
         {choice ? <ChoiceList choice={choice} label={picker.title || 'Items'} /> : <ul className="picker-list" aria-label={picker.title || 'Items'}>
@@ -120,14 +135,16 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
         <p className="ask-question"><Linked text={item.question} /></p>
         <ol className="ask-options">{item.options.map(option => <li key={option.label}><strong>{option.label}</strong>{option.description && <small>{option.description}</small>}</li>)}
           <li><strong>Type something</strong><small>Write your own answer in the terminal.</small></li><li><strong>Chat about this</strong></li></ol></div>)}
-        {ask.length === 1 ? <p className="ask-hint">Press a number to choose. The pane is too short to show the whole question.</p> : <p className="ask-hint">The pane is too short to show the question, so this card cannot follow your answers. The terminal shows one question at a time: press a number to answer it, then the next one opens.{ask.some(item => item.multi) ? ' In a “choose one or more” question, a number ticks a box; press Question → when done.' : ''} Open the terminal view to see where you are.</p>}</div> : text && <div className={`choice-text ${approval || !options.length ? 'mono' : ''}`}>{approval || !options.length ? <PanelText text={text} /> : <Linked text={text} />}</div>}
+        {ask.length === 1 ? <p className="ask-hint">Press a number to choose. The pane is too short to show the whole question.</p> : <p className="ask-hint">The pane is too short to show the question, so this card cannot follow your answers. The terminal shows one question at a time: press a number to answer it, then the next one opens.{ask.some(item => item.multi) ? ' In a “choose one or more” question, a number ticks a box; press Question → when done.' : ''} Open the terminal view to see where you are.</p>}</div> : parts ? <>
+        {parts.lines.length > 0 && <pre className={`ask-detail ${parts.format}`} tabIndex={0} aria-label={parts.format === 'diff' ? 'Changes' : parts.format === 'command' ? 'Command' : 'Request'}><code>{parts.lines.map((line, at) => <span key={at} className={line.sign === '+' ? 'diff-add' : line.sign === '-' ? 'diff-remove' : undefined}>{line.text ? <Linked text={line.text} /> : ' '}</span>)}</code></pre>}
+        {parts.question && <p className="ask-closing">{parts.question}</p>}</> : asked ? null : text && <div className={`choice-text ${approval || !options.length ? 'mono' : ''}`}>{approval || !options.length ? <PanelText text={text} /> : <Linked text={text} />}</div>}
       {keepPlanning && <div className="plan-feedback"><label htmlFor={feedbackId}>Keep planning — optional feedback</label>
         <VoiceField multiline label="plan feedback" value={feedback} setValue={setFeedback} onBusyChange={setFeedbackVoiceBusy}
           field={{ id: feedbackId, maxLength: 10000, rows: 2, disabled: disabled || picked !== null, placeholder: 'Tell Claude what to change' }} />
       </div>}
       {current && current.total > 1 && options.length > 0 && <p className="ask-progress">Question {current.index + 1} of {current.total} · {current.header}{current.multi ? ' · choose one or more' : ''}</p>}
       {!picker && choice && options.length > 0 && <ChoiceMeta choice={choice} />}
-      {options.length > 0 && <div className="choice-options" role="list">{options.map(option => <button key={option.id} type="button" role="listitem" className={[option.selected ? 'current' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void pick(option)}>
+      {options.length > 0 && <div className={cardKind ? 'choice-options ask-options' : 'choice-options'} role="list">{options.map(option => <button key={option.id} type="button" role="listitem" className={[option.selected ? 'current' : '', option.id === primary ? 'ask-primary' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void pick(option)}>
         <span className="choice-number">{picked === option.id ? '…' : option.id}</span>{checkedById.has(option.id) && <Box checked={checkedById.get(option.id)!} multi={multiBox} />}{option.free
           ? <span><strong>Type your own answer</strong><small>{option.text === 'Type something.' ? 'Write it in the message box below, then send.' : `In the terminal now: “${option.text}”. Your answer from the message box replaces it.`}</small></span>
           : <span><strong>{checkedById.has(option.id) ? option.text.replace(/^\[[ ✔xX]\]\s+/, '') : option.text}</strong>{chat(option) ? <small>Close the question and talk it through in the message box.</small> : option.detail && <small>{option.detail}</small>}</span>}</button>)}</div>}

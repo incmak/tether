@@ -1,0 +1,31 @@
+/* The chat ask card (Dock.tsx ChoiceDock): the wait, a one-line title, the detail box, the option buttons.
+   It uses the theme tokens, so it follows the light, dark and auto themes. */
+.ask-waited { margin: 10px 12px 2px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ask-title { margin: 10px 12px 8px; color: var(--text); font-size: 16px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.ask-waited + .ask-title { margin-top: 0; }
+.ask-title a { color: var(--accent); text-decoration: underline; }
+/* The full request. It scrolls inside the card, so the option buttons stay in view. */
+.choice-dock .ask-detail { margin: 0 12px 10px; max-height: clamp(88px, 18dvh, 200px); overflow: auto; overscroll-behavior: contain; padding: 8px 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; -webkit-user-select: text; user-select: text; }
+.ask-detail:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ask-detail code { display: block; padding: 0; background: none; font: inherit; }
+.ask-detail code > span { display: block; padding: 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask-detail a { color: var(--accent); text-decoration: underline; }
+/* A diff keeps its columns and scrolls sideways. */
+.ask-detail.diff code { min-width: max-content; }
+.ask-detail.diff code > span { white-space: pre; overflow-wrap: normal; }
+.ask-closing { margin: 0 12px 10px; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.plan-review .ask-title { margin-bottom: 0; font-size: 18px; }
+
+/* Options as separate buttons. The number is the key the option sends. */
+.choice-dock .choice-options.ask-options { gap: 6px; padding: 10px 12px; }
+.choice-dock .choice-options.ask-options button { align-items: center; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.choice-dock .choice-options.ask-options button:hover:not(:disabled) { background: var(--hover); }
+.choice-dock .choice-options.ask-options button.current { border-color: var(--muted); background: var(--hover); }
+.choice-dock .choice-options.ask-options button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.choice-dock .choice-options.ask-options button:disabled { opacity: .6; }
+.choice-dock .choice-options.ask-options .choice-number { border: 1px solid var(--line); background: var(--bg); color: var(--muted); }
+.choice-dock .choice-options.ask-options button.ask-primary { justify-content: flex-start; border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+.choice-dock .choice-options.ask-options button.ask-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
+.choice-dock .choice-options.ask-options button.ask-primary strong { font-weight: 600; }
+.choice-dock .choice-options.ask-options button.ask-primary small { color: inherit; opacity: .85; }
+.choice-dock .choice-options.ask-options button.ask-primary .choice-number { border-color: color-mix(in srgb, var(--accent-text) 45%, transparent); background: transparent; color: var(--accent-text); }
