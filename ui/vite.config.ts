@@ -23,9 +23,25 @@ const vadAssets = {
   },
 }
 
+// Move the app stylesheet from <head> to the end of <body>. A head stylesheet blocks all paint, so on 3G the
+// boot screen in index.html stayed blank until the CSS arrived. A body stylesheet still holds the module
+// script until it loads, so React never renders unstyled.
+const bodyStylesheet = {
+  name: 'body-stylesheet',
+  apply: 'build' as const,
+  transformIndexHtml: {
+    order: 'post' as const,
+    handler(html: string) {
+      const links: string[] = []
+      const out = html.replace(/\s*<link rel="stylesheet"[^>]*>/g, (tag) => { links.push(tag.trim()); return '' })
+      return out.replace('</body>', `  ${links.join('\n    ')}\n  </body>`)
+    },
+  },
+}
+
 export default defineConfig({
   base: '/chat/',
-  plugins: [react(), tailwindcss(), vadAssets],
+  plugins: [react(), tailwindcss(), vadAssets, bodyStylesheet],
   server: {
     proxy: { '/mobile': { target: 'http://127.0.0.1:7683', changeOrigin: false } },
   },

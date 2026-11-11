@@ -14,9 +14,19 @@
       // Apply the saved theme and text size before the first paint, so a dark choice does not flash light.
       try { const p = JSON.parse(localStorage.getItem('tmux-chat.prefs.v1') || '{}'); if (p.theme === 'light' || p.theme === 'dark') document.documentElement.dataset.theme = p.theme; if (p.textSize) document.documentElement.dataset.textSize = p.textSize } catch {}
     </script>
+    <style>
+      /* Boot screen: shows while the app script downloads on a slow network. React replaces #root's content on its first render. */
+      html { background: #f7f5f0; color: #6c6a62; }
+      @media (prefers-color-scheme: dark) { html:not([data-theme="light"]) { background: #262624; color: #b1ada3; } }
+      html[data-theme="dark"] { background: #262624; color: #b1ada3; }
+      .boot { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; animation: boot-in .3s ease-out .5s both; }
+      .boot svg { display: block; }
+      @keyframes boot-in { from { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) { .boot { animation-duration: .01s; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="boot" role="status"><svg viewBox="0 0 512 512" width="48" height="48" aria-hidden="true"><rect width="512" height="512" rx="112" fill="#C96442"/><path d="M150 150h212a40 40 0 0 1 40 40v120a40 40 0 0 1-40 40H236l-64 52v-52h-22a40 40 0 0 1-40-40V190a40 40 0 0 1 40-40Z" fill="#FBF7F1"/><path d="m180 214 40 36-40 36M248 286h84" fill="none" stroke="#C96442" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Loading Tether…</span></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

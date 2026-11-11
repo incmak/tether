@@ -41,6 +41,8 @@
 /* The base button:hover (index.css) is more specific and would paint --hover under --bg text. */
 button.oldest-button:not(:disabled):hover { background-color: var(--attention); color: var(--bg); }
 .oldest-button.compact { gap: 5px; min-width: 44px; min-height: 36px; padding: 0 10px; }
+/* 320 px phones: the count alone, so the chat title keeps some room. */
+@media (max-width: 359px) { .oldest-button.compact > svg { display: none; } }
 .oldest-count { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--bg); color: var(--attention); font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
 
 .waiting-sheet { display: flex; flex-direction: column; max-height: 80dvh; padding: 10px 10px max(14px, env(safe-area-inset-bottom)); overflow: auto; }

@@ -8,6 +8,8 @@
 .phone-tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; color: var(--muted); font-size: 11px; font-weight: 500; }
 .phone-tabbar button[aria-current='page'] { color: var(--accent); font-weight: 600; }
 .phone-tabbar button:disabled { opacity: .4; }
+/* Seven tabs on a 320–374 px phone: a smaller label, so Terminals and Browser do not touch. */
+@media (max-width: 374px) { .phone-tabbar button { min-width: 0; font-size: 10px; letter-spacing: -.1px; } }
 .phone-tabbar button:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: var(--radius); }
 /* Typing: the keyboard takes the bottom of the screen, so the tab bar steps aside. */
 .app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) { bottom: 0; }

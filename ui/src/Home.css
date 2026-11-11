@@ -123,6 +123,10 @@
 @container home (max-width: 460px) {
   .home-new span { display: none; }
   .home-new { width: var(--control); padding: 0; justify-content: center; }
+  /* Too narrow for the headline beside the buttons: buttons on the first row, the headline on its own row under them. */
+  .home-head h1 { order: 1; flex-basis: 100%; }
+  .home-head h1 + * { margin-left: auto; }
+  .home-scope, .home-summary { order: 2; }
 }
 
 /* Medium page: each group becomes a lane. Needs you runs across the top in two columns, Working and Done sit side by side below it. */
