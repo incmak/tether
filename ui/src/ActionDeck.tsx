@@ -1,24 +1,27 @@
-// The action deck: the asks that wait on you, one card at a time. Each card shows the tab, the question and the
-// right answer control: a reply box for a reply ask, or "Open tab" for a prompt that waits in the terminal
-// (approval, plan, question). It opens from the Waiting on you list, and by itself for a new urgent ask.
+// The action deck: the asks that wait on you, one card at a time. Each card shows the tab, the whole prompt and the
+// right answer control: a reply box for a reply ask, or the Home card's answer buttons for a prompt that waits in the
+// terminal (approval, plan, question). On a wide screen a list of every ask sits beside the card.
+// It opens from the Waiting on you list, and by itself for a new urgent ask.
 import { useEffect, useRef, useState } from 'react'
 import { ArrowRight, Check, CircleAlert, ExternalLink, Send, X } from 'lucide-react'
-import type { Api, Pane } from './api'
+import type { Api, Choice, Pane } from './api'
 import { errorText } from './api'
+import { AnswerActions } from './answers'
 import { askAction } from './attention'
 import type { Waiting } from './attention'
 import { sendToTab } from './backlogSend'
+import { answerName, askLines, askText, deckItem, deckKey, deckOrder, hasAnswers, isTyping, planOptions, sendPlanChoice } from './deck'
 import { useModal } from './hooks'
 import { age } from './needs'
 import { useNow } from './attention'
-import { chatTitle } from './Sidebar'
+import { agentNames, chatTitle } from './Sidebar'
 import type { Session } from './Sidebar'
+import { answerError, sendAnswer } from './useAnswers'
 import './ActionDeck.css'
 
 const KIND: Record<string, string> = { reply: 'Asks you', approval: 'Needs approval', plan: 'Plan to approve', question: 'Asks a question' }
-
-/** Urgent asks first, then oldest first. */
-export const deckOrder = (items: Waiting[]) => [...items].sort((a, b) => Number(!!b.ask.urgent) - Number(!!a.ask.urgent) || a.ask.since - b.ask.since)
+/** A key pressed this soon after a card appears was meant for the card before it (milliseconds). */
+const SETTLE = 400
 
 export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: { api: Api; items: Waiting[]; sessions: Session[]; onOpen: (pane: Pane) => void; onClose: () => void; onUpdate: () => void }) {
   const modal = useModal(true, onClose)
@@ -33,6 +36,41 @@ export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: 
   const live = queue.map(id => items.find(item => item.pane.id === id)).filter((item): item is Waiting => !!item)
   const at = Math.min(index, Math.max(0, live.length - 1))
   const card = live[at]
+  const title = (pane: Pane) => chatTitle(pane, sessions.find(item => item.id === pane.tmux_session))
+  // A prompt in the terminal is answered from the pane's state now, so the buttons match the text on the card.
+  const item = card && card.ask.kind !== 'reply' ? deckItem(card.pane) : undefined
+  const next = () => { setStatus(''); setIndex(at + 1 < live.length ? at + 1 : 0) }
+
+  async function run(pane: Pane, work: () => Promise<unknown>, result: string) {
+    setBusy(true); setStatus('')
+    try { await work(); setStatus(result); onUpdate(); setDone(current => [...current, pane.id]) }
+    catch (error) { setStatus(answerError(error)); onUpdate() }
+    finally { setBusy(false) }
+  }
+  // The same checked routes as the Home card (useAnswers.ts). A sent answer cannot be taken back, so there is no undo.
+  const answer = (pane: Pane, option: Choice) => { if (item && !busy) void run(pane, () => sendAnswer(api, item, option), `${answerName(item, option)} sent to ${title(pane)}.`) }
+
+  // Y, A and N answer a checked approval, 1-9 a question's menu, J shows the next card. A plan has no answer keys.
+  // Not while you type, and not right after a card appears.
+  const cardKey = card ? `${card.pane.id} ${card.ask.since}` : ''
+  const shown = useRef(0)
+  useEffect(() => { shown.current = Date.now() }, [cardKey])
+  const keys = useRef<(event: KeyboardEvent) => void>(() => {})
+  useEffect(() => {
+    keys.current = event => {
+      if (!card || busy || event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || isTyping(event.target as HTMLElement | null)) return
+      const action = deckKey(event.code, item)
+      if (!action) return
+      event.preventDefault()
+      if (action === 'next') { if (live.length > 1) next() }
+      else if (Date.now() - shown.current >= SETTLE) answer(card.pane, action)
+    }
+  })
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => keys.current(event)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   if (!card) {
     return <dialog {...modal} className="sheet action-deck" aria-labelledby="deck-title">
@@ -43,39 +81,66 @@ export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: 
   }
 
   const { pane, ask } = card
-  const session = sessions.find(item => item.id === pane.tmux_session)
-  const name = chatTitle(pane, session)
-  const next = () => { setStatus(''); setIndex(at + 1 < live.length ? at + 1 : 0) }
-  async function run(work: () => Promise<unknown>, result: string) {
-    setBusy(true); setStatus('')
-    try { await work(); setStatus(result); onUpdate(); setDone(current => [...current, pane.id]) }
-    catch (error) { setStatus(errorText(error)) }
-    finally { setBusy(false) }
-  }
-  const send = (text: string) => void run(() => sendToTab(api, pane, text), `Sent to ${name}.`)
-  const handled = () => void run(() => askAction(api, pane, 'handled'), `${name}: handled.`)
+  const name = title(pane)
+  const send = (text: string) => void run(pane, () => sendToTab(api, pane, text), `Sent to ${name}.`)
+  const handled = () => void run(pane, () => askAction(api, pane, 'handled'), `${name}: handled.`)
+  const text = ask.kind === 'reply' ? '' : askText(pane)
+  const answers = hasAnswers(item)
+  const plans = planOptions(pane, item)
+  const choosePlan = (option: Choice) => { if (!busy) void run(pane, () => sendPlanChoice(api, pane, option), `${answerName(item!, option)} sent to ${name}.`) }
 
-  return <dialog {...modal} className={ask.urgent ? 'sheet action-deck urgent' : 'sheet action-deck'} aria-labelledby="deck-title">
+  return <dialog {...modal} className={ask.urgent ? 'sheet action-deck has-list urgent' : 'sheet action-deck has-list'} aria-labelledby="deck-title">
     <div className="sheet-heading deck-head">
       <h2 id="deck-title">Waiting on you <span className="deck-count">{at + 1} of {live.length}</span></h2>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X size={18} /></button>
     </div>
-    <article className="deck-card" aria-live="polite">
-      <p className="deck-meta">
-        {ask.urgent && <span className="deck-urgent"><CircleAlert size={14} aria-hidden="true" />Urgent</span>}
-        <span>{KIND[ask.kind] ?? 'Waits on you'}</span><span aria-hidden="true">·</span><span>waited {age(ask.since, now)}</span>
-      </p>
-      <h3 className="deck-tab">{name}</h3>
-      <p className="deck-question">{ask.next || 'Open the tab to see what it needs.'}</p>
-      {ask.kind === 'reply'
-        ? <ReplyBox key={`${pane.id} ${ask.since}`} name={name} busy={busy} onSend={send} />
-        : <p className="deck-hint">This prompt waits in the tab. Open the tab to answer it.</p>}
-    </article>
-    {status && <p className="deck-status" role="status">{status}</p>}
-    <div className="deck-actions">
-      <button type="button" className="secondary" disabled={busy} onClick={() => { onClose(); onOpen(pane) }}><ExternalLink size={15} aria-hidden="true" />Open tab</button>
-      <button type="button" className="secondary" disabled={busy} onClick={handled}><Check size={15} aria-hidden="true" />Handled</button>
-      <button type="button" className="secondary" disabled={busy || live.length < 2} onClick={next}>Skip<ArrowRight size={15} aria-hidden="true" /></button>
+    <div className="deck-body">
+      <ul className="deck-list" aria-label="Asks that wait on you">
+        {live.map((row, position) => {
+          const session = sessions.find(found => found.id === row.pane.tmux_session)
+          const rowName = title(row.pane)
+          const source = [agentNames[row.pane.agent], session && session.name !== rowName ? session.name : ''].filter(Boolean).join(' · ')
+          return <li key={row.pane.id}>
+            <button type="button" className="deck-row" aria-current={position === at ? 'true' : undefined} disabled={busy} onClick={() => { setStatus(''); setIndex(position) }}>
+              <span className="deck-row-top">
+                {row.ask.urgent && <CircleAlert size={13} className="deck-row-urgent" aria-label="Urgent" />}
+                <span className="deck-row-kind">{KIND[row.ask.kind] ?? 'Waits on you'}</span>
+                <span className="deck-row-age">{age(row.ask.since, now)}</span>
+              </span>
+              <span className="deck-row-title">{rowName}</span>
+              <span className="deck-row-source">{source}</span>
+            </button>
+          </li>
+        })}
+      </ul>
+      <div className="deck-main">
+        <article className="deck-card" aria-live="polite">
+          <p className="deck-meta">
+            {ask.urgent && <span className="deck-urgent"><CircleAlert size={14} aria-hidden="true" />Urgent</span>}
+            <span>{KIND[ask.kind] ?? 'Waits on you'}</span><span aria-hidden="true">·</span><span>{agentNames[pane.agent]}</span><span aria-hidden="true">·</span><span>waited {age(ask.since, now)}</span>
+          </p>
+          <h3 className="deck-tab">{name}</h3>
+          <p className="deck-question">{ask.next || 'Open the tab to see what it needs.'}</p>
+          {text && text !== ask.next && <pre className="deck-text" tabIndex={0} aria-label={`What ${name} asks`}>
+            {askLines(text, item?.kind ?? ask.kind).map((line, row) => <span key={row} className={line.mark || undefined}>{line.text}{'\n'}</span>)}
+          </pre>}
+          {ask.kind === 'reply'
+            ? <ReplyBox key={cardKey} name={name} busy={busy} onSend={send} />
+            : plans.length
+              ? <div className="inbox-actions deck-plan" role="group" aria-label={`Answer ${name}`}>
+                {plans.map(option => <button type="button" key={option.id} disabled={busy} onClick={() => choosePlan(option)}>{option.text}</button>)}
+              </div>
+              : answers && item
+              ? <AnswerActions api={api} item={item} label={name} waiting={busy} onAnswer={(_, option) => answer(pane, option)} onFail={(_, error) => setStatus(errorText(error))} />
+              : <p className="deck-hint">This prompt waits in the tab. Open the tab to answer it.</p>}
+        </article>
+        {status && <p className="deck-status" role="status">{status}</p>}
+        <div className="deck-actions">
+          <button type="button" className="secondary" disabled={busy} onClick={() => { onClose(); onOpen(pane) }}><ExternalLink size={15} aria-hidden="true" />Open tab</button>
+          <button type="button" className="secondary" disabled={busy} onClick={handled}><Check size={15} aria-hidden="true" />Handled</button>
+          <button type="button" className="secondary" disabled={busy || live.length < 2} onClick={next}>Skip<kbd>J</kbd><ArrowRight size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
     </div>
   </dialog>
 }

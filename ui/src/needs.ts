@@ -5,8 +5,9 @@ import { isDone, needsYou } from './paneState'
 // The rows of the desktop "Needs you" list (Inbox.tsx).
 
 export type Kind = Needs['kind'] | 'done' | 'browser' | 'working' | 'stopped'
-/** browser: an agent asked for the person in the shared browser (AgentBrowser.tsx). ask is its id, tab the agent's first tab. */
-export interface InboxItem { pane: Pane; kind: Kind; text: string; at: number; yes?: Choice; no?: Choice; menu?: Choice[]; ask?: string; tab?: string }
+/** browser: an agent asked for the person in the shared browser (AgentBrowser.tsx). ask is its id, tab the agent's first tab.
+ *  always: the "Yes, and don't ask again" option. Only the action deck sets it (deck.ts). */
+export interface InboxItem { pane: Pane; kind: Kind; text: string; at: number; yes?: Choice; always?: Choice; no?: Choice; menu?: Choice[]; ask?: string; tab?: string }
 export interface BrowserAskRow { id: string; pane: string | null; text: string; at: number; tab?: string }
 
 export const KIND_LABEL: Record<Kind, string> = { working: 'Working', approval: 'Needs permission', plan: 'Plan to review', question: 'Question', done: 'Done', browser: 'Needs you in the browser', stopped: 'Stopped' }

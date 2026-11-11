@@ -14,6 +14,12 @@ const paneA = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: '
   ask: ask('%1', { since: now - 120, urgent: true, next: 'The release script needs the signing key. Which key should I use: staging or production?' }) }
 const paneB = { id: '%2', tmux_session: '$1', label: 'project:0.1', pane_name: 'Docs pass', agent: 'codex', dir: '/srv/project', state: 'Idle', writable: true, thread: 't2', approval: null,
   ask: ask('%2', { since: now - 3600, kind: 'approval', next: 'Run npm install?' }) }
+// A real permission prompt: the pane's state carries the request, so the deck can answer it in place.
+const paneC = { id: '%3', tmux_session: '$1', label: 'project:0.2', pane_name: 'Build check', agent: 'claude', dir: '/srv/project', state: 'Approval', writable: true, thread: 't3', since: now - 900,
+  needs: { kind: 'approval', text: 'Edit file · src/build.js' },
+  approval: { id: 'permit-1', actionable: true, text: 'Edit file\nsrc/build.js\n\n 12 -const retries = 1\n 12 +const retries = 3\n 13  run(retries)',
+    options: [{ id: 1, text: 'Yes' }, { id: 2, text: 'Yes, allow all edits during this session (shift+tab)' }, { id: 3, text: 'No, and tell Claude what to do differently (esc)' }] },
+  ask: ask('%3', { since: now - 900, kind: 'approval', next: 'Edit src/build.js?' }) }
 const levels = [['Check-in', 'Confirms the plan first.'], ['Guided', 'Confirms the plan, then works.'], ['Standard', 'Asks when a decision is material.'],
   ['Trusted', 'Uses sensible defaults.'], ['Autopilot', 'Does not ask about normal decisions.'], ['Full auto', 'Runs the task alone. Asks only when blocked; urgent asks reach the user at once.']]
   .map(([name, summary], level) => ({ level, name, summary }))
@@ -22,7 +28,7 @@ let autonomy = { levels, global: 2, level: 2, source: 'global', project: null, r
   models: { claude: [{ slug: 'opus', name: 'Opus' }, { slug: 'claude-fable-5-2', name: 'Fable 5.2' }], codex: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh'] }] },
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }
 const fixture = {
-  sessions: { sessions: [paneA, paneB], default_thread: 't1' },
+  sessions: { sessions: [paneA, paneB, paneC], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
@@ -98,19 +104,50 @@ async function main() {
       await deck.waitFor()
       check(`${at} deck opens for urgent ask`, true)
       check(`${at} urgent card first`, (await deck.locator('.deck-tab').innerText()).trim() === 'Deploy fix' && await deck.getByText('Urgent', { exact: true }).isVisible())
-      check(`${at} count`, (await deck.locator('.deck-count').innerText()).trim() === '1 of 2')
+      check(`${at} count`, (await deck.locator('.deck-count').innerText()).trim() === '1 of 3')
       await page.waitForTimeout(100)
       check(`${at} reply box focused`, await deck.locator('textarea').evaluate(node => node === document.activeElement))
       check(`${at} no page overflow (deck)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `deck-urgent-${width}.png`) })
-      await deck.locator('textarea').fill('Use staging.')
+      // On a wide screen the list of every ask sits beside the card: urgent first, then oldest first. A phone keeps one card.
+      const rows = deck.locator('.deck-row')
+      if (width >= 900) {
+        check(`${at} list order`, (await rows.locator('.deck-row-title').allInnerTexts()).join('|') === 'Deploy fix|Docs pass|Build check' && await rows.first().getAttribute('aria-current') === 'true')
+        check(`${at} list row names kind and agent`, /Needs approval/.test(await rows.nth(2).innerText()) && /Claude/.test(await rows.nth(2).innerText()))
+      } else check(`${at} no list on a phone`, !(await deck.locator('.deck-list').isVisible()))
+      // Keys are off while you type: J and Y stay in the reply box.
       const before = posts.length
+      await deck.locator('textarea').pressSequentially('jy')
+      check(`${at} keys stay in the reply box`, await deck.locator('textarea').inputValue() === 'jy' && (await deck.locator('.deck-tab').innerText()).trim() === 'Deploy fix' && posts.length === before)
+      await deck.locator('textarea').fill('Use staging.')
       await page.keyboard.press('Control+Enter')
       await deck.getByText('Run npm install?').waitFor()
       const sent = posts.slice(before).find(post => post.endpoint === 'message')
       check(`${at} Ctrl+Enter sends to the tab`, sent && sent.body.session === '%1' && sent.body.message === 'Use staging.', JSON.stringify(posts.slice(before)))
       check(`${at} next card: approval hint`, await deck.getByText('This prompt waits in the tab.').isVisible() && await deck.locator('textarea').count() === 0)
+      check(`${at} no answer buttons without a live prompt`, await deck.locator('.inbox-actions').count() === 0)
+      await page.keyboard.press('y')
+      check(`${at} Y does nothing without a live prompt`, !posts.slice(before).some(post => post.endpoint === 'approval'))
+      // The next card holds a real permission prompt: J (or its list row) shows it, with the full text and the answer buttons.
+      if (width >= 900) await rows.nth(1).click(); else await page.keyboard.press('j')
+      await deck.getByText('Edit src/build.js?').waitFor()
+      const actions = deck.locator('.deck-card .inbox-actions button')
+      check(`${at} approval buttons`, (await actions.allInnerTexts()).map(text => text.replace(/\s+/g, ' ').trim().replace(/ [YAN]$/, '')).join('|') === 'Yes|Yes, allow all edits during this session (shift+tab)|No', (await actions.allInnerTexts()).join('|'))
+      // Key hints show on the buttons at desktop width, as on Home cards; a phone has no keyboard, so they hide.
+      const hints = (await deck.locator('.deck-card .inbox-actions kbd:visible').allInnerTexts()).join('')
+      check(`${at} key hints`, hints === (width >= 600 ? 'YAN' : '') && await deck.locator('.deck-actions kbd').isVisible() === (width >= 600), hints)
+      check(`${at} full text with diff marks`, (await deck.locator('.deck-text .remove').innerText()).includes('retries = 1') && (await deck.locator('.deck-text .add').innerText()).includes('retries = 3') && (await deck.locator('.deck-text').innerText()).includes('src/build.js'))
+      check(`${at} open tab, handled and skip stay`, await deck.getByRole('button', { name: 'Open tab' }).isVisible() && await deck.getByRole('button', { name: 'Handled' }).isVisible() && await deck.getByRole('button', { name: /Skip/ }).isVisible())
+      check(`${at} no page overflow (approval card)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `deck-approval-${width}.png`) })
+      await page.keyboard.press('Control+y')
+      await page.waitForTimeout(450)
+      check(`${at} Ctrl+Y sends nothing`, !posts.slice(before).some(post => post.endpoint === 'approval'))
+      await page.keyboard.press('y')
+      await deck.getByText('Yes sent to Build check.').waitFor()
+      const approved = posts.slice(before).filter(post => post.endpoint === 'approval')
+      check(`${at} Y sends one checked approval`, approved.length === 1 && approved[0].body.session === '%3' && approved[0].body.approval === 'permit-1' && approved[0].body.choice === 1 && approved[0].body.thread === 't3', JSON.stringify(approved))
+      check(`${at} moves to the next card, no undo`, (await deck.locator('.deck-tab').innerText()).trim() === 'Docs pass' && await deck.getByText(/undo/i).count() === 0)
       await deck.getByRole('button', { name: 'Handled' }).click()
       await deck.getByText('Docs pass: handled.').waitFor()
       check(`${at} Handled posts`, posts.some(post => post.endpoint === 'attention/handled' && post.body.session === '%2'))
