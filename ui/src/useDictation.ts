@@ -11,6 +11,10 @@ interface SpeechRecognizer {
   onresult: ((event: { results: ArrayLike<{ isFinal: boolean; [index: number]: { transcript: string } }> }) => void) | null
   onend: (() => void) | null
   onerror: ((event: { error: string }) => void) | null
+  onaudiostart: (() => void) | null
+  onsoundstart: (() => void) | null
+  onspeechstart: (() => void) | null
+  onnomatch: (() => void) | null
   start: () => void
   stop: () => void
   abort: () => void
@@ -57,6 +61,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     else await startRecorder()
   }
   function startSpeech(Recognition: SpeechConstructor) {
+    const android = /Android/i.test(navigator.userAgent)
     const base = textNow.current.trimEnd()
     let finish: (text: string) => void = () => undefined
     const final = new Promise<string>(resolve => { finish = resolve })
@@ -71,7 +76,10 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const started = Date.now()
     const join = (...parts: string[]) => parts.filter(Boolean).join(' ')
     const words = () => join(earlier, committed, interim).replace(/(?<=\S) slash (?=\S)/gi, '/')
-    const detach = () => { recognition.onresult = null; recognition.onend = null; recognition.onerror = null }
+    const detach = () => {
+      recognition.onresult = null; recognition.onend = null; recognition.onerror = null
+      recognition.onaudiostart = null; recognition.onsoundstart = null; recognition.onspeechstart = null; recognition.onnomatch = null
+    }
     const cleanup = () => {
       done = true
       window.clearInterval(timer); window.clearTimeout(pause)
@@ -109,8 +117,12 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       })
     }
     const attach = () => {
-      recognition.continuous = true; recognition.interimResults = true
+      recognition.continuous = !android; recognition.interimResults = true
       recognition.lang = navigator.language || 'en-US'; recognition.maxAlternatives = 1
+      recognition.onaudiostart = () => trace('audio')
+      recognition.onsoundstart = () => trace('sound')
+      recognition.onspeechstart = () => trace('speech')
+      recognition.onnomatch = () => trace('nomatch')
       recognition.onresult = event => {
         trace('r' + event.results.length)
         const finals: string[] = [], partials: string[] = []
@@ -122,9 +134,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       recognition.onend = () => {
         trace('end')
         if (done) return
-        if (!stopped) emptyEnds++
+        if (!received && !stopped) emptyEnds++
         if (!received && !stopped && (failed || emptyEnds >= 3)) { fallback(); return }
-        if (stopped || restarts >= 20) { complete(); return }
+        if (stopped || restarts >= (android ? 60 : 20)) { complete(); return }
         earlier = join(earlier, committed, interim); committed = ''; interim = ''; restarts++
         trace('restart')
         try { recognition.start(); trace('start') } catch {

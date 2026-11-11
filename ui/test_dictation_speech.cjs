@@ -98,7 +98,7 @@ function setup(env, options = {}) {
   const props = { text, setText: next => { text = next }, chime: false, onHandsFreeDone: () => done++, onFinished: () => env.focus++, ...options }
   return { h, useDictation, render: () => h.render(() => useDictation({ ...props, text })), text: () => text, done: () => done }
 }
-function speechEnvironment({ webkit = false, language = 'en-GB' } = {}) {
+function speechEnvironment({ webkit = false, language = 'en-GB', userAgent = 'Mozilla/5.0 (X11; Linux x86_64)' } = {}) {
   const env = environment()
   env.recognitions = []
   class Recognition {
@@ -112,6 +112,7 @@ function speechEnvironment({ webkit = false, language = 'en-GB' } = {}) {
   }
   env.globals.window[webkit ? 'webkitSpeechRecognition' : 'SpeechRecognition'] = Recognition
   env.globals.navigator.language = language
+  env.globals.navigator.userAgent = userAgent
   env.fire = ms => {
     const found = [...env.timers.entries()].filter(([, timer]) => timer.ms === ms)
     assert(found.length, `No ${ms} ms timer`)
@@ -151,6 +152,35 @@ async function main() {
   }
   console.log('Speech: standard/WebKit setup, interim streaming, append, slash tidy, stop/toggle and instant final text without fetch pass')
 
+  const androidUA = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36'
+  const androidEnv = speechEnvironment({ userAgent: androidUA }), android = setup(androidEnv, { text: 'Base' })
+  await android.render().toggle()
+  const androidSpeech = androidEnv.recognitions[0], androidFinal = android.render().finalText()
+  assert.equal(androidSpeech.continuous, false); assert.equal(androidSpeech.interimResults, true)
+  for (let n = 0; n < 5; n++) {
+    androidSpeech.result([`phrase${n}`, true]); androidSpeech.end(); await flush()
+    assert(android.render().listening && android.render().active())
+    assert.equal(androidEnv.records.length, 0); assert.equal(androidEnv.calls.length, 0)
+  }
+  assert.equal(androidSpeech.starts, 6)
+  android.render().stop()
+  assert.equal(await androidFinal, 'Base phrase0 phrase1 phrase2 phrase3 phrase4')
+  assert.equal(androidEnv.focus, 1); assert.equal(androidEnv.timers.size, 0)
+  console.log('Speech: Android disables continuous mode, keeps five phrases in order and never falls back pass')
+
+  const audioEnv = speechEnvironment(), audio = setup(audioEnv)
+  await audio.render().toggle()
+  const audioSpeech = audioEnv.recognitions[0], audioFinal = audio.render().finalText()
+  audioSpeech.onaudiostart(); audioSpeech.onsoundstart(); audioSpeech.onspeechstart(); audioSpeech.onnomatch()
+  audio.render().stop()
+  assert.equal(await audioFinal, '')
+  const audioTrail = 'start audio sound speech nomatch stop end'
+  assert.equal(audio.render().error, `No speech heard. Tap the mic and speak. (speech: ${audioTrail})`)
+  assert.deepEqual(audioEnv.logs, [['[dictation]', audioTrail]])
+  for (const event of ['onaudiostart', 'onsoundstart', 'onspeechstart', 'onnomatch']) assert.equal(audioSpeech[event], null)
+  assert.equal(audioEnv.timers.size, 0)
+  console.log('Speech: audio, sound, speech and nomatch events appear in the error trail and detach on completion pass')
+
   for (const throws of [false, true]) {
     const env = speechEnvironment(), s = setup(env)
     await s.render().toggle()
@@ -173,6 +203,15 @@ async function main() {
   assert.equal(await cappedFinal, Array.from({ length: 21 }, (_, n) => `word${n}`).join(' '))
   assert.equal(cappedEnv.timers.size, 0); assert.equal(cappedEnv.focus, 1)
   console.log('Speech: unexpected end keeps earlier words, restarts with replacement on throw, and caps restarts at 20 pass')
+
+  const androidCapEnv = speechEnvironment({ userAgent: androidUA }), androidCap = setup(androidCapEnv)
+  await androidCap.render().toggle()
+  const androidCapFinal = androidCap.render().finalText(), androidCapSpeech = androidCapEnv.recognitions[0]
+  for (let n = 0; n <= 60; n++) { androidCapSpeech.result([`word${n}`, true]); androidCapSpeech.end() }
+  assert.equal(androidCapSpeech.starts, 61)
+  assert.equal(await androidCapFinal, Array.from({ length: 61 }, (_, n) => `word${n}`).join(' '))
+  assert.equal(androidCapEnv.records.length, 0); assert.equal(androidCapEnv.timers.size, 0); assert.equal(androidCapEnv.focus, 1)
+  console.log('Speech: Android caps restarts at 60 pass')
 
   const handsEnv = speechEnvironment(), hands = setup(handsEnv, { handsFree: true, text: 'Base' })
   await hands.render().toggle()
@@ -290,6 +329,7 @@ async function main() {
   speech.result(['discard me', false]); closed.h.unmount(); await flush()
   assert.equal(await closedFinal, 'Base'); assert.equal(speech.aborts, 1)
   assert.equal(speech.onresult, null); assert.equal(speech.onend, null); assert.equal(speech.onerror, null)
+  for (const event of ['onaudiostart', 'onsoundstart', 'onspeechstart', 'onnomatch']) assert.equal(speech[event], null)
   assert.equal(closedEnv.timers.size, 0); assert.equal(closedEnv.focus, 0); assert.equal(closedEnv.records.length, 0)
   const chimeEnv = speechEnvironment(), chime = setup(chimeEnv, { chime: true })
   const starting = chime.render().toggle(); chime.h.unmount(); await starting
