@@ -62,7 +62,7 @@ export function AgentPill({ list, onOpen }: { list: SubAgents | undefined; onOpe
   const label = agents.length ? count(busyAgents || agents.length, 'agent') : count(busyTasks || tasks.length, 'task')
   const labelRunning = agents.length ? busyAgents > 0 : busyTasks > 0
   return <button type="button" className={`pill agent-pill ${running ? 'running' : ''}`} aria-haspopup="dialog" aria-label={`${label}${labelRunning ? ' running' : ''}. Open the agent map`} onClick={onOpen}>
-    <span className={`agent-dot ${running ? 'running' : 'finished'}`} aria-hidden="true" />{label}
+    <span className={`agent-dot ${running ? 'running' : 'finished'}`} aria-hidden="true" />{label.split(' ')[0]}<span className="agent-pill-word">{label.split(' ')[1]}</span>
   </button>
 }
 

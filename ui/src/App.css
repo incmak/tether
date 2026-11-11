@@ -443,6 +443,13 @@ a { -webkit-touch-callout: default; }
 .composer textarea::placeholder { color: var(--muted); }
 .composer-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .composer-controls > div { display: flex; align-items: center; gap: 5px; min-width: 0; }
+/* Mic and send keep their size; the pills give way. */
+.composer-controls > div:last-child { flex: none; }
+.composer { container-type: inline-size; }
+/* Phone width: the model name keeps the room. Effort shows in the model sheet, the task count drops its word, the mode its icon. */
+@container (max-width: 400px) {
+  .composer-pills .pill-effort, .composer-pills .agent-pill-word, .composer-pills .mode-container .pill > svg { display: none; }
+}
 .composer-status { font-size: 12px; color: var(--muted); padding-left: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .attach { color: var(--muted); }
 .attachments { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: -4px 0 10px; padding: 0; }
@@ -689,7 +696,7 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .pull-note { position: relative; z-index: 1; height: 40px; transform: translate3d(0, -40px, 0); opacity: 0; pointer-events: none; display: flex; align-items: flex-end; justify-content: center; margin: 0 0 -40px; padding-bottom: 8px; overflow: hidden; font-size: 13px; color: var(--muted); }
 
 /* Mode menu above the mode pill; session details; reply times; model list refresh. */
-.mode-container { position: relative; display: inline-flex; flex: none; }
+.mode-container { position: relative; display: inline-flex; flex: none; min-width: 0; max-width: 40%; }
 .mode-menu { left: auto; right: 0; bottom: 40px; min-width: 180px; }
 .mode-menu button { justify-content: space-between; }
 .message-time { align-self: center; margin-left: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
