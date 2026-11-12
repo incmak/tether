@@ -50,7 +50,7 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 const deferred = () => { let resolve; const promise = new Promise(ok => { resolve = ok }); return { promise, resolve } }
 function environment(label = '') {
   let now = 0, nextTimer = 1
-  const timers = new Map(), records = [], calls = [], streams = []
+  const timers = new Map(), records = [], calls = [], streams = [], storage = new Map()
   const response = text => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({ text }) })
   const env = { calls, records, streams, timers, result: '', focus: 0, chimes: [], spoken: 0, fine: true, logs: [], voiceReports: [] }
   const stream = () => {
@@ -71,7 +71,7 @@ function environment(label = '') {
     Date: { now: () => now }, crypto: { randomUUID: () => 'fake-recording' }, MediaRecorder: Recorder,
     navigator: { mediaDevices: { getUserMedia: async () => env.acquire ? env.acquire.promise : stream() } },
     window: { setInterval: setTimer, setTimeout: setTimer, clearInterval: id => timers.delete(id), clearTimeout: id => timers.delete(id) },
-    matchMedia: () => ({ matches: env.fine }), localStorage: { getItem() {}, setItem() {} },
+    matchMedia: () => ({ matches: env.fine }), localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, String(value)) },
     fetch: async (path, options) => {
       if (path === '/mobile/api/voice-log') { env.voiceReports.push({ ...JSON.parse(options.body), options }); return { ok: true } }
       calls.push({ path, options })
@@ -257,7 +257,7 @@ async function main() {
   quick.render().stop(); quickEnv.recognitions[1].end(); await flush(); quick.h.unmount()
   noSpeechEnv.recognitions[0].error('no-speech'); noSpeechEnv.advance(3000); noSpeech.render().stop()
   assert.equal(await noSpeechFinal, '')
-  assert.equal(noSpeech.render().error, 'No speech heard. Tap the mic and speak. (speech: start e:no-speech stop end)')
+  assert.equal(noSpeech.render().error, "This device's speech service heard nothing, so Tether will use the server voice here. Tap the mic and speak again. (speech: start e:no-speech stop end)")
   assert.deepEqual(noSpeechEnv.logs, [['[dictation]', 'start e:no-speech stop end']])
   await noSpeech.render().toggle()
   assert.equal(noSpeechEnv.recognitions.length, 1); assert.equal(noSpeechEnv.records.length, 1)
@@ -336,12 +336,15 @@ async function main() {
     const env = speechEnvironment(), s = setup(env)
     await s.render().toggle(); const final = s.render().finalText(), speech = env.recognitions[0]
     if (safety) speech.stop = () => { speech.stops++ }
+    speech.onaudiostart(); speech.onsoundstart()
     env.advance(3000); s.render().stop()
     if (safety) env.fire(1500)
     assert.equal(await final, '')
-    const trail = `start stop ${safety ? 'timeout' : 'end'}`
+    const trail = `start audio sound stop ${safety ? 'timeout' : 'end'}`
     assert.equal(s.render().error, `No speech heard. Tap the mic and speak. (speech: ${trail})`)
     assert.deepEqual(env.logs, [['[dictation]', trail]])
+    assert.equal(env.voiceReports[0].event, 'empty')
+    assert.equal(env.globals.localStorage.getItem('tether.speechDeafUntil'), null)
     assert.equal(env.records.length, 0); assert.equal(env.timers.size, 0)
     await s.render().toggle(); assert.equal(env.recognitions.length, 1); assert.equal(env.records.length, 1)
     s.render().stop(); await flush()
@@ -354,6 +357,72 @@ async function main() {
     assert.equal(env.recognitions.length, 2); assert.equal(env.records.length, 2)
     s.h.unmount(); assert.equal(env.timers.size, 0)
   }
+  const week = 7 * 24 * 60 * 60 * 1000, deafKey = 'tether.speechDeafUntil'
+  for (const audio of [false, true]) {
+    const env = speechEnvironment(), s = setup(env)
+    await s.render().toggle(); const final = s.render().finalText(), speech = env.recognitions[0]
+    if (audio) speech.onaudiostart()
+    env.advance(3000); s.render().stop()
+    assert.equal(await final, '')
+    const trail = audio ? 'start audio stop end' : 'start stop end'
+    assert.equal(s.render().error, `This device's speech service heard nothing, so Tether will use the server voice here. Tap the mic and speak again. (speech: ${trail})`)
+    assert.equal(env.voiceReports[0].event, 'deaf')
+    assert.equal(env.voiceReports[0].trail, trail); assert.equal(env.voiceReports[0].ms, 3000)
+    assert.equal(env.globals.localStorage.getItem(deafKey), String(3000 + week))
+    await s.render().toggle()
+    assert.equal(env.recognitions.length, 1); assert.equal(env.records.length, 1)
+    s.render().stop(); await flush(); s.h.unmount()
+    // A fresh module loses the in-memory cooldown, but keeps this device's storage.
+    const reloaded = setup(env)
+    env.advance(week - 1)
+    await reloaded.render().toggle()
+    assert.equal(env.recognitions.length, 1); assert.equal(env.records.length, 2)
+    reloaded.render().stop(); await flush()
+    env.advance(2)
+    await reloaded.render().toggle()
+    assert.equal(env.recognitions.length, 2); assert.equal(env.records.length, 2)
+    reloaded.h.unmount(); await flush(); assert.equal(env.timers.size, 0)
+  }
+  console.log('Speech: audio-only and no-audio deaf sessions persist for seven days across reloads, then expire pass')
+
+  for (const token of ['sound', 'speech']) {
+    const env = speechEnvironment(), s = setup(env)
+    await s.render().toggle(); const final = s.render().finalText(), speech = env.recognitions[0]
+    speech.onaudiostart(); speech[`on${token}start`]()
+    env.advance(3000); s.render().stop(); await final
+    assert.equal(s.render().error, `No speech heard. Tap the mic and speak. (speech: start audio ${token} stop end)`)
+    assert.equal(env.voiceReports[0].event, 'empty')
+    assert.equal(env.globals.localStorage.getItem(deafKey), null)
+    s.h.unmount(); assert.equal(env.timers.size, 0)
+  }
+  for (const failure of ['getItem', 'setItem', 'access']) {
+    const env = speechEnvironment()
+    const storage = env.globals.localStorage
+    if (failure === 'access') {
+      // The sandbox copies globals, so simulate an unavailable storage object.
+      delete env.globals.localStorage
+    } else storage[failure] = () => { throw new Error('Storage blocked') }
+    const s = setup(env)
+    await s.render().toggle(); const final = s.render().finalText()
+    env.recognitions[0].onaudiostart()
+    env.advance(3000); s.render().stop(); await final
+    assert(s.render().error.startsWith("This device's speech service heard nothing"))
+    assert.equal(env.voiceReports[0].event, 'deaf')
+    // With reads blocked, ignore any successful write and use the in-memory rule.
+    await s.render().toggle()
+    assert.equal(env.recognitions.length, 1); assert.equal(env.records.length, 1)
+    s.render().stop(); await flush()
+    env.advance(5 * 60 * 1000 - 1)
+    await s.render().toggle()
+    assert.equal(env.recognitions.length, 1); assert.equal(env.records.length, 2)
+    s.render().stop(); await flush()
+    env.advance(1)
+    await s.render().toggle()
+    assert.equal(env.recognitions.length, 2); assert.equal(env.records.length, 2)
+    s.h.unmount(); await flush(); assert.equal(env.timers.size, 0)
+  }
+  console.log('Speech: sound/speech trails stay empty; blocked storage uses the five-minute cooldown without crashing pass')
+
   const trailEnv = speechEnvironment(), traced = setup(trailEnv)
   await traced.render().toggle(); const trailFinal = traced.render().finalText(), trailSpeech = trailEnv.recognitions[0]
   for (let n = 0; n < 30; n++) trailSpeech.error('aborted')

@@ -23,6 +23,8 @@ interface SpeechRecognizer {
 type SpeechConstructor = new () => SpeechRecognizer
 let speechOffUntil = 0
 const SPEECH_OFF_MS = 5 * 60 * 1000
+const SPEECH_DEAF_KEY = 'tether.speechDeafUntil'
+const SPEECH_DEAF_MS = 7 * 24 * 60 * 60 * 1000
 const speechOff = () => { speechOffUntil = Date.now() + SPEECH_OFF_MS }
 
 interface DictationOptions {
@@ -60,7 +62,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     if (chime) { prepareChime(); await playChime() }
     if (disposed.current) return
     const Recognition = speechConstructor()
-    if (Recognition && Date.now() >= speechOffUntil) startSpeech(Recognition)
+    let speechDeafUntil = 0
+    try { speechDeafUntil = Number(localStorage.getItem(SPEECH_DEAF_KEY) || 0) } catch { /* use the in-memory cooldown */ }
+    if (Recognition && Date.now() >= speechOffUntil && Date.now() >= speechDeafUntil) startSpeech(Recognition)
     else await startRecorder()
   }
   function startSpeech(Recognition: SpeechConstructor) {
@@ -94,11 +98,17 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       if (!received && !stopped && (failed || emptyEnds >= 3)) { fallback(); return }
       // Only a real attempt turns speech off. A quick tap on and off is not one.
       if (!received && stopped) { if (Date.now() - started >= 3000) speechOff(); message = undefined }
+      const deaf = !received && stopped && Date.now() - started >= 3000 &&
+        (!trail.includes('audio') || (!trail.includes('sound') && !trail.includes('speech')))
+      if (deaf) {
+        try { localStorage.setItem(SPEECH_DEAF_KEY, String(Date.now() + SPEECH_DEAF_MS)) } catch { speechOff() }
+      }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
-      reportVoice({ kind: 'dictation', event: spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
+      reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
       cleanup(); setText(next); finish(next); setListening(false)
       if (message !== undefined) setError(message)
+      else if (deaf && !handsFree) setError(`This device's speech service heard nothing, so Tether will use the server voice here. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
       else if (!spoken && !handsFree) setError(`No speech heard. Tap the mic and speak. (speech: ${trail.join(' ')})`)
       onFinished?.()
       if (handsFree && spoken && next !== base) onHandsFreeDone?.()
