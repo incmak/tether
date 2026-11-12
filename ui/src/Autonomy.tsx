@@ -4,6 +4,9 @@ import { SelectMenu } from './SelectMenu'
 import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
+import { withApproval } from './approval'
+import { SavedAnswers } from './AutonomySetup'
+import type { SavedAnswer } from './AutonomySetup'
 
 // Autonomy level and reviewer choice (server: autonomy.py). A Claude Code UserPromptSubmit hook gives each prompt the
 // active level's rules and the reviewer rules. The person sets both; agents never change them.
@@ -16,6 +19,7 @@ export interface AutonomyState {
   reviewers: Record<Tier, Reviewer>; tiers: Tier[]
   models: { claude: (string | { slug: string; name?: string })[]; codex: { slug: string; name: string; efforts: string[] }[] }
   efforts: string[]
+  decisions?: SavedAnswer[]
 }
 
 const TIERS: Record<Tier, { title: string; note: string }> = {
@@ -37,11 +41,12 @@ function useAutonomy(api: Api, project?: string) {
   const [error, setError] = useState('')
   async function save(body: Record<string, unknown>) {
     setPending(body); setError('')
-    try { await api<AutonomyState>('autonomy', body); await refresh() }
+    // Raising a level gives agents more power, so the server asks for a passkey approval; lowering it does not.
+    try { await withApproval<AutonomyState>(api, 'autonomy', 'level-raise', body); await refresh() }
     catch (failure) { setError(errorText(failure)) }
     finally { setPending(null) }
   }
-  return { data, error: error || loadError, pending, save }
+  return { data, error: error || loadError, pending, save, refresh }
 }
 
 /** One named row per level: the number, the name and what the agent does. */
@@ -120,11 +125,11 @@ export function ReviewerSettings({ api }: { api: Api }) {
 
 /** The Project sheet: an override that beats the global level while it is on. */
 export function ProjectAutonomy({ api, project }: { api: Api; project: string }) {
-  const { data, error, pending, save } = useAutonomy(api, project)
+  const { data, error, pending, save, refresh } = useAutonomy(api, project)
   const override = typeof pending?.override === 'boolean' ? pending.override : !!data?.project?.override
   const level = typeof pending?.level === 'number' ? pending.level : data?.project?.level ?? data?.global ?? 2
   const named = (n: number) => data?.levels[n] ? `${n} (${data.levels[n].name})` : `${n}`
-  return <section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
+  return <><section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
     {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <Loading className="setting-note" /> : <>
       <label className="switch-row"><span><strong>Use a project level</strong><small>{override ? `Agents here use level ${named(level)}, not the global level ${named(data.global)}.` : `Agents here use the global level ${named(data.global)}.`}</small></span>
@@ -132,4 +137,5 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
       <LevelList name="autonomy-project" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void save({ project, override: true, level: next })} />
     </>}
   </section>
+  {data && <SavedAnswers api={api} project={project} answers={data.decisions ?? []} onChange={() => void refresh()} />}</>
 }

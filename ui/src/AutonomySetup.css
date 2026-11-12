@@ -1,0 +1,23 @@
+/* Settings › Setup (AutonomySetup.tsx) */
+.setup-step + .setup-step { border-top: 1px solid var(--line); }
+.setup-buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.setup-step .switch-row > button, .setup-buttons button { flex: none; }
+.setup-review { display: grid; gap: 10px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.45; }
+.setup-review p { margin: 0; overflow-wrap: anywhere; }
+.setup-review pre { margin: 0; max-height: 220px; overflow: auto; padding: 10px; border-radius: var(--radius-sm); background: var(--bg); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.setup-review pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.setup-review .project-size-row { margin: 0; }
+.setup-review .project-size-row label { width: 72px; flex: none; }
+.setup-review .project-size-row input { flex: 1; min-width: 0; font-size: 16px; }
+.setup-review .sheet-buttons { margin: 0; }
+.setup-status { margin-top: 8px; }
+.saved-answers .project-item { flex: 1; min-width: 0; display: grid; gap: 2px; padding: 8px 0; }
+.saved-answers .project-item small, .saved-answers .project-item strong { overflow-wrap: anywhere; }
+.saved-answers .project-item strong { font-weight: 500; }
+.setup-review .primary { display: inline-flex; align-items: center; gap: 6px; }
+.setup-need-key { color: var(--attention); font-weight: 500; }
+.setup-keys { margin: 0 0 8px; }
+.setup-keys .project-item { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.setup-keys .project-item small { color: var(--muted); }
+.setup-keys .project-item strong { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.setup-keys .project-item small { font-size: 12px; }
