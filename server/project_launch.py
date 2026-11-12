@@ -136,17 +136,25 @@ def codex_args(pid, args, group=None):
 
 
 def codex_browser_env_args():
-    """Codex filters stdio MCP environments; allow the shared CDP endpoint."""
+    """Pass Tether's connection to tool shells and configured Playwright MCP servers.
+
+    Codex's core inheritance drops these variables. Set only Tether's handoff
+    values, leaving the user's inheritance policy and other explicit values intact.
+    """
+    overrides = []
+    for name in ('TETHER_CDP_URL', 'PLAYWRIGHT_MCP_CDP_ENDPOINT', 'TMUX', 'TMUX_PANE'):
+        value = os.environ.get(name)
+        if value:
+            overrides.extend(['-c', 'shell_environment_policy.set.' + name + '=' + toml_string(value)])
     try:
         import tomllib
     except ImportError:
-        return []  # Python 3.10 cannot read TOML without a third-party dependency.
+        return overrides  # Python 3.10 can still pass the shell handoff.
     import paths
     try:
         config = tomllib.loads((Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml').read_text())
     except FileNotFoundError:
-        return []
-    overrides = []
+        return overrides
     for name, server in config.get('mcp_servers', {}).items():
         if not playwright_server(server):
             continue

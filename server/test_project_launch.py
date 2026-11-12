@@ -29,7 +29,9 @@ class UnitTests(unittest.TestCase):
             patch = mock.patch.object(paths, name, value)
             patch.start()
             self.addCleanup(patch.stop)
-        patch = mock.patch.dict(os.environ, {'TMUX': '', 'TMUX_PANE': '', 'CODEX_HOME': '', 'TETHER_CDP_URL': '', 'TETHER_LAUNCH': ''})
+        patch = mock.patch.dict(os.environ, {'TMUX': '', 'TMUX_PANE': '', 'CODEX_HOME': '',
+                                             'TETHER_CDP_URL': '', 'PLAYWRIGHT_MCP_CDP_ENDPOINT': '',
+                                             'TETHER_LAUNCH': ''})
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -108,6 +110,25 @@ class UnitTests(unittest.TestCase):
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
             self.test_codex_plain_cases()
 
+    def test_codex_browser_shell_handoff_without_mcp(self):
+        paths.CODEX.mkdir()
+        (paths.CODEX / 'config.toml').write_text(
+            '[shell_environment_policy]\ninherit = "core"\n'
+            '[shell_environment_policy.set]\nKEEP = "user value"\n')
+        values = {'TETHER_CDP_URL': 'ws://127.0.0.1:1/cdp/test',
+                  'PLAYWRIGHT_MCP_CDP_ENDPOINT': 'ws://127.0.0.1:1/cdp/test',
+                  'TMUX': '/tmp/test-tmux,1,0', 'TMUX_PANE': '%42'}
+        with mock.patch.dict(os.environ, values):
+            args = project_launch.codex_args(None, ['resume', '--last'])
+        overrides = {}
+        for flag, value in zip(args[::2], args[1::2]):
+            if flag == '-c':
+                parsed = tomllib.loads(value)
+                overrides.update(parsed.get('shell_environment_policy', {}).get('set', {}))
+        self.assertEqual(overrides, values)
+        self.assertFalse(any('shell_environment_policy.inherit=' in arg for arg in args))
+        self.assertFalse(any('shell_environment_policy.set=' in arg for arg in args))
+
     def test_codex_browser_env_preserves_configured_names(self):
         paths.CODEX.mkdir()
         (paths.CODEX / 'config.toml').write_text('''
@@ -125,8 +146,7 @@ url = "https://example.test/playwright"
 ''')
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
             args = project_launch.codex_args(None, [])
-        self.assertEqual(len(args), 4)
-        config = tomllib.loads(args[3])
+        config = tomllib.loads(next(arg for arg in args if arg.startswith('mcp_servers.')))
         self.assertEqual(config['mcp_servers']['browser.tool']['env_vars'],
                          ['USER_TOKEN', {'name': 'REMOTE_TOKEN', 'source': 'remote'}, 'PLAYWRIGHT_MCP_CDP_ENDPOINT'])
         with mock.patch.dict(os.environ, TETHER_CDP_URL=''):
