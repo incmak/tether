@@ -4,12 +4,18 @@ import io
 import json
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+except ImportError:
+    HAS_CRYPTO = False
+else:
+    HAS_CRYPTO = True
 
 import approval
 import codex_level
@@ -49,6 +55,20 @@ class Handler:
         self.status, self.body = status, body
 
 
+class WithoutCryptography(unittest.TestCase):
+    def test_import_and_fail_closed_without_cryptography(self):
+        with mock.patch.dict(sys.modules, {
+                'cryptography': None,
+                'cryptography.exceptions': None,
+                'cryptography.hazmat.primitives': None,
+                'cryptography.hazmat.primitives.asymmetric': None}):
+            with self.assertRaises(approval.ApprovalError) as raised:
+                approval._crypto()
+            self.assertEqual(raised.exception.status, 503)
+            self.assertEqual(str(raised.exception),
+                             'Passkey approval needs the Python cryptography package on the Tether host.')
+
+
 class PasskeyCase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -63,7 +83,7 @@ class PasskeyCase(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.handler = Handler()
-        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.key = ec.generate_private_key(ec.SECP256R1()) if HAS_CRYPTO else None
         self.identifier = b'first-passkey'
         self.count = 1
 
@@ -111,6 +131,7 @@ class PasskeyCase(unittest.TestCase):
 
 
 class Ceremonies(PasskeyCase):
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_enroll_status_private_store_and_stable_user(self):
         self.assertEqual(approval.status('tether.test'), {'passkeys': [], 'here': 0})
         self.assertFalse(paths.CONFIG.exists())
@@ -132,6 +153,7 @@ class Ceremonies(PasskeyCase):
         self.assertEqual(approval.status('elsewhere.test')['here'], 0)
         self.assertNotIn('public_key', approval.status('tether.test')['passkeys'][0])
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_registration_rejects_wrong_origin_rp_flags_key_and_fmt(self):
         for kwargs in ({'origin': 'https://evil.test'}, {'host': 'evil.test'}, {'flags': 65},
                        {'flags': 68}, {'flags': 5}, {'cose': {1: 3, 3: -257, -1: b'RSA'}}, {'fmt': 'u2f'}):
@@ -141,6 +163,7 @@ class Ceremonies(PasskeyCase):
                 self.assertEqual(handler.status, 403, handler.body)
                 self.assertEqual(approval.status('tether.test')['here'], 0)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_registration_rejects_bad_cbor_and_oversize(self):
         for raw in (b'\xff', b'\xa1\x63fmt', b'\x9f\xff', b'x' * 4097):
             with self.subTest(raw=raw[:10]):
@@ -162,6 +185,7 @@ class Ceremonies(PasskeyCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 approval._cbor(raw)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_second_enroll_needs_valid_approval_and_remove_needs_approval(self):
         self.add()
         second = self.registration(name='Laptop', identifier=b'other')
@@ -182,6 +206,7 @@ class Ceremonies(PasskeyCase):
         approval.post(handler)
         self.assertEqual((handler.status, handler.body['here']), (200, 1))
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_assertion_updates_counter_and_last_used_and_replay_fails(self):
         self.add()
         value = self.assertion()
@@ -192,6 +217,7 @@ class Ceremonies(PasskeyCase):
         with self.assertRaises(approval.ApprovalError):
             self.require(value)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_challenge_binds_kind_action_payload_host_origin_and_expires(self):
         self.add()
         for action, payload in (('setup-ping', {'action': 'hook'}), ('setup-hook', {'action': 'ping'})):
@@ -211,6 +237,7 @@ class Ceremonies(PasskeyCase):
         with self.assertRaisesRegex(approval.ApprovalError, approval.NO_PASSKEY):
             approval.require(Handler(host='other.test', origin='https://other.test'), 'setup-hook', {'action': 'hook'}, value)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_assertion_rejects_wrong_signature_count_origin_rp_uv_id_and_type(self):
         self.add()
         wrong_key = ec.generate_private_key(ec.SECP256R1())
@@ -222,6 +249,7 @@ class Ceremonies(PasskeyCase):
         with self.assertRaises(approval.ApprovalError):
             self.require(self.assertion(count=4))
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_zero_counter_authenticators_and_canonical_payload(self):
         self.add()
         self.require(self.assertion(count=0))
@@ -230,6 +258,7 @@ class Ceremonies(PasskeyCase):
         proof = self.assertion(payload=payload)
         self.require(proof, payload={'action': 'hook', 'nested': {'a': 1, 'b': 2}})
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_missing_malformed_approval_and_identifiers(self):
         with self.assertRaisesRegex(approval.ApprovalError, approval.NO_PASSKEY):
             self.require(None)
@@ -256,6 +285,7 @@ class Ceremonies(PasskeyCase):
             with self.assertRaises(ValueError):
                 approval.options(Handler(host=host, origin=origin), 'create', 'passkey-add', {})
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_challenge_cap_get_options_and_expiry_cleanup(self):
         self.add()
         opts = approval.options(self.handler, 'get', 'setup-hook', {'action': 'hook'})
@@ -272,6 +302,7 @@ class Ceremonies(PasskeyCase):
             approval.options(self.handler, 'get', 'setup-hook', {})
         self.assertEqual(len(approval._CHALLENGES), 1)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_name_limit_max_passkeys_and_atomic_write_failure(self):
         for name in ('', 'a' * 41, 'bad\nname', None):
             with self.subTest(name=name), self.assertRaises(ValueError):
@@ -291,6 +322,7 @@ class Ceremonies(PasskeyCase):
         with self.assertRaises(ValueError):
             approval.enroll(self.handler, 'Eleven', {})
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_new_host_is_not_a_second_first_use(self):
         # An agent can send any Host header, so a host without a passkey must not get a free first passkey.
         self.add()
@@ -302,6 +334,7 @@ class Ceremonies(PasskeyCase):
         self.assertEqual(approval.status('other.test'), {'passkeys': approval.status('tether.test')['passkeys'], 'here': 0})
         self.assertEqual(len(approval.status('tether.test')['passkeys']), 1)
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_packed_attestation_is_accepted(self):
         self.handler = Handler(host='other.test', origin='https://other.test')
         body = self.registration(host='other.test', identifier=b'packed-rp', fmt='packed')
@@ -309,6 +342,7 @@ class Ceremonies(PasskeyCase):
         approval.post(handler)
         self.assertEqual((handler.status, handler.body['here']), (200, 1))
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_push_notice_and_failure_are_optional(self):
         keyfile = self.root / 'push-keys.json'
         keyfile.touch()
@@ -339,6 +373,7 @@ class Ceremonies(PasskeyCase):
         approval.post(handler)
         self.assertEqual((handler.status, handler.body['approval']), (403, 'no-passkey'))
 
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_direct_enroll_api_and_registration_replay(self):
         body = self.registration(name=' ')
         approval.enroll(self.handler, body['name'], body['credential'])

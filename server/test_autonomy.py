@@ -16,7 +16,7 @@ import codex_level
 import decisions
 import paths
 import server
-from test_approval import Handler as PasskeyHandler, PasskeyCase
+from test_approval import HAS_CRYPTO, Handler as PasskeyHandler, PasskeyCase
 
 PID = 'abcdef012345'
 
@@ -474,6 +474,7 @@ class Http(Base):
         self.assertFalse(autonomy.handles(autonomy.PATH + '/setup-other'))
 
 
+@unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
 class LevelApproval(PasskeyCase):
     def post(self, body):
         handler = PasskeyHandler(autonomy.PATH, body)

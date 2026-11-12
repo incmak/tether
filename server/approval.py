@@ -11,10 +11,6 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-
 import auth
 import paths
 import push
@@ -32,6 +28,16 @@ class ApprovalError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+def _crypto():
+    try:
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        raise ApprovalError(503, 'Passkey approval needs the Python cryptography package on the Tether host.') from None
+    return InvalidSignature, hashes, serialization, ec
 
 
 def _b64(data):
@@ -222,6 +228,7 @@ def _require(handler, action, payload, approval, data):
     rows = [row for row in data['passkeys'] if row['rp_id'] == host]
     if not rows:
         raise ApprovalError(403, NO_PASSKEY)
+    InvalidSignature, hashes, serialization, ec = _crypto()
     try:
         host, identifier, response, client = _client(handler, 'get', action, payload,
                                                     approval['challenge_id'], approval['credential'])
@@ -274,6 +281,7 @@ def enroll(handler, name, credential, approval=None):
             if not any(row['rp_id'] == host for row in data['passkeys']):
                 raise ApprovalError(409, OTHER_HOST)
             _require(handler, 'passkey-add', {'name': name}, approval, data)
+        _, _, serialization, ec = _crypto()
         try:
             # Direct Python callers can supply the browser credential alone. HTTP also supplies its challenge id.
             if not isinstance(credential, dict):

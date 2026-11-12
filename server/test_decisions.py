@@ -14,7 +14,7 @@ import autonomy
 import codex_level
 import decisions
 import paths
-from test_approval import Handler, PasskeyCase
+from test_approval import HAS_CRYPTO, Handler, PasskeyCase
 
 PID = 'abcdef012345'
 OTHER = '123456abcdef'
@@ -164,6 +164,7 @@ class DecisionsTest(unittest.TestCase):
                          {f'Question {index}' for index in range(12)})
 
 
+@unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
 class DecisionApproval(PasskeyCase):
     def test_record_refused_before_write_and_accepted_with_assertion_delete_stays_open(self):
         (paths.TETHER / 'projects' / PID).mkdir(parents=True)
