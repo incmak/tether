@@ -1176,14 +1176,24 @@ class Session:
             pending_voice = (not self.tts.voice_cancelled and (
                 self.tts.voice_open or (self.tts.voice_client and self.tts.voice_count
                                        and not self.tts.voice_playback_ended)))
-            if (self.bot_speaking or self.llm_running or pending_voice
-                    or (self.busy and not self.user_speaking)):
+            acted = bool(self.bot_speaking or self.llm_running or pending_voice
+                         or (self.busy and not self.user_speaking))
+            details = {key: data[key] if isinstance(data.get(key), str) and len(data[key]) <= 20
+                       else None for key in ('source', 'phase')}
+            details.update(acted=acted, bot_speaking=self.bot_speaking,
+                           llm_running=self.llm_running, pending_voice=bool(pending_voice))
+            print('Friday interrupt ' + json.dumps(details, separators=(',', ':')), file=sys.stderr, flush=True)
+            if acted:
                 turn = self.tts.voice_turn or self.turn
                 self.event_generation += 1
                 # The same bidirectional broadcast used by LLMUserAggregator
                 # on barge-in. It flushes pending speech and cancels LLM/TTS.
                 await self.aggregators.user().broadcast_interruption()
                 await self.rtvi.send_server_message({'t': 'interrupted', 'd': {'turn': turn}})
+        elif kind == 'bye':
+            reason = data.get('reason')
+            print('Friday bye ' + json.dumps({'reason': reason[:20] if isinstance(reason, str) else None},
+                                            separators=(',', ':')), file=sys.stderr, flush=True)
         elif kind == 'spoken':
             await self.tts.spoken(data)
         elif kind == 'stats':

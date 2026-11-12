@@ -5,6 +5,11 @@ interface Chat { session: string; chat: string; agent: string; state: string; bu
 
 export const normalize = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
 
+export function soundKey(name: string): string {
+  const key = normalize(name).replace(/th/g, 't').replace(/ph/g, 'f').replace(/ck/g, 'k')
+  return (key.slice(0, 1) + key.slice(1).replace(/[aeiouyhw]/g, '')).replace(/(.)\1+/g, '$1')
+}
+
 export function distance(left: string, right: string): number {
   let row = Array.from({ length: right.length + 1 }, (_, index) => index)
   for (let i = 0; i < left.length; i++) {
@@ -34,7 +39,12 @@ export function fridayChatList(chats: Chat[], sessions: Session[], target: strin
       distance: distance(query, entry.normalized),
     })).sort((a, b) => a.rank - b.rank || a.distance - b.distance) : []
     const closest = ranked[0]
-    const match = exact ?? (closest && (closest.rank < 2 || closest.distance <= Math.max(query.length, closest.normalized.length) * 0.4) ? closest : undefined)
+    let match = exact ?? (closest && (closest.rank < 2 || closest.distance <= Math.max(query.length, closest.normalized.length) * 0.4) ? closest : undefined)
+    const key = soundKey(wanted)
+    if (!match && key) {
+      const phonetic = entries.filter(entry => soundKey(entry.name) === key)
+      if (phonetic.length === 1) match = phonetic[0]
+    }
     if (!match) return { error: `No session called ${wanted}. Sessions: ${entries.map(entry => entry.name).join(', ')}` }
     return { session: match.name, chats: chats.filter(chat => chat.session === match.id).map(line) }
   }

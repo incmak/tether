@@ -20,7 +20,7 @@ function setup({ failConnect = false } = {}) {
       return new Map(reports.map(report => [report.id, report]))
     }
   }
-  const window = { RTCPeerConnection: PeerConnection }
+  const window = { RTCPeerConnection: PeerConnection, addEventListener() {}, removeEventListener() {} }
   class PipecatClient {
     constructor(options) { this.callbacks = options.callbacks; client = this }
     async initDevices() { assert.equal(window.RTCPeerConnection, PeerConnection) }
@@ -95,9 +95,10 @@ async function main() {
   h.agent.close()
   assert.equal(h.timers.size, 0)
   await settle()
-  assert.equal(h.sent.length, 3, 'Send final stats before disconnect')
-  assert.equal(h.sent[2].d.packetsReceived, 0)
-  assert.equal(h.sent[2].d.jitterBufferAvgMs, 0)
+  assert.equal(h.sent.length, 4, 'Send bye and final stats before disconnect')
+  assert.deepEqual(h.sent[2], { t: 'bye', d: { reason: 'ended' } })
+  assert.equal(h.sent[3].d.packetsReceived, 0)
+  assert.equal(h.sent[3].d.jitterBufferAvgMs, 0)
   assert.deepEqual(h.order.slice(-2), ['stats', 'disconnect'])
   console.log('Friday stats: audio selection, five-second deltas, jitter, buffer average, silent errors, final send and timer cleanup pass')
 

@@ -464,7 +464,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           if (gone || agent.current !== friday) return
           agent.current = null
           setAgentOn(false)
-          friday.close()
+          friday.close('transport')
           setProblem(`${reason} Using the basic voice instead.`)
           classic()
         },
@@ -482,14 +482,14 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         if (gone || agent.current !== friday) return  // onClosed already fell back
         agent.current = null
         setAgentOn(false)
-        friday.close()
+        friday.close('start-failed')
         if (blocked(failure)) { setProblem('The microphone is blocked. Allow it in the browser, then start Live mode again.'); go('idle'); return }
         console.error('Friday could not start', failure)
         setProblem(`Friday could not start: ${errorText(failure)} Using the basic voice instead.`)
         classic()
       }
     })
-    return () => { gone = true; agent.current?.close(); agent.current = null; voice.current?.close(); voice.current = null }
+    return () => { gone = true; agent.current?.close('ended'); agent.current = null; voice.current?.close(); voice.current = null }
   }, [])
 
   // Friday hears the chat list whenever it changes, so it can answer "what's running" from facts.
@@ -687,7 +687,9 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
 
   function talk() {
     if (agent.current) {  // Friday hears all the time: this only stops its reply. The mic button mutes.
-      if (phase === 'speaking' || phase === 'thinking') agent.current.interrupt()
+      if (phase === 'speaking' || phase === 'thinking') agent.current.interrupt('tap', phase)
+      // A tap while Friday thinks drops the answer it was about to give, so say so.
+      if (phase === 'thinking') setReply({ who: ASSISTANT, text: 'Stopped. Say it again.' })
       return
     }
     const engine = voice.current

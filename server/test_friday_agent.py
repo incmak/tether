@@ -438,6 +438,51 @@ class FridayRulesTests(unittest.TestCase):
 
 
 class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interrupt_logs_state_and_preserves_broadcast_condition(self):
+        session = friday.Session.__new__(friday.Session)
+        session.bot_speaking = session.llm_running = session.busy = session.user_speaking = False
+        session.tts = SimpleNamespace(voice_cancelled=False, voice_open=False, voice_client=False,
+                                     voice_turn=0)
+        session.turn = 1
+        session.event_generation = 0
+        user = SimpleNamespace(broadcast_interruption=AsyncMock())
+        session.aggregators = SimpleNamespace(user=lambda: user)
+        session.rtvi = SimpleNamespace(send_server_message=AsyncMock())
+        with patch('sys.stderr') as stderr:
+            await session.client_message('interrupt', {'source': 'tap', 'phase': 'listening'})
+            user.broadcast_interruption.assert_not_awaited()
+            session.llm_running = True
+            await session.client_message('interrupt', {'source': 'tap', 'phase': 'thinking'})
+        lines = [call.args[0] for call in stderr.write.call_args_list if call.args[0].strip()]
+        self.assertEqual(lines, [
+            'Friday interrupt {"source":"tap","phase":"listening","acted":false,'
+            '"bot_speaking":false,"llm_running":false,"pending_voice":false}',
+            'Friday interrupt {"source":"tap","phase":"thinking","acted":true,'
+            '"bot_speaking":false,"llm_running":true,"pending_voice":false}',
+        ])
+        user.broadcast_interruption.assert_awaited_once()
+        session.rtvi.send_server_message.assert_awaited_once_with({'t': 'interrupted', 'd': {'turn': 1}})
+        self.assertEqual(session.event_generation, 1)
+        session.llm_running = False
+        with patch('sys.stderr') as stderr:
+            for data in ({}, {'source': 42, 'phase': []}, {'source': 'x' * 21, 'phase': 'y' * 21},
+                         {'source': 'x' * 20, 'phase': 'y' * 20}):
+                await session.client_message('interrupt', data)
+        details = [json.loads(call.args[0].removeprefix('Friday interrupt '))
+                   for call in stderr.write.call_args_list if call.args[0].strip()]
+        self.assertEqual([(item['source'], item['phase']) for item in details],
+                         [(None, None)] * 3 + [('x' * 20, 'y' * 20)])
+
+    async def test_bye_logs_only_a_bounded_string_reason(self):
+        session = friday.Session.__new__(friday.Session)
+        with patch('sys.stderr') as stderr:
+            for data in ({'reason': 'ended'}, {'reason': 'x' * 21}, {'reason': 42}, {}):
+                await session.client_message('bye', data)
+        lines = [call.args[0] for call in stderr.write.call_args_list if call.args[0].strip()]
+        self.assertEqual(lines, ['Friday bye {"reason":"ended"}',
+                                 'Friday bye {"reason":"' + 'x' * 20 + '"}',
+                                 'Friday bye {"reason":null}', 'Friday bye {"reason":null}'])
+
     async def test_stats_dispatch_logs_only_filtered_numbers(self):
         session = friday.Session.__new__(friday.Session)
         with patch('sys.stderr') as stderr:
