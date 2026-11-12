@@ -30,6 +30,7 @@ import { OrganizeMenu, tagDot } from './Organize'
 import { useWords } from './words'
 import { WaitingBox } from './Attention'
 import { waitingAsks } from './attention'
+import { HOLD_MS } from './gesture'
 
 // The avatars layout variant (layouts.css) shows a round avatar per session and tab: up to two initials, a colour from the name.
 const initials = (name: string) => (name.match(/[\p{L}\p{N}]+/gu) ?? ['?']).slice(0, 2).map(word => [...word][0]).join('').toUpperCase()
@@ -240,6 +241,9 @@ interface Props {
   slots?: string[]
   /** Desktop workspace: rows can be dragged into a slot. */
   drag?: boolean
+  onDropPane?: (id: string, index: number, mode: null) => void
+  onDropSession?: (id: string) => void
+  onDropChat?: (data: string, index: number, mode: null) => void
   /** Desktop workspace: ⌘K opens the command menu, so the key hint opens it too. */
   onCommandMenu?: () => void
   /** Opens the "Message sessions" box. Absent when no agent pane takes input. */
@@ -255,7 +259,7 @@ interface Props {
   onAddPane?: (session: Session, at: Anchor) => void
 }
 
-export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, onClose, slots, drag, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
+export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -291,43 +295,69 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
     else if (source) { setCarry(null); setConfirming({ source, target }) }
   }
   const startCarry = (next: Carry | null) => { if (next) setRenaming(null); setCarry(next) }
-  // Phone: browsers do not drag with touch, so a long press picks a row up. Move it onto another session to merge,
-  // or a pane onto "New session" to split it out. A long press released on the spot opens the row's menu, as before.
+  // Touch lifts a row at every width. A hold released on the spot still opens the menu.
   const root = useRef<HTMLDivElement>(null)
-  const hold = useRef<{ timer: number; x: number; y: number; carried: Carry; label: string; menu: () => void; active: boolean; moved: boolean } | null>(null)
+  const hold = useRef<{ timer: number; x: number; y: number; lastX: number; lastY: number; lastAt: number; vx: number; vy: number; carried: Carry; label: string; menu: () => void; active: boolean; moved: boolean } | null>(null)
   const ghostRef = useRef<HTMLDivElement>(null)
+  const ghostTimer = useRef(0)
   const [ghost, setGhost] = useState<{ x: number; y: number; label: string } | null>(null)
   const [touchOver, setTouchOver] = useState<string | null>(null)
-  const latest = useRef({ dropOn, merge, openChat, sessions })
-  useEffect(() => { latest.current = { dropOn, merge, openChat, sessions } })
+  const latest = useRef({ dropOn, merge, openChat, sessions, onDropPane, onDropSession, onDropChat })
+  useEffect(() => { latest.current = { dropOn, merge, openChat, sessions, onDropPane, onDropSession, onDropChat } })
+  const ghostX = (x: number) => {
+    const edge = x < 118 ? 118 : x > window.innerWidth - 118 ? window.innerWidth - 118 : x
+    return edge + (x - edge) * .25
+  }
   const holdStart = (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => {
-    if (drag || reorder || event.touches.length !== 1) return
+    if (reorder || event.touches.length !== 1) return
     const { clientX: x, clientY: y } = event.touches[0]
     if (hold.current) window.clearTimeout(hold.current.timer)
-    hold.current = { x, y, carried, label, menu, active: false, moved: false, timer: window.setTimeout(() => {
+    // A ghost still settling from the last drop belongs to that drop: clear it, and let this touch start its own hold.
+    if (ghostTimer.current) { window.clearTimeout(ghostTimer.current); ghostTimer.current = 0; setGhost(null) }
+    hold.current = { x, y, lastX: x, lastY: y, lastAt: performance.now(), vx: 0, vy: 0, carried, label, menu, active: false, moved: false, timer: window.setTimeout(() => {
       const held = hold.current
       if (!held) return
       held.active = true
+      held.lastAt = performance.now()
       navigator.vibrate?.(12)
       startCarry(held.carried)
-      setGhost({ x: held.x, y: held.y, label: held.label })
-    }, 450) }
+      setGhost({ x: ghostX(held.x), y: held.y, label: held.label })
+    }, HOLD_MS) }
   }
   useEffect(() => {
     const el = root.current
-    if (!el || drag) return
+    if (!el) return
     let overNew = false, overSession: string | null = null
-    const spotAt = (x: number, y: number) => document.elementFromPoint(x, y)?.closest<HTMLElement>('.new-session-drop, .session-list > li[data-id]') ?? null
-    const end = () => { if (hold.current) window.clearTimeout(hold.current.timer); hold.current = null; setGhost(null); setTouchOver(null); setOverNew(false); overNew = false; overSession = null }
+    let overSlot: HTMLElement | null = null
+    const spotAt = (x: number, y: number) => document.elementFromPoint(x, y)?.closest<HTMLElement>('.slot[data-slot], .new-session-drop, .session-list > li[data-id]') ?? null
+    const finishGhost = (x: number, y: number, committed: boolean, speed: number) => {
+      const node = ghostRef.current
+      if (!node) { setGhost(null); return }
+      const position = new DOMMatrix(getComputedStyle(node).transform)
+      const distance = Math.hypot(x - position.m41, y - position.m42)
+      const duration = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : committed ? Math.round(Math.max(140, Math.min(320, distance / Math.max(speed, .8)))) : 220
+      node.style.transition = duration ? `transform ${duration}ms cubic-bezier(.32,.72,0,1)` : 'none'
+      node.style.transform = `translate3d(${x}px, ${y}px, 0)`
+      window.clearTimeout(ghostTimer.current)
+      if (duration) ghostTimer.current = window.setTimeout(() => { ghostTimer.current = 0; setGhost(null) }, duration)
+      else { ghostTimer.current = 0; setGhost(null) }
+    }
+    const end = () => { if (hold.current) window.clearTimeout(hold.current.timer); hold.current = null; setTouchOver(null); setOverNew(false); overNew = false; overSession = null; overSlot?.removeAttribute('data-touch-drop'); overSlot = null }
     const move = (event: TouchEvent) => {
       const held = hold.current, touch = event.touches[0]
       if (!held || !touch) return
+      if (event.touches.length !== 1) { cancel(); return }
       const far = Math.hypot(touch.clientX - held.x, touch.clientY - held.y) > 10
       if (!held.active) { if (far) end(); return }  // a scroll or a swipe, not a hold
       event.preventDefault()
       held.moved ||= far
-      if (ghostRef.current) ghostRef.current.style.transform = `translate3d(${Math.max(118, Math.min(window.innerWidth - 118, touch.clientX))}px, ${touch.clientY}px, 0)`
+      const now = performance.now()
+      if (now > held.lastAt) { held.vx = held.vx * .4 + (touch.clientX - held.lastX) / (now - held.lastAt) * .6; held.vy = held.vy * .4 + (touch.clientY - held.lastY) / (now - held.lastAt) * .6 }
+      held.lastX = touch.clientX; held.lastY = touch.clientY; held.lastAt = now
+      if (ghostRef.current) { ghostRef.current.style.transition = 'none'; ghostRef.current.style.transform = `translate3d(${ghostX(touch.clientX)}px, ${touch.clientY}px, 0)` }
       const spot = spotAt(touch.clientX, touch.clientY)
+      const nextSlot = latest.current.onDropPane && spot?.matches('.slot[data-slot]') ? spot : null
+      if (overSlot !== nextSlot) { overSlot?.removeAttribute('data-touch-drop'); overSlot = nextSlot; overSlot?.setAttribute('data-touch-drop', '') }
       const nextNew = !!(held.carried.pane || held.carried.chat) && !!spot?.classList.contains('new-session-drop')
       if (overNew !== nextNew) { overNew = nextNew; setOverNew(nextNew) }
       const id = spot?.dataset.id
@@ -335,7 +365,7 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
       if (overSession !== nextSession) { overSession = nextSession; setTouchOver(nextSession) }
       // Near the top or bottom edge of the list, the list scrolls so far rows can be reached.
       const nav = el.querySelector<HTMLElement>('.session-groups')
-      if (nav) { const box = nav.getBoundingClientRect(); if (touch.clientY < box.top + 48) nav.scrollTop -= 14; else if (touch.clientY > box.bottom - 48) nav.scrollTop += 14 }
+      if (nav && !nextSlot) { const box = nav.getBoundingClientRect(); if (touch.clientY < box.top + 48) nav.scrollTop -= 14; else if (touch.clientY > box.bottom - 48) nav.scrollTop += 14 }
     }
     const up = (event: TouchEvent) => {
       const held = hold.current
@@ -344,24 +374,41 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
       event.preventDefault()  // no click after a hold
       const touch = event.changedTouches[0]
       const spot = touch ? spotAt(touch.clientX, touch.clientY) : null
-      const { dropOn, merge, openChat, sessions } = latest.current
+      const { dropOn, merge, openChat, sessions, onDropPane, onDropSession, onDropChat } = latest.current
+      const speed = matchMedia('(prefers-reduced-motion: reduce)').matches || performance.now() - held.lastAt > 100 ? 0 : Math.hypot(held.vx, held.vy)
+      held.moved ||= speed > .4
+      const source = sessions.find(session => session.id === held.carried.session)
+      const slot = spot?.matches('.slot[data-slot]') ? Number(spot.dataset.slot) : NaN
+      const target = sessions.find(session => session.id === spot?.dataset.id)
+      const committed = held.moved && !!(Number.isInteger(slot) && onDropPane || spot?.classList.contains('new-session-drop') && (held.carried.pane || held.carried.chat) || target && target.id !== held.carried.session)
+      const box = committed ? spot?.getBoundingClientRect() : null
+      finishGhost(box ? ghostX(box.left + box.width / 2) : ghostX(held.x), box ? box.top + box.height / 2 : held.y, committed, speed)
       end()
       if (!held.moved) { setCarry(null); held.menu(); return }
+      if (Number.isInteger(slot) && onDropPane) {
+        setCarry(null)
+        if (held.carried.chat) onDropChat?.(JSON.stringify({ id: held.carried.chat.id, agent: held.carried.chat.agent }), slot, null)
+        else if (held.carried.pane) onDropPane(held.carried.pane, slot, null)
+        else if (source?.panes.length === 1) onDropPane(source.panes[0].id, slot, null)
+        else if (source) onDropSession?.(source.id)
+        return
+      }
       if (spot?.classList.contains('new-session-drop') && held.carried.chat) { openChat(held.carried.chat, null); return }
       if (spot?.classList.contains('new-session-drop') && held.carried.pane) { merge('break', held.carried.pane); return }
-      const target = sessions.find(session => session.id === spot?.dataset.id)
       if (target && target.id !== held.carried.session) dropOn(target)
       else setCarry(null)
     }
-    const cancel = () => { if (hold.current?.active) setCarry(null); end() }
+    const cancel = () => { const held = hold.current; if (held?.active) { finishGhost(ghostX(held.x), held.y, false, 0); setCarry(null) } end() }
     // The phone's own long-press menu would open the row's menu at once; the hold decides on release instead.
     const menu = (event: Event) => { if (hold.current) { event.preventDefault(); event.stopPropagation() } }
+    const nativeDrag = (event: Event) => { if (hold.current) { event.preventDefault(); event.stopPropagation() } }
+    el.addEventListener('dragstart', nativeDrag, true)
     el.addEventListener('touchmove', move, { passive: false })
     el.addEventListener('touchend', up)
     el.addEventListener('touchcancel', cancel)
     document.addEventListener('contextmenu', menu, true)
-    return () => { end(); el.removeEventListener('touchmove', move); el.removeEventListener('touchend', up); el.removeEventListener('touchcancel', cancel); document.removeEventListener('contextmenu', menu, true) }
-  }, [drag])
+    return () => { end(); window.clearTimeout(ghostTimer.current); el.removeEventListener('dragstart', nativeDrag, true); el.removeEventListener('touchmove', move); el.removeEventListener('touchend', up); el.removeEventListener('touchcancel', cancel); document.removeEventListener('contextmenu', menu, true) }
+  }, [])
   const [organizing, setOrganizing] = useState<{ at?: Anchor } | null>(null)
   const renamed = () => { setRenaming(null); onRetry() }
   const search = query.trim().toLowerCase()
@@ -444,7 +491,7 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
         {isOpen('past') && <PastChats api={api} search={search} showPaths={prefs.showPaths} onPick={onPastChat} sessions={sessions} drag={!!drag && !reorder} onCarry={startCarry} onHold={holdStart} />}
       </section>
     </nav>
-    {ghost && <div ref={ghostRef} className="touch-ghost" aria-hidden="true" style={{ transform: `translate3d(${Math.max(118, Math.min(window.innerWidth - 118, ghost.x))}px, ${ghost.y}px, 0)` }}><span>{ghost.label}</span></div>}
+    {ghost && <div ref={ghostRef} className="touch-ghost" aria-hidden="true" style={{ transform: `translate3d(${ghost.x}px, ${ghost.y}px, 0)` }}><span>{ghost.label}</span></div>}
     {confirming && <MergeConfirm {...confirming} marks={marks} onMerge={keep => merge('session', confirming.source.id, confirming.target.id, keep)} onCancel={() => setConfirming(null)} />}
     <footer className="sidebar-footer">
       <RunningNow sessions={sessions} selected={selected} onOpen={onOpen} />

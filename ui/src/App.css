@@ -214,10 +214,8 @@ label.broadcast-row:hover { background: var(--hover); }
 .session-list > li.carried > .swipe-row { opacity: .45; }
 .pane-children button { -webkit-touch-callout: none; user-select: none; }
 .touch-carrying .session-groups { overscroll-behavior: contain; }
-.touch-ghost { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; }
-.touch-ghost > span { display: block; max-width: 220px; overflow: hidden; padding: 8px 12px; border-radius: var(--radius); background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 8px 24px rgb(0 0 0 / .25); transform: translate(-50%, calc(-100% - 18px)) scale(1.02); animation: ghost-in .16s ease-out; }
-@keyframes ghost-in { from { opacity: 0; transform: translate(-50%, calc(-100% - 10px)) scale(.9); } }
-@media (prefers-reduced-motion: reduce) { .touch-ghost > span { animation: none; } }
+.touch-ghost { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; transition: none; will-change: transform; }
+.touch-ghost > span { display: block; max-width: 220px; overflow: hidden; padding: 8px 12px; border-radius: var(--radius); background: var(--accent); color: var(--accent-text); font-size: 14px; font-weight: 500; white-space: nowrap; text-overflow: ellipsis; box-shadow: 0 8px 24px rgb(0 0 0 / .25); transform: translate(-50%, calc(-100% - 18px)) scale(1.02); }
 .new-session-drop.over { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .rename-row { flex: 1; min-width: 0; padding: 4px 6px 6px; }
 .rename-row input { width: 100%; height: 32px; padding: 0 8px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 14px; }
@@ -1294,6 +1292,8 @@ button.live-chip:active { background: var(--line); }
 }
 /* Drop hints while dragging a pane, a session or a slot. */
 .drop-hint { position: absolute; inset: 6px; z-index: 5; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
+.touch-drop-hint { display: none; }
+.slot[data-touch-drop] > .touch-drop-hint { display: flex; }
 .drop-hint.left { right: 50%; } .drop-hint.right { left: 50%; } .drop-hint.top { bottom: 50%; } .drop-hint.bottom { top: 50%; }
 .drop-hint span { padding: 6px 12px; border-radius: 999px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; box-shadow: 0 2px 8px #00000026; }
 /* Buttons default to a 44px minimum height (index.css). The workspace is mouse-only, so its header buttons use their own sizes. */
