@@ -3,12 +3,12 @@
 .agent-pill { gap: 6px; }
 .agent-pill.running { color: var(--text); }
 .agent-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: color-mix(in srgb, var(--muted) 70%, transparent); }
-.agent-dot.running { background: var(--done); box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 22%, transparent); }
+.agent-dot.running { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .agent-dot.failed, .agent-dot.stopped { background: var(--error); }
 @media (prefers-reduced-motion: no-preference) {
-  .agent-pill .agent-dot.running, .agent-node .agent-dot.running { animation: agent-pulse 1.6s ease-in-out infinite; }
+  .agent-pill .agent-dot.running { animation: agent-pulse 1.6s ease-in-out infinite; }
 }
-@keyframes agent-pulse { 50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--done) 10%, transparent); } }
+@keyframes agent-pulse { 50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); } }
 
 .sheet.agent-map { overflow-y: auto; container: agent-map / inline-size; }
 @media (min-width: 600px) {
@@ -23,7 +23,6 @@
   display: flex; align-items: flex-start; gap: 10px; width: 100%; min-width: 0; padding: 9px 12px;
   border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); text-align: left;
 }
-.agent-node .agent-dot { margin-top: 0.45em; }
 button.agent-node:hover { background: var(--hover); border-color: color-mix(in srgb, var(--text) 30%, var(--line)); }
 button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .agent-node-text { display: grid; gap: 1px; min-width: 0; }
@@ -56,7 +55,7 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
   display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin-right: auto;
   font-family: inherit; font-size: 19px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere;
 }
-.agent-map .agent-title .agent-dot { margin-top: 0.55em; }
+.agent-map .agent-title .agent-state { margin-top: 0.12em; width: 24px; height: 24px; }
 .agent-meta { margin: 8px 0 14px; color: var(--muted); font-size: 14px; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .agent-meta p { margin: 0 0 4px; }
 .agent-summary { margin: 0; color: var(--error); font-size: 14px; }
@@ -115,3 +114,35 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
   .agent-tasks ul { max-width: calc((100% - 28px) / 2.2); }
 }
 .agent-output { max-height: 55vh; }
+
+/* State: an icon in a tinted disc plus the word, in one color per state. Running = the accent, pulsing;
+   done = green check; failed = red cross; stopped = amber square. Running rows carry a colored edge. */
+.agent-map { --st-running: var(--accent); --st-finished: var(--done); --st-failed: var(--error); --st-stopped: var(--attention); }
+.agent-state {
+  flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%;
+  color: var(--st); background: color-mix(in srgb, var(--st) 15%, transparent);
+}
+.agent-state.running { --st: var(--st-running); }
+.agent-state.finished { --st: var(--st-finished); }
+.agent-state.failed { --st: var(--st-failed); }
+.agent-state.stopped { --st: var(--st-stopped); }
+.agent-state.main { --st: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+.agent-state i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.agent-state.running i { box-shadow: 0 0 0 0 color-mix(in srgb, var(--st) 45%, transparent); }
+@media (prefers-reduced-motion: no-preference) {
+  .agent-state.running i { animation: agent-ring 1.6s cubic-bezier(.23, 1, .32, 1) infinite; }
+}
+@keyframes agent-ring { 70%, 100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--st) 0%, transparent); } }
+.agent-state-word { font-weight: 600; }
+.agent-state-word.running { color: var(--st-running); }
+.agent-state-word.finished { color: var(--st-finished); }
+.agent-state-word.failed { color: var(--st-failed); }
+.agent-state-word.stopped { color: var(--st-stopped); }
+.agent-node[data-state] { position: relative; overflow: hidden; }
+.agent-node[data-state]::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }
+.agent-node[data-state='running'] { border-color: color-mix(in srgb, var(--st-running) 45%, var(--line)); background: color-mix(in srgb, var(--st-running) 5%, var(--surface)); }
+.agent-node[data-state='running']::before { background: var(--st-running); }
+.agent-node[data-state='failed']::before { background: var(--st-failed); }
+.agent-node[data-state='stopped']::before { background: var(--st-stopped); }
+/* Finished work steps back so live work reads first. */
+.agent-node[data-state='finished'] strong { color: color-mix(in srgb, var(--text) 78%, var(--surface)); font-weight: 550; }
