@@ -32,6 +32,7 @@ def deploy(build: Path, target: Path) -> int:
             destination = target / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage / relative, destination)
+    (target / '.live-ui').touch(exist_ok=True)
     return len(files)
 
 

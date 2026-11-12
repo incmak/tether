@@ -1,9 +1,20 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { copyFileSync, mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
+
+const liveGuard: Plugin = {
+  name: 'live-guard',
+  apply: 'build',
+  configResolved(config) {
+    const outDir = resolve(config.root, config.build.outDir)
+    if (existsSync(resolve(outDir, '.live-ui'))) {
+      throw new Error('This folder is the live Tether UI. Build to another folder (vite build --outDir <dir>), then run scripts/deploy-ui.py <dir> ui/dist.')
+    }
+  },
+}
 
 // Copy from the installed versions so dev and production use the same local assets.
 const vadAssets = {
@@ -41,7 +52,7 @@ const bodyStylesheet = {
 
 export default defineConfig({
   base: '/chat/',
-  plugins: [react(), tailwindcss(), vadAssets, bodyStylesheet],
+  plugins: [liveGuard, react(), tailwindcss(), vadAssets, bodyStylesheet],
   server: {
     proxy: { '/mobile': { target: 'http://127.0.0.1:7683', changeOrigin: false } },
   },

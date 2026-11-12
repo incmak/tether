@@ -6,7 +6,7 @@ const ts = require('typescript')
 const never = new Promise(() => {})
 const microphoneMessage = 'The microphone did not open. Close other apps that use it, then try again.'
 
-function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWork, disconnect = Promise.resolve() } = {}) {
+function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWork, transportImportWork, disconnect = Promise.resolve() } = {}) {
   const exports = {}
   const timeouts = new Map()
   const intervals = new Map()
@@ -34,11 +34,11 @@ function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWo
   runInNewContext(ts.transpileModule(readFileSync('src/fridayAgent.ts', 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText, {
-    exports, window, Headers, Audio: class {},
+    exports, window, Headers, TypeError, Audio: class {},
     require: name => {
       if (name === './deviceVoice') return { DeviceVoice }
       if (name === '@pipecat-ai/client-js') return importWork ?? { PipecatClient }
-      if (name === '@pipecat-ai/small-webrtc-transport') return { SmallWebRTCTransport: class {} }
+      if (name === '@pipecat-ai/small-webrtc-transport') return transportImportWork ?? { SmallWebRTCTransport: class {} }
       throw Error(`Unexpected import: ${name}`)
     },
     setTimeout: (fn, delay) => { const id = ++nextId; timeouts.set(id, { fn, at: now + delay }); return id },
@@ -126,7 +126,25 @@ async function main() {
   assert.equal(importsOpen.error.message, 'The voice files did not load.')
   assert.equal(imports.disconnects(), 0, 'No client exists before imports finish')
   assert.equal(imports.timeouts.size, 0)
-  console.log('Friday startup: timeouts, track cleanup, constructor restoration, timer cleanup and mic denial identity pass')
+
+  for (const key of ['importWork', 'transportImportWork']) {
+    for (const message of [
+      'Failed to fetch dynamically imported module: https://x/assets/a.js',
+      'error loading dynamically imported module: https://x/assets/a.js',
+      'Importing a module script failed.',
+    ]) {
+      const missing = setup({ [key]: Promise.reject(new TypeError(message)) })
+      await assert.rejects(missing.agent.open(), { message: 'Tether was updated. Reload the page to use Friday.' })
+      assert.equal(missing.timeouts.size, 0)
+      assert.equal(missing.disconnects(), 0)
+    }
+    for (const failure of [new TypeError('Other import error'), new Error('Failed to fetch dynamically imported module')]) {
+      const failed = setup({ [key]: Promise.reject(failure) })
+      await assert.rejects(failed.agent.open(), error => error === failure)
+      assert.equal(failed.timeouts.size, 0)
+    }
+  }
+  console.log('Friday startup: timeouts, cleanup, mic denial identity and import reload errors pass')
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1 })

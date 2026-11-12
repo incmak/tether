@@ -34,6 +34,7 @@ class DeployUiTest(unittest.TestCase):
         self.assertEqual(installed[-1], 'index.html')
         self.assertEqual((self.target / 'assets/old.js').read_text(), 'old')
         self.assertEqual((self.target / 'assets/new.js').read_text(), 'new')
+        self.assertEqual((self.target / '.live-ui').read_bytes(), b'')
 
     def test_rejects_missing_assets_before_install(self):
         (self.build / 'assets/new.js').unlink()

@@ -110,7 +110,15 @@ export class FridayAgent {
     const [{ PipecatClient }, { SmallWebRTCTransport }] = await withTimeout(
       Promise.all([import('@pipecat-ai/client-js'), import('@pipecat-ai/small-webrtc-transport')]),
       15000, 'The voice files did not load.',
-    )
+    ).catch(failure => {
+      if (failure instanceof TypeError && (
+        failure.message.includes('dynamically imported module') ||
+        failure.message.includes('Importing a module script failed')
+      )) {
+        throw new Error('Tether was updated. Reload the page to use Friday.')
+      }
+      throw failure
+    })
     if (this.closed) return
     const headers = new Headers({ 'X-Codex-Mobile': '1' })
     const client = new PipecatClient({
