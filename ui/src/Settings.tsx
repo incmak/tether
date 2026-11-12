@@ -9,6 +9,7 @@ import { canSpeak } from './speech'
 import { playChime, prepareChime } from './sound'
 import { GlobalCodexLevel } from './CodexLevel'
 import { GlobalAutonomy, ReviewerSettings } from './Autonomy'
+import { AutonomySetup } from './AutonomySetup'
 import { AgentBrowserSettings } from './AgentBrowser'
 import { Choice, Notifications, SessionSettings, SystemSettings } from './SettingsControls'
 import { matchesSetting, SETTINGS_GROUPS } from './settingsIndex'
@@ -60,6 +61,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('sound-test', 'voice', 'Test the sound', 'chime play volume audio', <div className="switch-row"><span><strong>Test the sound</strong><small>Uses this device’s media volume.</small></span><button type="button" className="secondary" onClick={() => { prepareChime(); void playChime() }}>Play</button></div>),
     item('notifications', 'voice', 'Push notifications', 'alerts permissions approvals urgent important background delivery sound silent test', <section className="preferences-nested"><h3>Notifications</h3><Notifications api={api} /></section>),
     item('main-model', 'agents', 'Main AI model', 'main model ai claude codex haiku local suggest groups helper', <Field scope="All devices"><Choice legend="Main AI model" name="main-model" value={prefs.mainModel} options={[["auto", "Automatic"], ["claude", "Claude"], ["codex", "Codex"], ["none", "Local only"]]} onChange={mainModel => update(() => ({ mainModel }))} /><p className="setting-note">{prefs.mainModel === 'auto' ? 'Suggest groups uses the first installed agent: Claude, then Codex. It sends session, folder and tab names to that agent. With no agent, it uses the local model.' : prefs.mainModel === 'claude' ? 'Suggest groups uses Claude Haiku. It sends session, folder and tab names to Claude.' : prefs.mainModel === 'codex' ? 'Suggest groups uses Codex at low effort. It sends session, folder and tab names to Codex.' : 'Suggest groups uses the local model on this server, then folders.'}</p></Field>),
+    item('autonomy-setup', 'agents', 'Setup', 'setup install hook teams briskbot urgent ping notification approve', <Field scope="This server"><AutonomySetup api={api} /></Field>),
     item('autonomy', 'agents', 'Autonomy level', 'automation autopilot full auto ask questions check-in guided trusted level urgent', <Field scope="This server"><GlobalAutonomy api={api} /></Field>),
     item('reviewers', 'agents', 'Reviewers', 'review reviewer critical normal light model effort claude codex fable opus', <Field scope="This server"><ReviewerSettings api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),

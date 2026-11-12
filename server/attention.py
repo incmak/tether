@@ -10,13 +10,11 @@ import hashlib
 import json
 import os
 import re
-import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
-import decisions
 import needs
 import paths
 import urgent_ping
@@ -228,7 +226,7 @@ class Attention:
                 pass
         return True
 
-    def clear(self, pane, thread=None, save=True, answer=None):
+    def clear(self, pane, thread=None, save=True):
         """You answered the pane (any write that submits text to it). Returns True when an ask cleared."""
         with self.lock:
             ask = self.asks.get(pane)
@@ -238,11 +236,6 @@ class Attention:
             self._forget(pane, ask)
             if save:
                 self._save()
-        if (ask.get('urgent') or ask['kind'] == 'reply') and isinstance(answer, str) and answer.strip():
-            try:
-                decisions.record(ask['next'], answer)
-            except OSError as exc:
-                print(f'Could not record an attention answer: {exc}', file=sys.stderr)
         return True
 
     def _forget(self, pane, ask):
