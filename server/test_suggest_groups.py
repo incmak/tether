@@ -204,9 +204,9 @@ class SuggestGroupsTests(unittest.TestCase):
         self.assertIn('Do not just repeat one session name', body['messages'][0]['content'])
         self.assertIn('Web app: 3 8 12', body['messages'][0]['content'])
         self.assertEqual(body['messages'][1]['content'],
-                         '6 | Session | project | First chat\n'
-                         '9 | Session | project | First chat\n'
-                         '12 | Session | single | First chat')
+                         '6 | Session | work/project | First chat\n'
+                         '9 | Session | other/project | First chat\n'
+                         '12 | Session | work/single | First chat')
         self.assertEqual(suggest_groups.MODEL_TIMEOUT, 90)
         self.assertEqual(self.urlopen.call_args.kwargs['timeout'], suggest_groups.MODEL_TIMEOUT)
 
@@ -330,8 +330,20 @@ class SuggestGroupsTests(unittest.TestCase):
                    session('$13', '/', name='|\n\r', chats=['', '|'])]
         self.suggest([], entries)
         sent = json.loads(self.urlopen.call_args.args[0].data)['messages'][1]['content']
-        self.assertEqual(sent, '12 | Session | project | First chat; ' + 'x' * 40 + '; Third\n13')
+        self.assertEqual(sent, '12 | Session | work/project | First chat; ' + 'x' * 40 + '; Third\n13')
         self.assertEqual(entries[0]['name'], 'Ses|sion\n\r')
+
+    def test_model_input_uses_last_two_folder_parts_and_cleans_each(self):
+        entries = [session('$1', '/work/app/server'), session('$2', '/server'),
+                   session('$3', '/work/ap|p/ser|ver'), session('$4', '/work/|\n\r/server'),
+                   session('$5', '/'), session('$6', '/work//app/server/')]
+        self.assertEqual(suggest_groups.model_input(entries),
+                         '1 | Session | app/server | First chat\n'
+                         '2 | Session | server | First chat\n'
+                         '3 | Session | app/server | First chat\n'
+                         '4 | Session | server | First chat\n'
+                         '5 | Session | First chat\n'
+                         '6 | Session | app/server | First chat')
 
     def test_two_hundred_sessions_are_accepted(self):
         entries = [session('$' + str(index)) for index in range(200)]

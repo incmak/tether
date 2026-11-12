@@ -97,7 +97,9 @@ def model_input(entries):
         name = clean(item['name'])
         chats = [clean(chat) for chat in item['chats']]
         chats = [chat[:40] for chat in chats if chat and chat != name][:3]
-        parts = [item['id'][1:], name, clean(PurePosixPath(item['dir']).name), '; '.join(chats)]
+        folder_parts = [part for part in item['dir'].split('/') if part][-2:]
+        folder = '/'.join(part for part in map(clean, folder_parts) if part)
+        parts = [item['id'][1:], name, folder, '; '.join(chats)]
         lines.append(' | '.join(part for part in parts if part))
     return '\n'.join(lines)
 
