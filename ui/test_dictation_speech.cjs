@@ -52,7 +52,7 @@ function environment(label = '') {
   let now = 0, nextTimer = 1
   const timers = new Map(), records = [], calls = [], streams = []
   const response = text => ({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({ text }) })
-  const env = { calls, records, streams, timers, result: '', focus: 0, chimes: [], spoken: 0, fine: true, logs: [] }
+  const env = { calls, records, streams, timers, result: '', focus: 0, chimes: [], spoken: 0, fine: true, logs: [], voiceReports: [] }
   const stream = () => {
     const track = { label, stops: 0, stop() { this.stops++ } }
     const value = { track, getAudioTracks: () => [track], getTracks: () => [track] }
@@ -73,6 +73,7 @@ function environment(label = '') {
     window: { setInterval: setTimer, setTimeout: setTimer, clearInterval: id => timers.delete(id), clearTimeout: id => timers.delete(id) },
     matchMedia: () => ({ matches: env.fine }), localStorage: { getItem() {}, setItem() {} },
     fetch: async (path, options) => {
+      if (path === '/mobile/api/voice-log') { env.voiceReports.push({ ...JSON.parse(options.body), options }); return { ok: true } }
       calls.push({ path, options })
       if (options.headers['X-Live']) return response('rough preview')
       if (env.failure) throw env.failure
@@ -95,6 +96,7 @@ function setup(env, options = {}) {
     react: h.hooks, './api': { errorText: error => error.message },
     './sound': { prepareChime: () => env.chimes.push('prepare'), playChime: async () => env.chimes.push('play') },
     './speech': { stopSpeaking: () => env.spoken++ },
+    './voiceLog': load('voiceLog.ts', {}, env.globals),
   }, env.globals)
   const props = { text, setText: next => { text = next }, chime: false, onHandsFreeDone: () => done++, onFinished: () => env.focus++, ...options }
   return { h, useDictation, render: () => h.render(() => useDictation({ ...props, text })), text: () => text, done: () => done }
@@ -125,6 +127,12 @@ function speechEnvironment({ webkit = false, language = 'en-GB', userAgent = 'Mo
   return env
 }
 async function main() {
+  for (const fetch of [() => { throw new Error('Offline') }, async () => { throw new Error('Offline') }, async () => ({ ok: false, status: 429 })]) {
+    const { reportVoice } = load('voiceLog.ts', {}, { navigator: { userAgent: 'test' }, fetch })
+    assert.doesNotThrow(() => reportVoice({ kind: 'dictation', event: 'empty' }))
+    await flush()
+  }
+  console.log('Voice log: synchronous errors, rejected requests and HTTP failures stay silent pass')
   for (const webkit of [false, true]) {
     const env = speechEnvironment({ webkit, language: webkit ? '' : 'en-GB' })
     const s = setup(env, { text: 'Existing draft ', chime: true })
@@ -147,6 +155,13 @@ async function main() {
     assert.equal(await final, 'Existing draft src/App.tsx and tests')
     assert.equal(s.render().transcribing, false); assert.equal(s.render().listening, false)
     assert.equal(s.render().active(), false); assert.equal(s.render().finalText(), null)
+    assert.equal(env.voiceReports.length, 1)
+    const report = env.voiceReports[0]
+    assert.equal(report.kind, 'dictation'); assert.equal(report.event, 'ok'); assert.equal(report.ms, 2250)
+    assert.equal(report.trail, 'start r2 r2 stop end'); assert.equal(report.ua, env.globals.navigator.userAgent)
+    assert.equal(report.options.keepalive, true); assert.equal(report.options.credentials, 'same-origin')
+    assert.equal(report.options.headers['X-Codex-Mobile'], '1'); assert.equal(report.options.headers['Content-Type'], 'application/json')
+    assert(!('text' in report)); assert(!('audio' in report))
     assert.equal(env.calls.length, 0); assert.equal(env.records.length, 0)
     assert.equal(env.timers.size, 0); assert.equal(env.focus, 1); assert.equal(s.done(), 0)
     speech.end(); assert.equal(env.focus, 1)
@@ -178,6 +193,8 @@ async function main() {
   const audioTrail = 'start audio sound speech nomatch stop end'
   assert.equal(audio.render().error, `No speech heard. Tap the mic and speak. (speech: ${audioTrail})`)
   assert.deepEqual(audioEnv.logs, [['[dictation]', audioTrail]])
+  assert.equal(audioEnv.voiceReports.length, 1)
+  assert.equal(audioEnv.voiceReports[0].event, 'empty'); assert.equal(audioEnv.voiceReports[0].trail, audioTrail)
   for (const event of ['onaudiostart', 'onsoundstart', 'onspeechstart', 'onnomatch']) assert.equal(audioSpeech[event], null)
   assert.equal(audioEnv.timers.size, 0)
   console.log('Speech: audio, sound, speech and nomatch events appear in the error trail and detach on completion pass')
@@ -252,10 +269,15 @@ async function main() {
     env.result = 'fallback words'
     await s.render().toggle(); const final = s.render().finalText()
     env.recognitions[0].error(error); await flush()
+    assert.equal(env.voiceReports.length, 1)
+    assert.equal(env.voiceReports[0].event, 'fallback'); assert.equal(env.voiceReports[0].trail, `start e:${error}`)
+    assert.equal(env.voiceReports[0].ms, 0)
     assert.equal(env.recognitions[0].aborts, 1); assert.equal(env.records.length, 1)
     assert.equal(s.render().listening, true); assert.equal(s.render().error, `Browser speech failed, so the server converts this (slower). (speech: start e:${error})`)
     env.advance(1000); env.records[0].data(); s.render().stop()
     assert.equal(await final, 'Base fallback words')
+    assert.equal(env.voiceReports.length, 2); assert.equal(env.voiceReports[1].event, 'recorder')
+    assert.equal(env.voiceReports[1].ms, 0)
     assert.equal(env.calls.length, 1); assert.equal(env.timers.size, 0)
     const off = ['service-not-allowed', 'language-not-supported', 'audio-capture'].includes(error)
     await s.render().toggle()
@@ -358,7 +380,11 @@ async function main() {
     assert.equal(await final, 'Base'); assert.equal(env.timers.size, 0)
     assert.equal(env.records.length, 0)
     if (close) assert.equal(env.streams[0].track.stops, 1)
-    else assert.equal(s.render().error, 'Allow microphone access for this site, then try again.')
+    else {
+      assert.equal(s.render().error, 'Allow microphone access for this site, then try again.')
+      assert.equal(env.voiceReports.at(-1).event, 'mic-error')
+      assert.equal(env.voiceReports.at(-1).detail, 'NotAllowedError')
+    }
   }
   console.log('Speech: fallback permission denial and unmount during microphone acquisition settle final text and release resources pass')
 

@@ -93,6 +93,7 @@ function setup(env, options = {}) {
     react: h.hooks, './api': { errorText: error => error.message },
     './sound': { prepareChime: () => env.chimes.push('prepare'), playChime: async () => env.chimes.push('play') },
     './speech': { stopSpeaking: () => env.spoken++ },
+    './voiceLog': { reportVoice() {} },
   }, env.globals)
   const props = { text, setText: next => { text = next }, chime: false, onHandsFreeDone: () => done++, onFinished: () => env.focus++, ...options }
   return { h, useDictation, render: () => h.render(() => useDictation({ ...props, text })), text: () => text, done: () => done }

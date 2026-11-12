@@ -14,6 +14,7 @@ import { speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
+import { reportVoice } from './voiceLog'
 import './Live.css'
 
 // Live mode: talk to the agents hands-free. The orb listens, the words go to the target pane,
@@ -459,6 +460,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         onMetrics: metrics => console.debug('Friday turn', metrics),
         onVoice: kind => { if (!gone) setVoiceKind(kind) },
         onClosed: reason => {
+          reportVoice({ kind: 'friday', event: 'closed', detail: String(reason) })
           if (gone || agent.current !== friday) return
           agent.current = null
           setAgentOn(false)
@@ -476,6 +478,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         friday.state(chats())
         go('listening')
       } catch (failure) {
+        reportVoice({ kind: 'friday', event: 'start-failed', detail: errorText(failure) })
         if (gone || agent.current !== friday) return  // onClosed already fell back
         agent.current = null
         setAgentOn(false)

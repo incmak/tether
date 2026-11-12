@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { errorText } from './api'
 import { playChime, prepareChime } from './sound'
 import { stopSpeaking } from './speech'
+import { reportVoice } from './voiceLog'
 
 interface SpeechRecognizer {
   continuous: boolean
@@ -95,6 +96,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       if (!received && stopped) { if (Date.now() - started >= 3000) speechOff(); message = undefined }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
+      reportVoice({ kind: 'dictation', event: spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
       cleanup(); setText(next); finish(next); setListening(false)
       if (message !== undefined) setError(message)
       else if (!spoken && !handsFree) setError(`No speech heard. Tap the mic and speak. (speech: ${trail.join(' ')})`)
@@ -112,6 +114,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const fallback = () => {
       if (emptyEnds >= 3 || offForError) speechOff()
       console.info('[dictation] fallback', trail.join(' '))
+      reportVoice({ kind: 'dictation', event: 'fallback', trail: trail.join(' '), ms: Date.now() - started })
       // Say why the slow server voice runs, so the next report shows the cause.
       setError(`Browser speech failed, so the server converts this (slower). (speech: ${trail.join(' ')})`)
       cleanup(); setListening(false)
@@ -177,6 +180,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
   async function startRecorder() {
     let stream: MediaStream
     try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }) } catch (failure) {
+      reportVoice({ kind: 'dictation', event: 'mic-error', detail: failure instanceof DOMException ? failure.name : '' })
       setError(failure instanceof DOMException && failure.name === 'NotAllowedError' ? 'Allow microphone access for this site, then try again.' : 'Could not start the microphone. Close other apps that use it, then try again.')
       return
     }
@@ -212,6 +216,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const timer = window.setInterval(() => { const elapsed = Math.floor((Date.now() - started) / 1000); setSeconds(elapsed); if (elapsed >= 180 && active.state !== 'inactive') active.stop() }, 250)
     active.ondataavailable = event => { if (event.data.size) { chunks.push(event.data); if (active.state === 'recording') void askLive() } }
     active.onstop = () => {
+      const stopped = Date.now()
       done = true
       cleanupRecording.current = null
       window.clearInterval(timer); stream.getTracks().forEach(track => track.stop()); recorder.current = null; setListening(false)
@@ -220,6 +225,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       if (!heard) { setText(base); finish(base); return }
       if (Date.now() - started < 600 || !audio.size) { setText(base); setError('Tap the mic, speak, then tap stop.'); finish(base); return }
       void transcribeAudio(audio, base, recording, label).then(({ text, ok }) => {
+        reportVoice({ kind: 'dictation', event: 'recorder', ms: Date.now() - stopped })
         finish(text)
         // Send at once; submit still waits for this final text. Rough text after a failure waits for the person to check it.
         if (pause && ok && text.trim() && text !== base) onHandsFreeDone?.()
