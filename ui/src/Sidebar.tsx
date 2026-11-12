@@ -3,7 +3,7 @@ import { Bone, SkeletonRows, Spinner } from './Skeleton'
 import { RetryButton } from './Retry'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import { needsYou, isDone } from './paneState'
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Archive, ArchiveRestore, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
@@ -259,6 +259,9 @@ interface Props {
   onAddPane?: (session: Session, at: Anchor) => void
 }
 
+// The drawer unmounts on close; the wide sidebar keeps its own scroll.
+let drawerScrollTop = 0
+
 export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
@@ -412,6 +415,26 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
   const [organizing, setOrganizing] = useState<{ at?: Anchor } | null>(null)
   const renamed = () => { setRenaming(null); onRetry() }
   const search = query.trim().toLowerCase()
+  const drawer = !!onClose
+  useLayoutEffect(() => {
+    const nav = root.current?.querySelector<HTMLElement>('.session-groups')
+    if (!drawer || !nav) return
+    if (search) { nav.scrollTop = 0; return }
+    let scroll = drawerScrollTop
+    const save = () => { if (nav.clientHeight) scroll = nav.scrollTop }
+    const restore = () => {
+      if (!nav.clientHeight) return
+      nav.scrollTop = scroll
+      scroll = nav.scrollTop
+      observer.disconnect()
+    }
+    // The dialog opens after mount. Restore before paint once its list has a height.
+    const observer = new ResizeObserver(restore)
+    observer.observe(nav)
+    restore()
+    nav.addEventListener('scroll', save)
+    return () => { drawerScrollTop = scroll; observer.disconnect(); nav.removeEventListener('scroll', save) }
+  }, [drawer, search])
   const manual = prefs.sort === 'manual'
   const visible = sortSessions(sessions, prefs, selected).filter(session => !search || `${session.name} ${session.dir} ${session.panes.map(pane => agentNames[pane.agent]).join(' ')}`.toLowerCase().includes(search))
   const archived = visible.filter(session => isArchived(session, prefs.archived))
@@ -476,7 +499,7 @@ export function Sidebar({ onDeck, api, sessions, selected, prefs, update, loaded
           {isOpen(group.key) && group.items.length > 1 && !search && manual && group.key !== 'archived' && group.key !== 'needs' && <button className="group-edit" onClick={() => setReorder(reorder === group.key ? null : group.key)}>{reorder === group.key ? 'Done' : 'Reorder'}</button>}
         </div>
         {isOpen(group.key) && group.key === 'archived' && !group.items.length ? null : isOpen(group.key) && (group.items.length
-          ? <SessionList items={group.items} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} />
+          ? <SessionList items={group.items} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} />
           : !loaded ? !error && <SkeletonRows count={rememberedCount(`sidebar.${group.key}`, 2, 6)} label="Finding sessions…" className="sidebar-skeleton" meta={false} />
           : <p className="group-empty">{group.key === 'terminals' ? 'No plain terminals. Create one with New session.' : 'Nothing here yet.'}</p>)}
         {isOpen(group.key) && group.key === 'archived' && hiddenTabs.length > 0 && <ul className="archived-tabs">{hiddenTabs.map(pane => <li key={pane.id}>
@@ -516,7 +539,7 @@ function projectMark(mark: ProjectMark | undefined) {
   return <BookMarked size={11} className={`project-mark ${stale ? 'stale' : ''}`} aria-label={stale ? 'Project changed. Restart its agents to apply.' : 'Has project context'} />
 }
 
-function SessionList({ items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void }) {
+function SessionList({ items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void }) {
   const list = useRef<HTMLUListElement>(null)
   const dragging = useRef<string | null>(null)
   const [preview, setPreview] = useState<string[] | null>(null)
@@ -592,7 +615,7 @@ function SessionList({ items, reorder, selected, prefs, update, onOpen, onAction
           onClickCapture={event => { if (suppressClick.current && event.detail) { suppressClick.current = false; event.preventDefault(); event.stopPropagation() } }}
           onTouchStart={event => {
             suppressClick.current = false
-            if (carry || reorder || event.touches.length !== 1) return
+            if (!swipe || carry || reorder || event.touches.length !== 1) return
             if ((event.target as HTMLElement).closest('.swipe-actions')) {
               const pending = swipeMotion.current
               if (pending) { clearTimeout(pending.timer); pending.done() }

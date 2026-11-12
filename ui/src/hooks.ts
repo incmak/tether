@@ -141,6 +141,8 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
     const moveTouch = (event: TouchEvent) => {
       const from = start.current
       if (!from) return
+      // An active row hold owns the touch before it reaches the drawer.
+      if (horizontal && event.defaultPrevented) { cancel(); return }
       if (event.touches.length !== 1) { cancel(); return }
       const touch = event.touches[0], dx = touch.clientX - from.x, dy = touch.clientY - from.y
       const delta = horizontal ? dx : dy, across = horizontal ? dy : dx
@@ -184,7 +186,6 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
       start.current = null
       const dialog = event.currentTarget
       if (!horizontal && (!dialog.classList.contains('sheet') || dialog.classList.contains('popover') || matchMedia('(min-width: 600px)').matches)) return
-      if (horizontal && (event.target as Element).closest('.swipe-row')) return
       for (let node = event.target as HTMLElement | null; !horizontal && node && node !== dialog.parentElement; node = node.parentElement) if (node.scrollTop > 0) return
       const touch = event.touches[0], box = dialog.getBoundingClientRect()
       if (touch.clientX < box.left || touch.clientX > box.right || touch.clientY < box.top || touch.clientY > box.bottom) return
