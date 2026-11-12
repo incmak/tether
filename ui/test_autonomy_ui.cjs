@@ -6,7 +6,7 @@ const path = require('node:path')
 const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/autonomy/shots')
+const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-12/guided-setup/shots')
 const sizes = [[390, 844], [1280, 900]]
 const now = Math.floor(Date.now() / 1000)
 const ask = (pane, extra) => ({ pane, thread: null, since: now - 600, next: '', kind: 'reply', opened: false, snoozed_until: null, urgent: false, ...extra })
@@ -33,6 +33,18 @@ const fixture = {
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
 }
 
+const setupFresh = () => ({
+  hook: { state: 'missing', path: '/srv/u/.claude/settings.json', entry: { type: 'command', command: '/usr/bin/python3 /srv/tether/server/autonomy.py hook', timeout: 5 } },
+  ping: { state: 'off', preset: null, fields: {}, base_url: '', presets: [{ id: 'briskbot', name: 'BriskBot (Microsoft Teams)', available: true }] },
+})
+let setup = setupFresh()
+// Passkeys: a fake navigator.credentials stands in for the authenticator (Tether's CDP proxy refuses the WebAuthn domain).
+// It records the options it gets. server/test_approval.py checks the real signatures.
+let keys = []
+const b64 = bytes => Buffer.from(bytes).toString('base64url')
+const approved = body => !!body.approval?.challenge_id && !!body.approval?.credential?.response?.signature
+const needsKey = () => ({ status: 403, json: keys.length ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Setup first.', approval: 'no-passkey' } })
+
 async function main() {
   let browser, page, server, failed = 0
   const posts = [], pageErrors = [], unexpected = new Set()
@@ -50,7 +62,7 @@ async function main() {
       } catch { res.writeHead(404); res.end() }
     })
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
-    const origin = `http://127.0.0.1:${server.address().port}`
+    const origin = `http://localhost:${server.address().port}`  // a secure context with a valid WebAuthn rp id
     browser = await getBrowser()
     const context = browser.contexts()[0]
     if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
@@ -66,10 +78,34 @@ async function main() {
         const endpoint = url.pathname.split('/api/')[1]
         if (request.method() !== 'GET') {
           const body = request.postDataJSON(); posts.push({ endpoint, body })
+          if (endpoint === 'passkeys') {
+            if (body.op === 'options') return route.fulfill({ json: { challenge_id: `c${posts.length}`, publicKey: body.kind === 'create'
+              ? { challenge: b64(Buffer.alloc(32, 1)), rp: { id: 'localhost', name: 'Tether' }, user: { id: b64(Buffer.alloc(16, 2)), name: 'tether', displayName: 'Tether' },
+                  pubKeyCredParams: [{ type: 'public-key', alg: -7 }], authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' }, attestation: 'none', timeout: 60000,
+                  excludeCredentials: keys.map(key => ({ type: 'public-key', id: key.id })) }
+              : { challenge: b64(Buffer.alloc(32, 3)), rpId: 'localhost', userVerification: 'required', timeout: 60000, allowCredentials: keys.map(key => ({ type: 'public-key', id: key.id })) } } })
+            if (body.op === 'enroll') {
+              if (keys.length && !approved(body)) return route.fulfill(needsKey())
+              keys = [...keys, { id: body.credential.id, name: body.name, created: new Date().toISOString(), last_used: null }]
+            }
+            if (body.op === 'remove') { if (!approved(body)) return route.fulfill(needsKey()); keys = keys.filter(key => key.id !== body.id) }
+            return route.fulfill({ json: { passkeys: keys, here: keys.length } })
+          }
+          const gated = (endpoint === 'autonomy/setup' && ['hook', 'ping'].includes(body.action)) || (endpoint === 'autonomy/decisions' && !body.delete)
+            || (endpoint === 'autonomy' && body.level !== undefined && !body.project && body.level > autonomy.global)
+          if (gated && !approved(body)) return route.fulfill(needsKey())
           if (endpoint === 'autonomy') { autonomy = { ...autonomy, ...(body.level !== undefined && !body.project ? { global: body.level, level: body.level } : {}), ...(body.reviewers ? { reviewers: body.reviewers } : {}) }; return route.fulfill({ json: autonomy }) }
+          if (endpoint === 'autonomy/setup') {
+            if (body.action === 'hook') setup = { ...setup, hook: { ...setup.hook, state: 'ok' } }
+            if (body.action === 'ping') setup = { ...setup, ping: { ...setup.ping, state: 'on', preset: body.preset, fields: body.fields, base_url: body.base_url } }
+            return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
+          }
+          if (endpoint === 'autonomy/decisions') return route.fulfill({ json: { entry: { id: 'abcd1234', date: '2026-11-12', question: body.question, answer: body.answer }, project: 'e89e1e21b318' } })
           if (endpoint.startsWith('attention/')) return route.fulfill({ json: { ask: null, waiting: 1 } })
           return route.fulfill({ json: { ok: true } })
         }
+        if (endpoint === 'autonomy/setup') return route.fulfill({ json: setup })
+        if (endpoint === 'passkeys') return route.fulfill({ json: { passkeys: keys, here: keys.length } })
         if (endpoint.startsWith('autonomy')) return route.fulfill({ json: autonomy })
         if (endpoint.startsWith('codex-level')) return route.fulfill({ json: { level: 0, global: 0, levels: [], project: null, models: [] } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
@@ -84,6 +120,15 @@ async function main() {
     await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
       localStorage.clear()
+      const calls = window.__webauthn = []
+      const buffer = text => new TextEncoder().encode(text).buffer
+      const credential = (kind, response) => ({ id: 'cred-1', rawId: buffer('cred-1'), type: 'public-key', response })
+      const record = (kind, publicKey) => calls.push({ kind, uv: publicKey.userVerification || publicKey.authenticatorSelection?.userVerification,
+        challenge: publicKey.challenge instanceof Uint8Array ? publicKey.challenge.length : -1, ids: (publicKey.allowCredentials || publicKey.excludeCredentials || []).map(item => item.id instanceof Uint8Array) })
+      Object.defineProperty(navigator, 'credentials', { configurable: true, value: {
+        create: async ({ publicKey }) => { record('create', publicKey); return credential('create', { clientDataJSON: buffer('{"type":"webauthn.create"}'), attestationObject: buffer('att') }) },
+        get: async ({ publicKey }) => { record('get', publicKey); return credential('get', { clientDataJSON: buffer('{"type":"webauthn.get"}'), authenticatorData: buffer('auth'), signature: buffer('sig'), userHandle: null }) },
+      } })
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false }))
     })
@@ -91,6 +136,9 @@ async function main() {
     for (const [width, height] of sizes) {
       const at = `${width}px`
       autonomy = { ...autonomy, global: 2, level: 2, reviewers: { critical: auto, normal: auto, light: auto } }
+      setup = setupFresh()
+      keys = []
+      const first = posts.length
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
       // The urgent ask opens the deck by itself.
@@ -103,10 +151,16 @@ async function main() {
       check(`${at} reply box focused`, await deck.locator('textarea').evaluate(node => node === document.activeElement))
       check(`${at} no page overflow (deck)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `deck-urgent-${width}.png`) })
+      check(`${at} remember is off by default`, !(await deck.getByLabel('Remember for this project').isChecked()))
       await deck.locator('textarea').fill('Use staging.')
+      await deck.getByLabel('Remember for this project').check()
+      await deck.locator('textarea').focus()
       const before = posts.length
       await page.keyboard.press('Control+Enter')
       await deck.getByText('Run npm install?').waitFor()
+      const saved = posts.slice(before).filter(post => post.endpoint === 'autonomy/decisions')
+      check(`${at} remember asks to save the answer for the pane`, saved.length === 1 && saved[0].body.pane === '%1' && saved[0].body.answer === 'Use staging.' && !!saved[0].body.question, JSON.stringify(saved))
+      check(`${at} no passkey: not saved, says what to do`, await deck.getByText('Tether did not save the answer: Add a passkey', { exact: false }).isVisible() && !posts.slice(before).some(post => post.endpoint === 'passkeys'))
       const sent = posts.slice(before).find(post => post.endpoint === 'message')
       check(`${at} Ctrl+Enter sends to the tab`, sent && sent.body.session === '%1' && sent.body.message === 'Use staging.', JSON.stringify(posts.slice(before)))
       check(`${at} next card: approval hint`, await deck.getByText('This prompt waits in the tab.').isVisible() && await deck.locator('textarea').count() === 0)
@@ -121,6 +175,40 @@ async function main() {
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
       await page.getByRole('button', { name: 'Settings' }).first().click()
       const search = page.getByPlaceholder(/Search settings/)
+      // Setup: add a passkey, then each step shows its change and applies it only after a passkey approval.
+      if (await search.count()) await search.fill('setup')
+      const review = page.getByRole('button', { name: 'Review change' })
+      await review.waitFor()
+      check(`${at} hook not applied before approval`, !posts.slice(first).some(post => post.endpoint === 'autonomy/setup'))
+      await review.click()
+      check(`${at} approve disabled without a passkey`, await page.getByRole('button', { name: 'Approve and apply' }).isDisabled() && await page.getByText('Add a passkey above first.').first().isVisible())
+      await page.screenshot({ path: path.join(SHOTS, `settings-setup-nokey-${width}.png`) })
+      await page.getByRole('button', { name: 'Add passkey' }).click()
+      await page.getByText('Passkey added.', { exact: false }).waitFor()
+      check(`${at} passkey enrolled`, keys.length === 1 && keys[0].id === 'cred-1', JSON.stringify(keys))
+      check(`${at} passkey count shows`, await page.getByText('1 passkey approves changes').isVisible())
+      check(`${at} hook preview shows the command`, (await page.locator('.setup-review pre').innerText()).includes('autonomy.py hook'))
+      check(`${at} no page overflow (setup review)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `settings-setup-review-${width}.png`) })
+      await page.getByRole('button', { name: 'Approve and apply' }).click()
+      await page.getByText('Ready. Each Claude prompt gets').waitFor()
+      const hookPosts = posts.slice(first).filter(post => post.endpoint === 'autonomy/setup' && post.body.action === 'hook')
+      check(`${at} hook applies only with a passkey approval`, hookPosts.length === 2 && !hookPosts[0].body.approval && approved(hookPosts[1].body), JSON.stringify(hookPosts.map(post => !!post.body.approval)))
+      await page.getByRole('button', { name: 'Set up' }).click()
+      const approvePing = page.getByRole('button', { name: 'Approve and turn on' })
+      check(`${at} ping approve disabled without mention`, await approvePing.isDisabled())
+      await page.locator('#ping-mention').fill('sam')
+      check(`${at} ping preview names the mention`, await page.getByText('@sam', { exact: false }).first().isVisible())
+      check(`${at} no page overflow (ping form)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `settings-setup-ping-${width}.png`) })
+      await approvePing.click()
+      await page.getByRole('button', { name: 'Send test' }).waitFor()
+      const ping = posts.slice(first).find(post => post.endpoint === 'autonomy/setup' && post.body.action === 'ping' && post.body.approval)
+      check(`${at} ping posts fields and origin`, ping && ping.body.fields.mention === 'sam' && ping.body.fields.space === 'team' && ping.body.base_url === origin, JSON.stringify(ping))
+      await page.getByRole('button', { name: 'Send test' }).click()
+      await page.getByText('Test sent. Check Teams.').waitFor()
+      check(`${at} send test`, true)
+      await page.screenshot({ path: path.join(SHOTS, `settings-setup-on-${width}.png`) })
       if (await search.count()) await search.fill('autonomy')
       const level = page.getByRole('radio', { name: /Full auto/ }).first()
       await level.waitFor()
@@ -129,14 +217,16 @@ async function main() {
       check(`${at} no page overflow (autonomy)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-autonomy-${width}.png`), fullPage: false })
       await level.check({ force: true })
-      await page.waitForTimeout(300)
-      check(`${at} level posts`, posts.some(post => post.endpoint === 'autonomy' && post.body.level === 5))
+      for (let tries = 0; tries < 50 && autonomy.global !== 5; tries++) await page.waitForTimeout(100)
+      check(`${at} level raise carries a passkey approval`, posts.slice(first).some(post => post.endpoint === 'autonomy' && post.body.level === 5 && approved(post.body)) && autonomy.global === 5, JSON.stringify(posts.slice(first).filter(post => post.endpoint === 'autonomy' || post.endpoint === 'passkeys').map(post => [post.endpoint, post.body.op || post.body.level, !!post.body.approval])))
       if (await search.count()) await search.fill('reviewers')
       const agent = page.locator('#reviewer-critical-agent')
       await agent.waitFor()
       await agent.scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(SHOTS, `settings-reviewers-${width}.png`) })
       check(`${at} no page overflow (reviewers)`, !(await overflow()))
+      const calls = await page.evaluate(() => window.__webauthn)
+      check(`${at} every passkey call asks for user verification with byte challenges`, calls.length >= 4 && calls.every(call => call.uv === 'required' && call.challenge === 32 && call.ids.every(Boolean)), JSON.stringify(calls))
       await page.keyboard.press('Escape').catch(() => {})
     }
     check('no unmocked requests', !unexpected.size, [...unexpected].join(', '))

@@ -13,7 +13,10 @@
 .deck-reply { display: grid; gap: 8px; margin: 4px 0 0; }
 .deck-reply textarea { width: 100%; min-height: 76px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 16px; resize: vertical; }
 .deck-reply textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.deck-reply button { justify-self: end; }
+.deck-reply-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.deck-remember { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; font-size: 14px; color: var(--muted); cursor: pointer; }
+.deck-remember input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.deck-reply-row button { margin-left: auto; }
 .action-deck button.primary { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 16px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .action-deck button.primary:disabled { opacity: .5; }
 .deck-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }

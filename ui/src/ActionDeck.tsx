@@ -8,6 +8,7 @@ import { errorText } from './api'
 import { askAction } from './attention'
 import type { Waiting } from './attention'
 import { sendToTab } from './backlogSend'
+import { withApproval } from './approval'
 import { useModal } from './hooks'
 import { age } from './needs'
 import { useNow } from './attention'
@@ -48,11 +49,17 @@ export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: 
   const next = () => { setStatus(''); setIndex(at + 1 < live.length ? at + 1 : 0) }
   async function run(work: () => Promise<unknown>, result: string) {
     setBusy(true); setStatus('')
-    try { await work(); setStatus(result); onUpdate(); setDone(current => [...current, pane.id]) }
+    try { const said = await work(); setStatus(typeof said === 'string' ? said : result); onUpdate(); setDone(current => [...current, pane.id]) }
     catch (error) { setStatus(errorText(error)) }
     finally { setBusy(false) }
   }
-  const send = (text: string) => void run(() => sendToTab(api, pane, text), `Sent to ${name}.`)
+  const send = (text: string, remember: boolean) => void run(async () => {
+    await sendToTab(api, pane, text)
+    if (!remember) return
+    // The reply went out, so the card is done even when the save fails; say so instead of offering a resend.
+    try { await withApproval(api, 'autonomy/decisions', 'decision-save', { pane: pane.id, question: ask.next || '', answer: text }) }
+    catch (error) { return `Sent to ${name}. Tether did not save the answer: ${errorText(error)}` }
+  }, remember ? `Sent to ${name}. Saved for this project.` : `Sent to ${name}.`)
   const handled = () => void run(() => askAction(api, pane, 'handled'), `${name}: handled.`)
 
   return <dialog {...modal} className={ask.urgent ? 'sheet action-deck urgent' : 'sheet action-deck'} aria-labelledby="deck-title">
@@ -81,18 +88,22 @@ export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: 
 }
 
 /** The answer box. Keyed by the ask, so each card starts empty. Ctrl/Cmd+Enter sends. */
-function ReplyBox({ name, busy, onSend }: { name: string; busy: boolean; onSend: (text: string) => void }) {
+function ReplyBox({ name, busy, onSend }: { name: string; busy: boolean; onSend: (text: string, remember: boolean) => void }) {
   const [text, setText] = useState('')
+  const [remember, setRemember] = useState(false)
   const box = useRef<HTMLTextAreaElement>(null)
   // The dialog's showModal() runs after this mounts and moves focus to the first button; take it back a frame later.
   useEffect(() => { const frame = requestAnimationFrame(() => box.current?.focus()); return () => cancelAnimationFrame(frame) }, [])
-  const send = () => { if (text.trim()) onSend(text.trim()) }
+  const send = () => { if (text.trim()) onSend(text.trim(), remember) }
   return <form className="deck-reply" onSubmit={event => { event.preventDefault(); send() }}>
     <label htmlFor="deck-text" className="visually-hidden">Your answer to {name}</label>
     <textarea ref={box} id="deck-text" rows={3} value={text} disabled={busy} placeholder="Your answer"
       onChange={event => setText(event.target.value)}
       onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send() } }} />
-    <button type="submit" className="primary" disabled={busy || !text.trim()}><Send size={15} aria-hidden="true" />Send</button>
+    <div className="deck-reply-row">
+      <label className="deck-remember"><input type="checkbox" checked={remember} disabled={busy} onChange={event => setRemember(event.target.checked)} />Remember for this project</label>
+      <button type="submit" className="primary" disabled={busy || !text.trim()}><Send size={15} aria-hidden="true" />Send</button>
+    </div>
   </form>
 }
 

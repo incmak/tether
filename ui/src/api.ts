@@ -199,7 +199,8 @@ export interface SessionsData { sessions: Pane[]; default_thread: string | null;
 export class ApiError extends Error {
   status: number
   draft: boolean  // the agent's own input box has text that blocks this action
-  constructor(status: number, message: string, draft = false) { super(message); this.status = status; this.draft = draft }
+  approval: boolean  // the action needs a passkey approval (approval.ts)
+  constructor(status: number, message: string, draft = false, approval = false) { super(message); this.status = status; this.draft = draft; this.approval = approval }
 }
 /** timeout: milliseconds before the request gives up (10 s). A broadcast types into many panes one after another, so it waits longer. */
 export type Api = <T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'DELETE', timeout?: number) => Promise<T>
@@ -219,7 +220,7 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
-  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true)
+  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
 /** tmux session names: spaces are fine; tmux turns . and : into _, so they are refused. Same rule as the server. */

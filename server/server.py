@@ -88,6 +88,7 @@ import groups
 import groups_api
 import codex_level
 import autonomy
+import approval
 import custom_layouts
 import backgrounds
 import codex_runs
@@ -1669,6 +1670,8 @@ class Handler(BaseHTTPRequestHandler):
                 codex_level.get(self)
             elif autonomy.handles(path):
                 autonomy.get(self)
+            elif approval.handles(path):
+                approval.get(self)
             elif custom_layouts.handles(path):
                 custom_layouts.get(self)
             elif backgrounds.handles(path):
@@ -1782,7 +1785,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -1837,13 +1840,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab') else 65536):
+            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab') else 65536):
                 self.respond(413, {'error': 'Message is too large.'})
                 return
             body = json.loads(self.rfile.read(size))
             message = body.get('message') if isinstance(body, dict) else None
             if not isinstance(body, dict):
                 raise ValueError('Invalid request.')
+            if approval.handles(self.path):
+                approval.post(self, body)
+                return
             if self.path == '/mobile/api/update':
                 try:
                     self.respond(202, {'run': updates.start(body.get('version'))})
@@ -1898,7 +1904,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = broadcast_message(body)
                 for row in result.get('results') or []:
                     if row.get('result') in ('sent', 'sent_busy'):
-                        attention.STORE.clear(row.get('pane'), answer=message)  # you answered that tab
+                        attention.STORE.clear(row.get('pane'))  # you answered that tab
                 self.respond(200, result)
                 return
             if self.path == '/mobile/api/accounts/refresh':
@@ -2341,14 +2347,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('The answer contains terminal control characters.')
                 with SEND_LOCK:
                     menu_choose(config, choice, label=label, answer=answer)
-                attention.STORE.clear(config['id'], config.get('thread'), answer=answer)
+                attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/type':
                 with SEND_LOCK:
                     type_text(config, body.get('text'), enter=body.get('enter') is True, login_url=body.get('login_url'))
                 if body.get('enter') is True:
-                    attention.STORE.clear(config['id'], config.get('thread'), answer=body.get('text'))
+                    attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/unqueue':
@@ -2364,11 +2370,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/mobile/api/approval':
                 with SEND_LOCK:
                     respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'), feedback=body.get('feedback'))
-                attention.STORE.clear(config['id'], config.get('thread'), answer=body.get('feedback'))
+                attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
             else:
                 delivery = send_text(config, message)
-                attention.STORE.clear(config['id'], config.get('thread'), answer=message)  # you answered the tab
+                attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
         except (ValueError, UnicodeError) as exc:
             self.respond(400, {'error': str(exc) if self.path in ('/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})

@@ -20,7 +20,9 @@ interface SpeechRecognizer {
   abort: () => void
 }
 type SpeechConstructor = new () => SpeechRecognizer
-let speechBroken = false
+let speechOffUntil = 0
+const SPEECH_OFF_MS = 5 * 60 * 1000
+const speechOff = () => { speechOffUntil = Date.now() + SPEECH_OFF_MS }
 
 interface DictationOptions {
   text: string
@@ -57,7 +59,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     if (chime) { prepareChime(); await playChime() }
     if (disposed.current) return
     const Recognition = speechConstructor()
-    if (Recognition && !speechBroken) startSpeech(Recognition)
+    if (Recognition && Date.now() >= speechOffUntil) startSpeech(Recognition)
     else await startRecorder()
   }
   function startSpeech(Recognition: SpeechConstructor) {
@@ -69,7 +71,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     void final.then(() => { if (finalDraft.current === final) finalDraft.current = null })
     let recognition: SpeechRecognizer
     let earlier = '', committed = '', interim = '', received = false, stopped = false, done = false, restarts = 0
-    let failed = false, emptyEnds = 0
+    let failed = false, emptyEnds = 0, offForError = false
     const trail: string[] = []
     const trace = (token: string) => { trail.push(token); if (trail.length > 24) trail.shift() }
     let pause: number | undefined
@@ -89,8 +91,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const complete = (message?: string) => {
       if (done) return
       if (!received && !stopped && (failed || emptyEnds >= 3)) { fallback(); return }
-      // Only a real attempt marks speech broken. A quick tap on and off is not one.
-      if (!received && stopped) { if (Date.now() - started >= 3000) speechBroken = true; message = undefined }
+      // Only a real attempt turns speech off. A quick tap on and off is not one.
+      if (!received && stopped) { if (Date.now() - started >= 3000) speechOff(); message = undefined }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
       cleanup(); setText(next); finish(next); setListening(false)
@@ -108,7 +110,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       window.clearTimeout(pause); pause = window.setTimeout(() => { trace('timeout'); complete() }, 1500)
     }
     const fallback = () => {
-      speechBroken = true
+      if (emptyEnds >= 3 || offForError) speechOff()
       console.info('[dictation] fallback', trail.join(' '))
       // Say why the slow server voice runs, so the next report shows the cause.
       setError(`Browser speech failed, so the server converts this (slower). (speech: ${trail.join(' ')})`)
@@ -154,9 +156,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
         if (error !== 'aborted' && error !== 'no-speech') failed = true  // a late start gives no-speech; 3 empty ends catch a dead service
         if (done || error === 'aborted' || error === 'no-speech') return
         if (received) { complete(); return }
+        offForError = ['service-not-allowed', 'language-not-supported', 'audio-capture'].includes(error)
         if (error === 'not-allowed') { complete('Allow microphone access for this site, then try again.'); return }
         if (error === 'audio-capture') {
-          speechBroken = true
           complete('Could not start the microphone. Close other apps that use it, then try again.'); return
         }
         complete()

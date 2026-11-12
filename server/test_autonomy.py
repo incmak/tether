@@ -11,9 +11,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import autonomy
+import approval
 import codex_level
+import decisions
 import paths
 import server
+from test_approval import Handler as PasskeyHandler, PasskeyCase
 
 PID = 'abcdef012345'
 
@@ -39,7 +42,7 @@ class Base(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for name in ('CONFIG', 'TETHER', 'CODEX'):
+        for name in ('CONFIG', 'TETHER', 'CODEX', 'CLAUDE'):
             patch = mock.patch.object(paths, name, self.root / name.lower())
             patch.start()
             self.addCleanup(patch.stop)
@@ -107,18 +110,33 @@ class Rules(Base):
                 self.assertNotIn('Before you ask the user, read', text)
                 self.assertEqual(text.splitlines()[-1], 'Do not change the level. The user sets it in Tether.')
 
-    def test_decisions_only_exist_at_levels_three_to_five_with_a_file(self):
-        path = paths.CONFIG / 'decisions.md'
-        self.write(path, 'Past decisions.')
-        expected = (f'Before you ask the user, read {path.resolve()}. If a past decision answers your question, '
-                    'use it and say so.')
+    def test_saved_answers_only_at_levels_three_to_five_for_the_selected_project(self):
+        folder = paths.TETHER / 'projects' / PID
+        folder.mkdir(parents=True)
+        other = '012345abcdef'
+        (folder.parent / other).mkdir()
+        legacy = paths.CONFIG / 'decisions.md'
+        self.write(legacy, 'Old global decisions.')
         for level in range(6):
-            text = autonomy.rules({'level': level, 'source': 'project'})
+            resolved = {'level': level, 'source': 'project'}
+            self.assertNotIn('The user saved answers', autonomy.rules(resolved, PID))
+        row = decisions.record(PID, 'Choose?', 'Default')
+        expected = (f'The user saved answers for this project in {decisions.path(PID).resolve()}. '
+                    'Reuse one only when it answers the same question; if in doubt, ask.')
+        for level in range(6):
+            resolved = {'level': level, 'source': 'project'}
+            text = autonomy.rules(resolved, PID)
             self.assertIn('set by the user for this project.', text)
             self.assertEqual(expected in text, level >= 3)
-        path.unlink()
-        for level in range(3, 6):
-            self.assertNotIn('Before you ask the user, read', autonomy.rules({'level': level, 'source': 'global'}))
+            self.assertNotIn('The user saved answers', autonomy.rules(resolved, other))
+            self.assertNotIn('The user saved answers', autonomy.rules(resolved))
+            self.assertNotIn(str(legacy), text)
+        decisions.delete(PID, row['id'])
+        self.assertNotIn('The user saved answers', autonomy.rules({'level': 5, 'source': 'global'}, PID))
+        self.assertEqual(legacy.read_text(), 'Old global decisions.')
+
+    def test_missing_project_does_not_break_rules(self):
+        self.assertNotIn('The user saved answers', autonomy.rules({'level': 5, 'source': 'global'}, PID))
 
 
 class Reviewers(Base):
@@ -201,10 +219,11 @@ class Hook(Base):
     def test_hook_shape_project_and_both_context_parts(self):
         autonomy.set_global(1)
         autonomy.set_project(PID, True, 3)
+        decisions.record(PID, 'Choose?', 'Default')
         tmux = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=PID + '\n'))
         out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/tmux', 'TMUX_PANE': '%7'}, tmux))
         self.assertEqual(out, {'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext':
-                         autonomy.rules(autonomy.resolve(PID)) + '\n\n' + autonomy.reviewer_rules(reviewers())}})
+                         autonomy.rules(autonomy.resolve(PID), PID) + '\n\n' + autonomy.reviewer_rules(reviewers())}})
         tmux.assert_called_once_with('display-message', '-p', '-t', '%7', '#{@project}')
 
     def test_tmux_failure_uses_global(self):
@@ -233,6 +252,125 @@ class Hook(Base):
 
 
 class Http(Base):
+    def setUp(self):
+        super().setUp()
+        # These tests isolate the existing route contracts. Real passkey gates are tested below.
+        patcher = mock.patch.object(approval, 'require')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_state_includes_project_answers_only_when_project_is_given(self):
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        self.assertEqual(autonomy.state(PID)['decisions'], [])
+        row = decisions.record(PID, 'Choose?', 'Default')
+        self.assertEqual(autonomy.state(PID)['decisions'], [row])
+        self.assertNotIn('decisions', autonomy.state())
+        handler = Handler(f'{autonomy.PATH}?project={PID}')
+        autonomy.get(handler)
+        self.assertEqual((handler.status, handler.body['decisions']), (200, [row]))
+
+    def test_setup_get_and_each_explicit_action(self):
+        route = autonomy.PATH + '/setup'
+        status = {'hook': {'state': 'missing'}, 'ping': {'state': 'off'}}
+        with mock.patch.object(autonomy, 'setup_state', return_value=status):
+            handler = Handler(route)
+            autonomy.get(handler)
+            self.assertEqual((handler.status, handler.body), (200, status))
+            for body, function, args in (
+                    ({'action': 'hook'}, 'install_hook', ()),
+                    ({'action': 'ping', 'preset': 'briskbot', 'fields': {'mention': 'user'},
+                      'base_url': 'https://tether.test'}, 'save_ping',
+                     ('briskbot', {'mention': 'user'}, 'https://tether.test')),
+                    ({'action': 'ping-off'}, 'disable_ping', ()),
+                    ({'action': 'ping-test'}, 'test_ping', ())):
+                with self.subTest(action=body['action']), mock.patch.object(
+                        autonomy.autonomy_setup, function, return_value={'ok': True, 'code': 0, 'detail': ''}) as action:
+                    handler = Handler(route, body)
+                    autonomy.post(handler)
+                    action.assert_called_once_with(*args)
+                    expected = dict(status)
+                    if body['action'] == 'ping-test':
+                        expected['test'] = {'ok': True, 'code': 0, 'detail': ''}
+                    self.assertEqual((handler.status, handler.body), (200, expected))
+
+    def test_setup_validation_errors_preserve_the_reason(self):
+        for action, function in (('hook', 'install_hook'), ('ping', 'save_ping'),
+                                 ('ping-off', 'disable_ping'), ('ping-test', 'test_ping')):
+            with self.subTest(action=action), mock.patch.object(
+                    autonomy.autonomy_setup, function, side_effect=ValueError('Specific reason.')):
+                handler = Handler(autonomy.PATH + '/setup', {'action': action})
+                autonomy.post(handler)
+                self.assertEqual((handler.status, handler.body), (400, {'error': 'Specific reason.'}))
+        handler = Handler(autonomy.PATH + '/setup', {'action': 'unknown'})
+        autonomy.post(handler)
+        self.assertEqual(handler.status, 400)
+
+    def test_save_answer_uses_the_panes_project_and_delete_round_trip(self):
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        route = autonomy.PATH + '/decisions'
+        handler = Handler(route, {'pane': '%12', 'project': '000000000000',
+                                  'question': 'Choose?', 'answer': 'Default'})
+        with mock.patch.object(codex_level, '_tmux', return_value=SimpleNamespace(
+                returncode=0, stdout=PID + '\n')) as tmux:
+            autonomy.post(handler)
+        tmux.assert_called_once_with('display-message', '-p', '-t', '%12', '#{@project}')
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(handler.body['project'], PID)
+        row = handler.body['entry']
+        self.assertEqual(decisions.entries(PID), [row])
+        for expected in (200, 404):
+            handler = Handler(route, {'project': PID, 'delete': row['id']})
+            autonomy.post(handler)
+            self.assertEqual(handler.status, expected)
+            if expected == 200:
+                self.assertEqual(handler.body, {'decisions': []})
+
+    def test_save_answer_missing_project_bad_pane_and_bad_entries(self):
+        route = autonomy.PATH + '/decisions'
+        for shown in (SimpleNamespace(returncode=0, stdout=''), SimpleNamespace(returncode=1, stdout=PID),
+                      SimpleNamespace(returncode=0, stdout='../x'), SimpleNamespace(returncode=0, stdout=PID)):
+            with self.subTest(shown=shown), mock.patch.object(codex_level, '_tmux', return_value=shown):
+                handler = Handler(route, {'pane': '%12', 'question': 'Choose?', 'answer': 'Default'})
+                autonomy.post(handler)
+                self.assertEqual((handler.status, handler.body), (409, {'error':
+                    'This tab is not in a Tether project, so Tether cannot save the answer.'}))
+        for error in (OSError('no tmux'), subprocess.TimeoutExpired('tmux', 2)):
+            with mock.patch.object(codex_level, '_tmux', side_effect=error):
+                handler = Handler(route, {'pane': '%12', 'question': 'Choose?', 'answer': 'Default'})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 409)
+        with mock.patch.object(codex_level, '_tmux') as tmux:
+            for pane in (None, [], '%12;sh', '%12\n', '12', '%-1'):
+                handler = Handler(route, {'pane': pane, 'question': 'Choose?', 'answer': 'Default'})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 400)
+            tmux.assert_not_called()
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        with mock.patch.object(codex_level, '_tmux', return_value=SimpleNamespace(returncode=0, stdout=PID)):
+            for change in ({'question': ''}, {'answer': '\x00\n'}, {'answer': []}):
+                handler = Handler(route, dict({'pane': '%12', 'question': 'Choose?', 'answer': 'Default'}, **change))
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 400)
+        for body in ({'project': '../x', 'delete': '1234abcd'}, {'project': PID, 'delete': None}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 400)
+
+    def test_setup_and_decisions_body_limits(self):
+        for route, limit in ((autonomy.PATH + '/setup', 16384), (autonomy.PATH + '/decisions', 16384)):
+            for size, expected in ((limit, 400), (limit + 1, 413)):
+                handler = Handler(route)
+                handler.rfile = io.BytesIO(b'{}' + b' ' * (size - 2))
+                handler.headers['Content-Length'] = str(size)
+                autonomy.post(handler)
+                self.assertEqual(handler.status, expected)
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        handler = Handler(autonomy.PATH + '/decisions', {'pane': '%12', 'question': 'q', 'answer': 'a' * 5000})
+        with mock.patch.object(codex_level, '_tmux', return_value=SimpleNamespace(returncode=0, stdout=PID)):
+            autonomy.post(handler)
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(len(handler.body['entry']['answer']), 500)
+
     def test_get_and_post_round_trips(self):
         handler = Handler()
         autonomy.get(handler)
@@ -278,7 +416,7 @@ class Http(Base):
         self.assertFalse(autonomy.handles(autonomy.PATH + '-other'))
 
     def test_bad_json_sizes_and_save_failure(self):
-        for size in ('0', '-1', '4097'):
+        for size in ('0', '-1', '16385'):
             handler = Handler(body={'level': 1})
             handler.headers['Content-Length'] = size
             autonomy.post(handler)
@@ -296,22 +434,110 @@ class Http(Base):
 
     def test_server_post_dispatch_preserves_auth_and_origin_guards(self):
         handler = object.__new__(server.Handler)
-        handler.path, handler.command = autonomy.PATH, 'POST'
+        handler.command = 'POST'
         handler.headers = {'Host': 'phone.test', 'Origin': 'http://phone.test', 'X-Codex-Mobile': '1'}
         handler.deny = mock.Mock(return_value=False)
         handler.respond = mock.Mock()
         with mock.patch.object(autonomy, 'post') as post:
-            handler.do_POST()
-            post.assert_called_once_with(handler)
-            post.reset_mock()
-            for headers in ({'Origin': 'https://evil.test'}, {'X-Codex-Mobile': ''}):
-                handler.headers.update(headers)
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions'):
+                handler.path = route
+                handler.headers.update({'Origin': 'http://phone.test', 'X-Codex-Mobile': '1'})
+                handler.deny.return_value = False
                 handler.do_POST()
-                handler.respond.assert_called_with(403, {'error': 'Reload the page and try again.'})
-            post.assert_not_called()
-            handler.deny.return_value = True
-            handler.do_POST()
-            post.assert_not_called()
+                post.assert_called_once_with(handler)
+                post.reset_mock()
+                for headers in ({'Origin': 'https://evil.test'}, {'X-Codex-Mobile': ''}):
+                    handler.headers.update(headers)
+                    handler.do_POST()
+                    handler.respond.assert_called_with(403, {'error': 'Reload the page and try again.'})
+                post.assert_not_called()
+                handler.deny.return_value = True
+                handler.do_POST()
+                post.assert_not_called()
+
+    def test_server_get_dispatch_preserves_auth_guards(self):
+        handler = object.__new__(server.Handler)
+        handler.command = 'GET'
+        handler.deny = mock.Mock(return_value=False)
+        handler.respond = mock.Mock()
+        with mock.patch.object(autonomy, 'get') as get:
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions'):
+                handler.path = route
+                self.assertTrue(autonomy.handles(route + '?project=' + PID))
+                handler.deny.return_value = False
+                handler.do_GET()
+                get.assert_called_once_with(handler)
+                get.reset_mock()
+                handler.deny.return_value = True
+                handler.do_GET()
+                get.assert_not_called()
+        self.assertFalse(autonomy.handles(autonomy.PATH + '/setup-other'))
+
+
+class LevelApproval(PasskeyCase):
+    def post(self, body):
+        handler = PasskeyHandler(autonomy.PATH, body)
+        autonomy.post(handler)
+        return handler
+
+    def test_global_raise_refused_without_key_or_approval_and_accepted_with_assertion(self):
+        payload = {'level': 4}
+        handler = self.post(payload)
+        self.assertEqual((handler.status, handler.body), (403, {'error': approval.NO_PASSKEY, 'approval': 'no-passkey'}))
+        self.assertFalse(autonomy.global_path().exists())
+        self.add()
+        handler = self.post(payload)
+        self.assertEqual((handler.status, handler.body), (403, {'error': approval.APPROVE, 'approval': 'required'}))
+        self.assertFalse(autonomy.global_path().exists())
+        handler = self.post(dict(payload, approval=self.assertion('level-raise', payload)))
+        self.assertEqual((handler.status, autonomy.read_global()), (200, 4))
+        self.assertEqual(self.post({'level': 1}).status, 200)
+        self.assertEqual(self.post({'level': 1}).status, 200)
+
+    def test_project_raises_and_disabling_lower_override_require_approval(self):
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        self.add()
+        autonomy.set_global(4)
+        for current, payload in (
+                (None, {'project': PID, 'override': True, 'level': 5}),
+                ({'override': True, 'level': 1}, {'project': PID, 'override': True, 'level': 2}),
+                ({'override': True, 'level': 1}, {'project': PID, 'override': False, 'level': 0})):
+            with self.subTest(current=current, payload=payload):
+                autonomy.project_path(PID).unlink(missing_ok=True)
+                if current:
+                    autonomy.set_project(PID, **current)
+                handler = self.post(payload)
+                self.assertEqual(handler.status, 403)
+                self.assertEqual(autonomy.read_project(PID), current)
+                handler = self.post(dict(payload, approval=self.assertion('level-raise', payload)))
+                self.assertEqual(handler.status, 200, handler.body)
+                self.assertEqual(autonomy.read_project(PID), {k: payload[k] for k in ('override', 'level')})
+
+    def test_lower_equal_disabled_override_and_reviewers_are_open(self):
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        autonomy.set_global(3)
+        for payload in ({'project': PID, 'override': True, 'level': 2},
+                        {'project': PID, 'override': True, 'level': 2},
+                        {'project': PID, 'override': False, 'level': 5},
+                        {'reviewers': reviewers()}):
+            if payload.get('override') is False:
+                autonomy.set_global(1)
+            handler = self.post(payload)
+            self.assertEqual(handler.status, 200, handler.body)
+        self.assertFalse((paths.CONFIG / 'passkeys.json').exists())
+
+    def test_raise_uses_current_stored_level_and_payload_cannot_change(self):
+        self.add()
+        payload = {'level': 5}
+        proof = self.assertion('level-raise', payload)
+        handler = self.post({'level': 4, 'approval': proof})
+        self.assertEqual(handler.status, 403)
+        self.assertFalse(autonomy.global_path().exists())
+        autonomy.set_global(1)
+        proof = self.assertion('level-raise', {'level': 2})
+        autonomy.set_global(0)
+        self.assertEqual(self.post({'level': 2}).status, 403)
+        self.assertEqual(self.post({'level': 2, 'approval': proof}).status, 200)
 
 
 if __name__ == '__main__':

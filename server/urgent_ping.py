@@ -30,12 +30,17 @@ def _name(pane):
     return out.stdout.strip()[:80] if out.returncode == 0 else ''
 
 
-def _argv(ask):
+def _config():
     try:
         config = json.loads((paths.CONFIG / 'urgent-ping.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
-        return None
-    if not isinstance(config, dict):
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _argv(ask):
+    config = _config()
+    if config.get('enabled') is False:
         return None
     command, base_url = config.get('command'), config.get('base_url', '')
     if (not isinstance(command, list) or not command or not isinstance(base_url, str)
@@ -86,21 +91,38 @@ def send(ask, *, clock=time.monotonic, runner=subprocess.run):
     return True
 
 
-def test():
-    """Run a test command in the foreground and show its result."""
+def run_test():
+    """Run the configured test command in the foreground, shared by the API and CLI."""
     argv = _argv({'pane': '%0', 'next': 'Test ping from Tether'})
     if argv is None:
-        print('Urgent ping is off: no valid urgent-ping.json config.')
+        return {'ok': False, 'code': None, 'detail': 'Urgent ping is off: no valid urgent-ping.json config.'}
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = getattr(exc, 'stderr', None) or getattr(exc, 'stdout', None) or str(exc)
+        if isinstance(detail, bytes):
+            detail = detail.decode('utf-8', 'replace')
+        return {'ok': False, 'code': None, 'detail': detail[-300:]}
+    detail = result.stderr or result.stdout or b''
+    if isinstance(detail, bytes):
+        detail = detail.decode('utf-8', 'replace')
+    return {'ok': result.returncode == 0, 'code': result.returncode, 'detail': detail[-300:]}
+
+
+def test():
+    """Run the same foreground test as Settings and show its result."""
+    from autonomy_setup import test_ping
+    try:
+        result = test_ping()
+    except ValueError as exc:
+        print(str(exc))
         return 1
-    result = _run(argv, subprocess.run)
-    if result is None:
-        return 1
-    print(f'Exit code: {result.returncode}')
-    tail = result.stderr or b''
-    if isinstance(tail, bytes):
-        tail = tail.decode('utf-8', 'replace')
-    print('Stderr tail:\n' + tail[-2000:])
-    return result.returncode
+    if result['code'] is not None:
+        print(f'Exit code: {result["code"]}')
+        print('Stderr tail:\n' + result['detail'])
+    else:
+        print(result['detail'])
+    return result['code'] if result['code'] is not None else 1
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ChevronRight, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronRight, Square, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, ToolSummary } from './api'
 import { useModal, usePolling } from './hooks'
@@ -21,7 +21,8 @@ interface TaskDetail extends BgTask { output: string; output_cut?: boolean }
 type Step = { kind: 'text'; text: string } | ({ kind: 'tool' } & ToolSummary)
 interface AgentDetail extends SubAgent { prompt: string; steps: Step[]; steps_cut?: boolean; report: string | null }
 
-const STATE_LABEL: Record<AgentState, string> = { running: 'Running', finished: 'Finished', failed: 'Failed', stopped: 'Stopped' }
+const STATE_LABEL: Record<AgentState, string> = { running: 'Running', finished: 'Done', failed: 'Failed', stopped: 'Stopped' }
+const STATE_ORDER: AgentState[] = ['running', 'failed', 'stopped', 'finished']
 
 // "claude-opus-5-5" → "Opus 5.5"; short names ("sonnet") get a capital letter.
 export function modelName(model: string | null | undefined) {
@@ -66,8 +67,23 @@ export function AgentPill({ list, onOpen }: { list: SubAgents | undefined; onOpe
   </button>
 }
 
-function Dot({ state }: { state: AgentState }) {
-  return <span className={`agent-dot ${state}`} role="img" aria-label={STATE_LABEL[state]} />
+// A state is never color alone: an icon in a tinted disc, and the word beside it.
+function StateIcon({ state }: { state: AgentState }) {
+  return <span className={`agent-state ${state}`} aria-hidden="true">
+    {state === 'running' ? <i /> : state === 'finished' ? <Check size={13} strokeWidth={3} /> : state === 'failed' ? <X size={13} strokeWidth={3} /> : <Square size={9} strokeWidth={0} fill="currentColor" />}
+  </span>
+}
+function StateWord({ state }: { state: AgentState }) {
+  return <b className={`agent-state-word ${state}`}>{STATE_LABEL[state]}</b>
+}
+// "1 running · 2 done": one count per state present, busiest first.
+const stateCounts = (items: { state: AgentState }[]) => STATE_ORDER
+  .map(state => [state, items.filter(item => item.state === state).length] as const)
+  .filter(([, n]) => n > 0).map(([state, n]) => `${n} ${STATE_LABEL[state].toLowerCase()}`)
+const runningFirst = <T extends { state: AgentState }>(items: T[]) => [...items].sort((a, b) => Number(b.state === 'running') - Number(a.state === 'running'))
+// The second line of a row: the state word, then plain facts.
+function RowFacts({ state, children }: { state: AgentState; children: string }) {
+  return <small><StateWord state={state} />{children && <> · {children}</>}</small>
 }
 
 export function AgentMap({ api, session, list, onClose }: { api: Api; session: string; list: SubAgents | undefined; onClose: () => void }) {
@@ -75,8 +91,6 @@ export function AgentMap({ api, session, list, onClose }: { api: Api; session: s
   const modal = useModal(true, onClose)
   const agents = list?.agents ?? []
   const tasks = list?.tasks ?? []
-  const running = agents.filter(agent => agent.state === 'running').length
-  const busyTasks = tasks.filter(task => task.state === 'running').length
   const chosen = agents.find(agent => agent.id === open)
   const chosenTask = chosen ? undefined : tasks.find(task => task.id === open)
   const owner = (id: string | null | undefined) => id ? agents.find(agent => agent.id === id) : undefined
@@ -85,20 +99,20 @@ export function AgentMap({ api, session, list, onClose }: { api: Api; session: s
       : chosenTask ? <TaskView key={chosenTask.id} api={api} session={session} task={chosenTask} parent={owner(chosenTask.parent)} onBack={() => setOpen(null)} onClose={onClose} /> : <>
       <div className="sheet-heading"><h2 id="agent-map-title">Agent map</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
       {agents.length > 0 && <>
-        <p className="sheet-sub">{facts(count(agents.length, 'agent'), running > 0 && `${running} running`, 'select an agent for details')}</p>
+        <p className="sheet-sub">{facts(count(agents.length, 'agent'), ...stateCounts(agents))}</p>
         <div className="agent-tree">
           <div className="agent-branch">
-            <div className="agent-node main"><span className="agent-dot" aria-hidden="true" /><span className="agent-node-text"><strong>{list?.main.title || 'Main agent'}</strong><small>{facts(modelName(list?.main.model), list?.main.context != null && `${tokenText(list.main.context)} in context`)}</small></span></div>
+            <div className="agent-node main"><span className="agent-state main" aria-hidden="true"><i /></span><span className="agent-node-text"><strong>{list?.main.title || 'Main agent'}</strong><small>{facts(modelName(list?.main.model), list?.main.context != null && `${tokenText(list.main.context)} in context`)}</small></span></div>
             <Children agents={agents} parent={null} onOpen={setOpen} />
           </div>
         </div>
       </>}
       {tasks.length > 0 && <section className="agent-tasks" aria-labelledby="agent-tasks-title">
-        <p className="sheet-sub" id="agent-tasks-title">{facts(count(tasks.length, 'background task'), busyTasks > 0 && `${busyTasks} running`, 'select a task for details')}</p>
-        <ul>{tasks.map(task => <li key={task.id}>
-          <button type="button" className="agent-node" onClick={() => setOpen(task.id)}>
-            <Dot state={task.state} />
-            <span className="agent-node-text"><strong className={task.description ? '' : 'mono'}>{taskName(task)}</strong><small>{facts(task.kind, task.seconds != null && formatElapsed(task.seconds))}</small></span>
+        <p className="sheet-sub" id="agent-tasks-title">{facts(count(tasks.length, 'background task'), ...stateCounts(tasks))}</p>
+        <ul>{runningFirst(tasks).map(task => <li key={task.id}>
+          <button type="button" className="agent-node" data-state={task.state} onClick={() => setOpen(task.id)}>
+            <StateIcon state={task.state} />
+            <span className="agent-node-text"><strong className={task.description ? '' : 'mono'}>{taskName(task)}</strong><RowFacts state={task.state}>{facts(task.kind, task.seconds != null && formatElapsed(task.seconds))}</RowFacts></span>
           </button>
         </li>)}</ul>
       </section>}
@@ -110,13 +124,13 @@ export function AgentMap({ api, session, list, onClose }: { api: Api; session: s
 // sits with the main agent.
 function Children({ agents, parent, onOpen }: { agents: SubAgent[]; parent: string | null; onOpen: (id: string) => void }) {
   const known = new Set(agents.map(agent => agent.id))
-  const here = agents.filter(agent => parent === null ? !agent.parent || !known.has(agent.parent) : agent.parent === parent)
+  const here = runningFirst(agents.filter(agent => parent === null ? !agent.parent || !known.has(agent.parent) : agent.parent === parent))
   if (!here.length) return null
   return <ul className="agent-children" aria-label={parent === null ? 'Spawned agents' : undefined}>
     {here.map(agent => <li key={agent.id}><div className="agent-branch">
-      <button type="button" className="agent-node" onClick={() => onOpen(agent.id)}>
-        <Dot state={agent.state} />
-        <span className="agent-node-text"><strong>{agent.description || agent.type}</strong><small>{facts(agent.seconds != null && formatElapsed(agent.seconds), tokenText(agent.tokens))}</small></span>
+      <button type="button" className="agent-node" data-state={agent.state} onClick={() => onOpen(agent.id)}>
+        <StateIcon state={agent.state} />
+        <span className="agent-node-text"><strong>{agent.description || agent.type}</strong><RowFacts state={agent.state}>{facts(agent.seconds != null && formatElapsed(agent.seconds), tokenText(agent.tokens))}</RowFacts></span>
       </button>
       <Children agents={agents} parent={agent.id} onOpen={onOpen} />
     </div></li>)}
@@ -167,9 +181,9 @@ function AgentView({ api, session, agent, parent, onBack, onClose }: { api: Api;
     </ol>
   </>
   return <>
-    {heading(onBack, 'Back to the agent map', <><Dot state={shown.state} />{title}</>)}
+    {heading(onBack, 'Back to the agent map', <><StateIcon state={shown.state} />{title}</>)}
     <div className="agent-meta">
-      <p className="agent-facts">{facts(STATE_LABEL[shown.state], shown.type, modelName(shown.model), shown.effort, shown.background && 'background')}</p>
+      <p className="agent-facts"><StateWord state={shown.state} /> · {facts(shown.type, modelName(shown.model), shown.effort, shown.background && 'background')}</p>
       <p>Spawned by {parent ? parent.description || parent.type : 'the main agent'}</p>
       <p className="agent-numbers">{facts(shown.seconds != null && formatElapsed(shown.seconds), tokenText(shown.tokens))}</p>
     </div>
@@ -227,11 +241,11 @@ function TaskView({ api, session, task, parent, onBack, onClose }: { api: Api; s
   return <>
     <div className="sheet-heading">
       <button type="button" className="icon-button" aria-label="Back to the agent map" onClick={onBack}><ArrowLeft /></button>
-      <h2 id="agent-map-title" className={`agent-title ${shown.description ? '' : 'mono'}`}><Dot state={shown.state} />{taskName(shown)}</h2>
+      <h2 id="agent-map-title" className={`agent-title ${shown.description ? '' : 'mono'}`}><StateIcon state={shown.state} />{taskName(shown)}</h2>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
     </div>
     <div className="agent-meta">
-      <p className="agent-facts">{facts(STATE_LABEL[shown.state], shown.kind, 'background')}</p>
+      <p className="agent-facts"><StateWord state={shown.state} /> · {facts(shown.kind, 'background')}</p>
       <p>Started by {parent ? parent.description || parent.type : 'the main agent'}</p>
       <p className="agent-numbers">{shown.seconds != null && formatElapsed(shown.seconds)}</p>
     </div>

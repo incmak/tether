@@ -20,6 +20,9 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import codex_level  # noqa: E402
+import approval  # noqa: E402
+import autonomy_setup  # noqa: E402
+import decisions  # noqa: E402
 import delegate  # noqa: E402
 import paths  # noqa: E402
 from codex_level import hook_project  # noqa: E402
@@ -53,7 +56,8 @@ SAFETY = ('At every level, ask before you delete data, force-push, run a destruc
           'public release, or send a message to another person.')
 URGENT = ('When you must ask, end the reply with "Needs you: yes". If the question blocks the work, put a line '
           '"Urgent: <the question in one sentence>" just before it.')
-DECISIONS = ('Before you ask the user, read {path}. If a past decision answers your question, use it and say so.')
+DECISIONS = ('The user saved answers for this project in {path}. Reuse one only when it answers the same question; '
+             'if in doubt, ask.')
 LAST = 'Do not change the level. The user sets it in Tether.'
 PROJECT_ID = codex_level.PROJECT_ID
 SLUG = codex_level.SLUG
@@ -61,6 +65,7 @@ TIERS = ('critical', 'normal', 'light')
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CLAUDE_REVIEW_MODELS = tuple(model for model, _ in delegate.CLAUDE_MODELS)  # what a new tab accepts
 TIER_DEFAULT = {'agent': 'auto', 'model': 'auto', 'effort': 'auto'}
+_LEVEL_LOCK = threading.Lock()
 
 
 class LevelError(Exception):
@@ -135,16 +140,19 @@ def resolve(pid=None):
     return {'level': base, 'source': 'global', 'global': base, 'project': project}
 
 
-def rules(resolved):
+def rules(resolved, pid=None):
     level = resolved['level']
     where = 'for this project' if resolved['source'] == 'project' else 'for all projects'
     head = f'Autonomy level {level} of {len(LEVELS) - 1} ({LEVELS[level][0]}), set by the user {where}.'
     lines = [head, RULES[level], SAFETY]
     if level >= 4:
         lines.append(URGENT)
-    decisions = paths.CONFIG / 'decisions.md'
-    if level >= 3 and decisions.exists():
-        lines.append(DECISIONS.format(path=decisions.resolve()))
+    if level >= 3 and pid is not None:
+        try:
+            if decisions.entries(pid):
+                lines.append(DECISIONS.format(path=decisions.path(pid).resolve()))
+        except ValueError:
+            pass  # The pane may still name a project that no longer exists.
     lines.append(LAST)
     return '\n'.join(lines)
 
@@ -230,7 +238,7 @@ def hook_output(data, env=os.environ, tmux=codex_level._tmux):
         pid = hook_project(cwd, env, tmux)
     except (OSError, subprocess.SubprocessError):
         pid = None
-    text = rules(resolve(pid)) + '\n\n' + reviewer_rules(read_reviewers())
+    text = rules(resolve(pid), pid) + '\n\n' + reviewer_rules(read_reviewers())
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': text}})
 
 
@@ -251,22 +259,36 @@ PATH = '/mobile/api/autonomy'
 
 
 def handles(path):
-    return path.split('?', 1)[0] == PATH
+    return path.split('?', 1)[0] in (PATH, PATH + '/setup', PATH + '/decisions')
 
 
 def state(pid=None):
     resolved = resolve(pid)
     models = [{'slug': row['slug'], 'name': row['name'],
                'efforts': [effort for effort in row['efforts'] if effort in EFFORTS]} for row in codex_level.models()]
-    return {'levels': [{'level': index, 'name': name, 'summary': summary} for index, (name, summary) in enumerate(LEVELS)],
+    result = {'levels': [{'level': index, 'name': name, 'summary': summary} for index, (name, summary) in enumerate(LEVELS)],
             'global': resolved['global'], 'level': resolved['level'], 'source': resolved['source'],
             'project': resolved['project'], 'reviewers': read_reviewers(), 'tiers': list(TIERS),
             'models': {'claude': [{'slug': slug, 'name': name} for slug, name in delegate.CLAUDE_MODELS], 'codex': models}, 'efforts': list(EFFORTS)}
+    if pid is not None:
+        result['decisions'] = decisions.entries(pid)
+    return result
+
+
+def setup_state():
+    return {'hook': autonomy_setup.hook_status(), 'ping': autonomy_setup.ping_status()}
 
 
 def get(handler):
     from urllib.parse import parse_qs, urlsplit
-    query = parse_qs(urlsplit(handler.path).query)
+    url = urlsplit(handler.path)
+    if url.path == PATH + '/setup':
+        handler.respond(200, setup_state())
+        return
+    if url.path == PATH + '/decisions':
+        handler.respond(405, {'error': 'Use POST for saved answers.'})
+        return
+    query = parse_qs(url.query)
     pid = query.get('project', [None])[0]
     try:
         if pid is not None:
@@ -274,29 +296,106 @@ def get(handler):
         handler.respond(200, state(pid))
     except LevelError as exc:
         handler.respond(exc.status, {'error': str(exc)})
+    except ValueError as exc:
+        handler.respond(400, {'error': str(exc)})
+
+
+def _setup(body):
+    action = body.get('action')
+    test = None
+    if action == 'hook':
+        autonomy_setup.install_hook()
+    elif action == 'ping':
+        autonomy_setup.save_ping(body.get('preset'), body.get('fields'), body.get('base_url'))
+    elif action == 'ping-off':
+        autonomy_setup.disable_ping()
+    elif action == 'ping-test':
+        test = autonomy_setup.test_ping()
+    else:
+        raise ValueError('Choose a setup action.')
+    result = setup_state()
+    if test is not None:
+        result['test'] = test
+    return result
+
+
+def _decisions(body):
+    if 'delete' in body:
+        pid, entry_id = body.get('project'), body['delete']
+        if not isinstance(entry_id, str) or not re.fullmatch(r'[0-9a-f]{8}', entry_id):
+            raise ValueError('Choose a saved answer.')
+        if not decisions.delete(pid, entry_id):
+            raise LevelError(404, 'That saved answer is gone.')
+        return {'decisions': decisions.entries(pid)}
+    pane = body.get('pane')
+    if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
+        raise ValueError('Select a tab first.')
+    pid = None
+    try:
+        shown = codex_level._tmux('display-message', '-p', '-t', pane, '#{@project}')
+        value = shown.stdout.strip()
+        if shown.returncode == 0 and PROJECT_ID.fullmatch(value):
+            decisions.path(value)
+            pid = value
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    if pid is None:
+        raise LevelError(409, 'This tab is not in a Tether project, so Tether cannot save the answer.')
+    return {'entry': decisions.record(pid, body.get('question'), body.get('answer')), 'project': pid}
 
 
 def post(handler):
-    """Set the global level, a project override, or the full reviewer choices."""
+    """Set autonomy options, perform an explicit setup action, or save/delete a project answer."""
     try:
+        route = handler.path.split('?', 1)[0]
         size = int(handler.headers.get('Content-Length', '0') or 0)
-        if not 0 < size <= 4096:
+        if not 0 < size <= 16384:
             raise LevelError(413, 'Invalid request.')
-        body = json.loads(handler.rfile.read(size))
+        try:
+            body = json.loads(handler.rfile.read(size))
+        except (ValueError, UnicodeError):
+            raise LevelError(400, 'Invalid request.') from None
         if not isinstance(body, dict):
             raise LevelError(400, 'Invalid request.')
+        payload = {key: value for key, value in body.items() if key != 'approval'}
+        if route == PATH + '/setup':
+            if body.get('action') in ('hook', 'ping'):
+                approval.require(handler, 'setup-' + body['action'], payload, body.get('approval'))
+            handler.respond(200, _setup(body))
+            return
+        if route == PATH + '/decisions':
+            if 'delete' not in body:
+                approval.require(handler, 'decision-save', payload, body.get('approval'))
+            handler.respond(200, _decisions(body))
+            return
         pid = body.get('project')
         if 'reviewers' in body:
             set_reviewers(body['reviewers'])
-        elif pid is None:
-            set_global(body.get('level'))
         else:
-            set_project(pid, body.get('override'), body.get('level'))
+            with _LEVEL_LOCK:
+                level = body.get('level')
+                if not _valid(level) or (pid is not None and not isinstance(body.get('override'), bool)):
+                    raise LevelError(400, f'Choose a level from 0 to {len(LEVELS) - 1}.')
+                if pid is None:
+                    raises = level > read_global()
+                else:
+                    project_path(pid)
+                    current = resolve(pid)
+                    effective = level if body['override'] else current['global']
+                    raises = effective > current['level']
+                if raises:
+                    approval.require(handler, 'level-raise', payload, body.get('approval'))
+                if pid is None:
+                    set_global(level)
+                else:
+                    set_project(pid, body['override'], level)
         handler.respond(200, state(pid))
+    except approval.ApprovalError as exc:
+        approval.error(handler, exc)
     except LevelError as exc:
         handler.respond(exc.status, {'error': str(exc)})
-    except (ValueError, UnicodeError):
-        handler.respond(400, {'error': 'Invalid request.'})
+    except (ValueError, UnicodeError) as exc:
+        handler.respond(400, {'error': str(exc)})
     except OSError:
         handler.respond(500, {'error': 'Tether could not save the autonomy settings.'})
 
@@ -305,6 +404,7 @@ if __name__ == '__main__':
     if sys.argv[1:] == ['hook']:
         hook()
     elif sys.argv[1:] == ['show']:
-        print(rules(resolve(hook_project(os.getcwd()))) + '\n\n' + reviewer_rules(read_reviewers()))
+        pid = hook_project(os.getcwd())
+        print(rules(resolve(pid), pid) + '\n\n' + reviewer_rules(read_reviewers()))
     else:
         sys.exit(__doc__)
