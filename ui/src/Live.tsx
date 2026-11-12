@@ -9,7 +9,7 @@ import { fridayChatFolder } from './fridayFolders'
 import { LiveVoice, sentences } from './liveVoice'
 import { useBackStep } from './backNav'
 import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } from './floatingWindow'
-import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle, snapBubble } from './liveMotion'
+import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle } from './liveMotion'
 import { speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog, type Item } from './backlogItems'
@@ -73,7 +73,7 @@ const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.nee
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 export function Live({ api, panes, selected, commands, onClose, onBacklog, reveal = 0, from = null }: { api: Api; panes: Pane[]; selected?: Pane; commands: Command[]; onClose: () => void; onBacklog?: () => void; reveal?: number; from?: DOMRect | null }) {
-  const { mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: 300, minH: 360, bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
+  const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: 300, minH: 360, bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
   const root = useRef<HTMLDivElement>(null)
   const bubbleButton = useRef<HTMLButtonElement>(null)
   // Motion between window, bubble and full screen. The fold plays first, then the mode changes; the layout
@@ -104,7 +104,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     const el = root.current, prev = shown.current
     shown.current = { mode, bubble }
     if (prev.mode === null) { if (openedFrom.current && mode !== 'bubble') openFrom(el, openedFrom.current); else settle(el, true); return }
-    if (prev.mode === mode) { if (mode === 'bubble' && !moving) snapBubble(el, prev.bubble, bubble); return }
+    if (prev.mode === mode) return  // The drag hook owns bubble snap motion.
     folding.current?.cancel(); folding.current = null
     if (mode === 'bubble') { popBubble(el, folded.current); folded.current = false; if (focusBubble.current) bubbleButton.current?.focus(); focusBubble.current = false }
     else if (prev.mode === 'bubble') bloomFromBubble(el, bubble, BUBBLE)
@@ -748,7 +748,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const interruptable = phase === 'speaking' || phase === 'thinking'
   const voiceInfo = voiceKind === 'kokoro' ? 'Voice: this device' : voiceKind === 'system' ? 'Voice: device basic' : 'Voice: server'
   const bubbleLabel = `Open ${ASSISTANT}: ${status}${asks ? ', a chat needs your OK' : ''}`
-  return <div ref={root} className={`live live-${mode}${moving ? ' moving' : ''}`} style={mode === 'window' ? windowStyle : mode === 'bubble' ? bubbleStyle : undefined}
+  return <div ref={el => { root.current = el; attachWindow(el) }} className={`live live-${mode}${moving ? ' moving' : ''}`} style={mode === 'window' ? windowStyle : mode === 'bubble' ? bubbleStyle : undefined}
     tabIndex={-1} role="dialog" aria-modal={mode === 'full'} aria-label={`${ASSISTANT} Live mode`} data-phase={phase} data-asking={asks}>
     {mode === 'bubble' && <button ref={bubbleButton} type="button" className="live-bubble-hit" aria-label={bubbleLabel} title={bubbleLabel} {...bubbleHandlers}><i ref={lit} className="live-lit" aria-hidden="true" /></button>}
     {mode === 'window' && EDGES.map(edge => <span key={edge} className={`live-edge live-edge-${edge}`} aria-hidden="true" {...resize(edge)} />)}

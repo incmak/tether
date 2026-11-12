@@ -37,7 +37,7 @@
   background: var(--surface); color: var(--text); border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
   --spring: cubic-bezier(.32, .72, 0, 1);
-  transition: transform .28s var(--spring), width .28s var(--spring), height .28s var(--spring), border-radius .28s var(--spring),
+  transition: transform .22s var(--spring), width .28s var(--spring), height .28s var(--spring), border-radius .28s var(--spring),
     background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease, scale .15s ease; }
 /* Docked: a D-shaped tab, flat side on the screen edge. The ::before widens the touch area to 44px. */
 .agent-bubble.docked { box-shadow: 0 1px 2px rgb(0 0 0 / .06), 0 4px 12px rgb(0 0 0 / .12); }
@@ -156,7 +156,7 @@ label.broadcast-row:hover { background: var(--hover); }
 .agent-pop-hide { min-height: 36px; padding: 0 8px; border-radius: var(--radius); font-size: 13px; color: var(--text); font-weight: 500; }
 .agent-pop-hide:hover { background: var(--hover); }
 @media (prefers-reduced-motion: reduce) {
-  .agent-bubble { transition: none; }
+  .agent-bubble, .agent-bubble.dragging { transition: none; }
   .agent-bubble-counts, .agent-bubble > svg { animation: none; }
   .agent-bubble.working .agent-bubble-ring { animation: none; }
   .agent-bubble.attention .agent-bubble-ring::after, .agent-bubble.docked.attention::after { display: none; }
