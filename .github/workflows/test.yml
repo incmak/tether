@@ -30,29 +30,59 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: cd ui && npm ci && npx tsc -b && npx eslint . && npm run build
       - run: cd ui && node run_ui_tests.cjs --unit
-      - name: Check browser test paths
-        id: browser-paths
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null || ! git diff --quiet "$BASE" HEAD -- ui/ .github/workflows/test.yml; then
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          fi
+  browser:
+    # Match the OS supported by the pinned Playwright browser/dependency bundle.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - run: cd ui && npm ci && npm run build
       - uses: actions/cache@v4
-        if: steps.browser-paths.outputs.changed == 'true'
         with:
           path: ~/.cache/ms-playwright
           key: chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ui/package-lock.json') }}
+      - name: Install Chromium system packages
+        shell: bash
+        run: |
+          cd ui
+          for attempt in 1 2 3; do
+            if npx playwright-core install-deps chromium; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 30
+          done
       - name: Install test Chromium
-        if: steps.browser-paths.outputs.changed == 'true'
-        run: cd ui && npx playwright-core install --with-deps --only-shell chromium
+        shell: bash
+        run: |
+          cd ui
+          for attempt in 1 2 3; do
+            if npx playwright-core install --only-shell chromium; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 30
+          done
       - name: Browser UI tests
-        if: steps.browser-paths.outputs.changed == 'true'
         run: cd ui && node run_ui_tests.cjs --browser
+      - name: Upload browser test screenshots
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-browser-screenshots-${{ github.run_attempt }}
+          path: .release-work/
+          if-no-files-found: ignore
+          retention-days: 7
+          include-hidden-files: true

@@ -16,7 +16,7 @@ import autonomy
 import autonomy_setup as setup
 import paths
 import urgent_ping
-from test_approval import Handler, PasskeyCase
+from test_approval import HAS_CRYPTO, Handler, PasskeyCase
 
 
 class Base(unittest.TestCase):
@@ -276,6 +276,7 @@ class Ping(Base):
             self.assertEqual(setup.test_ping(), {'ok': False, 'code': None, 'detail': 'e' * 300})
 
 
+@unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
 class SetupApproval(PasskeyCase):
     def setUp(self):
         super().setUp()
