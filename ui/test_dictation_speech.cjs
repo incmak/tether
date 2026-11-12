@@ -231,7 +231,13 @@ async function main() {
   assert.equal(silence.done(), 0); assert.equal(silence.render().error, ''); assert.equal(silenceEnv.timers.size, 0)
   const noSpeechEnv = speechEnvironment(), noSpeech = setup(noSpeechEnv)
   await noSpeech.render().toggle(); const noSpeechFinal = noSpeech.render().finalText()
-  noSpeechEnv.recognitions[0].error('no-speech'); noSpeech.render().stop()
+  // A quick tap on and off does not mark speech broken.
+  const quickEnv = speechEnvironment(), quick = setup(quickEnv)
+  await quick.render().toggle(); quick.render().stop(); quickEnv.recognitions[0].end(); await flush()
+  await quick.render().toggle()
+  assert.equal(quickEnv.recognitions.length, 2); assert.equal(quickEnv.records.length, 0)
+  quick.render().stop(); quickEnv.recognitions[1].end(); await flush(); quick.h.unmount()
+  noSpeechEnv.recognitions[0].error('no-speech'); noSpeechEnv.advance(3000); noSpeech.render().stop()
   assert.equal(await noSpeechFinal, '')
   assert.equal(noSpeech.render().error, 'No speech heard. Tap the mic and speak. (speech: start e:no-speech stop end)')
   assert.deepEqual(noSpeechEnv.logs, [['[dictation]', 'start e:no-speech stop end']])
@@ -246,7 +252,7 @@ async function main() {
     await s.render().toggle(); const final = s.render().finalText()
     env.recognitions[0].error(error); await flush()
     assert.equal(env.recognitions[0].aborts, 1); assert.equal(env.records.length, 1)
-    assert.equal(s.render().listening, true); assert.equal(s.render().error, '')
+    assert.equal(s.render().listening, true); assert.equal(s.render().error, `Browser speech failed, so the server converts this (slower). (speech: start e:${error})`)
     env.advance(1000); env.records[0].data(); s.render().stop()
     assert.equal(await final, 'Base fallback words')
     assert.equal(env.calls.length, 1); assert.equal(env.timers.size, 0)
@@ -273,8 +279,8 @@ async function main() {
       speech.end(); assert.equal(env.records.length, 0); assert.equal(speech.starts, 3)
       speech.end(); await flush(); assert.equal(env.records.length, 1)
     }
-    assert.equal(speech.aborts, 1); assert.equal(env.logs.length, 0)
-    assert.equal(s.render().error, ''); assert(s.render().listening)
+    assert.equal(speech.aborts, 1); assert.equal(env.logs.length, 1); assert.equal(env.logs[0][0], '[dictation] fallback')
+    assert(s.render().error.startsWith('Browser speech failed')); assert(s.render().listening)
     env.advance(1000); env.records[0].data(); s.render().stop()
     assert.equal(await final, 'Base recorder words'); assert.equal(env.timers.size, 0)
   }
@@ -284,7 +290,7 @@ async function main() {
     const env = speechEnvironment(), s = setup(env)
     await s.render().toggle(); const final = s.render().finalText(), speech = env.recognitions[0]
     if (safety) speech.stop = () => { speech.stops++ }
-    s.render().stop()
+    env.advance(3000); s.render().stop()
     if (safety) env.fire(1500)
     assert.equal(await final, '')
     const trail = `start stop ${safety ? 'timeout' : 'end'}`

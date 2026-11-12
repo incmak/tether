@@ -89,7 +89,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const complete = (message?: string) => {
       if (done) return
       if (!received && !stopped && (failed || emptyEnds >= 3)) { fallback(); return }
-      if (!received && stopped) { speechBroken = true; message = undefined }
+      // Only a real attempt marks speech broken. A quick tap on and off is not one.
+      if (!received && stopped) { if (Date.now() - started >= 3000) speechBroken = true; message = undefined }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
       cleanup(); setText(next); finish(next); setListening(false)
@@ -108,6 +109,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     }
     const fallback = () => {
       speechBroken = true
+      console.info('[dictation] fallback', trail.join(' '))
+      // Say why the slow server voice runs, so the next report shows the cause.
+      setError(`Browser speech failed, so the server converts this (slower). (speech: ${trail.join(' ')})`)
       cleanup(); setListening(false)
       // A submit may already hold the speech promise. Resolve it with the recorder's final text.
       void startRecorder().then(() => {
