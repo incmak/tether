@@ -221,7 +221,11 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
   const host = useHost()
   const panelRef = useRef<HTMLElement>(null)
-  const headerTouch = useRef<{ x: number; y: number } | null>(null)
+  const headerTitle = useRef<HTMLButtonElement>(null)
+  const headerTouch = useRef<{ x: number; y: number; offset: number; width: number; mode: 'wait' | 'drag'; lastX: number; lastAt: number; speed: number } | null>(null)
+  const headerLeaving = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const headerDragged = useRef(false)
+  const headerFromTouch = useRef(false)
   const [limit, setLimit] = useState(() => scrollByPane.get(pane.id)?.limit ?? 40)
   const chatQuery = `session=${encodeURIComponent(pane.id)}&limit=${limit}&preview=${liveReplyPreview ? 1 : 0}${pane.agent === 'shell' ? '&mode=shell' : ''}`
   const fetchChat = useCallback((signal: AbortSignal) => api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal), [api, chatQuery])
@@ -261,12 +265,15 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const hold = useRef<{ top: number; until: number } | null>(null)
   useLayoutEffect(() => { const element = page.current, id = pane.id; return () => saveDock(id, element) }, [pane.id])
   // A side swipe on the chat: 'wait' until the finger shows a direction, then 'drag' moves the chat with the finger.
-  const swipe = useRef<{ x: number; y: number; mode: 'wait' | 'drag'; lastX: number; lastAt: number; speed: number } | null>(null)
+  const swipe = useRef<{ x: number; y: number; offset: number; mode: 'wait' | 'drag'; lastX: number; lastAt: number; speed: number } | null>(null)
   const leaving = useRef<ReturnType<typeof setTimeout> | null>(null)
   // For a moment after a pane opens, the messages already there do not play the "new message" settle-in.
   const [opening, setOpening] = useState(true)
   useEffect(() => { const timer = setTimeout(() => setOpening(false), 400); return () => clearTimeout(timer) }, [])
-  useEffect(() => () => { if (leaving.current) clearTimeout(leaving.current) }, [])
+  useEffect(() => () => {
+    if (leaving.current) clearTimeout(leaving.current)
+    if (headerLeaving.current) clearTimeout(headerLeaving.current)
+  }, [])
   // In a session with groups, the strip, the swipe and the prefetch use the open tab's group only.
   const view = useMemo(() => session?.groups?.length ? { ...session, panes: groupPanes(session.panes, session.groups, pane) } : session, [session, pane])
   const grouped = !!session?.groups?.length
@@ -301,16 +308,28 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     hold.current = null
     if (event.touches.length !== 1) return
     const touch = event.touches[0]
+    const currentX = page.current ? new DOMMatrix(getComputedStyle(page.current).transform).m41 : 0
+    if (leaving.current) { clearTimeout(leaving.current); leaving.current = null }
+    // Freeze all three pages and the pill where the finger caught them.
+    if (currentX) {
+      moveChat(currentX)
+      const width = page.current?.clientWidth || window.innerWidth
+      const target = swipeTarget(currentX)
+      const offset = !target || target === 'menu' ? currentX * 4 : Math.abs(currentX) > width ? Math.sign(currentX) * (width + (Math.abs(currentX) - width) * 4) : currentX
+      swipe.current = { x: touch.clientX, y: touch.clientY, offset, mode: 'drag', lastX: touch.clientX, lastAt: event.timeStamp, speed: 0 }
+      pull.current = null
+      return
+    }
     const offset = pullNote.current ? new DOMMatrix(getComputedStyle(pullNote.current).transform).m42 + 40 : 0
     if (pullNote.current) { pullNote.current.style.transition = 'none'; pullNote.current.style.transform = `translate3d(0, ${offset - 40}px, 0)` }
     pull.current = viewport.current && viewport.current.scrollTop <= 0 ? touch.clientY - Math.max(0, offset) : null
-    pullSpeed.current = { y: touch.clientY, at: performance.now(), speed: 0 }
+    pullSpeed.current = { y: touch.clientY, at: event.timeStamp, speed: 0 }
     if (touch.clientX < 28 || touch.clientX > window.innerWidth - 28) return
     for (let node = event.target as HTMLElement | null; node && node !== event.currentTarget; node = node.parentElement) {
       if (node.scrollWidth > node.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(node).overflowX)) return
     }
     if (window.getSelection()?.toString()) return
-    swipe.current = { x: touch.clientX, y: touch.clientY, mode: 'wait', lastX: touch.clientX, lastAt: performance.now(), speed: 0 }
+    swipe.current = { x: touch.clientX, y: touch.clientY, offset: 0, mode: 'wait', lastX: touch.clientX, lastAt: event.timeStamp, speed: 0 }
   }
   // Pull down at the top of the chat to load earlier messages.
   const pull = useRef<number | null>(null)
@@ -358,7 +377,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const moveChat = (x: number, ms = 0) => {
     const element = page.current
     if (!element) return
-    const transition = ms ? `transform ${ms}ms cubic-bezier(.2,.8,.2,1)` : ''
+    const transition = ms ? `transform ${ms}ms cubic-bezier(.32,.72,0,1)` : 'none'
     const target = x ? swipeTarget(x) : null
     movePill(tabs.current, target && target !== 'menu' ? target.id : null, Math.abs(x) / (element.clientWidth || window.innerWidth), ms)
     element.style.transition = transition
@@ -373,7 +392,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     const start = swipe.current
     if (!start || event.touches.length !== 1) return
     const touch = event.touches[0]
-    const dx = touch.clientX - start.x, dy = touch.clientY - start.y
+    const dx = touch.clientX - start.x + start.offset, dy = touch.clientY - start.y
     if (start.mode === 'wait') {
       if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
       if (Math.abs(dx) < Math.abs(dy) * 1.5) { swipe.current = null; return }  // a scroll, not a swipe
@@ -385,21 +404,22 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
         if (dock && !dock.childElementCount) dock.innerHTML = dockHtml(page.current, true)
       }
     }
-    const now = performance.now()
+    const now = event.timeStamp
     if (now > start.lastAt) start.speed = start.speed * 0.4 + ((touch.clientX - start.lastX) / (now - start.lastAt)) * 0.6
     start.lastX = touch.clientX; start.lastAt = now
     const target = swipeTarget(dx)
     // With a pane on that side the chat follows the finger; at the end of the row it resists.
-    moveChat(target && target !== 'menu' ? dx : dx * 0.25)
+    const width = page.current?.clientWidth || window.innerWidth
+    moveChat(target && target !== 'menu' ? Math.abs(dx) > width ? Math.sign(dx) * (width + (Math.abs(dx) - width) * 0.25) : dx : dx * 0.25)
   }
   const swipeEnd = (event: React.TouchEvent) => {
     pullEnd()
     const start = swipe.current
     swipe.current = null
     if (!start || start.mode !== 'drag') return
-    const dx = event.changedTouches[0].clientX - start.x
-    const width = viewport.current?.clientWidth || window.innerWidth
-    const fling = Math.abs(start.speed) > 0.35 && Math.sign(start.speed) === Math.sign(dx) && Math.abs(dx) > 40
+    const dx = event.changedTouches[0].clientX - start.x + start.offset
+    const width = page.current?.clientWidth || window.innerWidth
+    const fling = !reduceMotion() && event.timeStamp - start.lastAt < 100 && Math.abs(start.speed) > 0.35 && Math.sign(start.speed) === Math.sign(dx)
     const target = Math.abs(dx) > width * 0.3 || fling ? swipeTarget(dx) : null
     if (!target || target === 'menu') {
       moveChat(0, reduceMotion() ? 0 : 220)
@@ -408,13 +428,65 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     }
     if (reduceMotion()) { onOpenPane(target); return }
     // Finish at the finger's speed: a fast fling ends sooner, a slow drag eases in.
-    const time = Math.round(Math.min(280, Math.max(140, (width - Math.abs(dx)) / Math.max(Math.abs(start.speed), 1.2))))
+    const x = page.current ? new DOMMatrix(getComputedStyle(page.current).transform).m41 : dx
+    const time = Math.round(Math.min(320, Math.max(140, Math.abs(width - Math.abs(x)) / Math.max(Math.abs(start.speed), 1.2))))
     moveChat(Math.sign(dx) * width, time)
-    leaving.current = setTimeout(() => onOpenPane(target), time)
+    leaving.current = setTimeout(() => { leaving.current = null; onOpenPane(target) }, time)
   }
   const swipeCancel = () => {
     if (swipe.current?.mode === 'drag') moveChat(0, reduceMotion() ? 0 : 220)
     swipe.current = null; pull.current = null; setPulled(0)
+  }
+  const moveHeader = (x: number, width: number, ms = 0) => {
+    const title = headerTitle.current
+    if (!title) return
+    title.style.transition = ms ? `transform ${ms}ms cubic-bezier(.32,.72,0,1), opacity ${ms}ms cubic-bezier(.32,.72,0,1)` : 'none'
+    title.style.transform = `translateX(${x}px)`
+    title.style.opacity = `${Math.max(0, 1 - Math.abs(x) / width * 0.5)}`
+  }
+  const headerStart = (event: React.TouchEvent) => {
+    headerTouch.current = null
+    if (!sidePin?.pinned || sidePin.total <= 1 || event.touches.length !== 1 || !headerTitle.current) return
+    const touch = event.touches[0], width = event.currentTarget.clientWidth || window.innerWidth
+    const x = new DOMMatrix(getComputedStyle(headerTitle.current).transform).m41
+    if (headerLeaving.current) { clearTimeout(headerLeaving.current); headerLeaving.current = null }
+    moveHeader(x, width)
+    const offset = Math.abs(x) > width ? Math.sign(x) * (width + (Math.abs(x) - width) * 4) : x
+    headerDragged.current = !!x
+    headerTouch.current = { x: touch.clientX, y: touch.clientY, offset, width, mode: x ? 'drag' : 'wait', lastX: touch.clientX, lastAt: event.timeStamp, speed: 0 }
+  }
+  const headerMove = (event: React.TouchEvent) => {
+    const start = headerTouch.current
+    if (!start || event.touches.length !== 1) return
+    const touch = event.touches[0], dx = touch.clientX - start.x + start.offset, dy = touch.clientY - start.y
+    if (start.mode === 'wait') {
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return
+      if (Math.abs(dx) <= Math.abs(dy) * 1.5 || window.getSelection()?.toString()) { headerTouch.current = null; return }
+      start.mode = 'drag'; headerDragged.current = true
+    }
+    const now = event.timeStamp
+    if (now > start.lastAt) start.speed = start.speed * 0.4 + (touch.clientX - start.lastX) / (now - start.lastAt) * 0.6
+    start.lastX = touch.clientX; start.lastAt = now
+    const x = Math.abs(dx) > start.width ? Math.sign(dx) * (start.width + (Math.abs(dx) - start.width) * 0.25) : dx
+    moveHeader(x, start.width)
+  }
+  const headerEnd = (event: React.TouchEvent, cancelled = false) => {
+    const start = headerTouch.current
+    headerTouch.current = null
+    if (!start || start.mode !== 'drag') return
+    const dx = (event.changedTouches[0]?.clientX ?? start.lastX) - start.x + start.offset
+    const reduced = reduceMotion()
+    const fling = !reduced && event.timeStamp - start.lastAt < 100 && Math.abs(start.speed) > 0.35 && Math.sign(start.speed) === Math.sign(dx)
+    if (cancelled || !sidePin?.pinned || sidePin.total <= 1 || !(Math.abs(dx) > start.width * 0.3 || fling)) {
+      moveHeader(0, start.width, reduced ? 0 : 200)
+      return
+    }
+    const step = () => { headerLeaving.current = null; moveHeader(0, start.width); sidePin.onStep(dx < 0 ? 1 : -1) }
+    if (reduced) { step(); return }
+    const x = headerTitle.current ? new DOMMatrix(getComputedStyle(headerTitle.current).transform).m41 : dx
+    const time = Math.round(Math.max(140, Math.min(260, Math.abs(start.width - Math.abs(x)) / Math.max(Math.abs(start.speed), 1.2))))
+    moveHeader(Math.sign(dx) * start.width, start.width, time)
+    headerLeaving.current = setTimeout(step, time)
   }
   useEffect(() => { tabs.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }) }, [pane.id])
   const content = useRef<HTMLDivElement>(null)
@@ -819,15 +891,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const visibleNotices = (footer.notices ?? []).filter(note => !hiddenNotices.includes(note))
   const hideNotice = (note: string) => setHiddenNotices(current => [...current.filter(item => (footer.notices ?? []).includes(item)), note])
   return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><FilePane.Provider value={activePane.id}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
-    <header className="chat-header" draggable={!!slot?.onDragStart} onDragStart={slot?.onDragStart} onTouchStart={event => {
-      headerTouch.current = sidePin?.pinned && sidePin.total > 1 && event.touches.length === 1 ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null
-    }} onTouchEnd={event => {
-      const start = headerTouch.current, end = event.changedTouches[0]
-      headerTouch.current = null
-      if (!start || !end || !sidePin) return
-      const dx = end.clientX - start.x, dy = end.clientY - start.y
-      if (Math.abs(dx) >= 50 && Math.abs(dy) < 0.6 * Math.abs(dx)) sidePin.onStep(dx < 0 ? 1 : -1)
-    }} onTouchCancel={() => { headerTouch.current = null }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
       {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
