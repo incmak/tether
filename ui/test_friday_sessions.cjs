@@ -49,4 +49,26 @@ assert.equal(list([], [{ id: 'a', name: 'abcde' }], '', 'abxye').session, 'abcde
 assert.deepEqual(list([], [{ id: 'a', name: 'abcde' }], '', 'abxyz'), {
   error: 'No session called abxyz. Sessions: abcde',
 })
+const { soundKey } = exportsObject
+assert.equal(soundKey('theatre'), soundKey('Tether'))
+assert.notEqual(soundKey('Friday test'), soundKey('Tether'))
+assert.equal(soundKey('Philly'), 'fl')
+assert.equal(soundKey('Ckick'), 'k')
+assert.equal(soundKey('Awhyy'), 'a')
+assert.equal(soundKey('!!!'), '')
+const spokenSessions = [
+  { id: 't', name: 'Tether' }, { id: 'f', name: 'Friday test' }, { id: 'a', name: 'Admin Work' },
+]
+const spokenChats = [{ session: 't', chat: 'Fix', agent: 'Codex', state: 'idle', busy: false }]
+for (const wanted of ['theatre', 'theater']) {
+  assert.deepEqual(list(spokenChats, spokenSessions, '', wanted), {
+    session: 'Tether', chats: ['Fix, Codex, idle, in Tether'],
+  })
+}
+const ambiguous = [...spokenSessions, { id: 'other', name: 'Totoro' }]
+assert.equal(soundKey('Totoro'), soundKey('theatre'))
+assert.deepEqual(list([], ambiguous, '', 'theatre'), {
+  error: 'No session called theatre. Sessions: Tether, Friday test, Admin Work, Totoro',
+})
+assert.equal(list([], ambiguous, '', 'Tether').session, 'Tether', 'Existing matches win despite phonetic ambiguity')
 console.log('Friday sessions: names, counts, case-insensitive filtering, normalized and closest matches, threshold, errors and ID fallback pass')

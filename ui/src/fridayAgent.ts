@@ -53,6 +53,7 @@ export class FridayAgent {
   private isMuted = false
   private gated = false
   private closed = false
+  private onPageHide = () => this.close('pagehide')
   private micLevel = 0
   private botLevel = 0
   private bot = ''
@@ -161,6 +162,7 @@ export class FridayAgent {
       },
     })
     this.client = client
+    window.addEventListener('pagehide', this.onPageHide)
     for (const [name, handler] of Object.entries(this.events.tools)) {
       client.registerFunctionCallHandler(name, async call => {
         try { return await handler(call.arguments ?? {}) } catch (failure) { return { error: failure instanceof Error ? failure.message : String(failure) } }
@@ -239,9 +241,11 @@ export class FridayAgent {
     return this.statsStop
   }
 
-  close() {
+  close(reason = 'ended') {
     if (this.closed) return
     this.closed = true
+    if (this.client) this.send('bye', { reason })
+    window.removeEventListener('pagehide', this.onPageHide)
     this.audio.srcObject = null
     this.voice.close()
     const client = this.client
@@ -251,7 +255,7 @@ export class FridayAgent {
     })
   }
 
-  send(t: 'state' | 'event' | 'say' | 'note' | 'voice' | 'spoken' | 'interrupt' | 'stats', d: unknown) {
+  send(t: 'state' | 'event' | 'say' | 'note' | 'voice' | 'spoken' | 'interrupt' | 'stats' | 'bye', d: unknown) {
     try { this.client?.sendClientMessage(t, d) } catch { /* not connected yet */ }
   }
   state(chats: AgentChats) { this.send('state', chats) }
@@ -259,7 +263,7 @@ export class FridayAgent {
   say(text: string) { this.send('say', { text }) }
   note(text: string) { this.send('note', { text }) }
   /** Stop Friday now. Phones on speaker often hide the user's voice from the server, so a tap must work too. */
-  interrupt() { this.send('interrupt', {}); this.voice.stop(); this.setTurn('listening') }
+  interrupt(source = 'tap', phase?: string) { this.send('interrupt', { source, ...(phase !== undefined ? { phase } : {}) }); this.voice.stop(); this.setTurn('listening') }
 
   private setTurn(turn: AgentTurn) {
     if (this.turn === turn) return

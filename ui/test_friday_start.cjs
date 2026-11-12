@@ -11,11 +11,17 @@ function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWo
   const timeouts = new Map()
   const intervals = new Map()
   const stopped = []
+  const sent = []
+  const listeners = new Map()
   let now = 0
   let nextId = 0
   let disconnects = 0
   class PeerConnection {}
-  const window = { RTCPeerConnection: PeerConnection }
+  const window = {
+    RTCPeerConnection: PeerConnection,
+    addEventListener: (name, listener) => listeners.set(name, listener),
+    removeEventListener: (name, listener) => { if (listeners.get(name) === listener) listeners.delete(name) },
+  }
   class PipecatClient {
     async initDevices() { return init }
     async connect() { assert.notEqual(window.RTCPeerConnection, PeerConnection); return connect }
@@ -25,11 +31,12 @@ function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWo
         stop: () => stopped.push(kind),
       }])) }
     }
-    sendClientMessage() {}
+    sendClientMessage(t, d) { sent.push({ t, d: JSON.parse(JSON.stringify(d)) }) }
   }
   class DeviceVoice {
     async open() {}
     close() {}
+    stop() {}
   }
   runInNewContext(ts.transpileModule(readFileSync('src/fridayAgent.ts', 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
@@ -49,7 +56,7 @@ function setup({ init = Promise.resolve(), connect = Promise.resolve(), importWo
   })
   const agent = new exports.FridayAgent({ tools: {}, onClosed() {} })
   return {
-    agent, window, PeerConnection, timeouts, intervals, stopped,
+    agent, window, PeerConnection, timeouts, intervals, stopped, sent, listeners,
     disconnects: () => disconnects,
     advance: async ms => {
       await settle()
@@ -108,9 +115,32 @@ async function main() {
   assert.equal(normal.timeouts.size, 0, 'Successful startup clears every timeout')
   assert.equal(normal.window.RTCPeerConnection, normal.PeerConnection)
   assert.equal(normal.disconnects(), 0)
+  normal.agent.interrupt('tap', 'thinking')
+  normal.agent.interrupt()
+  assert.deepEqual(normal.sent, [
+    { t: 'interrupt', d: { source: 'tap', phase: 'thinking' } },
+    { t: 'interrupt', d: { source: 'tap' } },
+  ])
+  normal.agent.close('pagehide')
   normal.agent.close()
+  assert.deepEqual(normal.sent.slice(2), [{ t: 'bye', d: { reason: 'pagehide' } }])
+  assert.equal(normal.listeners.size, 0)
   await settle()
   assert.equal(normal.intervals.size, 0)
+
+  const hidden = setup()
+  await hidden.agent.open()
+  hidden.listeners.get('pagehide')()
+  hidden.agent.close()
+  assert.deepEqual(hidden.sent, [{ t: 'bye', d: { reason: 'pagehide' } }])
+  assert.equal(hidden.listeners.size, 0)
+  await settle()
+  assert.equal(hidden.disconnects(), 1)
+
+  const unopened = setup()
+  unopened.agent.close()
+  assert.deepEqual(unopened.sent, [])
+  await settle()
 
   const denied = new DOMException('Permission denied', 'NotAllowedError')
   const denial = setup({ init: Promise.reject(denied) })
