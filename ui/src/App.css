@@ -1430,9 +1430,12 @@ button.live-chip:active { background: var(--line); }
 .shell-hint { margin: 7px 8px 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
 
 /* Desktop: key hints in an empty, focused composer. Hidden on touch screens and when they do not fit. */
-.composer-keys { display: none; gap: 12px; min-width: 0; overflow: hidden; white-space: nowrap; font-size: 12px; color: var(--muted); padding-left: 4px; }
+/* The hints give way before the pills, so focus never moves a pill under the pointer mid-click. */
+.composer-keys { display: none; gap: 12px; min-width: 0; flex-shrink: 1000; overflow: hidden; white-space: nowrap; font-size: 12px; color: var(--muted); padding-left: 4px; }
 .composer-keys kbd { font: 11px var(--shell-mono); border: 1px solid var(--line); border-radius: var(--radius-xs); padding: 0 4px; margin-right: 3px; }
 @media (hover: hover) and (pointer: fine) { .composer:focus-within .composer-keys { display: inline-flex; } }
+/* Phone-width composer: the pills already lose their words, so there is no room for hints. */
+@container (max-width: 400px) { .composer:focus-within .composer-keys { display: none; } }
 
 /* A "!" line the person sent, as the prompt above its output. */
 .shell-command { display: flex; gap: 9px; align-items: baseline; width: fit-content; max-width: 100%; margin: 16px 0 6px auto; padding: 9px 14px; border: 1px solid var(--shell-line); border-radius: var(--radius); background: var(--shell-surface); font: 13.5px/1.55 var(--shell-mono); }

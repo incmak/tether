@@ -214,6 +214,8 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
   }
   const response = await reach(`/mobile/api/${path}`, init)
   const data = await response.json().catch(error => {
+    // Failed body reads must reject so callers do not treat them as empty data.
+    if (response.ok && error?.name !== 'SyntaxError') throw error
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })

@@ -104,7 +104,8 @@ async function main() {
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
       const pill = page.getByRole('button', { name: /1 agent running\. Open the agent map/ })
       await pill.waitFor()
-      check(`${at} pill shows running count`, (await pill.innerText()).trim() === '1 agent')
+      // Phone-width composers drop the word and keep the count (365c840).
+      check(`${at} pill shows running count`, (await pill.innerText()).replace(/\s+/g, ' ').trim() === (width < 500 ? '1' : '1 agent'))
       await page.screenshot({ path: path.join(SHOTS, `pill-${width}.png`) })
       await pill.click()
       const map = page.locator('dialog.agent-map')

@@ -234,49 +234,55 @@ async function main() {
     browser = await getBrowser()
     const context = browser.contexts()[0]
     if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
-    page = await context.newPage()
-    page.setDefaultTimeout(10000)
-    page.on('pageerror', error => pageErrors.push(error.message))
-    await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
-    await page.routeWebSocket('**/*', socket => socket.close())
     let fixture = fixtures('heads-open')
-    await page.route('**/*', async route => {
-      const request = route.request(), url = new URL(request.url())
-      // The random origin has no existing worker; never let this page install one.
-      if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
-      if (url.pathname.includes('/api/')) {
-        const endpoint = url.pathname.split('/api/')[1]
-        endpoints.add(`${request.method()} ${url.pathname}`)
+    async function openPage() {
+      const page = await context.newPage()
+      page.setDefaultTimeout(10000)
+      page.on('pageerror', error => pageErrors.push(error.message))
+      await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
+      await page.routeWebSocket('**/*', socket => socket.close())
+      await page.route('**/*', async route => {
+        const request = route.request(), url = new URL(request.url())
+        // The random origin has no existing worker; never let this page install one.
+        if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
+        if (url.pathname.includes('/api/')) {
+          const endpoint = url.pathname.split('/api/')[1]
+          endpoints.add(`${request.method()} ${url.pathname}`)
+          if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
+          if (!(endpoint in fixture)) unexpected.add(endpoint)
+          if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' }) // Use fixture polling, without SSE retries.
+          return route.fulfill({ json: fixture[endpoint] || {} })
+        }
         if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
-        if (!(endpoint in fixture)) unexpected.add(endpoint)
-        if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' }) // Use fixture polling, without SSE retries.
-        return route.fulfill({ json: fixture[endpoint] || {} })
-      }
-      if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
-      if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
-      unexpected.add(`${url.origin}${url.pathname}`)
-      return route.abort('blockedbyclient')
-    })
-    await page.addInitScript(() => {
-      // Service-worker fetches bypass page.route. Keep all fetches in this page.
-      if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('Fixture disables service workers'))
-      const query = new URL(location.href).searchParams
-      localStorage.clear()
-      localStorage.setItem('tmux-chat.prefs.synced', '1')
-      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light',
-        voiceOff: true, voiceSound: false, sidePins: [{ pane: '%1', note: 'Overlay fixture' }],
-        look: { layout: 'classic', surface: query.get('look') === 'glass' ? 'glass' : 'flat', backdrop: 'ember' },
-      }))
-      if (query.get('state') === 'queue') localStorage.setItem('tether.pending', JSON.stringify({ '%1': [1, 2].map(id => ({
-        id, text: `Queued fixture message ${id}`, key: `Queued fixture message ${id}`, seen: 0,
-        at: Date.now(), thread: 'overlay-thread',
-      })) }))
-    })
+        if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+        unexpected.add(`${url.origin}${url.pathname}`)
+        return route.abort('blockedbyclient')
+      })
+      await page.addInitScript(() => {
+        // Service-worker fetches bypass page.route. Keep all fetches in this page.
+        if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('Fixture disables service workers'))
+        const query = new URL(location.href).searchParams
+        localStorage.clear()
+        localStorage.setItem('tmux-chat.prefs.synced', '1')
+        localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light',
+          voiceOff: true, voiceSound: false, sidePins: [{ pane: '%1', note: 'Overlay fixture' }],
+          look: { layout: 'classic', surface: query.get('look') === 'glass' ? 'glass' : 'flat', backdrop: 'ember' },
+        }))
+        if (query.get('state') === 'queue') localStorage.setItem('tether.pending', JSON.stringify({ '%1': [1, 2].map(id => ({
+          id, text: `Queued fixture message ${id}`, key: `Queued fixture message ${id}`, seen: 0,
+          at: Date.now(), thread: 'overlay-thread',
+        })) }))
+      })
+      return page
+    }
     for (const state of states) for (const [width, height] of sizes) for (const look of ['plain', 'glass']) {
       const name = `${state}-${width}-${look}`, errorStart = pageErrors.length
       fixture = fixtures(state)
       cases++
       try {
+        // Each case gets a fresh page to contain stray history.back() from the previous case.
+        if (page) await page.close().catch(() => {})
+        page = await openPage()
         await page.setViewportSize({ width, height })
         await page.goto(`${origin}/chat/?session=%251&state=${state}&look=${look}`, { waitUntil: 'load' })
         await page.waitForSelector('.composer textarea:enabled')

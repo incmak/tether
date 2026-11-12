@@ -83,10 +83,10 @@ async function main() {
   console.log('UI B3: cache and rendered footer isolate conversations, including effect changes and late key completion')
 
   const apiOutput = { exports: {} }
-  let ok = true, valid = false
+  let ok = true, valid = false, bodyError
   runInNewContext(compile(readFileSync('src/api.ts', 'utf8')), {
     exports: apiOutput.exports, AbortSignal,
-    fetch: async () => ({ ok, status: ok ? 200 : 503, json: async () => { if (!valid) throw new SyntaxError('invalid JSON'); return { status: 'OK' } } }),
+    fetch: async () => ({ ok, status: ok ? 200 : 503, json: async () => { if (bodyError) throw bodyError; if (!valid) throw new SyntaxError('invalid JSON'); return { status: 'OK' } } }),
   })
   await assert.rejects(apiOutput.exports.request('footer?session=%25fixture'), { name: 'SyntaxError' })
   assert.equal(JSON.stringify(await apiOutput.exports.request('other-read')), '{}')
@@ -95,7 +95,12 @@ async function main() {
   await assert.rejects(apiOutput.exports.request('footer'), error => error.status === 503)
   ok = true; valid = true
   assert.equal((await apiOutput.exports.request('footer')).status, 'OK')
-  console.log('UI B4: invalid successful footer JSON rejects; other callers and HTTP errors keep their behavior')
+  bodyError = Object.assign(new Error('signal timed out'), { name: 'TimeoutError' })
+  await assert.rejects(apiOutput.exports.request('codex-runs?session=%251'), { name: 'TimeoutError' })
+  bodyError = Object.assign(new Error('signal aborted'), { name: 'AbortError' })
+  await assert.rejects(apiOutput.exports.request('codex-runs?session=%251'), { name: 'AbortError' })
+  bodyError = undefined
+  console.log('UI B4: invalid successful footer JSON and timed out or aborted body reads reject; other callers and HTTP errors keep their behavior')
   assert.equal(intervals.size, 0); assert.equal(timers.size, 0)
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })
