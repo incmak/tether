@@ -45,6 +45,7 @@ const scrollBySession = new Map<string, number>()  // the strip remounts with ea
 const swipeScroll = new WeakMap<HTMLElement, number>()  // strip scroll when the swipe started
 const scrollTween = new WeakMap<HTMLElement, number>()
 interface TabPosition { left: number; top: number; width: number; height: number }
+const swipePositions = new WeakMap<HTMLElement, { fromId: string; toId: string | null; from: TabPosition; to: TabPosition }>()
 interface TabSnapshot { session: string; active: string; scroll: number; tabs: Map<string, TabPosition>; pill?: TabPosition }
 // Chat remounts when its pane changes. Retain geometry so closing the active tab can still animate.
 const closedTabPositions = new Map<string, TabSnapshot>()
@@ -53,24 +54,33 @@ const tabTransform = (position: TabPosition, dx = 0) => `translate(${position.le
 
 /** Place the pill `progress` (0..1) of the way from the active tab to the tab `toId`. `ms` animates the move. */
 export function movePill(strip: HTMLElement | null, toId: string | null, progress: number, ms = 0) {
+  const finishing = ms > 0
   if (ms && matchMedia('(prefers-reduced-motion: reduce)').matches) ms = 0
   const pill = strip?.querySelector<HTMLElement>('.pane-tab-pill')
   const from = strip?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
   if (!strip || !pill || !from) return
   const to = toId ? strip.querySelector<HTMLElement>(`[data-pane="${CSS.escape(toId)}"]`) : null
   const p = to ? Math.min(1, Math.max(0, progress)) : 0
-  const end = to ?? from
-  pill.style.transition = ms ? `transform ${ms}ms ${SLIDE_CURVE}, width ${ms}ms ${SLIDE_CURVE}` : ''
-  pill.style.transform = `translate(${from.offsetLeft + (end.offsetLeft - from.offsetLeft) * p}px, ${from.offsetTop}px)`
-  pill.style.width = `${from.offsetWidth + (end.offsetWidth - from.offsetWidth) * p}px`
-  pill.style.height = `${from.offsetHeight}px`
+  const fromId = from.dataset.pane ?? ''
+  let positions = swipePositions.get(strip)
+  if (!positions || positions.fromId !== fromId || positions.toId !== toId) {
+    const start = positionOf(from)
+    positions = { fromId, toId, from: start, to: to ? positionOf(to) : start }
+    swipePositions.set(strip, positions)
+  }
+  const { from: start, to: end } = positions
+  if (!p || finishing) swipePositions.delete(strip)
+  pill.style.transition = ms ? `transform ${ms}ms cubic-bezier(.32,.72,0,1), width ${ms}ms cubic-bezier(.32,.72,0,1)` : 'none'
+  pill.style.transform = `translate(${start.left + (end.left - start.left) * p}px, ${start.top}px)`
+  pill.style.width = `${start.width + (end.width - start.width) * p}px`
+  pill.style.height = `${start.height}px`
   // Scroll the strip with the same progress, so a target tab off screen comes into view.
   cancelAnimationFrame(scrollTween.get(strip) ?? 0)
   let base = swipeScroll.get(strip)
   if (!p) { if (base !== undefined) { swipeScroll.delete(strip); scrollTo(strip, base, ms) } return }
   if (base === undefined) { base = strip.scrollLeft; swipeScroll.set(strip, base) }
   const pad = 12, view = strip.clientWidth
-  const goal = end.offsetLeft - pad < base ? end.offsetLeft - pad : end.offsetLeft + end.offsetWidth + pad > base + view ? end.offsetLeft + end.offsetWidth + pad - view : base
+  const goal = end.left - pad < base ? end.left - pad : end.left + end.width + pad > base + view ? end.left + end.width + pad - view : base
   scrollTo(strip, base + (goal - base) * p, ms)
 }
 // A scroll that follows the same curve and time as the pill (smooth scrolling has its own timing).
