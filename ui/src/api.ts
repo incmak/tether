@@ -263,7 +263,7 @@ export function errorText(error: unknown) {
   console.error('Tether app error:', error)
   return `Something went wrong in Tether.${error instanceof Error && error.message ? ` (${error.name}: ${error.message})` : ''}`
 }
-export interface CatalogItem { name: string; description: string; kind: 'builtin' | 'skill' | 'command'; aliases?: string[] }
+export interface CatalogItem { name: string; description: string; kind: 'builtin' | 'skill' | 'command'; aliases?: string[]; hint?: string }
 export interface Catalog { commands: CatalogItem[]; plugins: { name: string; source: string; enabled: boolean }[]; mcp: { name: string; source: string }[]; note: string }
 
 export interface FooterAgent { name: string; task: string; detail: string; main: boolean }

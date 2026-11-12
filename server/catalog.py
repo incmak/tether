@@ -15,6 +15,7 @@ import claude_probe
 import paths
 
 HOME = Path.home()
+CODEX_ADMIN = Path('/etc/codex')
 # Every documented Claude Code command, with aliases. Made by update_claude_commands.py from the official reference.
 COMMANDS_FILE = Path(__file__).with_name('claude_commands.json')
 
@@ -24,22 +25,78 @@ def claude_builtins():
         commands = json.loads(COMMANDS_FILE.read_text())['commands']
     except (OSError, ValueError, KeyError):
         return []
-    return [{'name': item['name'], 'description': short(item['description']), 'aliases': item.get('aliases') or [], 'kind': item.get('kind', 'builtin')}
+    return [{'name': item['name'], 'description': short(item['description']), 'aliases': item.get('aliases') or [], 'hint': item.get('hint', ''), 'kind': item.get('kind', 'builtin')}
             for item in commands]
 
 
+# Visible Linux commands in codex-cli 0.166 popup order.
 CODEX_BUILTINS = [
-    ('new', 'Start a new conversation'), ('compact', 'Summarize the conversation to free context'),
-    ('status', 'Show model, limits and token use'), ('model', 'Choose the model and effort'),
-    ('approvals', 'Choose what Codex may do without asking'), ('review', 'Review the current changes'),
-    ('diff', 'Show the git diff'), ('mention', 'Mention a file'), ('init', 'Write an AGENTS.md for this project'),
-    ('mcp', 'List MCP tools'), ('resume', 'Resume an earlier conversation'), ('undo', 'Undo the last turn'),
+    ('model', 'choose what model and reasoning effort to use', [], '[model]'),
+    ('presets', 'run or save reusable prompts and slash commands', [], ''),
+    ('daybreak', 'turn Daybreak on or off', [], ''),
+    ('ide', 'include current selection, open files, and other context from your IDE', [], '[context]'),
+    ('permissions', 'choose what Codex is allowed to do', [], '[mode]'),
+    ('keymap', 'remap TUI shortcuts', [], '[shortcut]'),
+    ('vim', 'toggle Vim mode for the composer', [], ''),
+    ('setup-default-sandbox', 'set up elevated agent sandbox', [], ''),
+    ('experimental', 'toggle experimental features', [], ''),
+    ('approve', 'approve one retry of a recent auto-review denial', [], ''),
+    ('memories', 'configure memory use and generation', [], ''),
+    ('skills', 'use skills to improve how Codex performs specific tasks', [], ''),
+    ('import', 'import setup, this project, and recent chats from Claude Code', [], ''),
+    ('hooks', 'view and manage lifecycle hooks', [], ''),
+    ('review', 'review my current changes and find issues', [], '[instructions]'),
+    ('rename', 'rename the current thread', [], '[title]'),
+    ('new', 'start a new chat during a conversation', [], '[text]'),
+    ('archive', 'archive this session', [], ''),
+    ('delete', 'permanently delete this session', [], ''),
+    ('resume', 'resume a saved chat', [], '[session]'),
+    ('fork', 'fork the current chat', [], '[text]'),
+    ('worktree', 'start or continue a conversation in a new worktree', [], ''),
+    ('init', 'create an AGENTS.md file with instructions for Codex', [], ''),
+    ('compact', 'summarize conversation to prevent hitting the context limit', [], ''),
+    ('config', 'configure Codex preferences', [], ''),
+    ('recap', 'summarize the current conversation now', [], ''),
+    ('plan', 'switch to Plan mode', [], '[text]'),
+    ('voice', 'start or stop voice; use /voice settings to choose a voice', [], '[settings]'),
+    ('goal', 'set or view the goal for a long-running task', [], '[text]'),
+    ('agents', 'open the agent command center', [], ''),
+    ('side', 'start a side conversation in an ephemeral fork', [], '[question]'),
+    ('btw', 'start a side conversation in an ephemeral fork', [], '[question]'),
+    ('copy', 'copy the last response or part of it', [], ''),
+    ('export', 'export the conversation as markdown', [], '[path]'),
+    ('raw', 'toggle raw scrollback mode for copy-friendly terminal selection', [], '[mode]'),
+    ('tui', 'choose the TUI mode for the next launch', [], ''),
+    ('diff', 'show git diff (including untracked files)', [], ''),
+    ('mention', 'mention a file', [], ''),
+    ('status', 'show current session configuration and token usage', [], ''),
+    ('daemon', 'Manage the local background server', [], ''),
+    ('warnings', 'view retained warnings and diagnostic details', [], ''),
+    ('cd', 'change the current working directory', [], '[path]'),
+    ('pwd', 'show the current working directory', ['cwd'], '[options]'),
+    ('usage', 'view account usage or use a usage limit reset', [], '[action]'),
+    ('debug-config', 'show config layers and requirement sources for debugging', [], ''),
+    ('title', 'configure which items appear in the terminal title', [], '[items]'),
+    ('statusline', 'configure which items appear in the status line', [], '[items]'),
+    ('theme', 'choose a syntax highlighting theme', [], ''),
+    ('pets', 'choose or hide the terminal pet', ['pet'], '[pet]'),
+    ('mcp', 'list MCP tools; use /mcp verbose or /mcp login <name>', [], '[action]'),
+    ('apps', 'manage apps', [], ''),
+    ('plugins', 'browse plugins', [], ''),
+    ('logout', 'log out of Codex', [], ''),
+    ('quit', 'exit Codex', [], ''),
+    ('exit', 'exit Codex', [], ''),
+    ('feedback', 'send logs to maintainers', [], ''),
+    ('ps', 'list background terminals', [], ''),
+    ('stop', 'stop all background terminals', ['clean'], ''),
+    ('clear', 'clear the terminal and start a new chat', [], '[text]'),
+    ('subagents', "switch between this session's subagents", [], ''),
 ]
 FRONT = re.compile(r'^---\s*\n(.*?)\n---', re.S)
 
 
 def front_matter(path):
-    """name and description from a SKILL.md or command file; tolerant of missing or odd front matter."""
+    """Metadata from a SKILL.md or command file; tolerant of missing or odd front matter."""
     try:
         text = path.read_text(errors='ignore')[:4000]
     except OSError:
@@ -48,7 +105,7 @@ def front_matter(path):
     result = {}
     for line in (match[1] if match else '').splitlines():
         key, _, value = line.partition(':')
-        if key.strip() in ('name', 'description') and value.strip() and value.strip() not in ('>', '|', '>-', '|-'):
+        if key.strip() in ('name', 'description', 'argument-hint') and value.strip() and value.strip() not in ('>', '|', '>-', '|-'):
             result[key.strip()] = value.strip().strip('"\'')
     return result
 
@@ -62,14 +119,15 @@ def skills_in(folder, prefix=''):
     items = []
     for skill in sorted(folder.glob('*/SKILL.md')) if folder.is_dir() else []:
         meta = front_matter(skill)
-        items.append({'name': prefix + (meta.get('name') or skill.parent.name), 'description': short(meta.get('description')), 'kind': 'skill'})
+        items.append({'name': prefix + (meta.get('name') or skill.parent.name), 'description': short(meta.get('description')), 'hint': meta.get('argument-hint', ''), 'kind': 'skill'})
     return items
 
 
 def commands_in(folder, prefix=''):
     items = []
     for command in sorted(folder.glob('*.md')) if folder.is_dir() else []:
-        items.append({'name': prefix + command.stem, 'description': short(front_matter(command).get('description')), 'kind': 'command'})
+        meta = front_matter(command)
+        items.append({'name': prefix + command.stem, 'description': short(meta.get('description')), 'hint': meta.get('argument-hint', ''), 'kind': 'command'})
     return items
 
 
@@ -152,7 +210,7 @@ def merged_commands(probe):
         doc = docs.get(command['name'])
         text = re.sub(r'\s*\((user|project|bundled|plugin[^)]*|managed)\)$', '', command['description'])
         items.append({'name': command['name'], 'description': short(text or (doc or {}).get('description')),
-                      'aliases': (doc or {}).get('aliases', []), 'hint': command.get('hint', ''),
+                      'aliases': (doc or {}).get('aliases', []), 'hint': command.get('hint') or (doc or {}).get('hint', ''),
                       'kind': (doc or {}).get('kind', 'skill') if doc else 'skill'})
         seen.add(command['name'])
     for name, doc in docs.items():
@@ -203,10 +261,23 @@ def claude_catalog(cwd, transcript=None, probe=True):
 
 
 def codex_catalog(cwd):
-    items = [{'name': name, 'description': text, 'kind': 'builtin'} for name, text in CODEX_BUILTINS]
+    items = [{'name': name, 'description': text[:1].upper() + text[1:], 'aliases': aliases, 'hint': hint, 'kind': 'builtin'}
+             for name, text, aliases, hint in CODEX_BUILTINS]
     items += commands_in(paths.CODEX / 'prompts', 'prompts:')
-    skills = skills_in(paths.CODEX / 'skills') + (skills_in(Path(cwd) / '.codex' / 'skills') if cwd else [])
-    items += [dict(skill, name='$' + skill['name']) for skill in skills]  # Codex calls a skill with $name
+    folders = []
+    if cwd:
+        project = Path(cwd).resolve()
+        ancestors = [project, *project.parents]
+        root = next((folder for folder in ancestors if (folder / '.git').exists()), project)
+        folders += [folder / '.agents' / 'skills' for folder in reversed(ancestors[:ancestors.index(root) + 1])]
+        folders.append(project / '.codex' / 'skills')
+    folders += [paths.CODEX / 'skills', HOME / '.agents' / 'skills', paths.CODEX / 'skills' / '.system', CODEX_ADMIN / 'skills']
+    seen = set()
+    for folder in folders:
+        for skill in skills_in(folder, '$'):
+            if skill['name'] not in seen:
+                items.append(skill)
+                seen.add(skill['name'])
     mcp = []
     if tomllib:
         try:

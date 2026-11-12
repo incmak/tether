@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import { AtSign, Blocks, File, Folder, Slash, Sparkles } from 'lucide-react'
+import { AtSign, Blocks, CircleHelp, File, Folder, Send, Slash, Sparkles } from 'lucide-react'
 import { errorText } from './api'
+import { agentName, bare, closest, named, needsMore, rank, unknownCommand } from './commandMatch'
 import type { Api, Catalog, CatalogItem, Pane } from './api'
 
 // One catalog per pane for a minute: skills and plugins rarely change while you type.
@@ -24,30 +25,18 @@ function trigger(draft: string, agent: Pane['agent']) {
   return null
 }
 
-// Like Claude's own menu: the name or an alias (/new finds /clear), then words in the description (/account finds /status).
-// -1 means no match. Separators are ignored, so /adddir finds /add-dir.
-const bare = (text: string) => text.toLowerCase().replace(/[-_:]/g, '')
-const rank = (item: CatalogItem, query: string) => {
-  if (!query) return 0
-  const name = item.name.toLowerCase()
-  const key = bare(query)
-  if (name.startsWith(query) || bare(name).startsWith(key)) return 0
-  if (name.split(/[:-]/).some(word => word.startsWith(query))) return 1
-  if (item.aliases?.some(alias => alias.startsWith(query) || bare(alias).startsWith(key))) return 2
-  if (name.includes(query) || bare(name).includes(key)) return 3
-  if (query.length >= 3 && item.description.toLowerCase().split(/[^a-z0-9]+/).some(word => word.startsWith(query))) return 4
-  return -1
-}
+// check(text) is true when the text starts with a command the agent does not have; the list then offers fixes.
+// The agent would run its closest command for a partial name, or reply "Unknown command".
+export interface SuggestHandle { key: (event: React.KeyboardEvent) => boolean; check: (text: string) => boolean }
+interface Props { api: Api; pane: Pane; draft: string; setDraft: (text: string) => void; focus: () => void; run: (text: string) => void; sendAnyway: () => void }
 
-export interface SuggestHandle { key: (event: React.KeyboardEvent) => boolean }
-interface Props { api: Api; pane: Pane; draft: string; setDraft: (text: string) => void; focus: () => void }
-
-export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions({ api, pane, draft, setDraft, focus }, ref) {
+export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions({ api, pane, draft, setDraft, focus, run, sendAnyway }, ref) {
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [catalogError, setCatalogError] = useState('')
   const [files, setFiles] = useState<{ query: string; list: string[] } | null>(null)
   const [dismissed, setDismissed] = useState('')
   const [active, setActive] = useState(0)
+  const [unknown, setUnknown] = useState('')
   const list = useRef<HTMLDivElement>(null)
   const found = pane.agent === 'shell' ? null : trigger(draft, pane.agent)
   const wantsCommands = found?.kind === 'command'
@@ -70,8 +59,14 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
     return () => { clearTimeout(timer); abort.abort() }
   }, [api, pane.id, fileQuery])
   useEffect(() => setActive(0), [found?.query, found?.kind])
-  let items: { label: string; detail: string; icon: React.ReactNode; insert: string }[] = []
-  if (found?.kind === 'command' && catalog) {
+  useEffect(() => setUnknown(''), [pane.id])
+  let items: { label: string; hint?: string; detail: string; icon: React.ReactNode; insert: string; item?: CatalogItem; action?: () => void }[] = []
+  const typo = unknown && draft.trim() === unknown && catalog ? /^\/([^\s/]+)(.*)$/s.exec(unknown) : null
+  if (typo && catalog) {
+    items = closest(typo[1], catalog.commands)
+      .map(item => ({ label: '/' + item.name, hint: item.hint, detail: item.description, icon: <Slash size={16} />, insert: '/' + item.name + (typo[2] || ' ') }))
+    items.push({ label: 'Send as typed', detail: `${agentName[pane.agent] ?? 'The agent'} may run its closest command instead.`, icon: <Send size={16} />, insert: '', action: () => { setUnknown(''); sendAnyway() } })
+  } else if (found?.kind === 'command' && catalog) {
     const query = found.query.slice(found.query[0] === '/' ? 1 : 0).toLowerCase()
     items = catalog.commands
       .filter(item => (found.query[0] === '$') === item.name.startsWith('$'))
@@ -79,40 +74,52 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
       .filter(entry => entry.at >= 0)
       .sort((a, b) => a.at - b.at || (a.at >= 3 ? a.item.name.length - b.item.name.length : 0))
       .slice(0, 40)
-      .map(({ item, at }) => ({ label: item.name.startsWith('$') ? item.name : '/' + item.name,
+      .map(({ item, at }) => ({ item, hint: item.hint, label: item.name.startsWith('$') ? item.name : '/' + item.name,
         detail: at === 2 ? `Also /${item.aliases!.find(alias => bare(alias).startsWith(bare(query)))}. ${item.description}` : item.description,
         icon: item.kind === 'skill' ? <Sparkles size={16} /> : item.name.includes(':') ? <Blocks size={16} /> : <Slash size={16} />,
         insert: (item.name.startsWith('$') ? item.name : '/' + item.name) + ' ' }))
   } else if (found?.kind === 'file' && files) {
     items = files.list.map(path => ({ label: path, detail: '', icon: path.endsWith('/') ? <Folder size={16} /> : <File size={16} />, insert: '@' + path + (path.endsWith('/') ? '' : ' ') }))
   }
-  const key = found ? `${found.kind}:${draft}` : ''
-  const status = found?.kind === 'command' && !catalog ? (catalogError ? `Could not load commands: ${catalogError}` : 'Loading commands…') : ''
-  const open = !!found && (items.length > 0 || !!status) && dismissed !== key
-  const pick = (index: number) => {
-    const item = items[index]
-    if (!item || !found) return
-    setDraft(draft.slice(0, found.start) + item.insert)
+  const key = typo ? `typo:${draft}` : found ? `${found.kind}:${draft}` : ''
+  const status = !typo && found?.kind === 'command' && !catalog ? (catalogError ? `Could not load commands: ${catalogError}` : 'Loading commands…') : ''
+  const open = (!!typo || !!found) && (items.length > 0 || !!status) && dismissed !== key
+  // Enter on the exact name runs it, as in the agent's own menu, unless it needs an argument. Tab only fills the box.
+  const pick = (index: number, enter = false) => {
+    const choice = items[index]
+    if (!choice) return
+    if (choice.action) { choice.action(); return }
+    if (typo) { setUnknown(''); setDraft(choice.insert); focus(); return }
+    if (!found) return
+    const typed = found.query.slice(1).toLowerCase()
+    if (enter && found.start === 0 && found.query[0] === '/' && choice.item && named(choice.item, typed) && !needsMore(choice.item)) { run('/' + choice.item.name); return }
+    setDraft(draft.slice(0, found.start) + choice.insert)
     focus()
   }
   useImperativeHandle(ref, () => ({
     key(event) {
       if (!open || !items.length) return false
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { setActive(current => (current + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length); return true }
-      if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) { pick(active); return true }
+      if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) { pick(active, event.key === 'Enter'); return true }
       if (event.key === 'Escape') { setDismissed(key); return true }
       return false
+    },
+    check(text) {
+      if (!unknownCommand(text, pane.agent, catalog?.commands ?? [])) return false
+      setUnknown(text.trim()); setActive(0)
+      return true
     },
   }))
   // Arrow keys move the highlight; keep it in view, below the sticky heading.
   useEffect(() => { list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [active, open])
   if (!open) return null
-  return <div ref={list} className="suggest" role="listbox" aria-label={found.kind === 'file' ? 'Files' : 'Commands and skills'}>
-    <div className="suggest-head">{found.kind === 'file' ? <><AtSign size={13} />Files in {pane.dir}</> : <><Slash size={13} />Commands and skills</>}</div>
+  const kind = typo ? 'typo' : found?.kind
+  return <div ref={list} className="suggest" role="listbox" aria-label={kind === 'file' ? 'Files' : kind === 'typo' ? 'Unknown command' : 'Commands and skills'}>
+    <div className={kind === 'typo' ? 'suggest-head warn' : 'suggest-head'}>{kind === 'file' ? <><AtSign size={13} />Files in {pane.dir}</> : kind === 'typo' ? <><CircleHelp size={13} />/{typo![1]} is not a {agentName[pane.agent]} command. Did you mean:</> : <><Slash size={13} />Commands and skills</>}</div>
     {status && <p className="suggest-status">{status}</p>}
     {items.map((item, index) => <button key={item.label} type="button" role="option" aria-selected={index === active} className={index === active ? 'active' : ''}
       onPointerDown={event => event.preventDefault()} onClick={() => pick(index)}>
-      {item.icon}<span><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</span>
+      {item.icon}<span><strong>{item.label}{item.hint && <code className="suggest-hint">{item.hint}</code>}</strong>{item.detail && <small>{item.detail}</small>}</span>
     </button>)}
   </div>
 })

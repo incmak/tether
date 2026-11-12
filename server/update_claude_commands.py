@@ -12,7 +12,7 @@ from pathlib import Path
 
 URL = 'https://code.claude.com/docs/en/commands.md'
 OUT = Path(__file__).with_name('claude_commands.json')
-ROW = re.compile(r'^\| `/([a-z0-9:-]+)[^`]*` \| (.*) \|\s*$')
+ROW = re.compile(r'^\| `/([a-z0-9:-]+)([^`]*)` \| (.*) \|\s*$')
 ALIASES = re.compile(r'Alias(?:es)?: ((?:`/[a-z0-9-]+`(?:,? (?:and )?)?)+)')
 
 
@@ -33,11 +33,11 @@ def parse(page):
         if not row or row[1] in seen:
             continue
         seen.add(row[1])
-        cell = row[2]
+        cell = row[3]
         kind = 'skill' if cell.startswith(('**[Skill]', '**[Workflow]')) else 'builtin'
         text = plain(re.sub(r'^\*\*\[(Skill|Workflow)\]\([^)]*\)\.\*\*\s*', '', cell))
         aliases = re.findall(r'/([a-z0-9-]+)', ALIASES.findall(cell)[-1]) if ALIASES.search(cell) else []
-        commands.append({'name': row[1], 'description': first_sentence(text), 'aliases': aliases, 'kind': kind})
+        commands.append({'name': row[1], 'description': first_sentence(text), 'aliases': aliases, 'hint': row[2].replace('\\|', '|').strip(), 'kind': kind})
     return commands
 
 

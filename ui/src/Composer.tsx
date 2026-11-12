@@ -193,15 +193,18 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
   const dictationRef = useRef(dictation)
   useLayoutEffect(() => { dictationRef.current = dictation })
   useEffect(() => { if (listenRequest && !dictationRef.current.active() && micOk) void dictationRef.current.toggle() }, [listenRequest, micOk])
-  async function submit(event: React.FormEvent) {
-    event.preventDefault()
-    const waiting = dictation.finalText()
-    if (disabled || sending || uploading || (!draft.trim() && !files.length && !pastes.length && !waiting) || (shellMode && !draft.slice(1).trim())) return
+  // own: text to send instead of the box (a command picked with Enter). force: skip the unknown-command check.
+  async function submit(event?: React.FormEvent, own?: string, force = false) {
+    event?.preventDefault()
+    const waiting = own === undefined ? dictation.finalText() : null
+    const typed = own ?? draft
+    if (disabled || sending || uploading || (!typed.trim() && !files.length && !pastes.length && !waiting) || (shellMode && !typed.slice(1).trim())) return
+    if (!force && !waiting && suggest.current?.check(typed)) return
     dictation.stop()
     const typing = document.activeElement === textarea.current
     setSending(true)
     try {
-      const body = waiting ? (await waiting).trim() : draft.trim()
+      const body = waiting ? (await waiting).trim() : typed.trim()
       const text = [...files.map(file => file.path), joinPastes(body, pastes)].filter(Boolean).join(' ')
       if (text && await onSend(text)) { if (body) remember(historyKind, body); browse.current = null; setDraft(''); setFiles([]); setPastes([]); setOpenPaste(null); if (coarse?.matches) navigator.vibrate?.(10) }
     } finally { setSending(false); if (typing) requestAnimationFrame(() => textarea.current?.focus()) }
@@ -259,7 +262,7 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
   }
   return <div className="composer-area">{pane.agent === 'shell' && <div className="shell-key-strip" role="group" aria-label="Terminal keys" onMouseDown={keepFocus}>
     {([['Escape', 'esc', 'Send Escape to terminal'], ['Tab', 'tab', 'Insert tab'], ['C-c', 'ctrl+c', 'Stop command'], ['ArrowUp', '↑', 'Previous command'], ['ArrowDown', '↓', 'Next command'], ['ArrowLeft', '←', 'Move cursor left'], ['ArrowRight', '→', 'Move cursor right']] as const).map(([key, label, title]) => <button key={key} type="button" title={title} aria-label={title} disabled={disabled || sending || listening || transcribing} onClick={() => terminalKey(key)}>{label}</button>)}
-  </div>}<Suggestions ref={suggest} api={api} pane={pane} draft={draft} setDraft={setDraft} focus={() => textarea.current?.focus()} /><form className={shellMode ? 'composer shell-mode' : 'composer'} ref={form} onSubmit={submit} onMouseDown={keepFocus}>
+  </div>}<Suggestions ref={suggest} api={api} pane={pane} draft={draft} setDraft={setDraft} focus={() => textarea.current?.focus()} run={text => { setDraft(text); void submit(undefined, text, true) }} sendAnyway={() => void submit(undefined, undefined, true)} /><form className={shellMode ? 'composer shell-mode' : 'composer'} ref={form} onSubmit={submit} onMouseDown={keepFocus}>
     {files.length + pastes.length > 0 && <ul className="attachments" aria-label="Attached files and pasted text">{files.map((file, index) => <li key={file.path} className="chip">{file.url ? <button type="button" className="chip-view" aria-label={`View ${file.name}`} onClick={() => setViewing({ name: file.name, url: file.url! })}><img src={file.url} alt="" /><span>{file.name}</span></button> : <><Paperclip size={13} /><span>{file.name}</span></>}<button type="button" aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter((_, at) => at !== index))}><X size={14} /></button></li>)}{pastes.map(paste => <PasteChip key={paste.id} paste={paste} open={openPaste === paste.id} onToggle={() => setOpenPaste(openPaste === paste.id ? null : paste.id)} onEdit={() => { setDraft(inlinePaste(draft, paste)); setPastes(current => current.filter(item => item.id !== paste.id)); setOpenPaste(null); textarea.current?.focus() }} onRemove={() => { setPastes(current => current.filter(item => item.id !== paste.id)); textarea.current?.focus() }} />)}</ul>}
     <ImageViewer image={viewing} close={() => setViewing(null)} items={files.flatMap(file => file.url ? [{ name: file.name, url: file.url }] : [])} onSelect={setViewing} />
     <div className="composer-input">{pane.agent === 'shell' && <span className="terminal-sigil" aria-hidden="true">$</span>}{shellMode && <span className="shell-prompt" title={pane.dir ? `Runs in ${pane.dir}` : undefined}><span className="shell-folder">{shortFolder(pane.dir)}</span><span aria-hidden="true">$</span></span>}
