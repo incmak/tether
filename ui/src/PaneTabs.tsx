@@ -9,6 +9,7 @@ import { WorktreeMark, worktreeNotice } from './Worktree'
 import { anchorOf, clipTitle } from './hooks'
 import type { Anchor } from './hooks'
 import type { Session } from './Sidebar'
+import { HOLD_MS } from './gesture'
 
 // Put panes in the saved order. Panes not in the list (new splits) keep tmux order at the end.
 export function orderPanes(panes: Pane[], order: string[] | undefined) {
@@ -86,7 +87,6 @@ function scrollTo(strip: HTMLElement, left: number, ms: number) {
 }
 
 interface Drag { id: string; tab: HTMLElement; startX: number; startY: number; startLeft: number; scroll: number; x: number; lastAt: number; speed: number; lifted: boolean; moved: boolean; touch: boolean; timer: number; centers: { id: string; x: number }[] }
-const HOLD_MS = 350
 const REORDER_CURVE = 'cubic-bezier(.32,.72,0,1)'
 
 // Tabs for the panes of one session. Reorder: long-press a tab, then drag it (a mouse drags at once).

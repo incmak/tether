@@ -152,9 +152,10 @@ export function Workspace({ layout, slots, focus, zoomed, onCount, onFocus, onLa
     </div>
     <div className="workspace-body">
     <div ref={grid} className={count > 1 ? 'slots multi' : 'slots single'} style={{ gridTemplateColumns: columns > 1 ? tracks(bounds) : undefined, gridTemplateRows: rows > 1 ? tracks([row]) : undefined }}>
-      {shown.map((pane, at) => { const index = zoomed ? focus : at; return <section key={pane.id} className={index === focus ? 'slot focused' : 'slot'} aria-label={`Slot ${index + 1}`}
+      {shown.map((pane, at) => { const index = zoomed ? focus : at; return <section key={pane.id} data-slot={index} className={index === focus ? 'slot focused' : 'slot'} aria-label={`Slot ${index + 1}`}
         onPointerDownCapture={() => { if (index !== focus) onFocus(index) }} onFocusCapture={() => { if (index !== focus) onFocus(index) }} {...dropProps(index)}>
         {renderSlot(pane, index, count)}
+        <div className="drop-hint touch-drop-hint" aria-hidden="true" />
         {drop?.index === index && <div className={`drop-hint ${drop.mode}`} aria-hidden="true"><span>{hint(drop.mode)}</span></div>}
       </section> })}
       {columns > 1 && bounds.map((share, j) => divider('col', j, share, columns))}
