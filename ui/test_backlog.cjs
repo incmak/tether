@@ -77,4 +77,41 @@ assert.equal(plain(b.parseBacklog('- [ ] #B5'))[0].ref, undefined, 'A bare ID is
 assert.equal(b.rewordItem(open, 'Fix it')(tracked), tracked.replace('- [ ] Fix (', '- [ ] Fix it ('), 'Rewording keeps the ID')
 assert.equal(b.startItem(open.raw, 0, 'claude · pane %41')(tracked), tracked.replace('pane %40 · chat abcd', 'pane %41').replace('claude · tmux $3 · ', 'claude · '), 'A new send replaces the old')
 assert.equal(b.startItem('- [x] Old #B7', 3, 'codex')(tracked), tracked.replace('  - Done: fixed in 1234abc (claude · chat ef)\n', '  - Doing: codex\n'))
-console.log('Backlog: parsing, add, tick, reword, delete, undo, move, groups, IDs and status passed')
+
+// Filters: Mine has no source, From agents has one, New is what the sidebar counts. Counts are of open items.
+const mixed = [
+  '- [ ] Mine one #B1',
+  '- [ ] Agent one (claude · tmux $3 · pane %14 · chat 4f1c9a2e) #B2',
+  '- [ ] Bare agent (codex) #B3',
+  '- [ ] Unknown agent (gemini · pane %2) #B4',
+  '- [ ] Tag (claude · chat ab) in the middle #B5',
+  '- [ ] Capital (Claude · chat ab) #B6',
+  '- [ ] Nested (see (claude · chat ab)) #B7',
+  '- [ ] (claude · chat ab) #B8',
+  '- [ ] No ID yet (codex · pane %9)',
+  '- [x] Done by agent (claude · chat cd) #B9',
+  '- [x] Done by me #B10',
+  '',
+  '## later',
+  'a free line',
+  '- [ ] Late agent (codex · chat ef) #B11',
+  '- [ ] Odd keys (claude · window 4 · chat) #B12',
+  '',
+].join('\n')
+const all = b.parseBacklog(mixed).filter(row => row.kind === 'item')
+const names = list => plain(list.map(item => item.text))
+assert.deepEqual(names(b.filterItems(all, 'all', 0)), names(all), 'All shows every item')
+assert.deepEqual(names(b.filterItems(all, 'agents', 0)), ['Agent one', 'Bare agent', 'No ID yet', 'Done by agent', 'Late agent', 'Odd keys'])
+assert.deepEqual(names(b.filterItems(all, 'mine', 0)), ['Mine one', 'Unknown agent (gemini · pane %2)', 'Tag (claude · chat ab) in the middle', 'Capital (Claude · chat ab)', 'Nested (see (claude · chat ab))', '(claude · chat ab)', 'Done by me'],
+  'Only a claude or codex tag at the end of the line is a source')
+assert.deepEqual(plain(all.find(item => item.text === 'Odd keys').source), { agent: 'claude' }, 'Unknown parts of a tag are dropped; the item is still from an agent')
+assert.deepEqual(names(b.filterItems(all, 'new', 2)), ['Bare agent', 'Late agent', 'Odd keys'], 'New: open, from an agent, above the last ID seen. No ID is not new')
+assert.deepEqual(names(b.filterItems(all, 'new', null)), [], 'On a first visit nothing is new')
+assert.deepEqual(names(b.filterItems(all, 'new', 12)), [])
+assert.deepEqual(names(b.freshItems(all, 2)), names(b.filterItems(all, 'new', 2)), 'New is the sidebar count')
+assert.deepEqual(plain(b.filterCounts(all, 2)), { all: 11, mine: 6, agents: 5, new: 3 }, 'Counts leave done items out')
+assert.deepEqual(plain(b.filterCounts(all, null)), { all: 11, mine: 6, agents: 5, new: 0 })
+assert.deepEqual(plain(b.filterCounts([], 0)), { all: 0, mine: 0, agents: 0, new: 0 })
+assert.equal(b.highestRef(all), 12)
+assert.deepEqual(['mine', 'agents', 'new', 'all', 'New', '', null, 7].map(value => b.asFilter(value)), ['mine', 'agents', 'new', 'all', 'all', 'all', 'all', 'all'], 'A stored filter that is not known falls back to All')
+console.log('Backlog: parsing, add, tick, reword, delete, undo, move, groups, IDs, status and filters passed')

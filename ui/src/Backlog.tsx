@@ -4,12 +4,12 @@ import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent as ReactPoin
 import { Check, ChevronRight, ClipboardList, FileText, GripVertical, ListChecks, Pencil, Plus, Send, Trash2, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
-import { addItem, blockOf, moveItem, openGroups, parseBacklog, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
-import type { Change, Item, Note, Source, Status } from './backlogItems'
+import { FILTERS, addItem, asFilter, blockOf, filterCounts, filterItems, highestRef, moveItem, openGroups, parseBacklog, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
+import type { Change, Filter, Item, Note, Source, Status } from './backlogItems'
 import { copyText } from './clipboard'
 import { useModal } from './hooks'
 import { usePanelPoll } from './panelProps'
-import { BACKLOG_PATH, highestRef, markSeen, useBacklogNews } from './backlogNews'
+import { BACKLOG_PATH, markSeen, readSeen, useBacklogNews } from './backlogNews'
 import { agentTabs, itemPrompt, sendToTab, startTab } from './backlogSend'
 import './Backlog.css'
 
@@ -21,6 +21,12 @@ const POLL_MS = 3000, SAVE_MS = 800, UNDO_MS = 8000, RETRIES = 5
 const PATH = BACKLOG_PATH
 /** A refused save says why. Anything else means the server could not be reached. */
 const saveProblem = (failure: unknown) => failure instanceof ApiError ? errorText(failure) : failure instanceof Error && failure.message.startsWith('The backlog') ? failure.message : 'Cannot reach Tether.'
+// The chosen filter, kept per browser.
+const FILTER_KEY = 'tether.backlog.filter'
+const FILTER_NAMES: Record<Filter, string> = { all: 'All', mine: 'Mine', agents: 'From agents', new: 'New' }
+function readFilter(): Filter {
+  try { return asFilter(localStorage.getItem(FILTER_KEY)) } catch { return 'all' }
+}
 
 /** How the sidebar names a tab. */
 const tabName = (pane: Pane) => pane.pane_name || pane.agent_name || pane.label || pane.id
@@ -104,7 +110,7 @@ interface RowActions {
   onSend?: (item: Item) => void
 }
 
-function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean }) {
+function ItemRow({ item, actions, links, sending, locked, fixed, editing, setEditing, typed: typedRef, drop, dragged }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; fixed: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean }) {
   const [wording, setWording] = useState(item.text)
   // Sub-steps stay in view. Notes (the why, the files, selected chat text) fold under the title until opened.
   const [showNotes, setShowNotes] = useState(false)
@@ -120,7 +126,7 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
   }
   return <li data-backlog-row={item.done ? undefined : item.id} className={['backlog-row', item.done && 'done', drop && `drop-${drop}`, dragged && 'dragged'].filter(Boolean).join(' ')}
     style={dragged ? { opacity: 1, zIndex: 1, background: 'var(--bg)', boxShadow: '0 3px 10px rgb(0 0 0 / .16)' } : undefined}>
-    {!item.done && <button type="button" className="backlog-grip" aria-label={`Move ${item.text}. Use the up and down arrow keys.`} title="Drag to reorder" disabled={locked}
+    {!item.done && <button type="button" className="backlog-grip" aria-label={fixed ? `Move ${item.text}. Show All to reorder.` : `Move ${item.text}. Use the up and down arrow keys.`} title={fixed ? 'Show All to reorder' : 'Drag to reorder'} disabled={locked || fixed}
       onPointerDown={event => actions.onDragStart(event, item)} onKeyDown={event => actions.onDragKey(event, item)}
       onTouchStart={event => event.stopPropagation()} onTouchEnd={event => event.stopPropagation()}><GripVertical size={15} aria-hidden="true" /></button>}
     <input type="checkbox" className="backlog-box" aria-label={item.text} checked={item.done} disabled={locked} onChange={event => actions.onDone(item.raw, item.line, event.target.checked)} />
@@ -176,6 +182,9 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   const [drag, setDrag] = useState<{ item: Item; target: string | null; after: boolean } | null>(null)
   const [sendFor, setSendFor] = useState<string | null>(null)  // the row whose Send panel is open
   const [sent, setSent] = useState<{ label: string; pane: Pane | null } | null>(null)
+  const [filter, setFilter] = useState(readFilter)
+  // What was seen before this sheet opened. Opening marks every item seen, so New needs the older mark.
+  const [seenBefore] = useState(readSeen)
   const textBox = useRef<HTMLTextAreaElement>(null)
   const caret = useRef<number | null>(null)
   const typedRow = useRef('')
@@ -349,15 +358,27 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
 
   const add = (event: FormEvent) => {
     event.preventDefault()
-    if (!itemVoice && item.trim() && change(addItem(item))) { reveal.current = `- [ ] ${item.trim().replace(/\s*\n\s*/g, ' ')}\n`; setItem('') }
+    if (!itemVoice && item.trim() && change(addItem(item))) {
+      reveal.current = `- [ ] ${item.trim().replace(/\s*\n\s*/g, ' ')}\n`; setItem('')
+      // The person's own item is hidden under these two filters.
+      if (filter === 'agents' || filter === 'new') pick('all')
+    }
   }
+  const pick = (next: Filter) => { setFilter(next); try { localStorage.setItem(FILTER_KEY, next) } catch { /* private window: the filter lasts until reload */ } }
   const rows = parseBacklog(shown)
-  const done = rows.filter((row): row is Item => row.kind === 'item' && row.done)
-  const groups = openGroups(rows)
-  const highest = highestRef(rows.filter((row): row is Item => row.kind === 'item'))
+  const items = rows.filter((row): row is Item => row.kind === 'item')
+  const counts = filterCounts(items, seenBefore)
+  const filtered = filter !== 'all'
+  const visible = new Set(filterItems(items, filter, seenBefore))
+  const allGroups = openGroups(rows)
+  // A filter shows items only: a free line belongs to nobody.
+  const groups = !filtered ? allGroups : allGroups.map(group => ({ ...group, rows: group.rows.filter(row => row.kind === 'item' && visible.has(row)) })).filter(group => group.rows.length)
+  const done = items.filter(row => row.done && visible.has(row))
+  const highest = highestRef(items)
   useEffect(() => { if (active && highest) markSeen(highest) }, [active, highest])
-  const hasHeadings = groups.some(group => group.heading)
-  const openItems = groups.flatMap(group => group.rows.filter((row): row is Item => row.kind === 'item'))
+  const hasHeadings = allGroups.some(group => group.heading)
+  const openItems = items.filter(row => !row.done)
+  const shownOpen = groups.flatMap(group => group.rows.filter((row): row is Item => row.kind === 'item'))
   const locked = !saved || !!conflict
 
   const short = (text: string) => text.length > 40 ? `${text.slice(0, 40)}…` : text
@@ -374,7 +395,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     onReword: (target, wording) => { change(rewordItem(target, wording)) },
     onSend: target => { setSent(null); setSendFor(now => now === target.id ? null : target.id) },
     onDragStart: (event, target) => {
-      if (event.button !== 0 || !(event.currentTarget instanceof HTMLElement)) return
+      if (filtered || event.button !== 0 || !(event.currentTarget instanceof HTMLElement)) return
       const box = list.current
       const row = box?.querySelector<HTMLElement>(`[data-backlog-row="${CSS.escape(target.id)}"]`)
       if (!box || !row) return
@@ -441,7 +462,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
       grip.addEventListener('lostpointercapture', finish)
     },
     onDragKey: (event, target) => {
-      if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+      if (filtered || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
       event.preventDefault()
       const at = openItems.findIndex(row => row.id === target.id)
       const up = event.key === 'ArrowUp'
@@ -454,7 +475,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   const links: Links = { panes, onOpenPane }
   const showRow = (row: Item | Note) => row.kind === 'note'
     ? <NoteRow key={row.id} note={row} />
-    : <ItemRow key={row.id} item={row} actions={actions} links={links} locked={locked}
+    : <ItemRow key={row.id} item={row} actions={actions} links={links} locked={locked} fixed={filtered}
         sending={sendFor === row.id && !row.done ? <SendPanel item={row} api={api} links={links} command={saved?.command} onClose={() => setSendFor(null)}
           onSent={(who, pane, name) => { setSendFor(null); change(startItem(row.raw, row.line, who)); setSent({ label: `Sent ${row.ref} to ${name}`, pane }) }} /> : undefined} editing={editingRow === row.id} setEditing={setEditingRow} typed={typedRow} dragged={drag?.item.id === row.id}
         drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} />
@@ -482,6 +503,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     : tooLong ? `Keep it under ${saved.limit.toLocaleString()} characters.`
     : unsaved || saving ? 'Saving…'
     : !rows.length ? ''
+    : filtered ? `${shownOpen.length} of ${openItems.length} open shown · Saved`
     : `${openItems.length} open · Saved`
 
   return <div className="backlog">
@@ -495,11 +517,18 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
       <button type="button" className="icon-button" aria-pressed={inText} disabled={!saved || itemVoice || textVoice || (!inText && changes.length > 0)} aria-label={inText ? 'Show checklist' : 'Edit as text'} title={inText ? 'Show checklist' : 'Edit as text'}
         onClick={() => { if (inText) void leaveText(); else { setUndo(null); setDraft(shown) } }}>{inText ? <ListChecks size={17} /> : <FileText size={16} />}</button>
     </div>
+    {!inText && saved && !!rows.length && <div className="backlog-filters">
+      <div role="group" aria-label="Filter the backlog">
+        {FILTERS.map(name => <button key={name} type="button" className="backlog-chip" aria-pressed={filter === name} onClick={() => pick(name)}>{FILTER_NAMES[name]}<span>{counts[name]}</span></button>)}
+      </div>
+      {filtered && <p className="backlog-filter-hint">Show All to reorder.</p>}
+    </div>}
     {inText
       ? <VoiceField label="backlog text" onBusyChange={setTextVoice} value={draft} setValue={setDraft} multiline fieldRef={textBox} field={{ 'aria-label': 'Backlog text', className: 'backlog-text', readOnly: !!conflict, disabled: !!conflict, spellCheck: true }} />
       : <div className="backlog-list" ref={list}>
           {saved && !rows.length && <div className="backlog-empty"><ClipboardList size={26} aria-hidden="true" /><p><strong>Nothing here yet</strong></p><p>Add what you want to remember. Agents add follow-ups they find, and fill in items you point them to.</p></div>}
           {saved && !!rows.length && !openItems.length && <p className="backlog-clear"><Check size={16} aria-hidden="true" />All done.</p>}
+          {filtered && !!openItems.length && !shownOpen.length && <p className="backlog-clear">{filter === 'new' ? 'Nothing new from agents.' : filter === 'mine' ? 'No open items of yours.' : 'No open items from agents.'} <button type="button" className="link-button" onClick={() => pick('all')}>Show all</button></p>}
           {groups.map(group => <section key={group.heading?.id ?? 'inbox'} className="backlog-group">
             {(group.heading || hasHeadings) && <h3 className="backlog-heading"><span>{group.heading?.text ?? 'Inbox'}</span><span className="backlog-count">{group.rows.filter(row => row.kind === 'item').length}</span></h3>}
             <ul>{group.rows.map(row => showRow(row as Item | Note))}</ul>

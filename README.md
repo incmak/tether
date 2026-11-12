@@ -12,6 +12,7 @@ The agent stays in tmux when you leave your desk.
 - Attach photos and files, select models, and view usage reports.
 - Use `!command` for shell commands in the session's folder.
 - Keep one backlog across all sessions that you, Claude Code and Codex can all add to.
+- Filter the backlog by your items, items from agents, or items agents added since you last looked.
 - Use dictation and push notifications where supported.
 
 The server runs on your machine. There is no Tether cloud account or relay.

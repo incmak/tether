@@ -2,7 +2,7 @@
 // marks them seen. "Seen" is the highest item ID shown in the open sheet, kept per browser.
 import { useCallback, useEffect, useState } from 'react'
 import type { Api } from './api'
-import { parseBacklog } from './backlogItems'
+import { freshItems, highestRef, parseBacklog } from './backlogItems'
 import type { Item } from './backlogItems'
 import { usePolling } from './hooks'
 
@@ -11,10 +11,8 @@ const KEY = 'tether.backlog.seen'
 const EVENT = 'tether-backlog-seen'
 const POLL_MS = 30000
 
-const number = (item: Item) => Number(item.ref?.slice(1) ?? 0)
-export const highestRef = (items: Item[]) => items.reduce((most, item) => Math.max(most, number(item)), 0)
-
-function readSeen(): number | null {
+/** The highest item ID the person has seen. null: they have not opened Tether's backlog in this browser yet. */
+export function readSeen(): number | null {
   try { const value = localStorage.getItem(KEY); return value === null ? null : Number(value) || 0 } catch { return 0 }
 }
 
@@ -39,6 +37,6 @@ export function useBacklogNews(api: Api) {
   }, [])
   const items = data ? parseBacklog(data.text).filter((row): row is Item => row.kind === 'item' && !row.done) : []
   useEffect(() => { if (data && seen === null) markSeen(highestRef(items)) })
-  const fresh = seen === null ? [] : items.filter(item => item.source && number(item) > seen)
+  const fresh = freshItems(items, seen)
   return { open: items.length, fresh }
 }

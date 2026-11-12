@@ -4,6 +4,13 @@
 .backlog-sheet input.backlog-input { flex: 1; width: auto; min-width: 0; height: 38px; min-height: 0; margin: 0; box-sizing: border-box; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; }
 .backlog-sheet input.backlog-input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; box-shadow: none; border-color: var(--accent); }
 .backlog-sheet input.backlog-reword { width: 100%; height: 34px; }
+.backlog-filters { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.backlog-filters > div { display: flex; flex-wrap: wrap; gap: 6px; }
+button.backlog-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--bubble); color: var(--text); font-size: 13px; line-height: 1; white-space: nowrap; cursor: pointer; }
+button.backlog-chip:not(:disabled):hover { background: var(--hover); }
+button.backlog-chip[aria-pressed="true"], button.backlog-chip[aria-pressed="true"]:hover { background: var(--text); color: var(--bg); }
+.backlog-chip > span { font-size: 12px; font-variant-numeric: tabular-nums; opacity: .7; }
+.backlog-filter-hint { margin: 0; color: var(--muted); font-size: 12px; }
 .backlog-mode { flex: 1; margin: 0; color: var(--muted); font-size: 13px; }
 .backlog-text { flex: 1; width: 100%; min-height: 160px; box-sizing: border-box; resize: none; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .backlog-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin-inline: -4px; padding-inline: 4px; }
@@ -89,6 +96,7 @@ button.backlog-resize:focus-visible { outline: 2px solid var(--accent); outline-
   .backlog-box { width: 20px; height: 20px; margin-top: 1px; }
   .backlog-actions .icon-button { width: 34px; height: 34px; }
   button.backlog-tag { padding-block: 3px; }
+  button.backlog-chip { min-height: 32px; }
 }
 @media (prefers-reduced-motion: reduce) { .backlog-done-toggle svg, .backlog-actions, .backlog-grip { transition: none; } }
 .backlog-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }

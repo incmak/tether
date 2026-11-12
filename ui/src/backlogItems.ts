@@ -202,3 +202,28 @@ export function openGroups(rows: Row[]): { heading: Note | null; rows: Row[] }[]
   }
   return groups.filter(group => group.rows.length)
 }
+
+const refNumber = (item: Item) => Number(item.ref?.slice(1) ?? 0)
+export const highestRef = (items: Item[]) => items.reduce((most, item) => Math.max(most, refNumber(item)), 0)
+
+/** Open items an agent added after the person last looked. seen is the highest ID they saw; null is a first visit,
+ * where nothing is new. The sidebar's "N new" and the sheet's New filter both count these. */
+export const freshItems = (items: Item[], seen: number | null) => seen === null ? [] : items.filter(item => !item.done && !!item.source && refNumber(item) > seen)
+
+/** The checklist's filters. They only choose which rows show; the file stays as it is. */
+export const FILTERS = ['all', 'mine', 'agents', 'new'] as const
+export type Filter = typeof FILTERS[number]
+export const asFilter = (value: unknown): Filter => FILTERS.find(filter => filter === value) ?? 'all'
+
+/** The items a filter shows. Mine: nobody is named as the source. From agents: a source is named. */
+export function filterItems(items: Item[], filter: Filter, seen: number | null): Item[] {
+  if (filter === 'mine') return items.filter(item => !item.source)
+  if (filter === 'agents') return items.filter(item => !!item.source)
+  return filter === 'new' ? freshItems(items, seen) : items
+}
+
+/** How many open items each filter shows. */
+export function filterCounts(items: Item[], seen: number | null): Record<Filter, number> {
+  const open = items.filter(item => !item.done)
+  return { all: open.length, mine: filterItems(open, 'mine', seen).length, agents: filterItems(open, 'agents', seen).length, new: freshItems(open, seen).length }
+}
