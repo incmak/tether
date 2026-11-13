@@ -56,11 +56,12 @@ import { useHost } from './host'
 import { ReviewLinks } from './ReviewLinks'
 import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
 import { codexRunItems, useCodexRuns } from './CodexRuns'
+import { HOLD_MS } from './gesture'
 
 
 interface ChatProps { liveReplyPreview: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
 /** Desktop workspace controls for a Chat shown in a slot next to other slots. */
-export interface SlotControls { index: number; zoomed: boolean; onZoom: () => void; onClose?: () => void; onPick?: () => void; onDragStart?: (event: React.DragEvent) => void }
+export interface SlotControls { index: number; zoomed: boolean; onZoom: () => void; onClose?: () => void; onPick?: () => void; onDragStart?: (event: React.DragEvent) => void; onSwapTo?: (to: number) => void }
 export interface SidePinControls { pinned: boolean; index: number; total: number; note: string; onToggle(): void; onNote(text: string): void; onStep(dir: 1 | -1): void }
 
 // A pinned chat says so in the header line: its place in the set and its note. A side swipe on the header steps (phone).
@@ -444,6 +445,84 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     title.style.transform = `translateX(${x}px)`
     title.style.opacity = `${Math.max(0, 1 - Math.abs(x) / width * 0.5)}`
   }
+  const headerRef = useRef<HTMLElement>(null)
+  const headerGhost = useRef<HTMLDivElement | null>(null)
+  const headerSwap = useRef(slot?.onSwapTo)
+  // Polls replace slot callbacks. Keep the current one without cancelling a hold.
+  useLayoutEffect(() => { headerSwap.current = slot?.onSwapTo })
+  const canCarryHeader = !!slot?.onSwapTo
+  useEffect(() => {
+    const header = headerRef.current
+    if (!header || !canCarryHeader) return
+    let held: { x: number; y: number; lastX: number; lastY: number; active: boolean; moved: boolean; timer: ReturnType<typeof setTimeout>; source: HTMLElement } | null = null
+    let over: HTMLElement | null = null
+    const end = () => {
+      if (held) { clearTimeout(held.timer); if (held.active) headerDragged.current = true; held.source.removeAttribute('data-carried') }
+      held = null
+      over?.removeAttribute('data-touch-drop'); over = null
+      headerGhost.current?.remove(); headerGhost.current = null
+    }
+    const targetAt = (x: number, y: number) => {
+      const target = document.elementFromPoint(x, y)?.closest<HTMLElement>('.slot[data-slot]')
+      return target && target !== held?.source ? target : null
+    }
+    const start = (event: TouchEvent) => {
+      end()
+      if (event.touches.length !== 1) return
+      const target = event.target as Element
+      if (target.closest('button:not(.chat-title), .icon-button, [role="button"], a, input, select, textarea, [role="menu"]')) return
+      const source = header.closest<HTMLElement>('.slot[data-slot]')
+      if (!source) return
+      const touch = event.touches[0]
+      held = { x: touch.clientX, y: touch.clientY, lastX: touch.clientX, lastY: touch.clientY, active: false, moved: false, source, timer: setTimeout(() => {
+        if (!held) return
+        held.active = true; headerDragged.current = true; headerTouch.current = null
+        navigator.vibrate?.(12)
+        const ghost = document.createElement('div'), label = document.createElement('span')
+        ghost.className = 'touch-ghost'; ghost.setAttribute('aria-hidden', 'true')
+        ghost.style.transform = `translate3d(${held.lastX}px, ${held.lastY}px, 0)`
+        label.textContent = headerTitle.current?.querySelector('h1')?.textContent ?? ''
+        ghost.append(label); document.body.append(ghost); headerGhost.current = ghost
+        source.setAttribute('data-carried', '')
+      }, HOLD_MS) }
+    }
+    const move = (event: TouchEvent) => {
+      if (!held) return
+      if (event.touches.length !== 1) { end(); return }
+      const touch = event.touches[0], distance = Math.hypot(touch.clientX - held.x, touch.clientY - held.y)
+      if (held.active) held.moved ||= touch.clientX !== held.lastX || touch.clientY !== held.lastY
+      held.lastX = touch.clientX; held.lastY = touch.clientY
+      if (!held.active) { if (distance > 10) end(); return }
+      event.preventDefault()
+      if (headerGhost.current) headerGhost.current.style.transform = `translate3d(${touch.clientX}px, ${touch.clientY}px, 0)`
+      const next = targetAt(touch.clientX, touch.clientY)
+      if (over !== next) { over?.removeAttribute('data-touch-drop'); over = next; over?.setAttribute('data-touch-drop', '') }
+    }
+    const up = (event: TouchEvent) => {
+      if (!held) return
+      if (!held.active) { end(); return }
+      event.preventDefault()
+      const touch = event.changedTouches[0], target = touch && held.moved ? targetAt(touch.clientX, touch.clientY) : null
+      const to = target ? Number(target.dataset.slot) : NaN
+      end()
+      if (Number.isInteger(to)) headerSwap.current?.(to)
+    }
+    const extraFinger = (event: TouchEvent) => { if (event.touches.length > 1) end() }
+    const context = (event: Event) => { if (held?.active) event.preventDefault() }
+    header.addEventListener('touchstart', start, { passive: true })
+    header.addEventListener('touchmove', move, { passive: false })
+    header.addEventListener('touchend', up, { passive: false })
+    header.addEventListener('touchcancel', end)
+    header.addEventListener('contextmenu', context)
+    window.addEventListener('touchstart', extraFinger, { capture: true, passive: true })
+    return () => {
+      end()
+      header.removeEventListener('touchstart', start); header.removeEventListener('touchmove', move)
+      header.removeEventListener('touchend', up); header.removeEventListener('touchcancel', end)
+      header.removeEventListener('contextmenu', context)
+      window.removeEventListener('touchstart', extraFinger, true)
+    }
+  }, [canCarryHeader, pane.id, slot?.index])
   const headerStart = (event: React.TouchEvent) => {
     headerTouch.current = null
     if (!sidePin?.pinned || sidePin.total <= 1 || event.touches.length !== 1 || !headerTitle.current) return
@@ -891,7 +970,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const visibleNotices = (footer.notices ?? []).filter(note => !hiddenNotices.includes(note))
   const hideNotice = (note: string) => setHiddenNotices(current => [...current.filter(item => (footer.notices ?? []).includes(item)), note])
   return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><FilePane.Provider value={activePane.id}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
-    <header className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
       {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
