@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import urllib.request
 
+import paths
+
 PATH = '/mobile/api/suggest-groups'
 BODY_LIMIT = 4 * 1024 * 1024
 # The local model runs on the CPU. Output tokens cost most, so the reply is one short line per group.
@@ -112,8 +114,9 @@ def parse_output(output):
         raise ValueError('Invalid model output.')
     output = output.strip()
     # The short form is "Name: 1 4 7", one group per line. JSON replies still work.
-    lines = [GROUP_LINE.fullmatch(line) for line in output.splitlines() if line.strip()]
-    if lines and all(lines):
+    lines = [match for line in output.splitlines() if line.strip()
+             if (match := GROUP_LINE.fullmatch(line))]
+    if lines:
         return {'groups': [{'name': match[1], 'sessions': ['$' + ident for ident in re.findall(r'[0-9]+', match[2])]}
                            for match in lines]}
     if output.startswith('```json'):
@@ -136,6 +139,21 @@ def output_groups(output, entries):
     return groups
 
 
+def codex_fast_model():
+    try:
+        cache = Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'models_cache.json'
+        models = json.loads(cache.read_text(encoding='utf-8'))
+        if isinstance(models, dict):
+            models = models.get('models')
+        if not isinstance(models, list) or not all(
+                isinstance(model, dict) and isinstance(model.get('slug'), str) for model in models):
+            return None
+        return next((model['slug'] for model in models
+                     if re.fullmatch(r'gpt-[0-9.]+-luna', model['slug'])), None)
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+
+
 def agent_output(agent, executable, entries):
     with tempfile.TemporaryDirectory(prefix='tether-groups-') as folder:
         outfile = Path(folder) / 'groups.txt'
@@ -144,7 +162,9 @@ def agent_output(agent, executable, entries):
             command = [executable, '-p', '--model', 'haiku', '--tools', '', '--setting-sources', '',
                        '--strict-mcp-config', '--no-session-persistence', '--system-prompt', PROMPT]
         else:
+            model = codex_fast_model()
             command = [executable, 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
+                       *(['-m', model] if model else []),
                        '-c', 'model_reasoning_effort=low', '-o', str(outfile), '--', PROMPT + '\n\n' + content]
         process = subprocess.Popen(command, cwd=folder,
                                    stdin=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,

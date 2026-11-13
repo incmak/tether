@@ -25,6 +25,7 @@ class SuggestGroupsTests(unittest.TestCase):
         self.urlopen = self.enterContext(patch('urllib.request.urlopen'))
         self.which = self.enterContext(patch('suggest_groups.shutil.which', return_value=None))
         self.popen = self.enterContext(patch('suggest_groups.subprocess.Popen'))
+        self.fast_model = self.enterContext(patch('suggest_groups.codex_fast_model', return_value=None))
         self.entries = [session('$6'), session('$9', '/other/project/'), session('$12', '/work/single')]
 
     def reply(self, output):
@@ -132,6 +133,19 @@ class SuggestGroupsTests(unittest.TestCase):
                 self.which.assert_called_once_with(main)
         self.popen.assert_not_called()
 
+    def test_codex_command_uses_luna_model_when_available(self):
+        self.fast_model.return_value = 'gpt-6-luna'
+        self.popen.side_effect = self.agent_process
+        suggest_groups.agent_output('codex', '/bin/codex', self.entries)
+        folder = self.popen.call_args.kwargs['cwd']
+        self.assertEqual(self.popen.call_args.args[0],
+                         ['/bin/codex', 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
+                          '-m', 'gpt-6-luna', '-c', 'model_reasoning_effort=low',
+                          '-o', str(Path(folder) / 'groups.txt'), '--',
+                          suggest_groups.PROMPT + '\n\n' + suggest_groups.model_input(self.entries)])
+        self.fast_model.assert_called_once_with()
+        self.urlopen.assert_not_called()
+
     def test_agent_timeout_kills_process_group_then_uses_local_model(self):
         for agent in ('claude', 'codex'):
             for missing_process in (False, True):
@@ -212,6 +226,12 @@ class SuggestGroupsTests(unittest.TestCase):
 
     def test_line_output_maps_ids_and_uses_validation(self):
         self.reply('Project: 6 9, $6 99\n- Single: 12\n')
+        self.assertEqual(suggest_groups.suggest({'sessions': self.entries}),
+                         {'groups': [{'name': 'Project', 'sessions': ['$6', '$9']},
+                                     {'name': 'Other', 'sessions': ['$12']}], 'source': 'llm'})
+
+    def test_line_output_ignores_trailer_and_other_stray_lines(self):
+        self.reply('Here are the groups:\nProject: 6 9\n\nNeeds you: no')
         self.assertEqual(suggest_groups.suggest({'sessions': self.entries}),
                          {'groups': [{'name': 'Project', 'sessions': ['$6', '$9']},
                                      {'name': 'Other', 'sessions': ['$12']}], 'source': 'llm'})
@@ -362,6 +382,38 @@ class SuggestGroupsTests(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 suggest_groups.suggest(body)
         self.urlopen.assert_not_called()
+
+
+class CodexFastModelTests(unittest.TestCase):
+    def test_first_luna_model_in_both_cache_shapes(self):
+        models = [{'slug': slug} for slug in
+                  ('gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-5.6-luna')]
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, CODEX_HOME=folder):
+            for cache in ({'models': models}, models):
+                with self.subTest(cache=cache):
+                    (Path(folder) / 'models_cache.json').write_text(json.dumps(cache), encoding='utf-8')
+                    self.assertEqual(suggest_groups.codex_fast_model(), 'gpt-6-luna')
+
+    def test_missing_cache_returns_none(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, CODEX_HOME=folder):
+            self.assertIsNone(suggest_groups.codex_fast_model())
+
+    def test_bad_json_wrong_types_and_no_luna_return_none(self):
+        caches = ('not JSON', 'null', '42', '"models"', '{}', '{"models":null}',
+                  '{"models":{}}', '[null]', '[{}]', '[{"slug":6}]',
+                  '[{"slug":"gpt-6.1-sol"}]',
+                  '[{"slug":"gpt-6-luna-extra"},{"slug":"other-gpt-6-luna"}]')
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, CODEX_HOME=folder):
+            for cache in caches:
+                with self.subTest(cache=cache):
+                    (Path(folder) / 'models_cache.json').write_text(cache, encoding='utf-8')
+                    self.assertIsNone(suggest_groups.codex_fast_model())
+
+    def test_empty_codex_home_uses_default_path(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, CODEX_HOME=''), \
+                patch.object(suggest_groups.paths, 'CODEX', Path(folder)):
+            (Path(folder) / 'models_cache.json').write_text('[{"slug":"gpt-6-luna"}]', encoding='utf-8')
+            self.assertEqual(suggest_groups.codex_fast_model(), 'gpt-6-luna')
 
 
 class RouteTests(unittest.TestCase):
