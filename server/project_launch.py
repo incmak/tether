@@ -138,10 +138,30 @@ def _option(args, short, long):
 
 def _mode(value):
     """True for a writable sandbox mode, False for read-only, UNSURE for anything else."""
-    value = value.strip().strip('"\'') if isinstance(value, str) else value
     if value == 'read-only':
         return False
     return True if value in ('workspace-write', 'danger-full-access') else UNSURE
+
+
+def _override(raw):
+    """The value of a -c override as Codex reads it (utils/cli/src/config_override.rs): TOML, else the raw text
+    without its outer quotes."""
+    raw = raw.strip()
+    try:
+        import tomllib
+        return tomllib.loads(f'_x_ = {raw}')['_x_']
+    except Exception:
+        return raw.strip().strip('"\'')
+
+
+def _canon(path):
+    """Strict realpath, as Codex canonicalize: None when any part is missing or broken."""
+    if path is None:
+        return None
+    try:
+        return os.path.realpath(path, strict=True)
+    except (OSError, ValueError):
+        return None
 
 
 def _toml(path):
@@ -199,7 +219,9 @@ def _repo_root(cwd):
     whose gitdir and commondir files point back to this checkout and to <common>, and the main checkout
     owns <common>. A submodule or a --separate-git-dir checkout gives no root. Where this port may differ
     from Codex (a symlinked .git), it gives no root, so Tether starts Codex without --add-dir."""
-    base = os.path.realpath(cwd)  # Codex gets its cwd from the kernel, with symlinks resolved
+    base = _canon(cwd)  # Codex gets its cwd from the kernel, with symlinks resolved
+    if base is None:
+        return None
     if not os.path.isdir(base):
         base = os.path.dirname(base)
     while True:
@@ -226,7 +248,10 @@ def _repo_root(cwd):
     git_dir = _gitdir(dot_git)
     if git_dir is None or os.path.islink(git_dir) or not os.path.isdir(git_dir):
         return None
-    real = Path(os.path.realpath(git_dir))
+    real = _canon(git_dir)
+    if real is None:
+        return None
+    real = Path(real)
     if real.parent.name != 'worktrees':
         return None
     common = real.parent.parent
@@ -236,8 +261,8 @@ def _repo_root(cwd):
     back_dot_git, linked_common = _join(real, back), _join(real, commondir)
     if back_dot_git is None or linked_common is None or os.path.basename(back_dot_git) != '.git':
         return None
-    if (os.path.realpath(os.path.dirname(back_dot_git)) != os.path.realpath(root)
-            or os.path.realpath(linked_common) != str(common)):
+    checkout = _canon(os.path.dirname(back_dot_git))
+    if checkout is None or checkout != _canon(root) or _canon(linked_common) != str(common):
         return None
     main_root = os.path.dirname(os.path.dirname(os.path.dirname(git_dir)))
     main_dot_git = Path(main_root) / '.git'
@@ -247,7 +272,7 @@ def _repo_root(cwd):
         main_git_dir = _gitdir(main_dot_git)
     else:
         return None
-    if main_git_dir is None or os.path.realpath(main_git_dir) != str(common):
+    if _canon(main_git_dir) != str(common):
         return None
     return main_root
 
@@ -320,7 +345,7 @@ def codex_writable(args, cwd=None):
         return False
     for key, _, setting in reversed(overrides):
         if key.strip() == 'sandbox_mode':
-            return _mode(setting) is True
+            return _mode(_override(setting)) is True
     if any(key.strip().split('.')[0].strip('"\'') in ('projects', 'project_root_markers') for key, _, _ in overrides):
         return False  # a -c project entry can shadow the trusted root with an untrusted one
     import paths
@@ -331,10 +356,12 @@ def codex_writable(args, cwd=None):
         return False
     folder = (_option(args, '-C', '--cd') or [None])[-1]
     start = cwd or os.getcwd()
+    if folder:
+        raw = os.path.join(start, folder)
+        if '..' in raw.split('/') or _canon(raw) != os.path.normpath(raw):
+            return False  # Codex keeps a logical --cd path through symlinks and '..'; not modelled
     folder = os.path.normpath(os.path.join(start, folder) if folder else start)
     real = os.path.realpath(folder)
-    if _option(args, '-C', '--cd') and real != folder:
-        return False  # Codex keeps the logical --cd path through symlinks; its root search is not modelled
     root = _repo_root(folder)
     for path in _layers([folder, real], home.resolve()):
         layer = _toml(path)
@@ -345,7 +372,8 @@ def codex_writable(args, cwd=None):
     known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
     # Codex takes the first entry it finds; both spellings of the start folder come before the repository root.
     own = [known[key] for key in dict.fromkeys([folder, real]) if key in known]
-    entries = own or ([known[root]] if root and root in known else [])
+    # For the root too, Codex tries the canonical spelling before the original (config/src/project_trust.rs).
+    entries = own or [known[key] for key in dict.fromkeys([_canon(root), root]) if key and key in known]
     return bool(entries) and all(isinstance(entry, dict) and entry.get('trust_level') in ('trusted', 'untrusted')
                                  for entry in entries)
 

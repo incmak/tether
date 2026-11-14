@@ -213,6 +213,20 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(project_launch.codex_writable(['--cd', str(main / 'inner' / 'src')], str(self.temp)))
         self.assertFalse(project_launch.codex_writable(['--cd', str(self.temp / 'alias' / 'src')], str(self.temp)))
 
+    def test_writable_round_six_paths_and_modes(self):
+        folder = str(self.temp)
+        for args in (['-s', ' workspace-write '], ['-s', '"workspace-write"']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)  # Codex exits 2 on these
+        self.assertTrue(project_launch.codex_writable(['-c', 'sandbox_mode=" workspace-write"'.replace(' w', 'w')], folder))
+        main, other = self.temp / 'main', self.temp / 'other'
+        subprocess.run(['git', 'init', '-q', str(main)], check=True)
+        for d in (main / 'src', other / 'child', other / 'src'):
+            d.mkdir(parents=True)
+        (main / 'alias').symlink_to(other / 'child')
+        self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable(['--cd', str(main / 'src')], folder))
+        self.assertFalse(project_launch.codex_writable(['--cd', f'{main}/alias/../src'], folder))
+
     def test_writable_worktree_pointer_must_match_its_registration(self):
         git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
         main = self.temp / 'main'
@@ -256,6 +270,21 @@ class UnitTests(unittest.TestCase):
         (registration / 'gitdir').write_bytes(str(linked).encode() + b'/\x00/../.git\n')
         self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex rejects NUL before normalizing')
         (registration / 'gitdir').write_bytes(original)
+        (self.temp / 'broken').symlink_to(f'{self.temp}/missing/../{linked.name}')
+        (self.temp / 'brokenmain').symlink_to(f'{self.temp}/missing/../main')
+        for name, text in (('gitdir', f'{self.temp}/broken/.git\n'), ('commondir', f'{self.temp}/brokenmain/.git\n')):
+            saved = (registration / name).read_bytes()
+            (registration / name).write_text(text)
+            self.assertFalse(project_launch.codex_writable([], str(linked)), f'broken symlink in {name}')
+            (registration / name).write_bytes(saved)
+        self.assertTrue(project_launch.codex_writable([], str(linked)))
+        (self.temp / 'mainalias').symlink_to(main)
+        saved = (linked / '.git').read_bytes()
+        (linked / '.git').write_text(f'gitdir: {self.temp}/mainalias/.git/worktrees/linked\n')
+        self.config(f'[projects."{self.temp}/mainalias"]\ntrust_level = "trusted"\n[projects."{os.path.realpath(main)}"]\n')
+        self.assertFalse(project_launch.codex_writable([], str(linked)), 'the canonical root key comes first')
+        (linked / '.git').write_bytes(saved)
+        self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
         aliases = self.temp / 'aliases'
         aliases.mkdir()
         (linked / 'child').mkdir()
