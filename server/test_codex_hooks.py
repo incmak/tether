@@ -1,5 +1,7 @@
 """Codex hooks use isolated cache/config files and mocked terminal reads."""
 from datetime import datetime, timezone
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import claude_hooks as hooks
+import autonomy
 import paths
 import server
 import terminal_input as terminal
@@ -261,14 +264,55 @@ class CodexHooksTests(unittest.TestCase):
             self.assertEqual(run.stderr, '')
         self.assertEqual(set(json.loads(paths.CODEX_HOOKS.read_text())['hooks']), set(hooks.CODEX_EVENTS))
 
-    def test_codex_main_prints_nothing_including_browser_note(self):
+    def test_codex_main_only_prompt_prints_rules_under_isolated_python(self):
         for event in hooks.CODEX_EVENTS:
             run = subprocess.run([sys.executable, '-I', hooks.__file__, 'codex'],
                                  input=json.dumps({'session_id': self.entry['thread'], 'hook_event_name': event}),
-                                 env=dict(os.environ, TETHER_CDP_URL='http://localhost:9222'),
+                                 env=dict(os.environ, TETHER_CDP_URL='http://localhost:9222',
+                                          HOME=str(self.root), MOBILE_TMUX_HOME=str(self.root),
+                                          MOBILE_TMUX_CONFIG=str(self.root / 'config'),
+                                          TETHER_HOME=str(self.root / 'tether'), CODEX_HOME=str(self.root / 'codex'),
+                                          MOBILE_TMUX_TMUX='/bin/false'),
                                  text=True, capture_output=True, timeout=5)
-            self.assertEqual((run.returncode, run.stdout, run.stderr), (0, '', ''), event)
+            self.assertEqual((run.returncode, run.stderr), (0, ''), event)
+            if event == 'UserPromptSubmit':
+                output = json.loads(run.stdout)['hookSpecificOutput']
+                self.assertEqual(output['hookEventName'], event)
+                self.assertIn('Autonomy level 2', output['additionalContext'])
+                self.assertNotIn('browser', output['additionalContext'].lower())
+            else:
+                self.assertEqual(run.stdout, '', event)
         self.assertEqual(json.loads(self.state().read_text())['agent'], 'codex')
+
+    def test_codex_prompt_rules_follow_capture_and_exceptions_are_quiet(self):
+        payload = {'session_id': self.entry['thread'], 'hook_event_name': 'UserPromptSubmit'}
+        order = []
+        with patch.object(sys, 'argv', [hooks.__file__, 'codex']), \
+                patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                patch.object(hooks, 'capture', side_effect=lambda *a, **k: order.append('capture')), \
+                patch.object(autonomy, 'hook_output', side_effect=lambda *a, **k: order.append('rules') or '{}') as output, \
+                contextlib.redirect_stdout(io.StringIO()) as stdout:
+            hooks.main()
+        self.assertEqual(order, ['capture', 'rules'])
+        output.assert_called_once_with(payload, agent='codex')
+        self.assertEqual(stdout.getvalue(), '{}\n')
+        for raw in (json.dumps(payload), 'null', '[]', '{bad',
+                    json.dumps(dict(payload, session_id='../invalid'))):
+            with patch.object(sys, 'argv', [hooks.__file__, 'codex']), \
+                    patch.object(sys, 'stdin', io.StringIO(raw)), \
+                    patch.object(hooks, 'capture'), \
+                    patch.object(autonomy, 'hook_output', side_effect=RuntimeError('broken')), \
+                    contextlib.redirect_stdout(io.StringIO()) as stdout:
+                hooks.main()
+            self.assertEqual(stdout.getvalue(), '')
+        with patch.object(sys, 'argv', [hooks.__file__, 'codex']), \
+                patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                patch.object(hooks, 'capture', side_effect=RuntimeError('broken')), \
+                patch.object(autonomy, 'hook_output') as output, \
+                contextlib.redirect_stdout(io.StringIO()) as stdout:
+            hooks.main()
+        self.assertEqual(stdout.getvalue(), '')
+        output.assert_not_called()
 
 
 if __name__ == '__main__':

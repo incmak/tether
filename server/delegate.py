@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import codex_provider
 import helper_tabs
+import model_catalog
 import paths
 import review_links
 from terminal_input import PROFILE_NAME, UUID, new_window_after
@@ -32,7 +33,9 @@ def task_models(home=None):
                                        key=lambda row: row.get('priority', 0))]
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
-    return {'claude': [{'id': model, 'label': label} for model, label in CLAUDE_MODELS], 'codex': codex}
+    claude = [{'id': model, 'label': label} for model, label in CLAUDE_MODELS[:4]]
+    claude += [{'id': row['slug'], 'label': row['name']} for row in model_catalog.claude()['models']]
+    return {'claude': claude, 'codex': codex}
 
 
 def normalize_review(value):
@@ -59,7 +62,10 @@ def validate(body, entries, models=None):
     model = body.get('model')
     if model is not None:
         models = task_models() if models is None else models
-        if not isinstance(model, str) or model not in [row['id'] for row in models.get(body['agent'], [])]:
+        allowed = [row['id'] for row in models.get(body['agent'], [])]
+        if body['agent'] == 'claude':
+            allowed += [slug for slug, _ in CLAUDE_MODELS]
+        if not isinstance(model, str) or model not in allowed:
             raise ValueError('Choose a model from the list.')
     efforts = (*EFFORTS, 'ultra') if body['agent'] == 'codex' else EFFORTS
     if body.get('effort') is not None and body['effort'] not in efforts:

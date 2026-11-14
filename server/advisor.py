@@ -1,4 +1,5 @@
 """User-selected advisor and provider-owned latest model choices."""
+import copy
 import json
 import os
 import threading
@@ -6,8 +7,11 @@ import threading
 import codex_level
 import delegate
 import paths
+import model_catalog
 
-DEFAULT = {'agent': 'claude', 'model': 'latest', 'effort': 'high', 'second': True}
+OFF = {'agent': 'none', 'model': 'latest', 'effort': 'auto'}
+DEFAULT = {'version': 2, 'main': {'agent': 'claude', 'model': 'latest', 'effort': 'high'},
+           'second': {'agent': 'codex', 'model': 'latest', 'effort': 'high'}}
 
 
 class LevelError(Exception):
@@ -38,11 +42,12 @@ def valid_choice(agent, model, effort):
     if not isinstance(model, str) or not codex_level.SLUG.fullmatch(model) or not isinstance(effort, str):
         return False
     if agent == 'claude':
-        return (model in ('latest', *(slug for slug, _ in delegate.CLAUDE_MODELS))
+        return (model in ('latest', *(row['slug'] for row in model_catalog.claude()['models']),
+                         *(slug for slug, _ in delegate.CLAUDE_MODELS))
                 and effort in ('auto', *delegate.EFFORTS))
     if agent != 'codex':
         return False
-    models = codex_level.models()
+    models = model_catalog.codex()['models']
     chosen = models[0] if models and model == 'latest' else next(
         (row for row in models if row['slug'] == model), None)
     if models and chosen is None:
@@ -51,23 +56,40 @@ def valid_choice(agent, model, effort):
     return effort == 'auto' or effort in efforts
 
 
-def _valid(settings):
-    if not isinstance(settings, dict) or set(settings) != set(DEFAULT) or not isinstance(settings['second'], bool):
+def _valid_choice(choice):
+    if not isinstance(choice, dict) or set(choice) != set(OFF):
         return False
-    if settings['agent'] == 'none':
-        return settings == {'agent': 'none', 'model': 'latest', 'effort': 'auto', 'second': False}
-    return valid_choice(settings['agent'], settings['model'], settings['effort'])
+    if choice['agent'] == 'none':
+        return choice == OFF
+    return valid_choice(choice['agent'], choice['model'], choice['effort'])
+
+
+def _valid(settings):
+    return (isinstance(settings, dict) and set(settings) == set(DEFAULT)
+            and type(settings['version']) is int and settings['version'] == 2
+            and _valid_choice(settings['main']) and _valid_choice(settings['second'])
+            and (settings['main']['agent'] != 'none' or settings['second']['agent'] == 'none'))
 
 
 def read():
     try:
         settings = json.loads(path().read_text(encoding='utf-8', errors='replace'))
     except (OSError, ValueError):
-        return dict(DEFAULT)
-    return settings if _valid(settings) else dict(DEFAULT)
+        return copy.deepcopy(DEFAULT)
+    if (isinstance(settings, dict) and set(settings) == {'agent', 'model', 'effort', 'second'}
+            and isinstance(settings['second'], bool)):
+        main = {key: settings[key] for key in OFF}
+        other = 'codex' if main['agent'] == 'claude' else 'claude'
+        second = ({'agent': other, 'model': 'latest', 'effort': 'high'}
+                  if settings['second'] and main['agent'] != 'none' else dict(OFF))
+        settings = {'version': 2, 'main': main, 'second': second}
+    return settings if _valid(settings) else copy.deepcopy(DEFAULT)
 
 
 def write(settings):
+    # HTTP clients do not need to send the on-disk format version.
+    if isinstance(settings, dict) and set(settings) == {'main', 'second'}:
+        settings = dict(settings, version=2)
     if not _valid(settings):
         raise LevelError(400, 'Choose an advisor, a model and an effort.')
     _write(path(), json.dumps(settings) + '\n')
@@ -76,19 +98,17 @@ def write(settings):
 def resolve(agent, model):
     if model != 'latest':
         return model
-    if agent == 'claude':
-        return 'fable'
-    models = codex_level.models()
-    return models[0]['slug'] if models else None
+    latest = (model_catalog.claude() if agent == 'claude' else model_catalog.codex())['latest']
+    return latest['launch'] if latest else None
 
 
 def second_opinion(settings):
-    if not settings['second'] or settings['agent'] == 'none':
+    if settings['main']['agent'] == 'none' or settings['second']['agent'] == 'none':
         return None
-    other = 'codex' if settings['agent'] == 'claude' else 'claude'
-    return {'agent': other, 'model': resolve(other, 'latest'), 'effort': 'high'}
+    second = settings['second']
+    return dict(second, model=resolve(second['agent'], second['model']))
 
 
 def latest_names():
-    models = codex_level.models()
-    return {'claude': 'Latest Fable', 'codex': models[0]['name'] if models else None}
+    return {agent: value['latest']['name'] if value['latest'] else None
+            for agent, value in model_catalog.catalog().items()}

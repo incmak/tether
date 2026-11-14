@@ -8,7 +8,8 @@ import { SCHEMES, schemeById } from './schemes'
 import { canSpeak } from './speech'
 import { playChime, prepareChime } from './sound'
 import { GlobalCodexLevel } from './CodexLevel'
-import { AdvisorSettings, GlobalAutonomy, ReviewerSettings } from './Autonomy'
+import { GlobalAutonomy } from './Autonomy'
+import { HelperSettings } from './Helpers'
 import { AutonomySetup } from './AutonomySetup'
 import { AgentBrowserSettings } from './AgentBrowser'
 import { Choice, Notifications, SessionSettings, SystemSettings } from './SettingsControls'
@@ -63,8 +64,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('main-model', 'agents', 'Main AI model', 'main model ai claude codex haiku local suggest groups helper', <Field scope="All devices"><Choice legend="Main AI model" name="main-model" value={prefs.mainModel} options={[["auto", "Automatic"], ["claude", "Claude"], ["codex", "Codex"], ["none", "Local only"]]} onChange={mainModel => update(() => ({ mainModel }))} /><p className="setting-note">{prefs.mainModel === 'auto' ? 'Suggest groups uses the first installed agent: Claude, then Codex. It sends session, folder and tab names to that agent. With no agent, it uses the local model.' : prefs.mainModel === 'claude' ? 'Suggest groups uses Claude Haiku. It sends session, folder and tab names to Claude.' : prefs.mainModel === 'codex' ? 'Suggest groups uses Codex at low effort. It sends session, folder and tab names to Codex.' : 'Suggest groups uses the local model on this server, then folders.'}</p></Field>),
     item('autonomy-setup', 'agents', 'Setup', 'setup install hook teams briskbot urgent ping notification approve', <Field scope="This server"><AutonomySetup api={api} /></Field>),
     item('autonomy', 'agents', 'Autonomy level', 'automation autopilot full auto ask questions check-in guided trusted level urgent', <Field scope="This server"><GlobalAutonomy api={api} /></Field>),
-    item('advisor', 'agents', 'Advisor', 'advisor consult second opinion never guess decide fable codex latest model', <Field scope="This server"><AdvisorSettings api={api} /></Field>),
-    item('reviewers', 'agents', 'Reviewers', 'review reviewer critical normal light model effort claude codex fable opus', <Field scope="This server"><ReviewerSettings api={api} /></Field>),
+    item('advisor', 'agents', 'Advisor and reviewers', 'advisor reviewers review reviewer second opinion consult never guess decide critical normal light latest model effort claude codex fable opus gpt', <Field scope="This server"><HelperSettings api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),
     item('system', 'system', 'Updates and resources', 'version release reload refresh cpu memory host processes btop monitor', <Field scope="This server"><SystemSettings api={api} onReload={onReload} /></Field>),

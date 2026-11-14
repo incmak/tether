@@ -172,7 +172,8 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
   }, [horizontal, move, finish, reset])
   return {
     ref,
-    onCancel: (event: React.SyntheticEvent) => { event.preventDefault(); close() },
+    // React passes cancel up its tree; stop it so Escape closes only the top dialog, not a dialog that holds it.
+    onCancel: (event: React.SyntheticEvent) => { event.preventDefault(); event.stopPropagation(); close() },
     // A tap on the dimmed backdrop lands on the dialog itself, outside its box.
     onClick: (event: React.MouseEvent<HTMLDialogElement>) => {
       const box = event.currentTarget.getBoundingClientRect()

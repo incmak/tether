@@ -25,6 +25,7 @@ import approval  # noqa: E402
 import autonomy_setup  # noqa: E402
 import decisions  # noqa: E402
 import delegate  # noqa: E402
+import model_catalog  # noqa: E402
 import paths  # noqa: E402
 from codex_level import hook_project  # noqa: E402
 from advisor import LevelError  # noqa: E402
@@ -154,7 +155,24 @@ def resolve(pid=None):
     return {'level': base, 'source': 'global', 'global': base, 'project': project}
 
 
-def rules(resolved, pid=None):
+def advisor_label(choice):
+    provider = (model_catalog.claude() if choice['agent'] == 'claude' else model_catalog.codex())
+    if choice['model'] == 'latest':
+        latest = provider['latest']
+        label = (latest['name'] if latest else 'default model') + ' (latest)'
+    else:
+        names = {row['slug']: row['name'] for row in provider['models']}
+        if choice['agent'] == 'claude':
+            names.update({slug: name for slug, name in delegate.CLAUDE_MODELS if slug not in names})
+            names.update({family: row['name'] for family in model_catalog.FAMILIES
+                          for row in provider['models'] if row['slug'].startswith(f'claude-{family}-')})
+        label = names.get(choice['model'], choice['model'])
+    return f'{choice["agent"].title()}, {label}, {choice["effort"]} effort'
+
+
+def rules(resolved, pid=None, agent='claude'):
+    # All rule strings use shared CLI helpers and plain questions. Neither provider
+    # needs Claude-only tools, subagents, or hook instructions to follow them.
     level = resolved['level']
     where = 'for this project' if resolved['source'] == 'project' else 'for all projects'
     head = f'Autonomy level {level} of {len(LEVELS) - 1} ({LEVELS[level][0]}), set by the user {where}.'
@@ -162,19 +180,18 @@ def rules(resolved, pid=None):
     if level >= 3:
         lines.append(EVIDENCE)
         settings = advisor.read()
-        if settings['agent'] == 'none':
+        if settings['main']['agent'] == 'none':
             lines.append(NO_ADVISOR)
         else:
-            model = advisor.resolve(settings['agent'], settings['model'])
-            label = 'latest Fable' if settings['agent'] == 'claude' and settings['model'] == 'latest' else model or 'default model'
-            who = f'{settings["agent"].title()}, {label}, {settings["effort"]} effort'
+            who = advisor_label(settings['main'])
             second = advisor.second_opinion(settings)
             instruction = ADVISOR
             if second:
-                second_label = f'{second["agent"].title()}, {second["model"] or "default model"}'
+                second_label = advisor_label(settings['second'])
             else:
                 second_label = 'off'
-                instruction = instruction.replace('; a second advisor ({second}) then answers too.', '.')
+                instruction = instruction.replace('; a second advisor ({second}) then answers too.',
+                                                  '; a second advisor is off.')
             lines.append(instruction.format(who=who, second=second_label, cli=HERE / 'agent_advisor_cli.py'))
         lines.append(ASK_USER)
     if level >= 4:
@@ -215,11 +232,12 @@ def _valid_reviewers(reviewers):
             return False
         if agent == 'auto' and model != 'auto':
             return False
-        if agent == 'claude' and model not in ('auto', 'latest', *CLAUDE_REVIEW_MODELS):
+        if agent == 'claude' and model not in ('auto', 'latest', *CLAUDE_REVIEW_MODELS,
+                                                     *(row['slug'] for row in model_catalog.claude()['models'])):
             return False
         if agent == 'codex':
             if available is None:
-                available = codex_level.models()
+                available = model_catalog.codex()['models']
             chosen = available[0] if available and model in ('auto', 'latest') else next(
                 (row for row in available if row['slug'] == model), None)
             if available and chosen is None:
@@ -277,14 +295,14 @@ def reviewer_rules(reviewers):
 
 # ---- the hook ----
 
-def hook_output(data, env=os.environ, tmux=codex_level._tmux):
+def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude'):
     """The hook's stdout for one UserPromptSubmit input, as a JSON string."""
     cwd = data.get('cwd') if isinstance(data, dict) else None
     try:
         pid = hook_project(cwd, env, tmux)
     except (OSError, subprocess.SubprocessError):
         pid = None
-    text = rules(resolve(pid), pid) + '\n\n' + reviewer_rules(read_reviewers())
+    text = rules(resolve(pid), pid, agent=agent) + '\n\n' + reviewer_rules(read_reviewers())
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': text}})
 
 
@@ -310,12 +328,15 @@ def handles(path):
 
 def state(pid=None):
     resolved = resolve(pid)
-    models = [{'slug': row['slug'], 'name': row['name'], 'efforts': list(row['efforts'])}
-              for row in codex_level.models()]
+    catalog = model_catalog.catalog()
+    settings = advisor.read()
+    models = catalog['codex']['models']
     result = {'levels': [{'level': index, 'name': name, 'summary': summary} for index, (name, summary) in enumerate(LEVELS)],
             'global': resolved['global'], 'level': resolved['level'], 'source': resolved['source'],
             'project': resolved['project'], 'reviewers': read_reviewers(), 'tiers': list(TIERS),
-            'advisor': advisor.read(), 'latest': advisor.latest_names(),
+            'advisor': {key: settings[key] for key in ('main', 'second')}, 'catalog': catalog,
+            'latest': {agent: value['latest']['name'] if value['latest'] else None
+                       for agent, value in catalog.items()},
             'models': {'claude': [{'slug': slug, 'name': name} for slug, name in delegate.CLAUDE_MODELS], 'codex': models}, 'efforts': list(EFFORTS)}
     if pid is not None:
         result['decisions'] = decisions.entries(pid)

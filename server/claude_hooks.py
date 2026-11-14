@@ -452,7 +452,7 @@ def overlay(config, result, now=None, screen_read_at=None):
         return result
 
 
-if __name__ == '__main__':
+def main():
     if sys.argv[1:] == ['install-codex']:
         added = install_codex()
         print('Added Codex hooks: ' + ', '.join(added) if added else 'Codex hooks already installed.')
@@ -462,9 +462,20 @@ if __name__ == '__main__':
         occurred = time.time()
         data = json.load(sys.stdin)
         capture(data, occurred, agent=agent)
+        if (agent == 'codex' and isinstance(data, dict) and valid_session(data.get('session_id'))
+                and data.get('hook_event_name') == 'UserPromptSubmit'):
+            here = str(Path(__file__).resolve().parent)
+            if here not in sys.path:
+                sys.path.insert(0, here)  # python -I omits the script's folder.
+            import autonomy
+            print(autonomy.hook_output(data, agent='codex'))
         if (agent == 'claude' and isinstance(data, dict) and valid_session(data.get('session_id'))
                 and data.get('hook_event_name') == 'SessionStart' and os.environ.get('TETHER_CDP_URL')):
             from agent_browser_cli import note
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': note()}}))
     except Exception:
         pass  # hook errors must never print context or fail Claude Code
+
+
+if __name__ == '__main__':
+    main()

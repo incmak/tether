@@ -1,5 +1,6 @@
 """Advisor settings and CLI contracts, with isolated files and mocked tmux/tab processes."""
 import contextlib
+import copy
 import io
 import json
 import os
@@ -16,13 +17,24 @@ import agent_advisor_cli as cli
 import autonomy
 import codex_level
 import delegate
+import model_catalog
 import paths
 
 PID = 'abcdef012345'
 MODELS = [{'slug': 'new-model', 'name': 'Newest Model', 'efforts': ['high', 'ultra']},
           {'slug': 'old-model', 'name': 'Older Model', 'efforts': ['low', 'medium', 'high']}]
 REPLY = 'ANSWER: Use the tested option.\nCONFIDENCE: high\nEVIDENCE: server/example.py\nNEEDS_USER: no'
-OFF = {'agent': 'none', 'model': 'latest', 'effort': 'auto', 'second': False}
+OFF = {'version': 2, 'main': dict(advisor.OFF), 'second': dict(advisor.OFF)}
+
+
+def choices(second=None, **changes):
+    value = copy.deepcopy(advisor.DEFAULT)
+    value['main'].update(changes)
+    if changes.get('agent') == 'codex':
+        value['second'] = {'agent': 'claude', 'model': 'latest', 'effort': 'high'}
+    if second is not None:
+        value['second'] = dict(advisor.OFF) if second is False else second
+    return value
 
 
 class Base(unittest.TestCase):
@@ -32,6 +44,7 @@ class Base(unittest.TestCase):
         self.root = Path(temp.name)
         for name in ('CONFIG', 'CACHE', 'TETHER', 'CODEX', 'CLAUDE', 'HOME'):
             self.enterContext(patch.object(paths, name, self.root / name.lower()))
+        self.enterContext(patch.object(model_catalog.shutil, 'which', return_value=None))
         self.models = self.enterContext(patch.object(codex_level, 'models', return_value=MODELS))
 
     def write(self, path, text):
@@ -43,19 +56,62 @@ class Settings(Base):
     def test_missing_or_invalid_file_defaults_and_reads_are_independent(self):
         self.assertEqual(advisor.path(), paths.CONFIG / 'advisor.json')
         self.assertEqual(advisor.read(), advisor.DEFAULT)
-        for raw in ('not json', 'null', '[]', '{}', json.dumps(dict(advisor.DEFAULT, effort='ultra'))):
+        for raw in ('not json', 'null', '[]', '{}', json.dumps(choices(effort='ultra'))):
             self.write(advisor.path(), raw)
             self.assertEqual(advisor.read(), advisor.DEFAULT)
         value = advisor.read()
-        value['agent'] = 'none'
+        value['main']['agent'] = 'none'
         self.assertEqual(advisor.read(), advisor.DEFAULT)
+
+    def test_v1_migration_true_false_and_disabled_main(self):
+        for agent, model, effort, second in (
+                ('claude', 'opus', 'medium', True), ('claude', 'claude-fable-5-2', 'high', False),
+                ('codex', 'old-model', 'low', True), ('none', 'latest', 'auto', False),
+                ('none', 'latest', 'auto', True)):
+            old = {'agent': agent, 'model': model, 'effort': effort, 'second': second}
+            raw = json.dumps(old)
+            self.write(advisor.path(), raw)
+            expected_second = ({'agent': 'codex' if agent == 'claude' else 'claude',
+                                'model': 'latest', 'effort': 'high'}
+                               if second and agent != 'none' else dict(advisor.OFF))
+            self.assertEqual(advisor.read(), {'version': 2, 'main': {key: old[key] for key in advisor.OFF},
+                                              'second': expected_second})
+            self.assertEqual(advisor.path().read_text(), raw)  # Migration on read has no config writes.
+        self.write(advisor.path(), json.dumps({'agent': 'bad', 'model': 'latest', 'effort': 'high', 'second': True}))
+        self.assertEqual(advisor.read(), advisor.DEFAULT)
+
+    def test_v2_configurable_second_and_main_off_constraint(self):
+        value = choices(second={'agent': 'claude', 'model': 'opus', 'effort': 'medium'})
+        advisor.write({key: value[key] for key in ('main', 'second')})
+        self.assertEqual(json.loads(advisor.path().read_text()), value)
+        self.assertEqual(advisor.second_opinion(value), value['second'])
+        for bad in (dict(value, main=dict(advisor.OFF)), dict(value, second=True),
+                    dict(value, second={'agent': 'codex', 'model': 'old-model', 'effort': 'ultra'}),
+                    dict(value, version=True), dict(value, version=3), dict(value, extra=True)):
+            with self.subTest(bad=bad), self.assertRaises(advisor.LevelError):
+                advisor.write(bad)
+        self.assertEqual(advisor.read(), value)
+        self.assertIsNone(advisor.second_opinion(dict(value, main=dict(advisor.OFF))))
+
+    def test_catalog_models_validate_and_latest_resolves_to_family_alias(self):
+        provider = {'latest': {'launch': 'opus', 'slug': 'claude-opus-6-1', 'name': 'Opus 6.1'},
+                    'models': [{'slug': 'claude-opus-6-1', 'name': 'Opus 6.1', 'efforts': list(delegate.EFFORTS)}]}
+        with patch.object(model_catalog, 'claude', return_value=provider):
+            advisor.write(choices(model='claude-opus-6-1'))
+            self.assertEqual(advisor.read()['main']['model'], 'claude-opus-6-1')
+            self.assertEqual(advisor.resolve('claude', 'latest'), 'opus')
+            text = autonomy.rules({'level': 5, 'source': 'global'})
+            self.assertIn('Claude, Opus 6.1, high effort', text)
+            advisor.write(choices())
+            self.assertIn('Claude, Opus 6.1 (latest), high effort',
+                          autonomy.rules({'level': 5, 'source': 'global'}))
 
     def test_claude_choices_round_trip_with_private_permissions(self):
         old_umask = os.umask(0)
         self.addCleanup(os.umask, old_umask)
         for model in ('latest', *(slug for slug, _ in delegate.CLAUDE_MODELS)):
             for effort in ('auto', *delegate.EFFORTS):
-                value = dict(advisor.DEFAULT, model=model, effort=effort)
+                value = choices(model=model, effort=effort)
                 advisor.write(value)
                 self.assertEqual(advisor.read(), value)
                 self.assertEqual(advisor.path().stat().st_mode & 0o777, 0o600)
@@ -66,37 +122,37 @@ class Settings(Base):
                               ('new-model', ['auto', 'high', 'ultra']),
                               ('old-model', ['auto', 'low', 'medium', 'high'])):
             for effort in efforts:
-                value = dict(advisor.DEFAULT, agent='codex', model=model, effort=effort)
+                value = choices(agent='codex', model=model, effort=effort)
                 advisor.write(value)
                 self.assertEqual(advisor.read(), value)
         for model, effort in (('old-model', 'ultra'), ('latest', 'medium'), ('new-model', 'low'), ('unknown', 'auto')):
             with self.subTest(model=model, effort=effort), self.assertRaises(advisor.LevelError):
-                advisor.write(dict(advisor.DEFAULT, agent='codex', model=model, effort=effort))
+                advisor.write(choices(agent='codex', model=model, effort=effort))
 
     def test_codex_without_cache_accepts_slugs_with_auto_effort(self):
         self.models.return_value = []
         for model in ('latest', 'future-model.v2'):
-            advisor.write(dict(advisor.DEFAULT, agent='codex', model=model, effort='auto'))
-            self.assertEqual(advisor.read()['model'], model)
+            advisor.write(choices(agent='codex', model=model, effort='auto'))
+            self.assertEqual(advisor.read()['main']['model'], model)
         with self.assertRaises(advisor.LevelError):
-            advisor.write(dict(advisor.DEFAULT, agent='codex', effort='ultra'))
+            advisor.write(choices(agent='codex', effort='ultra'))
         with self.assertRaises(advisor.LevelError):
-            advisor.write(dict(advisor.DEFAULT, agent='codex', model='bad;command'))
+            advisor.write(choices(agent='codex', model='bad;command'))
 
     def test_none_has_only_the_disabled_shape(self):
         advisor.write(OFF)
         self.assertEqual(advisor.read(), OFF)
-        for change in ({'model': 'opus'}, {'effort': 'high'}, {'second': True}):
+        for change in ({'model': 'opus'}, {'effort': 'high'}, {'extra': True}):
             with self.assertRaises(advisor.LevelError):
-                advisor.write(dict(OFF, **change))
+                advisor.write(dict(OFF, main=dict(OFF['main'], **change)))
 
     def test_bad_input_preserves_settings_and_uses_shared_error(self):
         advisor.write(advisor.DEFAULT)
-        bad = [None, [], {}, dict(advisor.DEFAULT, extra=True)]
-        bad += [dict(advisor.DEFAULT, **change) for change in (
+        bad = [None, [], {}, choices(extra=True)]
+        bad += [choices(**change) for change in (
             {'agent': []}, {'agent': 'auto'}, {'agent': True}, {'model': []}, {'model': None},
             {'model': 'new-model'}, {'effort': []}, {'effort': 'ultra'}, {'effort': 'auto '},
-            {'second': 1}, {'second': 'yes'})]
+            {'extra': 1}, {'extra': 'yes'})]
         for value in bad:
             with self.subTest(value=value), self.assertRaises(autonomy.LevelError) as caught:
                 advisor.write(value)
@@ -109,19 +165,19 @@ class Settings(Base):
         self.assertEqual(advisor.resolve('codex', 'latest'), 'new-model')
         self.assertEqual(advisor.resolve('claude', 'opus'), 'opus')
         self.assertEqual(advisor.resolve('codex', 'old-model'), 'old-model')
-        self.assertEqual(advisor.latest_names(), {'claude': 'Latest Fable', 'codex': 'Newest Model'})
+        self.assertEqual(advisor.latest_names(), {'claude': 'Fable 5.2', 'codex': 'Newest Model'})
         self.models.return_value = list(reversed(MODELS))
         self.assertEqual(advisor.resolve('codex', 'latest'), 'old-model')
         self.models.return_value = []
         self.assertIsNone(advisor.resolve('codex', 'latest'))
-        self.assertEqual(advisor.latest_names(), {'claude': 'Latest Fable', 'codex': None})
+        self.assertEqual(advisor.latest_names(), {'claude': 'Fable 5.2', 'codex': None})
 
     def test_second_uses_other_agent_latest_and_high_effort(self):
         self.assertEqual(advisor.second_opinion(advisor.DEFAULT),
                          {'agent': 'codex', 'model': 'new-model', 'effort': 'high'})
-        self.assertEqual(advisor.second_opinion(dict(advisor.DEFAULT, agent='codex')),
+        self.assertEqual(advisor.second_opinion(choices(agent='codex')),
                          {'agent': 'claude', 'model': 'fable', 'effort': 'high'})
-        self.assertIsNone(advisor.second_opinion(dict(advisor.DEFAULT, second=False)))
+        self.assertIsNone(advisor.second_opinion(choices(second=False)))
         self.assertIsNone(advisor.second_opinion(OFF))
         self.models.return_value = []
         self.assertIsNone(advisor.second_opinion(advisor.DEFAULT)['model'])
@@ -145,8 +201,8 @@ class Rules(Base):
                 needles.append(autonomy.LAST)
                 positions = [text.index(needle) for needle in needles]
                 self.assertEqual(positions, sorted(positions))
-                self.assertIn('Claude, latest Fable, high effort', text)
-                self.assertIn('second advisor (Codex, new-model)', text)
+                self.assertIn('Claude, Fable 5.2 (latest), high effort', text)
+                self.assertIn('second advisor (Codex, Newest Model (latest), high effort)', text)
                 self.assertIn(f'python3 {cli.__file__} ask "QUESTION"', text)
 
     def test_none_adds_no_advisor_and_keeps_evidence_product_and_user_rules(self):
@@ -160,11 +216,11 @@ class Rules(Base):
             self.assertEqual(autonomy.PRODUCT in text, level >= 4)
 
     def test_resolved_codex_model_and_second_off_instruction(self):
-        advisor.write(dict(advisor.DEFAULT, agent='codex', effort='ultra', second=False))
+        advisor.write(choices(agent='codex', effort='ultra', second=False))
         text = autonomy.rules({'level': 3, 'source': 'global'})
-        self.assertIn('Codex, new-model, ultra effort', text)
-        self.assertNotIn('a second advisor', text)
-        self.assertIn('Add --critical for security, data, money, release or architecture decisions.', text)
+        self.assertIn('Codex, Newest Model (latest), ultra effort', text)
+        self.assertIn('a second advisor is off', text)
+        self.assertIn('Add --critical for security, data, money, release or architecture decisions;', text)
 
 
 class Cli(Base):
@@ -255,14 +311,14 @@ class Cli(Base):
         self.live = True
         for change in ({'model': 'opus'}, {'effort': 'medium'}, {'agent': 'codex', 'model': 'latest', 'effort': 'high'}):
             settings = advisor.read()
-            advisor.write(dict(settings, **change))
+            advisor.write(dict(settings, main=dict(settings['main'], **change)))
             self.calls.clear()
             code, _ = self.invoke()
             self.assertEqual(code, 0)
             self.assertEqual(self.tab_calls()[0][0][2], 'start')
 
     def test_latest_model_refresh_restarts_codex_advisor(self):
-        advisor.write(dict(advisor.DEFAULT, agent='codex'))
+        advisor.write(choices(agent='codex'))
         first = self.invoke()[1]['advisors'][0]
         self.models.return_value = list(reversed(MODELS))
         second = self.invoke()[1]['advisors'][0]
@@ -283,8 +339,17 @@ class Cli(Base):
         self.invoke(['ask', '--critical', 'Next design?'])
         self.assertEqual([command[2] for command, _ in self.tab_calls()], ['send', 'send', 'wait', 'wait'])
 
+    def test_critical_uses_configured_second_model_and_effort(self):
+        advisor.write(choices(second={'agent': 'claude', 'model': 'opus', 'effort': 'medium'}))
+        code, result = self.invoke(['ask', '--critical', 'Which design?'])
+        self.assertEqual(code, 0)
+        second = result['advisors'][1]
+        self.assertEqual((second['agent'], second['model']), ('claude', 'opus'))
+        command = self.tab_calls()[1][0]
+        self.assertEqual(command[command.index('--effort') + 1], 'medium')
+
     def test_critical_second_off_is_harmless(self):
-        advisor.write(dict(advisor.DEFAULT, second=False))
+        advisor.write(choices(second=False))
         code, result = self.invoke(['ask', '--critical', 'Which design?'])
         self.assertEqual(code, 0)
         self.assertEqual(len(result['advisors']), 1)
@@ -392,7 +457,7 @@ class Cli(Base):
 
     def test_codex_without_models_and_auto_effort_omits_options(self):
         self.models.return_value = []
-        advisor.write(dict(advisor.DEFAULT, agent='codex', effort='auto'))
+        advisor.write(choices(agent='codex', effort='auto'))
         self.assertEqual(self.invoke()[0], 0)
         command = self.tab_calls()[0][0]
         self.assertNotIn('--model', command)

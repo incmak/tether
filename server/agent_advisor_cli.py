@@ -119,8 +119,8 @@ def ask(settings, args, key, replies):
         state = {}
     if not isinstance(state, dict):
         state = {}
-    wanted = [('main', {'agent': settings['agent'], 'model': advisor.resolve(settings['agent'], settings['model']),
-                        'effort': settings['effort']})]
+    main = settings['main']
+    wanted = [('main', dict(main, model=advisor.resolve(main['agent'], main['model'])))]
     second = advisor.second_opinion(settings) if args.critical else None
     if second:
         wanted.append(('second', second))
@@ -187,9 +187,10 @@ def log(pid, question, result, settings):
         lines = []
     question = ' '.join(question.split())[:200]
     answer = ' '.join(result.get('answer', '').split())[:300]
-    model = advisor.resolve(settings['agent'], settings['model']) if settings['agent'] != 'none' else 'latest'
+    main = settings['main']
+    model = advisor.resolve(main['agent'], main['model']) if main['agent'] != 'none' else 'latest'
     lines.append(f'- {time.strftime("%Y-%m-%d %H:%M")} [{result["status"]}] Q: {question} -> A: {answer} '
-                 f'({settings["agent"]} {model or "default"})')
+                 f'({main["agent"]} {model or "default"})')
     advisor._write(path, '\n'.join(lines[-200:]) + '\n')
 
 
@@ -199,7 +200,7 @@ def main(argv=None):
         args = arguments(argv)
         settings = advisor.read()
         pane = os.environ.get('TMUX_PANE', '')
-        if settings['agent'] == 'none':
+        if settings['main']['agent'] == 'none':
             result = {'status': 'off'}
             if PANE.fullmatch(pane):
                 try:

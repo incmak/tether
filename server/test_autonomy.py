@@ -16,6 +16,7 @@ import approval
 import codex_level
 import decisions
 import paths
+import model_catalog
 import server
 from test_approval import HAS_CRYPTO, Handler as PasskeyHandler, PasskeyCase
 
@@ -43,10 +44,11 @@ class Base(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        for name in ('CONFIG', 'TETHER', 'CODEX', 'CLAUDE'):
+        for name in ('CONFIG', 'CACHE', 'TETHER', 'CODEX', 'CLAUDE'):
             patch = mock.patch.object(paths, name, self.root / name.lower())
             patch.start()
             self.addCleanup(patch.stop)
+        self.enterContext(mock.patch.object(model_catalog.shutil, 'which', return_value=None))
         models = mock.patch.object(codex_level, 'models', return_value=[])
         models.start()
         self.addCleanup(models.stop)
@@ -191,11 +193,11 @@ class Reviewers(Base):
     def test_codex_model_must_be_in_nonempty_cache(self):
         value = reviewers(critical={'agent': 'codex', 'model': 'listed'})
         autonomy.set_reviewers(value)  # no cache accepts any slug
-        with mock.patch.object(codex_level, 'models', return_value=[{'slug': 'listed'}]):
+        with mock.patch.object(codex_level, 'models', return_value=[{'slug': 'listed', 'name': 'Listed'}]):
             autonomy.set_reviewers(value)
             with self.assertRaises(autonomy.LevelError):
                 autonomy.set_reviewers(reviewers(critical={'agent': 'codex', 'model': 'unlisted'}))
-        with mock.patch.object(codex_level, 'models', return_value=[{'slug': 'different'}]):
+        with mock.patch.object(codex_level, 'models', return_value=[{'slug': 'different', 'name': 'Different'}]):
             self.assertEqual(autonomy.read_reviewers(), reviewers())
 
     def test_default_algorithm_and_override_lines(self):
@@ -230,6 +232,15 @@ class Reviewers(Base):
             self.assertIn('Critical reviewer: Claude, model fable.', text)
             self.assertIn('Normal reviewer: Codex, model new.', text)
 
+    def test_catalog_claude_slugs_and_existing_aliases_validate(self):
+        with mock.patch.object(model_catalog, 'claude', return_value={
+                'models': [{'slug': 'claude-opus-6-2'}], 'latest': {'launch': 'opus'}}):
+            for model in ('claude-opus-6-2', 'opus', 'latest'):
+                value = reviewers(normal={'agent': 'claude', 'model': model})
+                autonomy.set_reviewers(value)
+                self.assertEqual(autonomy.read_reviewers(), value)
+            self.assertIn('Normal reviewer: Claude, model opus.', autonomy.reviewer_rules(value))
+
     def test_override_omits_auto_parts(self):
         for choice, expected in (
                 ({'agent': 'claude'}, 'Claude'),
@@ -250,6 +261,33 @@ class Hook(Base):
         self.assertEqual(out, {'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext':
                          autonomy.rules(autonomy.resolve(PID), PID) + '\n\n' + autonomy.reviewer_rules(reviewers())}})
         tmux.assert_called_once_with('display-message', '-p', '-t', '%7', '#{@project}')
+
+    def test_codex_full_context_size_and_no_claude_only_features(self):
+        autonomy.set_global(5)
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        for index in range(3):
+            decisions.record(PID, f'Question {index}?', f'Answer {index}.')
+        models = [{'slug': 'gpt-new', 'name': 'GPT New', 'efforts': ['high', 'ultra']}]
+        with mock.patch.object(codex_level, 'models', return_value=models):
+            advisor.write(advisor.DEFAULT)
+            autonomy.set_reviewers(reviewers(**{tier: {'agent': 'codex', 'model': 'latest', 'effort': 'ultra'}
+                                                for tier in autonomy.TIERS}))
+            tmux = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=PID))
+            out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/fixture', 'TMUX_PANE': '%7'}, tmux, agent='codex'))
+        text = out['hookSpecificOutput']['additionalContext']
+        self.assertLess(len(text), 9000)
+        self.assertIn('Autonomy level 5', text)
+        self.assertIn('second advisor (Codex, GPT New (latest), high effort)', text)
+        self.assertIn('The user saved answers', text)
+        for tier in autonomy.TIERS:
+            self.assertIn(f'{tier.title()} reviewer: Codex, model gpt-new, effort ultra', text)
+        for word in ('AskUserQuestion', 'subagent', 'Claude Code', 'UserPromptSubmit', 'hooks'):
+            self.assertNotIn(word, text)
+        self.assertIn('agent_tab_cli.py', text)
+        for level in range(6):
+            text = autonomy.rules({'level': level, 'source': 'global'}, agent='codex')
+            for word in ('AskUserQuestion', 'subagent', 'Claude Code', 'hooks'):
+                self.assertNotIn(word, text)
 
     def test_tmux_failure_uses_global(self):
         for error in (OSError('missing tmux'), subprocess.TimeoutExpired('tmux', 2)):
@@ -403,8 +441,9 @@ class Http(Base):
         self.assertEqual((handler.body['global'], handler.body['level'], len(handler.body['levels'])), (2, 2, 6))
         self.assertEqual(handler.body['reviewers'], reviewers())
         self.assertEqual(handler.body['tiers'], ['critical', 'normal', 'light'])
-        self.assertEqual(handler.body['advisor'], advisor.DEFAULT)
-        self.assertEqual(handler.body['latest'], {'claude': 'Latest Fable', 'codex': None})
+        self.assertEqual(handler.body['advisor'], {key: advisor.DEFAULT[key] for key in ('main', 'second')})
+        self.assertEqual(handler.body['catalog']['claude']['latest']['name'], 'Fable 5.2')
+        self.assertEqual(handler.body['latest'], {'claude': 'Fable 5.2', 'codex': None})
         self.assertEqual(handler.body['efforts'], ['low', 'medium', 'high', 'xhigh', 'max'])
         self.assertEqual(handler.body['models'], {'claude': [{'slug': s, 'name': n} for s, n in autonomy.delegate.CLAUDE_MODELS], 'codex': []})
         handler = Handler(body={'level': 4})
@@ -431,18 +470,18 @@ class Http(Base):
                              [{'slug': 'gpt-test', 'name': 'Test', 'efforts': ['low', 'high', 'ultra']}])
 
     def test_advisor_post_round_trip_and_validation_without_passkey_gate(self):
-        value = dict(advisor.DEFAULT, model='opus', second=False)
+        value = {'main': dict(advisor.DEFAULT['main'], model='opus'), 'second': dict(advisor.OFF)}
         with mock.patch.object(approval, 'require') as require:
             handler = Handler(body={'advisor': value})
             autonomy.post(handler)
             self.assertEqual((handler.status, handler.body['advisor']), (200, value))
             self.assertEqual(handler.body['level'], 2)
             require.assert_not_called()
-        handler = Handler(body={'advisor': dict(value, effort='ultra')})
+        handler = Handler(body={'advisor': dict(value, main=dict(value['main'], effort='ultra'))})
         autonomy.post(handler)
         self.assertEqual((handler.status, handler.body),
                          (400, {'error': 'Choose an advisor, a model and an effort.'}))
-        self.assertEqual(advisor.read(), value)
+        self.assertEqual(advisor.read(), dict(value, version=2))
 
     def test_bad_requests(self):
         for body in ({'level': 9}, {'level': '2'}, {'level': True}, {'project': 'x', 'override': True, 'level': 1},
@@ -561,7 +600,7 @@ class LevelApproval(PasskeyCase):
         for payload in ({'project': PID, 'override': True, 'level': 2},
                         {'project': PID, 'override': True, 'level': 2},
                         {'project': PID, 'override': False, 'level': 5},
-                        {'reviewers': reviewers()}, {'advisor': dict(advisor.DEFAULT)}):
+                        {'reviewers': reviewers()}, {'advisor': {'main': dict(advisor.DEFAULT['main']), 'second': dict(advisor.OFF)}}):
             if payload.get('override') is False:
                 autonomy.set_global(1)
             handler = self.post(payload)

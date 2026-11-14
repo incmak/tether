@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 import delegate
 import paths
+import model_catalog
 import server
 
 THREAD = '0f8fad5b-d9cb-469f-a165-70867728950e'
@@ -137,6 +138,11 @@ class ValidationTests(unittest.TestCase):
 
 
 class TaskModelsTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(paths, 'CACHE', root))
+        self.enterContext(patch.object(model_catalog.shutil, 'which', return_value=None))
+
     def test_cache_filters_hidden_models_sorts_priority_and_falls_back_to_slug(self):
         with tempfile.TemporaryDirectory() as home, \
                 patch.object(delegate.codex_provider, 'chosen', return_value='plan'):
@@ -152,6 +158,17 @@ class TaskModelsTests(unittest.TestCase):
             self.assertEqual(delegate.task_models(home), expected)
             with patch.object(delegate.codex_provider, 'chosen', return_value='foundry'):
                 self.assertEqual(delegate.task_models(home), dict(expected, codex=[]))
+
+    def test_catalog_rows_replace_version_rows_and_validate_with_legacy_choices(self):
+        row = {'slug': 'claude-fable-6-1', 'name': 'Fable 6.1', 'efforts': list(delegate.EFFORTS)}
+        with patch.object(model_catalog, 'claude', return_value={'models': [row]}), \
+                patch.object(delegate.codex_provider, 'chosen', return_value='foundry'):
+            models = delegate.task_models()
+            self.assertEqual(models['claude'], [{'id': slug, 'label': name}
+                                                for slug, name in delegate.CLAUDE_MODELS[:4]] +
+                                               [{'id': row['slug'], 'label': row['name']}])
+            for model in (row['slug'], *(slug for slug, _ in delegate.CLAUDE_MODELS)):
+                delegate.validate(body(model=model), [entry()])
 
     def test_missing_or_invalid_cache_returns_no_codex_models(self):
         with tempfile.TemporaryDirectory() as home, \
