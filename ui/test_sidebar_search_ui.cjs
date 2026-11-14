@@ -7,7 +7,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-14/sidebar-search/shots')
-const ids = { tether: '$1', blender: '$2' }
+const ids = { tether: '$1', blender: '$2', notes: '$3' }
 const pane = (id, session, name, extra = {}) => ({ id, tmux_session: ids[session], label: `${session}:0.${id.slice(1)}`, ask: null, agent: 'claude', dir: `/srv/${session}`, state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, pane_name: name, ...extra })
 const fixture = {
   sessions: { default_thread: null, sessions: [
@@ -16,12 +16,13 @@ const fixture = {
     pane('%3', 'tether', 'Release notes'),
     pane('%4', 'blender', 'Render farm'),
     pane('%5', 'tether', 'Old notes', { group: 'g1' }),
-  ], groups: { $1: [{ id: 'g1', name: 'Audio stack', project: '' }] } },
+    pane('%6', 'notes', 'Draft ideas', { group: 'g2' }),
+  ], groups: { $1: [{ id: 'g1', name: 'Audio stack', project: '' }], $3: [{ id: 'g2', name: 'Thinking stack', project: '' }] } },
   footer: { observed: false, notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, 'codex-runs': { pane: '', running: 0, runs: [] },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, 'projects/backlog': { text: '', version: 'v1', limit: 50000 },
-  prefs: { prefs: { archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' } } }, version: 1 }, 'projects/marks': {}, 'side-shells': { shells: [] },
+  prefs: { prefs: { archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' }, '%6': { thread: 't6', dir: '/srv/notes' } } }, version: 1 }, 'projects/marks': {}, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
@@ -80,7 +81,7 @@ async function main() {
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
       // Release notes was the last-used tab, so a plain click on the session would open it.
-      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' } } })))
+      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' }, '%6': { thread: 't6', dir: '/srv/notes' } } })))
       await page.reload({ waitUntil: 'load' })
       root = page.locator(width < 800 ? 'dialog.drawer' : 'aside.sidebar')
       if (width < 800) await page.getByRole('button', { name: 'Open sessions' }).first().click()
@@ -96,6 +97,9 @@ async function main() {
       check(`${at} archived tab matches its stack`, JSON.stringify(await archivedNames()).includes('Old notes'), JSON.stringify(await archivedNames()))
       await search.fill('old notes')
       check(`${at} only the archived tab matches`, (await tabs()).length === 0 && (await archivedNames()).length === 1, JSON.stringify([await tabs(), await archivedNames()]))
+      await search.fill('thinking')
+      check(`${at} archived tab of a fully archived session matches its stack`, JSON.stringify(await archivedNames()).includes('Draft ideas'), JSON.stringify(await archivedNames()))
+      await search.fill('old notes')
       await search.press('ArrowDown')
       check(`${at} Down reaches an archived result`, await page.evaluate(() => document.activeElement?.classList.contains('archived-tab-open')))
       await search.focus()

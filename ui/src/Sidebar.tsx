@@ -238,6 +238,7 @@ interface Props {
   onActions: (session: Session, remove?: boolean, at?: Anchor) => void
   onPaneActions: (pane: Pane, at?: Anchor) => void
   archivedTabs: Pane[]
+  stacks?: Record<string, GroupInfo[]>  // each tmux session's stacks, also for a session whose tabs are all archived
   onRestoreTab: (pane: Pane) => void
   onPastChat: (chat: PastChat) => void
   onSettings: () => void
@@ -270,7 +271,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab }: Props) {
+export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -447,14 +448,14 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   // The search text is built once per data change; each keystroke only scans it.
   const groupNames = useMemo(() => new Map(prefs.groups.map(group => [group.id, group.name])), [prefs.groups])
   const [index, archivedIndex] = useMemo(() => {
-    const stacksOf = new Map(sessions.map(session => [session.id, new Map((session.groups ?? []).map(stack => [stack.id, stack.name]))]))
+    const stacksOf = new Map(Object.entries(stacks ?? {}).map(([id, list]) => [id, new Map(list.map(stack => [stack.id, stack.name]))]))
     const tabText = (pane: Pane) => searchText(paneTitle(pane), pane.tmux_pane_name, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)
     const sessionText = (id: string, name: string, dir: string) => searchText(name, dir, groupNames.get(prefs.groupOf[id] ?? ''))
     const live: SearchEntry[] = sessions.map(session => ({ id: session.id, text: sessionText(session.id, session.name, session.dir), tabs: session.panes.map(pane => ({ id: pane.id, text: tabText(pane) })) }))
     // An archived tab is its own entry: its session's text and its own.
     const hidden: SearchEntry[] = archivedTabs.map(pane => ({ id: pane.id, text: sessionText(pane.tmux_session, sessionName(pane), pane.dir), tabs: [{ id: pane.id, text: tabText(pane) }] }))
     return [live, hidden]
-  }, [sessions, archivedTabs, groupNames, prefs.groupOf])
+  }, [sessions, archivedTabs, stacks, groupNames, prefs.groupOf])
   const matches = useMemo(() => search ? matchSessions(index, searchWords(search)) : null, [index, search])
   const archivedMatches = useMemo(() => search ? matchSessions(archivedIndex, searchWords(search)) : null, [archivedIndex, search])
   const visible = sortSessions(sessions, prefs, selected).filter(session => !matches || matches.has(session.id))
