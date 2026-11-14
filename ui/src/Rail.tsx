@@ -1,5 +1,5 @@
 import { AudioLines, Folder, Home, Images, MessageCircle, SquareTerminal } from 'lucide-react'
-import { ASSISTANT } from './Live'
+import { ASSISTANT } from './assistant'
 import { keyLabel } from './keys'
 
 export type Screen = 'home' | 'chats' | 'files' | 'terminals' | 'share'

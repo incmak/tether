@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { LayoutDashboard, SquareSplitHorizontal, SquareSplitVertical, Terminal } from 'lucide-react'
 import { ApiError, canFork, errorText, request, requestIfChanged } from './api'
@@ -62,13 +62,12 @@ import { toggleTerminal, toggleVoice } from './keys'
 import { copyPaneName, nameKindOf } from './CopyNames'
 import { Rail } from './Rail'
 import type { Screen } from './Rail'
-import { Explorer } from './Explorer'
 import { mentionText } from './fileWrites'
 import type { FilesTarget } from './Explorer'
-import { ExplorerPhone } from './ExplorerPhone'
-import { Share } from './Share'
 import { PhoneTabs } from './PhoneTabs'
-import { ASSISTANT, Live } from './Live'
+import { ASSISTANT } from './assistant'
+import { Loading } from './Skeleton'
+import { Explorer, ExplorerPhone, Live, prefetchPanels, Share } from './lazyPanels'
 import { BrowserFloat } from './BrowserWindow'
 import { BrowserSheet, WATCH_EVENT, browserAsks, setPaneLabels, useAgentBrowser, watchTab } from './AgentBrowser'
 import { AgentBubble } from './AgentBubble'
@@ -79,6 +78,7 @@ import { WordsContext, wordsFor } from './words'
 import type { GroupHooks } from './Groups'
 import { groupOf, placesOf, stepPlace, tabFor } from './groups'
 import './App.css'
+import './screens.css'
 import './TitleBar.css'
 import { useWindowControls } from './titlebar'
 import { PanelHandles } from './PanelHandles'
@@ -254,6 +254,10 @@ function App() {
     setScreen(current => current === 'chats' || current === 'terminals' ? shown : current)
   }, [home, pane?.id])
   const screenKeys = useRef<{ files: boolean; home: boolean; choose: (next: Screen) => void; toggleSidebar: () => void } | null>(null)
+  // Once the first sessions list is in, fetch the Files and Share chunks in idle time (B26). Once per page load.
+  const loaded = !!data
+  const prefetched = useRef(false)
+  useEffect(() => { if (loaded && !prefetched.current) { prefetched.current = true; prefetchPanels(wide) } }, [loaded, wide])
   useEffect(() => { screenKeys.current = wide ? { files: files || share, home, choose: chooseScreen, toggleSidebar: () => setDesk({ sidebar: !desk.sidebar }) } : null })
   useEffect(() => {
     const open = (event: Event) => { const { path, select } = (event as CustomEvent<Partial<FilesTarget>>).detail ?? {}; if (!path) return; setFilesTarget({ path, select }); setScreen('files') }
@@ -860,20 +864,20 @@ function App() {
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
     {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
-    {files && <Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} />}
-    {share && <Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
+    {files && <Suspense fallback={<PanelLoading label="Files" />}><Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} /></Suspense>}
+    {share && <Suspense fallback={<PanelLoading label="Share" cover={!wide} />}><Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
       const before = prefs.drafts[pane.id]?.text ?? ''
       setDraft(pane.id, before + (before && !/\s$/.test(before) ? ' ' : '') + mentionText(paths))
       choosePhoneScreen('chats', setScreen)
-    } : undefined} />}
-    {phoneFiles && <ExplorerPhone api={api} target={filesTarget?.path ?? null} onTarget={() => setFilesTarget(null)} onPin={pinTarget} chatName={pane ? (pane.pane_name || owner?.name || pane.label) : undefined}
+    } : undefined} /></Suspense>}
+    {phoneFiles && <Suspense fallback={<PanelLoading label="Files" cover />}><ExplorerPhone api={api} target={filesTarget?.path ?? null} onTarget={() => setFilesTarget(null)} onPin={pinTarget} chatName={pane ? (pane.pane_name || owner?.name || pane.label) : undefined}
       onAddToChat={pane ? paths => {
         // "Add to chat": append @~/path to the open chat's unsent draft, then go back to the chat.
         const before = prefs.drafts[pane.id]?.text ?? ''
         setDraft(pane.id, before + (before && !/\s$/.test(before) ? ' ' : '') + mentionText(paths))
         choosePhoneScreen('chats', setScreen)
         setNotice(paths.length === 1 ? `Added ${paths[0]} to the message.` : `Added ${paths.length} paths to the message.`)
-      } : undefined} />}
+      } : undefined} /></Suspense>}
     {!home && prefs.agentBubble && sessions.some(item => item.panes.some(p => p.agent !== 'shell')) && <AgentBubble sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} onPage={() => setAgentsPage('list')} onHide={() => { update(() => ({ agentBubble: false })); setNotice('Agents bubble hidden. Turn it on in Settings › Chat.') }} />}
     {livePins.length > 0 && <SidePins api={api} pins={prefs.sidePins} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onPin={pinPane} onUnpin={unpinPane} onNote={notePin} onMove={movePin} onUpdate={() => void refresh()} />}
     {!wide && <PhoneTabs screen={home ? 'home' : screen} waiting={waitingCount} onScreen={next => choosePhoneScreen(next, setScreen)} setScreen={setScreen} terminals={!!pane} onLive={openLive}
@@ -885,7 +889,7 @@ function App() {
     {browserSheet && pane && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
-    {liveMode && <Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} />}
+    {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
       onSize={(key, size) => update(current => { const sizes = { ...current.panelSizes[lookId] }; if (size === null) delete sizes[key]; else sizes[key] = size; return { panelSizes: { ...current.panelSizes, [lookId]: sizes } } })}
@@ -924,3 +928,8 @@ function App() {
   </main></WordsContext.Provider>
 }
 export default App
+
+/** Holds a screen's place while its chunk loads (B26): same surface and position as the screen, with one Loading line. */
+function PanelLoading({ label, cover = false }: { label: string; cover?: boolean }) {
+  return <section className={cover ? 'lazy-panel cover' : 'lazy-panel'} aria-label={label}><Loading label={`Loading ${label}…`} /></section>
+}

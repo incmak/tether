@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { AudioLines, Folder, Globe, Home, Images, MessageCircle, SquareTerminal } from 'lucide-react'
-import { ASSISTANT } from './Live'
+import { ASSISTANT } from './assistant'
 import type { Screen } from './Rail'
 import { toggleButton } from './phoneScreen'
 import './ExplorerPhone.css'

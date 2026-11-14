@@ -139,6 +139,43 @@ class ChatUIGzipTests(unittest.TestCase):
             self.request(encoding='gzip')
             self.assertEqual(server.CHAT_UI_GZIP_CACHE, {})
 
+    def test_prebuilt_brotli_for_hashed_assets(self):
+        packed = b'brotli bytes from the build'
+        (self.root / 'assets/app-abc.js.br').write_bytes(packed)
+        for encoding, expected in (('gzip, deflate, br, zstd', 'br'), ('BR;q=0.5', 'br'), ('*', 'br'),
+                                   ('gzip', 'gzip'), ('br;q=0, gzip', 'gzip'), (None, None)):
+            with self.subTest(encoding=encoding):
+                status, headers, body = self.request(encoding=encoding)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers['Vary'], 'Accept-Encoding')
+                self.assertEqual(headers['Content-Type'], 'text/javascript; charset=utf-8')
+                self.assertEqual(headers['Cache-Control'], 'max-age=31536000, immutable')
+                self.assertEqual(headers.get('Content-Encoding'), expected)
+                if expected == 'br':
+                    self.assertEqual(body, packed)
+                elif expected == 'gzip':
+                    self.assertEqual(gzip.decompress(body), self.script)
+                else:
+                    self.assertEqual(body, self.script)
+
+    def test_brotli_only_for_assets_folder(self):
+        # index.html and other files outside assets/ are not hashed, so a .br beside them could be stale.
+        (self.root / 'index.html').write_bytes(self.index * 40)
+        (self.root / 'index.html.br').write_bytes(b'stale')
+        (self.root / 'example.js').write_bytes(self.script)
+        (self.root / 'example.js.br').write_bytes(b'stale')
+        (self.root / 'assets/icon.png.br').write_bytes(b'stale')
+        for path in ('/chat/', '/chat/example.js', '/chat/assets/icon.png'):
+            with self.subTest(path=path):
+                _, headers, body = self.request(path, 'br, gzip')
+                self.assertNotEqual(headers.get('Content-Encoding'), 'br')
+                self.assertNotEqual(body, b'stale')
+
+    def test_missing_brotli_file_falls_back_to_gzip(self):
+        _, headers, body = self.request(encoding='br, gzip')
+        self.assertEqual(headers['Content-Encoding'], 'gzip')
+        self.assertEqual(gzip.decompress(body), self.script)
+
     def test_path_traversal_stays_rejected(self):
         status, _, _ = self.request('/chat/%2e%2e/outside.js', 'gzip')
         self.assertEqual(status, 404)

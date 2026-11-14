@@ -15,12 +15,12 @@ import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
 import { reportVoice } from './voiceLog'
+import { ASSISTANT } from './assistant'
 import './Live.css'
 
 // Live mode: talk to the agents hands-free. The orb listens, the words go to the target pane,
 // and the reply comes back as one or two spoken sentences. Colors come from the Settings color scheme.
 
-export const ASSISTANT = 'Friday'
 /** The tmux session that holds the chats Friday creates, one tab each. */
 const FRIDAY_SESSION = 'Friday chats'
 

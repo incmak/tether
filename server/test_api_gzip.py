@@ -94,5 +94,11 @@ class APIGzipTests(unittest.TestCase):
                 self.assertEqual(server.accepts_gzip(header), expected)
 
 
+    def test_accepts_other_codings(self):
+        cases = [('br', True), ('gzip, deflate, br, zstd', True), ('br;q=0, gzip', False), ('gzip', False), ('*', True), ('xbr', False)]
+        for header, expected in cases:
+            with self.subTest(header=header):
+                self.assertEqual(server.accepts_gzip(header, 'br'), expected)
+
 if __name__ == '__main__':
     unittest.main()

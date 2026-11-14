@@ -1906,3 +1906,8 @@ button.live-chip:active { background: var(--line); }
 .reviewer-tier .project-size-row { margin: 8px 0; }
 .reviewer-tier .project-size-row label { width: 72px; flex: none; }
 .autonomy-level:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* B26: a lazy screen's place while its chunk loads. Same surface as the screen; phone screens cover the chat. */
+.lazy-panel { flex: 1; min-width: 0; min-height: 0; display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; background: var(--surface); color: var(--muted); }
+.lazy-panel.cover { position: absolute; inset: 0; z-index: 5; padding-top: calc(24px + env(safe-area-inset-top)); }
+.lazy-float { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60; margin: 0; padding: 8px 14px; border-radius: 999px; background: var(--surface); color: var(--text); box-shadow: 0 4px 16px rgb(0 0 0 / .18); }

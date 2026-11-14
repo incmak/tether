@@ -1,0 +1,22 @@
+/* Screen-level rules for Files and Share, and the desktop rail. They stay in the main stylesheet because Files and
+   Share load as separate chunks (B26): the rail shows on every desktop screen, and the screen switch must hide the
+   workspace before the chunk arrives. */
+
+/* Desktop rail (Rail.tsx). It shows only at desktop width with a fine pointer, so the phone never sees it. */
+.app-rail { flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 60px; padding: 12px 0; background: color-mix(in srgb, var(--sidebar) 82%, var(--line)); border-right: 1px solid var(--line); }
+.app-rail-mark { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 10px; border-radius: var(--radius); background: var(--text); color: var(--bg); }
+.app-rail-button { position: relative; display: grid; place-items: center; width: var(--control-lg); height: var(--control-lg); border-radius: var(--radius); color: var(--muted); }
+.app-rail-button[aria-current="page"] { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
+.app-rail-button:not([aria-current="page"]):hover { color: var(--text); }
+.app-rail-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The Files screen hides the workspace but keeps it mounted, so chats and terminals keep their state. */
+.app-shell.screen-files > :is(.sidebar, .workspace, .inbox, .chat) { display: none; }
+
+/* "Open in Files" at the top of the panel column's Files tab. */
+.files-panel-open { display: flex; align-items: center; gap: 6px; align-self: flex-start; min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 500; color: var(--text); }
+.files-panel-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The Share screen hides the workspace the same way. */
+.app-shell.screen-share > :is(.sidebar, .workspace, .inbox, .chat) { display: none; }
+.app-shell.phone-share .chat-panel { visibility: hidden; }

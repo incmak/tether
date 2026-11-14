@@ -1172,8 +1172,8 @@ GZIP_TYPES = {'application/json', 'application/manifest+json', 'image/svg+xml',
 GZIP_MIN = 1024
 
 
-def accepts_gzip(header):
-    """True when an Accept-Encoding header allows gzip, by name or through '*', with q > 0."""
+def accepts_gzip(header, coding='gzip'):
+    """True when an Accept-Encoding header allows `coding` (gzip by default), by name or through '*', with q > 0."""
     encodings = {}
     for token in (header or '').split(','):
         encoding, *parameters = token.split(';')
@@ -1186,7 +1186,7 @@ def accepts_gzip(header):
                 except ValueError:
                     quality = 0.0
         encodings[encoding.strip().lower()] = quality
-    return 0 < encodings.get('gzip', encodings.get('*', 0)) <= 1
+    return 0 < encodings.get(coding, encodings.get('*', 0)) <= 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1468,7 +1468,15 @@ class Handler(BaseHTTPRequestHandler):
         kind = CHAT_UI_TYPES.get(target.suffix, 'application/octet-stream')
         cache = 'max-age=31536000, immutable' if target.parent.name == 'assets' else 'no-cache'
         headers = {'Vary': 'Accept-Encoding'} if target.suffix in CHAT_UI_TEXT_TYPES else {}
-        if (target.suffix in CHAT_UI_TEXT_TYPES and accepts_gzip(self.headers.get('Accept-Encoding'))
+        accept = self.headers.get('Accept-Encoding')
+        brotli = target.with_name(target.name + '.br')
+        # B26: the build writes .br files next to hashed assets (vite.config.ts). Brotli is about 20% smaller than
+        # gzip for JS. Only hashed assets: the .br file is made from the same build, so it cannot go stale.
+        if (target.suffix in CHAT_UI_TEXT_TYPES and target.parent.name == 'assets' and brotli.is_file()
+                and accepts_gzip(accept, 'br')):
+            data = brotli.read_bytes()
+            headers['Content-Encoding'] = 'br'
+        elif (target.suffix in CHAT_UI_TEXT_TYPES and accepts_gzip(accept)
                 and target.stat().st_size >= GZIP_MIN):
             with CHAT_UI_GZIP_LOCK:
                 info = target.stat()
