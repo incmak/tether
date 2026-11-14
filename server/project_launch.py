@@ -332,6 +332,9 @@ def codex_writable(args, cwd=None):
         return False
     if _managed():
         return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
+    # resume and fork: a True here adds --add-dir, and a non-empty --add-dir makes the resume send the current
+    # permissions, so a saved session's own profile is not restored (tui/src/resume_permissions.rs:33,
+    # app_server_session.rs). The exit-1 check uses the startup config (tui/src/startup_orchestration.rs:863).
     for i, arg in enumerate(args):
         if arg in SUBCOMMANDS:
             # A subcommand's own sandbox flags replace the ones before it, --yolo included
