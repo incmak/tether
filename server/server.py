@@ -2629,6 +2629,7 @@ if __name__ == '__main__':
         'on_change': forget_sessions,
     }, daemon=True).start()
     threading.Thread(target=window_size.watch, daemon=True).start()
+    backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()
     start_office_origin(host)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

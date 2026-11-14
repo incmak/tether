@@ -8,6 +8,10 @@ export interface BackgroundItem {
   created: number
   width?: number
   height?: number
+  /** A 480 px WebP for the Settings grid. Photos saved without an image encoder have none. */
+  thumb?: string
+  /** A 32 px WebP data URI, painted until the photo has loaded. */
+  placeholder?: string
 }
 export type BackgroundSize = 'landscape' | 'square'
 export type BackgroundJob = { state: 'running' } | { state: 'done'; item: BackgroundItem } | { state: 'failed'; error: string }

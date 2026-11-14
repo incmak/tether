@@ -11,7 +11,7 @@ import type { Anchor } from './hooks'
 import { setPlace, setPlaceHandler } from './backNav'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
-import { applyPhoto } from './photoLook'
+import { applyPhoto, usePhotoStage } from './photoLook'
 import { applyScheme } from './schemes'
 import { DEFAULT_LOOK, PHOTO_URL, type Look, type PanelName, applyLayoutTheme, gridStyle, hasPanel as layoutHas, lookKey, lookLayout, themeMode, variantAttrs } from './layouts'
 import { StatusColumn, WaitingPanel } from './LayoutPanels'
@@ -794,7 +794,8 @@ function App() {
   const photo = glass && deviceLook.backdrop === 'photo' && deviceLook.photo && PHOTO_URL.test(deviceLook.photo.url) ? deviceLook.photo.url : undefined
   const fill = glass && typeof deviceLook.fill === 'number' ? Math.min(0.9, Math.max(0.3, deviceLook.fill)) : undefined
   const blur = glass && typeof deviceLook.blur === 'number' ? Math.min(40, Math.max(0, Math.round(deviceLook.blur))) : undefined
-  const glassVars = { ...tint ? { '--g-tint': tint } : {}, ...photo ? { '--g-photo': `url("${photo}")` } : {}, ...fill !== undefined ? { '--g-alpha': `${Math.round(fill * 100)}%` } : {}, ...blur !== undefined ? { '--g-blur': `${blur}px` } : {} }
+  const photoStage = usePhotoStage(api, photo ? deviceLook.photo : undefined, update)
+  const glassVars = { ...tint ? { '--g-tint': tint } : {}, ...photoStage, ...fill !== undefined ? { '--g-alpha': `${Math.round(fill * 100)}%` } : {}, ...blur !== undefined ? { '--g-blur': `${blur}px` } : {} }
   const shellStyle = Object.keys(glassVars).length ? { ...lookStyle, ...glassVars } as CSSProperties : lookStyle
   const backdrop = deviceLook.backdrop === 'photo' ? (photo ? 'photo' : 'ember') : ['graphite', 'dusk', 'colour'].includes(deviceLook.backdrop) ? deviceLook.backdrop : 'ember'
   const lookAttrs = {

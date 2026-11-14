@@ -42,7 +42,9 @@ class BackgroundTests(unittest.TestCase):
         for patcher in (mock.patch.object(backgrounds.paths, 'BACKGROUNDS', self.root / 'backgrounds'),
                         mock.patch.object(backgrounds.paths, 'CODEX', self.root / 'codex'),
                         mock.patch.dict(os.environ, {'CODEX_HOME': str(self.root / 'codex')}),
-                        mock.patch.object(backgrounds, '_jobs', {})):
+                        mock.patch.object(backgrounds, '_jobs', {}),
+                        # Header fixtures cannot be decoded; tests that shrink patch this themselves.
+                        mock.patch.object(backgrounds.image_shrink, 'shrink', return_value=None)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -96,6 +98,100 @@ class BackgroundTests(unittest.TestCase):
                     self.assertEqual((item['width'], item['height']), (1, 1))
         self.assertEqual(len(json.loads((backgrounds.paths.BACKGROUNDS / 'index.json').read_text())), 3)
         self.assertFalse((backgrounds.paths.BACKGROUNDS / 'index.tmp').exists())
+
+    def small(self):
+        return {'image': WEBP + b'page', 'thumb': WEBP + b'thumb', 'placeholder': 'data:image/webp;base64,UklGRg==',
+                'width': 2560, 'height': 1440}
+
+    def test_upload_saves_small_copies_when_an_encoder_works(self):
+        with mock.patch.object(backgrounds.image_shrink, 'shrink', return_value=self.small()) as shrink:
+            status, item = self.post('/upload', PNG, 'image/png')
+        self.assertEqual(status, 200)
+        shrink.assert_called_once_with(PNG)
+        ident = item['id']
+        self.assertEqual(item['url'], f'{backgrounds.PATH}/{ident}.webp')
+        self.assertEqual(item['thumb'], f'{backgrounds.PATH}/{ident}.thumb.webp')
+        self.assertEqual(item['placeholder'], 'data:image/webp;base64,UklGRg==')
+        self.assertEqual((item['width'], item['height']), (2560, 1440))
+        self.assertNotIn('original', item)
+        self.assertEqual(self.get(f'/{ident}.webp')[:3], (200, WEBP + b'page', 'image/webp'))
+        self.assertEqual(self.get(f'/{ident}.thumb.webp')[:3], (200, WEBP + b'thumb', 'image/webp'))
+        # A new upload keeps only the small copies.
+        self.assertEqual(sorted(path.name for path in backgrounds.paths.BACKGROUNDS.iterdir()),
+                         sorted(['index.json', f'{ident}.webp', f'{ident}.thumb.webp']))
+        self.assertEqual(self.post('/delete', {'id': ident}), (200, {'ok': True}))
+        self.assertEqual(sorted(path.name for path in backgrounds.paths.BACKGROUNDS.iterdir()), ['index.json'])
+
+    def test_thumb_names_are_strict(self):
+        item = backgrounds.save(PNG)
+        for path in (f'/{item["id"]}.thumb.thumb.webp', f'/{item["id"]}.thumbwebp', f'/{item["id"]}.small.thumb.webp', f'/{item["id"]}.small.webp'):
+            self.assertEqual(self.get(path)[0], 404)
+
+    def test_upgrade_adds_small_copies_and_keeps_the_original(self):
+        old = backgrounds.save(PNG)
+        big = WEBP + bytes(5000)
+        large = backgrounds.save(big, 'image/webp')
+        tiny = backgrounds.save(WEBP, 'image/webp')
+        with mock.patch.object(backgrounds.image_shrink, 'shrink', return_value=self.small()):
+            self.assertEqual(backgrounds.upgrade(), 3)
+            self.assertEqual(backgrounds.upgrade(), 0)
+        items = {item['id']: item for item in self.get()[1]['items']}
+        png = items[old['id']]
+        self.assertEqual(png['url'], f'{backgrounds.PATH}/{old["id"]}.webp')
+        self.assertEqual(png['original'], old['url'])
+        self.assertEqual(self.get('/' + old['url'].rsplit('/', 1)[1])[:2], (200, PNG))
+        # A large old WebP gets <id>.small.webp: the copy cannot reuse the original's name.
+        webp = items[large['id']]
+        self.assertEqual(webp['url'], f'{backgrounds.PATH}/{large["id"]}.small.webp')
+        self.assertEqual(webp['original'], large['url'])
+        self.assertEqual(self.get(f'/{large["id"]}.small.webp')[:3], (200, WEBP + b'page', 'image/webp'))
+        self.assertEqual(self.get('/' + large['url'].rsplit('/', 1)[1])[:2], (200, big))
+        # A WebP that is already smaller than the copy keeps its page file.
+        kept = items[tiny['id']]
+        self.assertEqual(kept['url'], tiny['url'])
+        self.assertNotIn('original', kept)
+        self.assertEqual(kept['thumb'], f'{backgrounds.PATH}/{tiny["id"]}.thumb.webp')
+        backgrounds.delete(old['id'])
+        backgrounds.delete(large['id'])
+        self.assertEqual(sorted(path.name for path in backgrounds.paths.BACKGROUNDS.iterdir()),
+                         sorted(['index.json', f'{tiny["id"]}.webp', f'{tiny["id"]}.thumb.webp']))
+
+    def test_failed_writes_leave_no_stray_copies(self):
+        real = backgrounds._write_file
+
+        def page_fails(name, data):
+            if not name.endswith('.thumb.webp'):
+                raise OSError('disk full')
+            real(name, data)
+        with mock.patch.object(backgrounds.image_shrink, 'shrink', return_value=self.small()), \
+                mock.patch.object(backgrounds, '_write_file', side_effect=page_fails):
+            with self.assertRaises(OSError):
+                backgrounds.save(PNG)
+        self.assertEqual([path.name for path in backgrounds.paths.BACKGROUNDS.iterdir()], [])
+        old = backgrounds.save(PNG)
+        with mock.patch.object(backgrounds.image_shrink, 'shrink', return_value=self.small()), \
+                mock.patch.object(backgrounds, '_write', side_effect=OSError('disk full')):
+            self.assertEqual(backgrounds.upgrade(), 0)
+        self.assertEqual(sorted(path.name for path in backgrounds.paths.BACKGROUNDS.iterdir()),
+                         sorted(['index.json', old['url'].rsplit('/', 1)[1]]))
+        self.assertNotIn('thumb', self.get()[1]['items'][0])
+
+    def test_upgrade_without_an_encoder_changes_nothing(self):
+        item = backgrounds.save(PNG)
+        before = (backgrounds.paths.BACKGROUNDS / 'index.json').read_text()
+        self.assertEqual(backgrounds.upgrade(), 0)
+        self.assertEqual((backgrounds.paths.BACKGROUNDS / 'index.json').read_text(), before)
+        self.assertEqual(self.get()[1]['items'][0]['url'], item['url'])
+
+    def test_upgrade_skips_a_photo_deleted_while_it_shrinks(self):
+        item = backgrounds.save(PNG)
+
+        def shrink(data):
+            backgrounds.delete(item['id'])
+            return self.small()
+        with mock.patch.object(backgrounds.image_shrink, 'shrink', side_effect=shrink):
+            self.assertEqual(backgrounds.upgrade(), 0)
+        self.assertEqual(self.get(), (200, {'items': []}))
 
     def test_rejects_wrong_magic_and_mismatched_content_type(self):
         for data, kind in ((b'not an image', 'image/png'), (PNG, 'image/jpeg'), (PNG, 'text/html'),

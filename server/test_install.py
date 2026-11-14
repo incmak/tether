@@ -661,6 +661,15 @@ class InstallTests(unittest.TestCase):
         self.assertIn('transcribe_worker.py', plan['units']['tether-voice.service'])
         self.assertTrue(any('faster-whisper' in cmd and 'pywebpush' in cmd for cmd in plan['commands']))
 
+    def test_images_installs_pillow_in_the_server_venv(self):
+        plan = self.plan('--images')
+        self.assertTrue(plan['options']['images'])
+        self.assertTrue(any('pip' in cmd and 'pillow' in cmd for cmd in plan['commands']))
+        self.assertIn('server-venv/bin/python', plan['units']['tether.service'])
+        plain = self.plan('--no-images')
+        self.assertFalse(any('pillow' in cmd for cmd in plain['commands']))
+        self.assertNotIn('server-venv', plain['units']['tether.service'])
+
     def test_optional_dependencies_apply_and_optional_units_can_be_removed(self):
         plan = self.plan('--terminal', '--voice', '--push')
         actual_run = installer.run

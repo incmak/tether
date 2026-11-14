@@ -24,7 +24,8 @@
 
 /* Colour and Photo (Settings › Style). The fills come from the theme's own --surface, so they suit light, dark and
    layout colours. Colour builds the stage from the tint (or the accent); Photo puts the user's image under a light
-   --bg scrim. App.tsx sets --g-tint, --g-photo, --g-blur and --g-alpha from the look. */
+   --bg scrim. App.tsx sets --g-tint, --g-photo, --g-blur and --g-alpha from the look. --g-photo is set only after the
+   photo has decoded (photoLook.ts); until then the 32 px placeholder --g-photo-ph shows, scaled up soft. */
 .app-shell[data-surface="glass"]:is([data-backdrop="colour"], [data-backdrop="photo"]) {
   --g-fill: color-mix(in srgb, var(--surface) 55%, transparent); --g-fill-strong: color-mix(in srgb, var(--surface) 74%, transparent);
   --g-edge: color-mix(in srgb, var(--text) 12%, transparent); --g-line: color-mix(in srgb, var(--text) 12%, transparent); --g-glow: transparent;
@@ -37,7 +38,7 @@
   --g-stage: radial-gradient(70% 80% at 8% 0%, color-mix(in srgb, var(--g-tint, var(--accent)) 50%, var(--bg)) 0%, transparent 62%), radial-gradient(60% 70% at 100% 100%, color-mix(in srgb, var(--g-tint, var(--accent)) 32%, var(--bg)) 0%, transparent 60%), linear-gradient(180deg, color-mix(in srgb, var(--g-tint, var(--accent)) 14%, var(--bg)), var(--bg));
 }
 .app-shell[data-surface="glass"][data-backdrop="photo"] {
-  --g-stage: var(--g-photo, none) center / cover no-repeat, var(--bg);
+  --g-stage: var(--g-photo, none) center / cover no-repeat, var(--g-photo-ph, none) center / cover no-repeat, var(--bg);
   --g-vignette: linear-gradient(color-mix(in srgb, var(--bg) 16%, transparent), color-mix(in srgb, var(--bg) 16%, transparent));
   --g-arc1: transparent; --g-arc1-glow: transparent; --g-arc2: transparent; --g-arc2-glow: transparent;
 }

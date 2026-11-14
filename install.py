@@ -266,7 +266,7 @@ def parser():
     result.add_argument('--release-current', type=Path, help=argparse.SUPPRESS)
     result.add_argument('--defer-restart', action='store_true', help=argparse.SUPPRESS)
     result.add_argument('--ask-bridge-wait', type=int, help='Time for the phone to start answering, in seconds (5..120; default 30)')
-    for name in ('terminal', 'voice', 'push', 'hooks', 'ask-bridge', 'resources', 'build-ui'):
+    for name in ('terminal', 'voice', 'push', 'images', 'hooks', 'ask-bridge', 'resources', 'build-ui'):
         result.add_argument('--' + name, action=argparse.BooleanOptionalAction, default=None)
     return result
 
@@ -374,7 +374,7 @@ def make_plan(args, repo=ROOT, home=None):
         raise ValueError('Release unit paths must use the managed current symlink.')
     options = {}
     defaults = dict(host='127.0.0.1', auth='token', terminal=bool(shutil.which('ttyd')),
-                    voice=False, push=False, hooks=False, ask_bridge=False, ask_bridge_wait=30, resources=False, build_ui=None, updates=saved.get('updates', 'notify'))
+                    voice=False, push=False, images=False, hooks=False, ask_bridge=False, ask_bridge_wait=30, resources=False, build_ui=None, updates=saved.get('updates', 'notify'))
     reused = []
     for key, default in defaults.items():
         value = getattr(args, key)
@@ -512,14 +512,16 @@ def make_plan(args, repo=ROOT, home=None):
             if os.environ.get(key):
                 env[key] = os.environ[key]
         server_python = python
-        if options['voice'] or options['push']:
+        # images: Pillow makes small WebP copies of backdrop photos (server/image_shrink.py). Without it ffmpeg is tried.
+        if options['voice'] or options['push'] or options['images']:
             venv = home / '.local/share/tether' / ('whisper-venv' if options['voice'] else 'server-venv')
             vpython = str(venv / 'bin/python')
             if not (venv / 'bin/python').exists():
                 commands.append([python, '-m', 'venv', str(venv)])
-            packages = (['faster-whisper', 'av>=16,<17'] if options['voice'] else []) + (['pywebpush'] if options['push'] else [])
+            packages = ((['faster-whisper', 'av>=16,<17'] if options['voice'] else []) + (['pywebpush'] if options['push'] else [])
+                        + (['pillow'] if options['images'] else []))
             commands.append([vpython, '-m', 'pip', 'install', *packages])
-            if options['push']:
+            if options['push'] or options['images']:
                 server_python = vpython
             if options['voice']:
                 voice_env = {'MOBILE_TMUX_TRANSCRIBE_PORT': options['voice_port']}

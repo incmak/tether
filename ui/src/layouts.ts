@@ -32,7 +32,7 @@ export interface Layout {
 /** The look on this device: the chosen layout, the Style and the Glass backdrop. custom: the last good copy of a custom layout. */
 export interface Look {
   layout: string; surface: Surface; backdrop: Backdrop; custom?: Layout
-  photo?: { id: string; url: string }
+  photo?: { id: string; url: string; placeholder?: string }
   tint?: string  // hex colour
   blur?: number  // 0–40
   fill?: number  // 0.3–0.9 panel opacity
@@ -44,7 +44,9 @@ export const DEFAULT_LOOK: Look = { layout: 'classic', surface: 'flat', backdrop
 export const MANIFEST_VERSION = manifest.version
 export const CUSTOM_PREFIX = 'custom:'
 /** A Glass photo must be one of Tether's own backgrounds (server/backgrounds.py), so CSS never loads another URL. */
-export const PHOTO_URL = /^\/mobile\/api\/backgrounds\/[a-f0-9]{32}\.(png|jpg|webp)$/
+export const PHOTO_URL = /^\/mobile\/api\/backgrounds\/[a-f0-9]{32}(?:\.small)?\.(png|jpg|webp)$/
+/** The tiny placeholder that server/image_shrink.py makes. Only base64 characters reach CSS. */
+export const PHOTO_PLACEHOLDER = /^data:image\/webp;base64,[A-Za-z0-9+/]{1,4000}={0,2}$/
 const MIN_CONTRAST = manifest.theme.minContrast
 const RESERVED = manifest.limits.reserved
 

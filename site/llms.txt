@@ -52,7 +52,7 @@ In `hooks`, read `path` and `action`. An action that starts with `preserve` leav
 
 ## Step 4: Ask once for choices
 
-Features (any): interactive terminal (`--terminal`, needs ttyd), voice-to-text (`--voice`), push notifications (`--push`, needs HTTPS), usage hooks (`--hooks`), host resources (`--resources`). Pass `--no-<feature>` for each one not chosen.
+Features (any): interactive terminal (`--terminal`, needs ttyd), voice-to-text (`--voice`), push notifications (`--push`, needs HTTPS), usage hooks (`--hooks`), host resources (`--resources`), small photos (`--images`, installs Pillow). Pass `--no-<feature>` for each one not chosen.
 
 Remote access (one):
 

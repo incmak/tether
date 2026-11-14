@@ -92,10 +92,10 @@ Ask these choices in one numbered message with at most four questions, then wait
 Use the baseline plan's feature choices as defaults and label them in the question.
 Do not ask for ports, dependencies, or build choices unless the plan reports a failure that requires a decision.
 
-1. **Features**, choose any combination: interactive terminal, voice-to-text, push notifications, usage hooks, host resources.
-   Explain briefly: terminal needs ttyd; voice adds a local transcription worker; push needs browser support and HTTPS. Resources shows host usage in Settings.
+1. **Features**, choose any combination: interactive terminal, voice-to-text, push notifications, usage hooks, host resources, small photos.
+   Explain briefly: terminal needs ttyd; voice adds a local transcription worker; push needs browser support and HTTPS. Resources shows host usage in Settings. Small photos installs Pillow, so backdrop photos load fast on a slow network.
    Usage hooks add status lines only where the installer permits them.
-   An explicit none disables all five features; an omitted answer retains the baseline choices.
+   An explicit none disables all six features; an omitted answer retains the baseline choices.
 2. **Remote access** (phone, tablet, other computers), single choice: Tailscale / same Wi-Fi LAN / HTTPS reverse proxy / this computer only.
    Recommend Tailscale for phone access; this computer only offers no remote phone access.
    Include the LAN plain-HTTP warning below in this choice.
@@ -115,6 +115,7 @@ Use an explicit flag for each feature, including features the user disables:
 | Voice-to-text | `--voice` | `--no-voice` |
 | Host resources | `--resources` | `--no-resources` |
 | Push notifications | `--push` | `--no-push` |
+| Small photos | `--images` | `--no-images` |
 | Usage hooks | `--hooks` | `--no-hooks` |
 
 | Remote access | Installer flags |

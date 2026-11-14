@@ -289,7 +289,7 @@ function Photos({ api, look, prefs, set, update }: { api: Api; look: Look; prefs
       {items?.map(item => <div key={item.id} className="look-photo">
         <label title={item.prompt ?? 'Uploaded photo'}>
           <input type="radio" name="look-photo" checked={look.backdrop === 'photo' && look.photo?.id === item.id} onChange={() => void pick(item)} />
-          <img src={item.url} alt={item.prompt ? `AI image: ${item.prompt}` : 'Uploaded photo'} loading="lazy" />
+          <img src={item.thumb ?? item.url} alt={item.prompt ? `AI image: ${item.prompt}` : 'Uploaded photo'} loading="lazy" decoding="async" />
         </label>
         <ConfirmButton className="look-photo-delete" label="×" title="Delete the photo" confirm="Delete?" onConfirm={() => void remove(item)} />
       </div>)}

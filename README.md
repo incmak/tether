@@ -216,9 +216,10 @@ Without hooks, chat still works, but some usage reports are unavailable.
 
 `--json` prints a deterministic plan for tools. Plans write no files and do not start or stop services.
 Saved choices live in `~/.config/tether/install.json`. Runs without options reuse them; the plan lists reused choices.
-`--terminal` defaults on when ttyd exists. `--voice`, `--push`, `--hooks`, and `--resources` default off.
+`--terminal` defaults on when ttyd exists. `--voice`, `--push`, `--images`, `--hooks`, and `--resources` default off.
 Each switch accepts a `--no-` form. `--build-ui` forces a build; the default builds missing or stale `ui/dist`.
-Voice uses `~/.local/share/tether/whisper-venv`; push shares that environment or uses `~/.local/share/tether/server-venv`.
+Voice uses `~/.local/share/tether/whisper-venv`; push and images share that environment or use `~/.local/share/tether/server-venv`.
+`--images` installs Pillow there, to make small WebP copies of backdrop photos. Without it, Tether uses ffmpeg when it is installed, or keeps the original file.
 Uninstall removes only Tether's Claude live state hooks. It keeps status lines, user hooks, tokens, dependencies, and data.
 The installer prints the optional `loginctl enable-linger $USER` command for services that must survive logout.
 It does not run this command; admin permission may be needed.

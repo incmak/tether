@@ -13,6 +13,7 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+import image_shrink
 import paths
 
 PATH = '/mobile/api/backgrounds'
@@ -20,7 +21,7 @@ LIMIT = 12 * 1024 * 1024
 MAX_ITEMS = 30
 TIMEOUT = 300
 ID = re.compile(r'[a-f0-9]{32}')
-FILE = re.compile(r'([a-f0-9]{32})\.(png|jpg|webp)')
+FILE = re.compile(r'([a-f0-9]{32})(?:\.thumb|\.small)?\.(png|jpg|webp)')
 KINDS = {'png': 'image/png', 'jpg': 'image/jpeg', 'webp': 'image/webp'}
 _lock = threading.Lock()
 _jobs = {}
@@ -80,32 +81,69 @@ def _room(items, reserve=False):
         raise Bad('You can keep 30 backgrounds. Delete one before adding another.', 409)
 
 
+def _write_file(filename, data):
+    target = paths.BACKGROUNDS / filename
+    temporary = target.with_suffix('.tmp')
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, target)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _small(ident, small, page):
+    """Write the page copy and the thumbnail; return the item fields that point to them.
+
+    page is the page copy's file name, or None to keep the current page file."""
+    _write_file(ident + '.thumb.webp', small['thumb'])
+    fields = {'thumb': f'{PATH}/{ident}.thumb.webp', 'placeholder': small['placeholder']}
+    if page:
+        try:
+            _write_file(page, small['image'])
+        except OSError:
+            (paths.BACKGROUNDS / (ident + '.thumb.webp')).unlink(missing_ok=True)
+            raise
+        fields.update(url=f'{PATH}/{page}', width=small['width'], height=small['height'])
+    return fields
+
+
+def _files(item):
+    names = {item['url'].rsplit('/', 1)[-1]}
+    for key in ('thumb', 'original'):
+        if item.get(key):
+            names.add(item[key].rsplit('/', 1)[-1])
+    return names
+
+
 def save(data, content_type=None, source='upload', prompt=None):
     if not 0 < len(data) <= LIMIT:
         raise Bad('That image is empty or too large (the limit is 12 MB).', 413)
     ext = _kind(data)
     if content_type is not None and content_type != KINDS[ext]:
         raise Bad('The image does not match its Content-Type.')
+    # A 2560 px WebP is about 1% of a Codex PNG; on a slow phone link the PNG drew from top to bottom.
+    small = image_shrink.shrink(data)
     with _lock:
         items = _load()
         # Reserve the active job's last slot while an upload runs alongside it.
         _room(items, reserve=source == 'upload')
         paths.BACKGROUNDS.mkdir(parents=True, exist_ok=True, mode=0o700)
         ident = secrets.token_hex(16)
-        filename = ident + '.' + ext
-        target = paths.BACKGROUNDS / filename
-        temporary = target.with_suffix('.tmp')
-        item = {'id': ident, 'url': PATH + '/' + filename, 'source': source, 'created': time.time(),
-                **_dimensions(data, ext)}
+        item = {'id': ident, 'source': source, 'created': time.time()}
         if prompt is not None:
             item['prompt'] = prompt
         try:
-            temporary.write_bytes(data)
-            os.replace(temporary, target)
+            if small:
+                item.update(_small(ident, small, ident + '.webp'))
+            else:
+                _write_file(ident + '.' + ext, data)
+                item.update(url=f'{PATH}/{ident}.{ext}', **_dimensions(data, ext))
             _write([*items, item])
         except OSError:
-            temporary.unlink(missing_ok=True)
-            target.unlink(missing_ok=True)
+            for name in _files(item) if 'url' in item else ():
+                (paths.BACKGROUNDS / name).unlink(missing_ok=True)
+            (paths.BACKGROUNDS / (ident + '.' + ext)).unlink(missing_ok=True)
             raise
         return item
 
@@ -118,11 +156,70 @@ def delete(ident):
         item = next((item for item in items if item['id'] == ident), None)
         if item is None:
             raise Bad('No such background.', 404)
-        filename = item['url'].rsplit('/', 1)[-1]
-        if not FILE.fullmatch(filename):
+        names = _files(item)
+        if not all(FILE.fullmatch(name) for name in names):
             raise Bad('Invalid background file.', 503)
         _write([entry for entry in items if entry['id'] != ident])
-        (paths.BACKGROUNDS / filename).unlink(missing_ok=True)
+        for name in names:
+            (paths.BACKGROUNDS / name).unlink(missing_ok=True)
+
+
+def upgrade():
+    """Give photos saved before small copies existed a WebP, a thumbnail and a placeholder.
+
+    The original file stays on disk and is removed with the photo. Photos fail quietly and are
+    tried again on the next server start, for example after Pillow is installed."""
+    with _lock:
+        try:
+            pending = [item for item in _load() if 'thumb' not in item]
+        except Bad:
+            return 0
+    done = 0
+    for item in pending:
+        filename = item['url'].rsplit('/', 1)[-1]
+        if not FILE.fullmatch(filename) or '.thumb.' in filename or '.small.' in filename:
+            continue
+        source = paths.BACKGROUNDS / filename
+        try:
+            if source.is_symlink() or not source.is_file():
+                continue
+            data = source.read_bytes()
+            small = image_shrink.shrink(data)
+        except OSError:
+            continue
+        if not small:
+            continue
+        with _lock:
+            try:
+                items = _load()
+                current = next((entry for entry in items if entry['id'] == item['id']), None)
+                if current is None or 'thumb' in current:
+                    continue
+                # An old WebP already uses <id>.webp, so its small copy gets its own name. Keep the
+                # original as the page file when the copy is not smaller.
+                page = item['id'] + ('.small.webp' if filename.endswith('.webp') else '.webp')
+                if filename.endswith('.webp') and len(small['image']) >= len(data):
+                    page = None
+                fields = _small(item['id'], small, page)
+                if fields.get('url', current['url']) != current['url']:
+                    fields['original'] = current['url']
+                current.update(fields)
+                try:
+                    _write(items)
+                except (Bad, OSError):
+                    # The index still names only the original, so remove the copies it cannot reach.
+                    for key in ('thumb', 'url'):
+                        if key in fields:
+                            (paths.BACKGROUNDS / fields[key].rsplit('/', 1)[-1]).unlink(missing_ok=True)
+                    raise
+                done += 1
+            except (Bad, OSError):
+                continue
+    return done
+
+
+def upgrade_soon():
+    threading.Thread(target=upgrade, daemon=True, name='background-upgrade').start()
 
 
 def find_generated_image(folder, started_ns, output):
