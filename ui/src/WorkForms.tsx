@@ -10,13 +10,29 @@ import type { FixResult, WorkBoard, WorkItem, WorkProject } from './work'
 // Project settings (Add project, Settings) and New item: small sheets over the work page. The server checks every
 // field (work_items._clean_project); these forms show its message and keep what Mak typed.
 
-const FEEDS: { value: WorkProject['feed']; label: string; target: string; hint: string }[] = [
-  { value: 'manual', label: 'None: add items by hand', target: '', hint: '' },
-  { value: 'teams', label: 'Teams channel', target: 'Teams channels', hint: 'Channel names, separated by commas.' },
-  { value: 'github', label: 'GitHub issues', target: 'Repository (owner/name)', hint: '' },
-  { value: 'email', label: 'Email inbox', target: 'Inbox address', hint: '' },
+const FEEDS: { value: WorkProject['feed']; label: string; target: string; hint: string; placeholder: string; optional?: boolean }[] = [
+  { value: 'manual', label: 'None: add items by hand', target: '', hint: '', placeholder: '' },
+  { value: 'teams', label: 'Teams channel', target: 'Team/Channel', hint: 'One channel, like Brisk/QA.', placeholder: 'Team/Channel' },
+  { value: 'github', label: 'GitHub issues', target: 'Repository (owner/name)', hint: '', placeholder: 'owner/name' },
+  { value: 'email', label: 'Email (Microsoft 365)', target: 'Mail folder (optional)', hint: 'Empty reads the Inbox.', placeholder: 'Inbox', optional: true },
 ]
-const BLANK: WorkProject = { name: '', prefix: '', folder: '', triage: '', work: '', feed: 'manual', feedTarget: '', jira: '', qaStatus: '', jiraUser: '' }
+const BLANK: WorkProject = { name: '', prefix: '', folder: '', triage: '', work: '', feed: 'manual', feedTarget: '', feedBy: 'tether', jira: '', qaStatus: '', jiraUser: '' }
+
+/** What the feed does now: read by the project's agent, the last read, or what blocks it. */
+function feedNote(board: WorkBoard, form: WorkProject, saved?: WorkProject) {
+  if (form.feed === 'manual') return 'Add items with New item.'
+  if (form.feedBy === 'agent') return "Tether does not read this feed. The project's agent adds its items."
+  const graph = board.graph
+  if (form.feed !== 'github' && !graph?.connected) return `${graph?.why || 'Microsoft 365 is not connected.'} Until then, Tether does not read this feed.`
+  if (form.feed === 'teams' && !graph?.teams) return 'The Microsoft 365 sign-in has no Teams permission. Run tether graph connect --feeds mail,teams.'
+  if (form.feed === 'email' && !graph?.mail) return 'The Microsoft 365 sign-in has no mail permission. Run tether graph connect --feeds mail,teams.'
+  const state = saved && saved.feed === form.feed && saved.feedTarget === form.feedTarget && saved.feedBy === form.feedBy ? board.feeds?.[saved.name] : undefined
+  const start = 'Tether reads it every 2 minutes and adds new threads to Triage. It starts with messages that come after you save.'
+  if (!state || state.status === 'waiting' || !state.at) return start
+  const at = new Date(state.at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (state.status === 'ok') return `Last read at ${at}. ${state.items} ${state.items === 1 ? 'item' : 'items'} added so far.`
+  return `${state.status === 'off' ? 'Stopped' : 'The last read failed'} at ${at}: ${state.error}`
+}
 
 function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactNode }) {
   return <div className="work-field">
@@ -96,9 +112,10 @@ export function ProjectForm({ api, board, project, onClose, onSaved }: {
           <select id={`${id}-feed`} value={form.feed} onChange={set('feed')}>{FEEDS.map(entry => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
         </Field>
         {feed.value !== 'manual' && <Field id={`${id}-target`} label={feed.target} hint={feed.hint || undefined}>
-          <input id={`${id}-target`} value={form.feedTarget} onChange={set('feedTarget')} required maxLength={300} autoComplete="off" spellCheck={false} aria-describedby={feed.hint ? `${id}-target-hint` : undefined} />
+          <input id={`${id}-target`} value={form.feedTarget} onChange={set('feedTarget')} required={!feed.optional} maxLength={300} autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder={feed.placeholder} aria-describedby={feed.hint ? `${id}-target-hint` : undefined} />
         </Field>}
-        <p className="work-hint">Tether saves the feed now but does not read it yet. Add items with New item.</p>
+        {feed.value !== 'manual' && <label className="work-check"><input type="checkbox" checked={form.feedBy === 'agent'} onChange={event => { const agent = event.target.checked; setForm(current => ({ ...current, feedBy: agent ? 'agent' : 'tether' })) }} />The project's own agent adds items from this feed</label>}
+        <p className="work-hint">{feedNote(board, form, project)}</p>
       </fieldset>
       <fieldset className="work-fieldset">
         <legend>Jira <span>(optional)</span></legend>

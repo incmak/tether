@@ -8,7 +8,7 @@ import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { STAGE_LABEL, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix } from './work'
+import { STAGE_LABEL, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
 import type { JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
@@ -130,6 +130,7 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
       {board && view === 'board' && projects.length > 0 && <>
         <div role="status">{answers.results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
         {error && <p className="work-error" role="alert"><span>Could not refresh work items. The board can be out of date. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
+        {feedTrouble(board, projects.filter(entry => project === 'all' || entry.name === project)).map(text => <p key={text} className="work-error work-feed-error">{text}</p>)}
         {projects.length > 0 && !board.items.length && <p className="work-empty">No work items yet. Use New item, or an agent adds one with <code>tether item new</code>.</p>}
         <div className="work-columns">
           {columns.map(column => {
@@ -193,6 +194,17 @@ function BoardCard({ item, prefix, panes, now, onDetails }: { item: WorkItem; pr
 const JIRA_CARD: Record<string, string> = { moved: 'Jira moved', owners: 'Jira: owner moves it', failed: 'Jira move failed', off: 'Jira not connected' }
 
 /** What Done does, or did, to the item's Jira tickets. Only tickets assigned to the connected account move. */
+/** A feed that Tether cannot read: stopped until Mak acts (off), or failed 3 reads in a row. Agent-read feeds are not ours. */
+function feedTrouble(board: WorkBoard, projects: WorkProject[]) {
+  return projects.flatMap(entry => {
+    const state = board.feeds?.[entry.name]
+    if (!state || state.by !== 'tether') return []
+    if (state.status === 'off') return [`The ${entry.name} feed is stopped: ${state.error}`]
+    if (state.status === 'error' && state.errors >= 3) return [`The ${entry.name} feed failed ${state.errors} times in a row: ${state.error}`]
+    return []
+  })
+}
+
 function JiraState({ item, project, link }: { item: WorkItem; project?: WorkProject; link?: JiraLink }) {
   if (!project?.jira) return <p className="work-note">This project has no Jira project key.</p>
   const jira = item.jira
@@ -250,6 +262,10 @@ function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, o
     const done = await startFix(api, item)
     if (!done.fix.started) throw new Error(`Fix tab not started: ${done.fix.why}`)
   })
+  const triage = () => void write(`${item.id}: triage tab started.`, async () => {
+    const done = await startTriage(api, item)
+    if (!done.tab.started) throw new Error(`Triage tab not started: ${done.tab.why}`)
+  })
   const send = async (event: FormEvent) => {
     event.preventDefault()
     if (!ask || !reply.trim()) return
@@ -263,7 +279,10 @@ function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, o
   const live = (pane: string) => panes.find(entry => entry.id === pane)
   const firstMove = !ask && item.stage === 'review'
   // A Ready item can start a fix tab unless one still runs an agent (the Build answer tries first). Matches the server.
-  const canFix = item.stage === 'ready' && !item.tabs.some(tab => tab.role === 'fix' && live(tab.pane) && live(tab.pane)!.agent !== 'shell')
+  const runs = (role: string) => item.tabs.some(tab => tab.role === role && live(tab.pane) && live(tab.pane)!.agent !== 'shell')
+  const canFix = item.stage === 'ready' && !runs('fix')
+  // A Triage item without a working triage tab: a feed item that found no free tab, or a tab that closed. Matches the server.
+  const canTriage = item.stage === 'triage' && !runs('triage')
   return <dialog {...modal} className="work-drawer" aria-labelledby={`${id}-title`}>
     <div className="work-drawer-head">
       <div>
@@ -304,12 +323,13 @@ function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, o
         <div className="work-actions">
           {item.stage === 'review' && <button type="button" className="primary" data-first="" disabled={locked} onClick={() => move('done', `${item.id} is Done.`)}>Mark done</button>}
           {canFix && <button type="button" className="primary" data-first="" disabled={locked} onClick={fix}>Start fix tab</button>}
+          {canTriage && <button type="button" className="primary" data-first="" disabled={locked} onClick={triage}>Start triage tab</button>}
           {item.stage === 'hold'
             ? <>
               <button type="button" className="secondary" disabled={locked} onClick={() => move('triage', `${item.id} is back in Triage.`)}>Back to Triage</button>
               <button type="button" className="secondary" disabled={locked} onClick={() => move('ready', `${item.id} moved to Ready.`)}>Move to Ready</button>
             </>
-            : <button type="button" className={firstMove || canFix ? 'ghost' : 'secondary'} disabled={locked} onClick={() => move('hold', `${item.id} is on hold.`)}>Put on hold</button>}
+            : <button type="button" className={firstMove || canFix || canTriage ? 'ghost' : 'secondary'} disabled={locked} onClick={() => move('hold', `${item.id} is on hold.`)}>Put on hold</button>}
         </div>
       </section>}
       <section className="work-block" aria-labelledby={`${id}-tabs`}>

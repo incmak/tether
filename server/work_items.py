@@ -28,6 +28,8 @@ STAGE_LABELS = {'triage': 'Triage', 'needs': 'Needs you', 'ready': 'Ready', 'bui
                 'review': 'Review', 'done': 'Done', 'hold': 'On hold'}
 ROLES = ('triage', 'fix', 'review', 'other')
 FEEDS = ('manual', 'teams', 'github', 'email')
+FEED_BY = ('tether', 'agent')  # who reads the feed: Tether (work_feeds), or the project's own agent
+FEED_KEY = re.compile(r'(github|teams|email):[!-~]{1,280}')
 RESERVED = ('B',)  # backlog items (#B12) fold in later
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,31}')
 PREFIX = re.compile(r'[A-Z]{1,3}')
@@ -143,6 +145,9 @@ def _clean_project(data, existing=None):
     feed = data.get('feed') or 'manual'
     if feed not in FEEDS:
         raise invalid('Choose a feed.')
+    feed_by = data.get('feedBy') or 'tether'
+    if feed_by not in FEED_BY:
+        raise invalid('Choose who reads the feed.')
     jira = _line(data.get('jira'), 20, 'Jira key', required=False)
     if jira and not re.fullmatch(r'[A-Z][A-Z0-9]{0,19}', jira):
         raise invalid('A Jira key is capital letters and digits, like BS.')
@@ -153,11 +158,12 @@ def _clean_project(data, existing=None):
         'work': _line(data.get('work'), 64, 'work session', required=False) or name,
         'feed': feed,
         'feedTarget': _line(data.get('feedTarget'), FIELD_LIMIT, 'feed target', required=False) if feed != 'manual' else '',
+        'feedBy': feed_by,
         'jira': jira,
         'qaStatus': _line(data.get('qaStatus'), 64, 'QA status', required=False) or 'QA Testing',
         'jiraUser': _line(data.get('jiraUser'), 128, 'Jira user', required=False),
     }
-    if feed != 'manual' and not record['feedTarget']:
+    if feed not in ('manual', 'email') and not record['feedTarget']:  # email: no folder reads the Inbox
         raise invalid('Name where the feed reads from.')
     return record
 
@@ -174,7 +180,7 @@ def registry():
     for name, record in sorted(found.items()):
         if isinstance(record, dict) and NAME.fullmatch(name) and PREFIX.fullmatch(str(record.get('prefix', ''))):
             if all(p['prefix'] != record['prefix'] for p in projects):  # a hand edit that repeats a prefix: first wins
-                projects.append(dict(record, name=name))
+                projects.append({'feedBy': 'tether', **record, 'name': name})
     revision = data.get('revision') if isinstance(data.get('revision'), int) else 0
     return {'revision': revision, 'projects': projects}
 
@@ -208,6 +214,11 @@ def save_project(data, revision, create):
             if not existing:
                 raise ProjectError(404, 'That project is gone. Reload and try again.')
             record = _clean_project(data, existing)
+        old = by_name.get(record['name']) or {}
+        if record['feed'] != 'manual':  # a feed reads from the time it was saved (work_feeds.poll), never older mail
+            same = all(old.get(k) == record[k] for k in ('feed', 'feedTarget', 'feedBy'))
+            since = old.get('feedSince')
+            record['feedSince'] = since if same and isinstance(since, (int, float)) else time.time()
         by_name[record['name']] = record
         stored = {name: {k: v for k, v in p.items() if k != 'name'} for name, p in sorted(by_name.items())}
         _write(_registry_path(), json.dumps({'revision': revision + 1, 'projects': stored}, indent=2) + '\n')
@@ -274,7 +285,7 @@ def _valid(event):
         return False
     kind = event['type']
     text_fields = ('title', 'source', 'q', 'text', 'pane', 'role', 'chat', 'name', 'session', 'stack', 'ask',
-                   'choice', 'by', 'who', 'ref', 'status', 'error', 'target')
+                   'choice', 'by', 'who', 'ref', 'status', 'error', 'target', 'feed')
     if any(k in event and not isinstance(event[k], str) for k in text_fields):
         return False
     if 'at' in event and (isinstance(event['at'], bool) or not isinstance(event['at'], (int, float))):
@@ -352,7 +363,9 @@ def _append(prefix, event):
 def _history_text(event):
     kind = event['type']
     if kind == 'new':
-        return f'Added: {event.get("title", "")}' if event.get('by') == 'mak' else 'Created'
+        if event.get('by') == 'mak':
+            return f'Added: {event.get("title", "")}'
+        return f'From the feed: {event.get("source", "")}' if event.get('by') == 'feed' else 'Created'
     if kind == 'ask':
         return f'Asked: {event.get("q", "")}'
     if kind == 'answer':
@@ -437,6 +450,7 @@ def fold(record, events=None):
                 'id': event['item'], 'project': project_name, 'title': event.get('title', ''), 'stage': 'triage',
                 'qa': bool(event.get('qa')), 'ask': None, 'askFrom': None, 'answer': None,
                 'refs': list(event.get('refs') or []), 'tabs': [], 'history': [], 'source': event.get('source', ''),
+                'feed': event.get('feed', ''),
                 'created': event.get('at'), 'updated': event.get('at'), 'doneAt': None, 'jira': None, 'version': 0}
             item = items[event['item']]  # version: its count of events, so the new event makes it 1
             if event.get('stage') in STAGES and event['stage'] != 'needs':
@@ -514,6 +528,28 @@ def new(project_name, title, by, who='', refs=None, source='', item_id=None, sta
                  'refs': refs, 'source': source, 'stage': stage, 'qa': bool(qa)}
         _append(record['prefix'], event)
         return fold(record)[item_id]
+
+
+def from_feed(project_name, key, title, link, source):
+    """The item for one feed thread (a GitHub issue, a Teams thread, an email conversation): (item, created).
+    key names the thread; one key never makes a second item, even after a crash between the item and the cursor."""
+    if not isinstance(key, str) or not FEED_KEY.fullmatch(key):
+        raise invalid('Invalid feed key.')
+    title = ' '.join(str(title or '').split())
+    title = (title if len(title) <= 120 else title[:119] + '…') or 'No title'
+    refs = _refs([link] if isinstance(link, str) and link.startswith('https://') and len(link) <= REF_LIMIT else [])
+    source = _line(' '.join(str(source or '').split())[:FIELD_LIMIT], FIELD_LIMIT, 'source')
+    with locked():
+        record = project(project_name)
+        items = fold(record)
+        for item in items.values():
+            if item.get('feed') == key:
+                return item, False
+        item_id = _next_id(record['prefix'], items)
+        _append(record['prefix'], {'item': item_id, 'type': 'new', 'at': time.time(), 'by': 'feed', 'who': '',
+                                   'title': title, 'refs': refs, 'source': source, 'feed': key, 'stage': 'triage',
+                                   'qa': False})
+        return fold(record)[item_id], True
 
 
 def ask(item_id, question, options, pane='', chat='', by='agent', who='', version=None):

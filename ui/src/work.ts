@@ -8,7 +8,7 @@ import { usePolling } from './hooks'
 export type Stage = 'triage' | 'needs' | 'ready' | 'building' | 'review' | 'done' | 'hold'
 export const STAGE_LABEL: Record<Stage, string> = { triage: 'Triage', needs: 'Needs you', ready: 'Ready', building: 'Building', review: 'Review', done: 'Done', hold: 'On hold' }
 
-export interface WorkProject { name: string; prefix: string; folder: string; triage: string; work: string; feed: string; feedTarget: string; jira: string; qaStatus: string; jiraUser: string }
+export interface WorkProject { name: string; prefix: string; folder: string; triage: string; work: string; feed: string; feedTarget: string; feedBy: 'tether' | 'agent'; jira: string; qaStatus: string; jiraUser: string }
 export interface WorkTab { pane: string; role: 'triage' | 'fix' | 'review' | 'other'; chat: string; name: string; session: string; stack: string }
 export interface WorkAsk { id: string; q: string; options: string[]; pane: string; chat: string; at: number }
 export interface WorkHistory { at: number; by: string; text: string; ref?: string }
@@ -16,6 +16,8 @@ export interface WorkItem {
   id: string; project: string; title: string; stage: Stage; qa: boolean; ask: WorkAsk | null; askFrom: Stage | null
   refs: string[]; tabs: WorkTab[]; history: WorkHistory[]; source: string; created: number; updated: number
   doneAt: number | null; jira: WorkJira | null; version: number
+  /** The feed key (gh:…, teams:…, mail:…) when a feed added the item. */
+  feed?: string
 }
 /** The last Jira move of a Done item. moved: every ticket is in target. owners: some belong to someone else (owners
  * holds one note each). failed: error says why. off: Jira is not connected. tickets: the ones now in target. */
@@ -23,7 +25,13 @@ export interface WorkJira { status?: 'moved' | 'owners' | 'failed' | 'off'; erro
 /** The Jira connection on the Tether host (`tether jira connect`). Never holds the token. guard: Mak confirmed the
  * Only Assignee condition; without it nothing moves. why: what to do when not connected or not guarded. */
 export interface JiraLink { connected: boolean; site?: string; account?: string; guard?: boolean; why?: string }
-export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink }
+/** The Microsoft 365 connection for Teams and email feeds (`tether graph connect`). Never holds a token. mail, teams:
+ * the granted permissions allow that feed. why: what to do when not connected. */
+export interface GraphLink { connected: boolean; account?: string; mail?: boolean; teams?: boolean; why?: string }
+/** One project's feed as Tether reads it. by agent: the project's own agent reads it and Tether does not. waiting: not
+ * read yet. off: the feed cannot run until Mak acts (error says what to do). errors: failed reads in a row. */
+export interface FeedState { by: 'tether' | 'agent'; status: 'ok' | 'off' | 'error' | 'waiting'; at: number | null; error: string; errors: number; items: number }
+export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink; graph?: GraphLink; feeds?: Record<string, FeedState> }
 /** A Build answer, or Start fix tab, opens a fix tab. When it does not start, the item stays Ready and why says so. */
 export interface FixResult { started: boolean; why: string }
 export interface AnswerResult { item: WorkItem; sent: boolean; why: string; fix?: FixResult }
@@ -56,6 +64,10 @@ export const moveItem = (api: Api, item: WorkItem, stage: Stage) =>
 
 export const startFix = (api: Api, item: WorkItem) =>
   api<{ item: WorkItem; fix: FixResult }>('work/fix', { item: item.id, version: item.version })
+
+/** Start triage tab: for a Triage item with no live triage tab (a feed item that found no free tab, or a closed tab). */
+export const startTriage = (api: Api, item: WorkItem) =>
+  api<{ item: WorkItem; tab: FixResult }>('work/triage', { item: item.id, version: item.version })
 
 /** Add or change a project. revision: the registry revision the form started from (409 when it changed). */
 export const saveProject = (api: Api, project: WorkProject, revision: number, create: boolean) =>

@@ -10,6 +10,8 @@ import paths
 from projects import _read, _write
 
 import jira_client
+import graph_client
+import work_feeds
 import work_fix
 import work_items
 import work_jira
@@ -41,7 +43,8 @@ def get(handler):
 
     def work():
         if name == 'board':
-            return {**work_items.board(), 'jira': jira_client.status()}
+            return {**work_items.board(), 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
+                    'graph': graph_client.status()}
         raise ProjectError(404, 'Not found')
     _answer(handler, work)
 
@@ -131,6 +134,20 @@ def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
                 raise ProjectError(400, f'{item["id"]} has no Jira ticket of its project.')
             queued = work_jira.MOVER.queue(item['id'])
             return {'item': item, 'queued': bool(queued), 'why': '' if queued else 'A Jira move for it runs now.'}
+        if name == 'triage':  # Start triage tab from the drawer: a Triage item with no live triage tab
+            if not (sessions and run):
+                raise ProjectError(503, 'Triage tabs are off.')
+            with work_fix.START_LOCK:  # the feed's own launch takes it too: check the item inside it
+                _, item = work_items.find(body.get('item'))
+                if item['version'] != version:
+                    raise ProjectError(409, f'{item["id"]} changed since you loaded it. Reload and try again.')
+                if item['stage'] != 'triage':
+                    raise ProjectError(409, f'{item["id"]} is not in Triage.')
+                entries = sessions()
+                if work_fix.triage_running(item, entries, run):
+                    raise ProjectError(409, f'{item["id"]} already has a triage tab.')
+                item, tab = work_fix.start_triage(item, entries, run, lock)  # checks the item again under the lock
+            return {'item': item, 'tab': tab}
         if name == 'note':
             return {'item': work_items.note(body.get('item'), body.get('text'), 'mak', version=version)}
         if name == 'item':
