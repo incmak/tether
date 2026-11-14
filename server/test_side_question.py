@@ -59,6 +59,8 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(side_question.matches(MARKDOWN, side_question.detect(*frame('claude_btw_answer.txt'))['text']))
         self.assertTrue(side_question.matches(MARKDOWN, side_question.detect(*frame('claude_btw_narrow_earlier.ansi'))['text']))
         self.assertFalse(side_question.matches('def unrelated(): return other_things', 'Hello there. Good to see you.'))
+        # Half the words on screen is not proof: another pane's copy can share common words.
+        self.assertFalse(side_question.matches('Hello there. Totally different content follows here today', 'Hello there. Good to see you.'))
         self.assertTrue(side_question.matches('42', 'The answer: 42'))
 
 
@@ -162,6 +164,17 @@ class ObserveTests(unittest.TestCase):
         self.observe('claude_btw_narrow_earlier.ansi', 1)
         self.assertEqual(self.copies, ['say hello in two short sentences…', 'give a markdown table of 3 linux…'])
 
+    def test_same_question_asked_again_gets_its_new_answer(self):
+        self.observe('claude_btw_answer.txt', 0)
+        self.assertEqual(self.observe('claude_btw_answer.txt', 1)['text'], MARKDOWN)
+        self.assertTrue(self.observe('claude_btw_answering.txt', 2)['pending'])  # Claude answers the same words again
+        self.observe('claude_btw_answer.txt', 3, answer='A new answer.')
+        self.assertEqual(self.observe('claude_btw_answer.txt', 4)['text'], 'A new answer.')
+        self.assertIsNone(side_question.observe(ENTRY, '❯ \n', now=5))  # closed, then opened again with a fast answer
+        self.observe('claude_btw_answer.txt', 7, answer='A third answer.')
+        self.assertEqual(self.observe('claude_btw_answer.txt', 8)['text'], 'A third answer.')
+        self.assertEqual([answer for _, answer in self.saved], [MARKDOWN, 'A new answer.', 'A third answer.'])
+
     def test_closed_overlay_is_forgotten_after_the_grace_time(self):
         self.observe('claude_btw_answer.txt', 0)
         self.assertIsNone(side_question.observe(ENTRY, '❯ \n', now=1))
@@ -189,6 +202,15 @@ class SavedTests(unittest.TestCase):
             merged = terminal_replies.merge(ENTRY, [])
         self.assertEqual((first['kind'], first['title'], first['text']), ('side', 'why?', MARKDOWN))
         self.assertEqual([item['id'] for item in merged], [first['id']])
+
+    def test_side_answer_follows_the_conversation_not_the_process(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(terminal_replies, 'CACHE', Path(folder)):
+            first = terminal_replies.add_side(ENTRY, 'why?', MARKDOWN)
+            resumed = terminal_replies.merge(dict(ENTRY, owner_pid=99, process_start='77'), [])
+            other_chat = terminal_replies.merge(dict(ENTRY, thread='chat-2'), [])
+            codex = terminal_replies.merge(dict(ENTRY, agent='codex'), [])
+        self.assertEqual([item['id'] for item in resumed], [first['id']])
+        self.assertEqual((other_chat, codex), ([], []))
 
 
 if __name__ == '__main__':

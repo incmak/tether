@@ -205,17 +205,32 @@ def add_side(entry, question, answer):
     ident = 'terminal:side:' + hashlib.sha256((question + '\0' + answer).encode()).hexdigest()[:12]
     notice = {'id': ident, 'role': 'assistant', 'kind': 'side', 'title': question[:MAX_TEXT], 'text': answer[:SIDE_MAX],
               'time': datetime.now(timezone.utc).isoformat()}
+    name = side_key(entry)
     with LOCK:
-        old = saved(entry)
+        old = saved_side(entry)
         if any(item.get('id') == ident for item in old):
             return None
         CACHE.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = CACHE / (key(entry) + '.json')
-        temporary = CACHE / (key(entry) + '.' + str(os.getpid()) + '.tmp')
+        target = CACHE / (name + '.json')
+        temporary = CACHE / (name + '.' + str(os.getpid()) + '.tmp')
         temporary.write_text(json.dumps((old + [notice])[-KEEP:]))
         temporary.chmod(0o600)
         temporary.replace(target)
     return notice
+
+
+def side_key(entry):
+    """Side answers belong to the conversation: a resumed chat keeps them, and a new chat in the same process does not."""
+    thread = entry.get('thread')
+    return 'side-' + (hashlib.sha256(str(thread).encode()).hexdigest()[:32] if thread else key(entry))
+
+
+def saved_side(entry):
+    try:
+        value = json.loads((CACHE / (side_key(entry) + '.json')).read_text())
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError):
+        return []
 
 
 def record(entry, before, read, sleep=time.sleep, polls=8):
@@ -243,6 +258,8 @@ def merge(entry, messages):
     if entry.get('agent') == 'codex':
         # Older captures mixed a wrapped input and the live spinner into slash replies.
         notices = [notice for notice in notices if notice.get('id') == 'terminal:banner' or not SPINNER.search(notice.get('text', ''))]
+    if entry.get('agent') == 'claude':
+        notices = notices + saved_side(entry)
     if not notices:
         return messages
     # saved before banners had their own, quieter style

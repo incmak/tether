@@ -103,15 +103,17 @@ def _letters(text):
 
 
 def matches(markdown, drawn):
-    """True when the copied Markdown is the answer on screen. Another pane's copy can land in the same moment.
+    """True when the copied Markdown is the answer on screen.
 
-    The terminal wraps words and redraws a table as rows, so compare words, not lines.
+    tmux does not say which pane made a buffer, and another pane can copy in the same moment. So the text itself
+    must prove it: nearly all of its first words are on screen. The terminal wraps lines and redraws a table as
+    rows, so compare words, not lines. A buffer that fails stays untouched.
     """
     seen = _letters(drawn)
-    words = re.findall(r'[^\W_]{4,}', markdown[:600])[:6]
-    if not words:
-        return bool(_letters(markdown)) and _letters(markdown)[:12] in seen
-    return sum(word in seen for word in words) * 2 >= len(words)
+    words = re.findall(r'[^\W_]{4,}', markdown[:1500])[:24]
+    if len(words) < 3:
+        return bool(_letters(markdown)) and _letters(markdown)[:40] in seen
+    return sum(word in seen for word in words) * 4 >= len(words) * 3
 
 
 def _buffers(run):
@@ -184,14 +186,19 @@ def observe(entry, screen, styled=None, now=None, copy=copy_answer, save=None, s
         if not found:
             if state and now - state['last'] >= GRACE:
                 _seen.pop(key, None)
+            elif state:
+                state['closed'] = True
             return None
-        if not state or state['identity'] != identity or state['shown'] != found['shown']:
+        # The same words can be asked again: an overlay that closed, or that answers again, holds a new answer.
+        again = state and (state.get('closed') and now - state['last'] >= 1 or not found['done'] and state['answer'])
+        if not state or again or state['identity'] != identity or state['shown'] != found['shown']:
             state = {'identity': identity, 'shown': found['shown'], 'question': full_question(entry, found['shown']),
                      'answer': None, 'fetching': False, 'tries': 0, 'tried': -RETRY, 'last': now}
             _seen[key] = state
             while len(_seen) > 64:
                 _seen.pop(next(iter(_seen)))
         state['last'] = now
+        state['closed'] = False
         fetch = (found['done'] and not state['answer'] and not state['fetching'] and entry.get('writable')
                  and state['tries'] < ATTEMPTS and now - state['tried'] >= RETRY)
         if fetch:
