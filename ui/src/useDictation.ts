@@ -23,8 +23,13 @@ interface SpeechRecognizer {
 type SpeechConstructor = new () => SpeechRecognizer
 let speechOffUntil = 0
 const SPEECH_OFF_MS = 5 * 60 * 1000
-const SPEECH_DEAF_KEY = 'tether.speechDeafUntil'
-const SPEECH_DEAF_MS = 7 * 24 * 60 * 60 * 1000
+// A device whose speech service hears nothing twice uses the server voice for a day.
+// One silent tap is not enough: a person may tap the mic and say nothing.
+const SPEECH_DEAF_KEY = 'tether.speech-deaf-until'
+const OLD_DEAF_KEY = 'tether.speechDeafUntil'
+const SPEECH_DEAF_MS = 24 * 60 * 60 * 1000
+const STRIKE_WINDOW_MS = 10 * 60 * 1000
+let emptyStrikes = 0, lastStrikeAt = 0
 const speechOff = () => { speechOffUntil = Date.now() + SPEECH_OFF_MS }
 
 interface DictationOptions {
@@ -63,6 +68,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     if (disposed.current) return
     const Recognition = speechConstructor()
     let speechDeafUntil = 0
+    try { localStorage.removeItem(OLD_DEAF_KEY) } catch { /* the first version marked a device for 7 days after one silent tap */ }
     try { speechDeafUntil = Number(localStorage.getItem(SPEECH_DEAF_KEY) || 0) } catch { /* use the in-memory cooldown */ }
     if (Recognition && Date.now() >= speechOffUntil && Date.now() >= speechDeafUntil) startSpeech(Recognition)
     else await startRecorder()
@@ -76,7 +82,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     void final.then(() => { if (finalDraft.current === final) finalDraft.current = null })
     let recognition: SpeechRecognizer
     let earlier = '', committed = '', interim = '', received = false, stopped = false, done = false, restarts = 0
-    let failed = false, emptyEnds = 0, offForError = false
+    let failed = false, emptyEnds = 0, offForError = false, stoppedAt = 0
     const trail: string[] = []
     const trace = (token: string) => { trail.push(token); if (trail.length > 24) trail.shift() }
     let pause: number | undefined
@@ -97,18 +103,29 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       if (done) return
       if (!received && !stopped && (failed || emptyEnds >= 3)) { fallback(); return }
       // Only a real attempt turns speech off. A quick tap on and off is not one.
-      if (!received && stopped) { if (Date.now() - started >= 3000) speechOff(); message = undefined }
-      const deaf = !received && stopped && Date.now() - started >= 3000 &&
-        (!trail.includes('audio') || (!trail.includes('sound') && !trail.includes('speech')))
-      if (deaf) {
-        try { localStorage.setItem(SPEECH_DEAF_KEY, String(Date.now() + SPEECH_DEAF_MS)) } catch { speechOff() }
+      if (!received && stopped) message = undefined
+      // A real attempt: the person stopped after 3 s or more and no words came back.
+      const empty = !received && stopped && stoppedAt - started >= 3000  // time to the tap, not to a late end
+      const deaf = empty && !trail.includes('sound') && !trail.includes('speech')
+      if (received) emptyStrikes = 0
+      if (empty) {
+        emptyStrikes = Date.now() - lastStrikeAt <= STRIKE_WINDOW_MS ? emptyStrikes + 1 : 1
+        lastStrikeAt = Date.now()
+      }
+      const second = empty && emptyStrikes >= 2
+      if (second) {
+        emptyStrikes = 0
+        // The in-memory rule also covers storage that cannot be read or written.
+        speechOff()
+        if (deaf) { try { localStorage.setItem(SPEECH_DEAF_KEY, String(Date.now() + SPEECH_DEAF_MS)) } catch { /* the in-memory rule holds */ } }
       }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
       reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
       cleanup(); setText(next); finish(next); setListening(false)
       if (message !== undefined) setError(message)
-      else if (deaf && !handsFree) setError(`This device's speech service heard nothing, so Tether will use the server voice here. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
+      else if (second && deaf && !handsFree) setError(`This device's speech service heard nothing twice, so Tether uses the server voice here for 24 hours. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
+      else if (second && !handsFree) setError(`No speech heard twice, so Tether uses the server voice for 5 minutes. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
       else if (!spoken && !handsFree) setError(`No speech heard. Tap the mic and speak. (speech: ${trail.join(' ')})`)
       onFinished?.()
       if (handsFree && spoken && next !== base) onHandsFreeDone?.()
@@ -116,13 +133,14 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const stop = () => {
       if (done || stopped) return
       trace('stop')
-      stopped = true
+      stopped = true; stoppedAt = Date.now()
       recognition.stop()
       // Some browsers never fire onend after stop; finish with the words so far.
       window.clearTimeout(pause); pause = window.setTimeout(() => { trace('timeout'); complete() }, 1500)
     }
     const fallback = () => {
-      if (emptyEnds >= 3 || offForError) speechOff()
+      // Empty ends with sound heard mean a quiet person, not a dead service.
+      if ((emptyEnds >= 3 && !trail.includes('sound') && !trail.includes('speech')) || offForError) speechOff()
       console.info('[dictation] fallback', trail.join(' '))
       reportVoice({ kind: 'dictation', event: 'fallback', trail: trail.join(' '), ms: Date.now() - started })
       // Say why the slow server voice runs, so the next report shows the cause.
@@ -236,6 +254,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       if (Date.now() - started < 600 || !audio.size) { setText(base); setError('Tap the mic, speak, then tap stop.'); finish(base); return }
       void transcribeAudio(audio, base, recording, label).then(({ text, ok }) => {
         reportVoice({ kind: 'dictation', event: 'recorder', ms: Date.now() - stopped })
+        if (ok && text.trim() && text !== base) emptyStrikes = 0  // words came back, so the next silent tap is a first one
         finish(text)
         // Send at once; submit still waits for this final text. Rough text after a failure waits for the person to check it.
         if (pause && ok && text.trim() && text !== base) onHandsFreeDone?.()
