@@ -1,0 +1,72 @@
+/* Work board: project swatches, decision cards (Home and the desktop Needs you panel). */
+:root {
+  --work-hue-0: #b4532f; --work-hue-1: #3f6f8f; --work-hue-2: #2f8a68;
+  --work-hue-3: #8c6b22; --work-hue-4: #6b4fc4; --work-hue-5: #a8456f;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --work-hue-0: #e59572; --work-hue-1: #8db8d6; --work-hue-2: #62c49c;
+    --work-hue-3: #d9b761; --work-hue-4: #b8a4ff; --work-hue-5: #e58fb3;
+  }
+}
+:root[data-theme="dark"] {
+  --work-hue-0: #e59572; --work-hue-1: #8db8d6; --work-hue-2: #62c49c;
+  --work-hue-3: #d9b761; --work-hue-4: #b8a4ff; --work-hue-5: #e58fb3;
+}
+.work-swatch { flex: none; width: 10px; height: 10px; border-radius: 3px; background: var(--work-hue-0); }
+.work-swatch.hue-1 { background: var(--work-hue-1); }
+.work-swatch.hue-2 { background: var(--work-hue-2); }
+.work-swatch.hue-3 { background: var(--work-hue-3); }
+.work-swatch.hue-4 { background: var(--work-hue-4); }
+.work-swatch.hue-5 { background: var(--work-hue-5); }
+
+.home-group.decisions .home-group-head h2 svg, .home-decisions-mark { flex: none; color: var(--accent); }
+.work-card-body { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px 8px; }
+.work-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.work-id { flex: none; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
+.work-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.work-q { margin: 2px 0 0; padding: 8px 10px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 9%, var(--surface)); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-card .inbox-actions { padding: 0 12px 10px; }
+.work-reply { display: flex; align-items: center; gap: 6px; padding: 0 12px 10px; }
+.work-reply input { flex: 1; min-width: 0; height: var(--control); padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); font-size: 13.5px; }
+.work-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 8px; }
+.work-tab { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: var(--control-sm); padding: 0 8px; border-radius: var(--radius-sm); font-size: 12px; color: var(--muted); }
+.work-tab > span:not(.work-tab-dot) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-tab-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
+.work-tab-dot.closed { background: none; border: 1.5px solid var(--muted); }
+.work-tab:disabled { opacity: 1; }
+.work-result { margin: 0 0 6px; font-size: 12.5px; line-height: 1.45; color: var(--text); }
+.work-result:empty { display: none; }
+.work-result.failed { color: var(--error); }
+.work-error { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.work-card .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Medium and wide Home: the group runs across the top of the board, above the lanes, cards side by side. On a wide
+   page the board has one fixed row of lanes, so the group gets its own row and a height cap with its own scroll. */
+@container home (min-width: 640px) {
+  .home-board > .home-group.decisions { grid-column: 1 / -1; }
+  .home-board > .home-group.decisions ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); align-items: start; }
+}
+@container home (min-width: 980px) {
+  .home-board:has(> .home-group.decisions) { grid-template-rows: auto minmax(0, 1fr); }
+  .home-board > .home-group.decisions { max-height: 42dvh; }
+}
+
+/* In the desktop Needs you panel: no sticky head, a little room between this group and the tab rows. */
+.home-group.decisions.compact { padding: 4px 10px 10px; border-bottom: 1px solid var(--line); }
+.home-group.decisions.compact .home-group-head { position: static; background: none; }
+.home-group.decisions.compact ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.inbox-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.inbox-scroll .inbox-list { flex: none; overflow: visible; }
+.inbox-subhead { margin: 0; padding: 10px 14px 4px; font-size: 13.5px; font-weight: 600; }
+
+/* On the blank Home page (no agent running): the last answer's result under the New session button. */
+.home-blank .home-group.decisions { margin-top: 28px; }
+.home-blank .home-group.decisions p { margin: 0 0 6px; font-size: 12.5px; color: var(--text); }
+.home-blank .home-group.decisions p.failed { color: var(--error); }
+.home-blank .home-group.decisions .work-error { color: var(--muted); }
+
+@media (pointer: coarse) {
+  .work-card .inbox-actions button, .work-tab { min-height: 44px; }
+  .work-reply input { height: 44px; font-size: 16px; }
+}

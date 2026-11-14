@@ -81,6 +81,8 @@ import './App.css'
 import './TitleBar.css'
 import { useWindowControls } from './titlebar'
 import { PanelHandles } from './PanelHandles'
+import { decisions as workDecisions, useWork } from './work'
+import { DecisionsGroup, useDecisionAnswers } from './WorkItems'
 import { sizeVars } from './panelEdges'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
@@ -275,6 +277,11 @@ function App() {
   const agentBrowser = useAgentBrowser(api)
   const asks = useMemo(() => browserAsks(agentBrowser), [agentBrowser])
   const inbox = useMemo(() => desktop ? inboxItems(panes, prefs.seen, openId, asks) : [], [desktop, panes, prefs.seen, openId, asks])
+  // The work board: items whose agent asked Mak something show first in Home and in the Needs you panel.
+  const work = useWork(api)
+  const decisionCount = workDecisions(work.data).length
+  const decisionAnswers = useDecisionAnswers(api, work.refresh)
+  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} />
   const groups = useMemo(() => homeGroups(panes, sessions, prefs.seen, openId, asks), [panes, sessions, prefs.seen, openId, asks])
   // Attention mode: the tabs whose ask waits on you (oldest first). The Home badge counts them with the open prompts.
   const now = useNow()
@@ -459,6 +466,7 @@ function App() {
     setGo(null)
     if (go === 'new') setNewSession(true)
     else if (go === 'usage') setPlanSheet(true)
+    else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})
@@ -810,14 +818,14 @@ function App() {
         <button type="button" className="icon-button" aria-label={words.newRight} title={words.tmux ? 'New pane right (tmux split, opens in a new slot)' : 'New tab, opens in a new slot'} onClick={() => void split('right')}><SquareSplitHorizontal size={17} /></button>
         <button type="button" className="icon-button" aria-label={words.newBelow} title={words.tmux ? 'New pane below (tmux split, opens in a new slot)' : 'New tab below, opens in a new slot'} onClick={() => void split('down')}><SquareSplitVertical size={17} /></button>
         <OldestButton items={waiting} sessions={sessions} selected={openId} onOpen={openPane} onDeck={() => setDeck(true)} />
-        <InboxButton count={inbox.length} open={desk.inbox} onToggle={() => setDesk({ inbox: !desk.inbox })} />
+        <InboxButton count={inbox.length + decisionCount} open={desk.inbox} onToggle={() => setDesk({ inbox: !desk.inbox })} />
       </>}
       panelTools={<PanelTools desk={desk} pane={pane} setPanels={setPanels} onSideChat={() => void sideChat()} />}
       panels={<PanelColumn api={api} desk={desk} pane={pane} setPanels={setPanels} renderChat={id => { const target = panes.find(item => item.id === id); return target ? chatFor(target) : null }} />} /> : chatFor(pane)) : null}
     {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
-    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog(true)} />}
+    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog(true)} />}
     {files && <Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} />}
     {share && <Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
       const before = prefs.drafts[pane.id]?.text ?? ''
@@ -844,7 +852,7 @@ function App() {
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
     {liveMode && <Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog(true)} reveal={liveReveal} from={liveFrom} />}
-    {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
+    {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
       onSize={(key, size) => update(current => { const sizes = { ...current.panelSizes[lookId] }; if (size === null) delete sizes[key]; else sizes[key] = size; return { panelSizes: { ...current.panelSizes, [lookId]: sizes } } })}
       onClose={name => { if (name === 'sessions') setDesk({ sidebar: false }); else if (name === 'inbox') setDesk({ inbox: false }); else update(current => ({ panelsClosed: { ...current.panelsClosed, [lookId]: [...new Set([...(current.panelsClosed[lookId] ?? []), name])] } })) }}

@@ -6,6 +6,9 @@ stays in the item's history and the reply says it was not sent."""
 import json
 import threading
 
+import paths
+from projects import _read, _write
+
 import work_items
 from projects import ProjectError
 
@@ -115,3 +118,68 @@ def post(handler, sessions=None, status=None, send=None):
             return work_items.save_project(body.get('project'), body.get('revision'), create)
         raise ProjectError(404, 'Not found')
     _answer(handler, work)
+
+
+NOTICE_LIMIT = 180
+
+
+class Watcher:
+    """A push notification when an item enters Needs you, also with every page closed. It remembers the last event
+    number it saw per project (paths.work()/notified.json): a restart repeats no old question, and its first run
+    only takes note of what is there. It follows the Urgent setting in notification settings: Off sends nothing,
+    Silent sends a silent notice."""
+
+    def __init__(self, notify, every=4.0, clock=None, delivery=None):
+        import time
+        self.notify, self.every, self.clock = notify, every, clock or time.monotonic
+        self.delivery = delivery or (lambda: {})
+        self.next = 0.0
+
+    def _path(self):
+        return paths.work() / 'notified.json'
+
+    def _load(self):
+        try:
+            data = json.loads(_read(self._path()) or '{}')
+        except ValueError:
+            data = {}
+        return {k: v for k, v in data.items() if isinstance(v, int)} if isinstance(data, dict) else {}
+
+    def observe(self):
+        if self.clock() < self.next:
+            return 0
+        self.next = self.clock() + self.every
+        seen = self._load()
+        changed, sent = False, 0
+        for record in work_items.registry()['projects']:
+            prefix = record['prefix']
+            try:
+                events = work_items._events(prefix)
+            except ProjectError:
+                continue
+            top = events[-1]['n'] if events else 0
+            last = seen.get(prefix)
+            if last is None or top < last:  # first look, or the file started over
+                seen[prefix], changed = top, True
+                continue
+            asks = [e for e in events if e['n'] > last and e['type'] == 'ask']
+            mode = self.delivery().get('urgent', 'sound') if asks else 'sound'
+            if asks and mode != 'off':
+                items = work_items.fold(record, events)
+                for event in asks:
+                    item = items.get(event['item'])
+                    if item and item['stage'] == 'needs' and (item.get('ask') or {}).get('id') == event.get('ask'):
+                        self.notify(self.payload(item, silent=mode == 'silent'), True)
+                        sent += 1
+            if top != last:
+                seen[prefix], changed = top, True
+        if changed:
+            _write(self._path(), json.dumps(seen) + '\n')
+        return sent
+
+    @staticmethod
+    def payload(item, silent=False):
+        question = item['ask']['q']
+        body = question if len(question) <= NOTICE_LIMIT else question[:NOTICE_LIMIT - 1].rstrip() + '…'
+        return {'title': f'{item["id"]} needs you: {item["title"]}'[:120], 'body': body, 'tag': 'work-' + item['id'],
+                'go': 'work', 'item': item['id'], 'priority': 'urgent', 'silent': silent, 'url': '/chat/?go=work'}

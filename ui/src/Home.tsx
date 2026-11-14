@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { RetryButton } from './Retry'
 import { groupOf, placeName } from './groups'
 import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { Check, Hand, Menu, Plus, Terminal } from 'lucide-react'
+import { Check, ClipboardList, Hand, Menu, Plus, Terminal } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { AnswerActions } from './answers'
 import { useAnswers } from './useAnswers'
@@ -145,8 +145,8 @@ function Blank({ title, text, children, onMenu }: { title: string; text: string;
   </section>
 }
 
-export function Home({ api, groups: all, asks = [], sessions = [], sort, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
-  api: Api; groups: HomeGroups; asks?: Waiting[]; sessions?: Session[]; sort?: WaitSort; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
+export function Home({ api, groups: all, asks = [], sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
+  api: Api; groups: HomeGroups; asks?: Waiting[]; sessions?: Session[]; sort?: WaitSort; decisions?: ReactNode; decisionCount?: number; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
   onRetry: () => unknown; onOpen: (pane: Pane) => void; onMarkRead: (panes: string[]) => void; onUpdate: () => void; onNew: () => void; onMenu: () => void; onBacklog?: () => void
 }) {
   const root = useRef<HTMLElement>(null)
@@ -208,7 +208,8 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, hasAgen
 
   // The first paint, before any list has come back, and a server that never answered.
   if (!loaded && !loading) return <Blank title="Could not load sessions" text={error || 'The session list did not load.'} onMenu={onMenu}><span className="home-blank-action"><RetryButton onRetry={onRetry} className="secondary" /></span></Blank>
-  if (loaded && !hasAgents) return <Blank title="Space for your next task." text="No agent is running. Open a session, or start something new." onMenu={onMenu}><button type="button" className="primary home-blank-action" onClick={onNew}><Plus size={18} />New session</button></Blank>
+  // With no agent and no open question, the blank page still shows the last answer's result (sent or not).
+  if (loaded && !hasAgents && !decisionCount) return <Blank title="Space for your next task." text="No agent is running. Open a session, or start something new." onMenu={onMenu}><button type="button" className="primary home-blank-action" onClick={onNew}><Plus size={18} />New session</button>{decisions}</Blank>
 
   return <section className="home" ref={root} aria-label="Home" onFocus={onFocus}>
     <div className="home-inner">
@@ -220,6 +221,7 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, hasAgen
         {loaded && cards.length > 0 && <p className="home-scope">{plural(cards.length, 'active agent')} across {plural(sessionCount, 'session')}</p>}
         {!loaded && <div className="home-summary home-summary-bone" aria-hidden="true">{GROUPS.map(group => <span key={group.key}><Bone w={group.key === 'needs' ? 74 : 62} /></span>)}</div>}
         {loaded && <div className="home-summary" role="group" aria-label="Jump to a group">
+          {decisionCount > 0 && <button type="button" onClick={() => document.getElementById('home-group-decisions')?.scrollIntoView({ block: 'start' })}><ClipboardList size={13} aria-hidden="true" className="home-decisions-mark" /><b>{decisionCount}</b> Decisions</button>}
           {asks.length > 0 && <button type="button" onClick={() => document.getElementById('home-group-asks')?.scrollIntoView({ block: 'start' })}><Hand size={13} aria-hidden="true" className="home-asks-mark" /><b>{asks.length}</b> Waiting on you</button>}
           {GROUPS.map(group => <button key={group.key} type="button" onClick={() => document.getElementById(groupId(group.key))?.scrollIntoView({ block: 'start' })}>
             <span className={`state-dot ${group.dot}`} aria-hidden="true" /><b>{groups[group.key].length}</b> {group.label}
@@ -229,6 +231,7 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, hasAgen
       {loaded && onBacklog && <BacklogNews api={api} onOpen={onBacklog} />}
       {error && loaded && <p className="home-stale" role="alert"><span>Could not refresh this list. {error}</span><RetryButton onRetry={onRetry} className="ghost sm" /></p>}
       <div className={`home-board${loaded ? '' : ' loading skeleton'}`} aria-busy={!loaded}>
+        {loaded && decisions}
         {loaded && asks.length > 0 && <AsksGroup items={asks} sessions={sessions} sort={sort} onOpen={onOpen} />}
         {GROUPS.map(group => {
           const items = groups[group.key]

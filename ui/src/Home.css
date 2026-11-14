@@ -154,7 +154,8 @@
   .home-group { display: flex; flex-direction: column; min-height: 0; padding-bottom: 0; }
   .home-group:is(.needs, .asks) { grid-column: auto; }
   .home-group:is(.needs, .asks) ul { display: flex; }
-  .home-board:has(.home-group.asks) { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); }
+  /* Four lanes with Waiting on you. Each selector names the Needs you cards, so it outranks the three-lane rule above. */
+  .home-board:has(.home-group.asks):has(.home-group.needs .home-card) { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr); }
   .home-board:has(.home-group.asks):not(:has(.home-group.needs .home-card)) { grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
   .home-group-head { position: static; flex: none; }
   .home-group ul { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 2px 12px; margin-inline: -2px; }

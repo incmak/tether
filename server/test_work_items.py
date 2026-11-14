@@ -373,6 +373,63 @@ class Api(unittest.TestCase):
         self.assertEqual(self.post('nope', {'version': 1})[0], 404)
 
 
+class Watcher(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        patcher = mock.patch.object(paths, 'TETHER', Path(self.temp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.temp.cleanup)
+        work_items._CACHE.clear()
+        work_items.save_project(dict(PROJECT), 0, create=True)
+        self.sent = []
+        self.watcher = work_api.Watcher(lambda payload, urgent: self.sent.append((payload, urgent)), every=0)
+
+    def test_first_look_sends_nothing_then_each_new_ask_once(self):
+        work_items.new('shop', 'Login fails', 'agent')
+        work_items.ask('T-001', 'Old question?', ['Build'])
+        self.assertEqual(self.watcher.observe(), 0)
+        asked = work_items.ask('T-001', 'Fix the token check?', ['Build', 'Hold'])
+        self.assertEqual(self.watcher.observe(), 1)
+        payload, urgent = self.sent[0]
+        self.assertTrue(urgent)
+        self.assertEqual((payload['go'], payload['item'], payload['tag']), ('work', 'T-001', 'work-T-001'))
+        self.assertEqual(payload['body'], 'Fix the token check?')
+        self.assertEqual(self.watcher.observe(), 0)
+        # A restart reads the saved number: no repeat.
+        self.assertEqual(work_api.Watcher(lambda *a: self.sent.append(a), every=0).observe(), 0)
+        work_items.answer('T-001', asked['ask']['id'], asked['version'], choice='Build')
+        self.assertEqual(self.watcher.observe(), 0)
+
+    def test_answered_before_the_look_sends_nothing(self):
+        work_items.new('shop', 'Login fails', 'agent')
+        self.watcher.observe()
+        asked = work_items.ask('T-001', 'Quick?', ['Build'])
+        work_items.answer('T-001', asked['ask']['id'], asked['version'], choice='Build')
+        self.assertEqual(self.watcher.observe(), 0)
+
+    def test_long_question_is_cut(self):
+        work_items.new('shop', 'Login fails', 'agent')
+        self.watcher.observe()
+        work_items.ask('T-001', 'word ' * 100, ['Build'])
+        self.watcher.observe()
+        self.assertLessEqual(len(self.sent[0][0]['body']), work_api.NOTICE_LIMIT)
+
+    def test_urgent_setting_off_or_silent(self):
+        mode = {'urgent': 'off'}
+        watcher = work_api.Watcher(lambda payload, urgent: self.sent.append(payload), every=0, delivery=lambda: mode)
+        work_items.new('shop', 'Login fails', 'agent')
+        watcher.observe()
+        work_items.ask('T-001', 'One?', ['Build'])
+        self.assertEqual(watcher.observe(), 0)
+        self.assertEqual(self.sent, [])
+        mode['urgent'] = 'silent'
+        work_items.ask('T-001', 'Two?', ['Build'])
+        self.assertEqual(watcher.observe(), 1)
+        self.assertTrue(self.sent[0]['silent'])
+        self.assertEqual(self.sent[0]['body'], 'Two?')
+
+
 class Cli(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

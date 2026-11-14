@@ -34,7 +34,7 @@ async function notify(payload) {
   const title = payload.title || 'Tether', body = payload.body || ''
   for (const item of await self.registration.getNotifications({ tag: SUMMARY })) item.close()
   await self.registration.showNotification(title, { ...ICONS, body, tag: payload.tag, silent: payload.silent === true,
-    data: { session: payload.session, thread: payload.thread, approval: payload.approval, body: payload.body, review: payload.review },
+    data: { session: payload.session, thread: payload.thread, approval: payload.approval, body: payload.body, review: payload.review, go: payload.go },
     // A plain yes/no prompt gets Approve and Deny (the server picked it as safe to answer from here); others get Urgent only.
     actions: payload.approval ? [{ action: 'approve', title: 'Approve' }, { action: 'deny', title: 'Deny' }]
       : payload.review ? [{ action: 'resend', title: 'Ask again' }, { action: 'latest', title: 'Send this reply' }]
@@ -97,16 +97,18 @@ self.addEventListener('notificationclick', event => {
       headers: { 'Content-Type': 'application/json', 'X-Codex-Mobile': '1' }, body: JSON.stringify({ session, level: 'urgent' }) }))
     return
   }
-  event.waitUntil(event.action === 'agents' || event.notification.data?.go === 'agents' ? openAgents() : openPane(session))
+  const go = event.action === 'agents' ? 'agents' : event.notification.data?.go
+  event.waitUntil(go === 'agents' || go === 'work' ? openPage(go) : openPane(session))
 })
-// "All agents" (or an old summary) opens the Agents page: in the open Tether window when there is one, else in a new window.
-async function openAgents() {
+// "All agents" (or an old summary) opens the Agents page; a work item question opens Needs you. In the open Tether
+// window when there is one, else in a new window.
+async function openPage(go) {
   const chat = await lastWindow()
   if (chat) {
-    chat.postMessage({ go: 'agents' })
+    chat.postMessage({ go })
     try { await chat.focus(); return } catch { /* fall through and open a window */ }
   }
-  await self.clients.openWindow('/chat/?go=agents')
+  await self.clients.openWindow(`/chat/?go=${go}`)
 }
 async function lastWindow() {
   const windows = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })).filter(client => {

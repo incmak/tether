@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Inbox as InboxIcon, X } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { AgentIcon, agentNames, paneTitle, shownIndex } from './Sidebar'
@@ -29,6 +29,9 @@ interface InboxProps {
   onToggle: () => void
   onOpen: (pane: Pane) => void
   onUpdate: () => void
+  /** Decisions on work items, shown above the tabs that wait for input. */
+  decisions?: ReactNode
+  decisionCount?: number
 }
 
 /** The button in the workspace bar that shows and hides the list. */
@@ -41,7 +44,7 @@ export function InboxButton({ count, open, onToggle }: { count: number; open: bo
 
 const focusRow = (id: string) => document.querySelector<HTMLButtonElement>(`.inbox [data-pane="${CSS.escape(id)}"] .inbox-open`)?.focus()
 
-export function Inbox({ api, items, sessions, selected, open, onToggle, onOpen, onUpdate }: InboxProps) {
+export function Inbox({ api, items, sessions, selected, open, onToggle, onOpen, onUpdate, decisions, decisionCount = 0 }: InboxProps) {
   const { busy, errors, answer, fail, onAnswerKey } = useAnswers({ api, items, active: open, onUpdate, focusRow })
   const [now, setNow] = useState(() => Date.now() / 1000)
   useEffect(() => { const timer = setInterval(() => setNow(Date.now() / 1000), 30000); return () => clearInterval(timer) }, [])
@@ -84,12 +87,15 @@ export function Inbox({ api, items, sessions, selected, open, onToggle, onOpen, 
   return <aside className="inbox" aria-labelledby="inbox-title">
     <div className="inbox-head">
       <h2 id="inbox-title">Needs you</h2>
-      <span className="inbox-count">{items.length || ''}</span>
+      <span className="inbox-count">{items.length + decisionCount || ''}</span>
       <span className="workspace-spacer" />
       <button type="button" className="inbox-next" disabled={!items.length} title={`Open the next pane that needs you (${MOD}J)`}
         onClick={() => { const at = items.findIndex(item => item.pane.id === selected); const next = items[(at + 1) % items.length]; if (next) onOpen(next.pane) }}>Next <kbd>{MOD}J</kbd></button>
       <button type="button" className="icon-button" aria-label={`Hide Needs you (${MOD}I)`} title={`Hide (${MOD}I)`} onClick={onToggle}><X size={16} /></button>
     </div>
+    <div className="inbox-scroll">
+    {decisions}
+    {decisionCount > 0 && items.length > 0 && <h3 className="inbox-subhead">Tabs waiting for input · {items.length}</h3>}
     {items.length ? <ul className="inbox-list" aria-label="Panes that need you">
       {items.map(item => {
         const { pane } = item
@@ -107,6 +113,7 @@ export function Inbox({ api, items, sessions, selected, open, onToggle, onOpen, 
           {errors[pane.id] && <p className="inbox-error" role="alert">{errors[pane.id]}</p>}
         </li>
       })}
-    </ul> : <p className="inbox-empty">Nothing needs you.</p>}
+    </ul> : !decisionCount && <p className="inbox-empty">Nothing needs you.</p>}
+    </div>
   </aside>
 }
