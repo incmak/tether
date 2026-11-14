@@ -165,44 +165,70 @@ def _repo_root(cwd):
     return str(common.parent) if common.name == '.git' else lines[0]
 
 
+SYSTEM_FILES = ('/etc/codex/config.toml', '/etc/codex/requirements.toml', '/etc/codex/managed_config.toml')
+LAYER_KEYS = ('sandbox_mode', 'profile', 'default_permissions', 'permissions', 'projects', 'project_root_markers')
+
+
+def _layers(folders, home):
+    """Every .codex/config.toml Codex can load for these start folders: each folder and all its parents
+    (config/src/loader/mod.rs: "parent directories up to root"). CODEX_HOME itself is the user layer, not a project one."""
+    seen = set()
+    for folder in folders:
+        for place in [Path(folder), *Path(folder).parents]:
+            layer = place / '.codex'
+            if layer in seen or layer.resolve() == home:
+                continue
+            seen.add(layer)
+            yield layer / 'config.toml'
+
+
 def codex_writable(args, cwd=None):
     """True only when Codex will surely start with a writable workspace. Codex 0.166 exits with code 1 when it gets
     --add-dir and the start folder is not writable (tui/src/additional_dirs.rs). The order follows Codex:
     sandbox flags, then -c sandbox_mode, then config.toml, then the folder trust (core/src/config/permissions.rs:
     a [projects] entry with any trust_level gives the workspace profile; no entry gives read-only).
-    Profiles and permission profiles are not modelled: then the answer is False."""
+    Anything this does not model (profiles, permission profiles, system or managed config, project config layers)
+    gives False: Codex then starts without --add-dir, as before."""
+    if '--' in args:
+        args = args[:args.index('--')]  # after --, everything is the prompt
     if any(arg in WRITE_FLAGS for arg in args):
         return True
     for value in reversed(_option(args, '-s', '--sandbox')):
         return _mode(value) is True
     if _option(args, '-p', '--profile'):
         return False
-    for value in reversed(_option(args, '-c', '--config')):
-        key, _, setting = value.partition('=')
+    overrides = [value.partition('=') for value in _option(args, '-c', '--config')]
+    if any(key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.')
+           for key, _, _ in overrides):
+        return False  # Codex prefers permission profiles over sandbox_mode in the same layer, whatever the order
+    if any(os.path.exists(path) for path in SYSTEM_FILES):
+        return False
+    for key, _, setting in reversed(overrides):
         if key.strip() == 'sandbox_mode':
             return _mode(setting) is True
-        if key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.'):
-            return False
     import paths
-    config = _toml(Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml')
-    if config is None or any(key in config for key in ('profile', 'default_permissions', 'permissions')):
+    home = Path(os.environ.get('CODEX_HOME') or paths.CODEX)
+    config = _toml(home / 'config.toml')
+    if config is None or any(key in config for key in ('profile', 'default_permissions', 'permissions',
+                                                       'project_root_markers')):
         return False
     folder = (_option(args, '-C', '--cd') or [None])[-1]
     start = cwd or os.getcwd()
-    folder = os.path.join(start, folder) if folder else start
+    folder = os.path.normpath(os.path.join(start, folder) if folder else start)
+    real = os.path.realpath(folder)
     root = _repo_root(folder)
-    for place in [folder, root] if root else [folder]:  # a project .codex/config.toml can set its own sandbox
-        layer = _toml(Path(place) / '.codex' / 'config.toml')
-        if layer is None or any(key in layer for key in ('sandbox_mode', 'profile', 'default_permissions', 'permissions')):
+    for path in _layers([folder, real], home.resolve()):
+        layer = _toml(path)
+        if layer is None or any(key in layer for key in LAYER_KEYS):
             return False
     if 'sandbox_mode' in config:
         return _mode(config['sandbox_mode']) is True
     known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
-    for key in [folder, root] if root else [folder]:
-        if key in known:
-            entry = known[key]
-            return isinstance(entry, dict) and entry.get('trust_level') in ('trusted', 'untrusted')
-    return False
+    # Codex takes the first entry it finds; both spellings of the start folder come before the repository root.
+    own = [known[key] for key in dict.fromkeys([folder, real]) if key in known]
+    entries = own or ([known[root]] if root and root in known else [])
+    return bool(entries) and all(isinstance(entry, dict) and entry.get('trust_level') in ('trusted', 'untrusted')
+                                 for entry in entries)
 
 
 def codex_folders(args=()):

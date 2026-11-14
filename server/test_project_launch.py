@@ -97,6 +97,38 @@ class UnitTests(unittest.TestCase):
         for args in (['-C', 'elsewhere'], ['--cd=elsewhere'], ['-Celsewhere']):
             self.assertFalse(project_launch.codex_writable(args, folder), args)
 
+    def test_writable_round_two_cases(self):
+        repo = self.temp / 'repo'
+        deep = repo / 'a' / 'b'
+        deep.mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        trusted = f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n'
+        self.config(trusted)
+        self.assertTrue(project_launch.codex_writable([], str(deep)))
+        # A project layer between the start folder and the repository root counts too.
+        (repo / 'a' / '.codex').mkdir()
+        (repo / 'a' / '.codex' / 'config.toml').write_text('sandbox_mode = "read-only"\n')
+        self.assertFalse(project_launch.codex_writable([], str(deep)))
+        (repo / 'a' / '.codex' / 'config.toml').unlink()
+        # An empty entry for the real path of an alias shadows the trusted root.
+        alias = self.temp / 'alias'
+        alias.symlink_to(deep)
+        self.config(trusted + f'[projects."{os.path.realpath(deep)}"]\n')
+        self.assertFalse(project_launch.codex_writable([], str(alias)))
+        self.config(trusted)
+        self.assertTrue(project_launch.codex_writable([], str(alias)))
+        # Permission profiles win over sandbox_mode in any order; text after -- is the prompt.
+        self.assertFalse(project_launch.codex_writable(
+            ['-c', 'default_permissions=":read-only"', '-c', 'sandbox_mode="workspace-write"'], str(deep)))
+        self.assertFalse(project_launch.codex_writable(['--', '--yolo'], str(self.temp)))
+        self.assertTrue(project_launch.codex_writable(['--yolo', '--', 'hi'], str(self.temp)))
+        # System or managed config is not modelled.
+        system = self.temp / 'system.toml'
+        system.write_text('')
+        with mock.patch.object(project_launch, 'SYSTEM_FILES', (str(system),)):
+            self.assertFalse(project_launch.codex_writable([], str(deep)))
+            self.assertFalse(project_launch.codex_writable(['-c', 'sandbox_mode="workspace-write"'], str(deep)))
+
     def test_writable_read_only_codex_gets_no_folders(self):
         with mock.patch('os.getcwd', return_value=str(self.temp)):
             args = project_launch.codex_args(PID, ['resume', '--last'])
@@ -261,7 +293,8 @@ class WrapperTests(unittest.TestCase):
         self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh')
         (self.temp / 'codex').mkdir()
         (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
-        self.tmux('new-session', '-d', '-s', 'proj', '-x', '120', '-y', '30', '/bin/sh')  # not a login shell: /etc/profile would reset PATH
+        self.tmux('new-session', '-d', '-s', 'proj', '-c', str(self.temp),  # no real .codex folder above it
+                   '-x', '120', '-y', '30', '/bin/sh')  # not a login shell: /etc/profile would reset PATH
         self.addCleanup(self.tmux, 'kill-server')
 
     def tmux(self, *args):
