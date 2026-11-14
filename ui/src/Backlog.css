@@ -122,3 +122,56 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 @media (prefers-reduced-motion: reduce) { .backlog-status.loading { animation-duration: .01s; } }
 @media (pointer: coarse) { .backlog-bones .backlog-actions { width: 102px; } }
 .backlog-bones .backlog-heading .bone { vertical-align: baseline; }
+/* Search, filters and order (backlogView.ts). A filter changes only what is shown. */
+.backlog-main { display: flex; flex: 1; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; }
+.backlog-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.backlog-search { display: flex; flex: 1 1 200px; align-items: center; gap: 6px; min-width: 0; height: 34px; padding: 0 8px 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); cursor: text; }
+.backlog-search:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.backlog .backlog-search input { flex: 1; width: auto; min-width: 0; height: 100%; min-height: 0; margin: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; box-shadow: none; }
+.backlog .backlog-search input::-webkit-search-cancel-button { cursor: pointer; }
+.backlog-search kbd { flex: none; display: none; min-width: 18px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+@media (hover: hover) and (pointer: fine) { .backlog-search:not(:focus-within) kbd { display: inline-block; } }
+.backlog-filters { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.sm-trigger.backlog-filter { width: auto; max-width: 180px; min-height: 34px; padding: 0 8px 0 10px; border-radius: var(--radius); font-size: 13px; }
+.sm-trigger.backlog-filter > svg:first-child { color: var(--muted); }
+.backlog mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; }
+.backlog-row.fixed { grid-template-columns: 18px minmax(0, 1fr) auto; }
+.backlog-status .link-button { font-size: 12px; }
+.backlog-empty .secondary { margin-top: 6px; }
+@media (max-width: 420px) { .backlog-search { flex-basis: 100%; } .backlog .backlog-search input { font-size: 16px; } }
+@media (pointer: coarse) {
+  .backlog-search, .sm-trigger.backlog-filter { height: 44px; min-height: 44px; }
+  .backlog .backlog-search input { font-size: 16px; }
+  .backlog-row.fixed { grid-template-columns: 22px minmax(0, 1fr) auto; }
+}
+
+/* The full page: a side list of views and projects, and the list. A phone gets the side list as a row of chips. */
+.backlog-heading-buttons { display: inline-flex; align-items: center; gap: 4px; }
+.sheet.backlog-sheet.backlog-page[open] { width: 100%; max-width: none; height: calc(100dvh - 12px); }
+.backlog.page { flex-direction: column; gap: 12px; }
+.backlog-nav { display: flex; flex: none; gap: 6px; margin-inline: -24px; padding: 0 24px 2px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.backlog-nav-head { display: none; }
+.backlog-nav ul { display: contents; }
+.backlog-nav button { display: inline-flex; flex: none; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--text); font-size: 13px; white-space: nowrap; cursor: pointer; }
+.backlog-nav button:hover { background: var(--hover); }
+.backlog-nav button svg { flex: none; color: var(--muted); }
+.backlog-nav button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
+.backlog-nav button[aria-pressed="true"] svg { color: var(--accent); }
+.backlog-nav-count { color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.backlog.page .backlog-list { margin-inline: 0; padding-inline: 0; }
+@media (pointer: coarse) { .backlog-nav button { min-height: 44px; } }
+@media (min-width: 600px) {
+  .sheet.backlog-sheet.backlog-page[open] { width: calc(100% - 48px); max-width: 1440px; height: calc(100dvh - 48px); }
+}
+@media (min-width: 840px) {
+  .backlog.page { flex-direction: row; gap: 28px; }
+  .backlog-nav { display: block; width: 216px; margin: 0; padding: 0 12px 0 0; overflow: auto; border-right: 1px solid var(--line); }
+  .backlog-nav-head { display: block; margin: 14px 8px 6px; color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 600; }
+  .backlog-nav-head:first-child { margin-top: 2px; }
+  .backlog-nav ul { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+  .backlog-nav button { display: flex; width: 100%; padding: 0 8px; border: 0; border-radius: var(--radius-sm); text-align: start; }
+  .backlog-nav button > span:not(.backlog-nav-count) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .backlog-nav button[aria-pressed="true"] { background: var(--hover); }
+  .backlog.page .backlog-main { max-width: 920px; }
+  .backlog.page .backlog-search { flex-basis: 320px; }
+}

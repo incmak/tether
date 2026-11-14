@@ -1,7 +1,8 @@
 import { VoiceField } from './VoiceField'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
-import { Check, ChevronRight, ClipboardList, FileText, GripVertical, ListChecks, Pencil, Plus, Send, Trash2, X } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import { ArrowDownUp, Check, ChevronRight, CircleCheck, ClipboardList, FileText, GripVertical, Hash, Inbox, Layers, ListChecks, Maximize2, Minimize2, Pencil, Plus, Search, Send, Timer, Trash2, UserRound, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { addItem, blockOf, moveItem, openGroups, parseBacklog, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
@@ -12,6 +13,9 @@ import { usePanelPoll } from './panelProps'
 import { BACKLOG_PATH, highestRef, markSeen, useBacklogNews } from './backlogNews'
 import { agentTabs, itemPrompt, sendToTab, startTab } from './backlogSend'
 import { Bone } from './Skeleton'
+import { SelectMenu } from './SelectMenu'
+import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, highlight, isFiltered, matchesQuery, matchesStatus, matchesWho, projectCounts, viewGroups } from './backlogView'
+import type { SortKey, StatusFilter, View, Who } from './backlogView'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Backlog.css'
 
@@ -106,12 +110,11 @@ interface RowActions {
   onSend?: (item: Item) => void
 }
 
-function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean }) {
+function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged, reorder, query }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean; reorder: boolean; query: string }) {
   const [wording, setWording] = useState(item.text)
   // Sub-steps stay in view. Notes (the why, the files, selected chat text) fold under the title until opened.
   const [showNotes, setShowNotes] = useState(false)
   const notes = item.details.filter(detail => detail.done === undefined)
-  const shown = showNotes ? item.details : item.details.filter(detail => detail.done !== undefined)
   const ended = useRef(false)
   const finish = (keep: boolean) => {
     if (ended.current) return
@@ -120,9 +123,13 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
     setEditing(null)
     if (keep && wording.trim() && wording.trim() !== item.text) actions.onReword(item, wording)
   }
-  return <li data-backlog-row={item.done ? undefined : item.id} className={['backlog-row', item.done && 'done', drop && `drop-${drop}`, dragged && 'dragged'].filter(Boolean).join(' ')}
+  // A search shows the details that matched, so the reason for a match is in view.
+  const matchedNote = !!query.trim() && notes.some(detail => matchesQuery({ ...item, text: '', ref: undefined, source: undefined, status: undefined, details: [detail] }, query))
+  const notesOpen = showNotes || matchedNote
+  const visible = notesOpen ? item.details : item.details.filter(detail => detail.done !== undefined)
+  return <li data-backlog-row={item.done ? undefined : item.id} className={['backlog-row', item.done && 'done', !reorder && !item.done && 'fixed', drop && `drop-${drop}`, dragged && 'dragged'].filter(Boolean).join(' ')}
     style={dragged ? { opacity: 1, zIndex: 1, background: 'var(--bg)', boxShadow: '0 3px 10px rgb(0 0 0 / .16)' } : undefined}>
-    {!item.done && <button type="button" className="backlog-grip" aria-label={`Move ${item.text}. Use the up and down arrow keys.`} title="Drag to reorder" disabled={locked}
+    {!item.done && reorder && <button type="button" className="backlog-grip" aria-label={`Move ${item.text}. Use the up and down arrow keys.`} title="Drag to reorder" disabled={locked}
       onPointerDown={event => actions.onDragStart(event, item)} onKeyDown={event => actions.onDragKey(event, item)}
       onTouchStart={event => event.stopPropagation()} onTouchEnd={event => event.stopPropagation()}><GripVertical size={15} aria-hidden="true" /></button>}
     <input type="checkbox" className="backlog-box" aria-label={item.text} checked={item.done} disabled={locked} onChange={event => actions.onDone(item.raw, item.line, event.target.checked)} />
@@ -131,16 +138,16 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
         ? <VoiceField label="backlog title" value={wording} setValue={value => { setWording(value); typedRef.current = value }} onLeave={() => finish(true)} field={{ 'aria-label': `Reword ${item.text}`, className: 'backlog-input backlog-reword', autoFocus: true,
             onFocus: event => { ended.current = false; event.target.select() },
             onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); finish(true) } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false) } } }} />
-        : <span className="backlog-text-line" onDoubleClick={() => { if (!locked && !item.done) { setWording(item.text); setEditing(item.id) } }}>{item.text}</span>}
+        : <span className="backlog-text-line" onDoubleClick={() => { if (!locked && !item.done) { setWording(item.text); setEditing(item.id) } }}>{highlight(item.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)}</span>}
       {(item.ref || item.source) && <span className="backlog-meta">
         {item.ref && <span className="backlog-ref" title="The ID agents use for this item">{item.ref}</span>}
         {item.source && <SourceTag source={item.source} links={links} />}
       </span>}
       {item.status && (item.status.kind === 'done' ? item.done : !item.done) && <StatusLine status={item.status} links={links} />}
-      {notes.length > 0 && <button type="button" className="backlog-done-toggle backlog-notes-toggle" aria-expanded={showNotes} onClick={() => setShowNotes(!showNotes)}>
-        <ChevronRight size={14} className={showNotes ? 'open' : ''} aria-hidden="true" />Details · {notes.length}</button>}
-      {shown.length > 0 && <ul className="backlog-details">{shown.map(detail => <li key={detail.line}>
-        {detail.done === undefined ? <span>{detail.text}</span>
+      {notes.length > 0 && <button type="button" className="backlog-done-toggle backlog-notes-toggle" aria-expanded={notesOpen} disabled={matchedNote} onClick={() => setShowNotes(!showNotes)}>
+        <ChevronRight size={14} className={notesOpen ? 'open' : ''} aria-hidden="true" />Details · {notes.length}</button>}
+      {visible.length > 0 && <ul className="backlog-details">{visible.map(detail => <li key={detail.line}>
+        {detail.done === undefined ? <span>{highlight(detail.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)}</span>
           : <label className={`backlog-sub${detail.done ? ' done' : ''}`}><input type="checkbox" checked={detail.done} disabled={locked} onChange={event => actions.onDone(detail.raw, detail.line, event.target.checked)} /><span>{detail.text}</span></label>}
       </li>)}</ul>}
     </div>
@@ -185,7 +192,34 @@ interface Undo { label: string; change: Change }
 /** What a close has to ask about: text that would otherwise be lost. */
 export type BacklogGuard = RefObject<() => boolean>
 
-export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpenPane }: { api: Api; guard?: BacklogGuard; active?: boolean; panes?: Pane[]; onOpenPane?: (pane: Pane) => void }) {
+// The order and "Added by" stay per browser. Search, status and project start fresh each time.
+// A search from the command menu ignores the saved "Added by", so the item it names is not hidden.
+const VIEW_KEY = 'tether.backlogView'
+function readView(query: string): View {
+  // A search for one ID also looks in Done: the command menu opens the backlog this way for any item.
+  const start: View = { ...DEFAULT_VIEW, query, status: /^\s*b\d+\s*$/i.test(query) ? 'all' : 'open' }
+  try {
+    const saved = JSON.parse(localStorage.getItem(VIEW_KEY) || '{}') as Record<string, unknown>
+    return { ...start, ...(typeof saved.sort === 'string' && saved.sort in SORT_LABELS ? { sort: saved.sort as SortKey } : {}), ...(!query.trim() && typeof saved.who === 'string' && saved.who in WHO_LABELS ? { who: saved.who as Who } : {}) }
+  } catch { return start }
+}
+const typingIn = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+const projectLabel = (name: string) => name || 'Inbox'
+// A project in a menu: every project, the inbox (no heading), or one heading.
+const ALL = '*all', INBOX = '*inbox'
+const projectValue = (project: string | null) => project === null ? ALL : project === '' ? INBOX : `p:${project}`
+const projectOf = (value: string) => value === ALL ? null : value === INBOX ? '' : value.slice(2)
+const STATUS_ICONS: Record<StatusFilter, LucideIcon> = { open: Inbox, doing: Timer, done: CircleCheck, all: Layers }
+
+export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpenPane, layout = 'sheet', initialQuery = '' }: { api: Api; guard?: BacklogGuard; active?: boolean; panes?: Pane[]; onOpenPane?: (pane: Pane) => void; layout?: 'sheet' | 'page'; initialQuery?: string }) {
+  const page = layout === 'page'
+  const [view, setViewState] = useState(() => readView(initialQuery))
+  const setView = (patch: Partial<View>) => setViewState(current => {
+    const next = { ...current, ...patch }
+    if (patch.sort || patch.who) try { localStorage.setItem(VIEW_KEY, JSON.stringify({ sort: next.sort, who: next.who })) } catch { /* private window: the choice lasts until the sheet closes */ }
+    return next
+  })
+  const searchBox = useRef<HTMLInputElement>(null)
   const [saved, setSaved] = useState<Saved | null>(null)
   const [changes, setChanges] = useState<Change[]>([])  // made in the checklist, not saved yet
   const [draft, setDraft] = useState<string | null>(null)  // the text while the person edits it as text
@@ -360,10 +394,25 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   }, [unsaved])
 
   // The add box is disabled until the list loads, so the cursor goes there then. A phone keeps its keyboard closed.
+  // A backlog opened on a search keeps the cursor in the search.
   const loaded = !!saved
   useEffect(() => {
-    if (loaded && window.matchMedia('(pointer: fine)').matches) addBox.current?.focus()
-  }, [loaded])
+    if (loaded && window.matchMedia('(pointer: fine)').matches) (initialQuery ? searchBox.current : addBox.current)?.focus()
+  }, [loaded, initialQuery])
+
+  // "/" goes to the search from anywhere in the backlog. On the full page, Ctrl/Cmd+F does too.
+  useEffect(() => {
+    if (!active) return
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      const find = page && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.code === 'KeyF'
+      if (!find && (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || typingIn(event.target))) return
+      if (!searchBox.current) return
+      event.preventDefault()
+      searchBox.current.focus(); searchBox.current.select()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [active, page])
 
   useEffect(() => {
     if ((!refocus.current && !reveal.current) || !list.current) return
@@ -378,15 +427,31 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     if (!itemVoice && item.trim() && change(addItem(item))) { reveal.current = `- [ ] ${item.trim().replace(/\s*\n\s*/g, ' ')}\n`; setItem('') }
   }
   const rows = parseBacklog(shown)
-  const done = rows.filter((row): row is Item => row.kind === 'item' && row.done)
+  const allItems = rows.filter((row): row is Item => row.kind === 'item')
+  const done = allItems.filter(row => row.done)
   const groups = openGroups(rows)
-  const highest = highestRef(rows.filter((row): row is Item => row.kind === 'item'))
+  const highest = highestRef(allItems)
   useEffect(() => { if (active && highest) markSeen(highest) }, [active, highest])
   const hasHeadings = groups.some(group => group.heading)
-  const openItems = groups.flatMap(group => group.rows.filter((row): row is Item => row.kind === 'item'))
+  const allOpen = groups.flatMap(group => group.rows.filter((row): row is Item => row.kind === 'item'))
   const locked = !saved || !!conflict
   const headings = groups.filter(group => group.heading || hasHeadings).length
-  useEffect(() => { if (saved) { rememberCount('backlog.rows', openItems.length); rememberCount('backlog.groups', headings) } }, [saved, openItems.length, headings])
+  useEffect(() => { if (saved) { rememberCount('backlog.rows', allOpen.length); rememberCount('backlog.groups', headings) } }, [saved, allOpen.length, headings])
+  // The saved order with nothing filtered: the plain checklist, with its free-text notes. Anything else: the filtered groups.
+  const plain = !isFiltered(view) && view.sort === 'manual'
+  const filtered = plain ? [] : viewGroups(rows, view)
+  // While the list shows open items, the matching done items wait in the folded Done part below it.
+  const doneShown = view.status === 'open' ? viewGroups(rows, view, 'done').flatMap(group => group.items) : []
+  const openItems = plain ? allOpen : filtered.flatMap(group => group.items.filter(row => !row.done))
+  const reorder = canReorder(view)
+  const shownCount = plain ? allOpen.length : filtered.reduce((sum, group) => sum + group.items.length, 0)
+  const projects = projectCounts(rows)
+  const narrowed = projects.length > 1 || hasHeadings
+  const statusCount = (status: StatusFilter) => allItems.filter(row => matchesStatus(row, status)).length
+  const whoCount = (who: Who) => allItems.filter(row => matchesStatus(row, view.status) && matchesWho(row, who)).length
+  const clearFilters = () => setView({ query: '', status: 'open', project: null, who: 'any' })
+  const statuses = Object.keys(STATUS_LABELS) as StatusFilter[]
+  const projectOptions = [{ value: ALL, label: 'All projects', count: allOpen.length }, ...projects.map(entry => ({ value: projectValue(entry.name), label: projectLabel(entry.name), count: entry.open }))]
 
   const short = (text: string) => text.length > 40 ? `${text.slice(0, 40)}…` : text
   const actions: RowActions = {
@@ -485,7 +550,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     : <ItemRow key={row.id} item={row} actions={actions} links={links} locked={locked}
         sending={sendFor === row.id && !row.done ? <SendPanel item={row} api={api} links={links} command={saved?.command} onClose={() => setSendFor(null)}
           onSent={(who, pane, name) => { setSendFor(null); change(startItem(row.raw, row.line, who)); setSent({ label: `Sent ${row.ref} to ${name}`, pane }) }} /> : undefined} editing={editingRow === row.id} setEditing={setEditingRow} typed={typedRow} dragged={drag?.item.id === row.id}
-        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} />
+        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} reorder={reorder} query={view.query} />
   const clearDone = () => {
     const blocks = done.map(row => blockOf(shown, row.raw, row.line)).filter(block => block !== null).sort((a, b) => a.line - b.line)
     const remove: Change = text => done.reduce<string | null>((value, row) => { if (value === null) return null; return removeItem(row.raw, row.line)(value) ?? value }, text)
@@ -510,9 +575,44 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     : tooLong ? `Keep it under ${saved.limit.toLocaleString()} characters.`
     : unsaved || saving ? 'Saving…'
     : !rows.length ? ''
-    : `${openItems.length} open · Saved`
+    : plain ? `${allOpen.length} open · Saved`
+    : `${shownCount} shown · ${allOpen.length} open · Saved`
 
-  return <div className="backlog">
+  const doneList = plain ? done : doneShown
+  const tools = !inText && saved && rows.length > 0 && <div className="backlog-tools">
+    <label className="backlog-search"><Search size={15} aria-hidden="true" />
+      <input ref={searchBox} type="search" value={view.query} placeholder={page ? 'Search titles, IDs, details' : 'Search'} aria-label="Search the backlog" aria-keyshortcuts="/" autoComplete="off" spellCheck={false}
+        onChange={event => setView({ query: event.target.value })}
+        onKeyDown={event => { if (event.key === 'Escape' && view.query) { event.preventDefault(); event.stopPropagation(); setView({ query: '' }) } }} />
+      {!view.query && <kbd aria-hidden="true">/</kbd>}
+    </label>
+    <div className="backlog-filters">
+      {!page && <SelectMenu label="Show" value={view.status} className="sm-field backlog-filter" minWidth={180} onChange={value => setView({ status: value as StatusFilter })}
+        options={statuses.map(value => ({ value, label: STATUS_LABELS[value], count: statusCount(value) }))} />}
+      {!page && narrowed && <SelectMenu label="Project" value={projectValue(view.project)} className="sm-field backlog-filter" minWidth={200} searchLabel="Find a project" onChange={value => setView({ project: projectOf(value) })}
+        options={projectOptions} />}
+      <SelectMenu label="Added by" value={view.who} icon={<UserRound size={14} aria-hidden="true" />} triggerLabel={view.who === 'any' ? (page ? 'Anyone' : 'Who') : WHO_LABELS[view.who]} className="sm-field backlog-filter" minWidth={180}
+        onChange={value => setView({ who: value as Who })} options={(Object.keys(WHO_LABELS) as Who[]).map(value => ({ value, label: WHO_LABELS[value], count: whoCount(value) }))} />
+      <SelectMenu label="Order" value={view.sort} icon={<ArrowDownUp size={14} aria-hidden="true" />} triggerLabel={view.sort === 'manual' && !page ? 'Order' : SORT_LABELS[view.sort]} className="sm-field backlog-filter" minWidth={180}
+        onChange={value => setView({ sort: value as SortKey })} options={(Object.keys(SORT_LABELS) as SortKey[]).map(value => ({ value, label: SORT_LABELS[value], detail: value === 'manual' ? 'Drag to reorder' : undefined }))} />
+    </div>
+  </div>
+  const nav = page && <nav className="backlog-nav" aria-label="Backlog views">
+    <h3 className="backlog-nav-head">Views</h3>
+    <ul>{statuses.map(value => { const Icon = STATUS_ICONS[value]; return <li key={value}>
+      <button type="button" aria-pressed={view.status === value} onClick={() => setView({ status: value })}><Icon size={15} aria-hidden="true" /><span>{STATUS_LABELS[value]}</span><span className="backlog-nav-count">{saved ? statusCount(value) : ''}</span></button>
+    </li> })}</ul>
+    {narrowed && <>
+      <h3 className="backlog-nav-head">Projects</h3>
+      <ul>{projectOptions.map(option => <li key={option.value}>
+        <button type="button" aria-pressed={projectValue(view.project) === option.value} onClick={() => setView({ project: projectOf(option.value) })}>{option.value === ALL ? <Layers size={15} aria-hidden="true" /> : option.value === INBOX ? <Inbox size={15} aria-hidden="true" /> : <Hash size={15} aria-hidden="true" />}<span>{option.label}</span><span className="backlog-nav-count">{option.count}</span></button>
+      </li>)}</ul>
+    </>}
+  </nav>
+
+  return <div className={page ? 'backlog page' : 'backlog'}>
+    {nav}
+    <div className="backlog-main">
     <div className="backlog-top">
       {inText
         ? <p className="backlog-mode">Editing as text. Items are Markdown lines like <code>- [ ] Item</code>.</p>
@@ -523,22 +623,30 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
       <button type="button" className="icon-button" aria-pressed={inText} disabled={!saved || itemVoice || textVoice || (!inText && changes.length > 0)} aria-label={inText ? 'Show checklist' : 'Edit as text'} title={inText ? 'Show checklist' : 'Edit as text'}
         onClick={() => { if (inText) void leaveText(); else { setUndo(null); setDraft(shown) } }}>{inText ? <ListChecks size={17} /> : <FileText size={16} />}</button>
     </div>
+    {tools}
     {inText
       ? <VoiceField label="backlog text" onBusyChange={setTextVoice} value={draft} setValue={setDraft} multiline fieldRef={textBox} field={{ 'aria-label': 'Backlog text', className: 'backlog-text', readOnly: !!conflict, disabled: !!conflict, spellCheck: true }} />
       : <div className="backlog-list" ref={list} aria-busy={!saved && !error}>
           {!saved && !error && <BacklogBones />}
           {saved && !rows.length && <div className="backlog-empty"><ClipboardList size={26} aria-hidden="true" /><p><strong>Nothing here yet</strong></p><p>Add what you want to remember. Agents add follow-ups they find, and fill in items you point them to.</p></div>}
-          {saved && !!rows.length && !openItems.length && <p className="backlog-clear"><Check size={16} aria-hidden="true" />All done.</p>}
-          {groups.map(group => <section key={group.heading?.id ?? 'inbox'} className="backlog-group">
+          {saved && plain && !!rows.length && !openItems.length && <p className="backlog-clear"><Check size={16} aria-hidden="true" />All done.</p>}
+          {saved && !plain && !shownCount && <div className="backlog-empty" role="status"><Search size={24} aria-hidden="true" /><p><strong>Nothing matches</strong></p>
+            <p>{view.query.trim() ? <>No {view.status === 'all' ? '' : `${STATUS_LABELS[view.status].toLowerCase()} `}item has “{view.query.trim()}”.</> : 'No item fits these filters.'}{doneList.length > 0 && ` ${doneList.length} done below.`}</p>
+            <button type="button" className="secondary" onClick={clearFilters}>Clear filters</button></div>}
+          {plain && groups.map(group => <section key={group.heading?.id ?? 'inbox'} className="backlog-group">
             {(group.heading || hasHeadings) && <h3 className="backlog-heading"><span>{group.heading?.text ?? 'Inbox'}</span><span className="backlog-count">{group.rows.filter(row => row.kind === 'item').length}</span></h3>}
             <ul>{group.rows.map(row => showRow(row as Item | Note))}</ul>
           </section>)}
-          {done.length > 0 && <div className="backlog-done">
+          {!plain && filtered.map(group => <section key={group.key} className="backlog-group">
+            {narrowed && <h3 className="backlog-heading"><span>{projectLabel(group.name)}</span><span className="backlog-count">{group.items.length}</span></h3>}
+            <ul>{group.items.map(showRow)}</ul>
+          </section>)}
+          {doneList.length > 0 && <div className="backlog-done">
             <div className="backlog-done-bar">
-              <button type="button" className="backlog-done-toggle" aria-expanded={showDone} onClick={() => setShowDone(!showDone)}><ChevronRight size={15} className={showDone ? 'open' : ''} aria-hidden="true" />Done · {done.length}</button>
-              {showDone && <button type="button" className="link-button backlog-clear-done" disabled={locked} onClick={clearDone}>Clear done</button>}
+              <button type="button" className="backlog-done-toggle" aria-expanded={showDone} onClick={() => setShowDone(!showDone)}><ChevronRight size={15} className={showDone ? 'open' : ''} aria-hidden="true" />Done · {doneList.length}</button>
+              {showDone && plain && <button type="button" className="link-button backlog-clear-done" disabled={locked} onClick={clearDone}>Clear done</button>}
             </div>
-            {showDone && <ul>{done.map(showRow)}</ul>}
+            {showDone && <ul>{doneList.map(showRow)}</ul>}
           </div>}
         </div>}
     {sent && !undo && !inText && <div className="backlog-undo" role="status"><span>{sent.label}</span>{sent.pane && onOpenPane && <button type="button" className="link-button" onClick={() => onOpenPane(sent.pane!)}>Open</button>}<button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setSent(null)}><X size={14} /></button></div>}
@@ -552,7 +660,8 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     </div>
     : failed && unsaved ? <p className="error" role="alert"><strong>Not saved.</strong> {failed} Tether will keep trying. <button type="button" className="link-button" onClick={retry}>Try now</button></p>
     : error ? <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>
-    : <p className={`backlog-status${tooLong ? ' error' : ''}${saved ? '' : ' loading'}`} role="status">{status}</p>}
+    : <p className={`backlog-status${tooLong ? ' error' : ''}${saved ? '' : ' loading'}`} role="status">{status}{!plain && saved && !inText && <> · <button type="button" className="link-button" onClick={clearFilters}>Clear filters</button></>}</p>}
+    </div>
   </div>
 }
 
@@ -637,28 +746,37 @@ function SheetResize({ sheet, sizing, resized }: { sheet: RefObject<HTMLDialogEl
   </button>
 }
 
-export function BacklogSheet({ api, onClose, panes, onOpenPane }: { api: Api; onClose: () => void; panes?: Pane[]; onOpenPane?: (pane: Pane) => void }) {
+/** The backlog as a sheet, or as a full page with a side list of views and projects. Closing asks first only when text would be lost. */
+export function BacklogSheet({ api, onClose, panes, onOpenPane, page = false, query = '', onResize }: {
+  api: Api; onClose: () => void; panes?: Pane[]; onOpenPane?: (pane: Pane) => void
+  page?: boolean; query?: string; onResize?: () => void
+}) {
   const guard = useRef<() => boolean>(() => false)
-  const [asking, setAsking] = useState(false)
-  const close = () => { if (guard.current()) setAsking(true); else onClose() }
+  // What waits for "Leave anyway": closing. The switch between the sheet and the page keeps this component, so nothing is lost.
+  const [asking, setAsking] = useState<null | (() => void)>(null)
+  const leave = (then: () => void) => { if (guard.current()) setAsking(() => then); else then() }
+  const close = () => leave(onClose)
   const modal = useModal(true, close)
   const sizing = useSheetSize()
   const resized = useRef(0)
   // A resize that ends outside the sheet sends its click to the backdrop. That click must not close the sheet.
-  const onClick = (event: React.MouseEvent<HTMLDialogElement>) => { if (Date.now() - resized.current > 300) modal.onClick(event) }
-  return <dialog {...modal} onClick={onClick} style={sizing.style} className="sheet settings-sheet backlog-sheet" aria-labelledby="backlog-title">
-    <SheetResize sheet={modal.ref} sizing={sizing} resized={resized} />
+  const onClick = (event: React.MouseEvent<HTMLDialogElement>) => { if (page || Date.now() - resized.current > 300) modal.onClick(event) }
+  return <dialog {...modal} onClick={onClick} style={page ? undefined : sizing.style} className={`sheet settings-sheet backlog-sheet${page ? ' backlog-page' : ''}`} aria-labelledby="backlog-title">
+    {!page && <SheetResize sheet={modal.ref} sizing={sizing} resized={resized} />}
     <div className="sheet-heading">
       <h2 id="backlog-title">Backlog</h2>
-      <button type="button" className="icon-button" aria-label="Close" onClick={close}><X /></button>
+      <span className="backlog-heading-buttons">
+        {onResize && <button type="button" className="icon-button" aria-label={page ? 'Show as a sheet' : 'Open full page'} title={page ? 'Show as a sheet (⌥B)' : 'Open full page (⌥⇧B)'} onClick={onResize}>{page ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</button>}
+        <button type="button" className="icon-button" aria-label="Close" onClick={close}><X /></button>
+      </span>
     </div>
     <p className="sheet-sub">One list for all your sessions</p>
-    <Backlog api={api} guard={guard} panes={panes} onOpenPane={onOpenPane && (pane => { if (!guard.current()) onClose(); onOpenPane(pane) })} />
+    <Backlog api={api} guard={guard} panes={panes} layout={page ? 'page' : 'sheet'} initialQuery={query} onOpenPane={onOpenPane && (pane => { if (!guard.current()) onClose(); onOpenPane(pane) })} />
     {asking && <div className="confirm-box backlog-leave" role="alertdialog" aria-labelledby="backlog-leave">
-      <p id="backlog-leave"><strong>Some text is not saved.</strong> Close and lose it?</p>
+      <p id="backlog-leave"><strong>Some text is not saved.</strong> Leave and lose it?</p>
       <div className="sheet-buttons">
-        <button type="button" className="secondary" autoFocus onClick={() => setAsking(false)}>Keep editing</button>
-        <button type="button" className="secondary danger-text" onClick={onClose}>Close anyway</button>
+        <button type="button" className="secondary" autoFocus onClick={() => setAsking(null)}>Keep editing</button>
+        <button type="button" className="secondary danger-text" onClick={asking}>Leave anyway</button>
       </div>
     </div>}
   </dialog>

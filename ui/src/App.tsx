@@ -130,7 +130,9 @@ function App() {
   const [resume, setResume] = useState<PastChat | null>(null)
   const [notice, setNotice] = useState('')
   const [settings, setSettings] = useState<boolean | 'layout-maker'>(false)
-  const [backlog, setBacklog] = useState(false)
+  // The backlog: a sheet, or a full page with views and projects. `query` opens it on a search (the command menu does this).
+  const [backlog, setBacklog] = useState<null | { mode: 'sheet' | 'page'; query?: string }>(null)
+  const menuBacklog = useMemo(() => ({ api, open: (query: string) => setBacklog({ mode: 'page', query }) }), [api])
   const [backlogAdd, setBacklogAdd] = useState<{ text: string; pane: Pane } | null>(null)
   // The Project sheet for a tmux session, with a file from Files to pin when it came from there.
   const [project, setProject] = useState<{ session: string; pin?: string; group?: string } | null>(null)
@@ -489,6 +491,7 @@ function App() {
     else if (go === 'usage') setPlanSheet(true)
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
+    else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})
@@ -530,6 +533,21 @@ function App() {
       if (rail && screenKey && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && !document.querySelector('dialog[open]')) {
         event.preventDefault()
         rail.choose((['chats', 'files', 'terminals', 'share'] as const)[Number(screenKey[1]) - 1])
+        return
+      }
+      // ⌥Space and ⌘K open search from anywhere, like Spotlight; the same key again closes it. ⌘Space stays with the Mac.
+      // Inside another dialog (Settings) that dialog keeps ⌘K.
+      const commandK = (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k'
+      if (commandK || (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.code === 'Space')) {
+        event.preventDefault()
+        setMenu(current => current === 'commands' ? null : document.querySelector('dialog[open]') ? current : 'commands')
+        return
+      }
+      // ⌥B opens the backlog sheet and ⌥⇧B the backlog page, also from a text field. ⌘B is the sidebar. Read event.code: Alt+B types ∫ on a Mac.
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyB' && !document.querySelector('dialog[open]')) {
+        event.preventDefault()
+        setDrawer(false)
+        setBacklog({ mode: event.shiftKey ? 'page' : 'sheet' })
         return
       }
       if (rail && event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.code === 'KeyH' && !document.querySelector('dialog[open]')) {
@@ -587,15 +605,6 @@ function App() {
         // ⌥⇧S, C, P and T copy a name of the focused pane: the pane menu's Copy name keys (CopyNames.tsx).
         const copyKind = event.altKey && event.shiftKey && !mod ? nameKindOf(event.code) : undefined
         if (copyKind && slots.pane) { const target = slots.pane; return act(() => void copyPaneName(target, copyKind).then(setNotice)) }
-      }
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        // The workspace opens the command menu; ⌘K again closes it. The phone keeps the sidebar search.
-        if (slots) { setMenu(current => current === 'commands' ? null : document.querySelector('dialog[open]') ? current : 'commands'); return }
-        const input = document.querySelector<HTMLInputElement>('.sidebar .sidebar-search input')
-        if (input?.offsetParent) input.select()
-        else { setDrawer(true); setTimeout(() => document.querySelector<HTMLInputElement>('.drawer .sidebar-search input')?.focus(), 50) }
-        return
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && !document.querySelector('dialog[open]')) {
         // Every row that opens a pane: one-pane sessions and the pane rows under a session with several panes.
@@ -759,7 +768,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: () => { setDrawer(false); setNewSession(true) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog(true) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: () => { setDrawer(false); setNewSession(true) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -778,7 +787,8 @@ function App() {
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
     { label: 'Plan usage', run: () => setPlanSheet(true) },
-    { label: 'Backlog', run: () => setBacklog(true) },
+    { label: 'Backlog', key: '⌥B', run: () => setBacklog({ mode: 'sheet' }) },
+    { label: 'Backlog page', key: '⌥⇧B', run: () => setBacklog({ mode: 'page' }) },
     { label: 'Work board', run: () => setWorkSheet('board') },
     { label: 'Agents page', run: () => setAgentsPage('list') },
     ...(canMessage ? [{ label: 'Message all sessions', run: () => setAgentsPage('message') }] : []),
@@ -849,7 +859,7 @@ function App() {
     {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
-    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog(true)} />}
+    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
     {files && <Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} />}
     {share && <Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
       const before = prefs.drafts[pane.id]?.text ?? ''
@@ -875,7 +885,7 @@ function App() {
     {browserSheet && pane && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
-    {liveMode && <Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog(true)} reveal={liveReveal} from={liveFrom} />}
+    {liveMode && <Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} />}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
       onSize={(key, size) => update(current => { const sizes = { ...current.panelSizes[lookId] }; if (size === null) delete sizes[key]; else sizes[key] = size; return { panelSizes: { ...current.panelSizes, [lookId]: sizes } } })}
@@ -883,7 +893,8 @@ function App() {
       onOpen={name => update(current => ({ panelsClosed: { ...current.panelsClosed, [lookId]: (current.panelsClosed[lookId] ?? []).filter(item => item !== name) } }))} />}
     {view && picking !== null && picking < view.slots.length && <SlotPicker index={picking} sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} slots={view.slots} onPane={id => { showInSlot(id, picking); setPicking(null) }} onSession={target => { showSession(target); setPicking(null) }} onClose={() => setPicking(null)} />}
     {project && sessions.some(item => item.id === project.session && (!project.group || item.groups?.some(group => group.id === project.group))) && <ProjectSheet key={`${project.session}/${project.group ?? ''}`} api={api} session={sessions.find(item => item.id === project.session)!} group={project.group ? sessions.find(item => item.id === project.session)!.groups?.find(item => item.id === project.group) : undefined} mark={marks[project.session]} pin={project.pin} onChanged={loadMarks} onClose={() => setProject(null)} />}
-    {backlog && <BacklogSheet api={api} panes={panes} onOpenPane={openPane} onClose={() => setBacklog(false)} />}
+    {backlog && <BacklogSheet key={backlog.query ?? ''} api={api} panes={panes} onOpenPane={openPane} page={backlog.mode === 'page'} query={backlog.query}
+      onResize={() => setBacklog({ ...backlog, mode: backlog.mode === 'page' ? 'sheet' : 'page' })} onClose={() => setBacklog(null)} />}
     {backlogAdd && <BacklogAddSheet key={backlogAdd.text} api={api} text={backlogAdd.text} pane={backlogAdd.pane} onClose={() => setBacklogAdd(null)} onAdded={setNotice} />}
     {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === 'layout-maker' ? 'layout-maker' : undefined} />}
     {!settings && <TrialBar onRevert={revertLook} />}
@@ -903,7 +914,7 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {view && menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} backlog={menuBacklog} />}
     {(view || (wide && home)) && menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}

@@ -6,7 +6,8 @@ import { IS_MAC, keyLabel } from './keys'
 const GROUPS = [
   { name: 'Move', items: [
     ['Chats, Files or Terminals', '⌘1–3'],
-    ['Go to a pane or run a command', '⌘K'],
+    ['Search panes, commands and the backlog', '⌘K'],
+    ['Search from anywhere', '⌥Space'],
     ['Next pane that needs you', '⌘J'],
     ['Focus slot 1 to 4', '⌥1–4'],
     ['Previous or next session', '⌥↑ ⌥↓'],
@@ -15,6 +16,8 @@ const GROUPS = [
     ['Sidebar', '⌘B'],
     ['Needs you list', '⌘I'],
     ['Home', '⌥H'],
+    ['Backlog', '⌥B'],
+    ['Backlog as a full page', '⌥⇧B'],
   ] },
   { name: 'Layout', items: [
     ['Split right', '⌘\\'],

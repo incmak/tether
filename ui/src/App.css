@@ -1336,21 +1336,40 @@ button.live-chip:active { background: var(--line); }
 /* Command menu, shortcuts, status bar */
 .sidebar-search button.search-key { min-height: 0; cursor: pointer; }
 .sidebar-search button.search-key:hover { color: var(--text); border-color: var(--muted); }
-.sheet.command-menu { inset: 12vh 0 auto; width: calc(100% - 32px); max-width: 620px; max-height: min(520px, 76dvh); height: auto; display: flex; flex-direction: column; margin: 0 auto; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 24px 60px #00000038; }
-.command-search { display: flex; align-items: center; gap: 10px; padding: 0 16px; border-bottom: 1px solid var(--line); color: var(--muted); }
+/* Search (⌘K, ⌥Space): a Spotlight-like panel high on the screen. It grows in from 97% and fades in, quickly. */
+.sheet.command-menu { inset: 14vh 0 auto; width: calc(100% - 32px); max-width: 680px; max-height: min(560px, 76dvh); height: auto; display: flex; flex-direction: column; margin: 0 auto; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-xl); overflow: hidden; box-shadow: 0 1px 0 #ffffff14 inset, 0 28px 80px #0000004d, 0 4px 16px #0000001f; transform-origin: 50% 0; }
+.sheet.command-menu:not(.popover) { transition: opacity 160ms ease-out, transform 180ms cubic-bezier(.2,.9,.25,1); touch-action: auto; }
+@starting-style { .sheet.command-menu:not(.popover)[open] { opacity: 0; transform: scale(.97); } }
+.sheet.command-menu::backdrop { background: #11110e40; transition: opacity 160ms ease-out; }
+@starting-style { .sheet.command-menu[open]::backdrop { opacity: 0; } }
+.command-search { display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--line); color: var(--muted); }
 .command-search svg { flex: none; }
-.command-search input { flex: 1; min-width: 0; height: 52px; border: 0; background: transparent; color: var(--text); font-size: 16px; }
+.command-search input { flex: 1; min-width: 0; height: 60px; border: 0; background: transparent; color: var(--text); font-size: 20px; letter-spacing: -.01em; }
 .command-search input:focus-visible { outline: none; }
 .command-search input::placeholder { color: var(--muted); }
-.command-menu kbd { flex: none; font: 11px ui-monospace, SFMono-Regular, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-xs); padding: 1px 5px; }
-.command-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
-.command-group { padding: 10px 10px 4px; font-size: 11.5px; font-weight: 600; letter-spacing: .3px; color: var(--muted); }
-.command-row { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border-radius: var(--radius); font-size: 14px; cursor: pointer; }
-.command-row.active { background: var(--hover); }
-.command-row .state-slot { display: flex; align-items: center; justify-content: center; width: 12px; flex: none; }
+.command-menu kbd { display: inline-flex; flex: none; align-items: center; justify-content: center; min-width: 18px; height: 18px; box-sizing: border-box; font: 11px ui-monospace, SFMono-Regular, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: var(--radius-xs); padding: 0 4px; }
+.command-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px 8px 8px; scroll-padding-block: 28px 8px; }
+.command-group { padding: 12px 10px 4px; font-size: 11.5px; font-weight: 600; letter-spacing: .3px; color: var(--muted); }
+.command-row { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 0 10px; border-radius: var(--radius); font-size: 14px; cursor: pointer; }
+.command-row.active { background: color-mix(in srgb, var(--accent) 13%, var(--hover)); }
+.command-icon { display: flex; flex: none; align-items: center; justify-content: center; width: 18px; color: var(--muted); }
+.command-row.active .command-icon { color: var(--text); }
 .command-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-row.done .command-label { color: var(--muted); text-decoration: line-through; }
 .command-hint { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
-.command-empty { margin: 16px 10px; color: var(--muted); font-size: 14px; }
+.command-type { flex: none; min-width: 4.6em; color: var(--muted); font-size: 12px; text-align: end; }
+.command-empty, .command-note { margin: 16px 10px; color: var(--muted); font-size: 14px; }
+.command-note { margin-top: 8px; font-size: 13px; }
+.command-foot { display: flex; flex: none; align-items: center; justify-content: flex-end; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--hover) 55%, transparent); color: var(--muted); font-size: 12px; }
+.command-foot > span { display: inline-flex; align-items: center; gap: 4px; }
+@media (max-width: 599.98px) {
+  .sheet.command-menu { inset: max(12px, env(safe-area-inset-top)) 0 auto; width: calc(100% - 16px); max-height: min(560px, 70dvh); border-bottom: 1px solid var(--line); border-radius: var(--radius-xl); }
+  .command-search { padding: 0 14px; }
+  .command-search input { height: 54px; font-size: 18px; }
+  .command-hint, .command-type { display: none; }
+}
+@media (pointer: coarse) { .command-row { min-height: 44px; } .command-foot { display: none; } }
+@media (prefers-reduced-motion: reduce) { .sheet.command-menu:not(.popover), .sheet.command-menu::backdrop { transition: none; } }
 
 .sheet.shortcuts-sheet { max-width: 880px; width: calc(100% - 32px); }
 .shortcuts-sheet .sheet-heading { justify-content: flex-start; }
