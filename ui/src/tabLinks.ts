@@ -6,10 +6,16 @@ const ID = /^%\d+$/
 
 /** The tab a reply names, or null. A name shared by several tabs picks the one in the current session, else none. */
 export function tabTarget<T extends TabLike>(text: string, panes: T[], current?: TabLike | null): T | null {
-  const raw = text.trim().replace(/\s+tab$/i, '')
-  if (!raw || raw.length > 80) return null
-  if (ID.test(raw)) return panes.find(pane => pane.id === raw && pane.id !== current?.id) ?? null
-  const wanted = raw.toLowerCase()
+  const exact = text.trim()
+  if (!exact || exact.length > 80) return null
+  if (ID.test(exact)) return panes.find(pane => pane.id === exact && pane.id !== current?.id) ?? null
+  // The exact name wins: a tab may be called "review tab". Only then try it without a trailing " tab".
+  const stripped = exact.replace(/\s+tab$/i, '')
+  return named(exact, panes, current) ?? (stripped !== exact && stripped ? named(stripped, panes, current) : null)
+}
+
+function named<T extends TabLike>(text: string, panes: T[], current?: TabLike | null): T | null {
+  const wanted = text.toLowerCase()
   // Only names a person or agent gave: the bare agent name ("Claude", "Shell") would match too many tabs.
   const found = panes.filter(pane => pane.id !== current?.id && [pane.pane_name, pane.agent_name]
     .some(name => !!name && name.trim().toLowerCase() === wanted))
@@ -26,6 +32,15 @@ const QUOTED = /(["“])([^"“”\n]{1,80})(["”])|(?<![\w%])(%\d+)\b/g
 export function remarkTabs() {
   const walk = (node: Node) => {
     if (!node.children || node.type === 'link' || node.type === 'linkReference') return
+    // "**B69 review**": the quotes and the name are separate nodes. Link the emphasis between the two quotes.
+    node.children = node.children.map((child, i, all) => {
+      const name = (child.type === 'strong' || child.type === 'emphasis') && child.children?.length === 1
+        && child.children[0].type === 'text' ? child.children[0].value ?? '' : ''
+      const before = all[i - 1], after = all[i + 1]
+      return name && name.length <= 80 && before?.type === 'text' && /["“]$/.test(before.value ?? '')
+        && after?.type === 'text' && /^["”]/.test(after.value ?? '')
+        ? { type: 'link', url: '#', data: { hProperties: { 'data-tab': name } }, children: [child] } : child
+    })
     node.children = node.children.flatMap(child => {
       if (child.type !== 'text' || !child.value) { walk(child); return [child] }
       const parts: Node[] = []

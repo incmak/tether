@@ -17,12 +17,15 @@ const panes = [
   { id: '%6', tmux_session: 'c', pane_name: 'fix' },
   { id: '%7', tmux_session: 'd', pane_name: 'fix' },
 ]
+panes.push({ id: '%8', tmux_session: 'a', pane_name: 'review' }, { id: '%9', tmux_session: 'a', pane_name: 'review tab' })
 const here = panes[2]
 const id = text => m.tabTarget(text, panes, here)?.id ?? null
 
 assert.equal(id('B69 review'), '%1')
 assert.equal(id(' b69 REVIEW '), '%1', 'case and spaces do not matter')
 assert.equal(id('B69 review tab'), '%1', 'a trailing "tab" is fine')
+assert.equal(id('review tab'), '%9', 'an exact name that ends in "tab" wins')
+assert.equal(id('review'), '%8')
 assert.equal(id('Advisor: Triage'), '%2', 'the agent name counts')
 assert.equal(id('%5'), '%5', 'a pane id')
 assert.equal(id('%99'), null, 'a closed tab')
@@ -48,4 +51,13 @@ assert.equal(parts[1].children[0].value, 'B69 review')
 const plain = { type: 'root', children: [{ type: 'paragraph', children: [{ type: 'text', value: 'nothing here' }] }] }
 m.remarkTabs()(plain)
 assert.deepEqual(plain.children[0].children, [{ type: 'text', value: 'nothing here' }])
+// Emphasis inside quotes: the strong node becomes the link.
+const bold = { type: 'root', children: [{ type: 'paragraph', children: [
+  { type: 'text', value: 'See "' }, { type: 'strong', children: [{ type: 'text', value: 'B69 review' }] }, { type: 'text', value: '" now' },
+] }] }
+m.remarkTabs()(bold)
+const [, wrapped] = bold.children[0].children
+assert.equal(wrapped.type, 'link')
+assert.equal(wrapped.data.hProperties['data-tab'], 'B69 review')
+assert.equal(wrapped.children[0].type, 'strong')
 console.log('tab links: ok')

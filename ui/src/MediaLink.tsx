@@ -91,6 +91,9 @@ function useFileState(path: string | undefined) {
   return useSyncExternalStore(subscribe, snapshot, snapshot)
 }
 
+// Code inside a link stays plain: a second link inside it would nest one anchor in another.
+const InsideLink = createContext(false)
+
 function useOpen(text: string) {
   const open = useContext(MediaOpener)
   const media = mediaPath(text)
@@ -103,9 +106,10 @@ export function InlineCode(props: React.ComponentProps<'code'>) {
   const block = useIsMarkdownCodeBlock()
   const text = typeof props.children === 'string' ? props.children : ''
   const { media, open } = useOpen(block ? '' : text)
-  const tab = useTab(block || media ? '' : text)
+  const inLink = useContext(InsideLink)
+  const tab = useTab(block || media || inLink ? '' : text)
   if (tab) return <FileLink open={tab.open} label={`Open the tab ${text}`}><code {...props} /></FileLink>
-  if (!open) return <code {...props} className={media ? [props.className, 'file-chip'].filter(Boolean).join(' ') : props.className} />
+  if (!open || inLink) return <code {...props} className={media ? [props.className, 'file-chip'].filter(Boolean).join(' ') : props.className} />
   return <FileLink open={open} label={`${media?.kind === 'file' ? 'Download' : 'Open'} ${text}`}><code {...props} /></FileLink>
 }
 
@@ -117,14 +121,15 @@ export function Link({ href = '', children, ...props }: React.ComponentProps<'a'
   if (named !== undefined) return tab ? <FileLink open={tab.open} label={`Open the tab ${named}`}>{children}</FileLink> : <>{children}</>
   if (open) return <FileLink open={open}>{children}</FileLink>
   if (found || media) return <span className="file-chip">{children}</span>
-  return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>
+  return <a {...props} href={href} target="_blank" rel="noreferrer"><InsideLink.Provider value>{children}</InsideLink.Provider></a>
 }
 
 // A link, not a button: it flows and wraps with the text around it. Enter and Space both open it.
 function FileLink({ open, label, children }: { open: () => void; label?: string; children: React.ReactNode }) {
   return <a href="#" role="button" className="file-link" aria-label={label}
     onClick={event => { event.preventDefault(); open() }}
-    onKeyDown={event => { if (event.key === ' ') { event.preventDefault(); open() } }}>{children}</a>
+    onKeyDown={event => { if (event.key === ' ') { event.preventDefault(); open() } }}>
+    <InsideLink.Provider value>{children}</InsideLink.Provider></a>
 }
 
 /** Save a file the server sends as an attachment. */
