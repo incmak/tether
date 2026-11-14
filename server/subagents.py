@@ -17,7 +17,10 @@ import paths
 import tool_details
 
 TAIL_BYTES = 256 * 1024
-CACHE_LIMIT = 200
+# One entry per transcript, agent log or metadata file. One open Claude tab needs about 44; 56 tabs needed
+# 2,451 entries and about 54 MB (B65, 2026-11-14). At 200, switching tabs evicted the scans and each
+# listing reread up to 67 MB of transcripts.
+CACHE_LIMIT = 4096
 _cache = OrderedDict()
 _lock = threading.Lock()
 _UNAVAILABLE = 'That agent is no longer available.'
@@ -411,28 +414,49 @@ def _entry(agent_id, files, now, notifications, since):
     return entry, data, meta
 
 
-def _task_scan(path, previous=None, *, marker):
-    """Index task starts and notifications once, then scan only appended lines."""
-    data = {'starts': {}, 'calls': {}, 'notifications': {}, 'mentioned': False, '_offset': 0}
+_REF_LIMIT = 1024
+
+
+def _task_refs(text, refs, root):
+    """Add each "<root>/<slug>/<uuid>/tasks" folder that text mentions to refs. These are the only folders
+    _tasks_dir() can return, so a tab's folder is mentioned exactly when its path is in refs."""
+    prefix = root + '/'
+    start = 0
+    while len(refs) < _REF_LIMIT and (index := text.find(prefix, start)) >= 0:
+        start = index + len(prefix)
+        slash = text.find('/', start)
+        if slash <= start:
+            continue
+        rest = text[slash + 1:slash + 43]
+        if rest[36:] == '/tasks' and _uuid(rest[:36]):
+            refs.add(text[index:slash + 43])
+
+
+def _task_scan(path, previous=None, *, root):
+    """Index task starts, notifications and tasks-folder mentions once, then scan only appended lines.
+    The index does not depend on the tab that asks, so all tabs of one project share one scan per file."""
+    data = {'starts': {}, 'calls': {}, 'notifications': {}, 'refs': set(), '_offset': 0}
+    root_bytes = root.encode()
     with path.open('rb') as stream:
         size = stream.seek(0, 2)
         if previous is not None and size > previous[0][1]:
             old = previous[1]
             data = dict(old, starts=dict(old['starts']), calls=dict(old['calls']),
-                        notifications=dict(old['notifications']))
+                        notifications=dict(old['notifications']), refs=set(old['refs']))
         stream.seek(data['_offset'])
         while True:
             data['_offset'] = stream.tell()
             line = stream.readline()
             if not line:
                 break
-            if marker in line.decode('utf-8', errors='replace'):
-                data['mentioned'] = True
+            if root_bytes in line:
+                _task_refs(line.decode('utf-8', errors='replace'), data['refs'], root)
             for record in _records([line]):
                 message = record.get('message')
                 content = message.get('content') if isinstance(message, dict) else None
-                if marker in _text(content):
-                    data['mentioned'] = True
+                text = _text(content)
+                if root in text:
+                    _task_refs(text, data['refs'], root)
                 if record['type'] == 'assistant' and isinstance(content, list):
                     for part in content:
                         if (isinstance(part, dict) and part.get('type') == 'tool_use'
@@ -499,13 +523,16 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
     for identifier, group in files.items():
         for path in group:
             sources[path] = (identifier, identifier in shown)
+    # tasks_dir is always TASKS_TMP.resolve()/<slug>/<uuid>/tasks, so one scan per transcript and root
+    # serves every tab of the project.
     starts, notifications, calls, scans = {}, {}, {}, []
+    marker, root = str(tasks_dir), str(tasks_dir.parent.parent.parent)
     first = main.parent / f'{tasks_dir.parent.name}.jsonl'
     for path, (parent, in_scope) in sources.items():
         try:
-            scan, _ = _cached(path, lambda p, old: _task_scan(p, old, marker=str(tasks_dir)),
-                              incremental=True, namespace=('tasks', str(tasks_dir)))
-            if parent is None and path not in (main, first) and not scan['mentioned']:
+            scan, _ = _cached(path, lambda p, old: _task_scan(p, old, root=root),
+                              incremental=True, namespace=('tasks', root))
+            if parent is None and path not in (main, first) and marker not in scan['refs']:
                 continue
             notifications.update(scan['notifications'])
             calls.update(scan['calls'])

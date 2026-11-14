@@ -733,6 +733,54 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertNotIn('other01', tasks)
         self.assertNotIn('oldest1', tasks)
 
+    def test_tabs_of_one_project_share_one_task_scan_per_transcript(self):
+        # B65: the scan cache was keyed by each tab's tasks folder, so every tab reread every recent
+        # transcript in the project. Now one scan per file serves all tabs, and the mention check
+        # still keeps each tab to its own folder.
+        other = self.tmp / 'cwd-slug' / '66666666-6666-6666-6666-666666666666' / 'tasks'
+        other.mkdir(parents=True)
+        mine = self.project / '33333333-3333-3333-3333-333333333333.jsonl'
+        theirs = self.project / '44444444-4444-4444-4444-444444444444.jsonl'
+        self.write(mine, [self.record('user', f'see file://{self.tasks}/mine01.output')] + self.task_start('mine01'))
+        self.write(theirs, [self.record('user', f'cat "{other}/their01.output"')] + self.task_start('their01'))
+        for path in (mine, theirs):
+            os.utime(path, (self.now, self.now))
+        self.output('mine01')
+        (other / 'their01.output').write_text('')
+        self.assertIn('mine01', self.listed_tasks())
+        self.assertNotIn('their01', self.listed_tasks())
+        original = Path.open
+        def read(path, *args, **kwargs):
+            self.assertNotIn(path, (mine, theirs), 'A second tab must reuse the scan of an unchanged transcript')
+            return original(path, *args, **kwargs)
+        self.fds.return_value = [other]
+        subagents._tasks_cache.clear()
+        with patch.object(Path, 'open', read):
+            tasks = {item['id'] for item in subagents.listing(self.config)['tasks']}
+        self.assertIn('their01', tasks)
+        self.assertNotIn('mine01', tasks)
+        self.assertEqual(sum(1 for key in subagents._cache if isinstance(key, tuple) and key[0] == str(theirs)), 1)
+
+    def test_task_refs_keep_only_task_folders_under_root_including_spaces(self):
+        refs, root = set(), '/r/temp files'
+        folder = root + '/my slug/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/tasks'
+        subagents._task_refs(f'src/tasks, {root}/x/not-a-uuid/tasks, {root}/tasks, file://{folder}/x.output'
+                             f' and "{folder}"', refs, root)
+        self.assertEqual(refs, {folder})
+
+    def test_tasks_root_with_spaces_still_matches_quoted_mentions(self):
+        spaced = self.root / 'temp files'
+        tasks = spaced / 'cwd slug' / self.old / 'tasks'
+        tasks.mkdir(parents=True)
+        self.enterContext(patch.object(subagents, 'TASKS_TMP', spaced))
+        self.fds.return_value = [tasks]
+        subagents._tasks_cache.clear()
+        third = self.project / '33333333-3333-3333-3333-333333333333.jsonl'
+        self.write(third, [self.record('user', f'cat "{tasks}/third01.output"')] + self.task_start('third01'))
+        os.utime(third, (self.now, self.now))
+        (tasks / 'third01.output').write_text('')
+        self.assertIn('third01', self.listed_tasks())
+
     def test_fd_cache_expires_and_glob_fallback_validates_uuid(self):
         self.assertEqual(subagents._tasks_dir(self.config), self.tasks)
         self.assertEqual(subagents._tasks_dir(self.config), self.tasks)
