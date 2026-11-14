@@ -54,7 +54,7 @@ button.backlog-done-toggle:not(:disabled):hover { background: none; color: var(-
 .backlog-undo { display: flex; align-items: center; gap: 10px; padding: 4px 6px 4px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--hover); font-size: 13px; }
 .backlog-undo > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .backlog-undo .icon-button { width: 26px; height: 26px; min-width: 0; min-height: 0; }
-.backlog-status { margin: 0; font-size: 12px; color: var(--muted); }
+.backlog-status { min-height: 1.5em; margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .backlog .error, .backlog .confirm-box, .backlog-leave { margin: 0; font-size: 13px; }
 .backlog-leave { margin-top: 10px; }
 .backlog-sheet[open] { display: flex; flex-direction: column; height: min(var(--backlog-h, 720px), calc(100dvh - 24px)); max-height: none; overflow: hidden; }
@@ -113,3 +113,12 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 .backlog-send-empty { margin: 0; color: var(--muted); font-size: 13px; }
 .sidebar-backlog-new { flex: none; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 11px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) { .backlog-send li button { min-height: 38px; } }
+/* The first load: bones in the real row classes (BacklogBones). The checkbox bone keeps the box's size; tags lose their outline. */
+.backlog-bones .bone.backlog-box { display: block; border-radius: 4px; }
+.backlog-bones .backlog-tag { border-color: transparent; }
+.backlog-bones .backlog-actions { width: 90px; }
+/* Like the skeleton, the loading words wait 180 ms, so a fast load does not flash them (keyframes in Skeleton.css). */
+.backlog-status.loading { animation: skeleton-in .24s ease-out .18s both; }
+@media (prefers-reduced-motion: reduce) { .backlog-status.loading { animation-duration: .01s; } }
+@media (pointer: coarse) { .backlog-bones .backlog-actions { width: 102px; } }
+.backlog-bones .backlog-heading .bone { vertical-align: baseline; }

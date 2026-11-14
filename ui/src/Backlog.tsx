@@ -11,6 +11,8 @@ import { useModal } from './hooks'
 import { usePanelPoll } from './panelProps'
 import { BACKLOG_PATH, highestRef, markSeen, useBacklogNews } from './backlogNews'
 import { agentTabs, itemPrompt, sendToTab, startTab } from './backlogSend'
+import { Bone } from './Skeleton'
+import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Backlog.css'
 
 // The app's one backlog (server: backlog.py). People use the checklist or the text; agents use a command. Every save
@@ -153,6 +155,30 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
 
 function NoteRow({ note }: { note: Note }) {
   return <li className="backlog-free">{note.text}</li>
+}
+
+/** The checklist before the first load. The status line below the list says it is loading; these shapes are hidden from
+ * screen readers. They copy the last visit's groups and open rows, in the real row classes, so nothing moves when it lands. */
+const BONE_WIDTHS = ['78%', '56%', '88%', '64%', '72%', '48%', '83%', '60%']
+function BacklogBones() {
+  const rows = rememberedCount('backlog.rows', 6, 8), headed = rememberedCount('backlog.groups', 2, 3)
+  const parts = Math.max(1, Math.min(headed, rows))
+  const groups = Array.from({ length: parts }, (_, index) => Math.ceil((rows - index) / parts))
+  const first = (group: number) => groups.slice(0, group).reduce((sum, count) => sum + count, 0)
+  return <div className="skeleton backlog-bones" aria-hidden="true">
+    {groups.map((count, group) => <section key={group} className="backlog-group">
+      {headed > 0 && <div className="backlog-heading"><span><Bone w={group % 2 ? '7em' : '9em'} /></span><span className="backlog-count"><Bone w="1.2em" /></span></div>}
+      <ul>{Array.from({ length: count }, (_, row) => first(group) + row).map(index => <li key={index} className="backlog-row">
+        <span />
+        <Bone className="backlog-box" />
+        <span className="backlog-body">
+          <span className="backlog-text-line">{index % 3 === 1 ? <Bone w={BONE_WIDTHS[index % BONE_WIDTHS.length]} /> : <><Bone w="96%" /><br /><Bone w={BONE_WIDTHS[index % BONE_WIDTHS.length]} /></>}</span>
+          <span className="backlog-meta"><span className="backlog-ref"><Bone w="4ch" /></span><span className="backlog-tag"><Bone w={index % 3 ? '10ch' : '7ch'} /></span></span>
+        </span>
+        <span className="backlog-actions" />
+      </li>)}</ul>
+    </section>)}
+  </div>
 }
 
 interface Undo { label: string; change: Change }
@@ -359,6 +385,8 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   const hasHeadings = groups.some(group => group.heading)
   const openItems = groups.flatMap(group => group.rows.filter((row): row is Item => row.kind === 'item'))
   const locked = !saved || !!conflict
+  const headings = groups.filter(group => group.heading || hasHeadings).length
+  useEffect(() => { if (saved) { rememberCount('backlog.rows', openItems.length); rememberCount('backlog.groups', headings) } }, [saved, openItems.length, headings])
 
   const short = (text: string) => text.length > 40 ? `${text.slice(0, 40)}…` : text
   const actions: RowActions = {
@@ -478,7 +506,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   }
   const inText = draft !== null
 
-  const status = !saved ? 'Loading…'
+  const status = !saved ? (error ? '' : 'Loading backlog…')
     : tooLong ? `Keep it under ${saved.limit.toLocaleString()} characters.`
     : unsaved || saving ? 'Saving…'
     : !rows.length ? ''
@@ -497,7 +525,8 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     </div>
     {inText
       ? <VoiceField label="backlog text" onBusyChange={setTextVoice} value={draft} setValue={setDraft} multiline fieldRef={textBox} field={{ 'aria-label': 'Backlog text', className: 'backlog-text', readOnly: !!conflict, disabled: !!conflict, spellCheck: true }} />
-      : <div className="backlog-list" ref={list}>
+      : <div className="backlog-list" ref={list} aria-busy={!saved && !error}>
+          {!saved && !error && <BacklogBones />}
           {saved && !rows.length && <div className="backlog-empty"><ClipboardList size={26} aria-hidden="true" /><p><strong>Nothing here yet</strong></p><p>Add what you want to remember. Agents add follow-ups they find, and fill in items you point them to.</p></div>}
           {saved && !!rows.length && !openItems.length && <p className="backlog-clear"><Check size={16} aria-hidden="true" />All done.</p>}
           {groups.map(group => <section key={group.heading?.id ?? 'inbox'} className="backlog-group">
@@ -523,7 +552,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     </div>
     : failed && unsaved ? <p className="error" role="alert"><strong>Not saved.</strong> {failed} Tether will keep trying. <button type="button" className="link-button" onClick={retry}>Try now</button></p>
     : error ? <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>
-    : <p className={`backlog-status${tooLong ? ' error' : ''}`} role="status">{status}</p>}
+    : <p className={`backlog-status${tooLong ? ' error' : ''}${saved ? '' : ' loading'}`} role="status">{status}</p>}
   </div>
 }
 

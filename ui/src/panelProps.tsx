@@ -11,20 +11,24 @@ import { useHost } from './host'
 
 export type { PanelProps } from './panels'
 
-/** Run `load` now and every `ms` while the panel is active and the page is visible. A new load aborts the one before. */
+/** A load in flight this long is taken as stuck: the next tick aborts it and starts again. */
+const STALLED_MS = 30_000
+/** Run `load` now and every `ms` while the panel is active and the page is visible. A tick waits for a load in flight,
+ * so a slow network still finishes one; only a stuck load is aborted. */
 export function usePanelPoll(load: (signal: AbortSignal) => Promise<void>, ms: number, active: boolean) {
   const latest = useRef(load)
   useEffect(() => { latest.current = load })
   useEffect(() => {
     if (!active) return
     let controller = new AbortController()
-    let timer = 0
+    let timer = 0, started: number | null = null
     const tick = () => {
       window.clearTimeout(timer)
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && (started === null || Date.now() - started > STALLED_MS)) {
         controller.abort()
-        controller = new AbortController()
-        void latest.current(controller.signal)
+        const own = controller = new AbortController()
+        started = Date.now()
+        void latest.current(own.signal).catch(() => {}).finally(() => { if (controller === own) started = null })
       }
       timer = window.setTimeout(tick, ms)
     }
