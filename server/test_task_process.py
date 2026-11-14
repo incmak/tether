@@ -50,7 +50,7 @@ class FindTests(unittest.TestCase):
         self.procs.add(201, args=wrapped('sleep 1600'), fds=['/other.output'])
         self.procs.add(202, parent=999, fds=[self.output])  # not a child of the owner
         self.procs.add(203, group=100, fds=[self.output])  # not a group leader
-        self.assertEqual(task_process.find(100, {'kind': 'shell', 'command': 'sleep 1600'}, self.output, 1000), 200)
+        self.assertEqual(task_process.find(100, {'kind': 'shell', 'command': 'sleep 1600'}, self.output, 1000), (200, '1000.0'))
 
     def test_two_processes_on_one_output_are_not_exact(self):
         self.procs.add(200, fds=[self.output])
@@ -69,7 +69,7 @@ class FindTests(unittest.TestCase):
         command = "tail -f log | grep 'it''s'"
         self.procs.add(300, args=wrapped(command), start=995)
         task = {'kind': 'monitor', 'command': command}
-        self.assertEqual(task_process.find(100, task, None, 1000), 300)
+        self.assertEqual(task_process.find(100, task, None, 1000).pid, 300)
         self.assertIsNone(task_process.find(100, task, None, 1000 + task_process.START_BEFORE + 10))
         self.assertIsNone(task_process.find(100, task, None, 995 - task_process.START_AFTER - 1))
         self.assertIsNone(task_process.find(100, {'kind': 'monitor', 'command': 'tail -f log'}, None, 1000))
@@ -97,23 +97,49 @@ class StopTests(unittest.TestCase):
                 del self.procs.procs[pid]
         return send
 
+    def process(self):
+        return task_process.Process(200, '1000')
+
     def test_sigterm_stops_group(self):
-        self.assertTrue(task_process.stop(200, sleep=lambda _: None, kill=self.kill({signal.SIGTERM})))
+        self.assertTrue(task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill({signal.SIGTERM})))
         self.assertEqual(self.sent, [signal.SIGTERM])
 
     def test_sigkill_after_three_seconds(self):
-        self.assertTrue(task_process.stop(200, sleep=lambda _: None, kill=self.kill({signal.SIGKILL})))
+        self.assertTrue(task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill({signal.SIGKILL})))
         self.assertEqual(self.sent, [signal.SIGTERM, signal.SIGKILL])
 
     def test_zombie_counts_as_gone_and_reused_pid_is_not_signalled_twice(self):
         def send(pid, sig):
             self.sent.append(sig)
             self.procs.procs[pid]['start'] = 5000  # pid reused by a new process
-        self.assertTrue(task_process.stop(200, sleep=lambda _: None, kill=send))
+        self.assertTrue(task_process.stop(self.process(), sleep=lambda _: None, kill=send))
         self.assertEqual(self.sent, [signal.SIGTERM])
 
+    def test_pid_reused_between_find_and_stop_gets_no_signal(self):
+        found = task_process.Process(200, '1000')
+        self.procs.add(200, start=2000)  # The task exited; a new process now has pid 200.
+        self.assertTrue(task_process.stop(found, sleep=lambda _: None, kill=self.kill({signal.SIGTERM})))
+        self.assertEqual(self.sent, [])
+
+    def test_pid_that_left_its_group_gets_no_signal(self):
+        self.procs.procs[200]['group'] = 100
+        task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill({signal.SIGTERM}))
+        self.assertEqual(self.sent, [])
+
+    def test_find_refuses_a_pid_reused_during_its_checks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = str(Path(folder) / 'b1.output')
+            self.procs.add(200, fds=[output], start=1000)
+            real = task_process._writes_to
+
+            def reused(pid, path):
+                self.procs.procs[pid]['start'] = 2000
+                return real(pid, path)
+            with patch.object(task_process, '_writes_to', side_effect=reused):
+                self.assertIsNone(task_process.find(100, {'kind': 'shell', 'command': 'x'}, output, 1000))
+
     def test_unkillable_reports_false(self):
-        self.assertFalse(task_process.stop(200, sleep=lambda _: None, kill=self.kill(set())))
+        self.assertFalse(task_process.stop(self.process(), sleep=lambda _: None, kill=self.kill(set())))
 
 
 class LedgerTests(unittest.TestCase):

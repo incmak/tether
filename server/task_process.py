@@ -5,6 +5,7 @@ group. A shell writes to tasks/<id>.output, so its open file names it exactly. A
 socket, so it is matched by its command and start time. This does not depend on how a Claude Code
 version draws /tasks.
 """
+from collections import namedtuple
 import json
 import os
 import signal
@@ -20,6 +21,8 @@ LEDGER_LIMIT = 500
 START_BEFORE, START_AFTER = 15, 3
 _lock = threading.Lock()
 _memo = [None, frozenset()]  # (path, mtime_ns), keys
+# A pid alone can name a new process after the task exits; start ticks pin the exact process.
+Process = namedtuple('Process', 'pid ticks')
 
 
 def quoted(command):
@@ -69,21 +72,32 @@ def _runs(pid, command, started):
 
 
 def find(owner_pid, task, output, started, pids=None):
-    """Return the process group leader for one task, or None when it is gone or not exact.
+    """Return the task's process group leader as Process(pid, ticks), or None when it is gone or not exact.
 
     task: {'kind', 'command'}; output: resolved tasks/<id>.output path or None; started: epoch or None."""
-    pids = [pid for pid in (children(owner_pid) if pids is None else pids) if _group_leader(pid)]
+    ticks = {}
+    for pid in (children(owner_pid) if pids is None else pids):
+        try:
+            ticks[pid] = procinfo.start_ticks(pid)  # Read before the checks, compared after them.
+        except (OSError, ValueError, KeyError, IndexError):
+            continue
+    pids = [pid for pid in ticks if _group_leader(pid)]
+    chosen = None
     if output is not None:
         exact = [pid for pid in pids if _writes_to(pid, str(output))]
-        if len(exact) == 1:
-            return exact[0]
-        if exact:
+        if len(exact) > 1:
             return None
-    command = task.get('command')
-    if task.get('kind') != 'monitor' or not isinstance(command, str) or not command.strip() or started is None:
-        return None
-    matched = [pid for pid in pids if _runs(pid, command, started)]
-    return matched[0] if len(matched) == 1 else None
+        chosen = exact[0] if exact else None
+    if chosen is None:
+        command = task.get('command')
+        if task.get('kind') != 'monitor' or not isinstance(command, str) or not command.strip() or started is None:
+            return None
+        matched = [pid for pid in pids if _runs(pid, command, started)]
+        if len(matched) != 1:
+            return None
+        chosen = matched[0]
+    process = Process(chosen, ticks[chosen])
+    return process if _same(process) else None
 
 
 def _alive(pid, ticks):
@@ -93,23 +107,35 @@ def _alive(pid, ticks):
         return False
 
 
-def stop(pid, *, sleep=time.sleep, kill=os.killpg):
-    """SIGTERM the task's process group, then SIGKILL after 3 s. Returns True when it is gone."""
-    ticks = procinfo.start_ticks(pid)
-    kill(pid, signal.SIGTERM)
+def _same(process):
+    """True while process is still the same live group leader that find named."""
+    try:
+        return _alive(process.pid, process.ticks) and os.getpgid(process.pid) == process.pid
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def stop(process, *, sleep=time.sleep, kill=os.killpg):
+    """SIGTERM the task's process group, then SIGKILL after 3 s. Returns True when it is gone.
+
+    process comes from find. Each signal goes only while the pid still has the start ticks find
+    read, so a pid that a new process reused is never signalled."""
+    if not _same(process):
+        return True
+    kill(process.pid, signal.SIGTERM)
     for attempt in range(31):
-        if not _alive(pid, ticks):
+        if not _alive(*process):
             return True
         if attempt == 30:
             break
         sleep(0.1)
-    if _alive(pid, ticks):
-        kill(pid, signal.SIGKILL)
+    if _same(process):
+        kill(process.pid, signal.SIGKILL)
         for _ in range(10):
             sleep(0.1)
-            if not _alive(pid, ticks):
+            if not _alive(*process):
                 return True
-    return not _alive(pid, ticks)
+    return not _alive(*process)
 
 
 def _read():

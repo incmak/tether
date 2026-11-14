@@ -225,7 +225,7 @@ class StopTests(unittest.TestCase):
 
     def test_list_stops_second_row_with_exact_keys_and_reads_after_each_key(self):
         self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
-        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Down',), ('x',), ('Escape',)])
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Down',), ('Enter',), ('x',), ('Escape',)])
         self.verify.assert_called_once_with(self.entry, self.pane)
         self.assertFalse(self.pane.needs_read)
 
@@ -233,13 +233,13 @@ class StopTests(unittest.TestCase):
         self.pane.shells = ['First shell', 'Second shell']
         self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',),
-                                         ('Down',), ('Down',), ('Down',), ('x',), ('Escape',)])
+                                         ('Down',), ('Down',), ('Down',), ('Enter',), ('x',), ('Escape',)])
 
     def test_shell_with_matching_label_is_not_a_target(self):
         self.pane.shells = ['Alpha wait']
         self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
         self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',),
-                                         ('Down',), ('Down',), ('x',), ('Escape',)])
+                                         ('Down',), ('Down',), ('Enter',), ('x',), ('Escape',)])
 
     def test_detail_stops_and_closes_after_stop_hint_disappears(self):
         self.pane.detail = True
@@ -456,7 +456,7 @@ class ProcessStopTests(unittest.TestCase):
     def test_stop_task_moves_up_from_agent_to_second_shell_only(self):
         self.make_tasks()
         self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
-        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Up',), ('x',), ('Escape',)])
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Up',), ('Enter',), ('x',), ('Escape',)])
 
     def test_running_earlier_chat_task_can_confirm_after_it_leaves_listing(self):
         self.make_tasks()
@@ -469,6 +469,7 @@ class ProcessStopTests(unittest.TestCase):
     def test_task_can_target_description_when_command_differs(self):
         self.make_tasks()
         self.pane.shells[-1] = 'Second wait'
+        self.pane.shell_details[1] = (None, 'sleep 600')  # The detail view shows the real command.
         self.assertTrue(self.stop('shell02')['ok'])
 
     def test_task_detail_header_is_checked_before_x(self):
@@ -516,7 +517,7 @@ class ProcessStopTests(unittest.TestCase):
         self.pane.names = []
         self.pane.at = 0
         self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
-        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Down',), ('x',), ('Escape',)])
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Down',), ('Enter',), ('x',), ('Escape',)])
 
     def test_detail_opened_at_once_for_another_task_goes_back_to_list(self):
         self.make_tasks()
@@ -525,7 +526,7 @@ class ProcessStopTests(unittest.TestCase):
         self.pane.detail = True
         self.pane.viewing = 0  # /tasks opened the first shell's detail; the target is the second.
         self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
-        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Left',), ('Down',), ('x',), ('Escape',)])
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Left',), ('Down',), ('Enter',), ('x',), ('Escape',)])
 
     def test_task_with_exact_process_stops_by_signal_without_terminal_keys(self):
         self.make_tasks()
@@ -572,6 +573,32 @@ class ProcessStopTests(unittest.TestCase):
                              side_effect=lambda pid: self.output.write_text('[exited with code 143]') or True):
             self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
         self.assertNotIn(('x',), self.pane.keys)
+
+    def test_failure_after_x_never_falls_back_to_signal(self):
+        # After x, Claude may already have stopped the task; a signal could then reach a same-command twin.
+        for setup in (lambda: setattr(self.pane, 'confirms', False), lambda: setattr(self.pane, 'fail_key', ('Escape',))):
+            with self.subTest(setup=setup):
+                self.setUp()  # A fresh pane and session for each case.
+                self.make_tasks()
+                setup()
+                with patch.object(stop.task_process, 'find', return_value=stop.task_process.Process(4242, '1')), \
+                        patch.object(stop.task_process, 'stop') as signal_stop:
+                    with self.assertRaises(stop.StopError):
+                        self.stop('shell02')
+                signal_stop.assert_not_called()
+                self.assertIn(('x',), self.pane.keys)
+
+    def test_sole_row_whose_detail_does_not_fit_gets_no_x(self):
+        self.make_tasks()
+        self.pane.names = []
+        self.pane.at = 0
+        self.pane.shells = ['Second wait']
+        self.pane.shell_details = {0: (None, 'sleep 900')}  # Same label, other command.
+        with patch.object(stop.task_process, 'find', return_value=None):
+            with self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+                self.stop('shell02')
+        self.assertNotIn(('x',), self.pane.keys)
+        self.assertIn(('Enter',), self.pane.keys[2:])  # The detail view was opened and checked.
 
     def test_unreadable_screen_error_names_a_newer_claude_version(self):
         sessions = Path(self.meta).parent / 'sessions'

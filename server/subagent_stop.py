@@ -155,12 +155,20 @@ def in_section(target, section):
     return section in ('Shells', 'Monitors') or any(word in section.lower() for word in ('shell', 'monitor'))
 
 
-def stop_selected(entry, target, run, sleep, clock=time.time):
-    """Open /tasks, find the target, and press x on it.
+def stop_selected(entry, target, run, sleep, clock=time.time, pressed=None):
+    """Open /tasks, find the target, and press x on it from its verified detail view.
 
     target: task (bool), labels (names /tasks may show), kind (agent type), started (epoch or None),
-    body (prompt or command text that the detail view shows)."""
+    body (prompt or command text that the detail view shows). pressed: a dict that gets
+    pressed['x'] = True just before x is sent, so the caller knows Claude may already act on it."""
     noun = 'task' if target['task'] else 'agent'
+    pressed = {} if pressed is None else pressed
+
+    def press_x():
+        pressed['x'] = True
+        press(entry, 'x', run=run)
+        sleep(0.18)
+        visible(entry, run)
 
     def wait_for(text, tries=14):
         for _ in range(tries):
@@ -186,9 +194,7 @@ def stop_selected(entry, target, run, sleep, clock=time.time):
     if in_detail(screen):
         # With one task, /tasks can open its detail view at once.
         if fits(screen, target, clock()):
-            press(entry, 'x', run=run)
-            sleep(0.18)
-            visible(entry, run)
+            press_x()
             return
         if '← to go back' not in hint(screen):
             raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
@@ -232,29 +238,26 @@ def stop_selected(entry, target, run, sleep, clock=time.time):
     candidates = [index for index, row in enumerate(listed) if is_target(row)]
     if not candidates:
         raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
-    if len(candidates) == 1:
-        select(candidates[0], screen)
-        press(entry, 'x', run=run)
-        sleep(0.18)
-        visible(entry, run)
-        return
-    # Same name: open each one and compare its run time and prompt or command.
-    fitting = []
-    for index in candidates:
-        detail = view(index, screen)
-        if fits(detail, target, clock()):
-            fitting.append(index)
-        press(entry, 'Left', run=run)
-        screen = wait_for('↑/↓ to select')
-    if len(fitting) != 1:
-        raise StopError(f'{len(candidates)} {noun}s share this name and could not be told apart. Stop it in the terminal.'
-                        if fitting else f'Could not identify that {noun}. Stop it in the terminal.')
-    detail = view(fitting[0], screen)
+    index = candidates[0]
+    if len(candidates) > 1:
+        # Same name: open each one and compare its run time and prompt or command.
+        fitting = []
+        for index in candidates:
+            detail = view(index, screen)
+            if fits(detail, target, clock()):
+                fitting.append(index)
+            press(entry, 'Left', run=run)
+            screen = wait_for('↑/↓ to select')
+        if len(fitting) != 1:
+            raise StopError(f'{len(candidates)} {noun}s share this name and could not be told apart. Stop it in the terminal.'
+                            if fitting else f'Could not identify that {noun}. Stop it in the terminal.')
+        index = fitting[0]
+    # A sole row is checked too: its name can match while its run time or command does not.
+    detail = view(index, screen)
     if not fits(detail, target, clock()):
-        raise StopError('The tasks dialog changed. Check the terminal view.')
-    press(entry, 'x', run=run)
-    sleep(0.18)
-    visible(entry, run)
+        raise StopError(f'Could not identify that {noun}. Stop it in the terminal.' if len(candidates) == 1
+                        else 'The tasks dialog changed. Check the terminal view.')
+    press_x()
 
 
 # The newest Claude Code version whose /tasks screens the stop tests and a live run were checked on.
@@ -288,11 +291,11 @@ def stop_process(entry, task):
         return False
     output = tasks_dir / f'{task["id"]}.output'
     output = os.path.realpath(output) if output.exists() else None
-    pid = task_process.find(entry['owner_pid'], task, output, subagents._stamp(task.get('started')))
-    if pid is None:
+    process = task_process.find(entry['owner_pid'], task, output, subagents._stamp(task.get('started')))
+    if process is None:
         return False
     task_process.record(task_process.key(tasks_dir, task['id']))
-    if not task_process.stop(pid):
+    if not task_process.stop(process):
         raise StopError('The task did not stop. Check the terminal view.')
     return True
 
@@ -346,6 +349,8 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time)
         target = {'task': is_task, 'labels': labels, 'kind': agent.get('type') or 'general-purpose',
                   'started': subagents._stamp(agent.get('started')), 'body': body}
 
+        pressed = {}
+
         def by_terminal():
             terminal_input.verify(entry, run)
             # Do not drive an unverified pane, including a pane for another agent.
@@ -355,7 +360,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time)
                     raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
                 if any(terminal_input.prompt_draft(entry, run)):
                     raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
-                stop_selected(entry, target, run, sleep, clock)
+                stop_selected(entry, target, run, sleep, clock, pressed)
             finally:
                 close(entry, run, sleep)
             return confirm(entry, agent_id, is_task, sleep)
@@ -364,14 +369,16 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time)
         # Claude report a failed command, and its agent may then debug or rerun it. The signal is
         # the fallback: it does not read the screen, so it still works when a Claude Code update
         # changes /tasks. Agents have no process of their own, so they stop through /tasks only.
+        # After x, Claude may already be stopping this task, and its process may be gone. A signal
+        # then could reach a same-command twin, so a failure after x never falls back to it.
         try:
             return by_terminal()
         except StopError as exc:
-            if is_task and stop_process(entry, agent):
+            if is_task and not pressed and stop_process(entry, agent):
                 return confirm(entry, agent_id, True, sleep)
             raise StopError(with_version(entry, str(exc))) from exc
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
-            if is_task and stop_process(entry, agent):
+            if is_task and not pressed and stop_process(entry, agent):
                 return confirm(entry, agent_id, True, sleep)
             raise
     except StopError:
