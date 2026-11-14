@@ -274,7 +274,7 @@ def _valid(event):
         return False
     kind = event['type']
     text_fields = ('title', 'source', 'q', 'text', 'pane', 'role', 'chat', 'name', 'session', 'stack', 'ask',
-                   'choice', 'by', 'who', 'ref', 'status', 'error')
+                   'choice', 'by', 'who', 'ref', 'status', 'error', 'target')
     if any(k in event and not isinstance(event[k], str) for k in text_fields):
         return False
     if 'at' in event and (isinstance(event['at'], bool) or not isinstance(event['at'], (int, float))):
@@ -409,7 +409,7 @@ def _apply(item, event):
     elif kind == 'title':
         item['title'] = event.get('title') or item['title']
     elif kind == 'jira':
-        item['jira'] = {k: event.get(k) for k in ('status', 'error', 'tickets', 'owners') if k in event}
+        item['jira'] = {k: event.get(k) for k in ('status', 'error', 'tickets', 'owners', 'target') if k in event}
     if kind == 'stage' and event.get('stage') == 'done':
         item['doneAt'] = event.get('at')
     elif kind in ('stage', 'ask', 'answer') and item['stage'] != 'done':

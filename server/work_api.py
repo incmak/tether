@@ -9,8 +9,10 @@ import threading
 import paths
 from projects import _read, _write
 
+import jira_client
 import work_fix
 import work_items
+import work_jira
 from projects import ProjectError
 
 PREFIX = '/mobile/api/work/'
@@ -39,7 +41,7 @@ def get(handler):
 
     def work():
         if name == 'board':
-            return work_items.board()
+            return {**work_items.board(), 'jira': jira_client.status()}
         raise ProjectError(404, 'Not found')
     _answer(handler, work)
 
@@ -119,6 +121,16 @@ def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
                                              text=body.get('text') or '')}
         if name == 'qa':
             return {'item': work_items.set_qa(body.get('item'), body.get('qa'), 'mak', version=version)}
+        if name == 'jira':  # Move again: the Jira move of a Done item, on the worker thread
+            _, item = work_items.find(body.get('item'))
+            if item['version'] != version:
+                raise ProjectError(409, f'{item["id"]} changed since you loaded it. Reload and try again.')
+            if item['stage'] != 'done':
+                raise ProjectError(409, f'{item["id"]} is not Done. Tether moves Jira tickets when an item is Done.')
+            if not work_jira.tickets(item, work_items.project(item['project'])):
+                raise ProjectError(400, f'{item["id"]} has no Jira ticket of its project.')
+            queued = work_jira.MOVER.queue(item['id'])
+            return {'item': item, 'queued': bool(queued), 'why': '' if queued else 'A Jira move for it runs now.'}
         if name == 'note':
             return {'item': work_items.note(body.get('item'), body.get('text'), 'mak', version=version)}
         if name == 'item':

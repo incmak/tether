@@ -87,6 +87,7 @@ import auto_resume
 import window_size
 import projects_api
 import work_api
+import work_jira
 import groups
 import helper_close
 import groups_api
@@ -207,6 +208,10 @@ def monitor_notices():
             WORK_WATCHER.observe()
         except Exception as exc:  # the work board must never stop the monitor
             print(f'work watcher failed: {exc!r}', file=sys.stderr)
+        try:
+            work_jira.MOVER.observe()
+        except Exception as exc:  # Jira on Done must never stop the monitor
+            print(f'work jira failed: {exc!r}', file=sys.stderr)
         try:
             HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status)
         except Exception as exc:  # closing idle helper tabs must never stop the monitor

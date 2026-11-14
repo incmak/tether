@@ -110,7 +110,9 @@ export function ProjectForm({ api, board, project, onClose, onSaved }: {
             <input id={`${id}-qa`} value={form.qaStatus} onChange={set('qaStatus')} maxLength={64} autoComplete="off" placeholder="QA Testing" />
           </Field>
         </div>
-        <p className="work-hint">Tether saves these now but does not move tickets yet.</p>
+        <p className="work-hint">On Done, Tether moves the item's tickets that are assigned to you. {board.jira?.connected
+          ? `Connected to ${board.jira.site} as ${board.jira.account}.${board.jira.guard ? '' : ` ${board.jira.why}`}`
+          : 'Jira is not connected: run tether jira connect on the Tether host.'}</p>
       </fieldset>
       {error && <p className="work-form-error" role="alert">{error}</p>}
       <div className="work-form-actions">

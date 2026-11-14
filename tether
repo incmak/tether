@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Apply tagged Tether releases with a health check and automatic rollback; message many agent panes (broadcast);
-change work board items (item: run `tether item --help`)."""
+change work board items (item: run `tether item --help`), and connect Jira (jira: run `tether jira --help`)."""
 import argparse
 import contextlib
 import fcntl
@@ -362,6 +362,9 @@ def main(argv=None):
     if argv[:1] == ['item']:  # work board items: the agent command, run in this process (no server needed)
         import agent_item_cli
         return agent_item_cli.main(argv[1:])
+    if argv[:1] == ['jira']:  # Jira on Done for the work board: the token is asked for, never on the command line
+        import agent_jira_cli
+        return agent_jira_cli.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     update = commands.add_parser('update')

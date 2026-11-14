@@ -8,8 +8,8 @@ import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { STAGE_LABEL, decisions, moveItem, onBoard, projectHue, setItemQa, startFix } from './work'
-import type { Stage, WorkBoard, WorkItem, WorkProject } from './work'
+import { STAGE_LABEL, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix } from './work'
+import type { JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
 import type { DecisionAnswers } from './WorkItems'
@@ -145,7 +145,7 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
         </div>
       </>}
     </div>
-    {opened && <ItemDrawer key={opened.id} api={api} item={opened} project={projects.find(entry => entry.name === opened.project)} prefix={prefixOf(board, opened)} panes={panes}
+    {opened && <ItemDrawer key={opened.id} api={api} item={opened} project={projects.find(entry => entry.name === opened.project)} prefix={prefixOf(board, opened)} panes={panes} link={board?.jira}
       answers={answers} error={error} onRefresh={onRefresh} onOpen={open} onClose={() => setOpenId(null)} />}
     {board && form?.kind === 'project' && (!form.name || editing) && <ProjectForm api={api} board={board} project={editing} onClose={() => setForm(null)}
       onSaved={name => { close(sent); setProject(name); setAdded({ ok: true, text: editing ? `${name} settings saved.` : `Project ${name} added.` }); void onRefresh() }} />}
@@ -184,17 +184,37 @@ function BoardCard({ item, prefix, panes, now, onDetails }: { item: WorkItem; pr
       {item.tabs.map(tab => <span key={tab.pane} className="work-link-tab"><span className={`work-tab-dot${live.has(tab.pane) ? '' : ' closed'}`} aria-hidden="true" />{tabPath(tab)}{!live.has(tab.pane) && <span className="visually-hidden"> (closed)</span>}</span>)}
       {item.refs.length > 0 && <span>{item.refs.join(', ')}</span>}
       {item.qa && item.stage !== 'done' && <span>needs QA</span>}
-      {item.jira?.status && <span>Jira: {item.jira.status}</span>}
-      {item.jira?.error && <span className="work-link-error">Jira move failed</span>}
+      {item.jira?.status && <span className={item.jira.status === 'failed' || item.jira.status === 'off' ? 'work-link-error' : undefined}>{JIRA_CARD[item.jira.status] ?? 'Jira'}</span>}
     </span>}
   </button>
+}
+
+// The card's one-word Jira result. The drawer gives the details and Move again.
+const JIRA_CARD: Record<string, string> = { moved: 'Jira moved', owners: 'Jira: owner moves it', failed: 'Jira move failed', off: 'Jira not connected' }
+
+/** What Done does, or did, to the item's Jira tickets. Only tickets assigned to the connected account move. */
+function JiraState({ item, project, link }: { item: WorkItem; project?: WorkProject; link?: JiraLink }) {
+  if (!project?.jira) return <p className="work-note">This project has no Jira project key.</p>
+  const jira = item.jira
+  const target = item.qa ? project.qaStatus || 'its QA status' : 'Done'
+  if (item.stage !== 'done' || !jira?.status) {
+    return <>
+      <p className="work-note">On Done, Tether moves this item's {project.jira} tickets that are assigned to you to {target}.</p>
+      {link?.why && <p className="work-note failed">{link.why}</p>}
+    </>
+  }
+  return <>
+    {!!jira.tickets?.length && <p className="work-note">Moved to {jira.target || target}: {jira.tickets.join(', ')}.</p>}
+    {jira.owners?.map(owner => <p key={owner} className="work-note">{owner}</p>)}
+    {jira.error && <p className="work-note failed">{jira.status === 'off' ? jira.error : `Jira move failed: ${jira.error}`}</p>}
+  </>
 }
 
 const when = (at: number) => new Date(at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 const isUrl = (ref: string) => /^https?:\/\//.test(ref)
 
-function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefresh, onOpen, onClose }: {
-  api: Api; item: WorkItem; project?: WorkProject; prefix: string; panes: Pane[]; answers: DecisionAnswers; error: string
+function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, onRefresh, onOpen, onClose }: {
+  api: Api; item: WorkItem; project?: WorkProject; prefix: string; panes: Pane[]; link?: JiraLink; answers: DecisionAnswers; error: string
   onRefresh: () => unknown; onOpen: (pane: Pane) => void; onClose: () => void
 }) {
   const modal = useModal(true, onClose)
@@ -236,6 +256,10 @@ function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefre
     const sent = ask.id
     if (await answers.answer(item, { text: reply.trim() })) setDraft(current => current.ask === sent ? { ask: '', text: '' } : current)
   }
+  const again = () => void write(`${item.id}: Jira move started. The result shows here in a few seconds.`, async () => {
+    const done = await moveJira(api, item)
+    if (!done.queued) throw new Error(done.why)
+  })
   const live = (pane: string) => panes.find(entry => entry.id === pane)
   const firstMove = !ask && item.stage === 'review'
   // A Ready item can start a fix tab unless one still runs an agent (the Build answer tries first). Matches the server.
@@ -307,9 +331,9 @@ function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefre
             onChange={event => { const on = event.target.checked; void write(on ? `${item.id} needs QA testing.` : `${item.id} needs no QA testing.`, () => setItemQa(api, item, on)) }} />
           Needs QA testing
         </label>
-        {!project?.jira && <p className="work-note">This project has no Jira project key.</p>}
-        {item.jira?.status && <p className="work-note">Jira status: {item.jira.status}</p>}
-        {item.jira?.error && <p className="work-note failed">Jira move failed: {item.jira.error}</p>}
+        <JiraState item={item} project={project} link={link} />
+        {item.stage === 'done' && project?.jira && (item.jira?.status === 'failed' || item.jira?.status === 'off') &&
+          <div className="work-actions"><button type="button" className="secondary" disabled={locked} onClick={again}>Move again</button></div>}
       </section>
       <dl className="work-kv">
         <dt>Project</dt><dd>{item.project}</dd>

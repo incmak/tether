@@ -15,9 +15,15 @@ export interface WorkHistory { at: number; by: string; text: string; ref?: strin
 export interface WorkItem {
   id: string; project: string; title: string; stage: Stage; qa: boolean; ask: WorkAsk | null; askFrom: Stage | null
   refs: string[]; tabs: WorkTab[]; history: WorkHistory[]; source: string; created: number; updated: number
-  doneAt: number | null; jira: { status?: string; error?: string } | null; version: number
+  doneAt: number | null; jira: WorkJira | null; version: number
 }
-export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[] }
+/** The last Jira move of a Done item. moved: every ticket is in target. owners: some belong to someone else (owners
+ * holds one note each). failed: error says why. off: Jira is not connected. tickets: the ones now in target. */
+export interface WorkJira { status?: 'moved' | 'owners' | 'failed' | 'off'; error?: string; tickets?: string[]; owners?: string[]; target?: string }
+/** The Jira connection on the Tether host (`tether jira connect`). Never holds the token. guard: Mak confirmed the
+ * Only Assignee condition; without it nothing moves. why: what to do when not connected or not guarded. */
+export interface JiraLink { connected: boolean; site?: string; account?: string; guard?: boolean; why?: string }
+export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink }
 /** A Build answer, or Start fix tab, opens a fix tab. When it does not start, the item stays Ready and why says so. */
 export interface FixResult { started: boolean; why: string }
 export interface AnswerResult { item: WorkItem; sent: boolean; why: string; fix?: FixResult }
@@ -58,6 +64,10 @@ export const saveProject = (api: Api, project: WorkProject, revision: number, cr
 /** Add an item by hand. tab: start a triage tab for it; tab in the answer says whether it started. */
 export const newItem = (api: Api, project: string, title: string, refs: string[], tab: boolean) =>
   api<{ item: WorkItem; tab?: FixResult }>('work/item', { project, title, refs, tab })
+
+/** Move again: queue the Jira move of a Done item. The result shows on the item after the next poll. */
+export const moveJira = (api: Api, item: WorkItem) =>
+  api<{ item: WorkItem; queued: boolean; why: string }>('work/jira', { item: item.id, version: item.version })
 
 export const setItemQa = (api: Api, item: WorkItem, qa: boolean) =>
   api<{ item: WorkItem }>('work/qa', { item: item.id, qa, version: item.version })
