@@ -64,7 +64,7 @@ function traverse(step: -1 | 1) {
   moving = true
   clearTimeout(movingTimer)
   // A traversal that never ends in popstate (the browser refused it) must not block later steps.
-  movingTimer = setTimeout(() => { moving = false; drain() }, 1500)
+  movingTimer = setTimeout(() => { moving = false; flush(); drain() }, 1500)
   if (step < 0) history.back()
   else history.forward()
 }
@@ -76,9 +76,14 @@ function drain() {
   else wanted = 0
 }
 
+// History writes wait while a Back or a traversal is in flight, so that they act on the entry it lands on.
 function run(fn: () => void) {
-  if (pendingBacks > 0) queue.push(fn)
+  if (pendingBacks > 0 || moving) queue.push(fn)
   else fn()
+}
+
+function flush() {
+  while (!moving && pendingBacks === 0 && queue.length) queue.shift()!()
 }
 
 function back() {
@@ -94,6 +99,7 @@ function listen() {
     moving = false
     clearTimeout(movingTimer)
     onPop(event)
+    flush()
     drain()
   })
   function onPop(event: PopStateEvent) {
@@ -104,7 +110,6 @@ function listen() {
     changed()
     if (pendingBacks > 0) {
       pendingBacks--
-      while (pendingBacks === 0 && queue.length) queue.shift()!()
       return
     }
     const layer = next?.layer ?? 0

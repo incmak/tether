@@ -15,14 +15,19 @@ function makeHistory() {
   const tasks = []
   const entries = [{ state: null }]
   let at = 0
-  const fire = () => tasks.push(() => listeners.forEach(fn => fn({ state: entries[at].state })))
+  // Like a browser, the pointer and history.state change only when the traversal task runs.
+  const go = step => tasks.push(() => {
+    if (at + step < 0 || at + step >= entries.length) return
+    at += step
+    listeners.forEach(fn => fn({ state: entries[at].state }))
+  })
   const history = {
     get state() { return entries[at].state },
     get length() { return entries.length },
     pushState(state) { entries.splice(at + 1); entries.push({ state: structuredClone(state) }); at++ },
     replaceState(state) { entries[at] = { state: structuredClone(state) } },
-    back() { if (at > 0) { at--; fire() } },
-    forward() { if (at < entries.length - 1) { at++; fire() } },
+    back() { go(-1) },
+    forward() { go(1) },
   }
   const settle = () => { for (let n = 0; tasks.length && n < 50; n++) tasks.shift()() }
   return { history, listeners, settle, entries, get at() { return at } }
@@ -188,7 +193,20 @@ const can = nav => nav.useNavAvailability()
   console.log('ok command menu keeps Forward')
 }
 
-// 9. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
+// 9. An overlay that closes while an in-app Back is in flight adds no second Back (Codex review, P1).
+{
+  const { nav, h } = loadNav()
+  h.history.pushState(null, '')  // The entry before is another page: a second Back would leave Tether.
+  nav.setPlace({ screen: 'home' }, { push: true })
+  const id = nav.openOverlay(() => {}, 'backlog:page')
+  assert.equal(h.at, 2)
+  nav.goBack(); nav.closeOverlay(id); h.settle()
+  assert.equal(h.at, 1, 'one step only: the app stays open')
+  assert.deepEqual({ ...can(nav) }, { back: false, forward: true })
+  console.log('ok overlay close waits for the in-app Back')
+}
+
+// 10. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
 {
   const exports = {}
   runInNewContext(compile('navKeys.ts'), { exports, require: name => { if (name === './keys') return { IS_MAC: false }; throw Error(name) } })
