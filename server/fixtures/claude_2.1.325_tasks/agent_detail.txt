@@ -1,0 +1,12 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   general-purpose › Fixture wait 2
+   2m 18s · 38.0k tokens · 1 tool · Haiku 5.5
+
+   Progress
+   › Bash(python3 -c "import time; time.sleep(300)")
+
+   Prompt
+   Run this Bash command in the foreground with timeout 400000: python3 -c "import time; time.sleep(300)" . Then
+   reply done.
+
+   ← to go back · Esc/Enter/Space to close · x to stop · f to foreground

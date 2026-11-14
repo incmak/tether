@@ -1,0 +1,14 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Background
+   2 active shells · 1 active agent
+
+     Shells (2)
+     ● Fixture monitor   running
+     ● sleep 401         running
+
+     Local agents (1)
+   ❯ ● Fixture wait 2    running · Haiku 5.5
+
+       Earlier in this session (1)
+
+   ↑/↓ to select · Enter to view · f to foreground · x to stop · Esc to close

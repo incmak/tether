@@ -46,6 +46,31 @@ class RowsTests(unittest.TestCase):
             {'label': 'Short build', 'selected': False, 'section': 'Local agents'},
         ])
 
+    def test_one_kind_has_summary_and_no_header(self):
+        screen = ('''   Background
+   4 active shells
+
+   ❯ ● sleep 1502                                           running
+     ● sleep 1501                                           running
+
+       Earlier in this session (2)
+
+   ↑/↓ to select · Enter to view · x to stop · Esc to close
+''')
+        self.assertEqual([(row['label'], row['section']) for row in stop.rows(screen)],
+                         [('sleep 1502', 'Shells'), ('sleep 1501', 'Shells')])
+        self.assertEqual([row['section'] for row in stop.rows('1 active agent\n❯ ● Quiet wait  running · Haiku 5.5\n')],
+                         ['Local agents'])
+
+    def test_shell_detail_facts(self):
+        screen = ('Shell details\n\n Status:   running\n Runtime:  1m 19s\n Command:  sleep 1502\n Output:\n'
+                  ' No output available\n' + DETAIL_HINT)
+        target = {'task': True, 'labels': ['Same sleep', 'sleep 1502'], 'kind': 'x', 'started': 0, 'body': 'sleep 1502'}
+        self.assertEqual(stop.detail_facts(screen, target), (True, '1m 19s', 'sleep 1502'))
+        self.assertTrue(stop.fits(screen, target, 80))
+        self.assertFalse(stop.fits(screen, target, 120))
+        self.assertFalse(stop.fits(screen.replace('sleep 1502', 'sleep 1501'), target, 79))
+
     def test_five_rows_across_sections_ignore_other_lines_and_stop_at_hint(self):
         screen = ('● Before section\nShells (2)\n❯ ● Shell one running\n'
                   '● Shell two completed\n\nOther text\nLocal agents (2)\n'
@@ -80,20 +105,34 @@ class FakeTasks:
         self.fail_key = None
         self.on_stop = None
         self.detail_header = None
+        self.viewing = None  # Row index opened with Enter; None means /tasks opened the detail itself.
+        self.agent_details = {}  # name index -> (elapsed text, prompt)
+        self.shell_details = {}  # shell index -> (runtime text or None, command)
+        self.summary_only = False
 
     def screen(self):
         if not self.open:
             return self.before or f'──────────\n❯ {self.draft}\n──────────\n'
         if self.detail:
             hint = DETAIL_HINT.replace(' · x to stop', '') if self.stopped else DETAIL_HINT
-            header = self.detail_header or f'general-purpose › {self.names[-1]}'
-            return f'{header}\n28s · 42.3k tokens · 1 tool · Haiku 5.5\n\n   Progress\n   › Bash(sleep 600)\n...\n{hint}'
+            if self.viewing is not None and self.viewing < len(self.shells):
+                runtime, command = self.shell_details.get(self.viewing, (None, self.shells[self.viewing]))
+                return ('Shell details\n\nStatus:   running\n' + (f'Runtime:  {runtime}\n' if runtime else '')
+                        + f'Command:  {command}\n\nOutput:\nNo output available\n\n{hint}')
+            index = len(self.names) - 1 if self.viewing is None else self.viewing - len(self.shells)
+            elapsed, prompt = self.agent_details.get(index, ('28s', 'Wait'))
+            header = self.detail_header or f'general-purpose › {self.names[index]}'
+            return (f'{header}\n{elapsed} · 42.3k tokens · 1 tool · Haiku 5.5\n\n   Progress\n   › Bash(sleep 600)\n\n'
+                    f'   Prompt\n   {prompt}\n\n{hint}')
         if self.after_move and any(key in (('Down',), ('Up',)) for key in self.keys):
             return self.after_move
         shells = '\n'.join(f"{'❯' if self.at == index and not self.stopped else ' '} ● {name}    running"
                            for index, name in enumerate(self.shells))
         rows = '\n'.join(f"{'❯' if self.at == index + len(self.shells) and not self.stopped else ' '} ● {name}    running · Haiku 5.5"
                          for index, name in enumerate(self.names))
+        if self.summary_only:
+            # Claude Code 2.1.325 with one kind of task: a summary line and no section header.
+            return f'Background\n{len(self.shells)} active shells\n\n{shells}\n\n{LIST_HINT}'
         return ('Background\n2 active agents\n'
                 + (f'  Shells ({len(self.shells)})\n{shells}\n\n' if self.shells else '')
                 + '  Local agents (2)\n' + rows + '\n'
@@ -119,11 +158,21 @@ class FakeTasks:
             self.draft = '/tasks'
         elif keys == ('Enter',):
             if self.open:
-                raise AssertionError('A second Enter must never reach the dialog')
-            self.open = self.opens
-            self.draft = ''
+                # Enter views the selected row; in a detail view it would close the dialog.
+                if self.detail or self.stopped:
+                    raise AssertionError('Enter in a detail view closes the dialog')
+                self.detail, self.viewing = True, self.at
+            else:
+                self.open = self.opens
+                self.draft = ''
         elif keys in (('Down',), ('Up',)):
+            if self.detail:
+                raise AssertionError('Arrow keys sent in a detail view')
             self.at += 1 if keys == ('Down',) else -1
+        elif keys == ('Left',):
+            if not self.detail:
+                raise AssertionError('Left sent outside a detail view')
+            self.detail, self.viewing = False, None
         elif keys == ('x',):
             if not self.open:
                 raise AssertionError('x sent outside the tasks dialog')
@@ -164,6 +213,9 @@ class StopTests(unittest.TestCase):
         self.enterContext(patch.object(terminal, '_attention_seen', {}))
         self.addCleanup(subagents._cache.clear)
         self.enterContext(patch.object(subagents, '_fd_links', return_value=[]))
+        self.enterContext(patch.object(subagents.task_process, 'LEDGER', root / 'task-stops.json'))
+        # No task process is found unless a test supplies one, so the /tasks path runs.
+        self.children = self.enterContext(patch.object(stop.task_process, 'children', return_value=[]))
         subagents._tasks_cache.clear()
         self.addCleanup(subagents._tasks_cache.clear)
         subagents._cache.clear()
@@ -222,9 +274,37 @@ class StopTests(unittest.TestCase):
             with self.subTest(names=names):
                 self.pane = FakeTasks(self.meta)
                 self.pane.names = names
-                with self.assertRaisesRegex(stop.StopError, 'Two agents share this name. Stop it in the terminal.'):
+                with self.assertRaisesRegex(stop.StopError, '2 agents share this name and could not be told apart'):
                     self.stop()
-                self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Escape',)])
+                # Each one is viewed and left with Left; nothing is stopped.
+                self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Enter',), ('Left',),
+                                                  ('Down',), ('Enter',), ('Left',), ('Escape',)])
+
+    def test_same_name_agents_told_apart_by_prompt(self):
+        self.pane.names = ['Alpha wait', 'Alpha wait']
+        self.pane.agent_details = {0: ('28s', 'Another prompt'), 1: ('28s', 'Wait')}
+        self.assertEqual(self.stop(), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Enter',), ('Left',), ('Down',), ('Enter',),
+                                         ('Left',), ('Enter',), ('x',), ('Escape',)])
+
+    def test_same_name_agents_told_apart_by_run_time(self):
+        path = self.meta.with_name('agent-alpha.jsonl')
+        path.write_text('{"type":"user","timestamp":"2027-01-15T08:00:00Z","message":{"content":"Wait"}}\n')
+        started = subagents._stamp('2027-01-15T08:00:00Z')
+        self.enterContext(patch.object(subagents.procinfo, 'start_ms', return_value=(started - 60) * 1000))
+        self.pane.names = ['Alpha wait', 'Alpha wait']
+        self.pane.agent_details = {0: ('1m 43s', 'Wait'), 1: ('3m 2s', 'Wait')}
+        result = stop.stop(self.entry, 'alpha', run=self.pane, sleep=lambda _: None, clock=lambda: started + 183)
+        self.assertEqual(result, {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.pane.keys[-3:], [('Enter',), ('x',), ('Escape',)])
+        self.assertEqual(self.pane.at, 1)
+
+    def test_run_time_rounded_to_minutes_uses_wider_slack(self):
+        target = {'task': False, 'labels': ['Alpha wait'], 'kind': 'general-purpose', 'started': 0, 'body': ''}
+        screen = 'general-purpose › Alpha wait\n2h 5m · 1k tokens\n'
+        self.assertTrue(stop.fits(screen, target, 7500 + 60))
+        self.assertFalse(stop.fits(screen, target, 7500 + 200))
+        self.assertFalse(stop.fits('general-purpose › Alpha wait\n1m 40s · 1k tokens\n', target, 110))
 
     def test_mismatched_list_or_detail_refuses_and_closes(self):
         for detail in (False, True):
@@ -412,10 +492,97 @@ class ProcessStopTests(unittest.TestCase):
     def test_task_ambiguous_shells_refuse_with_task_error(self):
         self.make_tasks()
         self.pane.shells = ['sleep 600', 'Second wait']
-        with self.assertRaisesRegex(stop.StopError, 'Two tasks share this name'):
+        self.pane.shell_details = {0: (None, 'sleep 600'), 1: (None, 'sleep 600')}
+        with self.assertRaisesRegex(stop.StopError, '2 tasks share this name'):
             self.stop('shell02')
         self.assertNotIn(('x',), self.pane.keys)
         self.assertEqual(self.pane.keys[-1], ('Escape',))
+
+    def test_same_command_shells_told_apart_by_runtime(self):
+        self.make_tasks()
+        started = subagents._stamp('2027-01-15T08:00:00Z')
+        self.pane.names = []
+        self.pane.shells = ['sleep 600', 'sleep 600']
+        self.pane.at = 0
+        self.pane.shell_details = {0: ('19s', 'sleep 600'), 1: ('5m 0s', 'sleep 600')}
+        result = stop.stop(self.entry, 'shell02', run=self.pane, sleep=lambda _: None, clock=lambda: started + 301)
+        self.assertEqual(result, {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.pane.at, 1)
+        self.assertEqual(self.pane.keys[-3:], [('Enter',), ('x',), ('Escape',)])
+
+    def test_shells_only_list_without_section_header(self):
+        self.make_tasks()
+        self.pane.summary_only = True
+        self.pane.names = []
+        self.pane.at = 0
+        self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Down',), ('x',), ('Escape',)])
+
+    def test_detail_opened_at_once_for_another_task_goes_back_to_list(self):
+        self.make_tasks()
+        self.pane.names = []
+        self.pane.at = 0
+        self.pane.detail = True
+        self.pane.viewing = 0  # /tasks opened the first shell's detail; the target is the second.
+        self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.pane.keys, [('-l', '/tasks'), ('Enter',), ('Left',), ('Down',), ('x',), ('Escape',)])
+
+    def test_task_with_exact_process_stops_by_signal_without_terminal_keys(self):
+        self.make_tasks()
+        signals = []
+
+        def kill(pid, sig):
+            signals.append((pid, sig))
+            self.output.write_text('output\n[exited with code 143]\n')
+
+        # /tasks refuses (an unsent draft), so the signal fallback stops the task.
+        self.pane.draft = 'Keep draft'
+        with patch.object(stop.task_process, 'find', return_value=4242) as find, \
+                patch.object(stop.task_process, 'stop', side_effect=lambda pid: kill(pid, 15) or True):
+            self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(find.call_args.args[2], os.path.realpath(self.output))
+        self.assertEqual(signals, [(4242, 15)])
+        self.assertEqual(self.pane.keys, [])
+        task = subagents.listing(self.entry)['tasks'][0]
+        self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
+
+    def test_task_process_that_will_not_die_reports_error(self):
+        self.make_tasks()
+        self.pane.draft = 'Keep draft'
+        with patch.object(stop.task_process, 'find', return_value=4242), \
+                patch.object(stop.task_process, 'stop', return_value=False):
+            with self.assertRaisesRegex(stop.StopError, 'The task did not stop'):
+                self.stop('shell02')
+        self.assertEqual(self.pane.keys, [])
+
+    def test_tasks_screen_stop_never_sends_a_signal(self):
+        self.make_tasks()
+        with patch.object(stop.task_process, 'find', return_value=4242), \
+                patch.object(stop.task_process, 'stop') as signal_stop:
+            self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
+        signal_stop.assert_not_called()
+        self.assertIn(('x',), self.pane.keys)
+
+    def test_unreadable_tasks_screen_falls_back_to_signal(self):
+        self.make_tasks()
+        self.pane.shells = ['sleep 600', 'Second wait']
+        self.pane.shell_details = {0: (None, 'sleep 600'), 1: (None, 'sleep 600')}
+        with patch.object(stop.task_process, 'find', return_value=4242), \
+                patch.object(stop.task_process, 'stop',
+                             side_effect=lambda pid: self.output.write_text('[exited with code 143]') or True):
+            self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
+        self.assertNotIn(('x',), self.pane.keys)
+
+    def test_unreadable_screen_error_names_a_newer_claude_version(self):
+        sessions = Path(self.meta).parent / 'sessions'
+        sessions.mkdir(exist_ok=True)
+        (sessions / f'{self.entry["owner_pid"]}.json').write_text(json.dumps({'version': '9.9.9'}))
+        with patch.object(stop, 'SESSIONS', sessions):
+            message = stop.with_version(self.entry, 'Could not identify that agent. Stop it in the terminal.')
+            self.assertIn('Claude Code 9.9.9', message)
+            self.assertEqual(stop.with_version(self.entry, 'That agent is not running.'), 'That agent is not running.')
+            (sessions / f'{self.entry["owner_pid"]}.json').write_text(json.dumps({'version': stop.CHECKED_TASKS_UI}))
+            self.assertEqual(stop.with_version(self.entry, 'Could not identify x.'), 'Could not identify x.')
 
     def test_task_confirmation_accepts_finished_and_failed(self):
         self.make_tasks()
@@ -533,6 +700,43 @@ class StopRouteTests(unittest.TestCase):
             handler.do_POST()
         handler.respond.assert_called_once_with(503, {
             'error': 'The agent did not stop. Check the terminal view.', 'draft': False})
+
+
+class RealScreenTests(unittest.TestCase):
+    """Real /tasks screens captured from Claude Code. Add a folder for each new version whose screens change."""
+    FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.325_tasks'
+
+    def screen(self, name):
+        return (self.FOLDER / f'{name}.txt').read_text()
+
+    def test_list_reads_shells_monitor_and_agent_sections(self):
+        self.assertEqual([(row['label'], row['selected'], row['section']) for row in stop.rows(self.screen('list'))], [
+            ('Fixture monitor', True, 'Shells'), ('sleep 401', False, 'Shells'), ('Fixture wait 2', False, 'Local agents')])
+        self.assertEqual([row['selected'] for row in stop.rows(self.screen('list_agent_selected'))], [False, False, True])
+
+    def test_shell_detail(self):
+        target = {'task': True, 'labels': ['Fixture shell', 'sleep 401'], 'kind': 'shell', 'started': 1000.0,
+                  'body': 'sleep 401'}
+        self.assertEqual(stop.detail_facts(self.screen('shell_detail'), target), (True, '2m 45s', 'sleep 401'))
+        self.assertTrue(stop.fits(self.screen('shell_detail'), target, 1165))
+        self.assertFalse(stop.fits(self.screen('shell_detail'), target, 1400))
+        self.assertFalse(stop.fits(self.screen('shell_detail'), dict(target, labels=['sleep 402'], body='sleep 402'), 1165))
+
+    def test_monitor_detail_uses_script_line(self):
+        target = {'task': True, 'labels': ['Fixture monitor', 'sleep 402'], 'kind': 'monitor', 'started': 1000.0,
+                  'body': 'sleep 402'}
+        self.assertEqual(stop.detail_facts(self.screen('monitor_detail'), target), (True, '2m 41s', 'sleep 402'))
+        self.assertTrue(stop.fits(self.screen('monitor_detail'), target, 1161))
+
+    def test_agent_detail(self):
+        target = {'task': False, 'labels': ['Fixture wait 2'], 'kind': 'general-purpose', 'started': 1000.0,
+                  'body': 'Run this Bash command in the foreground with timeout 400000: '
+                          'python3 -c "import time; time.sleep(300)" . Then reply done.'}
+        named, shown, body = stop.detail_facts(self.screen('agent_detail'), target)
+        self.assertEqual((named, shown), (True, '2m 18s'))
+        self.assertTrue(stop.fits(self.screen('agent_detail'), target, 1138))
+        self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, body='Another prompt'), 1138))
+        self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, kind='Explore'), 1138))
 
 
 if __name__ == '__main__':

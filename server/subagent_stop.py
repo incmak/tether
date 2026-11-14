@@ -1,10 +1,18 @@
-"""Stop one Claude subagent through /tasks without disturbing the main turn."""
+"""Stop one Claude subagent or background task without disturbing the main turn.
+
+Shells and monitors stop by signal (task_process), which does not depend on the terminal screen.
+Agents run inside the Claude process, so they stop through /tasks. That path reads the screen and
+refuses whenever the screen does not match what it expects; it never guesses a row."""
+import json
+import os
+from pathlib import Path
 import re
 import subprocess
 import time
 
 from model_picker import press, visible
 import subagents
+import task_process
 import terminal_input
 
 
@@ -38,12 +46,21 @@ def matches(description, shown):
             and description.startswith(shown[:-1].rstrip()))
 
 
+SECTIONS = {'shell': 'Shells', 'agent': 'Local agents', 'monitor': 'Monitors'}
+
+
 def rows(text):
-    """Read selectable rows across all sections in screen order."""
+    """Read selectable rows across all sections in screen order.
+
+    With one kind of task, Claude Code 2.1.325 shows only a summary line ("2 active shells") and no section header."""
     found, section = [], None
     for line in text.splitlines():
         if '↑/↓ to select' in line:
             break
+        summary = re.findall(r'\d+ active (shell|agent|monitor)s?\b', line)
+        if summary and re.fullmatch(r'\s*\d+ active \w+(?:\s*·\s*\d+ active \w+)*\s*', line):
+            section = SECTIONS[summary[0]] if len(summary) == 1 else None
+            continue
         header = re.fullmatch(r'\s*(.+?) \(\d+\)\s*', line)
         if header:
             section = header[1]
@@ -58,67 +75,244 @@ def rows(text):
     return found
 
 
-def stop_selected(entry, description, kind, run, sleep, *, task=False):
-    noun = 'task' if task else 'agent'
-    labels = description if task else [description]
+def seconds(text):
+    """'1m 43s' -> 103; '2h 05m' -> 7500; None when there is no duration."""
+    parts = re.findall(r'(\d+)\s*([hms])\b', text)
+    if not parts:
+        return None
+    return sum(int(value) * {'h': 3600, 'm': 60, 's': 1}[unit] for value, unit in parts)
 
-    def identified(label):
-        return any(matches(value, label) for value in labels)
+
+def _norm(text):
+    return ' '.join((text or '').split())
+
+
+def detail_facts(screen, target):
+    """Read an open detail view: (identifies the target by name, elapsed seconds, rounding, body text)."""
+    lines = [line.strip() for line in screen.splitlines()]
+    labels = target['labels']
+    if target['task']:
+        # Shell details show "Command:"; monitor details show "Script:" (Claude Code 2.1.325).
+        command = next((found[1] for found in (re.fullmatch(r'(?:Command|Script):\s+(.+)', line) for line in lines)
+                        if found), None)
+        runtime = next((found[1] for found in (re.fullmatch(r'Runtime:\s+(.+)', line) for line in lines) if found), None)
+        if command:
+            headers = [command.strip()]
+        else:
+            # Older detail views put the command or description on the first header line.
+            first = next((line for line in lines if line), '')
+            headers = [first, first.split(' › ', 1)[-1]]
+        named = any(matches(label, header) for label in labels for header in headers)
+        return named, runtime, command
+    headers, shown, body = [], None, None
+    for index, line in enumerate(lines):
+        found = re.fullmatch(rf'{re.escape(target["kind"])} › (.+)', line)
+        if found:
+            headers.append(found[1].strip())
+            if index + 1 < len(lines) and '·' in lines[index + 1]:
+                shown = lines[index + 1].split('·', 1)[0].strip()
+    if 'Prompt' in lines:
+        body = []
+        for line in lines[lines.index('Prompt') + 1:]:
+            if 'to close' in line or line in ('Progress', 'Result', 'Response'):
+                break
+            body.append(line)
+    # Progress lines also start with "›", so exactly one header must name the agent.
+    named = len(headers) == 1 and any(matches(label, headers[0]) for label in labels)
+    return named, shown, None if body is None else ' '.join(body)
+
+
+def fits(screen, target, now):
+    """True when the open detail view shows this exact agent or task, not only its name.
+
+    A fact the view does not show is skipped; same-name rows with no telling fact all fit, and the caller refuses."""
+    named, shown, body = detail_facts(screen, target)
+    if not named:
+        return False
+    if target.get('started') is not None and shown is not None:
+        elapsed = seconds(shown)
+        if elapsed is None:
+            return False
+        # Without a seconds part the view rounds to minutes.
+        slack = 5 if re.search(r'\d+\s*s\b', shown) else 90
+        if abs((now - target['started']) - elapsed) > slack:
+            return False
+    expected = _norm(target.get('body'))
+    if expected and body is not None:
+        body = _norm(body)
+        if not body:
+            return False
+        cut = body.endswith('…')
+        body = body.rstrip('…').rstrip()
+        if not (expected == body or expected.startswith(body) and (cut or len(body) >= 20)):
+            return False
+    return True
+
+
+def in_section(target, section):
+    if not target['task']:
+        return section == 'Local agents'
+    return section in ('Shells', 'Monitors') or any(word in section.lower() for word in ('shell', 'monitor'))
+
+
+def stop_selected(entry, target, run, sleep, clock=time.time):
+    """Open /tasks, find the target, and press x on it.
+
+    target: task (bool), labels (names /tasks may show), kind (agent type), started (epoch or None),
+    body (prompt or command text that the detail view shows)."""
+    noun = 'task' if target['task'] else 'agent'
+
+    def wait_for(text, tries=14):
+        for _ in range(tries):
+            sleep(0.3)
+            screen = visible(entry, run)
+            if text in hint(screen):
+                return screen
+        raise StopError('The tasks dialog changed. Check the terminal view.')
+
+    def in_detail(screen):
+        return 'Esc/Enter/Space to close' in hint(screen)
 
     press(entry, '-l', '/tasks', run=run)
     sleep(0.7)
     screen = visible(entry, run)
     if terminal_input.approval(screen) or dialog_open(screen):
         raise StopError('The terminal changed. Check the terminal view.')
-    press(entry, 'Enter', run=run)  # A second Enter could act on the selected task.
-    screen = ''
-    for _ in range(14):
-        sleep(0.3)
-        screen = visible(entry, run)
-        if 'x to stop' in hint(screen):
-            break
-    else:
-        raise StopError('The tasks dialog did not open. Check the terminal view.')
-    for step in range(41):
-        shown = hint(screen)
-        if 'x to stop' not in shown:
-            raise StopError('The tasks dialog changed. Check the terminal view.')
-        if 'Esc/Enter/Space to close' in shown:
-            # The header is "<agent type> › <description>"; Progress lines also start with "›".
-            if task:
-                # Task details put their command/description on the first header line.
-                header = next((line.strip() for line in screen.splitlines() if line.strip()), '')
-                headers = [header, header.split(' › ', 1)[-1]]
-            else:
-                headers = [found[1].strip() for found in (re.fullmatch(rf'\s*{re.escape(kind)} › (.+)', line) for line in screen.splitlines()) if found]
-            if (not task and len(headers) != 1) or not any(identified(header) for header in headers):
-                raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
-            break
-        if '↑/↓ to select' not in shown:
-            raise StopError('Could not read the tasks dialog. Check the terminal view.')
-        agents = rows(screen)
-        targets = [index for index, row in enumerate(agents)
-                   if row['section'] == ('Shells' if task else 'Local agents') and identified(row['label'])]
-        if len(targets) > 1:
-            raise StopError(f'Two {noun}s share this name. Stop it in the terminal.')
-        if not targets:
+    press(entry, 'Enter', run=run)
+    try:
+        screen = wait_for('x to stop')
+    except StopError:
+        raise StopError('The tasks dialog did not open. Check the terminal view.') from None
+    if in_detail(screen):
+        # With one task, /tasks can open its detail view at once.
+        if fits(screen, target, clock()):
+            press(entry, 'x', run=run)
+            sleep(0.18)
+            visible(entry, run)
+            return
+        if '← to go back' not in hint(screen):
             raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
-        selected = [index for index, row in enumerate(agents) if row['selected']]
-        if len(selected) != 1:
-            raise StopError(f'Could not see which {noun} is selected. Check the terminal view.')
-        if selected[0] == targets[0]:
-            break
-        if step == 40:
-            raise StopError(f'Could not reach that {noun}. Stop it in the terminal.')
-        press(entry, 'Down' if targets[0] > selected[0] else 'Up', run=run)
+        press(entry, 'Left', run=run)
+        screen = wait_for('↑/↓ to select')
+
+    def is_target(row):
+        return in_section(target, row['section']) and any(matches(label, row['label']) for label in target['labels'])
+
+    def select(index, screen):
+        for step in range(41):
+            shown = hint(screen)
+            if 'x to stop' not in shown or in_detail(screen):
+                raise StopError('The tasks dialog changed. Check the terminal view.')
+            if '↑/↓ to select' not in shown:
+                raise StopError('Could not read the tasks dialog. Check the terminal view.')
+            listed = rows(screen)
+            if index >= len(listed) or not is_target(listed[index]):
+                raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
+            selected = [position for position, row in enumerate(listed) if row['selected']]
+            if len(selected) != 1:
+                raise StopError(f'Could not see which {noun} is selected. Check the terminal view.')
+            if selected[0] == index:
+                return screen
+            if step == 40:
+                break
+            press(entry, 'Down' if index > selected[0] else 'Up', run=run)
+            sleep(0.18)
+            screen = visible(entry, run)
+        raise StopError(f'Could not reach that {noun}. Stop it in the terminal.')
+
+    def view(index, screen):
+        """Open the row's detail view; Enter is pressed only on a verified candidate row."""
+        select(index, screen)
+        press(entry, 'Enter', run=run)
+        return wait_for('Esc/Enter/Space to close')
+
+    if '↑/↓ to select' not in hint(screen):
+        raise StopError('Could not read the tasks dialog. Check the terminal view.')
+    listed = rows(screen)
+    candidates = [index for index, row in enumerate(listed) if is_target(row)]
+    if not candidates:
+        raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
+    if len(candidates) == 1:
+        select(candidates[0], screen)
+        press(entry, 'x', run=run)
         sleep(0.18)
-        screen = visible(entry, run)
+        visible(entry, run)
+        return
+    # Same name: open each one and compare its run time and prompt or command.
+    fitting = []
+    for index in candidates:
+        detail = view(index, screen)
+        if fits(detail, target, clock()):
+            fitting.append(index)
+        press(entry, 'Left', run=run)
+        screen = wait_for('↑/↓ to select')
+    if len(fitting) != 1:
+        raise StopError(f'{len(candidates)} {noun}s share this name and could not be told apart. Stop it in the terminal.'
+                        if fitting else f'Could not identify that {noun}. Stop it in the terminal.')
+    detail = view(fitting[0], screen)
+    if not fits(detail, target, clock()):
+        raise StopError('The tasks dialog changed. Check the terminal view.')
     press(entry, 'x', run=run)
     sleep(0.18)
     visible(entry, run)
 
 
-def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep):
+# The newest Claude Code version whose /tasks screens the stop tests and a live run were checked on.
+CHECKED_TASKS_UI = '2.1.325'
+SESSIONS = Path.home() / '.claude' / 'sessions'
+
+
+def claude_version(entry):
+    try:
+        data = json.loads((SESSIONS / f'{int(entry["owner_pid"])}.json').read_text())
+        version = data.get('version')
+        return version if isinstance(version, str) and re.fullmatch(r'[0-9][0-9A-Za-z.+-]{0,40}', version) else None
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def with_version(entry, message):
+    """Name a Claude Code update as the likely cause when /tasks could not be read."""
+    version = claude_version(entry)
+    if version is None or version == CHECKED_TASKS_UI or not re.search(r'Could not (identify|read|see|reach)|dialog', message):
+        return message
+    return f'{message} This tab runs Claude Code {version}; Tether checked Stop on {CHECKED_TASKS_UI}.'
+
+
+def stop_process(entry, task):
+    """Stop a shell or monitor by signal. False when its process cannot be named exactly."""
+    if subagents._owner_since(entry) is None:
+        return False
+    tasks_dir = subagents._tasks_dir(entry)
+    if tasks_dir is None:
+        return False
+    output = tasks_dir / f'{task["id"]}.output'
+    output = os.path.realpath(output) if output.exists() else None
+    pid = task_process.find(entry['owner_pid'], task, output, subagents._stamp(task.get('started')))
+    if pid is None:
+        return False
+    task_process.record(task_process.key(tasks_dir, task['id']))
+    if not task_process.stop(pid):
+        raise StopError('The task did not stop. Check the terminal view.')
+    return True
+
+
+def confirm(entry, agent_id, is_task, sleep):
+    noun, collection = ('task', 'tasks') if is_task else ('agent', 'agents')
+    for attempt in range(21):
+        agent = next((item for item in subagents.listing(entry)[collection] if item['id'] == agent_id), None)
+        if agent is None:
+            # Earlier-chat rows leave the public listing as soon as they stop.
+            confirmed = subagents._listing(entry, include_finished=True)
+            agent = next((item for item in confirmed[collection] if item['id'] == agent_id), None)
+        if agent is not None and agent['state'] in (('stopped', 'finished', 'failed') if is_task else ('stopped',)):
+            return {'ok': True, 'state': agent['state']}
+        if attempt < 20:
+            sleep(0.25)
+    raise StopError(f'The {noun} did not stop. Check the terminal view.')
+
+
+def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time):
     noun = 'agent'
     try:
         if entry.get('agent') != 'claude':
@@ -136,35 +330,50 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep):
         if agent is None or agent['state'] != 'running':
             raise StopError(f'That {noun} is not running.')
         description = agent.get('description')
-        if is_task:
-            command = agent.get('command')
-            description = [value for value in (description, command.splitlines()[0] if command else None)
-                           if isinstance(value, str) and value.strip()]
-        if (not description if is_task else not isinstance(description, str) or not description.strip()):
+        command = agent.get('command') if is_task else None
+        first = command.strip().splitlines()[0] if isinstance(command, str) and command.strip() else None
+        labels = [value for value in ((description, first) if is_task else (description,))
+                  if isinstance(value, str) and value.strip()]
+        if not labels:
             raise StopError(f'Could not identify that {noun}. Stop it in the terminal.')
-        terminal_input.verify(entry, run)
-        # Do not drive an unverified pane, including a pane for another agent.
-        close(entry, run, sleep)
-        try:
-            if terminal_input.live_status(entry, run)['state'] not in ('Idle', 'Working'):
-                raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
-            if any(terminal_input.prompt_draft(entry, run)):
-                raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
-            stop_selected(entry, description, agent.get('type') or 'general-purpose', run, sleep, task=is_task)
-        finally:
+        if is_task:
+            body = first or ''
+        else:
+            try:
+                body = subagents.detail(entry, agent_id).get('prompt') or ''
+            except (OSError, ValueError, RuntimeError):
+                body = ''
+        target = {'task': is_task, 'labels': labels, 'kind': agent.get('type') or 'general-purpose',
+                  'started': subagents._stamp(agent.get('started')), 'body': body}
+
+        def by_terminal():
+            terminal_input.verify(entry, run)
+            # Do not drive an unverified pane, including a pane for another agent.
             close(entry, run, sleep)
-        for attempt in range(21):
-            collection = 'tasks' if is_task else 'agents'
-            agent = next((item for item in subagents.listing(entry)[collection] if item['id'] == agent_id), None)
-            if agent is None:
-                # Earlier-chat rows leave the public listing as soon as they stop.
-                confirmed = subagents._listing(entry, include_finished=True)
-                agent = next((item for item in confirmed[collection] if item['id'] == agent_id), None)
-            if agent is not None and agent['state'] in (('stopped', 'finished', 'failed') if is_task else ('stopped',)):
-                return {'ok': True, 'state': agent['state']}
-            if attempt < 20:
-                sleep(0.25)
-        raise StopError(f'The {noun} did not stop. Check the terminal view.')
+            try:
+                if terminal_input.live_status(entry, run)['state'] not in ('Idle', 'Working'):
+                    raise StopError(f'Claude is waiting for you. Answer its prompt before stopping a {noun}.')
+                if any(terminal_input.prompt_draft(entry, run)):
+                    raise StopError(f'There is an unsent draft in the {noun} input. Clear it, then try again.')
+                stop_selected(entry, target, run, sleep, clock)
+            finally:
+                close(entry, run, sleep)
+            return confirm(entry, agent_id, is_task, sleep)
+
+        # Tasks: /tasks first, so Claude records the task as stopped by the user. A signal makes
+        # Claude report a failed command, and its agent may then debug or rerun it. The signal is
+        # the fallback: it does not read the screen, so it still works when a Claude Code update
+        # changes /tasks. Agents have no process of their own, so they stop through /tasks only.
+        try:
+            return by_terminal()
+        except StopError as exc:
+            if is_task and stop_process(entry, agent):
+                return confirm(entry, agent_id, True, sleep)
+            raise StopError(with_version(entry, str(exc))) from exc
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
+            if is_task and stop_process(entry, agent):
+                return confirm(entry, agent_id, True, sleep)
+            raise
     except StopError:
         raise
     except (ValueError, RuntimeError) as exc:

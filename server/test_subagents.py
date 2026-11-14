@@ -30,6 +30,8 @@ class SubagentTests(unittest.TestCase):
         self.clock.start()
         self.addCleanup(self.clock.stop)
         self.enterContext(patch.object(subagents, '_fd_links', return_value=[]))
+        self.enterContext(patch.object(subagents.task_process, 'LEDGER', self.root / 'task-stops.json'))
+        self.process_children = self.enterContext(patch.object(subagents.task_process, 'children', return_value=[]))
         subagents._tasks_cache.clear()
         self.addCleanup(subagents._tasks_cache.clear)
         subagents._cache.clear()
@@ -570,6 +572,65 @@ class ProcessTasksTests(unittest.TestCase):
 
     def listed_tasks(self):
         return {item['id']: item for item in subagents.listing(self.config)['tasks']}
+
+    def states(self):
+        return {item['id']: item['state'] for item in subagents.listing(self.config)['agents']}
+
+    def test_dead_process_background_agent_without_link_in_owner_folder_is_stopped(self):
+        # An older process that /resumes a session: its fd folder is its first session's tasks folder.
+        # The dead process linked its agent elsewhere, so the agent cannot belong to this process.
+        self.agent('dead', meta={'description': 'Dead wait', 'requestShape': 'background'})
+        listed = {item['id']: item for item in subagents.listing(self.config)['agents']}
+        self.assertEqual(listed['dead']['state'], 'stopped')
+        self.assertEqual(listed['dead']['summary'], 'Claude exited before this agent finished.')
+
+    def test_owned_background_agent_with_link_runs(self):
+        path = self.agent('mine', meta={'description': 'Mine', 'requestShape': 'background'})
+        (self.tasks / 'mine.output').symlink_to(path)
+        self.assertEqual(self.states()['mine'], 'running')
+
+    def test_new_background_agent_gets_grace_before_its_link(self):
+        self.agent('new', meta={'requestShape': 'background'}, records=[
+            self.record('user', 'Fresh prompt', seconds=-subagents.LINK_GRACE + 2)])
+        self.assertEqual(self.states()['new'], 'running')
+
+    def test_foreground_agent_needs_no_link(self):
+        self.agent('front', meta={'description': 'Front'})
+        self.assertEqual(self.states()['front'], 'running')
+
+    def test_glob_fallback_keeps_time_rule(self):
+        self.fds.return_value = []
+        fallback = self.tmp / 'cwd-slug' / self.new / 'tasks'
+        fallback.mkdir(parents=True)
+        self.agent('dead', meta={'requestShape': 'background'})
+        self.assertEqual(self.states()['dead'], 'running')
+
+    def test_monitor_without_output_file_takes_state_from_its_process(self):
+        self.write(self.main, self.task_start('monitor1', name='Monitor', command='tail -f log', description='Watch log'))
+        with patch.object(subagents.task_process, 'find', return_value=777) as find:
+            task = self.listed_tasks()['monitor1']
+        self.assertEqual((task['kind'], task['state'], task['description']), ('monitor', 'running', 'Watch log'))
+        self.assertEqual(find.call_args.args[2], None)
+        with patch.object(subagents.task_process, 'find', return_value=None):
+            self.assertEqual(self.listed_tasks()['monitor1']['state'], 'finished')
+            subagents.task_process.record(subagents.task_process.key(self.tasks.resolve(), 'monitor1'))
+            task = self.listed_tasks()['monitor1']
+        self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
+
+    def test_monitor_from_dead_process_is_stopped_without_a_process_scan(self):
+        self.write(self.main, self.task_start('monitor1', name='Monitor', command='tail -f log', seconds=-400))
+        with patch.object(subagents.task_process, 'find') as find:
+            task = self.listed_tasks()['monitor1']
+        find.assert_not_called()
+        self.assertEqual(task['state'], 'stopped')
+
+    def test_shell_killed_by_tether_reads_stopped_not_failed(self):
+        self.output('shell01', 'out\n[exited with code 143]')
+        self.write(self.main, self.task_start('shell01'))
+        self.assertEqual(self.listed_tasks()['shell01']['state'], 'failed')
+        subagents.task_process.record(subagents.task_process.key(self.tasks.resolve(), 'shell01'))
+        task = self.listed_tasks()['shell01']
+        self.assertEqual((task['state'], task['summary']), ('stopped', 'Stopped from Tether.'))
 
     def test_link_to_new_session_before_any_write_finds_middle_session_lines(self):
         # Seen live: /clear points the link at the new session at once; the agent's lines stay in the

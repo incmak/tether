@@ -24,6 +24,16 @@ Tether is a browser chat UI for Claude Code, Codex, and Antigravity in tmux, for
 - Tests use fixtures and isolated or mocked processes. Use mocks for UI writes; they control real terminals.
 - Restart the backend after Python or legacy UI changes. Legacy assets load at startup; React assets come from `ui/dist`.
 
+## Terminal screens change with each agent update
+
+Claude Code, Codex and Antigravity redraw their screens between versions. Code that reads or drives a screen must survive that.
+
+1. Prefer a channel that does not depend on the screen: the process, transcript, session and task files. Use the screen only when no such channel exists.
+2. Code that reads a screen must refuse when the screen does not match what it expects. It must never guess, press keys on an unverified row, or act on a partial match.
+3. Keep real captured screens for each agent version in `server/fixtures/`, for example `server/fixtures/claude_2.1.325_tasks/`. Test the parsers against them. Remove private paths from captures before you commit them.
+4. After each agent update, test each screen-driven write live on a throwaway tab, for example Stop on agents, shells and monitors. Add fixtures for any screen that changed.
+5. When a refusal may come from a new version, say so in the error and name the version.
+
 ## Internal deployment and public release
 
 - Internal deployment updates Mak's running Tether. Complete authorized work through checks, a scoped commit, and internal deployment automatically.

@@ -50,8 +50,19 @@ export function useSubAgents(api: Api, session: string, enabled: boolean) {
 }
 
 const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-// A task's name: its description, else the first line of its command.
-const taskName = (task: BgTask) => task.description || task.command?.split('\n')[0] || task.id
+// A command's short name: its first line without a leading "cd <dir> &&" or "NAME=value" set-up, which every
+// command in a folder repeats. The full command stays in the task view.
+function shortCommand(command: string | null | undefined) {
+  const first = command?.split('\n').map(line => line.trim()).find(Boolean) ?? ''
+  let short = first, previous = ''
+  while (short !== previous) {
+    previous = short
+    short = short.replace(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*/, '').replace(/^[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s;&|]*)\s+/, '')
+  }
+  return short || first
+}
+// A task's name: its description, else the short form of its command.
+const taskName = (task: BgTask) => task.description || shortCommand(task.command) || task.id
 
 // The pill counts agents (running ones first); a session with only background tasks counts those.
 export function AgentPill({ list, onOpen }: { list: SubAgents | undefined; onOpen: () => void }) {
@@ -107,7 +118,7 @@ export function AgentMap({ api, session, list, onClose }: { api: Api; session: s
           </div>
         </div>
       </>}
-      {tasks.length > 0 && <section className="agent-tasks" aria-labelledby="agent-tasks-title">
+      {tasks.length > 0 && <section className={`agent-tasks ${agents.length ? '' : 'only'}`} aria-labelledby="agent-tasks-title">
         <p className="sheet-sub" id="agent-tasks-title">{facts(count(tasks.length, 'background task'), ...stateCounts(tasks))}</p>
         <ul>{runningFirst(tasks).map(task => <li key={task.id}>
           <button type="button" className="agent-node" data-state={task.state} onClick={() => setOpen(task.id)}>
@@ -241,7 +252,7 @@ function TaskView({ api, session, task, parent, onBack, onClose }: { api: Api; s
   return <>
     <div className="sheet-heading">
       <button type="button" className="icon-button" aria-label="Back to the agent map" onClick={onBack}><ArrowLeft /></button>
-      <h2 id="agent-map-title" className={`agent-title ${shown.description ? '' : 'mono'}`}><StateIcon state={shown.state} />{taskName(shown)}</h2>
+      <h2 id="agent-map-title" className={`agent-title task-title ${shown.description ? '' : 'mono'}`}><StateIcon state={shown.state} /><span className="agent-title-text">{taskName(shown)}</span></h2>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
     </div>
     <div className="agent-meta">
@@ -251,7 +262,7 @@ function TaskView({ api, session, task, parent, onBack, onClose }: { api: Api; s
     </div>
     <div className="agent-body">
       {(shown.state === 'failed' || shown.state === 'stopped') && shown.summary && <p className="agent-summary">{shown.summary}</p>}
-      {shown.command && <details className="agent-section" open={Boolean(shown.description) || undefined}><summary><ChevronRight size={16} aria-hidden="true" />Command</summary><pre className="agent-text" tabIndex={0}>{shown.command}</pre></details>}
+      {shown.command && <details className="agent-section" open><summary><ChevronRight size={16} aria-hidden="true" />Command</summary><pre className="agent-text" tabIndex={0}>{shown.command}</pre></details>}
       <details className="agent-section" open><summary><ChevronRight size={16} aria-hidden="true" />Output</summary>
         {error ? <p role="alert">{error} <RetryButton label="Retry" className="" busy={busy} onRetry={() => { setBusy(true); setAttempt(attempt + 1) }} /></p>
           : !detail ? <CodeBones lines={5} label="Loading output…" className="agent-text agent-output" />

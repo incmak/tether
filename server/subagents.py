@@ -14,6 +14,7 @@ import time
 from antigravity import process_start
 import procinfo
 import paths
+import task_process
 import tool_details
 
 TAIL_BYTES = 256 * 1024
@@ -253,45 +254,50 @@ def _uuid(value):
 
 
 def _tasks_dir(config, *, since=_MISSING):
+    return _tasks_source(config, since=since)[0]
+
+
+def _tasks_source(config, *, since=_MISSING):
+    """Return (tasks folder, whether the live owner process holds it open)."""
     if config.get('agent') != 'claude':
-        return None
+        return None, False
     if since is _MISSING:
         since = _owner_since(config)
     if since is None:
-        return None
+        return None, False
     key = (config['owner_pid'], config['process_start'])
     now = time.monotonic()
     with _lock:
         cached = _tasks_cache.get(key)
         if cached and now - cached[0] < 30:
-            return cached[1]
-    found = None
+            return cached[1], cached[2]
+    found, by_fd = None, False
     try:
         root = TASKS_TMP.resolve()
         if root.stat().st_uid != os.getuid():
-            return None
+            return None, False
         candidates = []
         try:
-            candidates = list(_fd_links(config['owner_pid']))
+            candidates = [(link, True) for link in _fd_links(config['owner_pid'])]
         except (OSError, ValueError):
             pass
         if _uuid(config.get('thread')):
-            candidates.extend(root.glob(f'*/{config["thread"]}/tasks'))
-        for candidate in candidates:
+            candidates.extend((link, False) for link in root.glob(f'*/{config["thread"]}/tasks'))
+        for candidate, from_fd in candidates:
             candidate = Path(candidate)
             resolved = candidate.resolve()
             if (candidate.name == 'tasks' and resolved.name == 'tasks' and _uuid(resolved.parent.name)
                     and resolved.parent.parent.parent == root and resolved.is_dir()):
-                found = resolved
+                found, by_fd = resolved, from_fd
                 break
     except (OSError, ValueError, RuntimeError):
         pass
     with _lock:
-        _tasks_cache[key] = (now, found)
+        _tasks_cache[key] = (now, found, by_fd)
         _tasks_cache.move_to_end(key)
         while len(_tasks_cache) > CACHE_LIMIT:
             _tasks_cache.popitem(last=False)
-    return found
+    return found, by_fd
 
 
 def _agent_files(config, tasks_dir):
@@ -389,7 +395,11 @@ def _agent_data(files):
     return data, meta
 
 
-def _entry(agent_id, files, now, notifications, since):
+# A new background agent can run briefly before Claude links its output into the tasks folder.
+LINK_GRACE = 10
+
+
+def _entry(agent_id, files, now, notifications, since, members=None):
     data, meta = _agent_data(files)
     status, summary = notifications.get(agent_id, (None, None))
     start = _stamp(data['started'])
@@ -401,6 +411,11 @@ def _entry(agent_id, files, now, notifications, since):
         state = 'finished'
     else:
         state = 'running' if since is not None and (start is None or start >= since - 5) else 'stopped'
+        if (state == 'running' and members is not None and meta.get('requestShape') == 'background'
+                and agent_id not in members and (start is None or now - start > LINK_GRACE)):
+            # The live process holds this tasks folder open. A background agent it owns has an
+            # output link there; without one, the agent belonged to another (dead) process.
+            state = 'stopped'
         if state == 'stopped' and not summary:
             summary = 'Claude exited before this agent finished.'
     end = now if state == 'running' else _stamp(data['ended'])
@@ -548,15 +563,20 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
             call = next((calls[key] for key in start['_call_ids'] if key in calls), {})
             starts[identifier] = dict(start, **call, parent=parent,
                                       _scope=in_scope or starts.get(identifier, {}).get('_scope', False))
-    result = []
+    result, seen = [], set()
+    ledger = task_process.stopped()
     for candidate in tasks_dir.glob('*.output'):
         try:
+            seen.add(candidate.stem)
             path = _task_path(tasks_dir, candidate.stem)
             info = path.stat()
             (state, footer), _ = _cached(path, _footer)
             status, summary = notifications.get(candidate.stem, (None, None))
             if state is None:
                 state = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped'}.get(status, 'running')
+            if state == 'failed' and task_process.key(tasks_dir, candidate.stem) in ledger:
+                # Tether stopped it with a signal; Claude records that as a non-zero exit.
+                state, footer, summary = 'stopped', None, STOPPED_BY_TETHER
             start = starts.get(candidate.stem, {})
             if not start:
                 # Claude makes an output file for every Bash call, so a foreground command can move to
@@ -578,14 +598,61 @@ def _tasks(config, tasks_dir, files, shown, now, since, *, include_finished=Fals
                            'parent': start.get('parent'), 'summary': (footer or summary) if state in ('failed', 'stopped') else None})
         except (OSError, ValueError, RuntimeError):
             continue
+    result.extend(_monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since,
+                            include_finished=include_finished))
     result.sort(key=lambda item: _stamp(item['started']) or 0)
     return result[-40:]
+
+
+STOPPED_BY_TETHER = 'Stopped from Tether.'
+
+
+def _monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since, *, include_finished=False):
+    """Claude Code 2.1.325 writes no output file for a monitor; read its state from its process."""
+    waiting = {identifier: start for identifier, start in starts.items()
+               if start.get('kind') == 'monitor' and identifier not in seen and (start.get('_scope') or include_finished)}
+    if not waiting:
+        return []
+    pids = None
+    found = []
+    for identifier, start in waiting.items():
+        stamp = _stamp(start.get('started'))
+        if stamp is None:
+            continue
+        status, summary = notifications.get(identifier, (None, None))
+        state = {'completed': 'finished', 'failed': 'failed', 'killed': 'stopped'}.get(status)
+        if state is None:
+            if since is None or stamp < since - 5:
+                state, summary = 'stopped', 'Claude exited before this task finished.'
+            else:
+                if pids is None:
+                    try:
+                        pids = task_process.children(config['owner_pid'])
+                    except (OSError, ValueError):
+                        pids = []
+                alive = task_process.find(config['owner_pid'], start, None, stamp, pids=pids) is not None
+                state, summary = ('running', None) if alive else ('finished', None)
+        if task_process.key(tasks_dir, identifier) in ledger and state != 'running':
+            state, summary = 'stopped', STOPPED_BY_TETHER
+        if state != 'running' and not start.get('_scope') and not include_finished:
+            continue
+        found.append({'id': identifier, 'kind': 'monitor', 'description': start.get('description'),
+                      'command': start.get('command'), 'state': state, 'started': start.get('started'),
+                      'ended': None, 'seconds': int(now - stamp) if state == 'running' else None,
+                      'parent': start.get('parent'), 'summary': summary if state in ('failed', 'stopped') else None})
+    return found
 
 
 def _listing(config, *, limit=True, include_finished=False):
     result = {'main': {'model': None, 'context': None, 'title': None}, 'agents': [], 'tasks': []}
     since = _owner_since(config) if config.get('agent') == 'claude' else None
-    tasks_dir = _tasks_dir(config, since=since)
+    tasks_dir, by_fd = _tasks_source(config, since=since)
+    members = None
+    if by_fd:
+        try:
+            members = {link.stem for link in tasks_dir.glob('*.output') if link.is_symlink()}
+        except OSError:
+            members = None
     try:
         files, current = _agent_files(config, tasks_dir)
         folder = _folder(config)
@@ -604,7 +671,7 @@ def _listing(config, *, limit=True, include_finished=False):
     owners, spawned = {}, {}
     for identifier, group in files.items():
         try:
-            entry, data, meta = _entry(identifier, group, now, notifications, since)
+            entry, data, meta = _entry(identifier, group, now, notifications, since, members)
         except (OSError, ValueError, UnicodeError, RecursionError):
             continue
         if identifier not in current and entry['state'] != 'running' and not include_finished:

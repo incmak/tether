@@ -56,6 +56,14 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
   font-family: inherit; font-size: 19px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere;
 }
 .agent-map .agent-title .agent-state { margin-top: 0.12em; width: 24px; height: 24px; }
+/* A long title wraps under the buttons' row; the buttons stay at the top, and the first line sits centered on them. */
+.agent-map.agent-detail .sheet-heading { align-items: flex-start; }
+.agent-map.agent-detail .sheet-heading .agent-title { padding-top: max(0px, calc((var(--control) - 1.35em) / 2)); }
+/* A command title: smaller mono text, at most two lines. The full command is in the Command section. */
+.agent-map .sheet-heading .agent-title.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 15px; font-weight: 500; }
+.agent-map .agent-title.mono .agent-state { margin-top: 0; }
+.agent-title-text { min-width: 0; }
+.task-title .agent-title-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .agent-meta { margin: 8px 0 14px; color: var(--muted); font-size: 14px; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .agent-meta p { margin: 0 0 4px; }
 .agent-summary { margin: 0; color: var(--error); font-size: 14px; }
@@ -111,8 +119,11 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
 .agent-tasks ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .agent-map .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; font-weight: 500; }
 @container agent-map (min-width: 680px) {
-  .agent-tasks ul { max-width: calc((100% - 28px) / 2.2); }
+  .agent-tasks:not(.only) ul { max-width: calc((100% - 28px) / 2.2); }
 }
+/* With no agents the tasks are the whole map: fill the width, in columns when there is room. */
+.agent-tasks.only { margin-top: 0; }
+.agent-tasks.only ul { grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
 .agent-output { max-height: 55vh; }
 
 /* State: an icon in a tinted disc plus the word, in one color per state. Running = the accent, pulsing;

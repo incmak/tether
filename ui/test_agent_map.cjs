@@ -7,7 +7,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/agent-map/shots')
-const sizes = [[390, 844], [1280, 900]]
+const sizes = [[320, 640], [390, 844], [1280, 900]]
 const now = Date.now()
 const iso = seconds => new Date(now - seconds * 1000).toISOString()
 const agent = (id, description, state, extra = {}) => ({ id, description, type: 'general-purpose', model: 'claude-sonnet-5-5', effort: 'medium',
@@ -43,6 +43,7 @@ const fixture = {
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
+  'work/board': { revision: 1, projects: [], items: [], stages: [] },
 }
 
 async function main() {
@@ -94,7 +95,9 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light', voiceOff: true, voiceSound: false }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
+    // Each row, scrolled into view the way a reader would, is the top element at its center (nothing covers it).
     const onTop = selector => page.evaluate(selector => [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length).every(el => {
+      el.scrollIntoView({ block: 'center' })
       const r = el.getBoundingClientRect(), top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
       return top && (el === top || el.contains(top))
     }), selector)
@@ -192,12 +195,54 @@ async function main() {
       await page.keyboard.press('Escape')
       await map.waitFor({ state: 'hidden' })
       check(`${at} Esc closes the map`, true)
+
+      // Tasks only: the list fills the map, a command row shows a short name, and the task view keeps the heading
+      // buttons at the top with a short, clamped title and the full command open below.
+      const full = fixture.subagents
+      const longCommand = 'cd /srv/project/server && PYTHONPATH=. python3 -m unittest discover -q -p "test_*.py" 2>&1 | tee /tmp/unit.log | tail -n 40 && echo finished-all-the-server-tests-without-any-description\necho second line'
+      fixture.subagents = { ...full, agents: [], tasks: [task('b9', 'shell', null, longCommand, 'running'), ...tasks] }
+      const lookup = id => ({ ...fixture.subagents.tasks.find(item => item.id === id), output: 'ok', output_cut: false })
+      await page.route('**/api/subagent-task**', route => route.fulfill({ json: lookup(new URL(route.request().url()).searchParams.get('id')) }))
+      await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+      await page.getByRole('button', { name: /2 tasks running\. Open the agent map/ }).click()
+      await map.waitFor()
+      const widths = await map.evaluate(node => [node.querySelector('.agent-tasks').clientWidth, node.querySelector('.agent-tasks ul').clientWidth])
+      check(`${at} tasks-only list fills the map`, widths[1] >= widths[0] - 1, widths.join(' vs '))
+      const shortName = 'python3 -m unittest discover -q -p "test_*.py" 2>&1 | tee /tmp/unit.log | tail -n 40 && echo finished-all-the-server-tests-without-any-description'
+      check(`${at} command row drops cd and VAR= set-up`, (await map.locator('.agent-tasks strong.mono').first().innerText()).trim() === shortName)
+      check(`${at} no page overflow (tasks only)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `tasks-only-${width}.png`) })
+      await map.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+      await page.screenshot({ path: path.join(SHOTS, `tasks-only-${width}-dark.png`) })
+      await map.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+      await map.locator('.agent-tasks .agent-node').first().click()
+      await map.getByLabel('Output').waitFor()
+      const head = await map.evaluate(node => {
+        const box = el => el.getBoundingClientRect()
+        const heading = node.querySelector('.sheet-heading'), title = node.querySelector('.agent-title-text')
+        const [back, close] = heading.querySelectorAll('.icon-button')
+        const line = parseFloat(getComputedStyle(title).lineHeight)
+        return { backTop: box(back).top, closeTop: box(close).top, headTop: box(heading).top, lines: Math.round(box(title).height / line), text: title.textContent }
+      })
+      check(`${at} task title is the short name`, head.text === shortName, head.text)
+      check(`${at} task title at most two lines`, head.lines <= 2, String(head.lines))
+      check(`${at} back and close stay at the top`, Math.abs(head.backTop - head.headTop) < 1 && Math.abs(head.closeTop - head.headTop) < 1, JSON.stringify(head))
+      check(`${at} command open with the full text`, await map.locator('details.agent-section').first().evaluate(node => node.open)
+        && (await map.locator('pre.agent-text').first().innerText()) === longCommand)
+      check(`${at} no page overflow (task title)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `task-long-command-${width}.png`) })
+      await map.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+      await page.screenshot({ path: path.join(SHOTS, `task-long-command-${width}-dark.png`) })
+      await map.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+      await page.keyboard.press('Escape')
+      await page.unroute('**/api/subagent-task**')
+      fixture.subagents = full
     }
     check('no unmocked requests', !unexpected.size, [...unexpected].join(', '))
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})
-    check('runner', false, error.message.split('\n')[0] + ' | ' + pageErrors.join('; '))
+    check('runner', false, error.message.split('\n')[0] + ' | ' + pageErrors.join('; ') + ' | unmocked: ' + [...unexpected].join(', '))
   } finally {
     if (page) await page.close().catch(() => {})
     if (browser) await browser.close().catch(() => {})
