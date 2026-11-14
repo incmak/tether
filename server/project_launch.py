@@ -191,6 +191,8 @@ def codex_writable(args, cwd=None):
     gives False: Codex then starts without --add-dir, as before."""
     if '--' in args:
         args = args[:args.index('--')]  # after --, everything is the prompt
+    if any(os.path.exists(path) for path in SYSTEM_FILES):
+        return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
     if any(arg in WRITE_FLAGS for arg in args):
         return True
     for value in reversed(_option(args, '-s', '--sandbox')):
@@ -201,11 +203,11 @@ def codex_writable(args, cwd=None):
     if any(key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.')
            for key, _, _ in overrides):
         return False  # Codex prefers permission profiles over sandbox_mode in the same layer, whatever the order
-    if any(os.path.exists(path) for path in SYSTEM_FILES):
-        return False
     for key, _, setting in reversed(overrides):
         if key.strip() == 'sandbox_mode':
             return _mode(setting) is True
+    if any(key.strip().split('.')[0].strip('"\'') in ('projects', 'project_root_markers') for key, _, _ in overrides):
+        return False  # a -c project entry can shadow the trusted root with an untrusted one
     import paths
     home = Path(os.environ.get('CODEX_HOME') or paths.CODEX)
     config = _toml(home / 'config.toml')

@@ -128,6 +128,21 @@ class UnitTests(unittest.TestCase):
         with mock.patch.object(project_launch, 'SYSTEM_FILES', (str(system),)):
             self.assertFalse(project_launch.codex_writable([], str(deep)))
             self.assertFalse(project_launch.codex_writable(['-c', 'sandbox_mode="workspace-write"'], str(deep)))
+            for args in (['--sandbox', 'workspace-write'], ['--yolo'], ['--full-auto']):
+                self.assertFalse(project_launch.codex_writable(args, str(deep)), args)  # requirements apply after
+
+    def test_writable_round_three_cli_project_overrides(self):
+        repo = self.temp / 'repo'
+        work = repo / 'work'
+        work.mkdir(parents=True)
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+        self.config(f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable([], str(work)))
+        for key in (f'projects.{work}', f'projects."{work}"', 'projects', ' projects.x.trust_level',
+                    'project_root_markers'):
+            self.assertFalse(project_launch.codex_writable(['-c', f'{key}={{}}'], str(work)), key)
+        self.assertTrue(project_launch.codex_writable(['-c', 'sandbox_mode="workspace-write"', '-c', 'projects={}'],
+                                                      str(work)), 'an explicit sandbox_mode wins')
 
     def test_writable_read_only_codex_gets_no_folders(self):
         with mock.patch('os.getcwd', return_value=str(self.temp)):
