@@ -163,31 +163,30 @@ class VirtualDisplay:
 
     def _fit_window(self):
         """Chrome keeps the window place it saved in the profile (it opened at 20,20), so move the main window to
-        fill the display. Once per display start, and only the largest window: popups such as a sign-in window
-        keep their own size and place."""
+        fill the display. Once per display start, and only windows whose WM_WINDOW_ROLE is "browser": with no window
+        manager a popup can be larger than the main window, so size cannot tell them apart. If xprop is missing or no
+        window has the role yet, move the first window opened (lowest id) and try again on the next watch."""
         executable = shutil.which('xdotool')
         if self.fitted or not executable or not self.environment:
             return
         env = dict(os.environ, **self.environment)
+        quiet = {'env': env, 'stdin': subprocess.DEVNULL, 'capture_output': True, 'text': True, 'timeout': 5}
         try:
-            found = subprocess.run([executable, 'search', '--onlyvisible', '--class', 'google-chrome'], env=env,
-                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
-            best, area = None, 0
-            for window in found.stdout.split():
-                if not window.isdigit():
-                    continue
-                shape = subprocess.run([executable, 'getwindowgeometry', '--shell', window], env=env,
-                                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
-                values = dict(line.split('=', 1) for line in shape.stdout.splitlines() if '=' in line)
-                size = int(values.get('WIDTH', '0') or 0) * int(values.get('HEIGHT', '0') or 0)
-                if size > area:
-                    best, area = window, size
-            if best is None:
+            found = subprocess.run([executable, 'search', '--onlyvisible', '--class', 'google-chrome'], **quiet)
+            windows = sorted({int(window) for window in found.stdout.split() if window.isdigit()})
+            if not windows:
                 return  # no window yet: try again on the next watch
-            subprocess.run([executable, 'windowmove', best, '0', '0', 'windowsize', best, str(self.size[0]), str(self.size[1])],
-                           env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5)
-            self.fitted = True
+            xprop = shutil.which('xprop')
+            main = []
+            if xprop:
+                for window in windows:
+                    role = subprocess.run([xprop, '-id', str(window), 'WM_WINDOW_ROLE'], **quiet).stdout
+                    if role.split('=', 1)[-1].strip() == '"browser"':
+                        main.append(window)
+            for window in main or windows[:1]:
+                subprocess.run([executable, 'windowmove', str(window), '0', '0',
+                                'windowsize', str(window), str(self.size[0]), str(self.size[1])], **quiet)
+            self.fitted = bool(main)
         except (OSError, ValueError, subprocess.SubprocessError):
             pass  # a misplaced window is still usable
 

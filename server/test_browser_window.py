@@ -283,20 +283,31 @@ class WindowReviewFixTests(unittest.TestCase):
         self.assertEqual(args[1:], ['key', 'ctrl+l', 'key', 'ctrl+a', 'keydown', 'ctrl+Left', 'keyup', 'ctrl+Left'])
         self.assertNotIn('super', ' '.join(args))
 
-    def test_fit_moves_only_the_largest_window_once(self):
-        shapes = {'11': 'WIDTH=400\nHEIGHT=300\n', '22': 'WIDTH=2559\nHEIGHT=1599\n', '33': 'WIDTH=800\nHEIGHT=600\n'}
+    def fit_with(self, roles, xprop='/fixture/xprop', calls=2):
         def run(args, **kwargs):
             if args[1] == 'search':
-                return Mock(stdout='11\n22\n33\n')
-            if args[1] == 'getwindowgeometry':
-                return Mock(stdout=shapes[args[-1]])
+                return Mock(stdout='33\n11\n22\n')
+            if args[0] == xprop:
+                return Mock(stdout=f'WM_WINDOW_ROLE(STRING) = "{roles[args[2]]}"\n' if args[2] in roles else 'WM_WINDOW_ROLE:  not found.\n')
             return Mock(stdout='')
-        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
+        which = {'xdotool': '/fixture/xdotool', 'xprop': xprop}
+        with patch.object(browser_display.shutil, 'which', side_effect=which.get), \
                 patch.object(browser_display.subprocess, 'run', side_effect=run) as spawn:
-            self.display._fit_window()
-            self.display._fit_window()
-        moves = [call.args[0] for call in spawn.call_args_list if call.args[0][1] == 'windowmove']
-        self.assertEqual(moves, [['/fixture/xdotool', 'windowmove', '22', '0', '0', 'windowsize', '22', '2560', '1600']])
+            for _ in range(calls):
+                self.display._fit_window()
+        return [call.args[0][2] for call in spawn.call_args_list if call.args[0][1] == 'windowmove']
+
+    def test_fit_moves_the_browser_window_not_a_larger_popup(self):
+        # Real Chrome with no window manager: the popup (22) came out larger than the main window (11).
+        self.assertEqual(self.fit_with({'11': 'browser', '22': 'pop-up', '33': 'pop-up'}), ['11'])
+        self.assertTrue(self.display.fitted)
+
+    def test_fit_without_a_browser_role_moves_the_first_window_and_tries_again(self):
+        self.assertEqual(self.fit_with({}), ['11', '11'])
+        self.assertFalse(self.display.fitted)
+        self.display = VirtualDisplay()
+        self.display.environment = {'DISPLAY': ':999', 'XAUTHORITY': '/fixture/auth'}
+        self.assertEqual(self.fit_with({}, xprop=None, calls=1), ['11'])
 
     def test_fit_waits_for_a_window(self):
         with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
