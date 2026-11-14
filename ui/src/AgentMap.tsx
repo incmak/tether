@@ -5,7 +5,7 @@ import { errorText } from './api'
 import type { Api, ToolSummary } from './api'
 import { useModal, usePolling } from './hooks'
 import { formatElapsed } from './Notices'
-import { Loading } from './Skeleton'
+import { Bone, CodeBones, Skeleton } from './Skeleton'
 import { RetryButton } from './Retry'
 import { ToolRow } from './ToolGroup'
 import './AgentMap.css'
@@ -188,7 +188,7 @@ function AgentView({ api, session, agent, parent, onBack, onClose }: { api: Api;
       <p className="agent-numbers">{facts(shown.seconds != null && formatElapsed(shown.seconds), tokenText(shown.tokens))}</p>
     </div>
     {error ? <p role="alert">{error} <RetryButton label="Retry" className="" busy={busy} onRetry={() => { setBusy(true); setAttempt(attempt + 1) }} /></p>
-      : !detail ? <Loading label="Loading agent…" /> : <div className="agent-body">
+      : !detail ? <Skeleton label="Loading agent…" className="agent-body"><div className="sk-summary" aria-hidden="true"><Bone w="5em" /></div><div className="sk-summary" aria-hidden="true"><Bone w="8em" /></div></Skeleton> : <div className="agent-body">
         {(shown.state === 'failed' || shown.state === 'stopped') && shown.summary && <p className="agent-summary">{shown.summary}</p>}
         {detail.report && <div className="agent-report" aria-label="Report">{detail.report}</div>}
         <details className="agent-section"><summary><ChevronRight size={16} aria-hidden="true" />Prompt</summary><pre className="agent-text" tabIndex={0}>{detail.prompt}</pre></details>
@@ -254,7 +254,7 @@ function TaskView({ api, session, task, parent, onBack, onClose }: { api: Api; s
       {shown.command && <details className="agent-section" open={Boolean(shown.description) || undefined}><summary><ChevronRight size={16} aria-hidden="true" />Command</summary><pre className="agent-text" tabIndex={0}>{shown.command}</pre></details>}
       <details className="agent-section" open><summary><ChevronRight size={16} aria-hidden="true" />Output</summary>
         {error ? <p role="alert">{error} <RetryButton label="Retry" className="" busy={busy} onRetry={() => { setBusy(true); setAttempt(attempt + 1) }} /></p>
-          : !detail ? <Loading label="Loading output…" />
+          : !detail ? <CodeBones lines={5} label="Loading output…" className="agent-text agent-output" />
           : detail.output ? <pre ref={output} onScroll={onScroll} className="agent-text agent-output" tabIndex={0} aria-label="Output">{detail.output_cut ? '…\n' : ''}{detail.output}</pre>
           : <p className="hint">No output yet.</p>}
       </details>

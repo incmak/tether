@@ -1,4 +1,4 @@
-import { Loading } from './Skeleton'
+import { Bone, Loading, Skeleton } from './Skeleton'
 import { useWords, count } from './words'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { FolderInput, Eye, Archive, ArchiveRestore, ArrowDown, BookMarked, ArrowUp, Bell, Check, Columns2, GitFork, LayoutDashboard, Merge, ArrowRightLeft, Plus, PanelBottom, PanelRight, Pencil, Pin, PinOff, Shapes, Sparkles, RotateCw, Rows2, Square, Trash2, X } from 'lucide-react'
@@ -345,7 +345,7 @@ export function Tools({ api, pane, onPick, onClose }: { api: Api; pane: Pane; on
     <p className="sheet-sub">{paneTitle(pane)} in {pane.dir}</p>
     <p className="hint">In the message box, type <code>/</code> for commands and skills{pane.agent === 'codex' ? <>, <code>$</code> for skills</> : null}, or <code>@</code> for files.</p>
     {error && <p className="error" role="alert">{error}</p>}
-    {!catalog && !error && <Loading className="hint" />}
+    {!catalog && !error && <Skeleton label="Loading tools"><div aria-hidden="true">{['MCP servers', 'Plugins', 'Skills', 'Commands'].map(name => <div key={name} className="tools-group"><div className="sk-summary"><Bone w="7em" /></div></div>)}</div></Skeleton>}
     {catalog && <>
       <details className="tools-group"><summary>MCP servers <span className="group-count">{catalog.mcp.length}</span></summary>
         <ul>{catalog.mcp.map(server => <li key={server.name + server.source}><strong>{server.name}</strong><small>{server.source}</small></li>)}</ul>

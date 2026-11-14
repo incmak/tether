@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Loading } from './Skeleton'
+import { LevelBones, NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
@@ -81,7 +81,7 @@ export function GlobalAutonomy({ api }: { api: Api }) {
   const value = typeof pending?.level === 'number' ? pending.level : data?.global
   return <section className="settings-group" aria-labelledby="settings-autonomy"><h3 id="settings-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
-    {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <Loading className="setting-note" /> : <>
+    {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading autonomy level"><NoteBone lines={3} /><LevelBones /></SettingSkeleton> : <>
       <p className="setting-note">How often agents stop to ask you. Agents get the rules with each prompt. At every level they ask before they delete data, force-push, spend money or release.</p>
       <LevelList name="autonomy-global" levels={data.levels} value={value ?? 2} disabled={!!pending} onChange={level => void save({ level })} />
     </>}
@@ -96,7 +96,7 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
   const named = (n: number) => data?.levels[n] ? `${n} (${data.levels[n].name})` : `${n}`
   return <><section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
-    {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <Loading className="setting-note" /> : <>
+    {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading autonomy level"><SwitchBone /><LevelBones /></SettingSkeleton> : <>
       <label className="switch-row"><span><strong>Use a project level</strong><small>{override ? `Agents here use level ${named(level)}, not the global level ${named(data.global)}.` : `Agents here use the global level ${named(data.global)}.`}</small></span>
         <input type="checkbox" role="switch" checked={override} disabled={!!pending} onChange={event => void save({ project, override: event.target.checked, level })} /></label>
       <LevelList name="autonomy-project" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void save({ project, override: true, level: next })} />

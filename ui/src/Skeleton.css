@@ -59,3 +59,18 @@ button > .spinner { vertical-align: -2px; }
 /* Share library: a day heading and square tiles, the same grid as the real library. */
 .sh-skeleton .sh-day { display: block; }
 .sh-skeleton .sh-tile { display: block; height: 100%; border-radius: var(--radius-sm); }
+/* Settings cards (SettingBones.tsx): bones sit in the real rows, so only the controls need a shape here. */
+.setting-bones .bone-switch { border-radius: 14px; }
+.setting-bones .autonomy-level, .setting-bones .segmented label { cursor: default; }
+/* Code and log output (CodeBones): one bone per line, in the host's pre box. */
+.sk-code pre { overflow: hidden; }
+.sk-code code { display: block; min-width: 0 !important; }
+.sk-code code > span { display: block; }
+/* Changes: file rows are 30px; a section bone stands for a closed details summary. */
+.repo-skeleton .sk-row { gap: 8px; min-height: 30px; padding: 0 6px; }
+.repo-skeleton .sk-title { font-size: 13px; }
+.sk-summary { display: flex; align-items: center; min-height: var(--control-lg, 40px); padding: 0 6px 0 2px; font-size: 15px; }
+/* Phones wrap the real text onto more lines, so a few bones show only there. */
+.bone-phone { display: none; }
+@media (max-width: 600px) { .bone-phone { display: inline; } }
+.setting-bones .bone-select { flex: 1; border-radius: var(--radius); }

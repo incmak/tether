@@ -1,3 +1,4 @@
+import { Bone } from './Skeleton'
 import { useCallback, useEffect, useState } from 'react'
 import { errorText } from './api'
 import type { Api } from './api'
@@ -141,7 +142,7 @@ export function SystemSettings({ api, onReload }: { api: Api; onReload: () => vo
     {host?.resources && <HostResources api={api} terminal={host.terminal} />}
     <section className="settings-group" aria-labelledby="settings-system"><h3 id="settings-system">Tether</h3>
       {(error || updateError) && <p className="error" role="alert">{error || updateError}</p>}
-      <div className="switch-row"><span><strong>Updates</strong><small>{status ? `Version ${status.current} · ${status.mode === 'off' ? 'Checks off' : status.checking ? 'Checking…' : status.available ? `${status.latest} available` : status.latest ? 'Up to date' : 'No release data'}` : 'Loading…'}</small></span>{status?.available && status.url.startsWith('https://') && <a className="secondary" href={status.url} target="_blank" rel="noreferrer">Release notes</a>}</div>
+      <div className="switch-row"><span><strong>Updates</strong><small>{status ? `Version ${status.current} · ${status.mode === 'off' ? 'Checks off' : status.checking ? 'Checking…' : status.available ? `${status.latest} available` : status.latest ? 'Up to date' : 'No release data'}` : <><Bone w="12em" /><span className="sk-label" role="status">Checking the version…</span></>}</small></span>{status?.available && status.url.startsWith('https://') && <a className="secondary" href={status.url} target="_blank" rel="noreferrer">Release notes</a>}</div>
       <div className="switch-row"><span><strong>Reload Tether</strong><small>Unsent drafts stay.</small></span><button type="button" className="secondary" onClick={onReload}>Reload</button></div>
     </section>
   </>

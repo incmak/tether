@@ -1,4 +1,6 @@
-import { Loading } from './Skeleton'
+import { Bone, Skeleton } from './Skeleton'
+import { NoteBone } from './SettingBones'
+import { rememberCount, rememberedCount } from './skeletonCounts'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Api } from './api'
 import { errorText } from './api'
@@ -26,6 +28,8 @@ function Memory({ used, total, hostTotal }: { used: number | null; total: number
 export function HostResources({ api, terminal }: { api: Api; terminal: boolean }) {
   const fetcher = useCallback((signal: AbortSignal) => api<Stats>('host-stats', undefined, signal), [api])
   const { data, error } = usePolling(fetcher, 5000)
+  const groups = rememberedCount('resources.groups', 4, 12)
+  useEffect(() => { if (data) rememberCount('resources.groups', data.groups.length) }, [data])
   const [shell, setShell] = useState<string | null>(null)
   const [showTerminal, setShowTerminal] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -69,6 +73,8 @@ export function HostResources({ api, terminal }: { api: Api; terminal: boolean }
       </tbody></table>
       {!data.groups.length && <p className="setting-note">No cgroup v2 groups found.</p>}
       {data.glances && <div className="glances-extras"><h3>Glances detected</h3>{data.processes?.length ? <ul>{data.processes.map(process => <li key={process.pid}><span>{process.name}</span><span>{percent(process.cpu_pct)}</span></li>)}</ul> : <p className="setting-note">No process samples available.</p>}</div>}
-    </> : !error && <Loading className="setting-note" label="Loading resources…" />}
+    </> : !error && <Skeleton label="Loading resources…"><div aria-hidden="true"><dl className="resource-summary">{['CPU', 'Memory', 'Disk'].map(name => <div key={name}><dt>{name}</dt><dd><Bone w="70%" /><small><Bone w="45%" /></small></dd></div>)}</dl><NoteBone lines={1} phone={0} />
+      <table className="resource-table"><thead><tr><th>Group</th><th>CPU</th><th>Memory</th></tr></thead><tbody>{Array.from({ length: groups }, (_, index) => <tr key={index}>
+        <th><span className="resource-kind"><Bone w="3em" /></span><span className="resource-name"><Bone w={index % 2 ? '60%' : '80%'} /></span></th><td><Bone w="70%" /></td><td><Bone w="60%" /></td></tr>)}</tbody></table></div></Skeleton>}
   </section>
 }

@@ -7,7 +7,7 @@ import type { ApprovalAction, ApprovalStatus } from './approval'
 import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
-import { Loading } from './Skeleton'
+import { NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { SelectMenu } from './SelectMenu'
 import './AutonomySetup.css'
 
@@ -51,7 +51,7 @@ export function AutonomySetup({ api }: { api: Api }) {
     finally { setBusy(false) }
   }
   return <section className="settings-group" aria-labelledby="settings-autonomy-setup"><h3 id="settings-autonomy-setup">Setup</h3>
-    {!data || !keys ? loadError ? <p className="setting-note" role="alert">{loadError}</p> : <Loading className="setting-note" /> : <>
+    {!data || !keys ? loadError ? <p className="setting-note" role="alert">{loadError}</p> : <SettingSkeleton label="Loading setup"><NoteBone lines={2} /><SwitchBone control="none" /><SwitchBone control="none" from={1} /><SwitchBone control="none" from={2} /></SettingSkeleton> : <>
       <p className="setting-note">Each step shows its change first. You approve it with your passkey, so an agent cannot approve it for you. Tether keeps a copy of the old file.</p>
       <PasskeyStep keys={keys} busy={busy}
         onAdd={() => keyAction(() => addPasskey(api, deviceName(), ready), 'Passkey added. Changes now need your approval.')}

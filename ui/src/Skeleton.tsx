@@ -31,6 +31,14 @@ export function Spinner({ size = 14, label, className }: { size?: number; label?
   return <LoaderCircle size={size} className={['spinner', className].filter(Boolean).join(' ')} aria-hidden={label ? undefined : true} aria-label={label} role={label ? 'img' : undefined} />
 }
 
+/** Lines of code or log output, inside the host's real `pre` class so the box, font and padding match. */
+export function CodeBones({ lines, label, className }: { lines: number; label: string; className?: string }) {
+  const widths = ['46%', '82%', '64%', '90%', '38%', '72%', '58%']
+  return <Skeleton label={label} className="sk-code"><pre className={className} aria-hidden="true"><code>
+    {Array.from({ length: lines }, (_, index) => <span key={index}><Bone w={widths[index % widths.length]} /></span>)}
+  </code></pre></Skeleton>
+}
+
 /** List rows: an icon and one or two lines, like a sidebar or picker row. Row height comes from `className`. */
 export function SkeletonRows({ count, label, className, icon = 16, meta = true }: { count: number; label: string; className?: string; icon?: number | false; meta?: boolean }) {
   const widths = ['72%', '58%', '84%', '64%', '76%', '50%']

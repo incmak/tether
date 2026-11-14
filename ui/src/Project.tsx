@@ -1,4 +1,4 @@
-import { Loading } from './Skeleton'
+import { Bone, Skeleton } from './Skeleton'
 import { VoiceField } from './VoiceField'
 import { useCallback, useEffect, useState } from 'react'
 import { SelectMenu } from './SelectMenu'
@@ -117,7 +117,7 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
       <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>
     </div>
     <p className="sheet-sub">{group ? `${session.name} › ${group.name}` : session.name}{project && ` · ${project.chars.toLocaleString()} / ${project.budget.toLocaleString()} characters`}</p>
-    {!project && !error && <Loading className="hint" />}
+    {!project && !error && <Skeleton label="Loading project"><div aria-hidden="true">{['Instructions', 'Pinned files', 'Notes from agents'].map((name, index) => <section key={name} className="settings-group"><h3>{name}</h3>{index ? <p className="hint"><Bone w={index === 1 ? '72%' : '54%'} /></p> : <Bone h={128} className="project-text" />}</section>)}</div></Skeleton>}
     {error && <p className="error" role="alert">{error}{stale && <> <button type="button" className="link-button" onClick={() => { setError(''); setStale(false); void load() }}>Reload</button></>}</p>}
 
     {project && note ? <section className="settings-group project-note" aria-label={`Note ${note.name}`}>

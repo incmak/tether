@@ -1,5 +1,6 @@
 import { RetryButton } from './Retry'
-import { Loading } from './Skeleton'
+import { CodeBones, SkeletonRows } from './Skeleton'
+import { rememberCount, rememberedCount } from './skeletonCounts'
 import { useCallback, useEffect, useId, useState } from 'react'
 import { ArrowDown, ArrowUp, ChevronRight, GitBranch } from 'lucide-react'
 import { ApiError, errorText } from './api'
@@ -49,8 +50,9 @@ export function ChangesPanel({ api, pane, folder, active }: PanelProps) {
   if (query !== previousQuery) { setPreviousQuery(query); setData(null); setError('') }
   usePanelPoll(load, POLL_MS, active)
   const [picked, choose] = useRepoChoice(api, data?.folder)
+  useEffect(() => { if (data) rememberCount('changes.rows', data.repos.reduce((sum, repo) => sum + repo.files.length, 0)) }, [data])
 
-  if (!data) return <div className="repo-panel">{error ? <p className="repo-note" role="alert">{error}</p> : <Loading className="repo-note" label="Loading changes…" />}</div>
+  if (!data) return <div className="repo-panel">{error ? <p className="repo-note" role="alert">{error}</p> : <SkeletonRows count={Math.max(1, rememberedCount('changes.rows', 4, 10))} label="Loading changes…" className="repo-skeleton" icon={14} meta={false} />}</div>
   if (!data.repos.length) return <div className="repo-panel"><div className="repo-empty">
     <GitBranch size={20} aria-hidden="true" /><p><strong>Changes need a Git repository</strong>None was found in this folder.</p>
   </div></div>
@@ -155,7 +157,7 @@ function FileDiffView({ id, api, query, label }: { id: string; api: Api; query: 
   const current = state?.query === query ? state : null
   return <div id={id} className="repo-diff">
     {current?.error ? <p className="repo-note" role="alert">{current.error}{!current.final && <> <RetryButton label="Retry" className="repo-retry" busy={current.attempt !== attempt} onRetry={() => setAttempt(attempt + 1)} /></>}</p>
-      : !current?.diff ? <Loading className="repo-note" label="Loading diff…" />
+      : !current?.diff ? <CodeBones lines={6} label="Loading diff…" />
       : current.diff.note && !current.diff.diff ? <p className="repo-note">{current.diff.note}</p>
       : <pre tabIndex={0} aria-label={`Changes in ${label}`}><code>{body(current.diff.diff).map((line, at) =>
         <span key={at} className={line.startsWith('@@') ? 'diff-hunk' : line.startsWith('+') ? 'diff-add' : line.startsWith('-') ? 'diff-remove' : undefined}>{line || ' '}{'\n'}</span>)}</code></pre>}

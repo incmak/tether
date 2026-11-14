@@ -44,7 +44,7 @@ function fixtures(state) {
     host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' },
     stream: {},
-    'codex-runs': { pane: '%1', running: 0, runs: [] },
+    'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
     'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
     'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
     usage: { claude: null, codex: null },

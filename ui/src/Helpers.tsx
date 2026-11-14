@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
-import { Loading } from './Skeleton'
+import { Bone } from './Skeleton'
+import { NoteBone, RowBones, SettingSkeleton } from './SettingBones'
 import type { Api } from './api'
 import { useModal } from './hooks'
 import { useAutonomy } from './Autonomy'
@@ -109,7 +110,7 @@ export function HelperSettings({ api }: { api: Api }) {
   }
   return <section className="settings-group helper-settings" aria-labelledby="settings-helpers"><h3 id="settings-helpers">Who helps your agents</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
-    {!data || !advisor || !reviewers ? error ? <p className="setting-note" role="alert">{error}</p> : <Loading className="setting-note" /> : <>
+    {!data || !advisor || !reviewers ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading helpers"><NoteBone lines={1} /><h4 className="helper-group-title"><Bone w="9em" /></h4><RowBones count={2} className="helper-rows" /><h4 className="helper-group-title"><Bone w="8em" /></h4><RowBones count={3} className="helper-rows" /><NoteBone lines={2} className="helper-latest" /></SettingSkeleton> : <>
       <p className="setting-note">Agents ask an advisor before they ask you. A reviewer checks their work when they finish.</p>
       <h4 className="helper-group-title" id="helpers-before">Before they ask you</h4>
       <ul className="helper-rows" aria-labelledby="helpers-before">{(['advisor', 'second'] as const).map(row)}</ul>

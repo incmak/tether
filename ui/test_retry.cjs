@@ -162,7 +162,7 @@ async function main() {
     host.unmount()
   }
   await hostCycle('ChangesPanel.tsx', 'FileDiffView', { query: 'fixture', id: 'diff', label: 'file' }, {
-    './Skeleton': { Loading: 'loading' }, 'lucide-react': {}, './panelProps': {},
+    './Skeleton': { CodeBones: 'loading', SkeletonRows: 'loading' }, './skeletonCounts': { rememberCount() {}, rememberedCount: n => n }, 'lucide-react': {}, './panelProps': {},
   }, {}, '\nexport { FileDiffView }')
   await hostCycle('ToolGroup.tsx', 'ToolRow', { tool: { id: 'tool', name: 'Read', title: '', status: 'complete' }, session: 'fixture', onOpen() {} }, {
     './Skeleton': { Loading: 'loading' }, 'lucide-react': {}, './ImageViewer': {}, './Notices': {}, './toolSummary': { toolSeconds: () => null, toolKind: () => 'read' },

@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { rememberCount, rememberedCount } from './skeletonCounts'
 import { Check, Globe, ListChecks, Pencil, Trash2 } from 'lucide-react'
-import { Loading } from './Skeleton'
+import { Bone } from './Skeleton'
+import { BoneLines, NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { errorText } from './api'
 import type { Api } from './api'
 import { withApproval } from './approval'
@@ -38,6 +40,8 @@ export function LearningSettings({ api }: { api: Api }) {
   const learning = data?.learning
   const [now] = useState(() => Date.now() / 1000)
   const [review, setReview] = useState(false)
+  const lessons = rememberedCount('learning.lessons', 0, 5)
+  useEffect(() => { if (learning) rememberCount('learning.lessons', learning.global.length) }, [learning])
   async function send(key: string, body: Record<string, unknown>) {
     setBusy(key); setFailure('')
     try { await api('autonomy/lessons', body); await refresh() }
@@ -46,7 +50,8 @@ export function LearningSettings({ api }: { api: Api }) {
   }
   return <section className="settings-group" aria-labelledby="settings-learning"><h3 id="settings-learning">Learning from feedback</h3>
     {(failure || (data && error)) && <p className="error" role="alert">{failure || error}</p>}
-    {!learning ? error && !data ? <p className="setting-note" role="alert">{error}</p> : <Loading className="setting-note" /> : <>
+    {!learning ? error && !data ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading learning settings"><SwitchBone lines={3} phone={2} /><NoteBone lines={3} phone={3} /><div className="review-entry"><span><strong><Bone w="9em" /></strong><small><BoneLines count={2} phone={1} /></small></span><Bone w={92} h={36} /></div><h4 className="helper-group-title"><Bone w="11em" /></h4>
+      {lessons ? <ul className="lesson-list">{Array.from({ length: lessons }, (_, index) => <li key={index} className="lesson"><span className="lesson-text"><span className="lesson-tags"><Bone w="5em" /></span><strong><BoneLines count={1} phone={1} from={index} /></strong><small><Bone w="40%" /></small></span></li>)}</ul> : <p className="hint"><BoneLines count={1} phone={1} /></p>}</SettingSkeleton> : <>
       <label className="switch-row"><span><strong>Learn from your feedback</strong>
         <small>When you correct an agent, it saves a lesson to avoid the mistake. When you confirm a choice, it saves a lesson to keep doing it. Claude and Codex get the lessons of the project with each prompt.</small></span>
         <input type="checkbox" role="switch" checked={learning.enabled} disabled={!!busy} onChange={event => void send('enabled', { enabled: event.target.checked })} /></label>

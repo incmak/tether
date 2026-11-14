@@ -7,7 +7,8 @@ import { Check, Pencil, Sparkles, Trash2, X } from 'lucide-react'
 import type { Api } from './api'
 import { errorText } from './api'
 import { useModal, usePolling } from './hooks'
-import { Loading } from './Skeleton'
+import { Bone, Skeleton } from './Skeleton'
+import { BoneLines } from './SettingBones'
 import { LessonText } from './Learning'
 import { reviewReason } from './lessonsReview'
 import './Settings.css'
@@ -111,7 +112,7 @@ export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: (
       <p className="setting-note">You can be wrong too. Keep what still holds, fix what is close and remove the rest. Lessons you do not touch stay as they are.</p>
       {data && !!all.length && <CheckPanel check={check} busy={starting} error={checkError} onStart={() => void startCheck()} />}
       {error && <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => { setError(''); void refresh() }}>Try again</button></p>}
-      {!data ? !error && <Loading className="setting-note" /> : !all.length ? <p className="hint">No lessons yet. Agents save one when you correct them or confirm a choice.</p> : data.groups.map(group => <section key={group.key} className="review-group" aria-labelledby={`review-${group.key}`}>
+      {!data ? !error && <Skeleton label="Loading lessons" className="review-group"><ul className="lesson-list" aria-hidden="true">{[0, 1, 2].map(index => <li key={index} className="lesson"><span className="lesson-text"><strong><BoneLines count={index === 1 ? 1 : 2} from={index} /></strong><small><Bone w="40%" /></small></span></li>)}</ul></Skeleton> : !all.length ? <p className="hint">No lessons yet. Agents save one when you correct them or confirm a choice.</p> : data.groups.map(group => <section key={group.key} className="review-group" aria-labelledby={`review-${group.key}`}>
         <h3 id={`review-${group.key}`}>{GROUP[group.key].title} <span className="review-group-count">{group.lessons.length}</span></h3>
         {GROUP[group.key].note && <p className="hint">{GROUP[group.key].note}</p>}
         <ul className="lesson-list">{group.lessons.map(lesson => <li key={lesson.id} className="lesson review-lesson">
