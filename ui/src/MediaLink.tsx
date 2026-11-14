@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useSyncExternalStore } from 'react'
 import { fileChecks } from './fileChecks'
 import { useIsMarkdownCodeBlock } from '@assistant-ui/react-markdown'
+import type { Pane } from './api'
+import { tabTarget } from './tabLinks'
 
 // Paths an agent names in a reply (`shots/row-menu.png`, [clip](out/demo.mp4), src/App.tsx:42) open on the phone through
 // GET /mobile/api/file. the server decides what may open: home folder only, no secrets. Media, text and Office files open in Tether;
@@ -72,6 +74,15 @@ export const MediaOpener = createContext<((path: string, kind: Kind, line?: numb
 
 export const FilePane = createContext<string | null>(null)
 
+/** The live tabs and how to open one, so a tab name in a reply opens that tab (tabLinks.ts). */
+export const TabOpener = createContext<{ panes: Pane[]; current: Pane; open: (pane: Pane) => void } | null>(null)
+
+function useTab(text: string) {
+  const tabs = useContext(TabOpener)
+  const pane = tabs && text ? tabTarget(text, tabs.panes, tabs.current) : null
+  return pane && tabs ? { pane, open: () => tabs.open(pane) } : null
+}
+
 function useFileState(path: string | undefined) {
   const pane = useContext(FilePane)
   const subscribe = useCallback((listener: () => void) => pane && path
@@ -92,13 +103,18 @@ export function InlineCode(props: React.ComponentProps<'code'>) {
   const block = useIsMarkdownCodeBlock()
   const text = typeof props.children === 'string' ? props.children : ''
   const { media, open } = useOpen(block ? '' : text)
+  const tab = useTab(block || media ? '' : text)
+  if (tab) return <FileLink open={tab.open} label={`Open the tab ${text}`}><code {...props} /></FileLink>
   if (!open) return <code {...props} className={media ? [props.className, 'file-chip'].filter(Boolean).join(' ') : props.className} />
   return <FileLink open={open} label={`${media?.kind === 'file' ? 'Download' : 'Open'} ${text}`}><code {...props} /></FileLink>
 }
 
 export function Link({ href = '', children, ...props }: React.ComponentProps<'a'>) {
   const found = (props as Record<string, unknown>)['data-path'] as string | undefined
-  const { media, open } = useOpen(found ?? (/^(https?|mailto):/i.test(href) ? '' : safeDecode(href)))
+  const named = (props as Record<string, unknown>)['data-tab'] as string | undefined
+  const tab = useTab(named ?? '')
+  const { media, open } = useOpen(named !== undefined ? '' : found ?? (/^(https?|mailto):/i.test(href) ? '' : safeDecode(href)))
+  if (named !== undefined) return tab ? <FileLink open={tab.open} label={`Open the tab ${named}`}>{children}</FileLink> : <>{children}</>
   if (open) return <FileLink open={open}>{children}</FileLink>
   if (found || media) return <span className="file-chip">{children}</span>
   return <a {...props} href={href} target="_blank" rel="noreferrer">{children}</a>

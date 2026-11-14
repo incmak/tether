@@ -11,6 +11,7 @@ import type { Api, ChatMessage } from './api'
 import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
+import { remarkTabs } from './tabLinks'
 import { canSpeak, speak, stopSpeaking, useSpeaking } from './speech'
 import type { ToolSummary } from './api'
 
@@ -288,7 +289,7 @@ function QuoteBlock(props: React.ComponentProps<'blockquote'>) {
   const quote = useRef<HTMLQuoteElement>(null)
   return <div className="quote-block"><blockquote ref={quote} {...props} /><CopyButton text={() => quote.current ? visibleText(quote.current) : ''} label="Copy quote" className="copy-chip" /></div>
 }
-export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remarkGfm, remarkPaths]} smooth={false} components={{ CodeHeader, code: InlineCode, a: Link, blockquote: QuoteBlock }} /> }
+export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remarkGfm, remarkPaths, remarkTabs]} smooth={false} components={{ CodeHeader, code: InlineCode, a: Link, blockquote: QuoteBlock }} /> }
 export const convertMessage = (message: ChatMessage): ThreadMessageLike => ({
   id: message.id, role: message.role, content: message.text,
   metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,

@@ -378,7 +378,7 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
         parts.append(f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n')
     parts.append('\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
                  f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n')
-    parts.append('\n## Naming tabs\nIn replies, call a tab by its visible name, or say what it does. Write a pane id like %71 only if the user must type it.\n')
+    parts.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
     parts.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
                  'source code, official docs, or the real config. A failed search on guessed names, or a page that did not load, is not evidence of absence. '
                  'If you did not read the primary source, write "not checked", name what you did not read, and keep looking when the answer can change what the user does.\n')
