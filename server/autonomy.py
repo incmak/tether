@@ -64,7 +64,7 @@ EVIDENCE = ('Never guess. Before you decide or ask, check the evidence in this o
             'Verified (with its evidence) or Advisor (with the advisor answer).')
 ADVISOR = ('When the evidence, your own research and your own subagents do not settle a material decision, ask '
            'the advisor ({who}): '
-           '`python3 {cli} ask "QUESTION"`. Give the options and the evidence you found. Add --critical for '
+           '`python3 {cli} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words). Give the options and the evidence you found. Add --critical for '
            'security, data, money, release or architecture decisions; a second advisor ({second}) then answers too. '
            'Act on the answer only when the command exits 0 and, with two advisors, both answers agree. Otherwise ask '
            'the user. While you wait, do not change files that the answer affects. The advisor runs in its own tab: '

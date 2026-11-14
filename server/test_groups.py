@@ -14,6 +14,7 @@ from unittest import mock
 
 import agent_tab_cli
 import agent_tabs
+import auto_stacks
 import groups
 import groups_api
 import paths
@@ -84,6 +85,34 @@ class NameAndParseTests(unittest.TestCase):
         self.assertEqual(len({g['id'] for g in out}), len(out))
 
 
+class AutoNameTests(unittest.TestCase):
+    def test_short_names_pass_and_prompt_snippets_do_not(self):
+        cases = {'Desktop back nav': 'Desktop back nav', 'desktop-nav': 'Desktop nav', 'feature/tab_icons': 'Tab icons',
+                 'Advisor: Triage': 'Triage', 'Review: B81 fix': 'B81 fix', 'tether-bugs': 'Tether bugs',
+                 'Automation tether . Can we have…': None, 'you know all my work and…': None,
+                 'There are 2 issues. I will paste': None, 'can you check this?': None,
+                 'Root - Edgar submission live integration': None, '': None, None: None, 'a\x07b': None,
+                 'Release.': 'Release', 'x' * 33: None}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(auto_stacks.short_name(text), expected)
+
+    def test_goal_name_order_and_fallbacks(self):
+        home = str(paths.HOME)
+        self.assertEqual(auto_stacks.goal_name({'agent_name': 'Billing', 'pane_name': 'Docs'}, '/x/y'), 'Billing')
+        self.assertEqual(auto_stacks.goal_name({'pane_name': 'lets add search sort and other…', 'worktree': 'search-sort'},
+                                               '/x/y'), 'Search sort')
+        self.assertEqual(auto_stacks.goal_name({'pane_name': 'fix this please, now…'}, '/srv/apps/brisk-tag'), 'Brisk tag')
+        self.assertEqual(auto_stacks.goal_name({}, home), 'Work')
+        self.assertEqual(auto_stacks.goal_name({}, ''), 'Work')
+
+    def test_task_name_order(self):
+        self.assertEqual(auto_stacks.task_name({'name': 'Tab icons'}, 'b1', 'x'), 'Tab icons')
+        self.assertEqual(auto_stacks.task_name({'name': 'Please do the thing, then…'}, 'feature/desktop-nav', 'x'), 'Desktop nav')
+        self.assertEqual(auto_stacks.task_name({}, 'a/b/' + 'x' * 40, 'Fix nav'), 'Fix nav')
+        self.assertEqual(auto_stacks.task_name({}, 'x' * 40, 'Fix the back button on…'), 'Task')
+
+
 class RenderTests(Bundles):
     GPID = 'b1b2b3b4b5b6'
 
@@ -117,10 +146,10 @@ class RenderTests(Bundles):
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         text = projects.render(PID, 'claude', self.home)
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)
-        self.assertNotIn('Stack', text.replace('--stack NAME', ''))
+        self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
         self.assertNotIn('### Project notes', text)
-        self.assertIn('`--stack NAME` (made if missing)', text)
+        self.assertIn('`--stack GOAL` (always: 1–3 words; shared with this tab; with `--worktree`, the task)', text)
 
     def test_marks_cover_the_group_revision(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -333,16 +362,99 @@ class TmuxTests(Bundles):
         plain = terminal_input.new_window_after(self.a2, run)
         self.assertEqual([self.label(p) for p in (inherited, main, chosen, plain)], [docs['id'], '', api['id'], ''])
 
+    def start_group(self, body, caller, **kwargs):
+        with agent_tabs._start_group(body, caller, self.run_tmux, **kwargs) as group:
+            return group
+
+    def names(self, session):
+        return [g['name'] for g in groups.read(session, self.run_tmux)]
+
     def test_agent_tab_group_is_found_or_made_in_the_callers_session(self):
         run = self.run_tmux
-        caller = {'id': self.a1}
-        self.assertIsNone(agent_tabs._start_group({}, caller, run))
-        made = agent_tabs._start_group({'group': 'Docs'}, caller, run)
+        caller = {'id': self.a1, 'pane_name': 'Home dashboard'}
+        groups.move(self.a, self.a1, None, run, by_user=True)  # the user keeps this tab in Unstacked
+        self.assertEqual(self.start_group({}, caller), '')
+        made = self.start_group({'group': 'Docs'}, caller)
         self.assertEqual([(g['id'], g['name']) for g in groups.read(self.a, run)], [(made, 'Docs')])
-        self.assertEqual(agent_tabs._start_group({'group': 'docs'}, caller, run), made)
-        self.assertEqual(agent_tabs._start_group({'group': 'Main'}, caller, run), '')
-        self.assertEqual(agent_tabs._start_group({'group': 'unstacked'}, caller, run), '')
-        self.assertEqual(self.status(lambda: agent_tabs._start_group({'group': ''}, caller, run)), 400)
+        self.assertEqual(self.start_group({'group': 'docs'}, caller), made)
+        self.assertEqual(self.start_group({'group': 'Main'}, caller), '')
+        self.assertEqual(self.start_group({'group': 'unstacked'}, caller), '')
+        self.assertEqual(self.status(lambda: self.start_group({'group': ''}, caller)), 400)
+        self.assertEqual(self.label(self.a1), '', 'a tab the user placed is never moved')
+
+    def test_helper_joins_the_callers_stack(self):  # rule 1
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run, pane=self.a1)
+        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Other goal'}), docs['id'])
+        self.assertEqual(self.names(self.a), ['Docs'])
+
+    def test_unstacked_caller_gets_a_new_stack_named_after_its_goal(self):  # rules 2 and 3
+        run = self.run_tmux
+        made = self.start_group({}, {'id': self.a1, 'pane_name': 'desktop-nav'})
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Desktop nav'], made))
+        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Anything'}), made, 'the next helper joins it')
+        # Another Unstacked tab with the same name gets its own stack: the name is not its goal.
+        other = self.start_group({}, {'id': self.a2, 'pane_name': 'Desktop nav'})
+        self.assertNotEqual(other, made)
+        self.assertEqual(self.names(self.a), ['Desktop nav', 'Desktop nav 2'])
+
+    def test_explicit_stack_moves_an_unstacked_caller_in_too(self):  # rule 3, agent-given name
+        made = self.start_group({'group': 'Release notes'}, {'id': self.a1, 'pane_name': 'can you check how…'})
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Release notes'], made))
+        # An agent-given name that exists is the agent's choice: that stack is reused.
+        self.assertEqual(self.start_group({'group': 'release notes'}, {'id': self.a2}), made)
+        self.assertEqual(self.label(self.a2), made)
+
+    def test_worktree_task_gets_its_own_stack_and_the_caller_stays(self):  # rule 4
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run, pane=self.a1)
+        caller = {'id': self.a1, 'pane_name': 'Docs'}
+        task = self.start_group({'message': 'Fix the back button on desktop, then…'}, caller, branch='feature/desktop-nav')
+        self.assertEqual(self.names(self.a), ['Docs', 'Desktop nav'])
+        self.assertNotEqual(task, docs['id'])
+        named = self.start_group({'name': 'Tab icons', 'message': 'x'}, caller, branch='b1')
+        self.assertEqual(self.names(self.a)[-1], 'Tab icons')
+        self.assertEqual(self.start_group({'group': 'Tab icons', 'message': 'x'}, {'id': self.a2}, branch='b2'), named)
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (docs['id'], ''), 'callers stay where they are')
+        # The worker's own helpers then join the worker's stack by rule 1.
+        self.tmux('set-option', '-p', '-t', self.a2, '@group', task)
+        self.assertEqual(self.start_group({}, {'id': self.a2, 'pane_name': 'Fix the back button on…'}), task)
+
+    def test_user_placed_tabs_are_never_auto_moved(self):  # rule 5
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run)
+        groups.move(self.a, self.a1, docs['id'], run, by_user=True)
+        groups.move(self.a, self.a1, None, run, by_user=True)
+        self.assertTrue(groups.placed_by_user(self.a1, run))
+        self.assertFalse(groups.placed_by_user(self.a2, run))
+        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Docs work'}), '')
+        made = self.start_group({'group': 'Docs'}, {'id': self.a1})
+        self.assertEqual((made, self.label(self.a1)), (docs['id'], ''), 'the new tab goes in; the caller stays')
+        self.assertEqual(self.names(self.a), ['Docs'])
+        api = groups.create(self.a, 'API', run, pane=self.a2, by_user=True)
+        self.assertTrue(groups.placed_by_user(self.a2, run))
+        groups.ungroup(self.a, api['id'], run, by_user=True)
+        self.assertTrue(groups.placed_by_user(self.a2, run))
+        self.assertFalse(groups.auto_move(self.a, self.a2, docs['id'], run))
+        self.assertEqual(self.label(self.a2), '')
+
+    def test_failed_start_undoes_the_auto_stack(self):
+        caller = {'id': self.a1, 'pane_name': 'Docs'}
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({}, caller, self.run_tmux):
+                raise RuntimeError('launch failed')
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({'group': 'Docs'}, caller, self.run_tmux):
+                raise RuntimeError('launch failed')
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
+
+    def test_free_name_numbers_taken_and_reserved_names(self):
+        taken = [{'id': 'g00000001', 'name': 'Docs', 'project': ''}, {'id': 'g00000002', 'name': 'docs 2', 'project': ''}]
+        self.assertEqual(groups.free_name(taken, 'DOCS'), 'DOCS 3')
+        self.assertEqual(groups.free_name(taken, 'Main'), 'Main 2')
+        self.assertEqual(groups.free_name([], 'x' * 40), 'x' * 40)
+        self.assertEqual(groups.free_name([{'id': 'g00000001', 'name': 'x' * 40, 'project': ''}], 'x' * 40), 'x' * 38 + ' 2')
 
     def test_merge_appends_numbered_groups_and_relabels_clashing_ids(self):
         run = self.run_tmux

@@ -1,10 +1,13 @@
 """Local agent commands share the browser's guarded tab launcher."""
+import contextlib
 import hmac
 import os
 import re
+import subprocess
 
 import auth
 import auto_resume
+import auto_stacks
 import delegate
 import groups
 import helper_close
@@ -77,14 +80,46 @@ def close_tab(body, caller, entries, run, status):
     return {'closed': pane}
 
 
-def _start_group(body, caller, run):
-    """`start --group NAME`: the id of that group in the caller's session, made when missing ("" for Unstacked).
-    None without --group: the new tab then joins the caller's group (terminal_input.new_window_after)."""
-    if 'group' not in body:
-        return None
-    session_id = groups.group_of_pane(caller['id'], run)[0]
-    group = groups.find_or_create(session_id, body['group'], run)
-    return group['id'] if group else ''
+@contextlib.contextmanager
+def _start_group(body, caller, run, *, folder='', branch=None):
+    """Yield the group id for a new tab ("" = Unstacked), under the auto stack rules (auto_stacks.py). It may make a
+    group and move the caller into it; when the start fails, the caller goes back and an empty new group goes away.
+    branch: the --worktree branch of a separate task."""
+    made, moved = None, False
+    with groups.LOCK():
+        session_id, current = groups.group_of_pane(caller['id'], run)
+        if 'group' in body:
+            found = next((g for g in groups.read(session_id, run)
+                          if g['name'].lower() == groups.clean_name(body['group']).lower()), None)
+            group = groups.find_or_create(session_id, body['group'], run)
+            made = group if group is not None and found is None else None
+            if group is not None and current is None and branch is None:
+                moved = groups.auto_move(session_id, caller['id'], group['id'], run)
+            group_id = group['id'] if group is not None else ''
+        elif branch is not None:
+            name = auto_stacks.task_name(body, branch, delegate.task_name(body.get('message') or ''))
+            made = groups.create_unique(session_id, name, run)
+            group_id = made['id']
+        elif current is not None:
+            group_id = current['id']
+        elif groups.placed_by_user(caller['id'], run):
+            group_id = ''
+        else:
+            made = groups.create_unique(session_id, auto_stacks.goal_name(caller, folder), run)
+            moved = groups.auto_move(session_id, caller['id'], made['id'], run)
+            group_id = made['id']
+    try:
+        yield group_id
+    except BaseException:
+        with groups.LOCK():
+            try:
+                if moved:
+                    groups.move(session_id, caller['id'], '', run)
+                if made is not None:
+                    groups.remove(session_id, made['id'], run)
+            except (groups.GroupError, OSError, subprocess.SubprocessError):
+                pass  # the start error is the one to report
+        raise
 
 
 def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
@@ -127,11 +162,11 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
         made = worktrees.from_body(body, body.get('cwd', directory))
         with lock, worktrees.keeping(made):
             caller = delegate.validate(request, sessions())
-            group = _start_group(body, caller, run)
-            pane, name = delegate.start(caller, request, directory, run=run,
-                                        recent=lambda: snapshot(caller).get('messages') or [],
-                                        cwd=made['path'], worktree=made['branch'],
-                                        owner=helper_tabs.new_record(caller), group=group)
+            with _start_group(body, caller, run, folder=directory, branch=made['branch']) as group:
+                pane, name = delegate.start(caller, request, directory, run=run,
+                                            recent=lambda: snapshot(caller).get('messages') or [],
+                                            cwd=made['path'], worktree=made['branch'],
+                                            owner=helper_tabs.new_record(caller), group=group)
         handler.respond(201, {'pane': pane, 'name': name, 'worktree': made})
         return
     with lock:
@@ -144,14 +179,15 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
             request = dict(body, thread=caller.get('thread'))
             request.setdefault('agent', caller['agent'] if caller.get('agent') in ('claude', 'codex') else 'claude')
             delegate.validate(request, entries)
-            if 'cwd' in body and body['cwd'] is None:
-                raise ValueError('Choose an absolute path to an existing directory.')
+            if 'cwd' in body and (not isinstance(body['cwd'], str) or not os.path.isabs(body['cwd'])
+                                  or not os.path.isdir(body['cwd'])):
+                raise ValueError('Choose an absolute path to an existing directory.')  # before a stack is made
             directory = folder(caller)
-            group = _start_group(body, caller, run)
-            pane, name = delegate.start(caller, request,
-                                        directory if directory and os.path.isdir(directory) else str(paths.HOME),
-                                        run=run, recent=lambda: snapshot(caller).get('messages') or [],
-                                        cwd=body.get('cwd'), owner=helper_tabs.new_record(caller), group=group)
+            with _start_group(body, caller, run, folder=directory) as group:
+                pane, name = delegate.start(caller, request,
+                                            directory if directory and os.path.isdir(directory) else str(paths.HOME),
+                                            run=run, recent=lambda: snapshot(caller).get('messages') or [],
+                                            cwd=body.get('cwd'), owner=helper_tabs.new_record(caller), group=group)
             result = 201, {'pane': pane, 'name': name}
         elif action == 'link':
             if caller['id'] not in (body.get('worker'), body.get('reviewer')):

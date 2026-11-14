@@ -40,6 +40,8 @@ def arguments(argv):
     ask = actions.add_parser('ask')
     ask.add_argument('--critical', action='store_true')
     ask.add_argument('--timeout', type=int, default=600)
+    ask.add_argument('--stack', metavar='NAME', help="your goal in 1 to 3 words: a new advisor tab joins that stack "
+                     "(made if missing) with this tab; without it, it joins this tab's stack or one named after this tab")
     ask.add_argument('question')
     args = parser.parse_args(argv)
     if not 60 <= args.timeout <= 600:
@@ -145,7 +147,10 @@ def ask(settings, args, key, replies):
                 command += ['--model', choice['model']]
             if choice['effort'] != 'auto':
                 command += ['--effort', choice['effort']]
-            command += ['--role', 'advisor' if role == 'main' else 'second-advisor', '--cwd', os.getcwd(), '-']
+            command += ['--role', 'advisor' if role == 'main' else 'second-advisor', '--cwd', os.getcwd()]
+            if args.stack is not None:
+                command += ['--stack', args.stack]
+            command.append('-')
             code, response = tab(command, args.timeout, prompt)
             pane = response.get('pane')
         if code != 0:

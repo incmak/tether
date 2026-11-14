@@ -214,7 +214,7 @@ class Rules(Base):
                 self.assertEqual(positions, sorted(positions))
                 self.assertIn('Claude, Fable 5.2 (latest), high effort', text)
                 self.assertIn('second advisor (Codex, Newest Model (latest), high effort)', text)
-                self.assertIn(f'python3 {cli.__file__} ask "QUESTION"', text)
+                self.assertIn(f'python3 {cli.__file__} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words)', text)
 
     def test_none_adds_no_advisor_and_keeps_evidence_product_and_user_rules(self):
         advisor.write(OFF)
@@ -301,6 +301,14 @@ class Cli(Base):
         self.assertRegex(log.read_text(), r'^- \d{4}-\d\d-\d\d \d\d:\d\d \[decided\] Q: Which option\? '
                                          r'-> A: Use the tested option\. \(claude fable\)\n$')
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+    def test_stack_goal_goes_to_each_new_advisor_tab(self):
+        self.enterContext(patch.object(advisor, 'second_opinion', return_value={'agent': 'codex', 'model': 'gpt', 'effort': 'high'}))
+        code, _ = self.invoke(['ask', '--critical', '--stack', 'Desktop nav', 'Which option?'])
+        starts = [command[2:] for command, _ in self.tab_calls() if command[2] == 'start']
+        self.assertEqual(len(starts), 2)
+        for command in starts:
+            self.assertEqual(command[-3:], ['--stack', 'Desktop nav', '-'])
 
     def test_reuse_live_pane_sends_prompt_without_starting_or_review_links(self):
         self.invoke()

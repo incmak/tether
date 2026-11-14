@@ -3,6 +3,7 @@
 The session option @groups holds the list, in order, empty groups included:
   [{"id": "g1a2b3c4d", "name": "Home dashboard", "project": "<12-hex projects.py id or empty>"}]
 The pane option @group holds a group id. A pane with no @group, or with an id that is not in @groups, is in Unstacked.
+The pane option @group_by is "user" after the user moved the tab by hand (groups_api.py). Auto stacks never move such a tab.
 A group's context is a projects.py bundle, made on first use. Removing a group archives the bundle; nothing is deleted.
 This module is the store and its rules. groups_api.py is the HTTP part."""
 import contextlib
@@ -192,11 +193,22 @@ def _pane(pane, run):
     return fields[1], fields[2]
 
 
-def _label(pane, group_id, run):
+def _label(pane, group_id, run, by_user=False):
     if group_id:
         _check(_tmux(run, 'set-option', '-p', '-t', pane, '@group', group_id), 'Could not move the tab. It may have closed.')
     else:
         _check(_tmux(run, 'set-option', '-p', '-u', '-t', pane, '@group'), 'Could not move the tab. It may have closed.')
+    if by_user:
+        _check(_tmux(run, 'set-option', '-p', '-t', pane, BY, 'user'), 'Could not move the tab. It may have closed.')
+
+
+BY = '@group_by'
+
+
+def placed_by_user(pane, run=subprocess.run):
+    """True when the user moved this tab by hand (to a stack or to Unstacked). Auto stacks leave such a tab alone."""
+    shown = _tmux(run, 'display-message', '-p', '-t', pane, '#{' + BY + '}')
+    return shown.returncode == 0 and shown.stdout.strip() == 'user'
 
 
 def _pane_in(session_id, pane, run):
@@ -204,8 +216,8 @@ def _pane_in(session_id, pane, run):
         raise GroupError(404, 'That tab is in another session. Refresh the list and try again.')
 
 
-def create(session_id, name, run=subprocess.run, pane=None):
-    """Add a group at the end of the list. With pane, move that tab into it."""
+def create(session_id, name, run=subprocess.run, pane=None, by_user=False):
+    """Add a group at the end of the list. With pane, move that tab into it. by_user: the user asked (groups_api.py)."""
     name = clean_name(name)
     with LOCK():
         groups = read(session_id, run)
@@ -216,7 +228,7 @@ def create(session_id, name, run=subprocess.run, pane=None):
         group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6)}
         write(session_id, groups + [group], run)
         if pane is not None:
-            _label(pane, group['id'], run)
+            _label(pane, group['id'], run, by_user)
     return group
 
 
@@ -233,14 +245,14 @@ def rename(session_id, group_id, name, run=subprocess.run):
     return group
 
 
-def move(session_id, pane, group_id, run=subprocess.run):
+def move(session_id, pane, group_id, run=subprocess.run, by_user=False):
     """Put a tab in a group of its session. None or '' puts it in Unstacked."""
     with LOCK():
         groups = read(session_id, run)
         if group_id:
             _find(groups, group_id)
         _pane_in(session_id, pane, run)
-        _label(pane, group_id or '', run)
+        _label(pane, group_id or '', run, by_user)
 
 
 def _labelled(session_id, group_id, run):
@@ -254,13 +266,13 @@ def _archive(group):
         projects.archive(group['project'])
 
 
-def ungroup(session_id, group_id, run=subprocess.run):
+def ungroup(session_id, group_id, run=subprocess.run, by_user=False):
     """Move the group's tabs to Unstacked and drop the group. No agent stops. Its context bundle goes to the archive."""
     with LOCK():
         groups = read(session_id, run)
         group = _find(groups, group_id)
         for pane in _labelled(session_id, group_id, run):
-            _label(pane, '', run)
+            _label(pane, '', run, by_user)
         write(session_id, [g for g in groups if g['id'] != group_id], run)
     _archive(group)
 
@@ -284,6 +296,32 @@ def find_or_create(session_id, name, run=subprocess.run):
     with LOCK():
         found = next((g for g in read(session_id, run) if g['name'].lower() == name.lower()), None)
         return found or create(session_id, name, run)
+
+
+def free_name(groups, name):
+    """name, or "name 2", "name 3"... : the first one that no group has (any case) and that is not reserved."""
+    name, base, number = clean_name(name), clean_name(name), 2
+    taken = {g['name'].lower() for g in groups} | RESERVED
+    while name.lower() in taken:
+        suffix = f' {number}'
+        name = base[:NAME_LIMIT - len(suffix)].rstrip() + suffix
+        number += 1
+    return name
+
+
+def create_unique(session_id, name, run=subprocess.run):
+    """Auto stacks: a new group under a free form of name ("Name 2" when "Name" is taken)."""
+    with LOCK():
+        return create(session_id, free_name(read(session_id, run), name), run)
+
+
+def auto_move(session_id, pane, group_id, run=subprocess.run):
+    """Auto stacks: put a tab in a group, unless the user placed it by hand. True when it moved."""
+    with LOCK():
+        if placed_by_user(pane, run):
+            return False
+        move(session_id, pane, group_id, run)
+    return True
 
 
 def group_of_pane(pane, run=subprocess.run):

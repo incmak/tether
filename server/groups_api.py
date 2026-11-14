@@ -78,16 +78,18 @@ def post(handler, run=subprocess.run):
         session_id = _session(body.get('session'))
         if name == 'create':
             pane = body.get('pane')
-            return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane))}
+            return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
+                                           by_user=True)}
         if name == 'move':
             group_id = body.get('group')
-            groups.move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run)
+            groups.move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run,
+                        by_user=True)
             return {'ok': True}
         group_id = _group(body.get('group'))
         if name == 'rename':
             return {'group': groups.rename(session_id, group_id, body.get('name'), run)}
         if name == 'ungroup':
-            groups.ungroup(session_id, group_id, run)
+            groups.ungroup(session_id, group_id, run, by_user=True)
         else:
             groups.remove(session_id, group_id, run)
         return {'ok': True}

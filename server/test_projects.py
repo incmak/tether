@@ -102,9 +102,10 @@ class ProjectTests(unittest.TestCase):
                        'max 600', '3 timeout (still working)', '4 gone', '5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost).'):
             self.assertIn(option, text)
         self.assertIn(
-            'It opens a tab Tether can track. Options: `--review-it` '
+            'not raw tmux. Options: `--review-it` '
             '(this tab reviews each turn of the new tab), '
             '`--reviews-me` (the new tab reviews this tab), ', text)
+        self.assertIn('`--stack GOAL` (always: 1–3 words; shared with this tab; with `--worktree`, the task)', text)
         self.assertIn(
             'Start your review reply with APPROVED when nothing is wrong. '
             '`send --pane %N "text"` (`-` = stdin) steers a tab you started. '
