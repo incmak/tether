@@ -24,7 +24,7 @@ class PushTests(unittest.TestCase):
         handler.respond = Mock()
         with patch.object(handler, 'deny', return_value=False), patch.object(server, 'choose', return_value=self.entry), patch.object(server, 'chat_payload', return_value={}):
             handler.do_GET()
-        handler.respond.assert_called_once_with(200, {})
+        handler.respond.assert_called_once_with(200, server.with_version({}))
 
     def test_host_route_returns_short_hostname(self):
         handler = object.__new__(server.Handler)

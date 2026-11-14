@@ -1059,6 +1059,13 @@ def window_limit(query):
         return DEFAULT_WINDOW
 
 
+def with_version(payload):
+    """Add a short hash of the chat payload. A client that already shows this version passes it to the stream as
+    `have`, and the stream answers `event: same` instead of sending the payload again (B63)."""
+    payload['version'] = hashlib.sha1(json.dumps(payload).encode()).hexdigest()[:20]
+    return payload
+
+
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
     """One chat view: the latest `limit` messages plus how many older ones were left out."""
     before = change_signature(config) if preview else None
@@ -1238,8 +1245,9 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):  # the player stopped or seeked
                 pass
 
-    def stream_chat(self, identifier, shell_mode, limit=DEFAULT_WINDOW, lifetime=600, preview=False):
-        """Server-sent events: push a fresh chat payload whenever something the chat view depends on changes."""
+    def stream_chat(self, identifier, shell_mode, limit=DEFAULT_WINDOW, lifetime=600, preview=False, have=''):
+        """Server-sent events: push a fresh chat payload whenever something the chat view depends on changes.
+        have: the version the client already shows. When the first payload has that version, send `event: same`."""
         config = choose(identifier)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -1282,10 +1290,10 @@ class Handler(BaseHTTPRequestHandler):
                         signature, full = current, now
                         payload = chat_payload(config, shell_mode, limit, preview=True) if preview else chat_payload(config, shell_mode, limit)
                         working = payload.get('state') == 'Working'
-                        body = json.dumps(payload)
+                        body = json.dumps(with_version(payload))
                         if body != last_body:
-                            last_body = body
-                            send(('data: ' + body + '\n\n').encode())
+                            first, last_body = last_body is None, body
+                            send(('event: same\ndata: ' + json.dumps({'version': have}) + '\n\n').encode() if first and have and payload['version'] == have else ('data: ' + body + '\n\n').encode())
                             wrote = now
                 except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as exc:
                     if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
@@ -1761,7 +1769,7 @@ class Handler(BaseHTTPRequestHandler):
                 if query.get('watch') == ['1']:
                     with WATCHING_LOCK:
                         WATCHED[config['id']] = time.monotonic()
-                self.respond(200, chat_payload(config, query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'] and query.get('watch') == ['1']))
+                self.respond(200, with_version(chat_payload(config, query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'] and query.get('watch') == ['1'])))
             elif path == '/mobile/api/screen':
                 query = parse_qs(urlsplit(self.path).query)
                 config = choose(query.get('session', [None])[0])
@@ -1800,7 +1808,7 @@ class Handler(BaseHTTPRequestHandler):
                 attention.get(self)
             elif path == '/mobile/api/stream':
                 query = parse_qs(urlsplit(self.path).query)
-                self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'])
+                self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'], have=query.get('have', [''])[0][:64])
             elif path == '/mobile/api/sessions':
                 body, tag = sessions_listing()
                 headers = {'ETag': tag, 'Vary': 'Accept-Encoding, Sec-Fetch-Site'}

@@ -120,6 +120,8 @@ export interface ChatMessage {
   image_key?: string
 }
 export interface ChatData {
+  /** A hash of this payload. The chat stream takes it as `have` and skips sending the same payload again (B63). */
+  version?: string
   login_result?: { phase: 'done' | 'failed' | 'unknown'; message: string }
   preview?: { text: string }
   // A `!` shell command that is still running in Claude Code, read from the screen (the transcript gets it only at the end).

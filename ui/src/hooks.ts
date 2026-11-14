@@ -5,8 +5,11 @@ import { useBackStep } from './backNav'
 
 // One request at a time. Abort obsolete requests and pause polling in hidden tabs.
 // `initial` shows saved data at once (no loading state) while the first fetch runs.
-export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, interval: number, streamPath?: string, initial?: T) {
+/** streamPath: an SSE path that pushes new data. As a function, it gets the data on screen when the stream opens,
+ *  so the server can skip sending that data again (B63). */
+export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, interval: number, streamPath?: string | ((shown: T | undefined) => string), initial?: T) {
   const [data, setData] = useState<T | undefined>(initial)
+  const shown = useRef<T | undefined>(initial)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(initial === undefined)
   const active = useRef<AbortController | null>(null)
@@ -16,7 +19,7 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
     active.current = controller
     try {
       const result = await fetcher(controller.signal)
-      if (!controller.signal.aborted) { setData(result); setError('') }
+      if (!controller.signal.aborted) { shown.current = result; setData(result); setError('') }
     } catch (error) {
       if (!controller.signal.aborted) setError(errorText(error))
     } finally {
@@ -29,14 +32,28 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
     let stream: EventSource | null = null
     const connect = () => {
       if (!streamPath || !('EventSource' in window) || document.hidden || stopped) return
-      stream = new EventSource(`/mobile/api/${streamPath}`)
+      stream = new EventSource(`/mobile/api/${typeof streamPath === 'function' ? streamPath(shown.current) : streamPath}`)
       stream.onmessage = event => {
         try {
           const result = JSON.parse(event.data) as T
           active.current?.abort()  // an older poll must not overwrite a pushed update
-          received = Date.now(); setData(result); setError(''); setLoading(false)
+          received = Date.now(); shown.current = result; setData(result); setError(''); setLoading(false)
         } catch { received = 0 }
       }
+      // The server did not send the data again because the screen already shows that version. EventSource reconnects
+      // with its first URL, so `have` can be older than the screen: on a mismatch, close and let tick() fetch and reopen.
+      const current = stream
+      current.addEventListener('same', event => {
+        let version: unknown
+        try { version = (JSON.parse((event as MessageEvent<string>).data) as { version?: unknown }).version } catch { version = undefined }
+        if (!version || version !== (shown.current as { version?: unknown } | undefined)?.version) {
+          current.close(); if (stream === current) stream = null
+          received = 0
+          return
+        }
+        active.current?.abort()  // an older fallback poll must not bring back an error banner
+        received = Date.now(); setError(''); setLoading(false)
+      })
       stream.addEventListener('idle', () => { if (received) received = Date.now() })
       stream.addEventListener('unavailable', () => { received = 0 })
       stream.onerror = () => { received = 0 }
@@ -45,8 +62,10 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
       if (stopped || document.hidden) return
       if (!received || Date.now() - received > 25000) {
         if (received) { stream?.close(); stream = null; received = 0 }
-        if (!stream) connect()
+        // Fetch first, then open the stream with what is on screen: its first event is then a short `same`,
+        // not the whole payload a second time on the same slow link.
         await refresh()
+        if (!stream) connect()
       }
       if (!stopped) timer = setTimeout(tick, interval)
     }
