@@ -180,6 +180,24 @@ class UnitTests(unittest.TestCase):
         self.config(f'[projects."{os.path.realpath(split)}"]\ntrust_level = "trusted"\n')
         self.assertFalse(project_launch.codex_writable([], str(split / 'a')))
 
+    def test_writable_root_keeps_spaces_in_folder_names(self):
+        git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        for name in ('repo', 'repo ', 'repo\u00a0'):
+            subprocess.run([*git, 'init', '-q', str(self.temp / name)], check=True)
+            (self.temp / name / 'src').mkdir()
+        self.config(f'[projects."{os.path.realpath(self.temp / "repo")}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable([], str(self.temp / 'repo' / 'src')))
+        for name in ('repo ', 'repo\u00a0'):
+            self.assertFalse(project_launch.codex_writable([], str(self.temp / name / 'src')), repr(name))
+
+    def test_writable_skips_a_git_folder_without_head(self):
+        git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        outer = self.temp / 'outer'
+        subprocess.run([*git, 'init', '-q', str(outer)], check=True)
+        (outer / 'inner' / '.git').mkdir(parents=True)
+        self.config(f'[projects."{os.path.realpath(outer)}"]\ntrust_level = "trusted"\n')
+        self.assertEqual(project_launch._repo_root(str(outer / 'inner')), os.path.realpath(outer))
+
     def test_writable_worktree_pointer_must_match_its_registration(self):
         git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
         main = self.temp / 'main'
@@ -217,6 +235,15 @@ class UnitTests(unittest.TestCase):
         original = (registration / 'gitdir').read_bytes()
         (registration / 'gitdir').write_bytes(original.rstrip() + b'\xc2\xa0\n')
         self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex trims ASCII space only')
+        (registration / 'gitdir').write_bytes(original)
+        self.assertTrue(project_launch.codex_writable([], str(linked)))
+        aliases = self.temp / 'aliases'
+        aliases.mkdir()
+        (linked / 'child').mkdir()
+        (aliases / 'hop').symlink_to(linked / 'child')
+        original = (registration / 'gitdir').read_bytes()
+        (registration / 'gitdir').write_text(f'{aliases}/hop/../.git\n')
+        self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex resolves .. before symlinks')
         (registration / 'gitdir').write_bytes(original)
         self.assertTrue(project_launch.codex_writable([], str(linked)))
         (registration / 'gitdir').write_bytes((registration / 'gitdir').read_bytes() + b' ' * 70000)
