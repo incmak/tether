@@ -1088,6 +1088,33 @@ CHAT_UI_TEXT_TYPES = {'.html', '.js', '.mjs', '.css', '.svg', '.json', '.webmani
 CHAT_UI_GZIP_CACHE = {}
 CHAT_UI_GZIP_LOCK = threading.Lock()
 CHAT_UI_GZIP_LIMIT = 64 * 1024 * 1024
+# Text bodies of at least GZIP_MIN bytes go out gzip-compressed when the client accepts it:
+# API JSON is 4-6x smaller, which matters on a phone link. Only same-origin requests get gzip
+# (Sec-Fetch-Site same-origin or none, or no header from curl and CLI clients). Tailscale-identity
+# and proxy sign-in work without the SameSite=Strict cookie, so a cross-site page could otherwise
+# send signed-in requests that reflect its input (files/search q) and time compressed sizes (BREACH).
+# 'same-site' is not trusted: sibling hosts under the tailnet domain are other machines.
+GZIP_SITES = (None, 'same-origin', 'none')
+GZIP_TYPES = {'application/json', 'application/manifest+json', 'image/svg+xml',
+              'text/html', 'text/javascript', 'text/css', 'text/plain', 'text/markdown'}
+GZIP_MIN = 1024
+
+
+def accepts_gzip(header):
+    """True when an Accept-Encoding header allows gzip, by name or through '*', with q > 0."""
+    encodings = {}
+    for token in (header or '').split(','):
+        encoding, *parameters = token.split(';')
+        quality = 1.0
+        for parameter in parameters:
+            name, separator, value = parameter.strip().partition('=')
+            if name.lower() == 'q':
+                try:
+                    quality = float(value) if separator else 0.0
+                except ValueError:
+                    quality = 0.0
+        encodings[encoding.strip().lower()] = quality
+    return 0 < encodings.get('gzip', encodings.get('*', 0)) <= 1
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1098,12 +1125,20 @@ class Handler(BaseHTTPRequestHandler):
         if (self.command in ('POST', 'DELETE') and status < 300 and self.path.split('?', 1)[0] in TMUX_WRITES
                 and not getattr(self, 'keep_sessions', False)):
             forget_sessions()
+        headers = dict(headers or {})
+        if content_type in GZIP_TYPES and 'Content-Encoding' not in headers and status not in (204, 304):
+            headers.setdefault('Vary', 'Accept-Encoding, Sec-Fetch-Site')
+            request = getattr(self, 'headers', None) or {}
+            if (len(data) >= GZIP_MIN and request.get('Sec-Fetch-Site') in GZIP_SITES
+                    and accepts_gzip(request.get('Accept-Encoding'))):
+                data = gzip.compress(data, compresslevel=6, mtime=0)
+                headers['Content-Encoding'] = 'gzip'
         self.send_response(status)
         self.send_header('Content-Type', content_type + '; charset=utf-8')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
-        for name, value in (headers or {}).items():
+        for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
@@ -1345,22 +1380,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         kind = CHAT_UI_TYPES.get(target.suffix, 'application/octet-stream')
         cache = 'max-age=31536000, immutable' if target.parent.name == 'assets' else 'no-cache'
-        headers = {}
-        encodings = {}
-        if target.suffix in CHAT_UI_TEXT_TYPES:
-            headers['Vary'] = 'Accept-Encoding'
-            for token in self.headers.get('Accept-Encoding', '').split(','):
-                encoding, *parameters = token.split(';')
-                quality = 1.0
-                for parameter in parameters:
-                    name, separator, value = parameter.strip().partition('=')
-                    if name.lower() == 'q':
-                        try:
-                            quality = float(value) if separator else 0.0
-                        except ValueError:
-                            quality = 0.0
-                encodings[encoding.strip().lower()] = quality
-        if headers and 0 < encodings.get('gzip', encodings.get('*', 0)) <= 1 and target.stat().st_size >= 1024:
+        headers = {'Vary': 'Accept-Encoding'} if target.suffix in CHAT_UI_TEXT_TYPES else {}
+        if (target.suffix in CHAT_UI_TEXT_TYPES and accepts_gzip(self.headers.get('Accept-Encoding'))
+                and target.stat().st_size >= GZIP_MIN):
             with CHAT_UI_GZIP_LOCK:
                 info = target.stat()
                 key = (target.resolve(), info.st_mtime_ns, info.st_size)
