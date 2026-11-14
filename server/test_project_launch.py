@@ -198,6 +198,21 @@ class UnitTests(unittest.TestCase):
         self.config(f'[projects."{os.path.realpath(outer)}"]\ntrust_level = "trusted"\n')
         self.assertEqual(project_launch._repo_root(str(outer / 'inner')), os.path.realpath(outer))
 
+    def test_writable_dangling_head_and_cd_symlink(self):
+        repo = self.temp / 'repo'
+        (repo / '.git').mkdir(parents=True)
+        (repo / '.git' / 'HEAD').symlink_to(self.temp / 'missing')
+        (repo / 'src').mkdir()
+        self.config(f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(repo / 'src')), 'Codex skips a .git without HEAD')
+        main = self.temp / 'main'
+        subprocess.run(['git', 'init', '-q', str(main)], check=True)
+        (main / 'inner' / 'src').mkdir(parents=True)
+        (self.temp / 'alias').symlink_to(main / 'inner')
+        self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable(['--cd', str(main / 'inner' / 'src')], str(self.temp)))
+        self.assertFalse(project_launch.codex_writable(['--cd', str(self.temp / 'alias' / 'src')], str(self.temp)))
+
     def test_writable_worktree_pointer_must_match_its_registration(self):
         git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
         main = self.temp / 'main'
@@ -237,6 +252,10 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex trims ASCII space only')
         (registration / 'gitdir').write_bytes(original)
         self.assertTrue(project_launch.codex_writable([], str(linked)))
+        original = (registration / 'gitdir').read_bytes()
+        (registration / 'gitdir').write_bytes(str(linked).encode() + b'/\x00/../.git\n')
+        self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex rejects NUL before normalizing')
+        (registration / 'gitdir').write_bytes(original)
         aliases = self.temp / 'aliases'
         aliases.mkdir()
         (linked / 'child').mkdir()

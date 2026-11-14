@@ -175,7 +175,10 @@ def _read(path):
 
 
 def _join(base, target):
-    """Codex PathUri::join_native_bytes: join, then drop "." and resolve ".." lexically, before any symlink."""
+    """Codex PathUri::join_native_bytes: join, then drop "." and resolve ".." lexically, before any symlink.
+    Codex rejects a NUL byte before it normalizes (utils/path-uri/src/lib.rs), so None."""
+    if '\x00' in target:
+        return None
     return os.path.normpath(os.path.join(str(base), target))
 
 
@@ -209,7 +212,7 @@ def _repo_root(cwd):
         dot_git = Path(candidate) / '.git'
         if dot_git.is_symlink():
             return None
-        if not dot_git.is_dir() or os.path.lexists(dot_git / 'HEAD'):
+        if not dot_git.is_dir() or os.path.exists(dot_git / 'HEAD'):  # get_metadata follows symlinks
             break
         parent = os.path.dirname(candidate)
         if parent == candidate:
@@ -230,11 +233,11 @@ def _repo_root(cwd):
     back, commondir = _read(real / 'gitdir'), _read(real / 'commondir')
     if not back or not commondir:
         return None
-    back_dot_git = _join(real, back)
-    if os.path.basename(back_dot_git) != '.git':
+    back_dot_git, linked_common = _join(real, back), _join(real, commondir)
+    if back_dot_git is None or linked_common is None or os.path.basename(back_dot_git) != '.git':
         return None
     if (os.path.realpath(os.path.dirname(back_dot_git)) != os.path.realpath(root)
-            or os.path.realpath(_join(real, commondir)) != str(common)):
+            or os.path.realpath(linked_common) != str(common)):
         return None
     main_root = os.path.dirname(os.path.dirname(os.path.dirname(git_dir)))
     main_dot_git = Path(main_root) / '.git'
@@ -330,6 +333,8 @@ def codex_writable(args, cwd=None):
     start = cwd or os.getcwd()
     folder = os.path.normpath(os.path.join(start, folder) if folder else start)
     real = os.path.realpath(folder)
+    if _option(args, '-C', '--cd') and real != folder:
+        return False  # Codex keeps the logical --cd path through symlinks; its root search is not modelled
     root = _repo_root(folder)
     for path in _layers([folder, real], home.resolve()):
         layer = _toml(path)
