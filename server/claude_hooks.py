@@ -452,49 +452,27 @@ def overlay(config, result, now=None, screen_read_at=None):
         return result
 
 
-def prompt_hooks():
-    """The script names of the `<script> hook` commands in Claude's UserPromptSubmit hooks."""
-    import shlex
-    import paths
-    try:
-        groups = json.loads((Path(paths.CLAUDE) / 'settings.json').read_text())['hooks']['UserPromptSubmit']
-        commands = [hook.get('command', '') for group in groups for hook in group.get('hooks', [])]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return set()
-    names = set()
-    for command in commands:
-        try:
-            words = shlex.split(command) if isinstance(command, str) else []
-        except ValueError:
-            continue
-        if len(words) >= 2 and words[-1] == 'hook':
-            names.add(Path(words[-2]).name)
-    return names
-
-
 def session_start_context(data, agent, env=os.environ):
-    """SessionStart text. The prompt hooks send their rules once per conversation (prompt_context.py, B74): a new,
-    cleared or resumed conversation gets them again on its next prompt, and a compacted one gets them here at once,
-    because a compaction can happen in the middle of a long turn."""
+    """(SessionStart text, {kind: rules} to mark as sent once the text is printed).
+
+    The prompt hooks send their rules once per conversation (prompt_context.py, B74): a new, cleared or resumed
+    conversation gets them again on its next prompt. A compacted one gets them here at once, because a compaction can
+    happen in the middle of a long turn. They come from the saved records, so this stays fast."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)  # python -I omits the script's folder.
     import prompt_context
+    rules = prompt_context.saved(data) if data.get('source') == 'compact' else {}
     prompt_context.forget(data)
     parts = []
     if agent == 'claude' and env.get('TETHER_CDP_URL'):
-        from agent_browser_cli import note
-        parts.append(note())
-    if data.get('source') == 'compact':
-        import autonomy
-        import codex_level
-        # Codex gets the autonomy rules from this script. Claude gets each set only when its prompt hook is installed.
-        installed = prompt_hooks() if agent == 'claude' else {'autonomy.py'}
-        if 'codex_level.py' in installed:
-            parts.append(codex_level.hook_output(data, env=env, event='SessionStart'))
-        if 'autonomy.py' in installed:
-            parts.append(autonomy.hook_output(data, env=env, agent=agent, event='SessionStart'))
-    return '\n\n'.join(part for part in parts if part)
+        try:
+            from agent_browser_cli import note
+            parts.append(note())
+        except Exception:
+            pass  # the rules still go out
+    parts += rules.values()
+    return '\n\n'.join(part for part in parts if part), rules
 
 
 def main():
@@ -516,9 +494,13 @@ def main():
             print(autonomy.hook_output(data, agent='codex'))
         if (isinstance(data, dict) and valid_session(data.get('session_id'))
                 and data.get('hook_event_name') == 'SessionStart'):
-            context = session_start_context(data, agent)
+            context, rules = session_start_context(data, agent)
             if context:
-                print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}))
+                print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}),
+                      flush=True)
+            import prompt_context
+            for kind, text in rules.items():
+                prompt_context.mark(data, kind, text)  # only after the text is out
     except Exception:
         pass  # hook errors must never print context or fail Claude Code
 

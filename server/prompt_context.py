@@ -6,11 +6,14 @@ a conversation sees it, and again when the text changes. Otherwise it returns a 
 rules (the level) and a note that the rules still apply.
 
 Both Claude Code and Codex fire SessionStart again after /clear, a resume and a compaction. claude_hooks.py then calls
-forget(), so the next prompt carries the full text again, and after a compaction it adds the full text at once.
+forget(), so the next prompt carries the full text again. After a compaction it also adds the saved full texts at
+once (saved()), and marks them as sent again only after its output is printed (mark()). It reads them from the records
+and does not run the prompt hooks again: SessionStart has a one-second timeout.
 As a safety net (a rewind or an undo can drop the earlier text), the full text also goes out every FULL_EVERY prompts.
 
-Records: paths.CACHE/prompt-context/<conversation>.<kind>, one line "<sha256> <prompts since the full text>".
-A conversation is the hook input's session_id, plus agent_id for a Codex subagent (it has its own context).
+Records: paths.CACHE/prompt-context/<session_id>.<kind>: a line "<sha256> <prompts since the full text>", then the
+full text. A Codex subagent (agent_id in the input) always gets the full text: Codex 0.166 runs no SessionStart hook
+when a subagent compacts (core/src/hook_runtime.rs), so nothing would tell this module that its context lost the rules.
 """
 import hashlib
 import os
@@ -38,10 +41,8 @@ def conversation(data):
     session, agent = data.get('session_id'), data.get('agent_id')
     if not isinstance(session, str) or not ID.fullmatch(session):
         return None
-    if isinstance(agent, str) and agent:
-        if not ID.fullmatch(agent):
-            return None
-        return f'{session}-{agent}'
+    if agent:
+        return None  # a Codex subagent: see the module notes
     return session
 
 
@@ -68,18 +69,35 @@ def once(data, kind, text):
     digest = hashlib.sha256(text.encode()).hexdigest()
     path = folder() / f'{key}.{kind}'
     try:
-        try:
-            seen, _, count = path.read_text().partition(' ')
-            count = int(count)
-        except (OSError, ValueError):
-            seen, count = '', 0
+        seen, count, _ = _read(path)
         if seen == digest and count + 1 < FULL_EVERY:
-            _write(path, f'{digest} {count + 1}')
+            _write(path, f'{digest} {count + 1}\n{text}')
             return f'{text.splitlines()[0]} {SAME}'
-        _write(path, f'{digest} 0')
+        _write(path, f'{digest} 0\n{text}')
     except OSError:
         pass
     return text
+
+
+def _read(path):
+    """(digest, count, full text) of one record; ('', 0, '') when it is missing or broken."""
+    try:
+        head, _, text = path.read_text().partition('\n')
+        seen, _, count = head.partition(' ')
+        return seen, int(count), text
+    except (OSError, ValueError):
+        return '', 0, ''
+
+
+def saved(data):
+    """{kind: the full text this conversation last got}, in KINDS order. Read it before forget()."""
+    key = conversation(data)
+    found = {}
+    for kind in KINDS if key is not None else ():
+        seen, _, text = _read(folder() / f'{key}.{kind}')
+        if text and hashlib.sha256(text.encode()).hexdigest() == seen:
+            found[kind] = text
+    return found
 
 
 def mark(data, kind, text):
@@ -88,7 +106,7 @@ def mark(data, kind, text):
     if key is None or kind not in KINDS or not text:
         return
     try:
-        _write(folder() / f'{key}.{kind}', hashlib.sha256(text.encode()).hexdigest() + ' 0')
+        _write(folder() / f'{key}.{kind}', hashlib.sha256(text.encode()).hexdigest() + ' 0\n' + text)
     except OSError:
         pass
 

@@ -241,20 +241,16 @@ def hook_project(cwd, env=os.environ, tmux=_tmux):
     return found.pop() if len(found) == 1 else None
 
 
-def hook_output(data, env=os.environ, tmux=_tmux, event='UserPromptSubmit'):
+def hook_output(data, env=os.environ, tmux=_tmux):
     """The hook's stdout for one UserPromptSubmit input, as a JSON string.
 
-    The rules go out once per conversation (prompt_context.py). With event='SessionStart' (after a compaction) it
-    returns the full rules as plain text and records them as sent."""
+    The rules go out once per conversation (prompt_context.py)."""
     cwd = data.get('cwd') if isinstance(data, dict) else None
     try:
         pid = hook_project(cwd, env, tmux)
     except (OSError, subprocess.SubprocessError):
         pid = None
     text = rules(resolve(pid))
-    if event == 'SessionStart':
-        prompt_context.mark(data, 'codex-level', text)
-        return text
     text = prompt_context.once(data, 'codex-level', text)
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': text}})
 

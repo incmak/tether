@@ -356,10 +356,8 @@ def reviewer_rules(reviewers):
 
 # ---- the hook ----
 
-def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude', event='UserPromptSubmit'):
-    """The hook's stdout for one UserPromptSubmit input, as a JSON string.
-
-    With event='SessionStart' (after a compaction) it returns the full rules as plain text and records them as sent."""
+def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude'):
+    """The hook's stdout for one UserPromptSubmit input, as a JSON string."""
     cwd = data.get('cwd') if isinstance(data, dict) else None
     try:
         pid = hook_project(cwd, env, tmux)
@@ -377,9 +375,6 @@ def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude', ev
             helper = True  # Do not teach a helper when its identity cannot be checked.
     resolved, reviewers = resolve(pid), reviewer_rules(read_reviewers())
     standing = rules(resolved, pid, agent=agent, helper=helper) + '\n\n' + reviewers
-    if event == 'SessionStart':
-        prompt_context.mark(data, 'autonomy', standing)
-        return standing
     # The standing rules go out once per conversation (B74). Lines that depend on this prompt go out every time.
     shown = set(standing.splitlines())
     extra = [line for line in rules(resolved, pid, agent=agent, prompt=prompt, helper=helper).splitlines()

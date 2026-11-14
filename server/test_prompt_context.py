@@ -33,8 +33,9 @@ class OnceTests(unittest.TestCase):
         self.assertEqual(short, 'Level 4 of 5 (Autopilot). ' + prompt_context.SAME)
         self.assertEqual(prompt_context.once(data, 'codex-level', RULES), RULES, 'each kind on its own')
         self.assertEqual(prompt_context.once({'session_id': 's2'}, 'autonomy', RULES), RULES, 'each conversation')
-        self.assertEqual(prompt_context.once({'session_id': 's1', 'agent_id': 'a1'}, 'autonomy', RULES), RULES,
-                         'a Codex subagent has its own context')
+        for _ in range(3):
+            self.assertEqual(prompt_context.once({'session_id': 's1', 'agent_id': 'a1'}, 'autonomy', RULES), RULES,
+                             'a Codex subagent always gets the full text: no SessionStart after its compaction')
 
     def test_a_change_sends_the_full_text_again(self):
         data = {'session_id': 's1'}
@@ -44,7 +45,7 @@ class OnceTests(unittest.TestCase):
         self.assertNotEqual(prompt_context.once(data, 'autonomy', changed), changed)
 
     def test_no_conversation_or_errors_send_the_full_text(self):
-        for data in ({}, {'session_id': '../x'}, {'session_id': 's', 'agent_id': 'a/b'}, None, {'session_id': 5}):
+        for data in ({}, {'session_id': '../x'}, None, {'session_id': 5}):
             self.assertEqual(prompt_context.once(data, 'autonomy', RULES), RULES, data)
             self.assertEqual(prompt_context.once(data, 'autonomy', RULES), RULES, data)
         self.assertEqual(prompt_context.once({'session_id': 's'}, 'other', RULES), RULES)
@@ -112,39 +113,72 @@ class HookTests(OnceTests):
         self.assertTrue(again.startswith('Codex level 1 of 5'))
         self.assertNotIn('codex-lane', again)
 
-    def install(self, *scripts):
-        groups = [{'hooks': [{'type': 'command', 'command': f'/usr/bin/python3 /x/{name} hook'}]} for name in scripts]
-        paths.CLAUDE.mkdir(parents=True, exist_ok=True)
-        (paths.CLAUDE / 'settings.json').write_text(json.dumps({'hooks': {'UserPromptSubmit': groups}}))
+    def start(self, source, agent='claude', env=None):
+        """SessionStart as main() runs it: the text, then the marks."""
+        data = {'session_id': 's1', 'hook_event_name': 'SessionStart', 'source': source}
+        text, rules = claude_hooks.session_start_context(data, agent, env=env or {})
+        for kind, rule in rules.items():
+            prompt_context.mark(data, kind, rule)
+        return text
 
-    def test_session_start_after_compact_resends_the_rules(self):
-        self.install('autonomy.py', 'codex_level.py')
+    def codex(self, data):
+        return json.loads(codex_level.hook_output(data, {}, mock.Mock()))['hookSpecificOutput']['additionalContext']
+
+    def test_session_start_after_compact_resends_the_saved_rules(self):
         data = {'session_id': 's1', 'prompt': 'go'}
         self.autonomy(data)
+        self.codex(data)
         self.assertLess(len(self.autonomy(data)), 300)
-        start = {'session_id': 's1', 'hook_event_name': 'SessionStart', 'source': 'compact'}
-        text = claude_hooks.session_start_context(start, 'claude', env={})
+        with mock.patch.object(autonomy, 'hook_output', side_effect=AssertionError('no hook runs at SessionStart')), \
+                mock.patch.object(codex_level, 'hook_output', side_effect=AssertionError):
+            text = self.start('compact')
         self.assertIn('Choose a reviewer by the risk', text)
         self.assertIn('codex-lane', text)
         self.assertLess(len(self.autonomy(data)), 300, 'the compact text counts as sent')
+        self.assertLess(len(self.codex(data)), 300)
+
+    def test_session_start_sends_only_rules_this_conversation_got(self):
+        self.codex({'session_id': 's1'})
+        text = self.start('compact')
+        self.assertIn('codex-lane', text)
+        self.assertNotIn('Choose a reviewer', text)
+        claude_hooks.session_start_context({'session_id': 's1', 'source': 'compact'}, 'claude', env={})
+        self.assertEqual(self.start('compact'), '', 'the first compact output was not marked, so nothing is saved')
 
     def test_session_start_clear_or_resume_resends_on_the_next_prompt(self):
-        self.install('autonomy.py')
         data = {'session_id': 's1', 'prompt': 'go'}
         self.autonomy(data)
         for source in ('clear', 'resume', 'startup'):
-            text = claude_hooks.session_start_context({'session_id': 's1', 'source': source}, 'claude', env={})
-            self.assertEqual(text, '')
+            self.assertEqual(self.start(source), '')
             self.assertIn('Choose a reviewer', self.autonomy(data), source)
 
-    def test_session_start_skips_rules_whose_hook_is_not_installed(self):
-        self.install('codex_level.py')
-        text = claude_hooks.session_start_context({'session_id': 's1', 'source': 'compact'}, 'claude', env={})
-        self.assertIn('codex-lane', text)
-        self.assertNotIn('Choose a reviewer', text)
-        codex = claude_hooks.session_start_context({'session_id': 's2', 'source': 'compact'}, 'codex', env={})
-        self.assertIn('Choose a reviewer', codex)
-        self.assertNotIn('codex-lane', codex)
+    def run_main(self, data, argv=('claude_hooks.py',), out=None):
+        import io
+        out = out or io.StringIO()
+        with mock.patch.object(claude_hooks.sys, 'argv', list(argv)), \
+                mock.patch.object(claude_hooks.sys, 'stdin', io.StringIO(json.dumps(data))), \
+                mock.patch.object(claude_hooks, 'capture'), mock.patch('sys.stdout', out):
+            claude_hooks.main()
+        return out.getvalue()
+
+    def test_main_marks_only_after_printing(self):
+        data = {'session_id': 's1', 'prompt': 'go'}
+        self.autonomy(data)
+        start = {'session_id': 's1', 'hook_event_name': 'SessionStart', 'source': 'compact'}
+        broken = mock.Mock()
+        broken.write.side_effect = BrokenPipeError
+        self.run_main(start, out=broken)
+        self.assertIn('Choose a reviewer', self.autonomy(data), 'nothing was printed, so the next prompt has it all')
+        self.autonomy(data)
+        printed = json.loads(self.run_main(start))['hookSpecificOutput']['additionalContext']
+        self.assertIn('Choose a reviewer', printed)
+        self.assertLess(len(self.autonomy(data)), 300)
+
+    def test_browser_note_failure_keeps_the_rules(self):
+        self.autonomy({'session_id': 's1', 'prompt': 'go'})
+        with mock.patch.dict('sys.modules', {'agent_browser_cli': None}):
+            text = self.start('compact', env={'TETHER_CDP_URL': 'ws://x'})
+        self.assertIn('Choose a reviewer', text)
 
 
 if __name__ == '__main__':
