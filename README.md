@@ -185,6 +185,18 @@ The editor uses Tether sign-in. Docker file downloads and saves require signed c
 Tether blocks secret files and Share files. External edits go to a separate `(Tether edit)` copy.
 Phones get the desktop editor, because Community Edition opens its mobile editor for viewing only.
 
+## Panel browser in a container (optional)
+
+When Docker and the `lscr.io/linuxserver/chromium` image are present, the panel browser runs in a container and streams as live video.
+Tether serves the live view on its own port (7698 by default, `MOBILE_TMUX_BROWSER_LIVE_PORT`), so the page in it cannot reach Tether.
+Without that port, the panel shows still pictures as before. Set `MOBILE_TMUX_BROWSER_SELKIES=0` to keep the local Chromium.
+
+If you reach Tether through Tailscale Serve, publish the port too:
+
+```sh
+tailscale serve --bg --https=7698 http://127.0.0.1:7698
+```
+
 ## Usage reports
 
 Claude Code and Antigravity supply usage through status-line hooks.
