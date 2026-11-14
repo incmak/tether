@@ -117,62 +117,92 @@ def codex_has_own_instructions():
 
 
 WRITE_FLAGS = {'--full-auto', '--dangerously-bypass-approvals-and-sandbox', '--yolo'}
+UNSURE = object()
 
 
-def _sandbox_arg(args):
-    """The sandbox mode the args set, or None. The last value wins, as in Codex."""
-    mode = None
+def _option(args, short, long):
+    """Every value of an option, in order: `-s X`, `-sX`, `--sandbox X` and `--sandbox=X`."""
+    values = []
     for i, arg in enumerate(args):
-        if arg in WRITE_FLAGS:
-            mode = 'workspace-write'
-        elif arg in ('-s', '--sandbox') and i + 1 < len(args):
-            mode = args[i + 1]
-        elif arg.startswith('--sandbox='):
-            mode = arg.partition('=')[2]
-        elif arg == '-c' and i + 1 < len(args) and args[i + 1].replace(' ', '').startswith('sandbox_mode='):
-            mode = args[i + 1].partition('=')[2].strip().strip('"\'')
-    return mode
+        if arg in (short, long) and i + 1 < len(args):
+            values.append(args[i + 1])
+        elif long and arg.startswith(long + '='):
+            values.append(arg[len(long) + 1:])
+        elif short and arg.startswith(short) and len(arg) > len(short) and not arg.startswith('--'):
+            values.append(arg[len(short):])
+    return values
 
 
-def _trust_keys(cwd):
-    """The folders Codex looks up in [projects]: the folder, its git root and, for a worktree, the main checkout."""
-    keys = [cwd]
+def _mode(value):
+    """True for a writable sandbox mode, False for read-only, UNSURE for anything else."""
+    value = value.strip().strip('"\'') if isinstance(value, str) else value
+    if value == 'read-only':
+        return False
+    return True if value in ('workspace-write', 'danger-full-access') else UNSURE
+
+
+def _toml(path):
+    try:
+        import tomllib
+        return tomllib.loads(Path(path).read_text())
+    except FileNotFoundError:
+        return {}
+    except (ImportError, OSError, ValueError):
+        return None
+
+
+def _repo_root(cwd):
+    """The trust root Codex uses: the main checkout of a repository, also for a linked worktree."""
     try:
         out = subprocess.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel',
                               '--git-common-dir'], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return keys
-    if out.returncode == 0:
-        lines = out.stdout.splitlines()
-        if lines:
-            keys.append(lines[0])
-        if len(lines) > 1 and Path(lines[1]).name == '.git':
-            keys.append(str(Path(lines[1]).parent))
-    return keys
+        return None
+    lines = out.stdout.splitlines() if out.returncode == 0 else []
+    if len(lines) < 2:
+        return None
+    common = Path(lines[1])
+    return str(common.parent) if common.name == '.git' else lines[0]
 
 
 def codex_writable(args, cwd=None):
-    """True when Codex will start with a sandbox that allows extra writable folders. Codex runs read-only in a folder
-    it does not trust, and then exits with code 1 when it gets --add-dir (Codex 0.166)."""
-    mode = _sandbox_arg(args)
-    if mode is None:
-        try:
-            import tomllib
-            import paths
-            config = tomllib.loads((Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml').read_text())
-        except (ImportError, OSError, ValueError):
-            config = {}
-        mode = config.get('sandbox_mode') if isinstance(config.get('sandbox_mode'), str) else None
-        if mode is None:
-            for i, arg in enumerate(args):
-                if arg in ('-C', '--cd') and i + 1 < len(args):
-                    cwd = args[i + 1]
-            folder = os.path.realpath(cwd or os.getcwd())
-            known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
-            trusted = any(isinstance(known.get(key), dict) and known[key].get('trust_level') == 'trusted'
-                          for key in _trust_keys(folder))
-            mode = 'workspace-write' if trusted else 'read-only'
-    return mode != 'read-only'
+    """True only when Codex will surely start with a writable workspace. Codex 0.166 exits with code 1 when it gets
+    --add-dir and the start folder is not writable (tui/src/additional_dirs.rs). The order follows Codex:
+    sandbox flags, then -c sandbox_mode, then config.toml, then the folder trust (core/src/config/permissions.rs:
+    a [projects] entry with any trust_level gives the workspace profile; no entry gives read-only).
+    Profiles and permission profiles are not modelled: then the answer is False."""
+    if any(arg in WRITE_FLAGS for arg in args):
+        return True
+    for value in reversed(_option(args, '-s', '--sandbox')):
+        return _mode(value) is True
+    if _option(args, '-p', '--profile'):
+        return False
+    for value in reversed(_option(args, '-c', '--config')):
+        key, _, setting = value.partition('=')
+        if key.strip() == 'sandbox_mode':
+            return _mode(setting) is True
+        if key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.'):
+            return False
+    import paths
+    config = _toml(Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml')
+    if config is None or any(key in config for key in ('profile', 'default_permissions', 'permissions')):
+        return False
+    folder = (_option(args, '-C', '--cd') or [None])[-1]
+    start = cwd or os.getcwd()
+    folder = os.path.join(start, folder) if folder else start
+    root = _repo_root(folder)
+    for place in [folder, root] if root else [folder]:  # a project .codex/config.toml can set its own sandbox
+        layer = _toml(Path(place) / '.codex' / 'config.toml')
+        if layer is None or any(key in layer for key in ('sandbox_mode', 'profile', 'default_permissions', 'permissions')):
+            return False
+    if 'sandbox_mode' in config:
+        return _mode(config['sandbox_mode']) is True
+    known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
+    for key in [folder, root] if root else [folder]:
+        if key in known:
+            entry = known[key]
+            return isinstance(entry, dict) and entry.get('trust_level') in ('trusted', 'untrusted')
+    return False
 
 
 def codex_folders(args=()):

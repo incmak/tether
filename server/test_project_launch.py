@@ -46,10 +46,11 @@ class UnitTests(unittest.TestCase):
     def test_writable_follows_codex_trust(self):
         folder = self.temp / 'work'
         folder.mkdir()
-        self.assertFalse(project_launch.codex_writable([], str(folder)))  # no config: untrusted, read-only
-        self.config(f'[projects."{folder}"]\ntrust_level = "trusted"\n')
-        self.assertTrue(project_launch.codex_writable([], str(folder)))
-        self.config(f'[projects."{folder}"]\ntrust_level = "untrusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(folder)))  # no config: no entry, read-only
+        for level, writable in (('trusted', True), ('untrusted', True)):  # any trust level gives the workspace profile
+            self.config(f'[projects."{folder}"]\ntrust_level = "{level}"\n')
+            self.assertEqual(project_launch.codex_writable([], str(folder)), writable, level)
+        self.config(f'[projects."{folder}"]\n')
         self.assertFalse(project_launch.codex_writable([], str(folder)))
 
     def test_writable_uses_the_git_root_and_the_main_checkout(self):
@@ -61,23 +62,40 @@ class UnitTests(unittest.TestCase):
         subprocess.run([*git, '-C', str(repo), 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
         tree = self.temp / 'tree'
         subprocess.run([*git, '-C', str(repo), 'worktree', 'add', '-q', str(tree)], check=True)
-        self.config(f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n')
+        trusted = f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n'
+        self.config(trusted)
         self.assertTrue(project_launch.codex_writable([], str(sub)))
         self.assertTrue(project_launch.codex_writable([], str(tree)))
         self.assertFalse(project_launch.codex_writable([], str(self.temp)))
+        self.config(trusted + f'[projects."{sub}"]\n')  # the first entry found wins, as in Codex
+        self.assertFalse(project_launch.codex_writable([], str(sub)))
+        self.config(trusted)
+        (repo / '.codex').mkdir()
+        (repo / '.codex' / 'config.toml').write_text('sandbox_mode = "read-only"\n')
+        self.assertFalse(project_launch.codex_writable([], str(sub)))
 
     def test_writable_sandbox_args_and_config_win(self):
         folder = str(self.temp)
-        for args in (['-s', 'workspace-write'], ['--sandbox=danger-full-access'], ['--full-auto'], ['--yolo'],
-                     ['-c', 'sandbox_mode="workspace-write"']):
+        for args in (['-s', 'workspace-write'], ['-sworkspace-write'], ['--sandbox=danger-full-access'], ['--full-auto'],
+                     ['--yolo'], ['-c', 'sandbox_mode="workspace-write"'], ['--config=sandbox_mode=workspace-write']):
             self.assertTrue(project_launch.codex_writable(args, folder), args)
-        self.config(f'sandbox_mode = "workspace-write"\n[projects."{folder}"]\ntrust_level = "untrusted"\n')
+        for args in (['-sread-only'], ['--config', 'sandbox_mode=read-only'], ['-csandbox_mode=read-only'],
+                     ['-s', 'read-only', '-c', 'sandbox_mode=workspace-write'], ['-p', 'safe'], ['--profile=safe'],
+                     ['-c', 'sandbox_mode=other']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)
+        self.config(f'sandbox_mode = "workspace-write"\n')
         self.assertTrue(project_launch.codex_writable([], folder))
         self.assertFalse(project_launch.codex_writable(['-s', 'read-only'], folder))
         self.config('sandbox_mode = "read-only"\n')
         self.assertFalse(project_launch.codex_writable([], folder))
+        self.config('default_permissions = "mine"\n')
+        self.assertFalse(project_launch.codex_writable([], folder))
+        self.config('not toml [')
+        self.assertFalse(project_launch.codex_writable([], folder))
         self.config(f'[projects."{folder}"]\ntrust_level = "trusted"\n')
-        self.assertFalse(project_launch.codex_writable(['-C', str(self.temp / 'elsewhere')], '/'))
+        self.assertTrue(project_launch.codex_writable([], folder))
+        for args in (['-C', 'elsewhere'], ['--cd=elsewhere'], ['-Celsewhere']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)
 
     def test_writable_read_only_codex_gets_no_folders(self):
         with mock.patch('os.getcwd', return_value=str(self.temp)):
