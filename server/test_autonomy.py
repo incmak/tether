@@ -15,6 +15,7 @@ import advisor
 import approval
 import codex_level
 import decisions
+import lessons
 import paths
 import model_catalog
 import server
@@ -256,25 +257,33 @@ class Hook(Base):
         autonomy.set_global(1)
         autonomy.set_project(PID, True, 3)
         decisions.record(PID, 'Choose?', 'Default')
-        tmux = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=PID + '\n'))
+        tmux = mock.Mock(side_effect=lambda *args: SimpleNamespace(returncode=0,
+                         stdout='' if args[-1] == '#{@tether_helper}' else PID + '\n'))
         out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/tmux', 'TMUX_PANE': '%7'}, tmux))
         self.assertEqual(out, {'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext':
                          autonomy.rules(autonomy.resolve(PID), PID) + '\n\n' + autonomy.reviewer_rules(reviewers())}})
-        tmux.assert_called_once_with('display-message', '-p', '-t', '%7', '#{@project}')
+        tmux.assert_any_call('display-message', '-p', '-t', '%7', '#{@project}')
+        tmux.assert_any_call('display-message', '-p', '-t', '%7', '#{@tether_helper}')
 
     def test_codex_full_context_size_and_no_claude_only_features(self):
         autonomy.set_global(5)
         (paths.TETHER / 'projects' / PID).mkdir(parents=True)
         for index in range(3):
             decisions.record(PID, f'Question {index}?', f'Answer {index}.')
+        for index in range(8):
+            lessons.add(PID, 'When case ' + str(index) + ' appears, ' + 'x' * 129, 'avoid', 'user', 'codex', force_new=True)
         models = [{'slug': 'gpt-new', 'name': 'GPT New', 'efforts': ['high', 'ultra']}]
         with mock.patch.object(codex_level, 'models', return_value=models):
             advisor.write(advisor.DEFAULT)
             autonomy.set_reviewers(reviewers(**{tier: {'agent': 'codex', 'model': 'latest', 'effort': 'ultra'}
                                                 for tier in autonomy.TIERS}))
-            tmux = mock.Mock(return_value=SimpleNamespace(returncode=0, stdout=PID))
+            tmux = mock.Mock(side_effect=lambda *args: SimpleNamespace(returncode=0,
+                             stdout='' if args[-1] == '#{@tether_helper}' else PID))
             out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/fixture', 'TMUX_PANE': '%7'}, tmux, agent='codex'))
         text = out['hookSpecificOutput']['additionalContext']
+        self.assertEqual(len(lessons.for_prompt(PID)), 8)
+        self.assertEqual([len(row['text']) for row in lessons.for_prompt(PID)], [150] * 8)
+        self.assertIn('Lessons from past feedback', text)
         self.assertLess(len(text), 9000)
         self.assertIn('Autonomy level 5', text)
         self.assertIn('second advisor (Codex, GPT New (latest), high effort)', text)
@@ -519,7 +528,7 @@ class Http(Base):
         handler.deny = mock.Mock(return_value=False)
         handler.respond = mock.Mock()
         with mock.patch.object(autonomy, 'post') as post:
-            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions'):
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons'):
                 handler.path = route
                 handler.headers.update({'Origin': 'http://phone.test', 'X-Codex-Mobile': '1'})
                 handler.deny.return_value = False
@@ -541,7 +550,7 @@ class Http(Base):
         handler.deny = mock.Mock(return_value=False)
         handler.respond = mock.Mock()
         with mock.patch.object(autonomy, 'get') as get:
-            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions'):
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons'):
                 handler.path = route
                 self.assertTrue(autonomy.handles(route + '?project=' + PID))
                 handler.deny.return_value = False
@@ -619,6 +628,137 @@ class LevelApproval(PasskeyCase):
         autonomy.set_global(0)
         self.assertEqual(self.post({'level': 2}).status, 403)
         self.assertEqual(self.post({'level': 2, 'approval': proof}).status, 200)
+
+
+class Learning(Base):
+    def setUp(self):
+        super().setUp()
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+
+    def add(self, text='When checks fail, read the exact output.', kind='avoid'):
+        return lessons.add(PID, text, kind, 'user', 'codex', force_new=True)['lesson']
+
+    def test_every_level_learns_and_keeps_order_and_agent_memory(self):
+        self.add()
+        self.add('When checks pass, preserve the useful evidence.', 'keep')
+        for agent in ('claude', 'codex'):
+            for level in range(6):
+                text = autonomy.rules({'level': level, 'source': 'project'}, PID, agent, prompt='wrong again?')
+                self.assertIn('Learn from feedback.', text)
+                self.assertIn('- Avoid: When checks fail', text)
+                self.assertIn('- Keep doing: When checks pass', text)
+                self.assertEqual('Do this as well as your own memory.' in text, agent == 'claude')
+                needles = [autonomy.RULES[level], 'Learn from feedback.', 'This message may correct',
+                           autonomy.LESSONS, autonomy.SAFETY, autonomy.LAST]
+                self.assertEqual([text.index(n) for n in needles], sorted(text.index(n) for n in needles))
+
+    def test_off_helper_no_project_and_missing_project_have_no_learning(self):
+        for options in ({'helper': True, 'pid': PID}, {'pid': None}, {'pid': '000000000000'}):
+            text = autonomy.rules({'level': 5, 'source': 'global'}, **options)
+            self.assertNotIn('Learn from feedback.', text)
+        lessons.set_enabled(False)
+        self.assertNotIn('Learn from feedback.', autonomy.rules({'level': 5, 'source': 'global'}, PID))
+
+    def test_nudges_only_for_short_human_prompts_and_review_exception(self):
+        def text(prompt):
+            return autonomy.rules({'level': 2, 'source': 'global'}, PID, prompt=prompt)
+        for prompt in ('WRONG', 'not what i asked', 'undo', 'revert', 'awful', 'terrible', 'again?',
+                       'you broke', 'that broke', 'why did you'):
+            self.assertIn('This message may correct', text(prompt))
+        for prompt in ('perfect', 'EXACTLY RIGHT', 'exactly what', 'great job', 'well done', 'love it', "that's it"):
+            self.assertIn('If this message confirms a choice', text(prompt))
+        for prompt in ('[Tether status] wrong', 'You are the advisor wrong', 'wrong' + 'x' * 300, 'Do the task.'):
+            self.assertNotIn('This message may correct', text(prompt))
+            self.assertNotIn('If this message confirms a choice', text(prompt))
+        self.assertIn('--avoid --source reviewer.', text('[Tether review] wrong'))
+        for index in range(9):
+            self.add(f'When case {index} occurs, inspect its exact output.')
+        self.assertIn(f'More lessons: {lessons.path(PID)}.', text(''))
+
+    def test_hook_reads_prompt_and_helper_metadata(self):
+        def tmux(*args):
+            return SimpleNamespace(returncode=0, stdout='helper' if args[-1] == '#{@tether_helper}' else PID)
+        out = json.loads(autonomy.hook_output({'prompt': 'wrong'}, {'TMUX': '/fixture', 'TMUX_PANE': '%1'}, tmux))
+        self.assertNotIn('Learn from feedback.', out['hookSpecificOutput']['additionalContext'])
+        tmux = mock.Mock(side_effect=lambda *args: SimpleNamespace(returncode=0,
+                         stdout='' if args[-1] == '#{@tether_helper}' else PID))
+        out = json.loads(autonomy.hook_output({'prompt': 'wrong'}, {'TMUX': '/fixture', 'TMUX_PANE': '%1'}, tmux))
+        self.assertIn('This message may correct', out['hookSpecificOutput']['additionalContext'])
+
+    def test_api_learning_keys_and_all_user_actions(self):
+        self.assertEqual(autonomy.state()['learning'], {'enabled': True, 'global': []})
+        self.assertEqual(autonomy.state(PID)['learning'],
+                         {'enabled': True, 'global': [], 'lessons': [], 'path': str(lessons.path(PID))})
+        row = self.add()
+        route = autonomy.PATH + '/lessons'
+        self.assertTrue(autonomy.handles(route))
+        handler = Handler(route, {'project': PID, 'edit': row['id'], 'text': 'When tests fail, read every error.'})
+        autonomy.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        self.assertEqual(handler.body['learning']['lessons'][0]['text'], 'When tests fail, read every error.')
+        for body in ({'enabled': False}, {'enabled': True}, {'project': PID, 'remove': row['id']}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 200, handler.body)
+        for body in ({'project': PID, 'remove': row['id']}, {'remove_global': row['id']},
+                     {'project': PID, 'edit': row['id'], 'text': 'When tests fail, read every error.'},
+                     {'project': PID, 'promote': row['id']}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['error']), (404, 'That lesson is gone.'))
+        for body in ({'enabled': 'yes'}, {'enabled': True, 'remove_global': row['id']},
+                     {'project': PID, 'add': 'When tests fail, read every error.'},
+                     {'project': '../x', 'remove': row['id']}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 400, handler.body)
+        row = self.add()
+        lessons.promote(PID, row['id'])
+        handler = Handler(route, {'remove_global': row['id']})
+        autonomy.post(handler)
+        self.assertEqual((handler.status, handler.body['learning']['global']), (200, []))
+
+    def test_recheck_and_unavailable_reviewer(self):
+        with mock.patch.object(model_catalog, 'recheck') as recheck:
+            handler = Handler(body={'catalog': 'recheck'})
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 200)
+            recheck.assert_called_once_with()
+        for available in (False, None, True):
+            with mock.patch.object(model_catalog, 'claude', return_value={
+                    'models': [{'slug': 'claude-mythos-5-2', 'available': available}]}):
+                choice = reviewers(normal={'agent': 'claude', 'model': 'claude-mythos-5-2'})
+                if available is False:
+                    with self.assertRaisesRegex(autonomy.LevelError, 'That model is not available for your account.'):
+                        autonomy.set_reviewers(choice)
+                else:
+                    autonomy.set_reviewers(choice)
+
+
+@unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
+class LessonApproval(PasskeyCase):
+    def test_promotion_requires_bound_passkey_and_preserves_source(self):
+        (paths.TETHER / 'projects' / PID).mkdir(parents=True)
+        row = lessons.add(PID, 'When checks fail, read every error.', 'avoid', 'reviewer', 'codex')['lesson']
+        payload = {'project': PID, 'promote': row['id']}
+        route = autonomy.PATH + '/lessons'
+        with mock.patch.object(model_catalog.shutil, 'which', return_value=None), \
+                mock.patch.object(paths, 'CACHE', self.root / 'cache'):
+            handler = PasskeyHandler(route, payload)
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['approval']), (403, 'no-passkey'))
+            self.assertEqual(len(lessons.entries(PID)), 1)
+            self.assertFalse(lessons.global_entries())
+            self.add()
+            handler = PasskeyHandler(route, payload)
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['approval']), (403, 'required'))
+            proof = self.assertion('lesson-promote', payload)
+            handler = PasskeyHandler(route, dict(payload, approval=proof))
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 200, handler.body)
+            self.assertEqual(lessons.global_entries()[0]['source'], 'reviewer')
+            self.assertEqual(lessons.entries(PID), [])
 
 
 if __name__ == '__main__':

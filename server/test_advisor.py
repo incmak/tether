@@ -106,6 +106,16 @@ class Settings(Base):
             self.assertIn('Claude, Opus 6.1 (latest), high effort',
                           autonomy.rules({'level': 5, 'source': 'global'}))
 
+    def test_unavailable_slug_has_specific_error_but_unchecked_is_accepted(self):
+        for available in (False, None, True):
+            with patch.object(model_catalog, 'claude', return_value={
+                    'models': [{'slug': 'claude-mythos-5-2', 'available': available}]}):
+                if available is False:
+                    with self.assertRaisesRegex(advisor.LevelError, 'That model is not available for your account.'):
+                        advisor.write(choices(model='claude-mythos-5-2'))
+                else:
+                    advisor.write(choices(model='claude-mythos-5-2'))
+
     def test_claude_choices_round_trip_with_private_permissions(self):
         old_umask = os.umask(0)
         self.addCleanup(os.umask, old_umask)

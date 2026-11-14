@@ -144,3 +144,27 @@
 .helper-sheet .segmented label { flex: 1 1 0; min-width: 0; }
 .helper-sheet .segmented span { padding: 6px 4px; text-align: center; line-height: 1.2; }
 .helper-sheet .segmented.effort-levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); }
+.helper-option:has(input:disabled) { cursor: not-allowed; }
+.helper-option:has(input:disabled) strong { color: var(--muted); }
+.helper-access { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 10px; }
+.helper-access .setting-note { margin: 0; }
+.helper-access button { min-height: var(--control); }
+
+/* Learning from feedback: lessons agents saved (Learning.tsx) */
+.lesson-list { list-style: none; margin: 8px 0 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.lesson { display: flex; align-items: flex-start; gap: 8px; padding: 10px 8px 10px 14px; }
+.lesson + .lesson { border-top: 1px solid var(--line); }
+.lesson-text { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+.lesson-text strong { font-size: 15px; font-weight: 500; line-height: 1.45; overflow-wrap: anywhere; }
+.lesson-text small { color: var(--muted); font-size: 12px; }
+.lesson-text .lesson-hint { color: var(--text); }
+.lesson-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.lesson-kind, .lesson-flag { font-size: 11px; font-weight: 600; line-height: 1; padding: 4px 7px; border-radius: 999px; background: var(--hover); }
+.lesson-avoid { color: var(--error); }
+.lesson-keep { color: var(--accent); }
+.lesson-flag { color: var(--muted); }
+.lesson-stuck { color: var(--attention); }
+.lesson-actions { display: flex; flex: none; }
+.lesson-edit { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; padding-right: 6px; }
+.lesson-edit textarea { width: 100%; font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); resize: vertical; }
+.lesson-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }

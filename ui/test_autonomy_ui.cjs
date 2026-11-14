@@ -23,8 +23,9 @@ let autonomy = { levels, global: 2, level: 2, source: 'global', project: null, r
   models: { claude: [{ slug: 'opus', name: 'Opus' }, { slug: 'claude-fable-5-2', name: 'Fable 5.2' }], codex: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { slug: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium'] }] },
   efforts: ['low', 'medium', 'high', 'xhigh', 'max'], advisor: advisorDefault(), latest: { claude: 'Fable 5.2', codex: 'GPT-6.1 Sol' },
   catalog: {
-    claude: { latest: { launch: 'fable', slug: 'claude-fable-5-2', name: 'Fable 5.2' }, models: [{ slug: 'claude-fable-5-2', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { slug: 'claude-opus-5-5', name: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }], new_families: [], source: 'claude-code', changed: { from: 'Fable 5.1', to: 'Fable 5.2', at: now - 3600 } },
-    codex: { latest: { launch: 'gpt-6.1-sol', slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }, models: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { slug: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium'] }], new_families: [], source: 'codex', changed: null } } }
+    claude: { latest: { launch: 'fable', slug: 'claude-fable-5-2', name: 'Fable 5.2' }, models: [{ slug: 'claude-fable-5-2', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { slug: 'claude-mythos-5-2', name: 'Mythos 5.2', family: 'mythos', available: false, access: 'no-access', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { slug: 'claude-opus-5-5', name: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }], new_families: [], source: 'claude-code', changed: { from: 'Fable 5.1', to: 'Fable 5.2', at: now - 3600 } },
+    codex: { latest: { launch: 'gpt-6.1-sol', slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }, models: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { slug: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium'] }], new_families: [], source: 'codex', changed: null } },
+  learning: { enabled: true, global: [{ id: 'aaaa1111', text: 'When you change UI, check it at 390 px before you report done.', kind: 'avoid', source: 'user', agent: 'codex', hits: 3, created: now - 86400 * 3, last_hit: now - 3600, stuck: true }] } }
 const fixture = {
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
@@ -103,6 +104,10 @@ async function main() {
             if (body.action === 'hook') setup = { ...setup, hook: { ...setup.hook, state: 'ok' } }
             if (body.action === 'ping') setup = { ...setup, ping: { ...setup.ping, state: 'on', preset: body.preset, fields: body.fields, base_url: body.base_url } }
             return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
+          }
+          if (endpoint === 'autonomy/lessons') {
+            const learning = { ...autonomy.learning, ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}), global: autonomy.learning.global.filter(item => item.id !== body.remove_global) }
+            autonomy = { ...autonomy, learning }; return route.fulfill({ json: autonomy })
           }
           if (endpoint === 'autonomy/decisions') return route.fulfill({ json: { entry: { id: 'abcd1234', date: '2026-11-12', question: body.question, answer: body.answer }, project: 'e89e1e21b318' } })
           if (endpoint.startsWith('attention/')) return route.fulfill({ json: { ask: null, waiting: 1 } })
@@ -238,6 +243,13 @@ async function main() {
       check(`${at} five helper rows in two groups`, await page.locator('.helper-row').count() === 5 && await page.getByRole('heading', { name: 'Before they ask you' }).isVisible() && await page.getByRole('heading', { name: 'After they finish' }).isVisible())
       check(`${at} advisor row names the concrete model`, (await advisorRow.innerText()).includes('Claude · Latest (Fable 5.2) · high effort'), await advisorRow.innerText())
       check(`${at} second opinion row: Codex latest`, (await row('Second opinion').innerText()).includes('Codex · Latest (GPT-6.1 Sol)'))
+      check(`${at} access notice names Mythos`, await page.getByText('Mythos 5.2: your account has no access.', { exact: false }).isVisible())
+      const rechecks = () => posts.filter(post => post.endpoint === 'autonomy' && post.body.catalog)
+      let mark0 = posts.length
+      const recheckMark = rechecks().length
+      await page.getByRole('button', { name: 'Check access again' }).click()
+      await settle(rechecks, recheckMark)
+      check(`${at} check access posts recheck`, posts.slice(mark0).some(post => post.body.catalog === 'recheck'))
       check(`${at} release notice shows`, await page.getByText('Fable 5.2 replaced Fable 5.1').isVisible())
       check(`${at} no page overflow (helpers)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-helpers-${width}.png`) })
@@ -245,6 +257,7 @@ async function main() {
       await sheet.waitFor()
       check(`${at} sheet: latest names model and is checked`, await sheet.getByRole('radio', { name: /Latest: Fable 5.2/ }).isChecked())
       check(`${at} sheet: pinned versions, no bare aliases`, await sheet.getByRole('radio', { name: /^Opus 5.5/ }).count() === 1 && await sheet.getByRole('radio', { name: /^Opus Stays/ }).count() === 0)
+      check(`${at} sheet: model without access is disabled and says why`, await sheet.getByRole('radio', { name: /^Mythos 5.2/ }).isDisabled() && await sheet.getByText('Your account has no access.', { exact: false }).isVisible())
       check(`${at} no page overflow (advisor sheet)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-advisor-sheet-${width}.png`) })
       let mark = advisorPosts().length
@@ -291,6 +304,20 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `settings-reviewer-sheet-${width}.png`) })
       await sheet.getByRole('button', { name: 'Done' }).click()
       await sheet.waitFor({ state: 'hidden' })
+      if (await search.count()) await search.fill('learning')
+      const learnSwitch = page.getByRole('switch', { name: /Learn from your feedback/ })
+      await learnSwitch.waitFor()
+      await learnSwitch.scrollIntoViewIfNeeded()
+      check(`${at} learning is on by default`, await learnSwitch.isChecked())
+      check(`${at} global lesson shows kind and did-not-stick flag`, await page.locator('.lesson').first().getByText('Avoid', { exact: true }).isVisible() && await page.getByText('Did not stick').first().isVisible())
+      check(`${at} no page overflow (learning)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `settings-learning-${width}.png`) })
+      mark0 = posts.length
+      await learnSwitch.click()
+      await page.waitForTimeout(300)
+      check(`${at} switch posts enabled false`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.enabled === false))
+      await learnSwitch.click()
+      await page.waitForTimeout(300)
       const calls = await page.evaluate(() => window.__webauthn)
       check(`${at} every passkey call asks for user verification with byte challenges`, calls.length >= 4 && calls.every(call => call.uv === 'required' && call.challenge === 32 && call.ids.every(Boolean)), JSON.stringify(calls))
       await page.keyboard.press('Escape').catch(() => {})

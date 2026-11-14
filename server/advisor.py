@@ -42,7 +42,10 @@ def valid_choice(agent, model, effort):
     if not isinstance(model, str) or not codex_level.SLUG.fullmatch(model) or not isinstance(effort, str):
         return False
     if agent == 'claude':
-        return (model in ('latest', *(row['slug'] for row in model_catalog.claude()['models']),
+        rows = model_catalog.claude()['models']
+        if any(row['slug'] == model and (row.get('available') is False or row.get('access') == 'checking') for row in rows):
+            return False
+        return (model in ('latest', *(row['slug'] for row in rows),
                          *(slug for slug, _ in delegate.CLAUDE_MODELS))
                 and effort in ('auto', *delegate.EFFORTS))
     if agent != 'codex':
@@ -90,6 +93,10 @@ def write(settings):
     # HTTP clients do not need to send the on-disk format version.
     if isinstance(settings, dict) and set(settings) == {'main', 'second'}:
         settings = dict(settings, version=2)
+    if isinstance(settings, dict):
+        for choice in (settings.get('main'), settings.get('second')):
+            if isinstance(choice, dict):
+                require_available(choice.get('agent'), choice.get('model'))
     if not _valid(settings):
         raise LevelError(400, 'Choose an advisor, a model and an effort.')
     _write(path(), json.dumps(settings) + '\n')
@@ -112,3 +119,9 @@ def second_opinion(settings):
 def latest_names():
     return {agent: value['latest']['name'] if value['latest'] else None
             for agent, value in model_catalog.catalog().items()}
+
+
+def require_available(agent, model):
+    if agent == 'claude' and any(row['slug'] == model and (row.get('available') is False or row.get('access') == 'checking')
+                                 for row in model_catalog.claude()['models']):
+        raise LevelError(400, 'That model is not available for your account.')

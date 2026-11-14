@@ -5,6 +5,7 @@ import type { Api } from './api'
 import { usePolling } from './hooks'
 import { withApproval } from './approval'
 import { SavedAnswers } from './AutonomySetup'
+import { ProjectLessons } from './Learning'
 import type { SavedAnswer } from './AutonomySetup'
 
 // Autonomy level and reviewer choice (server: autonomy.py). A Claude Code UserPromptSubmit hook gives each prompt the
@@ -14,7 +15,16 @@ export type Tier = 'critical' | 'normal' | 'light'
 export interface Reviewer { agent: 'auto' | 'claude' | 'codex' | 'none'; model: string; effort: string }
 export interface HelperChoice { agent: 'claude' | 'codex' | 'none'; model: string; effort: string }
 export interface Advisor { main: HelperChoice; second: HelperChoice }
-export interface CatalogModel { slug: string; name: string; efforts: string[] }
+export interface CatalogModel {
+  slug: string; name: string; efforts: string[]
+  // Claude rows only. available: false = this account cannot use it; null = Tether still checks.
+  family?: string; available?: boolean | null; access?: 'ok' | 'no-access' | 'checking' | 'error'
+}
+export interface Lesson {
+  id: string; text: string; kind: 'avoid' | 'keep'; source: 'user' | 'reviewer' | 'agent'; agent: string
+  hits: number; created: number; last_hit: number; proposed_global?: boolean; stuck?: boolean
+}
+export interface Learning { enabled: boolean; global: Lesson[]; lessons?: Lesson[]; path?: string }
 export interface ProviderCatalog {
   latest: { launch: string; slug: string; name: string } | null
   models: CatalogModel[]
@@ -30,6 +40,7 @@ export interface AutonomyState {
   decisions?: SavedAnswer[]
   advisor?: Advisor
   catalog?: { claude: ProviderCatalog; codex: ProviderCatalog }
+  learning?: Learning
 }
 
 export function useAutonomy(api: Api, project?: string) {
@@ -87,5 +98,6 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
       <LevelList name="autonomy-project" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void save({ project, override: true, level: next })} />
     </>}
   </section>
-  {data && <SavedAnswers api={api} project={project} answers={data.decisions ?? []} onChange={() => void refresh()} />}</>
+  {data && <SavedAnswers api={api} project={project} answers={data.decisions ?? []} onChange={() => void refresh()} />}
+  {data?.learning && <ProjectLessons api={api} project={project} learning={data.learning} onChange={() => void refresh()} />}</>
 }

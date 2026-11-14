@@ -33,6 +33,12 @@ const AUTO_SUMMARY: Record<Tier, string> = {
 }
 const AGENT_NAME: Record<Agent, string> = { auto: 'Auto', claude: 'Claude', codex: 'Codex', none: 'Off' }
 const PROVIDER: Record<'claude' | 'codex', string> = { claude: 'Anthropic', codex: 'OpenAI' }
+const ACCESS: Record<NonNullable<CatalogModel['access']>, string> = {
+  ok: 'Stays on this version.',
+  'no-access': 'Your account has no access. Anthropic gives it to verified organizations.',
+  checking: 'Tether is checking your access.',
+  error: 'Tether could not check your access. It tries again later.',
+}
 
 /** The provider catalog, or one built from the older `models` field when the server has no catalog. */
 function catalogFor(data: AutonomyState, agent: 'claude' | 'codex'): ProviderCatalog {
@@ -48,6 +54,10 @@ function efforts(data: AutonomyState, agent: Agent, model: string): string[] {
   const row = model === 'latest' || model === 'auto' ? catalog.models.find(item => item.slug === catalog.latest?.slug) ?? catalog.models[0]
     : catalog.models.find(item => item.slug === model)
   return row?.efforts ?? data.efforts
+}
+
+function listNames(names: string[]) {
+  return names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 export function effortLabel(effort: string) {
@@ -91,6 +101,7 @@ export function HelperSettings({ api }: { api: Api }) {
     else void save({ reviewers: { ...reviewers, [role]: next } })
   }
   const changed = data && (['claude', 'codex'] as const).map(agent => ({ agent, catalog: catalogFor(data, agent) }))
+  const blocked = data ? catalogFor(data, 'claude').models.filter(item => item.available === false) : []
   const row = (role: Role) => {
     const disabled = role === 'second' && advisor?.main.agent === 'none'
     return <li key={role}><button type="button" id={`helper-row-${role}`} className="helper-row" disabled={disabled} aria-haspopup="dialog" onClick={() => setOpen(role)}>
@@ -106,7 +117,9 @@ export function HelperSettings({ api }: { api: Api }) {
       <ul className="helper-rows" aria-labelledby="helpers-after">{data.tiers.map(row)}</ul>
       <p className="setting-note helper-latest">Latest uses the newest model of each provider: now {changed!.map(({ agent, catalog }) => `${catalog.latest?.name ?? 'none found'} (${AGENT_NAME[agent]})`).join(' and ')}. It moves when {PROVIDER.claude} or {PROVIDER.codex} releases a new model.</p>
       {changed!.filter(({ catalog }) => catalog.changed).map(({ agent, catalog }) => <p key={agent} className="setting-note helper-news"><strong>New model.</strong> {catalog.changed!.to} replaced {catalog.changed!.from} for {AGENT_NAME[agent]}. Latest uses it now.</p>)}
-      {changed!.filter(({ catalog }) => catalog.new_families?.length).map(({ agent, catalog }) => <p key={`${agent}-family`} className="setting-note helper-news">{agent === 'claude' ? 'Claude Code' : 'Codex'} lists a new model family: {catalog.new_families!.map(name => name[0].toUpperCase() + name.slice(1)).join(', ')}. Latest stays on {catalog.latest?.name ?? 'the current model'} until Tether supports it.</p>)}
+      {changed!.filter(({ catalog }) => catalog.new_families?.length).map(({ agent, catalog }) => <p key={`${agent}-family`} className="setting-note helper-news">{agent === 'claude' ? 'Claude Code' : 'Codex'} lists a new model family: {catalog.new_families!.map(name => name[0].toUpperCase() + name.slice(1)).join(', ')}. Tether checks your access. Latest moves to it when your account can use it and it ranks higher.</p>)}
+      {blocked.length > 0 && <div className="helper-access"><p className="setting-note">{listNames(blocked.map(item => item.name))}: your account has no access. Anthropic gives {blocked.length > 1 ? 'these models' : 'this model'} to verified organizations only. Latest switches when access starts.</p>
+        <button type="button" disabled={!!pending} onClick={() => void save({ catalog: 'recheck' })}>Check access again</button></div>}
       {open && <HelperSheet role={open} data={data} value={value(open)} busy={!!pending} onChange={next => change(open, next)} onClose={() => { const role = open; setOpen(null); requestAnimationFrame(() => document.getElementById(`helper-row-${role}`)?.focus()) }} />}
     </>}
   </section>
@@ -147,7 +160,7 @@ function HelperSheet({ role, data, value, busy, onChange, onClose }: { role: Rol
       </div>
       <p className="helper-subhead">Or keep one version</p>
       <div className="helper-options">
-        {pinned.map(item => <ModelOption key={item.slug} name={`${id}-model`} value={item.slug} checked={value.model === item.slug} title={item.name} detail="Stays on this version." onPick={model => pick({ model })} />)}
+        {pinned.map(item => <ModelOption key={item.slug} name={`${id}-model`} value={item.slug} checked={value.model === item.slug} title={item.name} detail={ACCESS[item.access ?? 'ok']} disabled={(item.available === false || item.access === 'checking') && value.model !== item.slug} onPick={model => pick({ model })} />)}
         {unknown && <ModelOption name={`${id}-model`} value={value.model} checked title={value.model} detail="Saved earlier. Not in the current list." onPick={model => pick({ model })} />}
       </div>
     </fieldset>}
@@ -160,7 +173,7 @@ function HelperSheet({ role, data, value, busy, onChange, onClose }: { role: Rol
   </dialog>
 }
 
-function ModelOption({ name, value, checked, title, detail, badge, onPick }: { name: string; value: string; checked: boolean; title: string; detail: string; badge?: string; onPick: (model: string) => void }) {
-  return <label className="helper-option"><input type="radio" name={name} value={value} checked={checked} onChange={() => onPick(value)} />
+function ModelOption({ name, value, checked, title, detail, badge, disabled, onPick }: { name: string; value: string; checked: boolean; title: string; detail: string; badge?: string; disabled?: boolean; onPick: (model: string) => void }) {
+  return <label className="helper-option"><input type="radio" name={name} value={value} checked={checked} disabled={disabled} onChange={() => onPick(value)} />
     <span><strong>{title}{badge && <em>{badge}</em>}</strong><small>{detail}</small></span>{checked && <Check size={18} aria-hidden="true" />}</label>
 }

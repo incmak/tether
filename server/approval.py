@@ -16,7 +16,7 @@ import paths
 import push
 
 PATH = '/mobile/api/passkeys'
-ACTIONS = ('setup-hook', 'setup-ping', 'decision-save', 'level-raise', 'passkey-add', 'passkey-remove')
+ACTIONS = ('setup-hook', 'setup-ping', 'decision-save', 'lesson-promote', 'level-raise', 'passkey-add', 'passkey-remove')
 NO_PASSKEY = 'Add a passkey in Settings › Setup first.'
 APPROVE = 'Approve with your passkey.'
 OTHER_HOST = 'Add more passkeys from the Tether address where your first passkey works.'

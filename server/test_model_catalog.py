@@ -119,6 +119,147 @@ class Catalog(unittest.TestCase):
             self.assertEqual(catalog.claude()['latest']['name'], 'Fable 5.2')
             self.assertEqual(catalog.codex()['latest']['name'], 'GPT New')
 
+    def registry_binary(self):
+        self.binary.write_bytes(
+            b'x' * 63 + b'{id:"claude-mythos-5-2",family:"mythos",display_name:"Mythos 5.2",'
+            b'provider_ids:{nested:{x:1}},advisor_rank:10}'
+            b'{id:"claude-fable-5-1",family:"fable",display_name:"Old Fable",advisor_rank:99}'
+            b'{id:"claude-fable-5-2",family:"fable",display_name:"Fable 5.2",advisor_rank:10}'
+            b'{id:"claude-opus-5-5",family:"opus",display_name:"Opus 5.5",advisor_rank:7}'
+            b'{id:"claude-future-6-1",family:"future",display_name:"Future 6.1",advisor_rank:11}'
+            b'{id:"claude-3-5-haiku",family:"haiku",display_name:"Old Haiku",advisor_rank:1}')
+
+    def test_registry_chunk_border_nested_rank_old_ids_and_order(self):
+        self.registry_binary()
+        with patch.object(catalog, 'CHUNK_SIZE', 64):
+            rows = catalog.registry(self.binary)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0], dict(id='claude-mythos-5-2', family='mythos', name='Mythos 5.2',
+                                       rank=10, version=(5, 2)))
+        with patch.object(catalog, '_start_probes'):
+            result = catalog.claude()
+        self.assertEqual([row['family'] for row in result['models']], ['future', 'mythos', 'fable', 'opus'])
+        self.assertEqual(result['new_families'], ['future'])
+        self.assertEqual(result['latest']['launch'], 'fable')
+        self.assertEqual([r['available'] for r in result['models']], [None, None, True, True])
+        self.assertEqual([r['launch'] for r in result['models']],
+                         ['claude-future-6-1', 'claude-mythos-5-2', 'fable', 'opus'])
+        self.assertEqual(result['models'][0]['access'], 'checking')
+
+    def test_registry_lookahead_cutoff_missing_rank_and_denied_families(self):
+        self.binary.write_bytes(
+            b'x' * 4090 + b'{id:"claude-fable-5-2",family:"fable",display_name:"Provider name",'
+            + b'x' * 3800 + b',provider_ids:{nested:{x:1}},advisor_rank:10}'
+            b'{id:"claude-haiku-5-5",family:"haiku",display_name:"Haiku 5.5"}'
+            b'{id:"claude-code-999",family:"code",display_name:"Not a model",advisor_rank:99}')
+        with patch.object(catalog, 'CHUNK_SIZE', 4096):
+            entries = catalog.registry(self.binary)
+        self.assertEqual(entries[0]['rank'], 10)
+        self.assertIsNone(entries[1]['rank'])
+        with patch.object(catalog, '_start_probes'):
+            result = catalog.claude()
+        self.assertEqual([row['name'] for row in result['models']], ['Provider name', 'Haiku 5.5'])
+        self.assertTrue(all(row['available'] is True for row in result['models']))
+        self.binary.write_bytes(b'{id:"claude-opus-6",family:"opus",display_name:"Opus 6"}')
+        self.assertEqual(catalog.claude()['latest']['launch'], 'opus')
+
+    def test_old_scan_cache_is_refreshed_and_unchanged_cache_is_not_written(self):
+        first = catalog.claude()
+        cache = catalog._read()
+        for row in cache['scan']['result']['models']:
+            row.pop('family')
+            row.pop('rank')
+        catalog._write(cache)
+        self.assertEqual(catalog.claude(), first)
+        with patch.object(catalog, '_write') as write:
+            catalog.claude()
+        write.assert_not_called()
+
+    def test_probe_outcomes_and_safe_command(self):
+        import subprocess
+        from types import SimpleNamespace
+        for done, expected in (
+                (SimpleNamespace(returncode=0, stdout='OK', stderr=''), 'available'),
+                (SimpleNamespace(returncode=1, stdout='It may not exist or you may not have access to it.', stderr=''), 'unavailable'),
+                (SimpleNamespace(returncode=1, stdout='', stderr='Not logged in'), 'error'),
+                (subprocess.TimeoutExpired('claude', 90), 'error'), (OSError('bad binary'), 'error')):
+            options = {'side_effect': done} if isinstance(done, Exception) else {'return_value': done}
+            with patch.object(catalog, '_run', **options) as run:
+                catalog._probe_all(self.binary, ['key'], ['claude-mythos-5-2'])
+            state = catalog._read()['probes']['claude-mythos-5-2']
+            self.assertEqual(state, dict(state=expected, at=1_000_000, key=['key']))
+            self.assertEqual(run.call_args.args[0], [str(self.binary), '-p', '--setting-sources', 'local',
+                             '--no-session-persistence', '--max-turns', '1', '--model', 'claude-mythos-5-2',
+                             'Reply with OK only.'])
+            self.assertEqual(run.call_args.kwargs, dict(cwd=paths.CACHE / 'model-probe', stdin=subprocess.DEVNULL,
+                                                      capture_output=True, text=True, timeout=90))
+        self.assertEqual(list((paths.CACHE / 'model-probe').iterdir()), [])
+        self.assertEqual((paths.CACHE / 'model-probe').stat().st_mode & 0o777, 0o700)
+
+    def test_probe_staleness(self):
+        self.assertTrue(catalog._stale({}, ['key']))
+        for state, days in (('available', 7), ('unavailable', 1), ('error', 1)):
+            value = dict(state=state, key=['key'], at=1_000_000)
+            self.assertFalse(catalog._stale(value, ['key'], 1_000_000 + days * 86400 - 1))
+            self.assertTrue(catalog._stale(value, ['key'], 1_000_000 + days * 86400))
+            self.assertTrue(catalog._stale(value, ['other']))
+
+    def test_latest_follows_only_available_ranked_models_and_recheck(self):
+        self.registry_binary()
+        with patch.object(catalog, '_start_probes') as start:
+            result = catalog.claude()
+            key = catalog._read()['scan']['key']
+            self.assertEqual(result['latest']['launch'], 'fable')
+            for state, available, access, launch in (('unavailable', False, 'no-access', 'fable'),
+                                                    ('error', None, 'error', 'fable'),
+                                                    ('available', True, 'ok', 'claude-mythos-5-2')):
+                cache = catalog._read()
+                cache['probes'] = {'claude-mythos-5-2': dict(state=state, key=key, at=1_000_000)}
+                catalog._write(cache)
+                result = catalog.claude()
+                self.assertEqual(result['latest']['launch'], launch)
+                mythos = result['models'][1]
+                self.assertIs(mythos['available'], available)
+                self.assertEqual(mythos['access'], access)
+            cache['probes']['claude-future-6-1'] = dict(state='available', key=key, at=1_000_000)
+            catalog._write(cache)
+            self.assertEqual(catalog.claude()['latest']['launch'], 'claude-future-6-1')
+            result = catalog.recheck()
+            self.assertNotIn('probes', catalog._read())
+            self.assertEqual(result['claude']['latest']['launch'], 'fable')
+            self.assertTrue(start.called)
+
+    def test_only_one_daemon_worker_and_recheck_discards_inflight_results(self):
+        import threading
+        entered, finish = threading.Event(), threading.Event()
+        self.registry_binary()
+        self.enterContext(patch.object(catalog, '_PENDING', []))
+        self.enterContext(patch.object(catalog, '_ACTIVE', None))
+        self.enterContext(patch.object(catalog, '_PROBING', False))
+        def probe(binary, slug):
+            entered.set()
+            self.assertTrue(finish.wait(5))
+            return 'available'
+        with patch.object(catalog, '_probe', side_effect=probe) as run:
+            catalog.claude()
+            self.assertTrue(entered.wait(2))
+            for _ in range(5):
+                catalog.claude()
+            self.assertEqual(catalog._PENDING, [])
+            with catalog._LOCK:
+                catalog._GENERATION += 1
+            finish.set()
+            # Wait on the actual thread with a bound; never leave it behind after this test.
+            threads = [t for t in threading.enumerate() if t is not threading.current_thread()
+                       and t.name.endswith('(_probe_worker)')]
+            for thread in threads:
+                self.assertTrue(thread.daemon)
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(run.call_count, 2)
+        self.assertFalse(catalog._PROBING)
+        self.assertNotIn('probes', catalog._read())
+
 
 if __name__ == '__main__':
     unittest.main()

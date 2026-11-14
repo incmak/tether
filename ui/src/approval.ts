@@ -3,7 +3,7 @@
 import { ApiError } from './api'
 import type { Api } from './api'
 
-export type ApprovalAction = 'setup-hook' | 'setup-ping' | 'decision-save' | 'level-raise' | 'passkey-add' | 'passkey-remove'
+export type ApprovalAction = 'setup-hook' | 'setup-ping' | 'decision-save' | 'level-raise' | 'passkey-add' | 'passkey-remove' | 'lesson-promote'
 export interface Passkey { id: string; name: string; created: string; last_used: string | null }
 export interface ApprovalStatus { passkeys: Passkey[]; here: number }
 type Options = { challenge_id: string; publicKey: Record<string, unknown> }

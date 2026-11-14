@@ -10,6 +10,7 @@ import { playChime, prepareChime } from './sound'
 import { GlobalCodexLevel } from './CodexLevel'
 import { GlobalAutonomy } from './Autonomy'
 import { HelperSettings } from './Helpers'
+import { LearningSettings } from './Learning'
 import { AutonomySetup } from './AutonomySetup'
 import { AgentBrowserSettings } from './AgentBrowser'
 import { Choice, Notifications, SessionSettings, SystemSettings } from './SettingsControls'
@@ -65,6 +66,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('autonomy-setup', 'agents', 'Setup', 'setup install hook teams briskbot urgent ping notification approve', <Field scope="This server"><AutonomySetup api={api} /></Field>),
     item('autonomy', 'agents', 'Autonomy level', 'automation autopilot full auto ask questions check-in guided trusted level urgent', <Field scope="This server"><GlobalAutonomy api={api} /></Field>),
     item('advisor', 'agents', 'Advisor and reviewers', 'advisor reviewers review reviewer second opinion consult never guess decide critical normal light latest model effort claude codex fable opus gpt', <Field scope="This server"><HelperSettings api={api} /></Field>),
+    item('learning', 'agents', 'Learning from feedback', 'learn learning lessons feedback self-learning reward punishment correct mistake memory remember improve', <Field scope="This server"><LearningSettings api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),
     item('system', 'system', 'Updates and resources', 'version release reload refresh cpu memory host processes btop monitor', <Field scope="This server"><SystemSettings api={api} onReload={onReload} /></Field>),
