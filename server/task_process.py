@@ -41,6 +41,13 @@ def children(owner_pid):
     return found
 
 
+def _child_of(pid, owner_pid):
+    try:
+        return procinfo.parent(pid) == owner_pid
+    except (OSError, ValueError, KeyError, IndexError):
+        return False
+
+
 def _group_leader(pid):
     try:
         return os.getpgid(pid) == pid and procinfo.uid(pid) == os.getuid()
@@ -75,13 +82,15 @@ def find(owner_pid, task, output, started, pids=None):
     """Return the task's process group leader as Process(pid, ticks), or None when it is gone or not exact.
 
     task: {'kind', 'command'}; output: resolved tasks/<id>.output path or None; started: epoch or None."""
+    # Ticks are read first and compared after every check, the parent check included. Equal ticks
+    # mean one process passed all the checks; a reused pid would show new ticks.
     ticks = {}
     for pid in (children(owner_pid) if pids is None else pids):
         try:
-            ticks[pid] = procinfo.start_ticks(pid)  # Read before the checks, compared after them.
+            ticks[pid] = procinfo.start_ticks(pid)
         except (OSError, ValueError, KeyError, IndexError):
             continue
-    pids = [pid for pid in ticks if _group_leader(pid)]
+    pids = [pid for pid in ticks if _child_of(pid, owner_pid) and _group_leader(pid)]
     chosen = None
     if output is not None:
         exact = [pid for pid in pids if _writes_to(pid, str(output))]
@@ -97,7 +106,7 @@ def find(owner_pid, task, output, started, pids=None):
             return None
         chosen = matched[0]
     process = Process(chosen, ticks[chosen])
-    return process if _same(process) else None
+    return process if same(process) else None
 
 
 def _alive(pid, ticks):
@@ -107,7 +116,7 @@ def _alive(pid, ticks):
         return False
 
 
-def _same(process):
+def same(process):
     """True while process is still the same live group leader that find named."""
     try:
         return _alive(process.pid, process.ticks) and os.getpgid(process.pid) == process.pid
@@ -120,7 +129,7 @@ def stop(process, *, sleep=time.sleep, kill=os.killpg):
 
     process comes from find. Each signal goes only while the pid still has the start ticks find
     read, so a pid that a new process reused is never signalled."""
-    if not _same(process):
+    if not same(process):
         return True
     kill(process.pid, signal.SIGTERM)
     for attempt in range(31):
@@ -129,7 +138,7 @@ def stop(process, *, sleep=time.sleep, kill=os.killpg):
         if attempt == 30:
             break
         sleep(0.1)
-    if _same(process):
+    if same(process):
         kill(process.pid, signal.SIGKILL)
         for _ in range(10):
             sleep(0.1)

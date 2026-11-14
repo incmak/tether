@@ -79,6 +79,14 @@ class FindTests(unittest.TestCase):
         self.procs.add(301, args=wrapped('watch it'), start=999.5)
         self.assertIsNone(task_process.find(100, {'kind': 'monitor', 'command': 'watch it'}, None, 1000))
 
+    def test_pid_reused_by_another_parent_before_the_tick_read_is_refused(self):
+        # children() saw pid 300 under the owner; it was then reused by another session's monitor.
+        self.procs.add(300, parent=999, args=wrapped('watch it'), start=999)
+        task = {'kind': 'monitor', 'command': 'watch it'}
+        with patch.object(task_process, 'children', return_value=[300]):
+            self.assertIsNone(task_process.find(100, task, None, 1000))
+        self.assertIsNone(task_process.find(100, task, None, 1000, pids=[300]))
+
     def test_quoting_matches_posix_single_quotes(self):
         self.assertEqual(task_process.quoted("a'b"), "'a'\\''b'")
 

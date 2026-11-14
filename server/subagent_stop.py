@@ -282,19 +282,39 @@ def with_version(entry, message):
     return f'{message} This tab runs Claude Code {version}; Tether checked Stop on {CHECKED_TASKS_UI}.'
 
 
-def stop_process(entry, task):
-    """Stop a shell or monitor by signal. False when its process cannot be named exactly."""
+def bind(entry, task, tasks):
+    """Name a shell or monitor's process before any terminal work: (Process, ledger key) or None.
+
+    The signal fallback uses only this process. It never looks again later, because by then the task
+    may have ended and a same-command twin could be the sole match. tasks: every task in the listing."""
     if subagents._owner_since(entry) is None:
-        return False
+        return None
     tasks_dir = subagents._tasks_dir(entry)
     if tasks_dir is None:
-        return False
+        return None
     output = tasks_dir / f'{task["id"]}.output'
     output = os.path.realpath(output) if output.exists() else None
-    process = task_process.find(entry['owner_pid'], task, output, subagents._stamp(task.get('started')))
-    if process is None:
+    started = subagents._stamp(task.get('started'))
+    if output is None and started is not None:
+        # A monitor is matched by command and start time; a twin in the same window makes that ambiguous.
+        window = task_process.START_BEFORE + task_process.START_AFTER
+        for other in tasks:
+            begun = subagents._stamp(other.get('started'))
+            if (other.get('id') != task['id'] and other.get('command') == task.get('command')
+                    and begun is not None and abs(begun - started) <= window):
+                return None
+    process = task_process.find(entry['owner_pid'], task, output, started)
+    return None if process is None else (process, task_process.key(tasks_dir, task['id']))
+
+
+def stop_process(bound):
+    """Stop the bound process by signal. False when there is none; True when it is gone."""
+    if bound is None:
         return False
-    task_process.record(task_process.key(tasks_dir, task['id']))
+    process, key = bound
+    if not task_process.same(process):
+        return True  # It ended on its own; confirm reads the state Claude recorded.
+    task_process.record(key)
     if not task_process.stop(process):
         raise StopError('The task did not stop. Check the terminal view.')
     return True
@@ -350,6 +370,7 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time)
                   'started': subagents._stamp(agent.get('started')), 'body': body}
 
         pressed = {}
+        bound = bind(entry, agent, subagents._listing(entry, include_finished=True)['tasks']) if is_task else None
 
         def by_terminal():
             terminal_input.verify(entry, run)
@@ -374,11 +395,11 @@ def stop(entry, agent_id, run=subprocess.run, sleep=time.sleep, clock=time.time)
         try:
             return by_terminal()
         except StopError as exc:
-            if is_task and not pressed and stop_process(entry, agent):
+            if is_task and not pressed and stop_process(bound):
                 return confirm(entry, agent_id, True, sleep)
             raise StopError(with_version(entry, str(exc))) from exc
         except (ValueError, RuntimeError, OSError, subprocess.SubprocessError):
-            if is_task and not pressed and stop_process(entry, agent):
+            if is_task and not pressed and stop_process(bound):
                 return confirm(entry, agent_id, True, sleep)
             raise
     except StopError:

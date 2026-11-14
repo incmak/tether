@@ -430,8 +430,14 @@ class StopTests(unittest.TestCase):
         self.assertEqual(self.pane.keys[-1], ('Escape',))
 
 
+PROCESS = stop.task_process.Process(4242, '1')
+
+
 class ProcessStopTests(unittest.TestCase):
-    setUp = StopTests.setUp
+    def setUp(self):
+        StopTests.setUp(self)
+        self.enterContext(patch.object(stop.task_process, 'same', return_value=True))
+
     stop = StopTests.stop
     def make_tasks(self):
         self.tasks = self.meta.parent.parent.parent / 'tmp' / 'cwd' / '11111111-1111-1111-1111-111111111111' / 'tasks'
@@ -538,8 +544,8 @@ class ProcessStopTests(unittest.TestCase):
 
         # /tasks refuses (an unsent draft), so the signal fallback stops the task.
         self.pane.draft = 'Keep draft'
-        with patch.object(stop.task_process, 'find', return_value=4242) as find, \
-                patch.object(stop.task_process, 'stop', side_effect=lambda pid: kill(pid, 15) or True):
+        with patch.object(stop.task_process, 'find', return_value=PROCESS) as find, \
+                patch.object(stop.task_process, 'stop', side_effect=lambda process: kill(process.pid, 15) or True):
             self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
         self.assertEqual(find.call_args.args[2], os.path.realpath(self.output))
         self.assertEqual(signals, [(4242, 15)])
@@ -550,7 +556,7 @@ class ProcessStopTests(unittest.TestCase):
     def test_task_process_that_will_not_die_reports_error(self):
         self.make_tasks()
         self.pane.draft = 'Keep draft'
-        with patch.object(stop.task_process, 'find', return_value=4242), \
+        with patch.object(stop.task_process, 'find', return_value=PROCESS), \
                 patch.object(stop.task_process, 'stop', return_value=False):
             with self.assertRaisesRegex(stop.StopError, 'The task did not stop'):
                 self.stop('shell02')
@@ -558,7 +564,7 @@ class ProcessStopTests(unittest.TestCase):
 
     def test_tasks_screen_stop_never_sends_a_signal(self):
         self.make_tasks()
-        with patch.object(stop.task_process, 'find', return_value=4242), \
+        with patch.object(stop.task_process, 'find', return_value=PROCESS), \
                 patch.object(stop.task_process, 'stop') as signal_stop:
             self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
         signal_stop.assert_not_called()
@@ -568,9 +574,9 @@ class ProcessStopTests(unittest.TestCase):
         self.make_tasks()
         self.pane.shells = ['sleep 600', 'Second wait']
         self.pane.shell_details = {0: (None, 'sleep 600'), 1: (None, 'sleep 600')}
-        with patch.object(stop.task_process, 'find', return_value=4242), \
+        with patch.object(stop.task_process, 'find', return_value=PROCESS), \
                 patch.object(stop.task_process, 'stop',
-                             side_effect=lambda pid: self.output.write_text('[exited with code 143]') or True):
+                             side_effect=lambda process: self.output.write_text('[exited with code 143]') or True):
             self.assertEqual(self.stop('shell02'), {'ok': True, 'state': 'stopped'})
         self.assertNotIn(('x',), self.pane.keys)
 
@@ -581,7 +587,7 @@ class ProcessStopTests(unittest.TestCase):
                 self.setUp()  # A fresh pane and session for each case.
                 self.make_tasks()
                 setup()
-                with patch.object(stop.task_process, 'find', return_value=stop.task_process.Process(4242, '1')), \
+                with patch.object(stop.task_process, 'find', return_value=PROCESS), \
                         patch.object(stop.task_process, 'stop') as signal_stop:
                     with self.assertRaises(stop.StopError):
                         self.stop('shell02')
@@ -599,6 +605,45 @@ class ProcessStopTests(unittest.TestCase):
                 self.stop('shell02')
         self.assertNotIn(('x',), self.pane.keys)
         self.assertIn(('Enter',), self.pane.keys[2:])  # The detail view was opened and checked.
+
+    def test_process_is_bound_once_before_any_terminal_key(self):
+        self.make_tasks()
+        self.pane.draft = 'Keep draft'
+        keys_at_find = []
+        with patch.object(stop.task_process, 'find',
+                          side_effect=lambda *args, **kwargs: keys_at_find.append(len(self.pane.keys)) or PROCESS), \
+                patch.object(stop.task_process, 'stop', side_effect=lambda process: self.output.write_text('[exited with code 143]') or True):
+            self.assertTrue(self.stop('shell02')['ok'])
+        self.assertEqual(keys_at_find, [0])
+
+    def test_task_that_ends_during_the_terminal_try_is_not_replaced_by_a_twin(self):
+        # The bound process ended on its own; the fallback must not look again and find a twin.
+        self.make_tasks()
+        self.pane.draft = 'Keep draft'
+        def ended(process):
+            self.output.write_text('[exited with code 0]')
+            return False
+        with patch.object(stop.task_process, 'find', return_value=PROCESS) as find, \
+                patch.object(stop.task_process, 'same', side_effect=ended), \
+                patch.object(stop.task_process, 'record') as record, \
+                patch.object(stop.task_process, 'stop') as signal_stop:
+            self.assertTrue(self.stop('shell02')['ok'])
+        self.assertEqual(find.call_count, 1)
+        signal_stop.assert_not_called()
+        record.assert_not_called()
+
+    def test_monitor_with_a_same_command_twin_in_its_start_window_is_not_bound(self):
+        folder = Path(self.meta).parent / 'monitor-tasks'
+        folder.mkdir()
+        monitor = {'id': 'm1', 'kind': 'monitor', 'command': 'tail -f log', 'started': '2026-11-14T10:00:00Z'}
+        twin = dict(monitor, id='m2', started='2026-11-14T10:00:05Z')
+        later = dict(monitor, id='m3', started='2026-11-14T10:05:00Z')
+        with patch.object(stop.subagents, '_owner_since', return_value=1), \
+                patch.object(stop.subagents, '_tasks_dir', return_value=folder), \
+                patch.object(stop.task_process, 'find', return_value=PROCESS) as find:
+            self.assertIsNone(stop.bind(self.entry, monitor, [monitor, twin, later]))
+            find.assert_not_called()
+            self.assertEqual(stop.bind(self.entry, monitor, [monitor, later]), (PROCESS, f'{folder}/m1'))
 
     def test_unreadable_screen_error_names_a_newer_claude_version(self):
         sessions = Path(self.meta).parent / 'sessions'
