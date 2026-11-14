@@ -150,6 +150,36 @@ class UnitTests(unittest.TestCase):
         with mock.patch.object(project_launch.sys, 'platform', 'win32'):
             self.assertFalse(project_launch.codex_writable(['--yolo'], str(self.temp)))
 
+    def test_writable_subcommand_flags_replace_root_flags(self):
+        folder = str(self.temp)
+        for args in (['--yolo', 'resume', '--last', '--sandbox', 'read-only'], ['--yolo', 'fork', '-s', 'read-only'],
+                     ['-s', 'workspace-write', 'resume', '--last', '--approve-for-me', '-c', 'default_permissions=":read-only"'],
+                     ['--full-auto', 'resume', '-c', 'sandbox_mode=read-only'],
+                     ['-s', 'workspace-write', '-c', 'default_permissions=":read-only"']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)
+        for args in (['--yolo', 'resume', '--last'], ['-s', 'workspace-write', 'fork', 'abc']):
+            self.assertTrue(project_launch.codex_writable(args, folder), args)
+
+    def test_writable_submodule_and_separate_git_dir_have_no_trust_root(self):
+        git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'protocol.file.allow=always']
+        inner = self.temp / 'inner'
+        subprocess.run([*git, 'init', '-q', str(inner)], check=True)
+        subprocess.run([*git, '-C', str(inner), 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
+        outer = self.temp / 'outer'
+        subprocess.run([*git, 'init', '-q', str(outer)], check=True)
+        subprocess.run([*git, '-C', str(outer), 'submodule', '-q', 'add', str(inner), 'sub'], check=True,
+                       capture_output=True)
+        src = outer / 'sub' / 'src'
+        src.mkdir()
+        self.config(f'[projects."{os.path.realpath(outer / "sub")}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(src)), 'Codex rejects the submodule .git file')
+        self.assertTrue(project_launch.codex_writable([], str(outer / 'sub')), 'the cwd entry itself still counts')
+        split = self.temp / 'split'
+        subprocess.run([*git, 'init', '-q', '--separate-git-dir', str(self.temp / 'split.git'), str(split)], check=True)
+        (split / 'a').mkdir()
+        self.config(f'[projects."{os.path.realpath(split)}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(split / 'a')))
+
     def test_writable_round_three_cli_project_overrides(self):
         repo = self.temp / 'repo'
         work = repo / 'work'

@@ -116,6 +116,8 @@ def codex_has_own_instructions():
     return re.search(r'^\s*developer_instructions\s*=', text, re.M) is not None
 
 
+SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
+SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
 WRITE_FLAGS = {'--full-auto', '--dangerously-bypass-approvals-and-sandbox', '--yolo'}
 UNSURE = object()
 
@@ -161,6 +163,21 @@ def _repo_root(cwd):
     lines = out.stdout.splitlines() if out.returncode == 0 else []
     if len(lines) < 2:
         return None
+    # Codex accepts a .git folder, or a .git file that points into <common>/worktrees/ (git-utils/src/trust.rs).
+    # A submodule or a --separate-git-dir checkout has another .git file: Codex finds no root, so neither do we.
+    dot_git = Path(lines[0]) / '.git'
+    if dot_git.is_symlink():
+        return None
+    if not dot_git.is_dir():
+        try:
+            pointer = dot_git.read_text().strip()
+        except OSError:
+            return None
+        if not pointer.startswith('gitdir:'):
+            return None
+        target = Path(os.path.realpath(dot_git.parent / pointer[len('gitdir:'):].strip()))
+        if target.parent.name != 'worktrees':
+            return None
     common = Path(lines[1])
     return str(common.parent) if common.name == '.git' else lines[0]
 
@@ -212,16 +229,23 @@ def codex_writable(args, cwd=None):
         args = args[:args.index('--')]  # after --, everything is the prompt
     if _managed():
         return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
+    for i, arg in enumerate(args):
+        if arg in SUBCOMMANDS:
+            # A subcommand's own sandbox flags replace the ones before it, --yolo included
+            # (utils/cli/src/shared_options.rs). Not modelled: any such flag after it gives False.
+            if any(a in WRITE_FLAGS or a.startswith(SANDBOX_PREFIXES) for a in args[i + 1:]):
+                return False
+            break
+    overrides = [value.partition('=') for value in _option(args, '-c', '--config')]
+    if any(key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.')
+           for key, _, _ in overrides):
+        return False  # a permission profile wins over sandbox flags and sandbox_mode, whatever the order
     if any(arg in WRITE_FLAGS for arg in args):
         return True
     for value in reversed(_option(args, '-s', '--sandbox')):
         return _mode(value) is True
     if _option(args, '-p', '--profile'):
         return False
-    overrides = [value.partition('=') for value in _option(args, '-c', '--config')]
-    if any(key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.')
-           for key, _, _ in overrides):
-        return False  # Codex prefers permission profiles over sandbox_mode in the same layer, whatever the order
     for key, _, setting in reversed(overrides):
         if key.strip() == 'sandbox_mode':
             return _mode(setting) is True
