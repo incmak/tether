@@ -116,11 +116,72 @@ def codex_has_own_instructions():
     return re.search(r'^\s*developer_instructions\s*=', text, re.M) is not None
 
 
-def codex_folders():
+WRITE_FLAGS = {'--full-auto', '--dangerously-bypass-approvals-and-sandbox', '--yolo'}
+
+
+def _sandbox_arg(args):
+    """The sandbox mode the args set, or None. The last value wins, as in Codex."""
+    mode = None
+    for i, arg in enumerate(args):
+        if arg in WRITE_FLAGS:
+            mode = 'workspace-write'
+        elif arg in ('-s', '--sandbox') and i + 1 < len(args):
+            mode = args[i + 1]
+        elif arg.startswith('--sandbox='):
+            mode = arg.partition('=')[2]
+        elif arg == '-c' and i + 1 < len(args) and args[i + 1].replace(' ', '').startswith('sandbox_mode='):
+            mode = args[i + 1].partition('=')[2].strip().strip('"\'')
+    return mode
+
+
+def _trust_keys(cwd):
+    """The folders Codex looks up in [projects]: the folder, its git root and, for a worktree, the main checkout."""
+    keys = [cwd]
+    try:
+        out = subprocess.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel',
+                              '--git-common-dir'], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return keys
+    if out.returncode == 0:
+        lines = out.stdout.splitlines()
+        if lines:
+            keys.append(lines[0])
+        if len(lines) > 1 and Path(lines[1]).name == '.git':
+            keys.append(str(Path(lines[1]).parent))
+    return keys
+
+
+def codex_writable(args, cwd=None):
+    """True when Codex will start with a sandbox that allows extra writable folders. Codex runs read-only in a folder
+    it does not trust, and then exits with code 1 when it gets --add-dir (Codex 0.166)."""
+    mode = _sandbox_arg(args)
+    if mode is None:
+        try:
+            import tomllib
+            import paths
+            config = tomllib.loads((Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml').read_text())
+        except (ImportError, OSError, ValueError):
+            config = {}
+        mode = config.get('sandbox_mode') if isinstance(config.get('sandbox_mode'), str) else None
+        if mode is None:
+            for i, arg in enumerate(args):
+                if arg in ('-C', '--cd') and i + 1 < len(args):
+                    cwd = args[i + 1]
+            folder = os.path.realpath(cwd or os.getcwd())
+            known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
+            trusted = any(isinstance(known.get(key), dict) and known[key].get('trust_level') == 'trusted'
+                          for key in _trust_keys(folder))
+            mode = 'workspace-write' if trusted else 'read-only'
+    return mode != 'read-only'
+
+
+def codex_folders(args=()):
     """--add-dir for the backlog and work item folders: the sandbox blocks `tether backlog` and `tether item` writes
-    without them. Given even when the user has own instructions."""
+    without them. Given even when the user has own instructions, but never to a read-only Codex: it exits on them."""
     import backlog
     import paths
+    if not codex_writable(list(args)):
+        return []
     out = []
     for place in (backlog.folder(), paths.items()):
         place.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -131,7 +192,7 @@ def codex_folders():
 def codex_args(pid, args, group=None):
     if any(arg in CODEX_PLAIN for arg in args):
         return args
-    folder_args = codex_folders() if pid else []
+    folder_args = codex_folders(args) if pid else []
     if any('developer_instructions' in arg for arg in args) or codex_has_own_instructions():
         return [*folder_args, *args]
     text = ''

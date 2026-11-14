@@ -34,6 +34,56 @@ class UnitTests(unittest.TestCase):
                                              'TETHER_LAUNCH': ''})
         patch.start()
         self.addCleanup(patch.stop)
+        if not self._testMethodName.startswith('test_writable'):
+            patch = mock.patch.object(project_launch, 'codex_writable', return_value=True)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def config(self, text):
+        paths.CODEX.mkdir(exist_ok=True)
+        (paths.CODEX / 'config.toml').write_text(text)
+
+    def test_writable_follows_codex_trust(self):
+        folder = self.temp / 'work'
+        folder.mkdir()
+        self.assertFalse(project_launch.codex_writable([], str(folder)))  # no config: untrusted, read-only
+        self.config(f'[projects."{folder}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable([], str(folder)))
+        self.config(f'[projects."{folder}"]\ntrust_level = "untrusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(folder)))
+
+    def test_writable_uses_the_git_root_and_the_main_checkout(self):
+        repo = self.temp / 'repo'
+        sub = repo / 'src'
+        sub.mkdir(parents=True)
+        git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        subprocess.run([*git, 'init', '-q', str(repo)], check=True)
+        subprocess.run([*git, '-C', str(repo), 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
+        tree = self.temp / 'tree'
+        subprocess.run([*git, '-C', str(repo), 'worktree', 'add', '-q', str(tree)], check=True)
+        self.config(f'[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable([], str(sub)))
+        self.assertTrue(project_launch.codex_writable([], str(tree)))
+        self.assertFalse(project_launch.codex_writable([], str(self.temp)))
+
+    def test_writable_sandbox_args_and_config_win(self):
+        folder = str(self.temp)
+        for args in (['-s', 'workspace-write'], ['--sandbox=danger-full-access'], ['--full-auto'], ['--yolo'],
+                     ['-c', 'sandbox_mode="workspace-write"']):
+            self.assertTrue(project_launch.codex_writable(args, folder), args)
+        self.config(f'sandbox_mode = "workspace-write"\n[projects."{folder}"]\ntrust_level = "untrusted"\n')
+        self.assertTrue(project_launch.codex_writable([], folder))
+        self.assertFalse(project_launch.codex_writable(['-s', 'read-only'], folder))
+        self.config('sandbox_mode = "read-only"\n')
+        self.assertFalse(project_launch.codex_writable([], folder))
+        self.config(f'[projects."{folder}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable(['-C', str(self.temp / 'elsewhere')], '/'))
+
+    def test_writable_read_only_codex_gets_no_folders(self):
+        with mock.patch('os.getcwd', return_value=str(self.temp)):
+            args = project_launch.codex_args(PID, ['resume', '--last'])
+        self.assertNotIn('--add-dir', args)
+        self.assertEqual(args[-2:], ['resume', '--last'])
 
     def test_toml_string_round_trips(self):
         for text in ('plain', 'a "quote" and \\ slash', 'line\nnext\ttab\r', 'emoji 🙂 and ü', 'del \x7f bell \x07', "'''"):
@@ -191,6 +241,8 @@ class WrapperTests(unittest.TestCase):
         self.socket = str(self.temp / 'tmux.sock')
         self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE', 'TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL')}
         self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh')
+        (self.temp / 'codex').mkdir()
+        (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
         self.tmux('new-session', '-d', '-s', 'proj', '-x', '120', '-y', '30', '/bin/sh')  # not a login shell: /etc/profile would reset PATH
         self.addCleanup(self.tmux, 'kill-server')
 
