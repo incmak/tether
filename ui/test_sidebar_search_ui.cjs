@@ -15,12 +15,13 @@ const fixture = {
     pane('%2', 'tether', 'Backlog search', { agent: 'codex', worktree: 'b77-search' }),
     pane('%3', 'tether', 'Release notes'),
     pane('%4', 'blender', 'Render farm'),
+    pane('%5', 'tether', 'Old notes', { group: 'g1' }),
   ], groups: { $1: [{ id: 'g1', name: 'Audio stack', project: '' }] } },
   footer: { observed: false, notices: [] },
   subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, 'codex-runs': { pane: '', running: 0, runs: [] },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, 'projects/backlog': { text: '', version: 'v1', limit: 50000 },
-  prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'side-shells': { shells: [] },
+  prefs: { prefs: { archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' } } }, version: 1 }, 'projects/marks': {}, 'side-shells': { shells: [] },
   update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
@@ -78,7 +79,8 @@ async function main() {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
-      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false })))
+      // Release notes was the last-used tab, so a plain click on the session would open it.
+      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' } } })))
       await page.reload({ waitUntil: 'load' })
       root = page.locator(width < 800 ? 'dialog.drawer' : 'aside.sidebar')
       if (width < 800) await page.getByRole('button', { name: 'Open sessions' }).first().click()
@@ -90,6 +92,13 @@ async function main() {
       check(`${at} only the matching tab shows`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Voice mode latency'), JSON.stringify(await tabs()))
       await search.fill('AUDIO')
       check(`${at} stack name matches`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Voice mode latency'), JSON.stringify(await tabs()))
+      const archivedNames = () => root.locator('.archived-tab-open').allInnerTexts()
+      check(`${at} archived tab matches its stack`, JSON.stringify(await archivedNames()).includes('Old notes'), JSON.stringify(await archivedNames()))
+      await search.fill('old notes')
+      check(`${at} only the archived tab matches`, (await tabs()).length === 0 && (await archivedNames()).length === 1, JSON.stringify([await tabs(), await archivedNames()]))
+      await search.press('ArrowDown')
+      check(`${at} Down reaches an archived result`, await page.evaluate(() => document.activeElement?.classList.contains('archived-tab-open')))
+      await search.focus()
       await search.fill('b77')
       check(`${at} worktree branch matches`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Backlog search'), JSON.stringify(await tabs()))
       await search.fill('tether release')
@@ -101,7 +110,8 @@ async function main() {
       check(`${at} no page overflow`, !(await overflow()))
       await search.fill('voice')
       await page.screenshot({ path: path.join(SHOTS, `voice-${width}.png`) })
-      // Enter opens the first matching tab.
+      // Enter opens the first matching tab, not the last-used one (Release notes).
+      await search.fill('tether')
       await search.press('Enter')
       await page.waitForFunction(() => /[?&#]/.test(location.href) || document.querySelector('[aria-current="page"]'), null, { timeout: 3000 }).catch(() => {})
       check(`${at} Enter opens the voice tab`, await page.evaluate(() => [...document.querySelectorAll('[aria-current="page"]')].some(el => el.textContent.includes('Voice')) || location.href.includes('%251') || location.href.includes('%1')), await page.evaluate(() => location.href))

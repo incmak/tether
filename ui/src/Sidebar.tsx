@@ -446,18 +446,20 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   const manual = prefs.sort === 'manual'
   // The search text is built once per data change; each keystroke only scans it.
   const groupNames = useMemo(() => new Map(prefs.groups.map(group => [group.id, group.name])), [prefs.groups])
-  const index = useMemo<SearchEntry[]>(() => sessions.map(session => {
-    const stacks = new Map((session.groups ?? []).map(stack => [stack.id, stack.name]))
-    return {
-      id: session.id,
-      text: searchText(session.name, session.dir, groupNames.get(prefs.groupOf[session.id] ?? '')),
-      tabs: session.panes.map(pane => ({ id: pane.id, text: searchText(paneTitle(pane), pane.tmux_pane_name, pane.agent_name, agentNames[pane.agent], stacks.get(pane.group ?? ''), pane.worktree) })),
-    }
-  }), [sessions, groupNames, prefs.groupOf])
+  const [index, archivedIndex] = useMemo(() => {
+    const stacksOf = new Map(sessions.map(session => [session.id, new Map((session.groups ?? []).map(stack => [stack.id, stack.name]))]))
+    const tabText = (pane: Pane) => searchText(paneTitle(pane), pane.tmux_pane_name, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)
+    const sessionText = (id: string, name: string, dir: string) => searchText(name, dir, groupNames.get(prefs.groupOf[id] ?? ''))
+    const live: SearchEntry[] = sessions.map(session => ({ id: session.id, text: sessionText(session.id, session.name, session.dir), tabs: session.panes.map(pane => ({ id: pane.id, text: tabText(pane) })) }))
+    // An archived tab is its own entry: its session's text and its own.
+    const hidden: SearchEntry[] = archivedTabs.map(pane => ({ id: pane.id, text: sessionText(pane.tmux_session, sessionName(pane), pane.dir), tabs: [{ id: pane.id, text: tabText(pane) }] }))
+    return [live, hidden]
+  }, [sessions, archivedTabs, groupNames, prefs.groupOf])
   const matches = useMemo(() => search ? matchSessions(index, searchWords(search)) : null, [index, search])
+  const archivedMatches = useMemo(() => search ? matchSessions(archivedIndex, searchWords(search)) : null, [archivedIndex, search])
   const visible = sortSessions(sessions, prefs, selected).filter(session => !matches || matches.has(session.id))
   const archived = visible.filter(session => isArchived(session, prefs.archived))
-  const hiddenTabs = archivedTabs.filter(pane => !search || searchWords(search).every(word => searchText(paneTitle(pane), sessionName(pane), pane.dir, agentNames[pane.agent]).includes(word)))
+  const hiddenTabs = archivedTabs.filter(pane => !archivedMatches || archivedMatches.has(pane.id))
   const live = visible.filter(session => !isArchived(session, prefs.archived))
   // A session that needs you moves to the top group, out of its usual group, so it shows once.
   const needs = live.filter(session => status(session.panes, prefs.seen, selected).kind === 'approval')
@@ -490,7 +492,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   })
   // Enter opens the first match; Down moves into the list; Escape clears the search.
   const searchKeys = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button)')
+    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button, .archived-tab-open)')
     if (event.key === 'Enter' && query.trim() && first) { event.preventDefault(); first.click(); setQuery(''); event.currentTarget.blur() }
     else if (event.key === 'ArrowDown' && first) { event.preventDefault(); first.focus() }
     else if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery('') }
@@ -622,10 +624,10 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
       const multi = session.panes.length > 1
       const active = session.panes.some(pane => pane.id === selected)
       const state = status(session.panes, prefs.seen, selected)
-      // During a search each session shows its matching tabs, open, and the session row opens the first match.
+      // During a search each session shows its matching tabs, open, and the session row opens the first match (not the last-used tab).
       const only = matches?.get(session.id)
       const tabs = only instanceof Set ? session.panes.filter(pane => only.has(pane.id)) : session.panes
-      const target = tabs.find(pane => pane.id === prefs.lastPane[session.id]) ?? tabs[0]
+      const target = (only ? undefined : session.panes.find(pane => pane.id === prefs.lastPane[session.id])) ?? tabs[0]
       const archived = isArchived(session, prefs.archived)
       // A session with several panes is open by default; its heading folds the pane rows away.
       const filtered = !!only
