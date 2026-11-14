@@ -33,8 +33,16 @@ const disputedLesson = { id: 'bbbb2222', text: 'When a test is slow, skip it in 
 const staleLesson = { id: 'cccc3333', text: 'When a test is slow, run it in CI and do not skip it.', kind: 'avoid', source: 'user', agent: 'codex', hits: 1, created: now - 86400 * 40, last_hit: now - 86400 * 40,
   status: 'trial', quote: 'never skip tests', tab: 'Tests', disputes: [], disputed: false, project: 'e89e1e21b318', project_name: 'Tether', flags: [{ type: 'conflict', with: 'bbbb2222' }] }
 let reviewFail = false
+// The advisor check: 'off' answers like a server with the advisor turned off.
+let checkMode = 'ok'
+const checkDone = { state: 'done', started: now - 300, finished: now - 60, label: 'Claude, Fable 5.2 (latest), high effort', count: 3, skipped: 0, error: '',
+  advice: {
+    bbbb2222: { verdict: 'remove', confidence: 'high', reason: 'The project notes ask for every test in CI, and a later correction says never skip tests.', text: '' },
+    cccc3333: { verdict: 'edit', confidence: 'medium', reason: 'It holds, but the notes allow a separate slow-test job.', text: 'When a test is slow, move it to the slow CI job; never skip it.' },
+  } }
 let reviewState = { due: true, reason: 'disputed', new: 1, disputed: 1, total: 3, last_review: now - 86400 * 20, snoozed_until: 0,
-  groups: [{ key: 'disputed', lessons: [disputedLesson] }, { key: 'stale', lessons: [staleLesson] }, { key: 'other', lessons: [{ ...autonomy.learning.global[0], project: null, project_name: null, flags: [] }] }] }
+  groups: [{ key: 'disputed', lessons: [disputedLesson] }, { key: 'stale', lessons: [staleLesson] }, { key: 'other', lessons: [{ ...autonomy.learning.global[0], project: null, project_name: null, flags: [] }] }],
+  check: { state: 'idle' } }
 const fixture = {
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
@@ -113,6 +121,15 @@ async function main() {
             if (body.action === 'hook') setup = { ...setup, hook: { ...setup.hook, state: 'ok' } }
             if (body.action === 'ping') setup = { ...setup, ping: { ...setup.ping, state: 'on', preset: body.preset, fields: body.fields, base_url: body.base_url } }
             return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
+          }
+          if (endpoint === 'autonomy/review' && body.action === 'check') {
+            if (checkMode === 'off') return route.fulfill({ status: 400, json: { error: 'Turn on the advisor in Settings › Agents first.' } })
+            if (checkMode === 'busy') {
+              reviewState = { ...reviewState, check: { ...reviewState.check, state: 'running', started: now + 5, finished: null, count: 3 } }
+              return route.fulfill({ status: 409, json: { error: 'The advisor is already checking the lessons.' } })
+            }
+            reviewState = { ...reviewState, check: { ...reviewState.check, state: 'running', started: now, finished: null, count: 3, error: '' } }
+            return route.fulfill({ json: reviewState })
           }
           if (endpoint === 'autonomy/review') { reviewState = { ...reviewState, due: false }; return route.fulfill({ json: reviewState }) }
           if (endpoint === 'autonomy/lessons') {
@@ -331,7 +348,7 @@ async function main() {
       check(`${at} switch posts enabled false`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.enabled === false))
       await learnSwitch.click()
       await page.waitForTimeout(300)
-      reviewState = { ...reviewState, due: true }
+      reviewState = { ...reviewState, due: true, check: { state: 'idle' } }
       await page.getByRole('button', { name: 'Review', exact: true }).click()
       const reviewSheet = page.getByRole('dialog', { name: 'Review lessons' })
       await reviewSheet.waitFor()
@@ -343,6 +360,39 @@ async function main() {
       check(`${at} review offers snooze when due`, await reviewSheet.getByRole('button', { name: 'Remind me in 3 days' }).isVisible())
       check(`${at} no overflow in the review`, await reviewSheet.evaluate(sheet => [...sheet.querySelectorAll('*')].every(node => node.scrollWidth <= node.clientWidth + 1 || getComputedStyle(node).overflowX !== 'visible' || node.getBoundingClientRect().right <= sheet.getBoundingClientRect().right + 1)))
       await page.screenshot({ path: path.join(SHOTS, `lessons-review-${width}.png`) })
+      // The advisor check: off shows the reason with a retry; on, it runs, then each lesson shows a suggestion.
+      checkMode = 'off'
+      mark0 = posts.length
+      await reviewSheet.getByRole('button', { name: 'Ask the advisor to check these' }).click()
+      await reviewSheet.getByText('Turn on the advisor in Settings › Agents first.').waitFor()
+      check(`${at} check posts action check`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/review' && post.body.action === 'check'))
+      checkMode = 'ok'
+      await reviewSheet.getByRole('button', { name: 'Try again' }).click()
+      await reviewSheet.getByText(/The advisor is checking 3 lessons/).waitFor()
+      check(`${at} running check hides the button and the error`, !(await reviewSheet.getByRole('button', { name: /Ask the advisor|Try again|Check again/ }).count()) && !(await reviewSheet.getByText('Turn on the advisor').count()))
+      await page.screenshot({ path: path.join(SHOTS, `lessons-check-running-${width}.png`) })
+      reviewState = { ...reviewState, check: checkDone }
+      await reviewSheet.getByText(/Advisor checked 3 lessons/).waitFor({ timeout: 8000 })
+      check(`${at} done check names the advisor`, await reviewSheet.getByText(/Claude, Fable 5.2 \(latest\), high effort/).isVisible())
+      check(`${at} advice shows verdict, confidence and reason`, await reviewSheet.getByText('Advisor suggests: Remove').isVisible() && await reviewSheet.getByText(/high confidence\. The project notes ask/).isVisible())
+      check(`${at} nothing applied by the check`, !posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons'))
+      check(`${at} no overflow with advice`, await reviewSheet.evaluate(sheet => [...sheet.querySelectorAll('*')].every(node => node.scrollWidth <= node.clientWidth + 1 || getComputedStyle(node).overflowX !== 'visible' || node.getBoundingClientRect().right <= sheet.getBoundingClientRect().right + 1)))
+      await reviewSheet.getByText('Advisor suggests: Fix').scrollIntoViewIfNeeded()
+      await page.screenshot({ path: path.join(SHOTS, `lessons-check-done-${width}.png`) })
+      await reviewSheet.getByRole('button', { name: 'Use this wording' }).click()
+      check(`${at} use this wording fills the edit form`, (await reviewSheet.getByLabel('Lesson text').inputValue()) === checkDone.advice.cccc3333.text)
+      check(`${at} the edit is not saved by itself`, !posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons'))
+      await reviewSheet.getByRole('button', { name: 'Cancel' }).click()
+      check(`${at} done check offers Check again`, await reviewSheet.getByRole('button', { name: 'Check again' }).isVisible())
+      // Another device starts a check first: this one gets 409, then the error goes once the check runs and ends.
+      checkMode = 'busy'
+      await reviewSheet.getByRole('button', { name: 'Check again' }).click()
+      await reviewSheet.getByText(/The advisor is checking 3 lessons/).waitFor()
+      check(`${at} a busy start shows the running check, not the error`, !(await reviewSheet.getByText('The advisor is already checking the lessons.').count()))
+      reviewState = { ...reviewState, check: { ...checkDone, started: now + 5 } }
+      await reviewSheet.getByText(/Advisor checked 3 lessons/).waitFor({ timeout: 8000 })
+      check(`${at} the busy error does not come back after the check`, !(await reviewSheet.getByText('The advisor is already checking the lessons.').count()))
+      checkMode = 'ok'
       mark0 = posts.length
       await reviewSheet.getByRole('button', { name: 'Keep' }).first().click()
       await reviewSheet.getByText('Kept').waitFor()

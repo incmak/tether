@@ -775,6 +775,7 @@ class Learning(Base):
         handler = Handler(route)
         autonomy.get(handler)
         self.assertEqual((handler.status, handler.body['due'], handler.body['groups']), (200, False, []))
+        self.assertEqual(handler.body['check'], {'state': 'idle'})
         row = self.add()
         lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
         handler = Handler(route, {'action': 'snooze'})
@@ -788,11 +789,40 @@ class Learning(Base):
         for body in ({}, [], None, {'action': 'bad'}, {'action': []}, {'action': 'done', 'extra': True}):
             handler = Handler(route, body)
             autonomy.post(handler)
-            self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done or snooze.'}))
+            self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done, snooze or check.'}))
         handler = Handler(route, {})
         handler.rfile = io.BytesIO(b'{x')
         autonomy.post(handler)
-        self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done or snooze.'}))
+        self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done, snooze or check.'}))
+
+    def test_review_check_get_fallback_and_post_without_passkey(self):
+        route = autonomy.PATH + '/review'
+        running = {'state': 'running', 'advice': {}}
+        with mock.patch.object(autonomy.lessons_check, 'status', return_value=running), \
+                mock.patch.object(autonomy.lessons_check, 'start', return_value=running) as start, \
+                mock.patch.object(approval, 'require') as require:
+            handler = Handler(route, {'action': 'check'})
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['check']), (200, running))
+            start.assert_called_once_with()
+            require.assert_not_called()
+            shown = Handler(route)
+            autonomy.get(shown)
+            self.assertEqual(shown.body, handler.body)
+        for error in (OSError('bad cache'), ValueError('invalid'), RuntimeError('unexpected')):
+            with mock.patch.object(autonomy.lessons_check, 'status', side_effect=error):
+                handler = Handler(route)
+                autonomy.get(handler)
+                self.assertEqual((handler.status, handler.body['check']), (200, {'state': 'idle'}))
+
+    def test_review_check_conflict_and_disabled_advisor(self):
+        for message, code in ((autonomy.lessons_check.BUSY, 409),
+                              ('Turn on the advisor in Settings › Agents first.', 400),
+                              ('There are no lessons to check.', 400)):
+            with mock.patch.object(autonomy.lessons_check, 'start', side_effect=ValueError(message)):
+                handler = Handler(autonomy.PATH + '/review', {'action': 'check'})
+                autonomy.post(handler)
+                self.assertEqual((handler.status, handler.body), (code, {'error': message}))
 
     def test_review_summary_is_small_and_errors_do_not_break_state(self):
         self.add()

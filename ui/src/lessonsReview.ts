@@ -14,6 +14,16 @@ export interface ReviewState extends ReviewSummary {
   last_review: number; snoozed_until: number
   groups: { key: ReviewGroupKey; lessons: ReviewLesson[] }[]
   skipped?: string[]
+  check?: LessonsCheck | null
+}
+
+// The advisor check (server: lessons_check.py). The advisor only suggests; the person still decides each lesson.
+export type CheckVerdict = 'keep' | 'edit' | 'remove' | 'unsure'
+export interface CheckAdvice { verdict: CheckVerdict; confidence: 'high' | 'medium' | 'low'; reason: string; text?: string }
+export interface LessonsCheck {
+  state: 'idle' | 'running' | 'done' | 'failed'
+  started?: number; finished?: number | null; label?: string; count?: number; skipped?: number; error?: string
+  advice?: Record<string, CheckAdvice>
 }
 
 /** How many lessons the review card names: the new and disputed ones, or all of them for the 14-day review. */

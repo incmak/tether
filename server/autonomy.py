@@ -27,6 +27,7 @@ import decisions  # noqa: E402
 import delegate  # noqa: E402
 import model_catalog  # noqa: E402
 import lessons  # noqa: E402
+import lessons_check  # noqa: E402
 import paths  # noqa: E402
 from codex_level import hook_project  # noqa: E402
 from advisor import LevelError  # noqa: E402
@@ -421,6 +422,15 @@ def setup_state():
     return {'hook': autonomy_setup.hook_status(), 'ping': autonomy_setup.ping_status()}
 
 
+def review_state():
+    result = lessons.review()
+    try:
+        check = lessons_check.status()
+    except Exception:
+        check = {'state': 'idle'}
+    return dict(result, check=check)
+
+
 def get(handler):
     from urllib.parse import parse_qs, urlsplit
     url = urlsplit(handler.path)
@@ -434,7 +444,7 @@ def get(handler):
     pid = query.get('project', [None])[0]
     try:
         if url.path == PATH + '/review':
-            handler.respond(200, lessons.review())
+            handler.respond(200, review_state())
             return
         if pid is not None:
             project_path(pid)
@@ -534,24 +544,29 @@ def post(handler):
         route = handler.path.split('?', 1)[0]
         size = int(handler.headers.get('Content-Length', '0') or 0)
         if route == PATH + '/review' and size <= 0:
-            raise ValueError('Choose done or snooze.')
+            raise ValueError('Choose done, snooze or check.')
         if not 0 < size <= 16384:
             raise LevelError(413, 'Invalid request.')
         try:
             body = json.loads(handler.rfile.read(size))
         except (ValueError, UnicodeError):
-            raise LevelError(400, 'Choose done or snooze.' if route == PATH + '/review' else 'Invalid request.') from None
+            raise LevelError(400, 'Choose done, snooze or check.' if route == PATH + '/review' else 'Invalid request.') from None
         if not isinstance(body, dict):
-            raise LevelError(400, 'Choose done or snooze.' if route == PATH + '/review' else 'Invalid request.')
+            raise LevelError(400, 'Choose done, snooze or check.' if route == PATH + '/review' else 'Invalid request.')
         payload = {key: value for key, value in body.items() if key != 'approval'}
         if route == PATH + '/review':
-            if set(body) != {'action'} or body['action'] not in ('done', 'snooze'):
-                raise ValueError('Choose done or snooze.')
+            if set(body) != {'action'} or body['action'] not in ('done', 'snooze', 'check'):
+                raise ValueError('Choose done, snooze or check.')
             if body['action'] == 'done':
                 lessons.review_done()
-            else:
+            elif body['action'] == 'snooze':
                 lessons.review_snooze()
-            handler.respond(200, lessons.review())
+            else:
+                try:
+                    lessons_check.start()
+                except ValueError as error:
+                    raise LevelError(409 if str(error) == lessons_check.BUSY else 400, str(error)) from None
+            handler.respond(200, review_state())
             return
         if route == PATH + '/setup':
             if body.get('action') in ('hook', 'ping'):

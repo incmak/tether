@@ -1,8 +1,9 @@
 // The lessons review sheet. Lists every lesson of every project, the ones that need a look first: questioned by an
 // agent, did not stick, seen once long ago, new. The person keeps, edits or removes each one; untouched lessons stay
-// as they are. "Finish review" starts the next 14 days; "Remind me in 3 days" snoozes the card.
-import { useCallback, useState } from 'react'
-import { Check, Pencil, Trash2, X } from 'lucide-react'
+// as they are. "Finish review" starts the next 14 days; "Remind me in 3 days" snoozes the card. The advisor check asks
+// the advisor model for a second look; it only suggests, and nothing changes until the person acts.
+import { useCallback, useEffect, useState } from 'react'
+import { Check, Pencil, Sparkles, Trash2, X } from 'lucide-react'
 import type { Api } from './api'
 import { errorText } from './api'
 import { useModal, usePolling } from './hooks'
@@ -11,7 +12,7 @@ import { LessonText } from './Learning'
 import { reviewReason } from './lessonsReview'
 import './Settings.css'
 import './lessonsReview.css'
-import type { ReviewGroupKey, ReviewLesson, ReviewState } from './lessonsReview'
+import type { CheckAdvice, CheckVerdict, LessonsCheck, ReviewGroupKey, ReviewLesson, ReviewState } from './lessonsReview'
 
 const GROUP: Record<ReviewGroupKey, { title: string; note?: string }> = {
   disputed: { title: 'Questioned by an agent', note: 'An agent found evidence against these. Read its reason, then decide.' },
@@ -19,6 +20,34 @@ const GROUP: Record<ReviewGroupKey, { title: string; note?: string }> = {
   stale: { title: 'Seen once, not repeated in 30 days', note: 'A lesson that works also does not repeat. Remove only the ones that no longer hold.' },
   new: { title: 'New since your last review' },
   other: { title: 'Other lessons' },
+}
+
+const VERDICT: Record<CheckVerdict, string> = { keep: 'Keep', edit: 'Fix', remove: 'Remove', unsure: 'Not sure' }
+const clock = (seconds: number) => new Date(seconds * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+const lessonsWord = (count: number) => `${count} ${count === 1 ? 'lesson' : 'lessons'}`
+
+/** The advisor check: one button, then running, done or failed. */
+function CheckPanel({ check, busy, error, onStart }: { check: LessonsCheck; busy: boolean; error: string; onStart: () => void }) {
+  const running = check.state === 'running'
+  const who = check.label ? `The advisor (${check.label})` : 'The advisor you chose in Settings › Agents'
+  return <section className="review-check" aria-labelledby="review-check-title">
+    <h3 id="review-check-title">Advisor check</h3>
+    {running ? <p className="review-check-status" role="status"><span className="review-check-pulse" aria-hidden="true" />The advisor is checking {check.count ? lessonsWord(check.count) : 'the lessons'}. It takes a few minutes. You can close this sheet.</p>
+      : check.state === 'done' ? <p className="review-check-status" role="status">Advisor checked {lessonsWord(check.count ?? 0)}{check.finished ? ` at ${clock(check.finished)}` : ''}{check.label ? ` · ${check.label}` : ''}.{check.skipped ? ` It checks up to 60 at a time, so ${lessonsWord(check.skipped)} were not checked.` : ''} You still decide each one.</p>
+      : <p className="setting-note">{who} reads your project notes and saved answers, then suggests what to keep, fix or remove. You still decide. It takes a few minutes.</p>}
+    {check.state === 'failed' && check.error && <p className="error" role="alert">{check.error}</p>}
+    {error && <p className="error" role="alert">{error}</p>}
+    {!running && <button type="button" className="secondary" disabled={busy} onClick={onStart}><Sparkles size={15} aria-hidden="true" />
+      {check.state === 'done' ? 'Check again' : check.state === 'failed' || error ? 'Try again' : 'Ask the advisor to check these'}</button>}
+  </section>
+}
+
+function AdviceLine({ advice, onUse }: { advice: CheckAdvice; onUse?: () => void }) {
+  return <span className={`review-advice review-advice-${advice.verdict}`}>
+    <small><strong>Advisor suggests: {VERDICT[advice.verdict]}</strong> · {advice.confidence} confidence. {advice.reason}</small>
+    {advice.verdict === 'edit' && advice.text && <small className="review-advice-text">“{advice.text}”</small>}
+    {advice.verdict === 'edit' && advice.text && onUse && <button type="button" className="link-button" onClick={onUse}>Use this wording</button>}
+  </span>
 }
 
 export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: () => void; onChange?: () => void }) {
@@ -31,7 +60,29 @@ export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: (
   const [kept, setKept] = useState<string[]>([])
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
   const [now] = useState(() => Date.now() / 1000)
+  // A start error belongs to the check that was shown when it failed. Once a check runs or a newer one exists (for
+  // example another device started it), the error no longer applies.
+  const [startError, setStartError] = useState<{ text: string; started?: number } | null>(null)
+  const [starting, setStarting] = useState(false)
+  const check: LessonsCheck = data?.check ?? { state: 'idle' }
+  const checkError = startError && check.state !== 'running' && startError.started === check.started ? startError.text : ''
+  const advice = check.advice ?? {}
 
+  // While the advisor works, look every 5 seconds; the normal poll is once a minute.
+  const running = check.state === 'running'
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => void refresh(), 5000)
+    return () => clearInterval(timer)
+  }, [running, refresh])
+
+  async function startCheck() {
+    const shown = check.started
+    setStarting(true); setStartError(null)
+    try { await api('autonomy/review', { action: 'check' }); await refresh() }
+    catch (caught) { setStartError({ text: errorText(caught), started: shown }); void refresh() }
+    finally { setStarting(false) }
+  }
 
   async function act(key: string, work: () => Promise<unknown>, after?: () => void) {
     setBusy(key); setError('')
@@ -58,6 +109,7 @@ export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: (
     <div className="review-body">
       {reason && <p className="review-reason">{reason}.</p>}
       <p className="setting-note">You can be wrong too. Keep what still holds, fix what is close and remove the rest. Lessons you do not touch stay as they are.</p>
+      {data && !!all.length && <CheckPanel check={check} busy={starting} error={checkError} onStart={() => void startCheck()} />}
       {error && <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => { setError(''); void refresh() }}>Try again</button></p>}
       {!data ? !error && <Loading className="setting-note" /> : !all.length ? <p className="hint">No lessons yet. Agents save one when you correct them or confirm a choice.</p> : data.groups.map(group => <section key={group.key} className="review-group" aria-labelledby={`review-${group.key}`}>
         <h3 id={`review-${group.key}`}>{GROUP[group.key].title} <span className="review-group-count">{group.lessons.length}</span></h3>
@@ -73,6 +125,7 @@ export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: (
               <LessonText lesson={lesson} now={now} where={lesson.project ? lesson.project_name ?? lesson.project : 'All projects'} />
               {lesson.disputes?.map(item => <small key={item.pane + item.at} className="review-dispute">Agent ({item.pane}): {item.reason}</small>)}
               {lesson.flags?.map(flag => textOf(flag.with) && <small key={flag.type + flag.with} className="review-flag">{flag.type === 'conflict' ? 'May conflict with' : 'May repeat'}: {textOf(flag.with)}</small>)}
+              {advice[lesson.id] && <AdviceLine advice={advice[lesson.id]} onUse={lesson.project ? () => setEditing({ id: lesson.id, text: advice[lesson.id].text ?? lesson.text }) : undefined} />}
             </span>
             <div className="review-actions">
               {kept.includes(lesson.id) && !lesson.disputed
