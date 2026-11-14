@@ -81,8 +81,10 @@ import './App.css'
 import './TitleBar.css'
 import { useWindowControls } from './titlebar'
 import { PanelHandles } from './PanelHandles'
-import { decisions as workDecisions, useWork } from './work'
+import { decisions as workDecisions, itemsByPane, useWork } from './work'
 import { DecisionsGroup, useDecisionAnswers } from './WorkItems'
+import { WorkSheet } from './WorkBoard'
+import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
@@ -137,6 +139,8 @@ function App() {
   // The Agents page (Active and Unread tabs). Tether's summary notification opens it with /chat/?go=agents.
   // 'message' opens it on the "Message sessions" box (sidebar button, command menu).
   const [agentsPage, setAgentsPage] = useState<false | 'list' | 'message'>(false)
+  // The work page (WorkBoard.tsx): the sidebar, the command menu and /chat/?go=board open it.
+  const [workSheet, setWorkSheet] = useState<false | WorkView>(false)
   const markRead = useCallback((ids: string[]) => {
     const now = Date.now() / 1000
     update(current => ({ seen: { ...current.seen, ...Object.fromEntries(ids.map(id => [id, now])) } }))
@@ -281,7 +285,11 @@ function App() {
   const work = useWork(api)
   const decisionCount = workDecisions(work.data).length
   const decisionAnswers = useDecisionAnswers(api, work.refresh)
-  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} />
+  const openWork = (view: WorkView) => { setDrawer(false); setWorkSheet(view) }
+  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onBoard={() => openWork('board')} />
+  const workMarks = useMemo(() => itemsByPane(work.data), [work.data])
+  const workLinks = work.data && (work.data.projects.length > 0 || work.data.items.length > 0)
+    ? { open: work.data.items.filter(item => item.stage !== 'done' && item.stage !== 'hold').length, asking: decisionCount, marks: workMarks, onOpen: () => openWork('board') } : undefined
   const groups = useMemo(() => homeGroups(panes, sessions, prefs.seen, openId, asks), [panes, sessions, prefs.seen, openId, asks])
   // Attention mode: the tabs whose ask waits on you (oldest first). The Home badge counts them with the open prompts.
   const now = useNow()
@@ -467,6 +475,7 @@ function App() {
     if (go === 'new') setNewSession(true)
     else if (go === 'usage') setPlanSheet(true)
     else if (go === 'work') { setDrawer(false); setScreen('home') }
+    else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})
@@ -737,7 +746,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: () => { setDrawer(false); setNewSession(true) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog(true) }, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: () => { setDrawer(false); setNewSession(true) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog(true) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -757,6 +766,7 @@ function App() {
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
     { label: 'Plan usage', run: () => setPlanSheet(true) },
     { label: 'Backlog', run: () => setBacklog(true) },
+    { label: 'Work board', run: () => setWorkSheet('board') },
     { label: 'Agents page', run: () => setAgentsPage('list') },
     ...(canMessage ? [{ label: 'Message all sessions', run: () => setAgentsPage('message') }] : []),
     { label: `${ASSISTANT} Live mode: talk hands-free`, run: openLive },
@@ -882,6 +892,7 @@ function App() {
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {view && menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} />}
     {(view || (wide && home)) && menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
+    {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}
     {updated && <div className="update-banner" role="status"><span>A new version of Tether is ready.</span><button type="button" onClick={reload}>Reload</button></div>}

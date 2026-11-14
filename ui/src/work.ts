@@ -42,3 +42,22 @@ export function projectHue(prefix: string) {
   for (const char of prefix) sum = (sum * 31 + char.charCodeAt(0)) % 997
   return sum % 6
 }
+
+export const moveItem = (api: Api, item: WorkItem, stage: Stage) =>
+  api<{ item: WorkItem }>('work/stage', { item: item.id, stage, version: item.version })
+
+export const setItemQa = (api: Api, item: WorkItem, qa: boolean) =>
+  api<{ item: WorkItem }>('work/qa', { item: item.id, qa, version: item.version })
+
+const DAY = 86400
+/** Done items leave the board after a week; their history stays in the store. */
+export const onBoard = (item: WorkItem, now: number) => item.stage !== 'done' || !item.doneAt || now - item.doneAt < 7 * DAY
+
+/** The item each open tab works on, for the sidebar: the newest link wins when a tab is linked to more than one. */
+export function itemsByPane(board?: WorkBoard) {
+  const now = Date.now() / 1000
+  const marks: Record<string, { id: string; stage: Stage }> = {}
+  for (const item of [...(board?.items ?? [])].filter(entry => onBoard(entry, now)).sort((a, b) => a.updated - b.updated))
+    for (const tab of item.tabs) marks[tab.pane] = { id: item.id, stage: item.stage }
+  return marks
+}

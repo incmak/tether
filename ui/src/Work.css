@@ -70,3 +70,114 @@
   .work-card .inbox-actions button, .work-tab { min-height: 44px; }
   .work-reply input { height: 44px; font-size: 16px; }
 }
+
+/* The work page: a large sheet. Phone: full height from the bottom. Wider: most of the window, centred. */
+.sheet.work-sheet[open] { display: flex; flex-direction: column; height: calc(100dvh - 12px); max-height: none; max-width: none; padding: 16px 0 0; overflow: hidden; }
+.work-sheet .visually-hidden, .work-drawer .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.work-head { flex: none; flex-wrap: wrap; gap: 8px 12px; padding: 0 16px; }
+.work-head h2 { margin: 0; }
+.work-views { margin-right: auto; }
+.work-views .badge { margin-left: 2px; }
+/* Narrow: the close button stays on the title row; the view switch takes its own row. */
+@media (max-width: 520px) {
+  .work-head > .icon-button { order: 1; margin-left: auto; }
+  .work-views { order: 2; flex-basis: 100%; margin-right: 0; }
+}
+.work-drawer-meta { min-width: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.work-filters { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 16px 0; }
+.work-projects { flex: 1 1 auto; }
+.work-projects .work-swatch { width: 8px; height: 8px; }
+.work-chip-count { font-weight: 400; font-variant-numeric: tabular-nums; }
+.work-hold { margin-left: auto; }
+.work-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 12px 16px max(16px, env(safe-area-inset-bottom)); }
+.work-body > .home-group.decisions.compact { padding: 0; border-bottom: 0; }
+.work-body > .home-group.decisions.compact ul { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); align-items: start; gap: 10px; }
+.work-empty { margin: 8px 0 16px; font-size: 14px; color: var(--muted); line-height: 1.5; }
+.work-empty code { font-size: 12.5px; }
+
+/* Columns: side by side, the board scrolls sideways inside the sheet. Phone: one column under the other. */
+.work-columns { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(240px, 1fr); gap: 12px; align-items: start; min-width: 0; }
+.work-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.work-col-head { display: flex; align-items: baseline; gap: 6px; margin: 0; padding: 0 2px 6px; border-bottom: 2px solid var(--line); font-size: 13px; font-weight: 600; }
+.work-col.needs .work-col-head { border-bottom-color: var(--accent); }
+.work-col-head .badge { align-self: center; }
+.work-col-hint { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.work-col-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.work-col-empty { margin: 0; padding: 10px 2px; font-size: 13px; color: var(--muted); }
+@media (max-width: 760px) {
+  .work-columns { grid-auto-flow: row; grid-auto-columns: auto; gap: 18px; }
+}
+
+/* A card that opens the item. */
+.work-bcard { display: flex; flex-direction: column; align-items: stretch; gap: 5px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--text) 10%, var(--surface)); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); font: inherit; text-align: left; cursor: pointer; transition: background-color .12s, border-color .12s; }
+.work-bcard:hover { background: var(--hover); }
+.work-bcard:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.work-bcard.sk { cursor: default; gap: 8px; }
+.work-bcard .work-title { display: block; }
+.work-links { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); min-width: 0; }
+.work-links > span { min-width: 0; overflow-wrap: anywhere; }
+.work-link-tab { display: inline-flex; align-items: center; gap: 5px; }
+.work-link-error { color: var(--error); }
+
+/* The item drawer: from the right, full width on a phone. */
+.work-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(440px, 100%); max-width: none; height: 100dvh; max-height: none; padding: 0; border: 0; border-left: 1px solid var(--line); }
+.work-drawer[open] { display: flex; flex-direction: column; }
+@media (prefers-reduced-motion: no-preference) {
+  .work-drawer { transition: transform 260ms cubic-bezier(.32,.72,0,1); }
+  @starting-style { .work-drawer[open] { transform: translateX(100%); } }
+}
+.work-drawer-head { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 16px 12px 12px 18px; border-bottom: 1px solid var(--line); }
+.work-drawer-head > div { flex: 1; min-width: 0; }
+.work-drawer-head h3 { margin: 6px 0 0; font-size: 17px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.work-drawer-close { position: relative; }
+.work-drawer-close::before { content: ''; position: absolute; width: max(100%, 44px); height: max(100%, 44px); left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.work-drawer-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 18px max(20px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 18px; }
+.work-track { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.work-track li { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+.work-track li.past { color: var(--text); background: var(--hover); border-color: transparent; }
+/* The current step: text colour on the surface, with an accent ring. White on the accent fill is 3.8:1, too low for 12px text. */
+.work-track li.on { color: var(--text); background: transparent; border: 2px solid var(--accent); padding: 1px 7px; font-weight: 600; }
+.work-drawer-status:not(:has(p)) { display: none; }
+.work-drawer-status .work-result { margin: 0; }
+.work-block h4 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.work-block .work-q { margin: 0 0 10px; }
+.work-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.work-block .work-reply { padding: 10px 0 0; }
+.work-tablist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.work-tablist .work-tab { width: 100%; justify-content: flex-start; color: var(--text); font-size: 13px; }
+.work-tablist .work-tab small { margin-left: auto; flex: none; color: var(--muted); font-size: 12px; }
+.work-tablist .work-tab:not(:disabled):hover { background: var(--hover); }
+.work-tablist .work-tab:disabled { color: var(--muted); }
+.work-note { margin: 6px 0 0; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.work-note.failed { color: var(--error); }
+.work-check { display: flex; align-items: center; gap: 8px; min-height: var(--control); font-size: 13.5px; }
+.work-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.work-kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 0; font-size: 13px; }
+.work-kv a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.work-kv dt { color: var(--muted); }
+.work-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.work-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 1.45; }
+.work-history li { display: grid; grid-template-columns: 7.5em 1fr; gap: 10px; }
+.work-history time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.work-history span { min-width: 0; overflow-wrap: anywhere; }
+
+@media (min-width: 600px) {
+  .sheet.work-sheet[open] { width: calc(100% - 48px); max-width: 1440px; height: calc(100dvh - 48px); padding-top: 20px; }
+  .work-head, .work-filters { padding-inline: 22px; }
+  .work-body { padding-inline: 22px; }
+}
+@media (pointer: coarse) {
+  .work-check { min-height: 44px; }
+  .work-check input { width: 22px; height: 22px; }
+  .work-actions button, .work-tablist .work-tab, .work-views > button, .work-projects > button, .work-hold { min-height: 44px; }
+  /* Beat the .sm, .icon-button and compact inbox sizes inside the sheet and the drawer. */
+  .work-sheet .work-filters .work-hold, .work-sheet .work-card .inbox-actions button { min-height: 44px; }
+  .work-sheet .work-head .icon-button, .work-drawer .work-drawer-close { width: 44px; height: 44px; }
+  .work-block .work-reply input { height: 44px; font-size: 16px; }
+}
+
+/* Sidebar: a tab's item id and stage. */
+.work-mark { flex: none; margin-left: 6px; padding: 0 5px; border-radius: var(--radius-sm); background: var(--hover); color: var(--muted); font: 600 10.5px/16px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.work-mark.needs { background: var(--accent-soft); color: var(--accent); }
+.work-mark .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.home-group-head .work-board-link { margin-left: auto; }

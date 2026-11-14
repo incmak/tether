@@ -13,9 +13,10 @@ import './Work.css'
 // "Decisions on items": work items whose agent asked Mak something. Each card answers in place; the answer goes to the
 // tab that asked. Home shows it first, and the desktop Needs you panel shows it above the tabs that wait for input.
 
-function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen }: {
+export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen, onDetails }: {
   scope: string; item: WorkItem; prefix: string; panes: Pane[]; busy: boolean
   onAnswer: (item: WorkItem, reply: { choice: string } | { text: string }) => Promise<boolean>; onOpen: (pane: Pane) => void
+  onDetails?: (item: WorkItem) => void
 }) {
   const now = useNow()
   const [replying, setReplying] = useState(false)
@@ -43,6 +44,7 @@ function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen }: {
       {ask.options.map((option, index) => <button key={option} type="button" className={index === 0 ? 'inbox-yes' : undefined} disabled={busy}
         onClick={() => void onAnswer(item, { choice: option })}><span>{option}</span></button>)}
       <button type="button" aria-expanded={replying} disabled={busy} onClick={() => setReplying(open => !open)}>Reply</button>
+      {onDetails && <button type="button" aria-haspopup="dialog" onClick={() => onDetails(item)}>Details<span className="visually-hidden"> of {item.id}</span></button>}
     </div>
     {replying && <form className="work-reply" onSubmit={event => void send(event)}>
       <label className="visually-hidden" htmlFor={`${scope}-work-${item.id}-reply`}>Reply to {item.id}</label>
@@ -95,22 +97,24 @@ export type DecisionAnswers = ReturnType<typeof useDecisionAnswers>
 
 /** The group. Hidden while nothing waits and no result shows; a failed load shows a retry, so a broken board does
  * not hide questions. */
-export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact }: {
+export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact, scope: named, onDetails, onBoard }: {
   board?: WorkBoard; error: string; panes: Pane[]; answers: DecisionAnswers; onRefresh: () => unknown; onOpen: (pane: Pane) => void; compact?: boolean
+  scope?: string; onDetails?: (item: WorkItem) => void; onBoard?: () => void
 }) {
   const items = decisions(board)
   const prefixes = new Map(board?.projects.map(project => [project.name, project.prefix]))
-  const scope = compact ? 'inbox' : 'home'
+  const scope = named ?? (compact ? 'inbox' : 'home')
   const { results } = answers
   if (!items.length && !error && !results.length) return null
-  return <section id={compact ? undefined : 'home-group-decisions'} className={`home-group decisions${compact ? ' compact' : ''}`} aria-labelledby={`${scope}-work-decisions-title`}>
+  return <section id={compact || named ? undefined : 'home-group-decisions'} className={`home-group decisions${compact ? ' compact' : ''}`} aria-labelledby={`${scope}-work-decisions-title`}>
     <div className="home-group-head">
       <h2 id={`${scope}-work-decisions-title`}><ClipboardList size={14} aria-hidden="true" />Decisions on items</h2>
       {items.length > 0 && <span className="home-count">{items.length}</span>}
+      {onBoard && <button type="button" className="ghost sm work-board-link" aria-haspopup="dialog" onClick={onBoard}>Board</button>}
     </div>
     <div role="status">{results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
     {error && <p className="work-error" role="alert"><span>{board ? 'Could not refresh work items. These questions can be out of date.' : 'Could not load work items.'} {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
     {items.length > 0 && <ul>{items.map(item => <DecisionCard key={`${item.id}:${item.ask!.id}`} scope={scope} item={item} prefix={prefixes.get(item.project) ?? item.id.split('-')[0]}
-      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} />)}</ul>}
+      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} onDetails={onDetails} />)}</ul>}
   </section>
 }
