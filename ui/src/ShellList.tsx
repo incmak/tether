@@ -15,15 +15,16 @@ export function ShellList({ api, open, onToggle, onOpenShell, onEnded }: { api: 
   const [confirm, setConfirm] = useState<'all' | string | null>(null)  // 'all', or the pane of a busy row
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
-  const load = useCallback(() => { void listShells(api).then(setShells, () => setShells(current => current ?? [])) }, [api])
+  const load = useCallback((priority?: RequestPriority) => { void listShells(api, priority).then(setShells, () => setShells(current => current ?? [])) }, [api])
   useEffect(() => {
     load()
     if (!open) return
-    const tick = () => { if (document.visibilityState === 'visible') load() }
+    const tick = () => { if (document.visibilityState === 'visible') load('low') }  // refresh of a list already shown
     const timer = setInterval(tick, POLL_MS)
-    window.addEventListener(SHELLS_CHANGED, load)
+    const changed = () => load()
+    window.addEventListener(SHELLS_CHANGED, changed)
     document.addEventListener('visibilitychange', tick)
-    return () => { clearInterval(timer); window.removeEventListener(SHELLS_CHANGED, load); document.removeEventListener('visibilitychange', tick) }
+    return () => { clearInterval(timer); window.removeEventListener(SHELLS_CHANGED, changed); document.removeEventListener('visibilitychange', tick) }
   }, [open, load])
   if (!shells?.length) return null
   const busy = shells.filter(shell => !shell.idle)

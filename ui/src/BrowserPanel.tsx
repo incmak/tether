@@ -115,9 +115,9 @@ export function BrowserPanel(props: BrowserPanelProps) {
 function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: BrowserPanelProps & { which: BrowserId; onSwitch: (id: BrowserId) => void }) {
   const host = useHost()
   // Every request names the signed-in browser; headed Chrome can take longer than 10 s to start.
-  const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout) => baseApi(
+  const api: Api = which === 'test' ? baseApi : (path, body, signal, method, timeout, priority) => baseApi(
     body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path,
-    body === undefined ? undefined : { ...(body as object), browser: which }, signal, method, timeout ?? 30000)
+    body === undefined ? undefined : { ...(body as object), browser: which }, signal, method, timeout ?? 30000, priority)
   const [browsers, setBrowsers] = useState<BrowserAvailability[]>([])
   const switchMenu = useMenu()
   const [tabs, setTabs] = useState<BrowserTab[]>([])

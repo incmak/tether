@@ -93,8 +93,8 @@ import { sizeVars } from './panelEdges'
 function App() {
   const [unauthorized, setUnauthorized] = useState(false)
   useWindowControls(!unauthorized)
-  const api: Api = useCallback(async (path, body, signal, method, timeout) => {
-    try { return await request(path, body, signal, method, timeout) } catch (error) {
+  const api: Api = useCallback(async (path, body, signal, method, timeout, priority) => {
+    try { return await request(path, body, signal, method, timeout, priority) } catch (error) {
       if (error instanceof ApiError && error.status === 401) setUnauthorized(true)
       throw error
     }

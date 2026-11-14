@@ -35,43 +35,48 @@ const POLL_MS = 4000
 
 // One poll for the whole app, however many chats show the card.
 let status: AgentBrowserStatus | null = null
-let poller: { api: Api; timer: number } | null = null
+let poller: { api: Api; timer: number } | null = null  // one chain of timers: the next poll waits for this one to end
 const listeners = new Set<() => void>()
 function emit() { listeners.forEach(listener => listener()) }
 let known: Record<string, AgentTab> = {}
 let signed: AgentBrowserStatus['signed'] = NO_SIGNED
-async function accept(api: Api, wire: AgentBrowserWire | null) {
+async function accept(api: Api, wire: AgentBrowserWire | null, priority?: RequestPriority) {
   // Older servers answer 404: treat that as "no agent browser".
   if (!wire || !Array.isArray(wire.agents)) { status = null; emit(); return }
   const ids = wire.agents.flatMap(agent => agent.tabs)
   // Only ask for titles when agents have tabs: then the browser runs already, and `browser/tabs` does not start it.
   if (ids.length) {
     try {
-      const rows = (await api<{ tabs: AgentTab[] }>('browser/tabs')).tabs
+      const rows = (await api<{ tabs: AgentTab[] }>('browser/tabs', undefined, undefined, undefined, undefined, priority)).tabs
       known = Object.fromEntries(rows.map(row => [row.id, { id: row.id, url: row.url, title: row.title }]))
     } catch { /* keep the old titles */ }
   }
   status = { ...wire, signed, agents: wire.agents.map(agent => ({ ...agent, tabs: agent.tabs.map(id => known[id] ?? { id, url: '', title: '' }) })) }
   emit()
 }
+// Background status: low fetch priority, so on a slow link it does not hold up chat requests (B67).
 async function poll(api: Api) {
   if (document.visibilityState !== 'visible') return
   let wire: AgentBrowserWire | null = null
-  try { wire = await api<AgentBrowserWire>('browser/agents') } catch { /* off or old server */ }
+  try { wire = await api<AgentBrowserWire>('browser/agents', undefined, undefined, undefined, undefined, 'low') } catch { /* off or old server */ }
   // Does not start Chrome. Older servers answer 404: no requests.
-  try { const access = await api<SignedBrowserAccess>('browser/signed/access'); signed = pickSigned(access) } catch { signed = NO_SIGNED }
-  await accept(api, wire)
+  try { const access = await api<SignedBrowserAccess>('browser/signed/access', undefined, undefined, undefined, undefined, 'low'); signed = pickSigned(access) } catch { signed = NO_SIGNED }
+  await accept(api, wire, 'low')
+}
+// The next poll starts POLL_MS after this one ends, so slow answers never stack up.
+function run(current: { api: Api; timer: number }) {
+  void poll(current.api).catch(() => {}).finally(() => { if (poller === current) current.timer = window.setTimeout(() => run(current), POLL_MS) })
 }
 function subscribe(api: Api) {
   return (listener: () => void) => {
     listeners.add(listener)
     if (!poller) {
-      poller = { api, timer: window.setInterval(() => void poll(api), POLL_MS) }
-      void poll(api)
+      poller = { api, timer: 0 }
+      run(poller)
     }
     return () => {
       listeners.delete(listener)
-      if (!listeners.size && poller) { clearInterval(poller.timer); poller = null }
+      if (!listeners.size && poller) { clearTimeout(poller.timer); poller = null }
     }
   }
 }

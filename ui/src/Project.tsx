@@ -45,7 +45,7 @@ export function KeepChoice({ source, target, value, disabled, onChange }: { sour
 /** Sidebar marks, read every 15 s. Read only: it never gives a session a project. */
 export function useProjectMarks(api: Api, ready: boolean) {
   const [marks, setMarks] = useState<ProjectMarks>({})
-  const load = useCallback(() => { api<ProjectMarks>('projects/marks').then(setMarks, () => {}) }, [api])
+  const load = useCallback(() => { api<ProjectMarks>('projects/marks', undefined, undefined, undefined, undefined, 'low').then(setMarks, () => {}) }, [api])
   useEffect(() => {
     if (!ready) return
     load()

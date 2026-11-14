@@ -6,7 +6,7 @@ import { panelCols, removePanel } from './workspace'
  * idle: only the shell runs (nothing would stop). monitor: a btop window for Host resources; folder is ''. */
 export interface SideShell { pane: string; folder: string; command: string; idle: boolean; monitor: boolean }
 
-export const listShells = (api: Api) => api<{ shells: SideShell[] }>('side-shells').then(data => Array.isArray(data.shells) ? data.shells : [])
+export const listShells = (api: Api, priority?: RequestPriority) => api<{ shells: SideShell[] }>('side-shells', undefined, undefined, undefined, undefined, priority).then(data => Array.isArray(data.shells) ? data.shells : [])
 export const endShell = (api: Api, pane: string) => api('side-shell/end', { pane })
 /** idle: only shells with nothing running. all: every shell. Returns the panes that ended. */
 export const endShells = (api: Api, which: 'idle' | 'all') => api<{ panes?: string[] }>('side-shell/end', { which }).then(data => Array.isArray(data.panes) ? data.panes : [])

@@ -28,7 +28,7 @@ export function markSeen(highest: number) {
 
 /** Open items, and the open items that agents added after the person last looked. On the first visit nothing is new. */
 export function useBacklogNews(api: Api) {
-  const fetcher = useCallback((signal: AbortSignal) => api<{ text: string }>(BACKLOG_PATH, undefined, signal), [api])
+  const fetcher = useCallback((signal: AbortSignal) => api<{ text: string }>(BACKLOG_PATH, undefined, signal, undefined, undefined, 'low'), [api])  // a badge: background
   const { data } = usePolling(fetcher, POLL_MS)
   const [seen, setSeen] = useState(readSeen)
   useEffect(() => {

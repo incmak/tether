@@ -205,9 +205,10 @@ export class ApiError extends Error {
   approval: boolean  // the action needs a passkey approval (approval.ts)
   constructor(status: number, message: string, draft = false, approval = false) { super(message); this.status = status; this.draft = draft; this.approval = approval }
 }
-/** timeout: milliseconds before the request gives up (10 s). A broadcast types into many panes one after another, so it waits longer. */
-export type Api = <T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'DELETE', timeout?: number) => Promise<T>
-export async function request<T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'DELETE', timeout = 10000): Promise<T> {
+/** timeout: milliseconds before the request gives up (10 s). A broadcast types into many panes one after another, so it waits longer.
+ *  priority: 'low' for background polls the current view does not wait on, so they do not compete with chat on a slow link (B67). */
+export type Api = <T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'DELETE', timeout?: number, priority?: RequestPriority) => Promise<T>
+export async function request<T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'DELETE', timeout = 10000, priority?: RequestPriority): Promise<T> {
   const raw = typeof Blob !== 'undefined' && body instanceof Blob  // background uploads send the image bytes as is
   const init: RequestInit = {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
@@ -216,6 +217,7 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
   }
+  if (priority) init.priority = priority  // browsers without Fetch priority ignore it
   const response = await reach(`/mobile/api/${path}`, init)
   const data = await response.json().catch(error => {
     // Failed body reads must reject so callers do not treat them as empty data.
