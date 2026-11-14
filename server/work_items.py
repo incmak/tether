@@ -374,7 +374,7 @@ def _history_text(event):
         return f'Renamed: {event.get("title", "")}'
     if kind == 'jira':
         return event.get('text', '')
-    if kind == 'sent':
+    if kind in ('sent', 'fix'):
         return event.get('text', '')
     return ''
 
@@ -625,7 +625,7 @@ def set_qa(item_id, value, by, who='', version=None):
 
 def record(item_id, kind, text, by='tether', **fields):
     """A Tether-made history line (sent, jira): no version check, it follows a write that had one."""
-    if kind not in ('sent', 'jira'):
+    if kind not in ('sent', 'jira', 'fix'):
         raise invalid('Invalid record.')
     return _write_event(item_id, None, dict(fields, type=kind, by=by, text=_line(text, TEXT_LIMIT, 'text')))
 

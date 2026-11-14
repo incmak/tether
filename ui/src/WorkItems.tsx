@@ -78,8 +78,9 @@ export function useDecisionAnswers(api: Api, onRefresh: () => unknown) {
     setResults(current => current.filter(entry => entry.id !== item.id))
     try {
       const done = await answerItem(api, item, reply)
-      show(done.sent ? { id: item.id, text: `${item.id}: answer sent to the tab.`, ok: true }
-        : { id: item.id, text: `${item.id}: answer saved. Not sent: ${done.why}`, ok: false })
+      const fix = !done.fix ? '' : done.fix.started ? ' Fix tab started.' : ` Fix tab not started: ${done.fix.why}`
+      show(done.sent ? { id: item.id, text: `${item.id}: answer sent to the tab.${fix}`, ok: !done.fix || done.fix.started }
+        : { id: item.id, text: `${item.id}: answer saved. Not sent: ${done.why}${fix}`, ok: false })
       return true
     } catch (failure) {
       const changed = failure instanceof ApiError && failure.status === 409

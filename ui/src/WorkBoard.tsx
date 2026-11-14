@@ -8,7 +8,7 @@ import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { STAGE_LABEL, decisions, moveItem, onBoard, projectHue, setItemQa } from './work'
+import { STAGE_LABEL, decisions, moveItem, onBoard, projectHue, setItemQa, startFix } from './work'
 import type { Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import type { DecisionAnswers } from './WorkItems'
@@ -193,6 +193,10 @@ function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefre
     finally { setBusy(false); void onRefresh() }
   }
   const move = (stage: Stage, done: string) => void write(done, () => moveItem(api, item, stage))
+  const fix = () => void write(`${item.id}: fix tab started.`, async () => {
+    const done = await startFix(api, item)
+    if (!done.fix.started) throw new Error(`Fix tab not started: ${done.fix.why}`)
+  })
   const send = async (event: FormEvent) => {
     event.preventDefault()
     if (!ask || !reply.trim()) return
@@ -201,6 +205,8 @@ function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefre
   }
   const live = (pane: string) => panes.find(entry => entry.id === pane)
   const firstMove = !ask && item.stage === 'review'
+  // A Ready item can start a fix tab unless one still runs an agent (the Build answer tries first). Matches the server.
+  const canFix = item.stage === 'ready' && !item.tabs.some(tab => tab.role === 'fix' && live(tab.pane) && live(tab.pane)!.agent !== 'shell')
   return <dialog {...modal} className="work-drawer" aria-labelledby={`${id}-title`}>
     <div className="work-drawer-head">
       <div>
@@ -240,12 +246,13 @@ function ItemDrawer({ api, item, project, prefix, panes, answers, error, onRefre
         <h4 id={`${id}-move`}>Move</h4>
         <div className="work-actions">
           {item.stage === 'review' && <button type="button" className="primary" data-first="" disabled={locked} onClick={() => move('done', `${item.id} is Done.`)}>Mark done</button>}
+          {canFix && <button type="button" className="primary" data-first="" disabled={locked} onClick={fix}>Start fix tab</button>}
           {item.stage === 'hold'
             ? <>
               <button type="button" className="secondary" disabled={locked} onClick={() => move('triage', `${item.id} is back in Triage.`)}>Back to Triage</button>
               <button type="button" className="secondary" disabled={locked} onClick={() => move('ready', `${item.id} moved to Ready.`)}>Move to Ready</button>
             </>
-            : <button type="button" className={firstMove ? 'ghost' : 'secondary'} disabled={locked} onClick={() => move('hold', `${item.id} is on hold.`)}>Put on hold</button>}
+            : <button type="button" className={firstMove || canFix ? 'ghost' : 'secondary'} disabled={locked} onClick={() => move('hold', `${item.id} is on hold.`)}>Put on hold</button>}
         </div>
       </section>}
       <section className="work-block" aria-labelledby={`${id}-tabs`}>

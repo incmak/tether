@@ -18,7 +18,9 @@ export interface WorkItem {
   doneAt: number | null; jira: { status?: string; error?: string } | null; version: number
 }
 export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[] }
-export interface AnswerResult { item: WorkItem; sent: boolean; why: string }
+/** A Build answer, or Start fix tab, opens a fix tab. When it does not start, the item stays Ready and why says so. */
+export interface FixResult { started: boolean; why: string }
+export interface AnswerResult { item: WorkItem; sent: boolean; why: string; fix?: FixResult }
 
 export const BOARD_PATH = 'work/board'
 const POLL_MS = 5000
@@ -45,6 +47,9 @@ export function projectHue(prefix: string) {
 
 export const moveItem = (api: Api, item: WorkItem, stage: Stage) =>
   api<{ item: WorkItem }>('work/stage', { item: item.id, stage, version: item.version })
+
+export const startFix = (api: Api, item: WorkItem) =>
+  api<{ item: WorkItem; fix: FixResult }>('work/fix', { item: item.id, version: item.version })
 
 export const setItemQa = (api: Api, item: WorkItem, qa: boolean) =>
   api<{ item: WorkItem }>('work/qa', { item: item.id, qa, version: item.version })

@@ -1902,7 +1902,7 @@ class Handler(BaseHTTPRequestHandler):
             projects_api.post(self)
             return
         if work_api.handles(self.path):
-            work_api.post(self, sessions=sessions, status=shared_status, send=review_send)
+            work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
             groups_api.post(self)

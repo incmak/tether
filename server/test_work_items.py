@@ -2,6 +2,7 @@ import io
 import json
 import multiprocessing
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest import mock
 import agent_item_cli
 import paths
 import work_api
+import work_fix
 import work_items
 from projects import ProjectError
 
@@ -484,3 +486,176 @@ class Cli(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FixTab(unittest.TestCase):
+    """A Build answer opens a fix tab in the project's work session (stack Fixes) and moves the item to Building."""
+    answer = Api.answer
+
+    def setUp(self):
+        Api.setUp(self)
+        self.work = {'id': '%7', 'tmux_session': 'Shop', 'label': 'Shop', 'agent': 'claude', 'thread': 'chat-7',
+                     'writable': True}
+        self.entry['agent'] = 'claude'
+        self.entries = [self.entry, self.work]
+        self.started = []
+        for target, value in (('group_of_pane', lambda pane, run: ('$1', 'Shop')),
+                              ('find_or_create', lambda session, name, run: {'id': 'g-fixes', 'name': name})):
+            patcher = mock.patch.object(work_fix.groups, target, side_effect=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        def start(entry, body, folder, run=None, group=None, **_):
+            self.started.append((entry['id'], body, group))
+            return '%42', body['name']
+        patcher = mock.patch.object(work_fix.delegate, 'start', side_effect=start)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.folder = self.temp.name
+        patcher = mock.patch.object(work_fix.work_items, 'project', side_effect=lambda name: dict(PROJECT, folder=self.folder))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sessions = {'%7': 'Shop'}
+
+    def tmux(self, command, **_):
+        """Fake tmux: display-message tells the pane's current session."""
+        pane = command[command.index('-t') + 1]
+        if pane not in self.sessions:
+            return subprocess.CompletedProcess(command, 1, '', "can't find pane")
+        return subprocess.CompletedProcess(command, 0, f'{pane}\t{self.sessions[pane]}\n', '')
+
+    def post(self, name, body):
+        handler = Handler(work_api.PREFIX + name, body)
+        work_api.post(handler, sessions=lambda: self.entries, status=lambda entry: {'state': self.state},
+                      send=lambda entry, text, state: self.sends.append((entry['id'], text)), run=self.tmux)
+        return handler.sent
+
+    def test_build_starts_a_linked_fix_tab(self):
+        status, payload = self.answer()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['fix'], {'started': True, 'why': ''})
+        item = payload['item']
+        self.assertEqual(item['stage'], 'building')
+        tab = next(tab for tab in item['tabs'] if tab['pane'] == '%42')
+        self.assertEqual((tab['role'], tab['stack'], tab['name']), ('fix', 'Fixes', 'T-001 fix'))
+        source, body, group = self.started[0]
+        self.assertEqual((source, group, body['agent']), ('%7', 'g-fixes', 'claude'))
+        self.assertIn('Fix work item T-001: Login fails', body['message'])
+        self.assertIn('Mak chose Build on: Fix it?', body['message'])
+
+    def test_hold_starts_no_fix_tab(self):
+        status, payload = self.answer(choice='Hold')
+        self.assertEqual(payload['item']['stage'], 'hold')
+        self.assertNotIn('fix', payload)
+        self.assertEqual(self.started, [])
+
+    def test_closed_work_session_keeps_the_item_ready(self):
+        self.entries = [self.entry]
+        status, payload = self.answer()
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['fix']['started'])
+        self.assertIn('work session Shop is not open', payload['fix']['why'])
+        self.assertEqual(payload['item']['stage'], 'ready')
+        self.assertTrue(payload['item']['history'][-1]['text'].startswith('Fix tab not started. The work session'))
+        self.assertEqual(self.started, [])
+
+    def test_a_failed_launch_keeps_the_item_ready(self):
+        work_fix.delegate.start.side_effect = RuntimeError('tmux refused')
+        payload = self.answer()[1]
+        self.assertEqual(payload['fix'], {'started': False, 'why': 'tmux refused'})
+        self.assertEqual(payload['item']['stage'], 'ready')
+
+    def test_retry_starts_the_tab_and_rejects_stale_or_doubled_starts(self):
+        self.entries = [self.entry]
+        item = self.answer()[1]['item']
+        self.entries = [self.entry, self.work]
+        status, payload = self.post('fix', {'item': 'T-001', 'version': item['version'] - 1})
+        self.assertEqual(status, 409)
+        status, payload = self.post('fix', {'item': 'T-001', 'version': item['version']})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['fix']['started'])
+        self.assertEqual(payload['item']['stage'], 'building')
+        self.entries.append({'id': '%42', 'thread': 'chat-42', 'agent': 'claude'})
+        status, payload = self.post('fix', {'item': 'T-001', 'version': payload['item']['version']})
+        self.assertEqual(status, 409)
+        self.assertEqual(len(self.started), 1)
+
+    def test_live_fix_tab_blocks_a_second_one(self):
+        item = self.answer()[1]['item']
+        work_items.stage('T-001', 'ready', 'mak', version=item['version'])
+        self.entries.append({'id': '%42', 'thread': 'chat-42', 'agent': 'claude'})
+        status, payload = self.post('fix', {'item': 'T-001', 'version': work_items.find('T-001')[1]['version']})
+        self.assertEqual(status, 409)
+        self.assertIn('already has a fix tab', payload['error'])
+
+    def test_a_fix_pane_left_at_a_shell_does_not_block_a_retry(self):
+        item = self.answer()[1]['item']
+        work_items.stage('T-001', 'ready', 'mak', version=item['version'])
+        self.entries.append({'id': '%42', 'thread': None, 'agent': 'shell'})
+        status, payload = self.post('fix', {'item': 'T-001', 'version': work_items.find('T-001')[1]['version']})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['fix']['started'])
+
+    def test_an_anchor_moved_to_another_session_starts_nothing(self):
+        self.sessions['%7'] = 'Other'
+        payload = self.answer()[1]
+        self.assertFalse(payload['fix']['started'])
+        self.assertIn('no longer in the work session Shop', payload['fix']['why'])
+        self.assertEqual(self.started, [])
+        self.assertEqual(payload['item']['stage'], 'ready')
+
+    def test_a_missing_project_folder_starts_nothing(self):
+        self.folder = os.path.join(self.temp.name, 'gone')
+        payload = self.answer()[1]
+        self.assertFalse(payload['fix']['started'])
+        self.assertIn('project folder', payload['fix']['why'])
+        self.assertEqual(self.started, [])
+
+    def test_a_move_while_waiting_for_the_lock_starts_nothing(self):
+        self.entries = [self.entry]
+        item = self.answer()[1]['item']
+        self.entries = [self.entry, self.work]
+
+        class Lock:
+            def __enter__(lock):
+                work_items.stage('T-001', 'hold', 'mak')
+            def __exit__(lock, *exc):
+                return False
+        with self.assertRaises(work_fix.ProjectError) as caught:
+            work_fix.try_start(item, self.entries, self.tmux, Lock(), strict=True)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(self.started, [])
+        self.assertEqual(work_items.find('T-001')[1]['stage'], 'hold')
+
+    def test_a_failed_launch_returns_the_claim(self):
+        work_fix.delegate.start.side_effect = RuntimeError('tmux refused')
+        item = self.answer()[1]['item']
+        self.assertEqual(item['stage'], 'ready')
+        self.assertIn('Starting fix tab', ' '.join(entry.get('text', '') for entry in item['history']))
+
+    def test_a_note_during_a_failed_launch_still_returns_the_claim(self):
+        def start(entry, body, folder, run=None, group=None, **_):
+            work_items.note('T-001', 'meanwhile', 'mak')
+            raise RuntimeError('tmux refused')
+        work_fix.delegate.start.side_effect = start
+        payload = self.answer()[1]
+        self.assertFalse(payload['fix']['started'])
+        self.assertEqual(payload['item']['stage'], 'ready')
+
+    def test_a_stage_move_during_a_failed_launch_is_kept(self):
+        def start(entry, body, folder, run=None, group=None, **_):
+            work_items.stage('T-001', 'hold', 'mak')
+            raise RuntimeError('tmux refused')
+        work_fix.delegate.start.side_effect = start
+        self.assertEqual(self.answer()[1]['item']['stage'], 'hold')
+
+    def test_a_change_during_the_launch_still_links_the_tab(self):
+        def start(entry, body, folder, run=None, group=None, **_):
+            work_items.note('T-001', 'meanwhile', 'mak')
+            self.started.append(entry['id'])
+            return '%42', body['name']
+        work_fix.delegate.start.side_effect = start
+        payload = self.answer()[1]
+        self.assertTrue(payload['fix']['started'])
+        self.assertEqual(payload['item']['stage'], 'building')
+        self.assertTrue(any(tab['pane'] == '%42' and tab['role'] == 'fix' for tab in payload['item']['tabs']))

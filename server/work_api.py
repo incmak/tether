@@ -9,6 +9,7 @@ import threading
 import paths
 from projects import _read, _write
 
+import work_fix
 import work_items
 from projects import ProjectError
 
@@ -72,7 +73,8 @@ def deliver(item, ask, text, sessions, status, send):
     return True, ''
 
 
-def post(handler, sessions=None, status=None, send=None):
+def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
+    """run and lock: tmux runner and the server's send lock. Without sessions and run, no fix tab starts."""
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
@@ -99,7 +101,19 @@ def post(handler, sessions=None, status=None, send=None):
                     sent, why = False, str(exc) or 'The message did not go through.'
             tab_name = ask.get('pane', '')
             item = work_items.record(item['id'], 'sent', f'Sent to tab {tab_name}' if sent else f'Not sent: {why}')
-            return {'item': item, 'sent': sent, 'why': why}
+            result = {'item': item, 'sent': sent, 'why': why}
+            if item['stage'] == 'ready' and (body.get('choice') or '').casefold() == 'build':
+                if sessions and run:
+                    result['item'], result['fix'] = work_fix.try_start(item, sessions(), run, lock, ask.get('q', ''))
+                else:
+                    result['fix'] = {'started': False, 'why': 'Fix tabs are off.'}
+            return result
+        if name == 'fix':
+            if not (sessions and run):
+                raise ProjectError(503, 'Fix tabs are off.')
+            _, item = work_items.find(body.get('item'))
+            item, fix = work_fix.try_start({**item, 'version': version}, sessions(), run, lock, strict=True)
+            return {'item': item, 'fix': fix}
         if name == 'stage':
             return {'item': work_items.stage(body.get('item'), body.get('stage'), 'mak', version=version,
                                              text=body.get('text') or '')}
