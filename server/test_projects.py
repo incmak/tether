@@ -85,7 +85,7 @@ class ProjectTests(unittest.TestCase):
         code = str(Path(projects.__file__).resolve().parent.parent)
         real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
         real = real.replace(code, '/srv/user/apps/tether')
-        self.assertLess(len(real), 3000)
+        self.assertLess(len(real), 3150)  # +150 for the subagents-first rule (2026-11-14)
         self.assertIn('not evidence of absence', text)
         self.assertLess(text.index('## Naming tabs'), text.index('## Claims of absence'))
         self.assertLess(text.index('## Claims of absence'), text.index('## New tabs and reviewers'))
@@ -93,6 +93,7 @@ class ProjectTests(unittest.TestCase):
         self.assertLess(text.index('## Tab icon'), text.index('## Naming tabs'))
         self.assertLess(text.index('## Naming tabs'), text.index('## New tabs and reviewers'))
         self.assertLess(text.index('## New tabs and reviewers'), text.index('## Notes'))
+        self.assertIn('Use your own subagents', text[text.index('## New tabs and reviewers'):text.index('## Notes')])
         self.assertIn(str(Path(projects.__file__).with_name('agent_tab_cli.py')), text)
         for option in ('--review-it', '--reviews-me', '--agent claude|codex', '--name NAME',
                        '--cwd DIR', '--worktree BRANCH', '--context', 'stop --worker %N [--reviewer %N]', '`list`',

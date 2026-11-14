@@ -292,12 +292,12 @@ class Hook(Base):
         self.assertIn('The user saved answers', text)
         for tier in autonomy.TIERS:
             self.assertIn(f'{tier.title()} reviewer: Codex, model gpt-new, effort ultra', text)
-        for word in ('AskUserQuestion', 'subagent', 'Claude Code', 'UserPromptSubmit', 'hooks'):
+        for word in ('AskUserQuestion', 'Claude Code', 'UserPromptSubmit', 'hooks'):
             self.assertNotIn(word, text)
         self.assertIn('agent_tab_cli.py', text)
         for level in range(6):
             text = autonomy.rules({'level': level, 'source': 'global'}, agent='codex')
-            for word in ('AskUserQuestion', 'subagent', 'Claude Code', 'hooks'):
+            for word in ('AskUserQuestion', 'Claude Code', 'hooks'):
                 self.assertNotIn(word, text)
 
     def test_tmux_failure_uses_global(self):

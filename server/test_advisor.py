@@ -200,6 +200,7 @@ class Rules(Base):
             for rule in (autonomy.EVIDENCE, autonomy.ASK_USER):
                 self.assertEqual(rule in text, level >= 3)
             self.assertEqual('ask the advisor (' in text, level >= 3)
+            self.assertEqual('never use it for searches' in text, level >= 3)
             self.assertEqual(autonomy.PRODUCT in text, level >= 4)
             if level >= 3:
                 needles = [autonomy.RULES[level], autonomy.EVIDENCE, 'ask the advisor (', autonomy.ASK_USER]

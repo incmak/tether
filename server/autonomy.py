@@ -38,8 +38,8 @@ LEVELS = (
     ('Standard', 'Asks when a decision is material and has no sensible default.'),
     ('Trusted', 'Uses sensible defaults. Asks its questions together at the end of the turn.'),
     ('Autopilot', 'Does not ask about normal decisions. Lists its assumptions. Asks only for new authority.'),
-    ('Full auto', 'Runs the task alone, opens its own tabs and reviewers, works the backlog. Asks only when blocked; '
-     'urgent asks reach the user at once.'),
+    ('Full auto', 'Runs the task alone with its own subagents and reviewers, works the backlog. Asks only when '
+     'blocked; urgent asks reach the user at once.'),
 )
 RULES = (
     'Write the plan and wait for the user to approve it before you start. Stop at each milestone with a short status '
@@ -53,19 +53,21 @@ RULES = (
     'Do not ask about normal decisions. Decide from the evidence, list each decision in the final reply, and continue '
     'until the work is done and verified. Ask only when you need new authority or a decision that only the user can make.',
     'Work alone until the task is done and verified. Do not ask about normal decisions; list each decision in the '
-    'final reply. Split large work into new tabs and start reviewers with agent_tab_cli.py. When the task is done, '
-    'start the next open backlog item of this project, if there is one. Ask only when you are blocked: the task cannot '
+    'final reply. Split large work with your own subagents and start reviewers with agent_tab_cli.py. When the task '
+    'is done, start the next open backlog item of this project, if there is one. Ask only when you are blocked: the task cannot '
     'continue without the user, or a critical bug needs a decision.',
 )
 EVIDENCE = ('Never guess. Before you decide or ask, check the evidence in this order: the request and this '
             'conversation; the project notes and saved answers; the code, tests and git history; the primary docs and '
             'standards (official docs, WCAG 2.2, platform guidelines). In the final reply, mark each material decision '
             'Verified (with its evidence) or Advisor (with the advisor answer).')
-ADVISOR = ('When the evidence does not settle a material decision, ask the advisor ({who}): '
+ADVISOR = ('When the evidence, your own research and your own subagents do not settle a material decision, ask '
+           'the advisor ({who}): '
            '`python3 {cli} ask "QUESTION"`. Give the options and the evidence you found. Add --critical for '
            'security, data, money, release or architecture decisions; a second advisor ({second}) then answers too. '
            'Act on the answer only when the command exits 0 and, with two advisors, both answers agree. Otherwise ask '
-           'the user. While you wait, do not change files that the answer affects.')
+           'the user. While you wait, do not change files that the answer affects. The advisor runs in its own tab: '
+           'never use it for searches, lookups or side tasks.')
 NO_ADVISOR = 'The user turned the advisor off. When the evidence does not settle a material decision, ask the user.'
 ASK_USER = ('Ask the user, not the advisor, about taste or brand choices that no evidence settles, business, pricing '
             'or legal choices, facts only the user knows, new authority, and the items in the safety rule.')

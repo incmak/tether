@@ -383,7 +383,9 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'source code, official docs, or the real config. A failed search on guessed names, or a page that did not load, is not evidence of absence. '
                  'If you did not read the primary source, write "not checked", name what you did not read, and keep looking when the answer can change what the user does.\n')
     cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
-    parts.append(f'\n## New tabs and reviewers\nTo start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
+    parts.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. Start a tab only for a reviewer '
+                 'or advisor that watches the work, or a task the user wants to steer.\n'
+                 f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
                  'It opens a tab Tether can track. Options: `--review-it` (this tab reviews each turn of the new tab), `--reviews-me` (the new tab reviews this tab), '
                  '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder; refused with `--reviews-me`), `--context`, `--stack NAME` (made if missing). '
                  '`stop --worker %N [--reviewer %N]` ends a review; `list` shows this tab\'s links. '
