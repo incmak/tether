@@ -19,8 +19,8 @@ const levels = [['Check-in', 'Confirms the plan first.'], ['Guided', 'Confirms t
   .map(([name, summary], level) => ({ level, name, summary }))
 const auto = { agent: 'auto', model: 'auto', effort: 'auto' }
 let autonomy = { levels, global: 2, level: 2, source: 'global', project: null, reviewers: { critical: auto, normal: auto, light: auto }, tiers: ['critical', 'normal', 'light'],
-  models: { claude: [{ slug: 'opus', name: 'Opus' }, { slug: 'claude-fable-5-2', name: 'Fable 5.2' }], codex: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh'] }] },
-  efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }
+  models: { claude: [{ slug: 'opus', name: 'Opus' }, { slug: 'claude-fable-5-2', name: 'Fable 5.2' }], codex: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { slug: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium'] }] },
+  efforts: ['low', 'medium', 'high', 'xhigh', 'max'], advisor: { agent: 'claude', model: 'latest', effort: 'high', second: true }, latest: { claude: 'Latest Fable', codex: 'GPT-6.1 Sol' } }
 const fixture = {
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
@@ -94,7 +94,7 @@ async function main() {
           const gated = (endpoint === 'autonomy/setup' && ['hook', 'ping'].includes(body.action)) || (endpoint === 'autonomy/decisions' && !body.delete)
             || (endpoint === 'autonomy' && body.level !== undefined && !body.project && body.level > autonomy.global)
           if (gated && !approved(body)) return route.fulfill(needsKey())
-          if (endpoint === 'autonomy') { autonomy = { ...autonomy, ...(body.level !== undefined && !body.project ? { global: body.level, level: body.level } : {}), ...(body.reviewers ? { reviewers: body.reviewers } : {}) }; return route.fulfill({ json: autonomy }) }
+          if (endpoint === 'autonomy') { autonomy = { ...autonomy, ...(body.level !== undefined && !body.project ? { global: body.level, level: body.level } : {}), ...(body.reviewers ? { reviewers: body.reviewers } : {}), ...(body.advisor ? { advisor: body.advisor } : {}) }; return route.fulfill({ json: autonomy }) }
           if (endpoint === 'autonomy/setup') {
             if (body.action === 'hook') setup = { ...setup, hook: { ...setup.hook, state: 'ok' } }
             if (body.action === 'ping') setup = { ...setup, ping: { ...setup.ping, state: 'on', preset: body.preset, fields: body.fields, base_url: body.base_url } }
@@ -135,7 +135,7 @@ async function main() {
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
     for (const [width, height] of sizes) {
       const at = `${width}px`
-      autonomy = { ...autonomy, global: 2, level: 2, reviewers: { critical: auto, normal: auto, light: auto } }
+      autonomy = { ...autonomy, global: 2, level: 2, reviewers: { critical: auto, normal: auto, light: auto }, advisor: { agent: 'claude', model: 'latest', effort: 'high', second: true } }
       setup = setupFresh()
       keys = []
       const first = posts.length
@@ -225,6 +225,46 @@ async function main() {
       await agent.scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(SHOTS, `settings-reviewers-${width}.png`) })
       check(`${at} no page overflow (reviewers)`, !(await overflow()))
+      // Advisor: latest models follow releases, efforts follow the model, Off disables the rest.
+      const choose = async (id, name) => { await page.locator(id).click(); await page.getByRole('option', { name, exact: true }).click() }
+      const advisorPosts = () => posts.filter(post => post.endpoint === 'autonomy' && post.body.advisor).map(post => post.body.advisor)
+      if (await search.count()) await search.fill('advisor')
+      const advisorAgent = page.locator('#advisor-agent')
+      await advisorAgent.waitFor()
+      await advisorAgent.scrollIntoViewIfNeeded()
+      check(`${at} advisor default: Claude, latest Fable, high`, (await advisorAgent.innerText()).trim() === 'Claude' && (await page.locator('#advisor-model').innerText()).includes('Latest Fable') && (await page.locator('#advisor-effort').innerText()).trim() === 'high')
+      check(`${at} second opinion on by default`, await page.getByRole('switch', { name: /Second opinion/ }).isChecked())
+      await page.screenshot({ path: path.join(SHOTS, `settings-advisor-${width}.png`) })
+      check(`${at} no page overflow (advisor)`, !(await overflow()))
+      let mark = advisorPosts().length
+      await choose('#advisor-agent', 'Codex')
+      for (let tries = 0; tries < 30 && advisorPosts().length === mark; tries++) await page.waitForTimeout(100)
+      let last = advisorPosts().at(-1)
+      check(`${at} codex advisor uses latest and keeps effort`, last && last.agent === 'codex' && last.model === 'latest' && last.effort === 'high' && last.second === true, JSON.stringify(last))
+      await page.locator('#advisor-model').waitFor()
+      check(`${at} codex latest names the model`, (await page.locator('#advisor-model').innerText()).includes('GPT-6.1 Sol'))
+      await page.locator('#advisor-effort').click()
+      check(`${at} codex efforts include ultra`, await page.getByRole('option', { name: 'ultra', exact: true }).isVisible())
+      await page.keyboard.press('Escape')
+      mark = advisorPosts().length
+      await choose('#advisor-model', 'GPT-6 Luna')
+      for (let tries = 0; tries < 30 && advisorPosts().length === mark; tries++) await page.waitForTimeout(100)
+      last = advisorPosts().at(-1)
+      check(`${at} effort the model lacks resets to auto`, last && last.model === 'gpt-6-luna' && last.effort === 'auto', JSON.stringify(last))
+      mark = advisorPosts().length
+      await choose('#advisor-agent', 'Off: agents ask you')
+      for (let tries = 0; tries < 30 && advisorPosts().length === mark; tries++) await page.waitForTimeout(100)
+      last = advisorPosts().at(-1)
+      check(`${at} off clears model, effort and second`, last && last.agent === 'none' && last.model === 'latest' && last.effort === 'auto' && last.second === false, JSON.stringify(last))
+      await page.waitForTimeout(150)
+      check(`${at} off disables the other controls`, await page.locator('#advisor-model').isDisabled() && await page.getByRole('switch', { name: /Second opinion/ }).isDisabled())
+      check(`${at} advisor changes need no passkey`, !posts.some(post => post.endpoint === 'autonomy' && post.body.advisor && post.body.approval))
+      if (await search.count()) await search.fill('reviewers')
+      await page.locator('#reviewer-critical-agent').waitFor()
+      await choose('#reviewer-critical-agent', 'Codex')
+      await page.locator('#reviewer-critical-model').click()
+      check(`${at} reviewer offers latest model`, await page.getByRole('option', { name: /Latest: GPT-6.1 Sol/ }).isVisible())
+      await page.keyboard.press('Escape')
       const calls = await page.evaluate(() => window.__webauthn)
       check(`${at} every passkey call asks for user verification with byte challenges`, calls.length >= 4 && calls.every(call => call.uv === 'required' && call.challenge === 32 && call.ids.every(Boolean)), JSON.stringify(calls))
       await page.keyboard.press('Escape').catch(() => {})

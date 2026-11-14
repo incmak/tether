@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import autonomy
+import advisor
 import approval
 import codex_level
 import decisions
@@ -110,6 +111,14 @@ class Rules(Base):
                 self.assertNotIn('Before you ask the user, read', text)
                 self.assertEqual(text.splitlines()[-1], 'Do not change the level. The user sets it in Tether.')
 
+    def test_decisions_replace_assumptions_and_sensible_defaults_at_high_levels(self):
+        self.assertTrue(autonomy.RULES[3].startswith('Decide from the evidence and continue.'))
+        self.assertIn('Decide from the evidence, list each decision in the final reply', autonomy.RULES[4])
+        self.assertIn('list each decision in the final reply', autonomy.RULES[5])
+        for level in (3, 4, 5):
+            self.assertNotIn('sensible defaults', autonomy.RULES[level])
+            self.assertNotIn('assumptions', autonomy.RULES[level])
+
     def test_saved_answers_only_at_levels_three_to_five_for_the_selected_project(self):
         folder = paths.TETHER / 'projects' / PID
         folder.mkdir(parents=True)
@@ -152,8 +161,8 @@ class Reviewers(Base):
 
     def test_valid_choices_round_trip(self):
         for agent, models in (('auto', ('auto',)), ('none', ('auto',)),
-                              ('claude', ('auto', *autonomy.CLAUDE_REVIEW_MODELS)),
-                              ('codex', ('auto', 'gpt-6.1-sol', 'new_slug.1'))):
+                              ('claude', ('auto', 'latest', *autonomy.CLAUDE_REVIEW_MODELS)),
+                              ('codex', ('auto', 'latest', 'gpt-6.1-sol', 'new_slug.1'))):
             for model in models:
                 for effort in (('auto',) if agent == 'none' else ('auto', 'low', 'medium', 'high', 'xhigh', 'max')):
                     with self.subTest(agent=agent, model=model, effort=effort):
@@ -204,6 +213,22 @@ class Reviewers(Base):
             'The user set the Critical reviewer: Codex, model gpt-6.1-sol, effort xhigh. This overrides the default.',
             'The user set the Normal reviewer effort: high.',
             'The user set the Light reviewer: none. Do not start a reviewer for light tasks.')))
+
+    def test_codex_efforts_follow_the_chosen_model_and_latest_resolves(self):
+        models = [{'slug': 'new', 'name': 'New', 'efforts': ['high', 'ultra']},
+                  {'slug': 'old', 'name': 'Old', 'efforts': ['medium']}]
+        with mock.patch.object(codex_level, 'models', return_value=models):
+            for model in ('auto', 'latest', 'new'):
+                value = reviewers(normal={'agent': 'codex', 'model': model, 'effort': 'ultra'})
+                autonomy.set_reviewers(value)
+                self.assertEqual(autonomy.read_reviewers(), value)
+            for model, effort in (('old', 'ultra'), ('new', 'medium'), ('latest', 'medium')):
+                with self.assertRaises(autonomy.LevelError):
+                    autonomy.set_reviewers(reviewers(normal={'agent': 'codex', 'model': model, 'effort': effort}))
+            text = autonomy.reviewer_rules(reviewers(
+                critical={'agent': 'claude', 'model': 'latest'}, normal={'agent': 'codex', 'model': 'latest'}))
+            self.assertIn('Critical reviewer: Claude, model fable.', text)
+            self.assertIn('Normal reviewer: Codex, model new.', text)
 
     def test_override_omits_auto_parts(self):
         for choice, expected in (
@@ -378,6 +403,8 @@ class Http(Base):
         self.assertEqual((handler.body['global'], handler.body['level'], len(handler.body['levels'])), (2, 2, 6))
         self.assertEqual(handler.body['reviewers'], reviewers())
         self.assertEqual(handler.body['tiers'], ['critical', 'normal', 'light'])
+        self.assertEqual(handler.body['advisor'], advisor.DEFAULT)
+        self.assertEqual(handler.body['latest'], {'claude': 'Latest Fable', 'codex': None})
         self.assertEqual(handler.body['efforts'], ['low', 'medium', 'high', 'xhigh', 'max'])
         self.assertEqual(handler.body['models'], {'claude': [{'slug': s, 'name': n} for s, n in autonomy.delegate.CLAUDE_MODELS], 'codex': []})
         handler = Handler(body={'level': 4})
@@ -401,7 +428,21 @@ class Http(Base):
         with mock.patch.object(codex_level, 'models', return_value=[
                 {'slug': 'gpt-test', 'name': 'Test', 'efforts': ['low', 'high', 'ultra'], 'fast': True}]):
             self.assertEqual(autonomy.state()['models']['codex'],
-                             [{'slug': 'gpt-test', 'name': 'Test', 'efforts': ['low', 'high']}])
+                             [{'slug': 'gpt-test', 'name': 'Test', 'efforts': ['low', 'high', 'ultra']}])
+
+    def test_advisor_post_round_trip_and_validation_without_passkey_gate(self):
+        value = dict(advisor.DEFAULT, model='opus', second=False)
+        with mock.patch.object(approval, 'require') as require:
+            handler = Handler(body={'advisor': value})
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['advisor']), (200, value))
+            self.assertEqual(handler.body['level'], 2)
+            require.assert_not_called()
+        handler = Handler(body={'advisor': dict(value, effort='ultra')})
+        autonomy.post(handler)
+        self.assertEqual((handler.status, handler.body),
+                         (400, {'error': 'Choose an advisor, a model and an effort.'}))
+        self.assertEqual(advisor.read(), value)
 
     def test_bad_requests(self):
         for body in ({'level': 9}, {'level': '2'}, {'level': True}, {'project': 'x', 'override': True, 'level': 1},
@@ -520,7 +561,7 @@ class LevelApproval(PasskeyCase):
         for payload in ({'project': PID, 'override': True, 'level': 2},
                         {'project': PID, 'override': True, 'level': 2},
                         {'project': PID, 'override': False, 'level': 5},
-                        {'reviewers': reviewers()}):
+                        {'reviewers': reviewers()}, {'advisor': dict(advisor.DEFAULT)}):
             if payload.get('override') is False:
                 autonomy.set_global(1)
             handler = self.post(payload)

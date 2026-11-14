@@ -61,7 +61,8 @@ def validate(body, entries, models=None):
         models = task_models() if models is None else models
         if not isinstance(model, str) or model not in [row['id'] for row in models.get(body['agent'], [])]:
             raise ValueError('Choose a model from the list.')
-    if body.get('effort') is not None and body['effort'] not in EFFORTS:
+    efforts = (*EFFORTS, 'ultra') if body['agent'] == 'codex' else EFFORTS
+    if body.get('effort') is not None and body['effort'] not in efforts:
         raise ValueError('Choose an effort from the list.')
     review = normalize_review(body.get('review', False))
     if 'worktree' in body and review == 'new':

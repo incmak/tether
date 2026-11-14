@@ -35,6 +35,12 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(effort=effort), self.assertRaisesRegex(ValueError, '^Choose an effort from the list\\.$'):
                 delegate.validate(body(effort=effort), [source])
 
+    def test_ultra_is_supported_only_for_codex(self):
+        source = entry()
+        self.assertIs(delegate.validate(body(agent='codex', effort='ultra'), [source]), source)
+        with self.assertRaisesRegex(ValueError, 'Choose an effort'):
+            delegate.validate(body(agent='claude', effort='ultra'), [source])
+
     def test_optional_model_must_be_listed_for_the_target_agent(self):
         models = {'claude': [{'id': 'opus', 'label': 'Opus'}],
                   'codex': [{'id': 'test-codex', 'label': 'Test Codex'}]}
@@ -282,7 +288,7 @@ class LaunchTests(unittest.TestCase):
     def test_commands_pass_and_quote_effort(self):
         path = self.root / 'prompt.md'
         suffix = f' "$(cat {shlex.quote(str(path))})"'
-        for effort in ('high', "x; $(danger) 'quoted'"):
+        for effort in ('high', 'ultra', "x; $(danger) 'quoted'"):
             self.assertEqual(delegate.launch_command(entry(), 'claude', path, 'Task', model='opus', effort=effort),
                              'claude --model opus --effort ' + shlex.quote(effort) + suffix)
             self.assertEqual(delegate.launch_command(entry(), 'codex', path, 'Task', profile='foundry',
