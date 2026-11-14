@@ -76,12 +76,12 @@ class UnitTests(unittest.TestCase):
 
     def test_writable_sandbox_args_and_config_win(self):
         folder = str(self.temp)
-        for args in (['-s', 'workspace-write'], ['-sworkspace-write'], ['--sandbox=danger-full-access'], ['--full-auto'],
+        for args in (['-s', 'workspace-write'], ['-sworkspace-write'], ['--sandbox=danger-full-access'],
                      ['--yolo'], ['-c', 'sandbox_mode="workspace-write"'], ['--config=sandbox_mode=workspace-write']):
             self.assertTrue(project_launch.codex_writable(args, folder), args)
         for args in (['-sread-only'], ['--config', 'sandbox_mode=read-only'], ['-csandbox_mode=read-only'],
                      ['-s', 'read-only', '-c', 'sandbox_mode=workspace-write'], ['-p', 'safe'], ['--profile=safe'],
-                     ['-c', 'sandbox_mode=other']):
+                     ['-c', 'sandbox_mode=other'], ['--full-auto']):
             self.assertFalse(project_launch.codex_writable(args, folder), args)
         self.config(f'sandbox_mode = "workspace-write"\n')
         self.assertTrue(project_launch.codex_writable([], folder))
@@ -128,7 +128,7 @@ class UnitTests(unittest.TestCase):
         with mock.patch.object(project_launch, 'SYSTEM_FILES', (str(system),)):
             self.assertFalse(project_launch.codex_writable([], str(deep)))
             self.assertFalse(project_launch.codex_writable(['-c', 'sandbox_mode="workspace-write"'], str(deep)))
-            for args in (['--sandbox', 'workspace-write'], ['--yolo'], ['--full-auto']):
+            for args in (['--sandbox', 'workspace-write'], ['--yolo']):
                 self.assertFalse(project_launch.codex_writable(args, str(deep)), args)  # requirements apply after
 
     def test_writable_macos_forced_preferences_and_other_systems(self):
@@ -179,6 +179,27 @@ class UnitTests(unittest.TestCase):
         (split / 'a').mkdir()
         self.config(f'[projects."{os.path.realpath(split)}"]\ntrust_level = "trusted"\n')
         self.assertFalse(project_launch.codex_writable([], str(split / 'a')))
+
+    def test_writable_worktree_pointer_must_match_its_registration(self):
+        git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
+        main = self.temp / 'main'
+        subprocess.run([*git, 'init', '-q', str(main)], check=True)
+        subprocess.run([*git, '-C', str(main), 'commit', '-q', '--allow-empty', '-m', 'x'], check=True)
+        linked = self.temp / 'linked'
+        subprocess.run([*git, '-C', str(main), 'worktree', 'add', '-q', str(linked)], check=True, capture_output=True)
+        self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
+        self.assertTrue(project_launch.codex_writable([], str(linked)))
+        copy = self.temp / 'copy'
+        copy.mkdir()
+        (copy / '.git').write_text((linked / '.git').read_text())
+        self.assertFalse(project_launch.codex_writable([], str(copy)), 'the backlink names another checkout')
+        base = self.temp / 'base'
+        (base / 'worktrees').mkdir(parents=True)
+        subprocess.run([*git, 'init', '-q', '--separate-git-dir', str(base / 'worktrees' / 'split.git'),
+                        str(base / 'split')], check=True)
+        (base / 'split' / 'src').mkdir()
+        self.config(f'[projects."{os.path.realpath(base / "split")}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable([], str(base / 'split' / 'src')), 'no worktree metadata')
 
     def test_writable_round_three_cli_project_overrides(self):
         repo = self.temp / 'repo'

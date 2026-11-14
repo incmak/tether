@@ -118,7 +118,7 @@ def codex_has_own_instructions():
 
 SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
 SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
-WRITE_FLAGS = {'--full-auto', '--dangerously-bypass-approvals-and-sandbox', '--yolo'}
+WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}  # Codex 0.166 rejects --full-auto
 UNSURE = object()
 
 
@@ -153,33 +153,74 @@ def _toml(path):
         return None
 
 
-def _repo_root(cwd):
-    """The trust root Codex uses: the main checkout of a repository, also for a linked worktree."""
+def _gitdir(dot_git):
+    """The folder a .git file points to ("gitdir: PATH"), or None."""
     try:
-        out = subprocess.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel',
-                              '--git-common-dir'], capture_output=True, text=True, timeout=5)
+        if dot_git.stat().st_size > 64 * 1024:
+            return None
+        text = dot_git.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith('gitdir:') or not text[len('gitdir:'):].strip():
+        return None
+    return dot_git.parent / text[len('gitdir:'):].strip()
+
+
+def _read(path):
+    try:
+        return path.read_text().strip()
+    except (OSError, UnicodeDecodeError):
+        return ''
+
+
+def _repo_root(cwd):
+    """The trust root Codex uses: the main checkout of a repository, also for a linked worktree.
+    This follows git-utils/src/trust.rs (same in Codex 0.166 and 0.169). A .git folder is its own root.
+    A .git file counts only for a registered linked worktree: its gitdir is <common>/worktrees/<name>,
+    whose gitdir and commondir files point back to this checkout and to <common>, and the main checkout
+    owns <common>. A submodule or a --separate-git-dir checkout gives no root."""
+    try:
+        out = subprocess.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel'],
+                             capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
-    lines = out.stdout.splitlines() if out.returncode == 0 else []
-    if len(lines) < 2:
+    root = out.stdout.strip() if out.returncode == 0 else ''
+    if not root:
         return None
-    # Codex accepts a .git folder, or a .git file that points into <common>/worktrees/ (git-utils/src/trust.rs).
-    # A submodule or a --separate-git-dir checkout has another .git file: Codex finds no root, so neither do we.
-    dot_git = Path(lines[0]) / '.git'
+    dot_git = Path(root) / '.git'
     if dot_git.is_symlink():
         return None
-    if not dot_git.is_dir():
-        try:
-            pointer = dot_git.read_text().strip()
-        except OSError:
-            return None
-        if not pointer.startswith('gitdir:'):
-            return None
-        target = Path(os.path.realpath(dot_git.parent / pointer[len('gitdir:'):].strip()))
-        if target.parent.name != 'worktrees':
-            return None
-    common = Path(lines[1])
-    return str(common.parent) if common.name == '.git' else lines[0]
+    if dot_git.is_dir():
+        return root
+    if not dot_git.is_file():
+        return None
+    git_dir = _gitdir(dot_git)
+    if git_dir is None or git_dir.is_symlink() or not git_dir.is_dir():
+        return None
+    real = Path(os.path.realpath(git_dir))
+    if real.parent.name != 'worktrees':
+        return None
+    common = real.parent.parent
+    back, commondir = _read(real / 'gitdir'), _read(real / 'commondir')
+    if not back or not commondir:
+        return None
+    back_dot_git = real / back
+    if back_dot_git.name != '.git':
+        return None
+    if (os.path.realpath(back_dot_git.parent) != os.path.realpath(root)
+            or os.path.realpath(real / commondir) != str(common)):
+        return None
+    main_root = git_dir.parent.parent.parent
+    main_dot_git = main_root / '.git'
+    if main_dot_git.is_dir():
+        main_git_dir = main_dot_git
+    elif main_dot_git.is_file():
+        main_git_dir = _gitdir(main_dot_git)
+    else:
+        return None
+    if main_git_dir is None or os.path.realpath(main_git_dir) != str(common):
+        return None
+    return str(main_root)
 
 
 SYSTEM_FILES = ('/etc/codex/config.toml', '/etc/codex/requirements.toml', '/etc/codex/managed_config.toml')
