@@ -9,7 +9,8 @@ import { useModal, usePolling } from './hooks'
 import { startTrial } from './lookTrial'
 import { TrialBar } from './TrialBar'
 import type { Anchor } from './hooks'
-import { setPlace, setPlaceHandler } from './backNav'
+import { goBack, goForward, setPlace, setPlaceHandler, setViewOpener, useNavAvailability } from './backNav'
+import { BACK_KEY, FORWARD_KEY, isNavKey } from './navKeys'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
 import { applyPhoto, usePhotoStage } from './photoLook'
@@ -288,6 +289,32 @@ function App() {
     })
     return () => setPlaceHandler(null)
   }, [update, chooseScreen])
+  // Forward opens a view again after Back closed it. The names come from the views' useModal calls.
+  useEffect(() => {
+    setViewOpener(view => {
+      setDrawer(false)
+      if (view === 'backlog:page' || view === 'backlog:sheet') setBacklog({ mode: view === 'backlog:page' ? 'page' : 'sheet' })
+      else if (view === 'work:board' || view === 'work:needs') setWorkSheet(view === 'work:board' ? 'board' : 'needs')
+      else if (view === 'settings') setSettings(true)
+      else if (view === 'agents') setAgentsPage('list')
+      else if (view === 'lessons') setReviewing(true)
+      else return false
+      return true
+    })
+    return () => setViewOpener(null)
+  }, [])
+  // Mouse buttons 4 and 5 go Back and Forward inside Tether. Stop the browser's own step, so it cannot leave the app.
+  useEffect(() => {
+    const mouse = (event: MouseEvent) => {
+      if (event.button !== 3 && event.button !== 4) return
+      event.preventDefault()
+      if (event.type === 'mouseup') { if (event.button === 3) goBack(); else goForward() }
+    }
+    window.addEventListener('mousedown', mouse)
+    window.addEventListener('mouseup', mouse)
+    return () => { window.removeEventListener('mousedown', mouse); window.removeEventListener('mouseup', mouse) }
+  }, [])
+  const navAvailable = useNavAvailability()
   const previousPlace = useRef<{ pane?: string; screen: Screen; slots: string[] }>({ screen, slots: [] })
   useEffect(() => {
     const before = previousPlace.current
@@ -529,6 +556,14 @@ function App() {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const typing = (event.target as Element | null)?.closest('input, textarea, select, [contenteditable="true"], dialog')
+      // Back and Forward: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere. Not in a text field or the terminal: there the keys edit text.
+      const nav = isNavKey(event)
+      if (nav) {
+        event.preventDefault()
+        if (nav === 'back') goBack()
+        else goForward()
+        return
+      }
       const rail = screenKeys.current
       // The workspace behind Home takes no keys. ⌘K then searches the sidebar.
       const slots = rail?.home ? null : workspaceKeys.current
@@ -787,6 +822,9 @@ function App() {
     ...(livePins.length > 1 ? [{ label: 'Next pinned chat', key: '⌥]', run: () => stepPin(1) }, { label: 'Previous pinned chat', key: '⌥[', run: () => stepPin(-1) }] : []),
     { label: 'New session', key: '⌥N', run: () => setNewSession(true) },
     { label: desk.sidebar ? 'Hide the sidebar' : 'Show the sidebar', key: '⌘B', run: () => setDesk({ sidebar: !desk.sidebar }) },
+    // After the menu closes: its own entry goes first, then the step.
+    ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
+    ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
     { label: 'Keyboard shortcuts', key: '?', run: () => setMenu('shortcuts') },
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
@@ -847,7 +885,7 @@ function App() {
     'data-tint': tint ? '' : undefined, 'data-fill': fill !== undefined ? '' : undefined,
   }
   if (unauthorized) return <main className="signin"><Terminal size={32} strokeWidth={1.4} /><h1>Sign in</h1><p>Sign in to access your terminal sessions.</p><a className="primary" href="/mobile/login?next=/chat/">Sign in</a></main>
-  return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', home && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
+  return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', home && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
     {pane ? (view ? <Workspace layout={desk} slots={slotPanes} focus={view.focus} zoomed={zoomed && multi} onCount={setCount} onFocus={focusSlot} onLayout={setDesk}
       renderSlot={(target, index, shown) => chatFor(target, shown > 1 || zoomed ? { index, zoomed, onZoom: toggleZoom, onClose: zoomed ? undefined : () => closeSlot(index), onPick: () => setPicking(index), onSwapTo: to => swap(index, to), onDragStart: event => { event.dataTransfer.setData(DRAG_SLOT, String(index)); event.dataTransfer.effectAllowed = 'move' } } : undefined)}
       onDropPane={dropPane} onDropSession={dropSession} onDropChat={dropChat} onSwap={swap}

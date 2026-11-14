@@ -1,10 +1,13 @@
 import { X } from 'lucide-react'
 import { useModal } from './hooks'
 import { IS_MAC, keyLabel } from './keys'
+import { BACK_KEY, FORWARD_KEY } from './navKeys'
 
 // Only keys that work in the desktop workspace. ⌘J and ⌘I come with the Needs you list.
 const GROUPS = [
   { name: 'Move', items: [
+    ['Back: close the top panel, or the previous chat or screen', BACK_KEY],
+    ['Forward', FORWARD_KEY],
     ['Chats, Files or Terminals', '⌘1–3'],
     ['Search panes, commands and the backlog', '⌘K'],
     ['Search from anywhere', '⌥Space'],
@@ -54,6 +57,6 @@ export function Shortcuts({ onClose }: { onClose: () => void }) {
         <dl>{group.items.map(([label, key]) => <div key={key}><dt>{label}</dt><dd><kbd>{keyLabel(key)}</kbd></dd></div>)}</dl>
       </section>)}
     </div>
-    <p className="hint">Typing anywhere else moves to the message box. Drag a divider to resize. Double-click it to make the panes equal again.</p>
+    <p className="hint">Mouse buttons 4 and 5 and a two-finger swipe on a Mac trackpad also go Back and Forward. Typing anywhere else moves to the message box. Drag a divider to resize. Double-click it to make the panes equal again.</p>
   </dialog>
 }

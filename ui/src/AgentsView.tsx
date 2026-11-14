@@ -51,7 +51,7 @@ export function AgentTabs({ sessions, seen, selected, tab, onTab, onOpen, onMark
 // The Agents page: a full sheet with the same tabs. A tap on Tether's summary notification opens it.
 // "Message" turns the sheet into the broadcast box (Broadcast.tsx); the back arrow returns to the lists.
 export function AgentsPage({ api, sessions, seen, selected, onOpen, onMarkRead, onClose, startMessaging = false }: { api: Api; sessions: Session[]; seen: Seen; selected?: string; onOpen: (pane: Pane) => void; onMarkRead: (panes: string[]) => void; onClose: () => void; startMessaging?: boolean }) {
-  const modal = useModal(true, onClose)
+  const modal = useModal(true, onClose, undefined, 'agents')
   const [tab, setTab] = useState<AgentTab>(() => firstTab(agentLists(sessions, seen, selected)))
   const [messaging, setMessaging] = useState(startMessaging)
   return <dialog {...modal} className="sheet agents-sheet" aria-labelledby="agents-title">

@@ -69,6 +69,9 @@
 :root[data-text-size="large"] { --chat-text: 19px; }
 * { box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+/* With a mouse or trackpad, sideways overscroll goes to the browser: a two-finger swipe on a Mac trackpad is Back or Forward.
+   Chrome starts that swipe only when the root lets x overscroll through. Touch screens keep none: no pull-to-refresh, no edge bounce. */
+@media (hover: hover) and (pointer: fine) { html, body { overscroll-behavior-x: auto; } }
 body { margin: 0; min-width: 320px; }
 button, input, textarea { font: inherit; color: inherit; }
 button, a, input, textarea, summary { -webkit-tap-highlight-color: transparent; }

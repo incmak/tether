@@ -31,7 +31,7 @@ function Field({ children, scope }: { children: ReactNode; scope: Scope }) {
 }
 
 export function Settings({ api, prefs, update, onReload, onClose, start }: { api: Api; prefs: Prefs; update: (change: (current: Prefs) => Partial<Prefs>) => void; onReload: () => void; onClose: () => void; start?: 'layout-maker' }) {
-  const modal = useModal(true, onClose)
+  const modal = useModal(true, onClose, undefined, 'settings')
   const [selected, setSelected] = useState<SettingsGroup | null>(start === 'layout-maker' ? 'appearance' : null)
   const [query, setQuery] = useState('')
   const search = useRef<HTMLInputElement>(null)

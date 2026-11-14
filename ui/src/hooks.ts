@@ -123,8 +123,9 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
   return { data, error, loading, refresh }
 }
 
-export function useModal(open: boolean, close: () => void, drawer?: { onInterrupt: () => void }) {
-  useBackStep(open, close)
+/** view: a name that lets Forward open this dialog again after Back closed it (backNav.ts setViewOpener). */
+export function useModal(open: boolean, close: () => void, drawer?: { onInterrupt: () => void }, view?: string) {
+  useBackStep(open, close, view)
   const ref = useRef<HTMLDialogElement>(null)
   const opened = useRef(0)
   const horizontal = !!drawer

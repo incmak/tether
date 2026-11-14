@@ -3,7 +3,7 @@
 .sheet.lessons-review:not([open]) { display: none; }
 .lessons-review .sheet-heading { flex: none; }
 .lessons-review .sheet-heading h2 { margin: 0; }
-.review-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -24px; padding: 0 24px 16px; }
+.review-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; margin: 0 -24px; padding: 0 24px 16px; }
 .review-reason { margin: 4px 0 6px; font-size: 15px; font-weight: 600; }
 .review-group { margin-top: 20px; }
 .review-group h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; font-size: 15px; }

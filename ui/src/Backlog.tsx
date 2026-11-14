@@ -756,7 +756,7 @@ export function BacklogSheet({ api, onClose, panes, onOpenPane, page = false, qu
   const [asking, setAsking] = useState<null | (() => void)>(null)
   const leave = (then: () => void) => { if (guard.current()) setAsking(() => then); else then() }
   const close = () => leave(onClose)
-  const modal = useModal(true, close)
+  const modal = useModal(true, close, undefined, page ? 'backlog:page' : 'backlog:sheet')
   const sizing = useSheetSize()
   const resized = useRef(0)
   // A resize that ends outside the sheet sends its click to the backdrop. That click must not close the sheet.

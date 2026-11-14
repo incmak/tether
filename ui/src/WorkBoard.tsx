@@ -61,7 +61,7 @@ const order = (stage: Stage) => (a: WorkItem, b: WorkItem) => stage === 'needs' 
 const tabPath = (tab: WorkItem['tabs'][number]) => [tab.session, tab.stack, tab.name || tab.pane].filter(Boolean).join(' › ')
 
 export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen, onClose, start }: Props) {
-  const modal = useModal(true, onClose)
+  const modal = useModal(true, onClose, undefined, start ? `work:${start}` : 'work')
   const now = useNow()
   const [view, setView] = useState<WorkView>(() => start ?? (decisions(board).length ? 'needs' : 'board'))
   const [chosen, setProject] = useState('all')
