@@ -131,6 +131,25 @@ class UnitTests(unittest.TestCase):
             for args in (['--sandbox', 'workspace-write'], ['--yolo'], ['--full-auto']):
                 self.assertFalse(project_launch.codex_writable(args, str(deep)), args)  # requirements apply after
 
+    def test_writable_macos_forced_preferences_and_other_systems(self):
+        prefs = self.temp / 'managed'
+        (prefs / 'someone').mkdir(parents=True)
+        with mock.patch.object(project_launch, 'MANAGED_PREFERENCES', str(prefs)), \
+                mock.patch.object(project_launch, 'SYSTEM_FILES', ()), \
+                mock.patch.object(project_launch.sys, 'platform', 'darwin'):
+            self.assertTrue(project_launch.codex_writable(['--yolo'], str(self.temp)))
+            (prefs / 'someone' / 'com.openai.codex.plist').write_text('')
+            self.assertFalse(project_launch.codex_writable(['--yolo'], str(self.temp)), 'per-user forced prefs')
+            (prefs / 'someone' / 'com.openai.codex.plist').unlink()
+            (prefs / 'com.openai.codex.plist').write_text('')
+            self.assertFalse(project_launch.codex_writable(['--sandbox', 'workspace-write'], str(self.temp)))
+        with mock.patch.object(project_launch, 'MANAGED_PREFERENCES', str(self.temp / 'none')), \
+                mock.patch.object(project_launch, 'SYSTEM_FILES', ()), \
+                mock.patch.object(project_launch.sys, 'platform', 'darwin'):
+            self.assertTrue(project_launch.codex_writable(['--yolo'], str(self.temp)))
+        with mock.patch.object(project_launch.sys, 'platform', 'win32'):
+            self.assertFalse(project_launch.codex_writable(['--yolo'], str(self.temp)))
+
     def test_writable_round_three_cli_project_overrides(self):
         repo = self.temp / 'repo'
         work = repo / 'work'

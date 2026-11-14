@@ -166,6 +166,25 @@ def _repo_root(cwd):
 
 
 SYSTEM_FILES = ('/etc/codex/config.toml', '/etc/codex/requirements.toml', '/etc/codex/managed_config.toml')
+MANAGED_PREFERENCES = '/Library/Managed Preferences'
+
+
+def _managed():
+    """True when Codex can load system or administrator config: /etc/codex files, or on macOS forced (MDM)
+    preferences for com.openai.codex (config/src/loader/macos.rs), stored for all users or for one user.
+    Other systems (Windows) are not modelled, so they count as managed."""
+    if any(os.path.exists(path) for path in SYSTEM_FILES):
+        return True
+    if sys.platform == 'darwin':
+        name = 'com.openai.codex.plist'
+        try:
+            return any(os.path.exists(os.path.join(base, name)) for base in
+                       [MANAGED_PREFERENCES, *(entry.path for entry in os.scandir(MANAGED_PREFERENCES) if entry.is_dir())])
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+    return not sys.platform.startswith('linux')
 LAYER_KEYS = ('sandbox_mode', 'profile', 'default_permissions', 'permissions', 'projects', 'project_root_markers')
 
 
@@ -191,7 +210,7 @@ def codex_writable(args, cwd=None):
     gives False: Codex then starts without --add-dir, as before."""
     if '--' in args:
         args = args[:args.index('--')]  # after --, everything is the prompt
-    if any(os.path.exists(path) for path in SYSTEM_FILES):
+    if _managed():
         return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
     if any(arg in WRITE_FLAGS for arg in args):
         return True
