@@ -31,6 +31,10 @@ const SPEECH_DEAF_MS = 24 * 60 * 60 * 1000
 const STRIKE_WINDOW_MS = 10 * 60 * 1000
 let emptyStrikes = 0, lastStrikeAt = 0
 const speechOff = () => { speechOffUntil = Date.now() + SPEECH_OFF_MS }
+const AUDIO = { audio: { echoCancellation: true, noiseSuppression: true } }
+
+// A recording that runs beside browser speech, so words that speech misses still reach the server voice.
+interface Backup { stream: MediaStream; active: MediaRecorder; chunks: Blob[]; type?: string; label?: string; started: number; level: ReturnType<typeof watchForPause> }
 
 interface DictationOptions {
   text: string
@@ -52,6 +56,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
   const finalDraft = useRef<Promise<string> | null>(null)
   const converting = useRef<AbortController | null>(null)
   const cleanupRecording = useRef<(() => void) | null>(null)
+  const rescuing = useRef(false)
   const disposed = useRef(false)
   const textNow = useRef(text)
   useLayoutEffect(() => { textNow.current = text }, [text])
@@ -60,6 +65,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     return () => { disposed.current = true; cleanupRecording.current?.() }
   }, [])
   async function toggle() {
+    if (rescuing.current) return  // the backup is closing; the converting state follows at once
     if (stopSpeech.current) { stopSpeech.current(); return }
     if (recorder.current) { if (recorder.current.state !== 'inactive') recorder.current.stop(); return }
     stopSpeaking()
@@ -87,6 +93,11 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const trace = (token: string) => { trail.push(token); if (trail.length > 24) trail.shift() }
     let pause: number | undefined
     const started = Date.now()
+    // Desktop only: on phones a second mic user can make the system speech service deaf.
+    // Only a backup that is already recording is used; one still waiting for the mic is closed when it arrives.
+    let ready: Backup | null = null, keepBackup = false
+    const backup = backupAllowed() ? openBackup() : null
+    void backup?.then(found => { if (found && !done) ready = found })
     const join = (...parts: string[]) => parts.filter(Boolean).join(' ')
     const words = () => join(earlier, committed, interim).replace(/(?<=\S) slash (?=\S)/gi, '/')
     const detach = () => {
@@ -98,6 +109,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       window.clearInterval(timer); window.clearTimeout(pause)
       stopSpeech.current = null; cleanupRecording.current = null
       if (recognition) { detach(); recognition.abort() }
+      if (!keepBackup) void backup?.then(found => { if (found) closeBackup(found) })
     }
     const complete = (message?: string) => {
       if (done) return
@@ -122,13 +134,44 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
       reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
+      let notice = message
+      if (notice === undefined && !handsFree) {
+        if (second && deaf) notice = `This device's speech service heard nothing twice, so Tether uses the server voice here for 24 hours. Tap the mic and speak again. (speech: ${trail.join(' ')})`
+        else if (second) notice = `No speech heard twice, so Tether uses the server voice for 5 minutes. Tap the mic and speak again. (speech: ${trail.join(' ')})`
+        else if (!spoken) notice = `No speech heard. Tap the mic and speak. (speech: ${trail.join(' ')})`
+      }
+      // Speech gave nothing after a real attempt: convert the backup recording, so the words are not lost.
+      const kept = ready
+      if (!received && stopped && stoppedAt - started >= 1000 && kept) {
+        keepBackup = true
+        cleanup(); setListening(false)
+        void rescue(kept, notice)
+        return
+      }
       cleanup(); setText(next); finish(next); setListening(false)
-      if (message !== undefined) setError(message)
-      else if (second && deaf && !handsFree) setError(`This device's speech service heard nothing twice, so Tether uses the server voice here for 24 hours. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
-      else if (second && !handsFree) setError(`No speech heard twice, so Tether uses the server voice for 5 minutes. Tap the mic and speak again. (speech: ${trail.join(' ')})`)
-      else if (!spoken && !handsFree) setError(`No speech heard. Tap the mic and speak. (speech: ${trail.join(' ')})`)
+      if (notice !== undefined) setError(notice)
       onFinished?.()
       if (handsFree && spoken && next !== base) onHandsFreeDone?.()
+    }
+    const rescue = async (found: Backup, notice: string | undefined) => {
+      let cancelled = false
+      const cancel = () => { cancelled = true; rescuing.current = false; cleanupRecording.current = null; closeBackup(found); finish(base) }
+      rescuing.current = true; cleanupRecording.current = cancel
+      const recorded = await finishBackup(found)
+      if (cancelled) return
+      rescuing.current = false
+      if (cleanupRecording.current === cancel) cleanupRecording.current = null
+      // The server drops silence itself; hands-free also needs the level, because its 8 s timer stops a silent tap.
+      if (!recorded.audio.size || (handsFree && !recorded.heard)) {
+        setText(base); finish(base)
+        if (notice !== undefined) setError(notice)
+        onFinished?.()
+        return
+      }
+      const { text, ok } = await transcribeAudio(recorded.audio, base, recordingId(), found.label)
+      reportVoice({ kind: 'dictation', event: 'rescue', trail: trail.join(' '), ms: Date.now() - stoppedAt })
+      finish(text)
+      if (handsFree && ok && text.trim() && text !== base) onHandsFreeDone?.()
     }
     const stop = () => {
       if (done || stopped) return
@@ -145,9 +188,12 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       reportVoice({ kind: 'dictation', event: 'fallback', trail: trail.join(' '), ms: Date.now() - started })
       // Say why the slow server voice runs, so the next report shows the cause.
       setError(`Browser speech failed, so the server converts this (slower). (speech: ${trail.join(' ')})`)
+      const kept = ready
+      keepBackup = !!kept
       cleanup(); setListening(false)
       // A submit may already hold the speech promise. Resolve it with the recorder's final text.
-      void startRecorder().then(() => {
+      // The backup recording keeps running, so the words said before the failure are kept.
+      void startRecorder(kept ?? undefined).then(() => {
         const next = finalDraft.current
         if (next && next !== final) void next.then(finish)
         else finish(base)
@@ -205,24 +251,27 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     setSeconds(0); setListening(true)
     try { recognition = new Recognition(); attach(); recognition.start(); trace('start') } catch { fallback() }
   }
-  async function startRecorder() {
+  async function startRecorder(adopt?: Backup) {
     let stream: MediaStream
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }) } catch (failure) {
-      reportVoice({ kind: 'dictation', event: 'mic-error', detail: failure instanceof DOMException ? failure.name : '' })
-      setError(failure instanceof DOMException && failure.name === 'NotAllowedError' ? 'Allow microphone access for this site, then try again.' : 'Could not start the microphone. Close other apps that use it, then try again.')
-      return
+    let heardBefore = false
+    if (adopt) { stream = adopt.stream; heardBefore = adopt.level?.stop() ?? false } else {
+      try { stream = await navigator.mediaDevices.getUserMedia(AUDIO) } catch (failure) {
+        reportVoice({ kind: 'dictation', event: 'mic-error', detail: failure instanceof DOMException ? failure.name : '' })
+        setError(failure instanceof DOMException && failure.name === 'NotAllowedError' ? 'Allow microphone access for this site, then try again.' : 'Could not start the microphone. Close other apps that use it, then try again.')
+        return
+      }
     }
-    if (disposed.current) { stream.getTracks().forEach(track => track.stop()); return }
+    if (disposed.current) { if (adopt) closeBackup(adopt); else stream.getTracks().forEach(track => track.stop()); return }
     const label = stream.getAudioTracks()[0]?.label
-    const type = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find(kind => MediaRecorder.isTypeSupported(kind))
-    const active = new MediaRecorder(stream, type ? { mimeType: type } : undefined)
-    const chunks: Blob[] = []
-    const started = Date.now()
+    const type = adopt ? adopt.type : recorderType()
+    const active = adopt?.active ?? new MediaRecorder(stream, type ? { mimeType: type } : undefined)
+    const chunks: Blob[] = adopt?.chunks ?? []
+    const started = adopt?.started ?? Date.now()
     // Live text: about every 1.5 s, send the audio so far to the fast model and show its rough text in the box.
     // The accurate model replaces it after stop.
     const base = textNow.current.trimEnd()
     // One id per recording: the server converts finished sentences while the user speaks, so stop only waits for the rest.
-    const recording = crypto.randomUUID?.() ?? `${started}-${Math.random().toString(36).slice(2)}`
+    const recording = recordingId()
     let finish: (text: string) => void = () => undefined
     const final = new Promise<string>(resolve => { finish = resolve })
     finalDraft.current = final
@@ -260,7 +309,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
         if (pause && ok && text.trim() && text !== base) onHandsFreeDone?.()
       })
     }
-    const pause = handsFree ? watchForPause(stream, () => { if (active.state !== 'inactive') active.stop() }) : null
+    const pause = handsFree ? watchForPause(stream, () => { if (active.state !== 'inactive') active.stop() }, heardBefore) : null
     cleanupRecording.current = () => {
       done = true
       active.onstop = null
@@ -271,7 +320,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       finish(base)
     }
     recorder.current = active
-    active.start(1000); setSeconds(0); setListening(true)
+    if (active.state === 'inactive') active.start(1000)
+    setSeconds(Math.floor((Date.now() - started) / 1000)); setListening(true)
   }
   // Returns the new draft; ok is false when the accurate text did not come and the box keeps the rough live text.
   // The server answers within about 25 s (transcribe_worker.py FINAL_BUDGET); 60 s means something is wrong.
@@ -313,18 +363,78 @@ function speechConstructor() {
   return speech.SpeechRecognition ?? speech.webkitSpeechRecognition
 }
 
+function recorderType() {
+  return ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find(kind => MediaRecorder.isTypeSupported(kind))
+}
+
+function recordingId() {
+  return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function backupAllowed() {
+  const agent = navigator.userAgent
+  // iPadOS reports a Mac user agent; touch points tell it apart.
+  const touchMac = /Macintosh/.test(agent) && (navigator.maxTouchPoints ?? 0) > 1
+  return !/Android|iPhone|iPad|iPod/i.test(agent) && !touchMac && typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
+}
+
+async function openBackup(): Promise<Backup | null> {
+  let stream: MediaStream | undefined, active: MediaRecorder | undefined, level: ReturnType<typeof watchForPause> = null
+  try {
+    stream = await navigator.mediaDevices.getUserMedia(AUDIO)
+    const type = recorderType()
+    active = new MediaRecorder(stream, type ? { mimeType: type } : undefined)
+    const chunks: Blob[] = []
+    active.ondataavailable = event => { if (event.data.size) chunks.push(event.data) }
+    active.start(1000)
+    level = watchForPause(stream)
+    return { stream, active, chunks, type, label: stream.getAudioTracks()[0]?.label, started: Date.now(), level }
+  } catch {
+    // Browser speech still runs; only the backup is missing. Release what was opened.
+    try { if (active && active.state !== 'inactive') active.stop() } catch { /* already stopped */ }
+    level?.stop()
+    stream?.getTracks().forEach(track => track.stop())
+    return null
+  }
+}
+
+function closeBackup(backup: Backup) {
+  backup.active.ondataavailable = null; backup.active.onstop = null
+  if (backup.active.state !== 'inactive') backup.active.stop()
+  backup.level?.stop()
+  backup.stream.getTracks().forEach(track => track.stop())
+}
+
+// Stop the backup, wait for its last chunk, and return the audio and whether the mic level showed speech.
+function finishBackup(backup: Backup): Promise<{ audio: Blob; heard: boolean }> {
+  return new Promise(resolve => {
+    const done = () => {
+      backup.active.onstop = null
+      const heard = backup.level?.stop() ?? true
+      backup.stream.getTracks().forEach(track => track.stop())
+      resolve({ audio: new Blob(backup.chunks, { type: backup.active.mimeType || backup.type || 'audio/webm' }), heard })
+    }
+    if (backup.active.state === 'inactive') { done(); return }
+    backup.active.onstop = done
+    backup.active.stop()
+  })
+}
+
 // Listen to the mic level. After speech, 1.8 s of quiet calls done. No speech in the first 8 s also calls done.
-// stop() returns whether any speech was heard.
-function watchForPause(stream: MediaStream, done: () => void) {
+// Without done, it only tracks the level. stop() returns whether any speech was heard.
+function watchForPause(stream: MediaStream, done?: () => void, heardBefore = false) {
   const Context = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
   if (!Context) return null
   const context = new Context()
-  const analyser = context.createAnalyser()
-  analyser.fftSize = 1024
-  context.createMediaStreamSource(stream).connect(analyser)
+  let analyser: AnalyserNode
+  try {
+    analyser = context.createAnalyser()
+    analyser.fftSize = 1024
+    context.createMediaStreamSource(stream).connect(analyser)
+  } catch (failure) { void context.close(); throw failure }
   const samples = new Float32Array(analyser.fftSize)
   const started = Date.now()
-  let heard = false, quietSince = Date.now(), floor = 0.01
+  let heard = heardBefore, quietSince = Date.now(), floor = 0.01
   const timer = window.setInterval(() => {
     analyser.getFloatTimeDomainData(samples)
     const level = Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length)
@@ -332,7 +442,8 @@ function watchForPause(stream: MediaStream, done: () => void) {
     if (Date.now() - started < 500) { floor = Math.max(floor, level); return }
     const speech = level > Math.max(0.02, floor * 2.5)
     if (speech) { heard = true; quietSince = Date.now() }
-    if (heard ? Date.now() - quietSince > 1800 : Date.now() - started > 8000) done()
+    if (done && (heard ? Date.now() - quietSince > 1800 : Date.now() - started > 8000)) done()
   }, 100)
-  return { stop: () => { window.clearInterval(timer); void context.close(); return heard } }
+  let closed = false
+  return { stop: () => { window.clearInterval(timer); if (!closed) { closed = true; void context.close() } return heard } }
 }

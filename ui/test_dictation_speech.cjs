@@ -101,7 +101,9 @@ function setup(env, options = {}) {
   const props = { text, setText: next => { text = next }, chime: false, onHandsFreeDone: () => done++, onFinished: () => env.focus++, ...options }
   return { h, useDictation, render: () => h.render(() => useDictation({ ...props, text })), text: () => text, done: () => done }
 }
-function speechEnvironment({ webkit = false, language = 'en-GB', userAgent = 'Mozilla/5.0 (X11; Linux x86_64)' } = {}) {
+// Default: a phone, where speech runs alone. Desktop cases pass DESKTOP_UA and also get the backup recording.
+const PHONE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/157.0.0.0'
+function speechEnvironment({ webkit = false, language = 'en-GB', userAgent = PHONE_UA } = {}) {
   const env = environment()
   env.recognitions = []
   class Recognition {
@@ -511,6 +513,102 @@ async function main() {
     }
   }
   console.log('Speech: fallback permission denial and unmount during microphone acquisition settle final text and release resources pass')
+  // Desktop: a backup recording runs beside browser speech, so a deaf speech service loses no words.
+  {
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { text: 'Base' })
+    env.result = 'rescued words'
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    assert.equal(env.records.length, 1); assert.equal(env.records[0].state, 'recording')
+    env.recognitions[0].onaudiostart(); env.records[0].data()
+    env.advance(6000); s.render().stop()
+    assert.equal(await final, 'Base rescued words'); assert.equal(s.text(), 'Base rescued words')
+    assert.equal(s.render().error, '')
+    const sent = env.calls.filter(call => call.path === '/mobile/api/transcribe')
+    assert.equal(sent.length, 1); assert.equal(sent[0].options.headers['X-Live'], undefined)
+    assert.equal(env.records[0].state, 'inactive'); assert.equal(env.streams[0].track.stops, 1)
+    assert.deepEqual(env.voiceReports.map(report => report.event), ['deaf', 'rescue'])
+    s.h.unmount(); assert.equal(env.timers.size, 0)
+  }
+  {
+    // Words from speech: the backup closes and nothing goes to the server.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.recognitions[0].result(['hello there', true]); env.advance(3000); s.render().stop()
+    assert.equal(await final, 'hello there'); await flush()
+    assert.equal(env.calls.length, 0); assert.equal(env.records[0].state, 'inactive'); assert.equal(env.streams[0].track.stops, 1)
+    // A quick tap with nothing said: no server call, the backup closes.
+    await s.render().toggle(); await flush(); const quick = s.render().finalText()
+    env.advance(500); s.render().stop(); assert.equal(await quick, 'hello there'); await flush()
+    assert.equal(env.calls.length, 0); assert.equal(env.streams[1].track.stops, 1)
+    s.h.unmount()
+  }
+  {
+    // A dead speech service: the recorder takes over the backup, so words said before the failure stay.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { text: 'Base' })
+    env.result = 'all the words'
+    await s.render().toggle(); await flush(); const final = s.render().finalText(), speech = env.recognitions[0]
+    env.records[0].data()
+    speech.end(); speech.end(); speech.end(); await flush()
+    assert.equal(env.records.length, 1); assert.equal(env.streams.length, 1); assert.equal(env.records[0].state, 'recording')
+    env.advance(3000); env.records[0].data(); s.render().stop()
+    assert.equal(await final, 'Base all the words')
+    const sent = env.calls.filter(call => call.path === '/mobile/api/transcribe' && !call.options.headers['X-Live'])
+    assert.equal(sent.length, 1); assert.equal(sent[0].options.body.size, 10)
+    assert.equal(env.streams[0].track.stops, 1)
+    s.h.unmount()
+  }
+  {
+    // The backup mic fails: speech still runs and the old message shows.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    env.globals.navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Busy', 'NotReadableError') }
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.recognitions[0].onaudiostart(); env.advance(3000); s.render().stop()
+    assert.equal(await final, ''); await flush()
+    assert.equal(s.render().error, 'No speech heard. Tap the mic and speak. (speech: start audio stop end)')
+    assert.equal(env.calls.length, 0)
+    s.h.unmount()
+  }
+  {
+    // Unmount while speech runs closes the backup too.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    await s.render().toggle(); await flush()
+    s.h.unmount(); await flush()
+    assert.equal(env.records[0].state, 'inactive'); assert.equal(env.streams[0].track.stops, 1)
+  }
+  {
+    // Review: a recorder that cannot start releases the backup mic.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    const proto = env.globals.MediaRecorder.prototype, start = proto.start
+    proto.start = () => { throw new Error('No codec') }
+    await s.render().toggle(); await flush()
+    assert.equal(env.streams[0].track.stops, 1)
+    proto.start = start
+    s.render().stop(); env.recognitions[0].end(); await flush(); s.h.unmount()
+  }
+  {
+    // Review: a backup still waiting for the mic is not used, and closes when it arrives.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    env.acquire = deferred()
+    await s.render().toggle(); const final = s.render().finalText()
+    env.recognitions[0].onaudiostart(); env.advance(3000); s.render().stop()
+    assert.equal(await final, ''); assert.equal(s.render().error, 'No speech heard. Tap the mic and speak. (speech: start audio stop end)')
+    env.acquire.resolve(env.stream()); await flush()
+    assert.equal(env.records[0].state, 'inactive'); assert.equal(env.streams[0].track.stops, 1)
+    assert.equal(env.calls.length, 0)
+    s.h.unmount()
+  }
+  {
+    // Review: unmount and taps while the backup closes for a rescue.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { text: 'Base' })
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    const backup = env.records[0]
+    backup.stop = function () { this.state = 'inactive' }  // the stop event comes late
+    env.recognitions[0].onaudiostart(); env.advance(3000); s.render().stop(); await flush()
+    await s.render().toggle(); assert.equal(env.recognitions.length, 1)
+    s.h.unmount()
+    assert.equal(await final, 'Base'); assert.equal(env.streams[0].track.stops, 1); assert.equal(env.calls.length, 0)
+  }
+  console.log('Speech: desktop backup converts a deaf tap, closes on words or a quick tap, carries into the fallback, and survives a mic failure pass')
 
   const closedEnv = speechEnvironment(), closed = setup(closedEnv, { text: 'Base' })
   await closed.render().toggle(); const closedFinal = closed.render().finalText(), speech = closedEnv.recognitions[0]
