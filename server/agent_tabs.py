@@ -7,6 +7,7 @@ import auth
 import auto_resume
 import delegate
 import groups
+import helper_close
 import helper_tabs
 import paths
 import review_links
@@ -72,9 +73,7 @@ def close_tab(body, caller, entries, run, status):
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
-    auto_resume.forget_pane(pane, run=run)
-    run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
-    review_links.remove(pane)
+    helper_close.close_pane(pane, run)
     return {'closed': pane}
 
 

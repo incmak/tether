@@ -239,6 +239,9 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
         options += [';', 'set-option', '-p', '-t', pane, '@chat_icon', role[1],
                     ';', 'set-option', '-p', '-t', pane, '@chat_icon_by', 'tether',
                     ';', 'set-option', '-p', '-t', pane, '@tether_role', body['role']]
+    elif review == 'new':
+        # Tether closes a reviewer tab when its review ends (helper_close.py).
+        options += [';', 'set-option', '-p', '-t', pane, '@tether_role', 'reviewer']
     if worktree is not None:
         options += [';', 'set-option', '-p', '-t', pane, '@worktree', worktree]
     run(options,

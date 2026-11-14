@@ -87,6 +87,7 @@ import window_size
 import projects_api
 import work_api
 import groups
+import helper_close
 import groups_api
 import codex_level
 import autonomy
@@ -147,6 +148,7 @@ def notify(payload, urgent):
     threading.Thread(target=push.send_all, args=(payload, urgent), daemon=True).start()
 
 
+HELPER_CLOSER = helper_close.Closer()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings, context=lambda entry: notification_context(entry))
 
 
@@ -199,6 +201,10 @@ def monitor_notices():
                 notify(digest, False)
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
+        try:
+            HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status)
+        except Exception as exc:  # closing idle helper tabs must never stop the monitor
+            print(f'helper close failed: {exc!r}', file=sys.stderr)
         time.sleep(2)
 
 
@@ -267,6 +273,12 @@ def shared_status(entry):
                 STATUS_CACHE[entry['id']] = (time.monotonic(), status)
             track(entry['id'], status['state'])
         return status
+
+
+def fresh_status(entry):
+    """shared_status without the one-second cache: for a check that must see a prompt sent a moment ago."""
+    STATUS_CACHE.pop(entry['id'], None)
+    return shared_status(entry)
 
 
 TRANSITIONS = {}  # entry id -> {'state', 'since', 'finished'}: wall-clock times, so the phone can sort and mark finished turns

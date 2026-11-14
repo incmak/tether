@@ -221,9 +221,13 @@ class LaunchTests(unittest.TestCase):
         recent = Mock(return_value=[{'role': 'user', 'text': 'Recent task'}])
         with patch.object(delegate, 'new_window_after', return_value='%13'), \
                 patch.object(delegate.review_links, 'add') as add:
+            run = Mock()
             result = delegate.start(source, body(review='new', message='', context=False), '/project',
-                                    run=Mock(), recent=recent)
+                                    run=run, recent=recent)
         self.assertEqual(result, ('%13', 'Review: Source title'))
+        options = run.call_args_list[0].args[0]
+        self.assertEqual(options[options.index('@tether_role') + 1], 'reviewer')
+        self.assertNotIn('@chat_icon', options)
         recent.assert_called_once_with()
         prompt, = (self.root / 'delegate').glob('*.md')
         self.assertEqual(prompt.read_text(), delegate.reviewer_prompt(source, '', 'User: Recent task'))
