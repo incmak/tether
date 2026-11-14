@@ -26,6 +26,10 @@ assert.equal(id(' b69 REVIEW '), '%1', 'case and spaces do not matter')
 assert.equal(id('B69 review tab'), '%1', 'a trailing "tab" is fine')
 assert.equal(id('review tab'), '%9', 'an exact name that ends in "tab" wins')
 assert.equal(id('review'), '%8')
+assert.equal(id('%5 tab'), '%5', 'a pane id with a trailing "tab"')
+const twice = [...panes, { id: '%10', tmux_session: 'x', pane_name: 'dup tab' }, { id: '%11', tmux_session: 'y', pane_name: 'dup tab' },
+  { id: '%12', tmux_session: 'x', pane_name: 'dup' }]
+assert.equal(m.tabTarget('dup tab', twice, here), null, 'an ambiguous exact name never falls back to the short name')
 assert.equal(id('Advisor: Triage'), '%2', 'the agent name counts')
 assert.equal(id('%5'), '%5', 'a pane id')
 assert.equal(id('%99'), null, 'a closed tab')

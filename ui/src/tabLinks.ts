@@ -8,17 +8,21 @@ const ID = /^%\d+$/
 export function tabTarget<T extends TabLike>(text: string, panes: T[], current?: TabLike | null): T | null {
   const exact = text.trim()
   if (!exact || exact.length > 80) return null
-  if (ID.test(exact)) return panes.find(pane => pane.id === exact && pane.id !== current?.id) ?? null
-  // The exact name wins: a tab may be called "review tab". Only then try it without a trailing " tab".
+  // The exact name wins: a tab may be called "review tab". Only a name no tab has is tried without a trailing " tab".
+  const others = panes.filter(pane => pane.id !== current?.id)
+  const found = named(exact, others)
   const stripped = exact.replace(/\s+tab$/i, '')
-  return named(exact, panes, current) ?? (stripped !== exact && stripped ? named(stripped, panes, current) : null)
+  return found.length || stripped === exact || !stripped ? pick(found, current) : pick(named(stripped, others), current)
 }
 
-function named<T extends TabLike>(text: string, panes: T[], current?: TabLike | null): T | null {
+// Only names a person or agent gave: the bare agent name ("Claude", "Shell") would match too many tabs.
+function named<T extends TabLike>(text: string, panes: T[]): T[] {
+  if (ID.test(text)) return panes.filter(pane => pane.id === text)
   const wanted = text.toLowerCase()
-  // Only names a person or agent gave: the bare agent name ("Claude", "Shell") would match too many tabs.
-  const found = panes.filter(pane => pane.id !== current?.id && [pane.pane_name, pane.agent_name]
-    .some(name => !!name && name.trim().toLowerCase() === wanted))
+  return panes.filter(pane => [pane.pane_name, pane.agent_name].some(name => !!name && name.trim().toLowerCase() === wanted))
+}
+
+function pick<T extends TabLike>(found: T[], current?: TabLike | null): T | null {
   if (found.length === 1) return found[0]
   const here = found.filter(pane => current && pane.tmux_session === current.tmux_session)
   return here.length === 1 ? here[0] : null
