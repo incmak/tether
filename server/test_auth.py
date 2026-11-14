@@ -272,6 +272,54 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(data.endswith(b'\x81\x02hi'))
         self.assertEqual(seen[1], b'\x81\x80mask')
 
+    def test_live_origin_hides_nothing_behind_interim_heads_or_a_reused_connection(self):
+        import browser
+        import socket
+        import tempfile
+        from types import SimpleNamespace
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = folder.name + '/web.sock'
+        upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        upstream.bind(path)
+        upstream.listen(1)
+        self.addCleanup(upstream.close)
+        seen = []
+
+        def serve():  # a hostile container: an early-hints head, then keep-alive and a second answer
+            connection, _ = upstream.accept()
+            connection.settimeout(3)
+            seen.append(connection.recv(4096))
+            connection.sendall(b'HTTP/1.1 103 Early Hints\r\nSet-Cookie: early=1\r\n\r\n'
+                               b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\nKeep-Alive: timeout=60\r\n\r\nok')
+            try:
+                seen.append(connection.recv(4096))
+                connection.sendall(b'HTTP/1.1 200 OK\r\nSet-Cookie: late=1\r\nContent-Length: 2\r\n\r\nno')
+            except OSError:
+                pass
+            connection.close()
+        threading.Thread(target=serve, daemon=True).start()
+        port = self.live_listener()
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        request = 'GET /browser/live/%s HTTP/1.1\r\nHost: phone.test:7698\r\nCookie: ' + cookie + '\r\n\r\n'
+        with mock.patch.object(browser.BROWSER, 'container', SimpleNamespace(web_auth=lambda: 'Basic c2VjcmV0', web_sock=path)):
+            client = socket.create_connection(('127.0.0.1', port), timeout=8)
+            client.sendall(((request % 'first') + (request % 'second')).encode())  # pipelined
+            data = b''
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            client.close()
+        self.assertNotIn(b'early=1', data)
+        self.assertNotIn(b'late=1', data)
+        self.assertEqual(data.count(b'HTTP/1.1 '), 1)
+        self.assertIn(b'Connection: close', data)
+        self.assertNotIn(b'Keep-Alive', data)
+        self.assertTrue(data.endswith(b'ok'))
+        self.assertNotIn(b'second', b''.join(seen))
+
     def test_live_ancestors_allow_only_the_main_origin(self):
         self.assertEqual(server.live_ancestors('phone.example.test:7698'),
                          'https://phone.example.test http://phone.example.test:%d https://phone.example.test:%d' % ((server.MAIN_PORT,) * 2))

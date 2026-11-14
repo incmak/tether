@@ -1476,13 +1476,16 @@ class Handler(BaseHTTPRequestHandler):
             lines.append('Connection: close')  # one response per connection, so live_head() sees every head
         self.pipe_upstream(upstream, lines, response_head=self.live_head)
 
-    def live_head(self, head):
+    def live_head(self, head, upgraded=False):
         """The container's response head without headers that act on Tether's site, and with Tether's own frame rule.
         Cookies and Clear-Site-Data reach the whole host (all ports), so they could sign the person out or plant a
         cookie. Folded lines (leading space) and lines without a colon are dropped too, so nothing can hide a header."""
         lines = head.decode('latin-1').split('\r\n')
         kept = [lines[0]] + [line for line in lines[1:] if line and line[0] not in ' \t' and ':' in line
-                             and line.split(':', 1)[0].strip().lower() not in LIVE_DROPPED_HEADERS]
+                             and line.split(':', 1)[0].strip().lower() not in LIVE_DROPPED_HEADERS
+                             and (upgraded or line.split(':', 1)[0].strip().lower() not in ('connection', 'keep-alive'))]
+        if not upgraded:
+            kept.append('Connection: close')  # one answer per connection: pipe_upstream stops reading the client
         kept.append('Content-Security-Policy: frame-ancestors ' + live_ancestors(self.headers.get('Host', '')))
         return ('\r\n'.join(kept) + '\r\n\r\n').encode('latin-1')
 
@@ -1499,8 +1502,8 @@ class Handler(BaseHTTPRequestHandler):
         self.respond(503, page, 'text/html')
 
     def pipe_upstream(self, upstream, lines, body=False, response_head=None):
-        """Relay an HTTP request and then pipe bytes, including WebSocket frames. response_head(bytes) -> bytes, when
-        given, rewrites the first response head (status line and headers, without the blank line)."""
+        """Relay an HTTP request and then pipe bytes, including WebSocket frames. response_head(head, upgraded) -> bytes,
+        when given, rewrites the final response head (status line and headers, without the blank line)."""
         with upstream:
             upstream.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
             if body:
@@ -1541,21 +1544,33 @@ class Handler(BaseHTTPRequestHandler):
                             left -= len(data)
                 except (ValueError, OSError):
                     return
+            pair = {self.connection: upstream, upstream: self.connection}
             if response_head is not None:
+                # Interim 1xx heads (100, 103) are dropped, so no header hides behind them. Only a 101 switch keeps
+                # the client's side open; otherwise the answer flows one way and the client connection closes, so
+                # the container cannot answer a later request on a reused connection with unfiltered headers.
                 data = b''
                 try:
                     upstream.settimeout(30)
-                    while b'\r\n\r\n' not in data:
-                        chunk = upstream.recv(65536)
-                        if not chunk or len(data) + len(chunk) > 65536:
-                            return
-                        data += chunk
-                    head, rest = data.split(b'\r\n\r\n', 1)
-                    self.connection.sendall(response_head(head) + rest)
+                    while True:
+                        while b'\r\n\r\n' not in data:
+                            chunk = upstream.recv(65536)
+                            if not chunk or len(data) + len(chunk) > 65536:
+                                return
+                            data += chunk
+                        head, data = data.split(b'\r\n\r\n', 1)
+                        status = head.split(b'\r\n', 1)[0].split(b' ', 2)
+                        code = status[1] if len(status) > 1 else b''
+                        if not (len(code) == 3 and code.startswith(b'1') and code != b'101'):
+                            break
+                    upgraded = code == b'101'
+                    self.connection.sendall(response_head(head, upgraded) + data)
                 except OSError:
                     return
+                self.close_connection = True
+                if not upgraded:
+                    pair = {upstream: self.connection}
             upstream.settimeout(None)
-            pair = {self.connection: upstream, upstream: self.connection}
             try:
                 while True:
                     ready, _, _ = select.select(list(pair), [], [], 600)
