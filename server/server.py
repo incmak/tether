@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
@@ -1186,8 +1187,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Accel-Buffering', 'no')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Connection', 'close')
+        # One gzip stream per connection, flushed after each event: repeated keys and messages compress
+        # well across events, and a sync flush hands each event to the client at once (B62).
+        packer = None
+        if accepts_gzip(self.headers.get('Accept-Encoding')) and self.headers.get('Sec-Fetch-Site') in GZIP_SITES:
+            packer = zlib.compressobj(6, zlib.DEFLATED, 31)
+            self.send_header('Content-Encoding', 'gzip')
+        self.send_header('Vary', 'Accept-Encoding, Sec-Fetch-Site')
         self.end_headers()
         self.close_connection = True
+
+        def send(data):
+            self.wfile.write(packer.compress(data) + packer.flush(zlib.Z_SYNC_FLUSH) if packer else data)
         watched = config.get('id')
         with WATCHING_LOCK:
             WATCHING[watched] = WATCHING.get(watched, 0) + 1
@@ -1196,7 +1207,7 @@ class Handler(BaseHTTPRequestHandler):
         sampled = 0.0
         working = False
         try:
-            self.wfile.write(b'retry: 2000\n\n')
+            send(b'retry: 2000\n\n')
             while time.monotonic() - started < lifetime:
                 now = time.monotonic()
                 try:
@@ -1214,19 +1225,22 @@ class Handler(BaseHTTPRequestHandler):
                         body = json.dumps(payload)
                         if body != last_body:
                             last_body = body
-                            self.wfile.write(('data: ' + body + '\n\n').encode())
+                            send(('data: ' + body + '\n\n').encode())
                             wrote = now
                 except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as exc:
                     if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
                         raise
-                    self.wfile.write(b'event: unavailable\ndata: {}\n\n')
+                    send(b'event: unavailable\ndata: {}\n\n')
                     wrote = now
                     time.sleep(1)
                 if now - wrote >= KEEPALIVE:  # a named event: the page counts it as proof the stream is alive (comments are invisible to it)
-                    self.wfile.write(b'event: idle\ndata: {}\n\n')
+                    send(b'event: idle\ndata: {}\n\n')
                     wrote = now
                 self.wfile.flush()
                 time.sleep(.1)  # stat is cheap; pane reads have a separate bounded cadence
+            if packer:  # end the gzip stream so the client sees a clean close, not a cut one
+                self.wfile.write(packer.flush())
+                self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             return
         finally:
