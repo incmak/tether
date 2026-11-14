@@ -52,7 +52,7 @@ function AdviceLine({ advice, onUse }: { advice: CheckAdvice; onUse?: () => void
 }
 
 export function LessonsReview({ api, onClose, onChange }: { api: Api; onClose: () => void; onChange?: () => void }) {
-  const modal = useModal(true, onClose, undefined, 'lessons')
+  const modal = useModal(true, onClose, undefined, { view: 'lessons' })
   const fetcher = useCallback((signal: AbortSignal) => api<ReviewState>('autonomy/review', undefined, signal), [api])
   const { data, error: loadError, refresh } = usePolling(fetcher, 60000)
   const [failure, setError] = useState('')

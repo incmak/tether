@@ -6,7 +6,7 @@ import { BACK_KEY, FORWARD_KEY } from './navKeys'
 // Only keys that work in the desktop workspace. ⌘J and ⌘I come with the Needs you list.
 const GROUPS = [
   { name: 'Move', items: [
-    ['Back: close the top panel, or the previous chat or screen', BACK_KEY],
+    ['Back', BACK_KEY],
     ['Forward', FORWARD_KEY],
     ['Chats, Files or Terminals', '⌘1–3'],
     ['Search panes, commands and the backlog', '⌘K'],

@@ -51,7 +51,8 @@ const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Backlo
 
 /** ⌘K or ⌥Space: go to a pane or session, run a command, or find a backlog item. Each command row shows its key, so the menu teaches the keys. */
 export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, backlog }: Props) {
-  const modal = useModal(true, onClose)
+  // Opening the menu keeps the Forward steps, so its Forward command can use them.
+  const modal = useModal(true, onClose, undefined, { keepForward: true })
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const { text: backlogText, failed: backlogFailed } = useBacklogText(backlog?.api)

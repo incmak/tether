@@ -33,7 +33,7 @@ function loadNav({ active = true } = {}) {
   const store = new Map()
   const exports = {}
   runInNewContext(compile('backNav.ts'), {
-    exports, structuredClone, Number, String, Math, Set, Error,
+    exports, structuredClone, Number, String, Math, Set, Error, setTimeout: () => 0, clearTimeout: () => {},
     history: h.history,
     navigator: { userActivation: { get isActive() { return active } } },
     sessionStorage: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) },
@@ -158,7 +158,37 @@ const can = nav => nav.useNavAvailability()
   console.log('ok no entry without activation')
 }
 
-// 7. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
+// 7. Quick repeated Back and Forward: each waits for the last popstate and checks the bounds again (Codex review, P1).
+{
+  const { nav, h } = loadNav()
+  nav.setPlace({ screen: 'home' }, { push: true })
+  nav.setPlace({ screen: 'chats', pane: '%1' }, { push: true })
+  nav.setPlace({ screen: 'files', pane: '%1' }, { push: true })
+  nav.goBack(); nav.goBack(); nav.goBack(); nav.goBack()  // Four Backs before any popstate: only two steps exist.
+  h.settle()
+  assert.equal(h.at, 0, 'quick Backs stop at the first Tether entry')
+  nav.goForward(); nav.goForward(); h.settle()
+  assert.equal(h.at, 2, 'two quick Forwards take two steps')
+  console.log('ok quick repeats stay inside Tether')
+}
+
+// 8. The command menu keeps the Forward steps (Codex review, P2); other overlays add their entry.
+{
+  const { nav, h } = loadNav()
+  nav.setPlace({ screen: 'home' }, { push: true })
+  nav.setPlace({ screen: 'chats', pane: '%1' }, { push: true })
+  nav.goBack(); h.settle()
+  const id = nav.openOverlay(() => {}, undefined, true)
+  assert.equal(h.entries.length, 2, 'no entry: Forward survives')
+  assert.deepEqual({ ...can(nav) }, { back: false, forward: true })
+  nav.closeOverlay(id); h.settle()
+  assert.equal(h.at, 0, 'closing it goes nowhere')
+  nav.goForward(); h.settle()
+  assert.equal(h.at, 1)
+  console.log('ok command menu keeps Forward')
+}
+
+// 9. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
 {
   const exports = {}
   runInNewContext(compile('navKeys.ts'), { exports, require: name => { if (name === './keys') return { IS_MAC: false }; throw Error(name) } })

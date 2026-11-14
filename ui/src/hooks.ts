@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { errorText } from './api'
-import { useBackStep } from './backNav'
+import { useBackStep, type StepOptions } from './backNav'
 
 type Delta = { base?: unknown; version?: unknown; set?: Record<string, unknown>; unset?: unknown; messages?: { drop?: unknown; keep?: unknown; tail?: unknown } }
 
@@ -123,9 +123,9 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
   return { data, error, loading, refresh }
 }
 
-/** view: a name that lets Forward open this dialog again after Back closed it (backNav.ts setViewOpener). */
-export function useModal(open: boolean, close: () => void, drawer?: { onInterrupt: () => void }, view?: string) {
-  useBackStep(open, close, view)
+/** step.view: a name that lets Forward open this dialog again after Back closed it (backNav.ts setViewOpener). */
+export function useModal(open: boolean, close: () => void, drawer?: { onInterrupt: () => void }, step?: StepOptions) {
+  useBackStep(open, close, step)
   const ref = useRef<HTMLDialogElement>(null)
   const opened = useRef(0)
   const horizontal = !!drawer

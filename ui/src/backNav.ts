@@ -23,6 +23,11 @@ let top = 0
 // Those entries are dead, so Forward turns off there.
 let skip: { start: number; bounced: boolean } | null = null
 const watchers = new Set<() => void>()
+// In-app Back and Forward requests (negative: Back). A traversal is async, so a second click or key press before its
+// popstate must wait and then check the bounds again; else two quick Backs from index 1 would leave Tether.
+let wanted = 0
+let moving = false
+let movingTimer: ReturnType<typeof setTimeout> | undefined
 
 const state = () => (typeof history === 'undefined' ? null : history.state) as Partial<NavState> | null
 const equal = (a: Place | null | undefined, b: Place | null) => a?.pane === b?.pane && a?.screen === b?.screen
@@ -55,6 +60,22 @@ function replace(next: NavState) {
   history.replaceState({ ...next, index: state()?.index ?? index }, '')
 }
 
+function traverse(step: -1 | 1) {
+  moving = true
+  clearTimeout(movingTimer)
+  // A traversal that never ends in popstate (the browser refused it) must not block later steps.
+  movingTimer = setTimeout(() => { moving = false; drain() }, 1500)
+  if (step < 0) history.back()
+  else history.forward()
+}
+
+function drain() {
+  if (moving || pendingBacks > 0) return
+  if (wanted < 0 && index > 0) { wanted++; traverse(-1) }
+  else if (wanted > 0 && index < top) { wanted--; traverse(1) }
+  else wanted = 0
+}
+
 function run(fn: () => void) {
   if (pendingBacks > 0) queue.push(fn)
   else fn()
@@ -70,6 +91,12 @@ function listen() {
   index = state()?.index ?? 0
   top = Math.max(index, readTop())
   window.addEventListener('popstate', event => {
+    moving = false
+    clearTimeout(movingTimer)
+    onPop(event)
+    drain()
+  })
+  function onPop(event: PopStateEvent) {
     const next = event.state as Partial<NavState> | null
     const from = index
     reopening = null
@@ -92,10 +119,10 @@ function listen() {
       }
       // An overlay that is closed now: step over its entry in the same direction.
       if (index > from && !skip) skip = { start: from, bounced: false }
-      if (index > from && index < top && !skip?.bounced) history.forward()
+      if (index > from && index < top && !skip?.bounced) traverse(1)
       else {
         if (skip && index > from) skip.bounced = true
-        history.back()
+        traverse(-1)
       }
       return
     }
@@ -107,10 +134,11 @@ function listen() {
       currentPlace = next.place
       placeHandler?.(next.place)
     }
-  })
+  }
 }
 
-export function openOverlay(close: () => void, view?: string): number {
+/** keepForward: when there are Forward steps, add no entry, so opening this overlay (the command menu) keeps them. */
+export function openOverlay(close: () => void, view?: string, keepForward = false): number {
   listen()
   const overlay: Overlay = { id: ++nextId, close, layer: overlays.length + 1, noEntry: true }
   const count = overlays.length
@@ -121,6 +149,7 @@ export function openOverlay(close: () => void, view?: string): number {
     overlay.noEntry = false
     return overlay.id
   }
+  if (keepForward && index < top) return overlay.id
   if (activated()) run(() => {
     if (!overlays.includes(overlay)) return
     const next: NavState = { ...state(), tether: 1, layer: overlay.layer, place: currentPlace ?? undefined, view }
@@ -172,25 +201,29 @@ export function setViewOpener(fn: ((view: string) => boolean) | null) {
 // They wait for a pending close (an overlay that goes back on its own entry), so they step from where it lands.
 export function goBack() {
   listen()
-  run(() => { if (index > 0) history.back() })
+  wanted--
+  run(drain)
 }
 export function goForward() {
   listen()
-  run(() => { if (index < top) history.forward() })
+  wanted++
+  run(drain)
 }
 
 export function useNavAvailability() {
   return useSyncExternalStore(watch => { listen(); changed(); watchers.add(watch); return () => watchers.delete(watch) }, () => snapshot, () => snapshot)
 }
 
-export function useBackStep(open: boolean, close: () => void, view?: string) {
+export type StepOptions = { view?: string; keepForward?: boolean }
+
+export function useBackStep(open: boolean, close: () => void, options?: StepOptions) {
   const latest = useRef(close)
   useLayoutEffect(() => { latest.current = close }, [close])
-  const name = useRef(view)
-  useLayoutEffect(() => { name.current = view }, [view])
+  const step = useRef(options)
+  useLayoutEffect(() => { step.current = options })
   useEffect(() => {
     if (!open) return
-    const id = openOverlay(() => latest.current(), name.current)
+    const id = openOverlay(() => latest.current(), step.current?.view, step.current?.keepForward)
     return () => closeOverlay(id)
   }, [open])
 }
