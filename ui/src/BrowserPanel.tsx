@@ -157,6 +157,9 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [handing, setHanding] = useState(false)
   const watchingRef = useRef(watching)
   useLayoutEffect(() => { watchingRef.current = watching }, [watching])
+  // While an agent controls the tab, the live view takes no keys either: inert keeps Tab out, and focus already in it leaves.
+  const liveFrameRef = useRef<HTMLIFrameElement>(null)
+  useLayoutEffect(() => { if (watching && document.activeElement === liveFrameRef.current) liveFrameRef.current?.blur() }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
   // Phone and tablet tabs keep the picture stream: they need Chrome's device emulation at the panel's scale.
   const liveWanted = !!liveBase && tab?.preset === 'desktop' && !windowView
@@ -888,7 +891,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} className="browser-live" src={liveSrc} hidden={noting}
+      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className="browser-live" src={liveSrc} hidden={noting} inert={watching}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
         referrerPolicy="no-referrer" onLoad={() => setLiveReady(true)} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}

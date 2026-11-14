@@ -6,6 +6,18 @@ const { resolve } = require('node:path')
 const { chromium } = require('playwright-core')
 const ts = require('typescript')
 
+// While watching, Tab never reaches the live view and typing changes nothing in it.
+async function keysStayOut(page, frame) {
+  await page.getByRole('button', { name: 'Take over', exact: true }).focus()
+  for (let step = 0; step < 40; step++) {
+    await page.keyboard.press('Tab')
+    assert.notEqual(await page.evaluate(() => document.activeElement.className), 'browser-live', `Tab ${step + 1} reached the live view`)
+    await page.keyboard.type('x')
+  }
+  assert.equal(await frame.getAttribute('inert'), '')
+  assert.equal(await page.frameLocator('iframe.browser-live').locator('input').inputValue(), '')
+}
+
 async function main() {
   const { createServer } = await import('vite')
   const evidence = resolve(__dirname, '../.work-notes/2026-11-14-selkies-live')
@@ -15,7 +27,7 @@ async function main() {
   liveServer = http.createServer((req, res) => {
     if (!req.url.startsWith('/browser/live/')) { res.statusCode = 404; res.end(); return }
     res.setHeader('Content-Type', 'text/html')
-    res.end('<!doctype html><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p></body>')
+    res.end('<!doctype html><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p><input aria-label="Fixture input" style="margin:24px"></body>')
   })
   await new Promise(done => liveServer.listen(0, '127.0.0.1', done))
   const livePort = liveServer.address().port
@@ -31,6 +43,7 @@ async function main() {
     const api = async (path, body) => {
       window.calls.push({path, body});
       if (path.startsWith('browser/tabs')) return {tabs:[window.tab], presets, nav:{back:true,forward:false}, live:'/browser/live/', live_port:window.livePort, live_run:window.run};
+      if (path === 'browser/device' && body.preset === 'agent') { window.tab = {...window.tab, controller:'agent'}; return window.tab }
       if (path === 'browser/device') { window.tab = {...window.tab, preset:body.preset, touch:body.preset !== 'desktop'}; return window.tab }
       return {ok:true};
     };
@@ -54,7 +67,7 @@ async function main() {
     }] })
     await server.listen()
     browser = await chromium.launch({ executablePath: process.env.MOBILE_TMUX_CHROME || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] })
-    for (const [width, height, touch, agent, down] of [[1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true]]) {
+    for (const [width, height, touch, agent, down, giveBack] of [[1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true], [1280, 900, false, false, false, true]]) {
       const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch, serviceWorkers: 'block' })
       const page = await context.newPage()
       page.setDefaultTimeout(15000)
@@ -65,6 +78,7 @@ async function main() {
       // Block all API requests, so a test can never reach a real Tether server.
       await page.route('**/mobile/**', route => route.fulfill({ json: { name: 'fixture' } }))
       if (agent) await page.addInitScript(() => { window.fixtureTab = { mode: 'agent', controller: 'agent', preset: 'desktop' } })
+      if (giveBack) await page.addInitScript(() => { window.fixtureTab = { mode: 'agent', controller: 'user', preset: 'desktop' } })
       if (down) await page.addInitScript(port => { window.livePort = port }, closedPort)
       await page.addInitScript(() => {
         window.calls = []; window.sockets = []; window.sources = []
@@ -133,8 +147,26 @@ async function main() {
         const coverBox = await cover.boundingBox()
         assert(Math.abs(coverBox.width - box.width) < 1 && Math.abs(coverBox.height - box.height) < 1)
         assert.equal(await page.evaluate(([x, y]) => document.elementFromPoint(x, y).className, [box.x + box.width / 2, box.y + box.height / 2]), 'browser-live-block')
+        await keysStayOut(page, frame)
         assert.deepEqual(errors, [])
         console.log('Browser live view: agent tab is watch-only')
+        await context.close()
+        continue
+      }
+
+      if (giveBack) {
+        // The person controls an agent tab and types into the live view, then gives it back: the keys stop at once.
+        const input = page.frameLocator('iframe.browser-live').locator('input')
+        await input.click()
+        assert.equal(await page.evaluate(() => document.activeElement.className), 'browser-live')
+        await page.getByRole('button', { name: 'Give back', exact: true }).click()
+        await page.getByRole('button', { name: 'Take over', exact: true }).waitFor()
+        assert.notEqual(await page.evaluate(() => document.activeElement.className), 'browser-live', 'focus left the live view')
+        await page.keyboard.type('late')
+        assert.equal(await input.inputValue(), '', 'no keys after Give back')
+        await keysStayOut(page, frame)
+        assert.deepEqual(errors, [])
+        console.log('Browser live view: Give back stops keys at once')
         await context.close()
         continue
       }
