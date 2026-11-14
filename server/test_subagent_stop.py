@@ -632,18 +632,21 @@ class ProcessStopTests(unittest.TestCase):
         signal_stop.assert_not_called()
         record.assert_not_called()
 
-    def test_monitor_with_a_same_command_twin_in_its_start_window_is_not_bound(self):
+    def test_monitor_is_never_bound_for_a_signal(self):
+        # A same-command monitor B can start after the listing snapshot and be the sole process match.
         folder = Path(self.meta).parent / 'monitor-tasks'
         folder.mkdir()
+        (folder / 'm1.output').write_text('')
         monitor = {'id': 'm1', 'kind': 'monitor', 'command': 'tail -f log', 'started': '2026-11-14T10:00:00Z'}
-        twin = dict(monitor, id='m2', started='2026-11-14T10:00:05Z')
-        later = dict(monitor, id='m3', started='2026-11-14T10:05:00Z')
+        shell = {'id': 's1', 'kind': 'shell', 'command': 'sleep 600'}
+        (folder / 's1.output').write_text('')
         with patch.object(stop.subagents, '_owner_since', return_value=1), \
                 patch.object(stop.subagents, '_tasks_dir', return_value=folder), \
                 patch.object(stop.task_process, 'find', return_value=PROCESS) as find:
-            self.assertIsNone(stop.bind(self.entry, monitor, [monitor, twin, later]))
+            self.assertIsNone(stop.bind(self.entry, monitor))
             find.assert_not_called()
-            self.assertEqual(stop.bind(self.entry, monitor, [monitor, later]), (PROCESS, f'{folder}/m1'))
+            self.assertEqual(stop.bind(self.entry, shell), (PROCESS, f'{folder}/s1'))
+            self.assertEqual(find.call_args.args[2], os.path.realpath(folder / 's1.output'))
 
     def test_unreadable_screen_error_names_a_newer_claude_version(self):
         sessions = Path(self.meta).parent / 'sessions'
