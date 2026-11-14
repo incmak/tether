@@ -213,7 +213,7 @@ class Watcher:
             if last is None or top < last:  # first look, or the file started over
                 seen[prefix], changed = top, True
                 continue
-            asks = [e for e in events if e['n'] > last and e['type'] == 'ask']
+            asks = [e for e in events if e['n'] > last and e['type'] == 'ask' and not e.get('quiet')]
             mode = self.delivery().get('urgent', 'sound') if asks else 'sound'
             if asks and mode != 'off':
                 items = work_items.fold(record, events)

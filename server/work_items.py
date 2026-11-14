@@ -296,7 +296,7 @@ def _valid(event):
         return False
     if 'options' in event and not _strings(event['options'], OPTIONS):
         return False
-    if 'qa' in event and not isinstance(event['qa'], bool):
+    if any(k in event and not isinstance(event[k], bool) for k in ('qa', 'quiet')):
         return False
     if kind in ('link', 'unlink') and not PANE.fullmatch(event.get('pane', '')):
         return False
@@ -362,6 +362,8 @@ def _append(prefix, event):
 
 def _history_text(event):
     kind = event['type']
+    if kind in ('new', 'triage') and event.get('status'):  # a triage ledger line (work_triage.py)
+        return f'{event["status"]}: {event.get("text", "")}'
     if kind == 'new':
         if event.get('by') == 'mak':
             return f'Added: {event.get("title", "")}'
@@ -406,7 +408,7 @@ def _apply(item, event):
         item['ask'] = None
         item['stage'] = event.get('stage') or item.get('askFrom') or 'triage'
         item['answer'] = {'choice': event.get('choice', ''), 'text': event.get('text', ''), 'at': event.get('at')}
-    elif kind == 'stage':
+    elif kind == 'stage' or kind == 'triage' and event.get('stage'):  # a triage line may move the item too
         if event.get('stage') != 'needs':
             item['ask'] = None
         item['stage'] = event.get('stage', item['stage'])
@@ -423,9 +425,10 @@ def _apply(item, event):
         item['title'] = event.get('title') or item['title']
     elif kind == 'jira':
         item['jira'] = {k: event.get(k) for k in ('status', 'error', 'tickets', 'owners', 'target') if k in event}
-    if kind == 'stage' and event.get('stage') == 'done':
+    moved = kind == 'stage' or kind == 'triage' and event.get('stage')
+    if moved and event.get('stage') == 'done':
         item['doneAt'] = event.get('at')
-    elif kind in ('stage', 'ask', 'answer') and item['stage'] != 'done':
+    elif (moved or kind in ('ask', 'answer')) and item['stage'] != 'done':
         item['doneAt'] = None
     text = _history_text(event)
     if text:
@@ -501,7 +504,10 @@ def _write_event(item_id, version, event, check=None):
 
 
 def _next_id(prefix, items):
-    taken = [int(ITEM_ID.fullmatch(i)[2]) for i in items if ITEM_ID.fullmatch(i)]
+    """The next free id. Ids named by any event count as taken: an import reserves the ids of old items it leaves
+    out with a 'reserve' event, so no new item takes an old number."""
+    named = list(items) + [e['item'] for e in _events(prefix)]
+    taken = [int(ITEM_ID.fullmatch(i)[2]) for i in named if ITEM_ID.fullmatch(i) and i.startswith(prefix + '-')]
     return f'{prefix}-{max(taken, default=0) + 1:03d}'
 
 
@@ -552,8 +558,10 @@ def from_feed(project_name, key, title, link, source):
         return fold(record)[item_id], True
 
 
-def ask(item_id, question, options, pane='', chat='', by='agent', who='', version=None):
-    """An agent asks Mak. The item moves to Needs you. pane and chat name the asking tab: the answer goes there."""
+def ask(item_id, question, options, pane='', chat='', by='agent', who='', version=None, quiet=False, status='', ref=''):
+    """An agent asks Mak. The item moves to Needs you. pane and chat name the asking tab: the answer goes there.
+    quiet: no push (an import, or a question that replaces one Mak already has). status and ref: the triage
+    ledger line the question came from (work_triage.py)."""
     question = _text(question, TEXT_LIMIT, 'question')
     options = _options(options)
     if pane and not PANE.fullmatch(pane):
@@ -564,8 +572,16 @@ def ask(item_id, question, options, pane='', chat='', by='agent', who='', versio
     def check(item):
         if item['stage'] in ('done',):
             raise invalid(f'{item["id"]} is Done. Move it back before you ask.')
-    return _write_event(item_id, version, {'type': 'ask', 'by': by, 'who': who, 'ask': os.urandom(8).hex(),
-                                           'q': question, 'options': options, 'pane': pane, 'chat': chat}, check)
+    event = {'type': 'ask', 'by': by, 'who': who, 'ask': os.urandom(8).hex(), 'q': question, 'options': options,
+             'pane': pane, 'chat': chat}
+    if quiet:
+        event['quiet'] = True
+    if status:
+        event['status'] = _line(status, 40, 'status')
+    ref = _line(ref, REF_LIMIT, 'link', required=False)
+    if ref:
+        event['ref'] = ref
+    return _write_event(item_id, version, event, check)
 
 
 def answer_stage(item, choice):
