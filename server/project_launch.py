@@ -132,7 +132,8 @@ def _option(args, short, long):
         elif long and arg.startswith(long + '='):
             values.append(arg[len(long) + 1:])
         elif short and arg.startswith(short) and len(arg) > len(short) and not arg.startswith('--'):
-            values.append(arg[len(short):])
+            value = arg[len(short):]
+            values.append(value[1:] if value.startswith('=') else value)  # clap reads -c=X as -c X
     return values
 
 
@@ -199,7 +200,8 @@ def _join(base, target):
     Codex rejects a NUL byte before it normalizes (utils/path-uri/src/lib.rs), so None."""
     if '\x00' in target:
         return None
-    return os.path.normpath(os.path.join(str(base), target))
+    path = os.path.normpath(os.path.join(str(base), target))
+    return '/' + path.lstrip('/') if path.startswith('//') else path  # PathUri keeps one leading slash
 
 
 def _gitdir(dot_git):
@@ -337,9 +339,12 @@ def codex_writable(args, cwd=None):
     if any(key.strip() in ('default_permissions', 'profile') or key.strip().startswith('permissions.')
            for key, _, _ in overrides):
         return False  # a permission profile wins over sandbox flags and sandbox_mode, whatever the order
+    sandboxes = _option(args, '-s', '--sandbox')
+    if any(_mode(value) is UNSURE for value in sandboxes):
+        return False  # clap rejects a sandbox value that is not an exact mode, even with --yolo
     if any(arg in WRITE_FLAGS for arg in args):
         return True
-    for value in reversed(_option(args, '-s', '--sandbox')):
+    for value in reversed(sandboxes):
         return _mode(value) is True
     if _option(args, '-p', '--profile'):
         return False

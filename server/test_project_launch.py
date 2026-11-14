@@ -227,6 +227,17 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(project_launch.codex_writable(['--cd', str(main / 'src')], folder))
         self.assertFalse(project_launch.codex_writable(['--cd', f'{main}/alias/../src'], folder))
 
+    def test_writable_round_seven_equals_short_options_and_double_slash(self):
+        folder = str(self.temp)
+        self.config(f'[projects."{os.path.realpath(folder)}"]\ntrust_level = "trusted"\n')
+        for args in (['-c', 'sandbox_mode=workspace-write', '-c=sandbox_mode=read-only'],
+                     ['--yolo', '-c=default_permissions=":read-only"'], ['-s=read-only'],
+                     ['--yolo', '-s', ' workspace-write '], ['--yolo', '-s', '"workspace-write"']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)
+        self.assertTrue(project_launch.codex_writable(['-s=workspace-write'], folder))
+        self.assertTrue(project_launch.codex_writable(['--yolo', '-s', 'read-only'], folder))
+        self.assertEqual(project_launch._join('/', '//a//b/../c'), '/a/c')  # PathUri keeps one leading slash
+
     def test_writable_worktree_pointer_must_match_its_registration(self):
         git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
         main = self.temp / 'main'
