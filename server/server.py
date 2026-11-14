@@ -151,6 +151,7 @@ def notify(payload, urgent):
 
 HELPER_CLOSER = helper_close.Closer()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings, context=lambda entry: notification_context(entry))
+WORK_WATCHER = work_api.Watcher(notify, delivery=push.delivery_settings)
 
 
 def review_alert(title, body, session, review=None):
@@ -202,6 +203,10 @@ def monitor_notices():
                 notify(digest, False)
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
+        try:
+            WORK_WATCHER.observe()
+        except Exception as exc:  # the work board must never stop the monitor
+            print(f'work watcher failed: {exc!r}', file=sys.stderr)
         try:
             HELPER_CLOSER.observe(entries, shared_status, subprocess.run, watching, lock=SEND_LOCK, fresh=fresh_status)
         except Exception as exc:  # closing idle helper tabs must never stop the monitor
