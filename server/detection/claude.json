@@ -54,6 +54,31 @@
       "regex": "^\\s*(?:─{3,}|[❯>!]|⏺|●)",
       "flags": [],
       "comment": "Find the first rule, prompt, or response after the Claude banner."
+    },
+    "SIDE_RULE": {
+      "regex": "^▔{20,}\\s*$",
+      "flags": [],
+      "comment": "Find the top edge of the /btw side question overlay."
+    },
+    "SIDE_QUESTION": {
+      "regex": "^\\s*/btw\\s+(\\S.*)$",
+      "flags": [],
+      "comment": "Read the question row of the /btw overlay."
+    },
+    "SIDE_FOOTER": {
+      "regex": "(?:^|· )Esc to close$",
+      "flags": [],
+      "comment": "Find the key hints that end the /btw overlay."
+    },
+    "SIDE_COPY": {
+      "regex": "\\bc to copy\\b|\\bCopied to clipboard\\b",
+      "flags": [],
+      "comment": "A finished /btw answer offers the copy key."
+    },
+    "SIDE_FORK": {
+      "regex": "\\bf to fork\\b",
+      "flags": [],
+      "comment": "A finished /btw answer offers the fork key."
     }
   }
 }

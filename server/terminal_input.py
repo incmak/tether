@@ -740,6 +740,13 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         capture_notices(entry, screen)
     else:
         capture_quota_notices(entry, screen)
+    if entry['agent'] == 'claude':
+        import side_question
+        # The /btw overlay covers the prompt area. Its answer is free text, so no other screen rule may read it.
+        side = side_question.observe(entry, screen, styled_screen)
+        if side:
+            prompt_actions.ledger.forget(entry['id'])
+            return {'state': 'Working' if WORKING.search(screen) else 'Idle', 'approval': None, 'attention': side}
     pending = approval(screen)
     if pending:
         prompt_actions.ledger.forget(entry['id'])

@@ -57,6 +57,11 @@ ORIGINALS = [
     ('terminal_replies', ('codex', 'REPLIES_CONTEXT'), 'CONTEXT_LINE', (r'.*·\s*Context\b'), 0),
     ('terminal_replies', ('antigravity', 'BANNER_END'), 'AGY_BANNER_END', (r'^\s*─{3,}'), 0),
     ('prompt_actions', ('codex', 'REPORT_RULE'), 'RULE', (r'^\s*[─━═-]{3,}\s*$'), 0),
+    ('side_question', ('claude', 'SIDE_RULE'), 'RULE', (r'^▔{20,}\s*$'), 0),
+    ('side_question', ('claude', 'SIDE_QUESTION'), 'QUESTION', (r'^\s*/btw\s+(\S.*)$'), 0),
+    ('side_question', ('claude', 'SIDE_FOOTER'), 'FOOTER', (r'(?:^|· )Esc to close$'), 0),
+    ('side_question', ('claude', 'SIDE_COPY'), 'COPY', (r'\bc to copy\b|\bCopied to clipboard\b'), 0),
+    ('side_question', ('claude', 'SIDE_FORK'), 'FORK', (r'\bf to fork\b'), 0),
 ]
 
 

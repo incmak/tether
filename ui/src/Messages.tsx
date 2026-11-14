@@ -2,7 +2,7 @@ import { terminalText } from './terminalText'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
@@ -117,6 +117,14 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
     const report = title === 'Subagent report'
     return <details className="peer-message" data-msg-id={id} open={!report}>
       <summary>{report ? <Blocks size={15} /> : <MessageSquare size={15} />}<strong>{title}</strong>{report && <span className="peer-preview">{text.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '')}</span>}<ChevronRight size={15} /></summary>
+      <MessagePrimitive.Root className="assistant-message"><MessagePrimitive.Parts components={{ Text: Markdown }} /><MessageActions text={text} time={time} /></MessagePrimitive.Root>
+    </details>
+  }
+  // Claude's /btw question and answer. Claude Code keeps them out of the transcript; the server saved this copy.
+  if (kind === 'side' && title) {
+    return <details className="peer-message side-message" data-msg-id={id} open>
+      <summary><MessageCircleQuestion size={15} /><strong>Side question</strong><span className="peer-preview side-preview">{title}</span><ChevronRight size={15} /></summary>
+      <p className="side-asked">{title}</p>
       <MessagePrimitive.Root className="assistant-message"><MessagePrimitive.Parts components={{ Text: Markdown }} /><MessageActions text={text} time={time} /></MessagePrimitive.Root>
     </details>
   }

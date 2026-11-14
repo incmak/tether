@@ -105,7 +105,7 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
-  kind?: 'actions' | 'terminal' | 'notice' | 'peer' | 'watch'
+  kind?: 'actions' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
   quiet?: string
   watch?: string
   members?: ChatMessage[]
@@ -172,7 +172,9 @@ export interface ChoiceState {
 }
 // Claude's /permissions dialog as server/permissions_dialog.py reads it.
 export interface PermissionsDialog { tabs: string[]; tab: string | null; lines: string[]; selected: number | null; hint: string; empty: boolean }
-export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions'; permissions?: PermissionsDialog;
+export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side'; permissions?: PermissionsDialog;
+  /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
+  pending?: boolean; markdown?: boolean; fork?: boolean;
   promptId?: string; revision?: string; requiresResponse?: boolean; body?: string; hints?: string[]; actions?: PromptAction[]; title?: string; subtitle?: string; items?: PickerItem[]; more_above?: number; more_below?: number; hint?: string; question?: string; options?: Choice[]; choice?: ChoiceState; ask?: { id: string; questions: AskQuestion[] }; askBridge?: AskBridge; ask_current?: AskCurrent; login?: { url: string; code: boolean; user_code?: string; message?: string } }
 export type ChatAgent = 'claude' | 'codex'
 export interface PastChat { id: string; agent: ChatAgent; title: string; dir: string | null; time: string; live: boolean; pane: string | null }

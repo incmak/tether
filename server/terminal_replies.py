@@ -1,6 +1,7 @@
 """Codex answers its slash commands (/cd, /pwd, /status ...) on the terminal only; nothing reaches its history file.
 After such a command is sent, read what the terminal added and keep it as a chat notice."""
 import difflib
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -191,6 +192,27 @@ def add(entry, text):
         target = CACHE / (key(entry) + '.json')
         temporary = CACHE / (key(entry) + '.' + str(os.getpid()) + '.tmp')
         temporary.write_text(json.dumps(notices))
+        temporary.chmod(0o600)
+        temporary.replace(target)
+    return notice
+
+
+SIDE_MAX = 60000
+
+
+def add_side(entry, question, answer):
+    """Keep a /btw side question and its answer in the chat. Claude Code writes them to no file."""
+    ident = 'terminal:side:' + hashlib.sha256((question + '\0' + answer).encode()).hexdigest()[:12]
+    notice = {'id': ident, 'role': 'assistant', 'kind': 'side', 'title': question[:MAX_TEXT], 'text': answer[:SIDE_MAX],
+              'time': datetime.now(timezone.utc).isoformat()}
+    with LOCK:
+        old = saved(entry)
+        if any(item.get('id') == ident for item in old):
+            return None
+        CACHE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = CACHE / (key(entry) + '.json')
+        temporary = CACHE / (key(entry) + '.' + str(os.getpid()) + '.tmp')
+        temporary.write_text(json.dumps((old + [notice])[-KEEP:]))
         temporary.chmod(0o600)
         temporary.replace(target)
     return notice

@@ -72,6 +72,8 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options?.filter(option => option.id <= 9)) ?? []
   const keepPlanning = plan && approval?.actionable ? options.find(option => /^No,?\s+keep planning\b/i.test(option.text)) : undefined
   const panel = !approval && attention?.reason === 'panel'
+  // Claude's /btw: a question and its answer that stay out of the main conversation.
+  const side = !approval && !plan && attention?.reason === 'side' ? attention : undefined
   // Claude's /permissions dialog: tabs, the list, and the keys that act on it.
   const perms = !approval && attention?.reason === 'permissions' ? attention.permissions : undefined
   const info = !approval && attention?.reason === 'info' ? attention : undefined
@@ -94,6 +96,19 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
     if (option.free) { focusBox(); return }
     setPicked(option.id); try { await onChoose(kind, option, approval, option.id === keepPlanning?.id ? feedback.trim() || undefined : undefined) } finally { setPicked(null) }
     if (chat(option)) focusBox() }
+  if (side) return <section ref={root} className="choice-dock side-dock open" aria-label={`${agent} side question`}>
+    <div className="choice-head"><span className="choice-mark" />{agent} · Side question</div>
+    <p className="side-question">{side.question}</p>
+    {side.pending ? <Loading label="Answering…" className="side-wait" />
+      : side.markdown ? <div className="side-answer assistant-message" tabIndex={0} aria-label="Answer"><TextMessagePartProvider text={side.text}><Markdown /></TextMessagePartProvider></div>
+      : <PanelPre text={side.text} />}
+    {side.markdown && <p className="info-note side-note">Claude keeps this out of the main conversation. Tether keeps a copy in this chat.</p>}
+    <div className="choice-keys">
+      <button type="button" disabled={disabled} onClick={() => onKey('Escape')}>Close</button>
+      {side.fork && !side.pending && <button type="button" disabled={disabled} onClick={() => onKey('f')} title="Claude starts a subagent that continues from this answer">Continue in a subagent</button>}
+      {!side.pending && side.text && <CopyButton text={side.text} label="Copy answer" className="copy-chip" />}
+    </div>
+  </section>
   return <section ref={root} className={`choice-dock ${plan ? 'plan-review' : ''} open`} aria-label={title}>
     <div className="choice-head"><span className="choice-mark" />{title}</div>
     <>

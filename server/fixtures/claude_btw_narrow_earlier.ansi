@@ -1,0 +1,30 @@
+  [36mls[39m -lh ~/Documents
+  grep -rn [31m"TODO"[39m ~/apps/tether
+  [36mdf[39m -h
+
+  Needs you: no
+
+[38;5;246m✻[39m [38;5;246mBrewed for 3s · done 10:19 PM[39m
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m
+    [1m/btw give a markdown table of 3 linux…[0m
+    [38;5;246m/btw say hello in two short sentences…[39m
+
+      [1mCommand:[0m [38;5;153mls -la[39m
+      [1mUse:[0m List all files, including
+      hidden
+        ones, with permissions and sizes.
+      ────────────────────────────────────
+      ───
+      [1mCommand:[0m [38;5;153mgrep -rn "text" .[39m
+      [1mUse:[0m Find every line that contains
+        "text" in the current folder and
+        below.
+      ────────────────────────────────────
+      ───
+      [1mCommand:[0m [38;5;153mdu -sh *[39m
+      [1mUse:[0m Show the size of each item in
+      the
+
+    [38;5;246m⇧←/→ to browse · c to copy · x to [39m
+    [38;5;246mclear history · Esc to close[39m

@@ -10,3 +10,11 @@
 .info-error { margin: 8px 0 0; color: var(--error); font-size: 13px; }
 .side-pin-quick .info-card { margin: 0 10px 6px; }
 .side-pin-quick .info-actions button { min-height: var(--control); padding: 0 10px; font-size: 12px; }
+
+/* Claude's /btw side question: the card over the message box, and the copy kept in the chat. */
+.side-question { margin: 0; padding: 0 16px 8px; color: var(--muted); font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.side-wait { margin: 0; padding: 4px 16px 12px; }
+.side-answer { margin: 0; padding: 0 16px 4px; overflow-wrap: anywhere; }
+.side-answer > :first-child { margin-top: 0; }
+.side-note { margin: 0; padding: 4px 16px 0; }
+.side-asked { margin: 2px 0 6px; color: var(--muted); font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }

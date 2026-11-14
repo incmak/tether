@@ -1,0 +1,30 @@
+  │ [38;5;153mdf[39m      │ Show free disk space on    │
+  │         │ each mounted drive.        │
+  └─────────┴────────────────────────────┘
+
+  - Add [38;5;153m-h[39m to [38;5;153mdf[39m and [38;5;153mls -l[39m for readable
+    sizes.
+  - Pipe output into [38;5;153mless[39m when a command
+    prints too much to read at once.
+
+  [36mls[39m -lh ~/Documents
+  grep -rn [31m"TODO"[39m ~/apps/tether
+  [36mdf[39m -h
+
+  Needs you: no
+
+[38;5;246m✻[39m [38;5;246mBrewed for 3s · done 10:19 PM[39m
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m
+    [38;5;246m/btw give a markdown table of 3 linux…[39m
+    [1m[38;5;220m/btw [0m[38;5;246msay hello in two short sentences…[39m
+
+      Hello there. Good to see you.
+
+      - Ask me anything, and I will answer
+        from what we have discussed here.
+
+      Needs you: no
+
+    [38;5;246m⇧←/→ to browse · c to copy · f to fork[39m
+    [38;5;246m· x to clear history · Esc to close[39m
