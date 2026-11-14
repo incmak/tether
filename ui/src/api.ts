@@ -224,6 +224,25 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
   if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
+/** A GET that the server can answer with 304 Not Modified. It sends the ETag of the last answer and returns the last
+ *  data again when nothing changed, so a poll of an unchanged list moves no body bytes. `last` holds the state per caller. */
+export async function requestIfChanged<T>(path: string, last: { tag?: string; data?: T }, signal?: AbortSignal, timeout = 10000): Promise<T> {
+  const response = await reach(`/mobile/api/${path}`, {
+    credentials: 'same-origin',
+    cache: 'no-store',  // the browser's own cache must not answer; the tag below is the only cache
+    headers: last.tag && last.data !== undefined ? { 'If-None-Match': last.tag } : undefined,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+  })
+  if (response.status === 304 && last.data !== undefined) return last.data
+  const data = await response.json().catch(error => {
+    if (response.ok) throw error
+    return {}
+  })
+  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`)
+  last.tag = response.headers.get('ETag') ?? undefined
+  last.data = data as T
+  return data as T
+}
 /** tmux session names: spaces are fine; tmux turns . and : into _, so they are refused. Same rule as the server. */
 export const SESSION_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9 _-]{0,62}[A-Za-z0-9_-])?$/
 export const SESSION_NAME_HELP = 'Use 1–64 letters, numbers, spaces, hyphens, or underscores. Start with a letter or number.'

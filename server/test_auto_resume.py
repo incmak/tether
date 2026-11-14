@@ -1188,8 +1188,9 @@ class AutoResumeTests(unittest.TestCase):
             handler = self.handler(method='GET', path='/mobile/api/sessions')
             with patch.object(server, 'sessions', return_value=[]), \
                     patch.object(server, 'settings', return_value={'thread': None}):
+                server.LISTING_CACHE.update(generation=None)  # a new list on each call, not the one-second shared one
                 handler.do_GET()
-            return handler.respond.call_args.args[1]
+            return json.loads(handler.respond.call_args.args[1])
         self.assertNotIn('auto_resume', listing())
         self.isdir.return_value = False
         self.restart()

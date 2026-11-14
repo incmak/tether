@@ -312,6 +312,7 @@ def timeline(identifier):
 
 SESSIONS_CACHE = [0.0, []]
 SESSIONS_LOCK = threading.Lock()
+SESSIONS_GENERATION = [0]  # counts tmux writes (forget_sessions); a list built across one is not cached
 
 
 def pane_identity(pane):
@@ -344,6 +345,59 @@ TMUX_WRITES = {'/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', 
 def forget_sessions():
     with SESSIONS_LOCK:
         SESSIONS_CACHE[0] = 0.0
+        SESSIONS_GENERATION[0] += 1
+
+
+def build_listing():
+    rows = session_rows(sessions())
+    try:
+        links = review_links.reviewed_by()
+        paused = review_links.paused()
+    except Exception:  # a review-store read error must not hide the session list
+        links = {}
+        paused = {}
+    for row in rows:
+        if links.get(row['id']):
+            row['reviewers'] = links[row['id']]
+        row['reviewers_paused'] = paused.get(row['id'], [])
+    listing = {'sessions': rows, 'default_thread': settings()['thread']}
+    try:
+        found_groups = groups.all_groups()
+    except Exception:  # a group read error must not hide the session list
+        found_groups = {}
+    if found_groups:
+        listing['groups'] = found_groups
+    resume_notice = auto_resume.notice()
+    if resume_notice['failed']:
+        listing['auto_resume'] = resume_notice
+    return listing
+
+
+LISTING_CACHE = {'at': 0.0, 'generation': None, 'body': b'', 'tag': ''}
+LISTING_LOCK = threading.Lock()
+
+
+def sessions_listing():
+    """The session list as JSON bytes and a weak ETag. Every open page polls it, so pages that ask within a second of
+    the last build share it, and a build in progress serves the pages that wait on it (B24). A tmux write
+    (forget_sessions) makes the next list new at once, and a list built while a write happened is not kept."""
+    with LISTING_LOCK:
+        generation = SESSIONS_GENERATION[0]
+        if LISTING_CACHE['generation'] == generation and time.monotonic() - LISTING_CACHE['at'] <= 1:
+            return LISTING_CACHE['body'], LISTING_CACHE['tag']
+        body = json.dumps(build_listing()).encode()
+        tag = 'W/"%s"' % hashlib.sha256(body).hexdigest()[:20]
+        if SESSIONS_GENERATION[0] == generation:
+            LISTING_CACHE.update(at=time.monotonic(), generation=generation, body=body, tag=tag)
+        return body, tag
+
+
+def etag_matches(header, tag):
+    """If-None-Match against one weak tag (weak comparison, RFC 9110 13.1.2)."""
+    if not header or not tag:
+        return False
+    plain = tag.removeprefix('W/')
+    return any(part.strip() == '*' or part.strip().removeprefix('W/') == plain for part in header.split(','))
 
 
 SESSION_ROW_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='session-row')
@@ -1141,7 +1195,8 @@ class Handler(BaseHTTPRequestHandler):
                 headers['Content-Encoding'] = 'gzip'
         self.send_response(status)
         self.send_header('Content-Type', content_type + '; charset=utf-8')
-        self.send_header('Content-Length', str(len(data)))
+        if status != 304:  # a 304 may only repeat the 200's length (RFC 9110 8.6), so it sends none
+            self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', cache)
         self.send_header('X-Content-Type-Options', 'nosniff')
         for name, value in headers.items():
@@ -1747,28 +1802,12 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'])
             elif path == '/mobile/api/sessions':
-                rows = session_rows(sessions())
-                try:
-                    links = review_links.reviewed_by()
-                    paused = review_links.paused()
-                except Exception:  # a review-store read error must not hide the session list
-                    links = {}
-                    paused = {}
-                for row in rows:
-                    if links.get(row['id']):
-                        row['reviewers'] = links[row['id']]
-                    row['reviewers_paused'] = paused.get(row['id'], [])
-                listing = {'sessions': rows, 'default_thread': settings()['thread']}
-                try:
-                    found_groups = groups.all_groups()
-                except Exception:  # a group read error must not hide the session list
-                    found_groups = {}
-                if found_groups:
-                    listing['groups'] = found_groups
-                resume_notice = auto_resume.notice()
-                if resume_notice['failed']:
-                    listing['auto_resume'] = resume_notice
-                self.respond(200, listing)
+                body, tag = sessions_listing()
+                headers = {'ETag': tag, 'Vary': 'Accept-Encoding, Sec-Fetch-Site'}
+                if etag_matches(self.headers.get('If-None-Match'), tag):
+                    self.respond(304, b'', cache='no-cache', headers=headers)
+                else:
+                    self.respond(200, body, cache='no-cache', headers=headers)
             elif path == '/mobile/api/side-shells':
                 self.respond(200, {'shells': side_shells.list_shells()})
             elif path == '/mobile/api/tmux-sessions':

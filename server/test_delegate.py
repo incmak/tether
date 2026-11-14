@@ -510,31 +510,36 @@ class EndpointTests(unittest.TestCase):
     def test_sessions_adds_reviewers_and_survives_store_read_errors(self):
         rows = [{'id': '%13'}, {'id': '%12'}, {'id': '%20'}]
         handler = object.__new__(server.Handler)
-        handler.path = '/mobile/api/sessions'
+        handler.path, handler.headers = '/mobile/api/sessions', {}
         handler.deny = Mock(return_value=False)
         handler.respond = Mock()
+
+        def get():
+            server.LISTING_CACHE.update(generation=None)  # a new list on each call, not the one-second shared one
+            handler.do_GET()
+            self.assertEqual(handler.respond.call_args.args[0], 200)
+            return json.loads(handler.respond.call_args.args[1])
         with patch.object(server, 'sessions', return_value=rows), \
                 patch.object(server, 'session_row', side_effect=lambda row: dict(row)), \
                 patch.object(server, 'settings', return_value={'thread': THREAD}), \
                 patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%12', '%20'], '%12': []}) as reviewed_by, \
                 patch.object(server.review_links, 'paused', return_value={'%13': ['%20']}) as paused:
-            handler.do_GET()
+            listing = get()
             reviewed_by.assert_called_once_with()
             paused.assert_called_once_with()
-            handler.respond.assert_called_with(200, {'sessions': [
+            self.assertEqual(listing, {'sessions': [
                 {'id': '%13', 'reviewers': ['%12', '%20'], 'reviewers_paused': ['%20']},
                 {'id': '%12', 'reviewers_paused': []}, {'id': '%20', 'reviewers_paused': []}], 'default_thread': THREAD})
             reviewed_by.reset_mock()
             reviewed_by.side_effect = OSError('disk')
-            handler.do_GET()
+            listing = get()
             reviewed_by.assert_called_once_with()
-            handler.respond.assert_called_with(200, {'sessions': [dict(row, reviewers_paused=[]) for row in rows],
-                                                      'default_thread': THREAD})
+            self.assertEqual(listing, {'sessions': [dict(row, reviewers_paused=[]) for row in rows],
+                                       'default_thread': THREAD})
             reviewed_by.side_effect = None
             paused.side_effect = OSError('disk')
-            handler.do_GET()
-            handler.respond.assert_called_with(200, {'sessions': [dict(row, reviewers_paused=[]) for row in rows],
-                                                      'default_thread': THREAD})
+            self.assertEqual(get(), {'sessions': [dict(row, reviewers_paused=[]) for row in rows],
+                                     'default_thread': THREAD})
 
     def test_route_bypasses_default_choose_and_holds_send_lock(self):
         source = entry()

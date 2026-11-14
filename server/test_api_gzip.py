@@ -24,7 +24,9 @@ class APIGzipTests(unittest.TestCase):
         handler.respond(*args, **kwargs)
         headers = dict(call.args for call in handler.send_header.call_args_list)
         body = handler.wfile.getvalue()
-        self.assertEqual(int(headers['Content-Length']), len(body))
+        self.assertEqual(int(headers.get('Content-Length', 0)), len(body))
+        if args[0] == 304:
+            self.assertNotIn('Content-Length', headers)  # RFC 9110 8.6
         return headers, body
 
     def test_large_json_is_gzipped(self):

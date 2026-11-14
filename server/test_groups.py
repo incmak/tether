@@ -463,12 +463,14 @@ class CliAndServerTests(unittest.TestCase):
                 mock.patch.object(server.review_links, 'paused', return_value={}), \
                 mock.patch.object(server.auto_resume, 'notice', return_value={'failed': []}), \
                 mock.patch.object(server.groups, 'all_groups', return_value=found):
+            server.LISTING_CACHE.update(generation=None)  # a new list on each call, not the one-second shared one
             handler.do_GET()
-            listing = handler.respond.call_args.args[1]
+            listing = json.loads(handler.respond.call_args.args[1])
             self.assertEqual((listing['groups'], listing['sessions'][0]['group']), (found, 'gaaaaaaaa'))
             with mock.patch.object(server.groups, 'all_groups', side_effect=OSError):
+                server.LISTING_CACHE.update(generation=None)
                 handler.do_GET()
-            self.assertNotIn('groups', handler.respond.call_args.args[1])
+            self.assertNotIn('groups', json.loads(handler.respond.call_args.args[1]))
             self.assertEqual(handler.respond.call_args.args[0], 200)
 
     def test_session_row_copies_group(self):

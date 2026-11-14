@@ -13,6 +13,17 @@
     <script>
       // Apply the saved theme and text size before the first paint, so a dark choice does not flash light.
       try { const p = JSON.parse(localStorage.getItem('tmux-chat.prefs.v1') || '{}'); if (p.theme === 'light' || p.theme === 'dark') document.documentElement.dataset.theme = p.theme; if (p.textSize) document.documentElement.dataset.textSize = p.textSize } catch {}
+      // Start the session list and the open chat now, while the app script downloads (src/boot.ts uses them).
+      try {
+        // A deadline, so a stalled early request cannot hold the app's first poll: after it the app asks again itself.
+        const get = path => fetch('/mobile/api/' + path, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout?.(20000) })
+          .then(r => r.ok ? r.json().then(data => ({ data, tag: r.headers.get('ETag') })) : null).catch(() => null)
+        let p = {}
+        try { p = JSON.parse(localStorage.getItem('tmux-chat.prefs.v1') || '{}') } catch {}
+        const pane = new URL(location.href).searchParams.get('session') || p.selected
+        const query = typeof pane === 'string' && pane ? 'session=' + encodeURIComponent(pane) + '&limit=40&preview=' + (p.liveReplyPreview === false ? 0 : 1) : ''
+        window.__tetherBoot = { sessions: get('sessions'), chat: query ? { query, answer: get('chat?' + query + (document.visibilityState === 'visible' ? '&watch=1' : '')) } : undefined }
+      } catch {}
     </script>
     <style>
       /* Boot screen: shows while the app script downloads on a slow network. React replaces #root's content on its first render. */

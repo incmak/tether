@@ -1,4 +1,5 @@
 import { RetryButton } from './Retry'
+import { takeBootChat } from './boot'
 import { noticeAction } from './noticeActions'
 import { terminalText } from './terminalText'
 import { ShellOutput } from './ShellOutput'
@@ -229,7 +230,11 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const headerFromTouch = useRef(false)
   const [limit, setLimit] = useState(() => scrollByPane.get(pane.id)?.limit ?? 40)
   const chatQuery = `session=${encodeURIComponent(pane.id)}&limit=${limit}&preview=${liveReplyPreview ? 1 : 0}${pane.agent === 'shell' ? '&mode=shell' : ''}`
-  const fetchChat = useCallback((signal: AbortSignal) => api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal), [api, chatQuery])
+  const fetchChat = useCallback(async (signal: AbortSignal) => {
+    const early = await takeBootChat(chatQuery)  // index.html asked for this chat while the app downloaded (B24)
+    if (early) return early.data as ChatData
+    return api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal)
+  }, [api, chatQuery])
   const { data, error, loading, refresh } = usePolling(fetchChat, 1500, `stream?${chatQuery}`, chatCache.get(pane.id))
   useEffect(() => { if (data) cacheChat(pane.id, data) }, [pane.id, data])
   const preview = useSteadyPreview(liveReplyPreview ? data?.preview?.text : undefined)

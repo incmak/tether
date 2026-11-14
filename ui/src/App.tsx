@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { LayoutDashboard, SquareSplitHorizontal, SquareSplitVertical, Terminal } from 'lucide-react'
-import { ApiError, canFork, errorText, request } from './api'
+import { ApiError, canFork, errorText, request, requestIfChanged } from './api'
+import { takeBootSessions } from './boot'
 import type { Api, Pane, PastChat, SessionsData } from './api'
 import { AutoResumeNotice } from './AutoResumeNotice'
 import { useModal, usePolling } from './hooks'
@@ -98,7 +99,19 @@ function App() {
       throw error
     }
   }, [])
-  const fetchSessions = useCallback((signal: AbortSignal) => api<SessionsData>('sessions', undefined, signal), [api])
+  // The list moves no bytes while it is unchanged (ETag and 304), and the first one comes from index.html (B24).
+  const lastSessions = useRef<{ tag?: string; data?: SessionsData }>({})
+  const fetchSessions = useCallback(async (signal: AbortSignal) => {
+    const early = await takeBootSessions()
+    if (early) {
+      lastSessions.current = { tag: early.tag ?? undefined, data: early.data as SessionsData }
+      return early.data as SessionsData
+    }
+    try { return await requestIfChanged<SessionsData>('sessions', lastSessions.current, signal) } catch (error) {
+      if (error instanceof ApiError && error.status === 401) setUnauthorized(true)
+      throw error
+    }
+  }, [])
   const { data, error, loading, refresh } = usePolling(fetchSessions, 4000)
   const [prefs, update] = usePrefs()
   useEffect(() => {
