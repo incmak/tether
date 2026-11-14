@@ -477,6 +477,8 @@ class CliAndServerTests(unittest.TestCase):
                 mock.patch.object(server, 'timeline', return_value={}), \
                 mock.patch.object(server.needs, 'summary', return_value=''):
             self.assertEqual(server.session_row({'id': '%1', 'group': 'gaaaaaaaa'})['group'], 'gaaaaaaaa')
+            self.assertEqual(server.session_row({'id': '%2', 'role': 'advisor'})['role'], 'advisor')
+            self.assertIsNone(server.session_row({'id': '%3'})['role'])
 
 
 if __name__ == '__main__':

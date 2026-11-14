@@ -80,6 +80,10 @@ def validate(body, entries, models=None):
         raise ValueError('The task contains terminal control characters.')
     if not isinstance(body.get('context', False), bool):
         raise ValueError('Context and review must be true or false.')
+    if body.get('role') is not None and (not isinstance(body['role'], str) or body['role'] not in ROLES):
+        raise ValueError('Choose a tab role from the list.')
+    if body.get('role') and (review or 'name' in body):
+        raise ValueError('A helper role names the tab itself. Do not add a name or a review.')
     if 'name' in body:
         name = body['name']
         if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 60
@@ -97,6 +101,11 @@ def validate(body, entries, models=None):
     if review == 'source' and (not supported or not entry.get('writable')):
         raise ValueError('Review needs a writable Claude or Codex chat.')
     return entry
+
+
+# Helper roles (agent_advisor_cli.py): the tab is named after the tab it helps (40 characters, the pane name limit), so two advisors in one session differ,
+# and wears an icon that marks the role. @chat_icon_by "tether" tells the helper to keep that icon (projects.render).
+ROLES = {'advisor': ('Advisor', 'lightbulb'), 'second-advisor': ('Advisor 2', 'lightbulb')}
 
 
 def task_name(message):
@@ -219,11 +228,17 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
         folder = cwd
     profile = codex_provider.launch_profile() if agent == 'codex' else None
     _check_profile(profile)
+    role = ROLES.get(body.get('role'))
     name = (body['name'].strip() if 'name' in body else
+            f'{role[0]}: {source_title(entry)}'[:40] if role else
             ('Review: ' + source_title(entry))[:60] if review == 'new' else task_name(body['message']))
     pane = new_window_after(entry['id'], run, cwd=folder, group=group)
     options = [paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
                'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
+    if role:
+        options += [';', 'set-option', '-p', '-t', pane, '@chat_icon', role[1],
+                    ';', 'set-option', '-p', '-t', pane, '@chat_icon_by', 'tether',
+                    ';', 'set-option', '-p', '-t', pane, '@tether_role', body['role']]
     if worktree is not None:
         options += [';', 'set-option', '-p', '-t', pane, '@worktree', worktree]
     run(options,

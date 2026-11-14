@@ -333,7 +333,7 @@ SESSION_ROW_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix='session
 def session_row(entry):
     """One pane in the session list. `needs` is a one-line summary when the pane waits on the user (the desktop "Needs you" list)."""
     status = shared_status(entry)
-    return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group')},
+    return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group', 'role')},
                 dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status),
                 ask=attention.STORE.ask(entry['id'], entry.get('thread')))
 

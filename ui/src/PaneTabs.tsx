@@ -1,7 +1,7 @@
 import { createPortal, flushSync } from 'react-dom'
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { useWords } from './words'
-import { Eye, Plus } from 'lucide-react'
+import { Eye, Lightbulb, Plus } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { NewTask } from './NewTask'
 import { AgentIcon, needsYou, paneTitle, shownIndex } from './Sidebar'
@@ -365,12 +365,12 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
   // While tabs are reordered, each tab draws its own highlight again.
   return <div className={preview ? 'pane-tabs' : 'pane-tabs has-pill'} ref={strip} role="tablist" aria-label={`Panes of ${session.name}`}>
     <span className="pane-tab-pill" aria-hidden="true" />
-    {shown.map(item => <button key={item.id} data-pane={item.id} role="tab" aria-selected={item.id === pane.id} className={[item.id === pane.id ? 'active' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : ''].filter(Boolean).join(' ')}
+    {shown.map(item => <button key={item.id} data-pane={item.id} role="tab" aria-selected={item.id === pane.id} className={[item.id === pane.id ? 'active' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', item.role === 'advisor' ? 'advisor-tab' : '', item.role === 'advisor' && item.state === 'Working' ? 'advising' : ''].filter(Boolean).join(' ')}
       onClick={() => { if (!suppressClick.current) onOpenPane(item) }}
       // A touch long press is handled above (drag, or actions on release). A right-click still opens the actions.
       onMouseEnter={clipTitle} onContextMenu={event => { event.preventDefault(); if (!drag.current?.touch && !suppressClick.current) onPaneActions(item.id, anchorOf(event)) }}>
-      <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} /><span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
-      {item.state === 'Working' || needsYou(item.state) ? <span className={`state-dot ${item.state === 'Working' ? 'working' : 'approval'}`} aria-label={item.state === 'Working' ? 'Working' : 'Needs you'} /> : item.state === 'Stopped' ? <span className="state-dot" aria-label="Stopped" /> : null}
+      {item.role === 'advisor' ? <><AgentIcon agent={item.agent} size={14} /><Lightbulb size={13} className="tab-advisor" aria-hidden="true" /></> : <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} />}<span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
+      {item.state === 'Working' || needsYou(item.state) ? <span className={`state-dot ${item.state === 'Working' ? 'working' : 'approval'}`} aria-label={item.state === 'Working' ? item.role === 'advisor' ? 'Advising' : 'Working' : 'Needs you'} /> : item.state === 'Stopped' ? <span className="state-dot" aria-label="Stopped" /> : null}
     </button>)}
     <button className="tab-add" aria-label={`${words.newRight} with a task`} title={`${words.newRight} with a task`} aria-haspopup="dialog" aria-expanded={!!taskAt}
       onClick={event => { const box = event.currentTarget.getBoundingClientRect(); setTaskAt({ x: box.right - 360, y: box.bottom + 6 }) }}><Plus size={16} /></button>

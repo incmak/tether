@@ -135,7 +135,7 @@ def codex_database():
 def discover(config, run):
     pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
-                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}'],
+                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}'],
                  capture_output=True, text=True, timeout=5)
     if result.returncode:
         return ([{'id': 'saved', 'label': 'Last chat', 'agent': 'codex',
@@ -143,6 +143,8 @@ def discover(config, run):
     positions = {}
     for line in result.stdout.splitlines():
         fields = line.split('\t')
+        if len(fields) > 12:
+            fields.pop()  # @tether_role
         if len(fields) > 9 and fields[-1]:
             positions[(fields[1], fields[-1])] = fields[3]
     processes = procinfo.table(run)
@@ -160,6 +162,8 @@ def discover(config, run):
     try:
         for line in result.stdout.splitlines():
             fields = line.split('\t')
+            # @tether_role (delegate.ROLES): a helper tab's job, such as "advisor". Older callers send no such field.
+            role = fields.pop() if len(fields) > 12 else ''
             if len(fields) > 9 and fields.pop():
                 continue  # @zoom_for identifies the placeholder, never a chat.
             group = fields.pop() if len(fields) > 10 else ''  # @group (groups.py); older callers send no such field
@@ -185,6 +189,8 @@ def discover(config, run):
                      'agent': 'shell', 'writable': False, 'worktree': worktree.strip()[:200], 'group': group.strip()[:16],
                      'pane_pid': int(pid), 'pane_start': process_start(int(pid)), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'pane_icon': icon if ICON.fullmatch(icon) else '',
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
+            if role in ('advisor', 'second-advisor'):
+                entry['role'] = 'advisor'
             live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
             if live:
                 project = re.sub(r'[^a-zA-Z0-9]', '-', live['cwd'])

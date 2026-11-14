@@ -470,6 +470,11 @@ class CLITests(unittest.TestCase):
     def payload(self):
         return json.loads(self.opener.open.call_args.args[0].data)
 
+    def test_start_passes_helper_role(self):
+        with patch('sys.stdin', io.StringIO('Which option?')):
+            self.assertEqual(cli.main(['start', '--agent', 'claude', '--role', 'second-advisor', '-']), 0)
+        self.assertEqual(self.payload()['role'], 'second-advisor')
+
     def test_start_maps_arguments_and_uses_read_only_hook_credentials_without_proxy(self):
         self.assertEqual(cli.main(['start', '--agent', 'codex', '--review-it', '--context',
                                    '--name', 'Name', '--cwd', 'relative', 'task']), 0)

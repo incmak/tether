@@ -145,7 +145,7 @@ def ask(settings, args, key, replies):
                 command += ['--model', choice['model']]
             if choice['effort'] != 'auto':
                 command += ['--effort', choice['effort']]
-            command += ['--name', 'Advisor' if role == 'main' else 'Advisor 2', '--cwd', os.getcwd(), '-']
+            command += ['--role', 'advisor' if role == 'main' else 'second-advisor', '--cwd', os.getcwd(), '-']
             code, response = tab(command, args.timeout, prompt)
             pane = response.get('pane')
         if code != 0:

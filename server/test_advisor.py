@@ -288,7 +288,7 @@ class Cli(Base):
             'answer': 'Use the tested option.', 'confidence': 'high', 'needs_user': False, 'raw': REPLY})
         calls = self.tab_calls()
         self.assertEqual(calls[0][0][2:], ['start', '--agent', 'claude', '--model', 'fable', '--effort', 'high',
-                                          '--name', 'Advisor', '--cwd', os.getcwd(), '-'])
+                                          '--role', 'advisor', '--cwd', os.getcwd(), '-'])
         self.assertEqual(calls[0][1]['input'], cli.PROMPT + 'Which option?')
         self.assertEqual(calls[1][0][2:], ['wait', '--pane', '%11', '--timeout', '600'])
         for _, options in self.calls:
@@ -340,7 +340,7 @@ class Cli(Base):
         self.assertEqual((code, result['status'], result['agree']), (0, 'decided', None))
         calls = self.tab_calls()
         self.assertEqual([command[2] for command, _ in calls], ['start', 'start', 'wait', 'wait'])
-        self.assertIn('Advisor 2', calls[1][0])
+        self.assertIn('second-advisor', calls[1][0])
         self.assertEqual([row['agent'] for row in result['advisors']], ['claude', 'codex'])
         self.assertEqual(result['advisors'][1]['model'], 'new-model')
         self.assertEqual(calls[2][1]['timeout'], 90)

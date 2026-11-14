@@ -291,6 +291,13 @@ label.broadcast-row:hover { background: var(--hover); }
 .pane-tabs:not(.has-pill) .pane-tab-pill { display: none; }
 .pane-tabs.has-pill button.active { background: transparent; border-color: transparent; }
 /* Agent session names can be long (reviewer-esef-phase-1-3-…): one line, cut with an ellipsis. */
+/* Advisor tabs (server delegate.ROLES): a lightbulb after the agent icon, and a soft glow while the advisor works. */
+.pane-tabs .tab-advisor { flex-shrink: 0; margin-left: -3px; color: var(--advisor); }
+.pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
+.pane-tabs button.advising { color: var(--text); border-color: color-mix(in srgb, var(--advisor) 70%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
+.pane-tabs button.advising .state-dot.working { border-color: color-mix(in srgb, var(--advisor) 25%, transparent); border-top-color: var(--advisor); }
+@keyframes advise-glow { from { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 25%, transparent), 0 0 4px color-mix(in srgb, var(--advisor) 25%, transparent); } to { box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 55%, transparent), 0 0 14px color-mix(in srgb, var(--advisor) 55%, transparent); } }
+@media (prefers-reduced-motion: reduce) { .pane-tabs button.advising { animation: none; } }
 .pane-tab-name { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Composer + menu and stop button */
 .attach-container { position: relative; }

@@ -219,6 +219,26 @@ class WorktreeDiscovery(unittest.TestCase):
         self.assertEqual(len(entries[2]['worktree']), 200)
         self.assertIn('#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}', run.call_args.args[0][-1])
 
+    def test_role_field_marks_advisor_tabs_and_keeps_zoom(self):
+        with tempfile.TemporaryDirectory() as folder:
+            lines = '\n'.join([
+                '%1\t$1\trepo\t1.0\t101\t/work\t123\tAdvisor: Fix\tlightbulb\t\t\t\tadvisor',
+                '%2\t$1\trepo\t2.0\t102\t/work\t123\tAdvisor 2: Fix\tlightbulb\t\t\t\tsecond-advisor',
+                '%3\t$1\trepo\t3.0\t103\t/work\t123\tTab\tbug\t\t\t\tboss',
+                '%4\t$1\trepo\t4.0\t104\t/work\t\t\t\t\t\t%1\tadvisor',
+                '%5\t$1\trepo\t5.0\t105\t/work\t123\tOld\tbug\t\t\t'])
+            run = Mock(return_value=subprocess.CompletedProcess([], 0, lines, ''))
+            with patch.object(agents, 'HOME', Path(folder)), \
+                    patch.object(agents.pane_view, 'zoom_repair_all'), \
+                    patch.object(agents.procinfo, 'table', return_value={}), \
+                    patch.object(agents, 'process_start', return_value='1'), \
+                    patch.object(agents, 'codex_database'):
+                entries = agents.discover({}, run)
+        self.assertEqual([(entry['id'], entry.get('role'), entry['pane_name'], entry['cwd']) for entry in entries],
+                         [('%1', 'advisor', 'Advisor: Fix', '/work'), ('%2', 'advisor', 'Advisor 2: Fix', '/work'),
+                          ('%3', None, 'Tab', '/work'), ('%5', None, 'Old', '/work')])
+        self.assertTrue(run.call_args.args[0][-1].endswith('#{@zoom_for}\t#{@tether_role}'))
+
     def test_group_field_is_read_and_old_lines_have_none(self):
         with tempfile.TemporaryDirectory() as folder:
             lines = '\n'.join([

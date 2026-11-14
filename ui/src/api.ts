@@ -82,6 +82,7 @@ export interface Pane {
   tmux_pane_name?: string  // the raw tmux name (@chat_name); pane_name is empty when a newer /rename wins
   group?: string  // the group id (tmux option @group, server/groups.py); empty or unknown = Unstacked
   worktree?: string  // the branch, when Tether started this tab in a new worktree (tmux option @worktree)
+  role?: 'advisor'  // a helper tab that answers another tab's questions (server delegate.ROLES)
   pane_icon?: string  // tmux option @chat_icon: a lucide icon name, or svg-<name> for an icon Claude drew (Sidebar.tsx AgentIcon)
   agent_name?: string  // the Claude or Codex session name (/rename); shown when the pane has no Tether name
   codex_profile?: string | null  // a Codex pane started with `codex -p foundry`: 'foundry'. null = the ChatGPT plan

@@ -256,6 +256,34 @@ class LaunchTests(unittest.TestCase):
                     delegate.start(entry(), body(), '/project', run=Mock(), cwd=cwd)
                 window.assert_not_called()
 
+    def test_helper_role_names_tab_after_source_and_sets_kept_icon(self):
+        for role, source, expected in (
+                ('advisor', entry(pane_name='Fix login'), 'Advisor: Fix login'),
+                ('second-advisor', entry(label='Fallback'), 'Advisor 2: Fallback'),
+                ('advisor', entry(pane_name='x' * 80), 'Advisor: ' + 'x' * 31)):
+            run = Mock()
+            with self.subTest(role=role), patch.object(delegate, 'new_window_after', return_value='%13'):
+                self.assertEqual(delegate.start(source, body(role=role), '/project', run=run), ('%13', expected))
+                options = run.call_args_list[0].args[0]
+                self.assertEqual(options[options.index('@chat_name') + 1], expected)
+                self.assertEqual(options[options.index('@chat_icon') + 1], 'lightbulb')
+                self.assertEqual(options[options.index('@chat_icon_by') + 1], 'tether')
+                self.assertEqual(options[options.index('@tether_role') + 1], role)
+        run = Mock()
+        with patch.object(delegate, 'new_window_after', return_value='%13'):
+            delegate.start(entry(), body(), '/project', run=run)
+        self.assertNotIn('@chat_icon', run.call_args_list[0].args[0])
+
+    def test_helper_role_is_validated(self):
+        source = entry(writable=True)
+        for request, error in ((body(role='boss'), 'tab role'), (body(role='advisor', name='X'), 'helper role'),
+                               (body(role='advisor', review='source'), 'helper role'),
+                               (body(role='advisor', review='new'), 'helper role'),
+                               (body(role=[]), 'tab role'), (body(role={}), 'tab role'), (body(role=1), 'tab role')):
+            with self.subTest(request=request), self.assertRaisesRegex(ValueError, error):
+                delegate.validate(dict(request, session='%12'), [source])
+        self.assertIs(delegate.validate(dict(body(role='advisor'), session='%12'), [source]), source)
+
     def test_prompt_context_is_a_short_brief_for_every_pair(self):
         recent = 'User: hi\n\nAgent: hello'
         for source_agent, target in (('claude', 'claude'), ('claude', 'codex'), ('codex', 'claude'), ('codex', 'codex')):

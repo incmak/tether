@@ -22,6 +22,7 @@
   --attention: #8c6b22;
   --done: #2f8a68;
   --pin: #3f6f8f;
+  --advisor: #6b4fc4;
   --error: #a43b31;
   color-scheme: light dark;
 }
@@ -40,10 +41,12 @@
     --attention: #d9b761;
     --done: #62c49c;
     --pin: #8db8d6;
+    --advisor: #b8a4ff;
     --error: #f09888;
   }
 }
 :root[data-theme="dark"] {
+  --advisor: #b8a4ff;
   color-scheme: dark;
   color: #e9e6df;
   background: #262624;

@@ -38,6 +38,7 @@ def arguments(argv):
     review.add_argument('--reviews-me', action='store_true')
     start.add_argument('--context', action='store_true')
     start.add_argument('--name')
+    start.add_argument('--role', choices=('advisor', 'second-advisor'), help='name the tab after this tab and mark it with the role icon')
     start.add_argument('--cwd')
     start.add_argument('--worktree', metavar='BRANCH')
     start.add_argument('--stack', '--group', dest='group', metavar='NAME', help='put the new tab in this stack of the session, made if missing (Unstacked or Main = no stack); --group is the old name')
@@ -65,7 +66,7 @@ def arguments(argv):
             parser.error('a task is required unless --reviews-me is set')
         body.update(message=message, context=args.context,
                     review='new' if args.reviews_me else 'source' if args.review_it else False)
-        for key in ('agent', 'model', 'effort', 'name', 'cwd', 'worktree', 'group'):
+        for key in ('agent', 'model', 'effort', 'name', 'role', 'cwd', 'worktree', 'group'):
             value = getattr(args, key)
             if value is not None:
                 body[key] = os.path.abspath(value) if key == 'cwd' else value
