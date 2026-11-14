@@ -216,7 +216,7 @@ class AuthTests(unittest.TestCase):
         hostile = (b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: tether=planted; Path=/\r\n'
                    b'set-cookie2: x=1\r\nClear-Site-Data: "cookies"\r\nX-Frame-Options: DENY\r\n'
                    b"Content-Security-Policy: frame-ancestors *\r\nAccess-Control-Allow-Origin: *\r\n"
-                   b'X-Kept: yes\r\n Set-Cookie: folded=1\r\nNoColon\r\n\r\nok')
+                   b'X-Kept: yes\r\n\r\nok')
         container, seen = self.fake_container([hostile])
         port = self.live_listener()
         with mock.patch.object(browser.BROWSER, 'container', container):
@@ -319,6 +319,39 @@ class AuthTests(unittest.TestCase):
         self.assertNotIn(b'Keep-Alive', data)
         self.assertTrue(data.endswith(b'ok'))
         self.assertNotIn(b'second', b''.join(seen))
+
+    def test_live_origin_refuses_malformed_heads(self):
+        import browser
+        answers = [b'HTTP/1.1 200 OK\r\nX-Kept: yes\nSet-Cookie: lf=1; Path=/\r\nContent-Length: 2\r\n\r\nok',
+                   b'HTTP/1.1 100\tContinue\r\n\r\nHTTP/1.1 200 OK\r\nSet-Cookie: interim=1\r\nContent-Length: 2\r\n\r\nok',
+                   b'HTTP/1.1  200 OK\r\nSet-Cookie: spaces=1\r\n\r\nok',
+                   b'HTTP/1.1 200 OK\r\nX-A: 1\r\n Set-Cookie: fold=1\r\n\r\nok',
+                   b'HTTP/1.1 200 OK\r\nX-A: 1\rSet-Cookie: cr=1\r\n\r\nok',
+                   b'HTTP/1.1 200 OK\r\nSet-Cookie : sp=1\r\n\r\nok',
+                   b'HTTP/1.1 200 OK\r\nX-A:\tx\r\n\r\nok',
+                   b'HTTP/1.1 200 OK\r\nNoColon\r\n\r\nok']
+        container, seen = self.fake_container(answers)
+        port = self.live_listener()
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        with mock.patch.object(browser.BROWSER, 'container', container):
+            for answer in answers:
+                response, body = self.live_request(port, 'GET', '/browser/live/', {'Cookie': cookie})
+                self.assertEqual(response.status, 502, answer)
+                self.assertIsNone(response.getheader('Set-Cookie'), answer)
+                self.assertNotIn(b'ok', body)
+        self.assertEqual(server.strict_response_code(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket'), 101)
+        self.assertEqual(server.strict_response_code(b'HTTP/1.1 204'), 204)
+
+    def test_live_origin_answers_when_the_container_sends_nothing(self):
+        import browser
+        container, _ = self.fake_container([b'', b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n'])  # closed; no blank line
+        port = self.live_listener()
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        with mock.patch.object(browser.BROWSER, 'container', container):
+            for _ in range(2):
+                response, body = self.live_request(port, 'GET', '/browser/live/', {'Cookie': cookie})
+                self.assertEqual(response.status, 503)
+                self.assertIn(b'http-equiv="refresh"', body)
 
     def test_live_ancestors_allow_only_the_main_origin(self):
         self.assertEqual(server.live_ancestors('phone.example.test:7698'),

@@ -121,6 +121,21 @@ LIVE_DROPPED_HEADERS = {'set-cookie', 'set-cookie2', 'clear-site-data', 'content
                         'access-control-allow-credentials', 'refresh'}
 
 
+RESPONSE_STATUS = re.compile(rb'HTTP/1\.[01] ([1-5][0-9][0-9])(?: [\x20-\x7e]*)?')
+RESPONSE_FIELD = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[ \x21-\x7e]*")
+
+
+def strict_response_code(head):
+    """The status code of a response head (no blank line), or None when any part is malformed: a bare CR or LF, a
+    tab, a folded line, a byte outside printable ASCII, or a bad field name. Browsers accept some of these forms, so
+    a lenient parser here would let a header pass the filter unseen."""
+    lines = head.split(b'\r\n')
+    match = RESPONSE_STATUS.fullmatch(lines[0])
+    if not match or not all(RESPONSE_FIELD.fullmatch(line) for line in lines[1:]):
+        return None
+    return int(match.group(1))
+
+
 def live_ancestors(host):
     """The frame-ancestors source list for the live view: only Tether's main origin on the same host may frame it.
     That is https on the default port (tailscale serve) or the main port itself (a direct connection)."""
@@ -1474,12 +1489,13 @@ class Handler(BaseHTTPRequestHandler):
         lines.append('Authorization: ' + secret)
         if not upgrading:
             lines.append('Connection: close')  # one response per connection, so live_head() sees every head
-        self.pipe_upstream(upstream, lines, response_head=self.live_head)
+        if self.pipe_upstream(upstream, lines, response_head=self.live_head) is False:
+            self.live_wait('The panel browser is starting.')  # Selkies accepted but did not answer yet
 
     def live_head(self, head, upgraded=False):
         """The container's response head without headers that act on Tether's site, and with Tether's own frame rule.
         Cookies and Clear-Site-Data reach the whole host (all ports), so they could sign the person out or plant a
-        cookie. Folded lines (leading space) and lines without a colon are dropped too, so nothing can hide a header."""
+        cookie. pipe_upstream already refused malformed heads (strict_response_code), so each line is one header."""
         lines = head.decode('latin-1').split('\r\n')
         kept = [lines[0]] + [line for line in lines[1:] if line and line[0] not in ' \t' and ':' in line
                              and line.split(':', 1)[0].strip().lower() not in LIVE_DROPPED_HEADERS
@@ -1549,6 +1565,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Interim 1xx heads (100, 103) are dropped, so no header hides behind them. Only a 101 switch keeps
                 # the client's side open; otherwise the answer flows one way and the client connection closes, so
                 # the container cannot answer a later request on a reused connection with unfiltered headers.
+                # The client connection carries one answer only. Returns False when no head came (closed, too
+                # big or too slow) and nothing was sent, so the caller can answer.
+                self.close_connection = True
                 data = b''
                 try:
                     upstream.settimeout(30)
@@ -1556,18 +1575,22 @@ class Handler(BaseHTTPRequestHandler):
                         while b'\r\n\r\n' not in data:
                             chunk = upstream.recv(65536)
                             if not chunk or len(data) + len(chunk) > 65536:
-                                return
+                                return False
                             data += chunk
                         head, data = data.split(b'\r\n\r\n', 1)
-                        status = head.split(b'\r\n', 1)[0].split(b' ', 2)
-                        code = status[1] if len(status) > 1 else b''
-                        if not (len(code) == 3 and code.startswith(b'1') and code != b'101'):
+                        code = strict_response_code(head)
+                        if code is None:
+                            self.respond(502, {'error': 'The browser container sent a malformed answer.'})
+                            return True
+                        if not (100 <= code < 200 and code != 101):
                             break
-                    upgraded = code == b'101'
+                except OSError:
+                    return False
+                upgraded = code == 101
+                try:
                     self.connection.sendall(response_head(head, upgraded) + data)
                 except OSError:
-                    return
-                self.close_connection = True
+                    return True
                 if not upgraded:
                     pair = {upstream: self.connection}
             upstream.settimeout(None)
