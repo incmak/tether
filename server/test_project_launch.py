@@ -202,6 +202,8 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(project_launch.codex_writable([], str(base / 'split' / 'src')), 'no worktree metadata')
         self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
         self.assertFalse(project_launch.codex_writable(['--full-auto'], str(linked)), 'Codex rejects the flag')
+        for args in (['--yolo', '--full-auto=true'], ['--full-auto=false']):
+            self.assertFalse(project_launch.codex_writable(args, str(linked)), args)
         registration = Path(os.path.realpath(main / '.git' / 'worktrees' / 'linked'))
         for name in ('gitdir', 'commondir'):
             original = (registration / name).read_bytes()
@@ -212,6 +214,11 @@ class UnitTests(unittest.TestCase):
             (registration / name).unlink()
             (registration / name).write_bytes(original)
             self.assertTrue(project_launch.codex_writable([], str(linked)))
+        original = (registration / 'gitdir').read_bytes()
+        (registration / 'gitdir').write_bytes(original.rstrip() + b'\xc2\xa0\n')
+        self.assertFalse(project_launch.codex_writable([], str(linked)), 'Codex trims ASCII space only')
+        (registration / 'gitdir').write_bytes(original)
+        self.assertTrue(project_launch.codex_writable([], str(linked)))
         (registration / 'gitdir').write_bytes((registration / 'gitdir').read_bytes() + b' ' * 70000)
         self.assertFalse(project_launch.codex_writable([], str(linked)), 'gitdir over 64 KiB')
 
