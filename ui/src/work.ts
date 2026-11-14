@@ -51,6 +51,14 @@ export const moveItem = (api: Api, item: WorkItem, stage: Stage) =>
 export const startFix = (api: Api, item: WorkItem) =>
   api<{ item: WorkItem; fix: FixResult }>('work/fix', { item: item.id, version: item.version })
 
+/** Add or change a project. revision: the registry revision the form started from (409 when it changed). */
+export const saveProject = (api: Api, project: WorkProject, revision: number, create: boolean) =>
+  api<{ revision: number; projects: WorkProject[] }>('work/project', { project, revision, create })
+
+/** Add an item by hand. tab: start a triage tab for it; tab in the answer says whether it started. */
+export const newItem = (api: Api, project: string, title: string, refs: string[], tab: boolean) =>
+  api<{ item: WorkItem; tab?: FixResult }>('work/item', { project, title, refs, tab })
+
 export const setItemQa = (api: Api, item: WorkItem, qa: boolean) =>
   api<{ item: WorkItem }>('work/qa', { item: item.id, qa, version: item.version })
 

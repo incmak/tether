@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Send, SquareKanban, X } from 'lucide-react'
+import { Plus, Send, Settings2, SquareKanban, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { RetryButton } from './Retry'
@@ -11,6 +11,7 @@ import { age } from './needs'
 import { STAGE_LABEL, decisions, moveItem, onBoard, projectHue, setItemQa, startFix } from './work'
 import type { Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
+import { NewItemForm, ProjectForm } from './WorkForms'
 import type { DecisionAnswers } from './WorkItems'
 import './Work.css'
 
@@ -66,8 +67,17 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   const [chosen, setProject] = useState('all')
   const [showHold, setShowHold] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
+  // A form over the sheet: add a project, a project's settings, or a new item. added: the last result line.
+  const [form, setForm] = useState<{ kind: 'project'; name?: string } | { kind: 'item' } | null>(null)
+  const [added, setAdded] = useState<{ text: string; ok: boolean } | null>(null)
+  // A reply closes only the form that sent it: Mak can cancel and open another form while a save runs.
+  const sent = form
+  const close = (mine: typeof form) => setForm(current => current === mine ? null : current)
   const projects = board?.projects ?? []
   const project = projects.some(entry => entry.name === chosen) ? chosen : 'all'
+  // Settings: the chosen project, or the only one.
+  const settingsFor = project !== 'all' ? project : projects.length === 1 ? projects[0].name : ''
+  const editing = form?.kind === 'project' && form.name ? projects.find(entry => entry.name === form.name) : undefined
   const items = (board?.items ?? []).filter(item => onBoard(item, now) && (project === 'all' || item.project === project))
   const shown = board && { ...board, items }
   const asking = decisions(shown).length
@@ -84,8 +94,9 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
       </div>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
     </div>
-    {(projects.length > 1 || view === 'board') && <div className="work-filters">
-      {projects.length > 1 && <div className="tab-bar work-projects" role="group" aria-label="Project">
+    {board && <div className="work-filters">
+      <div className="tab-bar work-projects" role="group" aria-label="Project">
+        {projects.length > 1 && <>
         <button type="button" aria-pressed={project === 'all'} onClick={() => setProject('all')}>All projects</button>
         {projects.map(entry => {
           const count = (board?.items ?? []).filter(item => item.project === entry.name && item.stage === 'needs').length
@@ -94,20 +105,32 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
             {count > 0 && <span className="work-chip-count"> · {count}<span className="visually-hidden"> need you</span></span>}
           </button>
         })}
-      </div>}
-      {view === 'board' && board && <button type="button" className="ghost sm work-hold" onClick={() => setShowHold(on => !on)}>{showHold ? 'Hide' : 'Show'} on hold ({holds})</button>}
+        </>}
+        <button type="button" className="work-add-project" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}><Plus size={14} aria-hidden="true" />Add project</button>
+      </div>
+      <div className="work-tools">
+        {settingsFor && <button type="button" className="ghost sm" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project', name: settingsFor })}>
+          <Settings2 size={14} aria-hidden="true" />Settings<span className="visually-hidden"> of {settingsFor}</span></button>}
+        {view === 'board' && projects.length > 0 && <button type="button" className="ghost sm work-hold" onClick={() => setShowHold(on => !on)}>{showHold ? 'Hide' : 'Show'} on hold ({holds})</button>}
+        {projects.length > 0 && <button type="button" className="secondary sm" aria-haspopup="dialog" onClick={() => setForm({ kind: 'item' })}><Plus size={14} aria-hidden="true" />New item</button>}
+      </div>
     </div>}
     <div className="work-body">
       {!board && !error && <BoardBones />}
       {!board && error && <p className="work-error" role="alert"><span>Could not load work items. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
-      {board && view === 'needs' && <>
+      {board && <div role="status" className="work-added">{added && <p className={`work-result${added.ok ? '' : ' failed'}`}>{added.text}</p>}</div>}
+      {board && !projects.length && <div className="work-empty work-start">
+        <p>No projects yet. Add a project: its items, sessions and Jira key live here.</p>
+        <button type="button" className="primary" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}>Add project</button>
+      </div>}
+      {board && view === 'needs' && projects.length > 0 && <>
         <DecisionsGroup board={shown} error={error} panes={panes} answers={answers} onRefresh={onRefresh} onOpen={open} compact scope="sheet" onDetails={item => setOpenId(item.id)} />
         {!asking && <p className="work-empty">Nothing waits on you. An item shows here when its agent asks you something.</p>}
       </>}
-      {board && view === 'board' && <>
+      {board && view === 'board' && projects.length > 0 && <>
         <div role="status">{answers.results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
         {error && <p className="work-error" role="alert"><span>Could not refresh work items. The board can be out of date. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
-        {!board.items.length && <p className="work-empty">No work items yet. An agent adds one with <code>tether item new</code>.</p>}
+        {projects.length > 0 && !board.items.length && <p className="work-empty">No work items yet. Use New item, or an agent adds one with <code>tether item new</code>.</p>}
         <div className="work-columns">
           {columns.map(column => {
             const list = items.filter(item => item.stage === column.stage).sort(order(column.stage))
@@ -124,6 +147,16 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
     </div>
     {opened && <ItemDrawer key={opened.id} api={api} item={opened} project={projects.find(entry => entry.name === opened.project)} prefix={prefixOf(board, opened)} panes={panes}
       answers={answers} error={error} onRefresh={onRefresh} onOpen={open} onClose={() => setOpenId(null)} />}
+    {board && form?.kind === 'project' && (!form.name || editing) && <ProjectForm api={api} board={board} project={editing} onClose={() => setForm(null)}
+      onSaved={name => { close(sent); setProject(name); setAdded({ ok: true, text: editing ? `${name} settings saved.` : `Project ${name} added.` }); void onRefresh() }} />}
+    {board && form?.kind === 'item' && <NewItemForm api={api} board={board} project={project === 'all' ? undefined : project} onClose={() => setForm(null)}
+      onAdded={(item, tab) => {
+        close(sent); setView('board')
+        if (project !== 'all') setProject(item.project)
+        const started = !tab ? '' : tab.started ? ' Triage tab started.' : ` Triage tab not started: ${tab.why}`
+        setAdded({ ok: !tab || tab.started, text: `${item.id} added to Triage.${started}` })
+        void onRefresh()
+      }} />}
   </dialog>
 }
 

@@ -659,3 +659,74 @@ class FixTab(unittest.TestCase):
         self.assertTrue(payload['fix']['started'])
         self.assertEqual(payload['item']['stage'], 'building')
         self.assertTrue(any(tab['pane'] == '%42' and tab['role'] == 'fix' for tab in payload['item']['tabs']))
+
+
+class TriageTab(unittest.TestCase):
+    """New item with "Start a triage tab" opens an unstacked Claude tab in the triage session; the stage stays Triage."""
+    tmux = FixTab.tmux
+    post = FixTab.post
+
+    def setUp(self):
+        FixTab.setUp(self)
+        self.triage = {'id': '%8', 'tmux_session': 'Triage', 'label': 'Triage', 'agent': 'codex', 'thread': 'chat-8',
+                       'writable': True}
+        self.entries.append(self.triage)
+        self.sessions['%8'] = 'Triage'
+
+    def new(self, **extra):
+        return self.post('item', dict({'project': 'shop', 'title': 'Export is slow', 'refs': ['BS-9']}, **extra))
+
+    def test_tab_starts_a_linked_triage_tab(self):
+        status, payload = self.new(tab=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['tab'], {'started': True, 'why': ''})
+        item = payload['item']
+        self.assertEqual((item['id'], item['stage'], item['source']), ('T-002', 'triage', 'Added by hand'))
+        self.assertEqual([(t['pane'], t['role'], t['name'], t['session'], t['stack']) for t in item['tabs']],
+                         [('%42', 'triage', 'T-002 triage', 'Triage', '')])
+        source, body, group = self.started[0]
+        self.assertEqual((source, group, body['agent']), ('%8', '', 'claude'))
+        self.assertIn('Triage work item T-002: Export is slow', body['message'])
+        self.assertIn('Links: BS-9', body['message'])
+        self.assertIn('tether item ask T-002', body['message'])
+        work_fix.groups.find_or_create.assert_not_called()
+
+    def test_no_tab_by_default(self):
+        payload = self.new()[1]
+        self.assertEqual(payload['item']['tabs'], [])
+        self.assertNotIn('tab', payload)
+        self.assertEqual(self.started, [])
+
+    def test_tab_must_be_a_flag(self):
+        self.assertEqual(self.new(tab='yes')[0], 400)
+        self.assertEqual(work_items.find('T-001')[1]['id'], 'T-001')
+        with self.assertRaises(work_items.ProjectError):
+            work_items.find('T-002')
+
+    def test_closed_triage_session_keeps_the_item(self):
+        self.entries = [self.entry, self.work]
+        status, payload = self.new(tab=True)
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['tab']['started'])
+        self.assertIn('triage session Triage is not open', payload['tab']['why'])
+        self.assertEqual(payload['item']['stage'], 'triage')
+        self.assertTrue(payload['item']['history'][-1]['text'].startswith('Triage tab not started. The triage session'))
+        self.assertEqual(self.started, [])
+
+    def test_a_moved_anchor_or_failed_launch_is_reported(self):
+        self.sessions['%8'] = 'Elsewhere'
+        payload = self.new(tab=True)[1]
+        self.assertIn('no longer in the triage session Triage', payload['tab']['why'])
+        self.assertEqual(self.started, [])
+        self.sessions['%8'] = 'Triage'
+        work_fix.delegate.start.side_effect = RuntimeError('tmux refused')
+        payload = self.new(tab=True)[1]
+        self.assertEqual(payload['tab'], {'started': False, 'why': 'tmux refused'})
+        self.assertEqual(payload['item']['history'][-1]['text'], 'Triage tab not started. tmux refused')
+
+    def test_tabs_off_without_a_runner(self):
+        handler = Handler(work_api.PREFIX + 'item', {'project': 'shop', 'title': 'X', 'tab': True})
+        work_api.post(handler)
+        status, payload = handler.sent
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['tab'], {'started': False, 'why': 'Triage tabs are off.'})

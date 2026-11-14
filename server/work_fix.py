@@ -79,6 +79,41 @@ def _release(item_id, claimed):
             continue
 
 
+def _where(project, key, entries, retry):
+    """The anchor tab and the folder for a new tab in the project's work or triage session. Raises NotStarted."""
+    label = 'work session' if key == 'work' else 'triage session'
+    source = anchor(project.get(key), entries)
+    if source is None:
+        raise NotStarted(f'The {label} {project.get(key) or "(none)"} is not open. Open it, then {retry}.')
+    folder = os.path.expanduser(project.get('folder') or '')
+    if not folder or not os.path.isabs(folder) or not os.path.isdir(folder):
+        raise NotStarted(f'The project folder {project.get("folder") or "(none)"} does not exist. '
+                         f'Fix it in the project settings, then {retry}.')
+    return source, folder
+
+
+def _check_anchor(source, session, label, run):
+    """The anchor tab can move to another session after the list was read: check it under the lock."""
+    try:
+        if _session_name(source['id'], run).casefold() != session.casefold():
+            raise RuntimeError(f'Tab {source["id"]} is no longer in the {label} {session}. Try again.')
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise NotStarted(str(exc) or type(exc).__name__) from exc
+
+
+def _launch(source, body, folder, run, stack):
+    """Open the tab after the anchor, in the stack when one is named. Returns (pane, name)."""
+    group = ''
+    if stack:
+        session_id = groups.group_of_pane(source['id'], run)[0]
+        found = groups.find_or_create(session_id, stack, run)
+        group = found['id'] if found else ''
+    return delegate.start(source, body, folder, run=run, group=group)
+
+
+LAUNCH_ERRORS = (OSError, RuntimeError, ValueError, subprocess.SubprocessError, groups.GroupError)
+
+
 def start(item_id, version, entries, run=subprocess.run, lock=None, question=''):
     """Move a Ready item to Building, open its fix tab and link it. Returns the item.
     Raises NotStarted (the item is back in Ready, with a history line) or ProjectError (409: the item changed)."""
@@ -91,14 +126,7 @@ def start(item_id, version, entries, run=subprocess.run, lock=None, question='')
         if live_fix(item, entries):
             raise ProjectError(409, f'{item_id} already has a fix tab.')
         project = work_items.project(item['project'])
-        source = anchor(project.get('work'), entries)
-        if source is None:
-            raise NotStarted(f'The work session {project.get("work") or "(none)"} is not open. '
-                             'Open it, then use Start fix tab.')
-        folder = os.path.expanduser(project.get('folder') or '')
-        if not folder or not os.path.isabs(folder) or not os.path.isdir(folder):
-            raise NotStarted(f'The project folder {project.get("folder") or "(none)"} does not exist. '
-                             'Fix it in the project settings, then use Start fix tab.')
+        source, folder = _where(project, 'work', entries, 'use Start fix tab')
         name = f'{item["id"]} fix'
         body = {'agent': 'claude', 'message': brief(item, question), 'name': name,
                 'session': source['id'], 'thread': source.get('thread')}
@@ -107,19 +135,12 @@ def start(item_id, version, entries, run=subprocess.run, lock=None, question='')
         except ValueError as exc:
             raise NotStarted(str(exc)) from exc
         with lock or threading.Lock():
-            try:
-                # The anchor tab can move to another session after the list was read: check it under the lock.
-                if _session_name(source['id'], run).casefold() != project['work'].casefold():
-                    raise RuntimeError(f'Tab {source["id"]} is no longer in the work session {project["work"]}. Try again.')
-            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-                raise NotStarted(str(exc) or type(exc).__name__) from exc
+            _check_anchor(source, project['work'], 'work session', run)
             # Claim the item before the launch: the store refuses (409) when it changed since the request was read.
             claimed = work_items.stage(item_id, 'building', 'tether', text=f'Starting fix tab {name}', version=version)
             try:
-                session_id = groups.group_of_pane(source['id'], run)[0]
-                group = groups.find_or_create(session_id, STACK, run)
-                pane, name = delegate.start(source, body, folder, run=run, group=group['id'] if group else '')
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, groups.GroupError) as exc:
+                pane, name = _launch(source, body, folder, run, STACK)
+            except LAUNCH_ERRORS as exc:
                 _release(item_id, claimed)
                 raise NotStarted(str(exc) or type(exc).__name__) from exc
         # The tab runs now. Link it whatever changed in the item meanwhile, so a retry cannot start a second one.
@@ -137,3 +158,40 @@ def try_start(item, entries, run=subprocess.run, lock=None, question='', strict=
         if strict:
             raise
         return item, {'started': False, 'why': str(exc)}
+
+
+def triage_brief(item):
+    """The triage tab's first message."""
+    lines = [f'Triage work item {item["id"]}: {item["title"]}']
+    if item.get('refs'):
+        lines.append('Links: ' + ', '.join(item['refs']))
+    lines += ['',
+              f'1. Run `tether item show {item["id"]}` and read it.',
+              '2. Check the report: reproduce it, find the cause and the size of the fix. Do not change code yet.',
+              f'3. Ask Mak: `tether item ask {item["id"]} "<what you found; build the fix?>" --option Build --option Hold`.']
+    return '\n'.join(lines)
+
+
+def start_triage(item, entries, run=subprocess.run, lock=None):
+    """Open a triage tab for a new item in the project's triage session and link it. The stage does not change.
+    Returns (item, {'started': bool, 'why': str}); a failure becomes a history line."""
+    try:
+        project = work_items.project(item['project'])
+        source, folder = _where(project, 'triage', entries, f'ask an agent there to triage {item["id"]}')
+        name = f'{item["id"]} triage'
+        body = {'agent': 'claude', 'message': triage_brief(item), 'name': name,
+                'session': source['id'], 'thread': source.get('thread')}
+        try:
+            delegate.validate(body, entries)
+        except ValueError as exc:
+            raise NotStarted(str(exc)) from exc
+        with lock or threading.Lock():
+            _check_anchor(source, project['triage'], 'triage session', run)
+            try:
+                pane, name = _launch(source, body, folder, run, '')
+            except LAUNCH_ERRORS as exc:
+                raise NotStarted(str(exc) or type(exc).__name__) from exc
+    except NotStarted as exc:
+        return work_items.record(item['id'], 'tab', f'Triage tab not started. {exc}'), {'started': False, 'why': str(exc)}
+    linked = work_items.link(item['id'], pane, 'triage', by='tether', name=name, session=project['triage'])
+    return linked, {'started': True, 'why': ''}

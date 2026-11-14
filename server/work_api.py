@@ -123,8 +123,16 @@ def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
             return {'item': work_items.note(body.get('item'), body.get('text'), 'mak', version=version)}
         if name == 'item':
             refs = body.get('refs') or []
-            return {'item': work_items.new(body.get('project'), body.get('title'), 'mak', refs=refs,
-                                           source='Added by hand')}
+            tab = body.get('tab', False)
+            if not isinstance(tab, bool):
+                raise ValueError('Invalid request.')
+            item = work_items.new(body.get('project'), body.get('title'), 'mak', refs=refs, source='Added by hand')
+            if not tab:
+                return {'item': item}
+            if not (sessions and run):
+                return {'item': item, 'tab': {'started': False, 'why': 'Triage tabs are off.'}}
+            item, started = work_fix.start_triage(item, sessions(), run, lock)
+            return {'item': item, 'tab': started}
         if name == 'project':
             create = body.get('create')
             if not isinstance(create, bool):

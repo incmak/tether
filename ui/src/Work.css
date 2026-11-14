@@ -85,7 +85,7 @@
 }
 .work-drawer-meta { min-width: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .work-filters { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 16px 0; }
-.work-projects { flex: 1 1 auto; }
+.work-projects { flex: 1 1 auto; flex-wrap: wrap; row-gap: 4px; }
 .work-projects .work-swatch { width: 8px; height: 8px; }
 .work-chip-count { font-weight: 400; font-variant-numeric: tabular-nums; }
 .work-hold { margin-left: auto; }
@@ -181,3 +181,34 @@
 .work-mark.needs { background: var(--accent-soft); color: var(--accent); }
 .work-mark .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .home-group-head .work-board-link { margin-left: auto; }
+
+/* Work page tools: Add project after the project chips; Settings, on hold and New item at the end of the row. */
+.work-projects .work-add-project { color: var(--muted); }
+.work-projects .work-add-project svg { width: 14px; height: 14px; }
+.work-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.work-tools .work-hold { margin-left: 0; }
+.work-added:not(:has(p)) { display: none; }
+.work-start { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+.work-start p { margin: 0; }
+
+/* Project settings and New item: a sheet over the work page. */
+.sheet.work-form-sheet { max-width: 560px; overflow-y: auto; overscroll-behavior: contain; }
+.work-form { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+.work-form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 14px; }
+.work-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.work-field label, .work-fieldset legend { font-size: 13px; font-weight: 600; color: var(--text); }
+.work-field input, .work-field select { width: 100%; min-width: 0; height: var(--control-lg); padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; font-size: var(--field-text); }
+.work-field input[readonly] { background: var(--hover); color: var(--text); }
+.work-field input:focus-visible, .work-field select:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.work-field input:user-invalid { border-color: var(--error); }
+.work-hint { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.sheet .work-fieldset { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin: 4px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--line); }
+.work-fieldset legend { float: left; width: 100%; padding: 0; }
+.work-fieldset legend span { font-weight: 400; color: var(--muted); }
+.work-form-error { margin: 0; font-size: 13px; line-height: 1.45; color: var(--error); }
+.work-form-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+@media (pointer: coarse) {
+  .work-field input, .work-field select { height: 44px; }
+  .work-form-actions button, .work-sheet .work-tools button, .work-sheet .work-projects .work-add-project { min-height: 44px; }
+  .work-form-sheet .sheet-heading .icon-button { width: 44px; height: 44px; }
+}
