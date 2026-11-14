@@ -155,6 +155,14 @@ class Import(Base):
         self.assertEqual(self.ledger.state(), 'ready')
         self.assertEqual(self.lines(self.ledger.rows()), self.old_lines())
 
+    def test_tab_links_make_no_line_and_open_shows_the_last_step(self):
+        self.imported()
+        before = self.lines(self.ledger.open_rows())
+        work_items.link('T-001', '%9', 'triage', by='import')
+        work_items.link('T-003', '%10', 'triage', by='agent')
+        self.assertEqual(self.lines(self.ledger.open_rows()), before)
+        self.assertEqual(self.lines(self.ledger.rows()), self.old_lines())
+
     def test_tab_links_do_not_count_as_imported_lines(self):
         self.imported()
         work_items.link('T-001', '%9', 'triage', by='import')

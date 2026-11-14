@@ -34,6 +34,7 @@ LINE = re.compile(r'^- (\d{4}-\d\d-\d\d \d\d:\d\d) \| ([A-Z]{1,3}-\d+|seen) \| (
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{1,29}')
 SEEN_KEEP = 500
 ARCHIVE = 'TRIAGE-before-board.md'
+TAB_EVENTS = ('link', 'unlink')
 ROW_TYPES = ('new', 'triage', 'ask')  # the events an imported ledger line becomes; links and reserves are not lines
 HEADER = """# Triage ledger
 
@@ -145,7 +146,8 @@ class Ledger:
 
     def item_rows(self, item_id, events=None, items=None):
         """The ledger rows of one item, from its events: triage lines as they were written, other changes as
-        `tether` lines (the history text)."""
+        `tether` lines (the history text). Tab links are bookkeeping, not steps: they make no line, so `open` still
+        shows each item's last step."""
         rows = []
         events = work_items._events(self.prefix) if events is None else events
         items = self.items() if items is None else items
@@ -166,6 +168,8 @@ class Ledger:
             if event.get('status') and event['type'] in ('new', 'triage', 'ask'):
                 text = event.get('q') if event['type'] == 'ask' else event.get('text', '')
                 rows.append((when, item_id, event['status'], text or '', event.get('ref', ''), at))
+                continue
+            if event['type'] in TAB_EVENTS:
                 continue
             text = work_items._history_text(event)
             if text:
