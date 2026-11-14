@@ -120,6 +120,8 @@ SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
 SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
 WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}
 UNKNOWN_FLAGS = {'--full-auto'}  # removed from Codex: 0.166 and 0.169 reject it
+# --worktree moves Codex to a new checkout; --ignore-user-config drops config.toml. Neither is modelled.
+UNMODELLED_FLAGS = {'--worktree', '--ignore-user-config'}
 UNSURE = object()
 
 
@@ -326,6 +328,8 @@ def codex_writable(args, cwd=None):
         args = args[:args.index('--')]  # after --, everything is the prompt
     if any(arg.partition('=')[0] in UNKNOWN_FLAGS for arg in args):
         return False  # Codex stops with "unexpected argument"
+    if any(arg.partition('=')[0] in UNMODELLED_FLAGS for arg in args):
+        return False
     if _managed():
         return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
     for i, arg in enumerate(args):

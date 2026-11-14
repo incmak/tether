@@ -237,6 +237,8 @@ class UnitTests(unittest.TestCase):
         self.assertTrue(project_launch.codex_writable(['-s=workspace-write'], folder))
         self.assertTrue(project_launch.codex_writable(['--yolo', '-s', 'read-only'], folder))
         self.assertEqual(project_launch._join('/', '//a//b/../c'), '/a/c')  # PathUri keeps one leading slash
+        for args in (['--worktree'], ['exec', '--ignore-user-config'], ['--yolo', '--worktree']):
+            self.assertFalse(project_launch.codex_writable(args, folder), args)  # new checkout or no config.toml
 
     def test_writable_worktree_pointer_must_match_its_registration(self):
         git = ['git', '-c', 'user.email=t@example.com', '-c', 'user.name=t']
