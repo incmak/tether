@@ -17,7 +17,7 @@ const good = { observed: true, goal: '10h', tasks: ['1 monitor'], notices: ['2% 
 const blank = { observed: true, goal: '', tasks: [], notices: [], status: '', heads_up: null }
 
 async function main() {
-  const calls = [], intervals = new Map(), timers = new Map(), writes = []
+  const calls = [], intervals = new Map(), timers = new Map(), polls = new Map(), writes = []
   let nextTimer = 0, cleanup, shown = good, failKey = false, pendingKey
   const context = {
     pane: { id: '%fixture', thread: 'thread-1' }, data: { thread: 'thread-1' }, activePane: { agent: 'claude' }, state: 'Idle',
@@ -27,7 +27,12 @@ async function main() {
     sendKey: async (key, card) => { writes.push({ key, card }); return pendingKey ? await pendingKey : !failKey },
     useEffect: fn => { cleanup = fn() }, setFooter: result => { shown = result.value },
     setInterval: fn => { intervals.set(++nextTimer, fn); return nextTimer }, clearInterval: id => intervals.delete(id),
-    setTimeout: (fn, delay) => { assert.equal(delay, 700); timers.set(++nextTimer, fn); return nextTimer }, clearTimeout: id => timers.delete(id),
+    setTimeout: (fn, delay) => {
+      if (delay === 700) timers.set(++nextTimer, fn)
+      else { assert.ok(delay === 1000 || delay === 5000, `poll delay ${delay}`); polls.set(++nextTimer, { fn, delay }) }
+      return nextTimer
+    },
+    clearTimeout: id => { timers.delete(id); polls.delete(id) },
   }
   runInNewContext(compile([
     declaration(source.statements, 'footerCache'), declaration(source.statements, 'footerKey'), declaration(source.statements, 'cacheFooter'),
@@ -60,7 +65,7 @@ async function main() {
   assert.equal(calls.length, 7)
   await context.press('1'); assert.equal(timers.size, 1)
   cleanup()
-  assert.equal(timers.size, 0); assert.equal(intervals.size, 0)
+  assert.equal(timers.size, 0); assert.equal(intervals.size, 0); assert.equal(polls.size, 0)
   calls[7].resolve(good); await flush()
   assert.equal(shown, blank); assert.equal(context.cache.get(context.footerId), blank)
   context.readFooter.current(); assert.equal(calls.length, 8)
@@ -79,8 +84,22 @@ async function main() {
   calls[8].resolve(other); await flush(); assert.equal(shown, other)
   pendingKey = new Promise(resolve => { context.resolveKey = resolve })
   const lateKey = context.press('1'); cleanup(); context.resolveKey(true); await lateKey
-  assert.equal(timers.size, 0); assert.equal(calls.length, 9)
+  assert.equal(timers.size, 0); assert.equal(polls.size, 0); assert.equal(calls.length, 9)
   console.log('UI B3: cache and rendered footer isolate conversations, including effect changes and late key completion')
+
+  context.state = 'Working'; context.start()
+  assert.equal(calls.length, 10); assert.equal(polls.size, 0)  // no timer while the first read is on the wire
+  calls[9].resolve(good); await flush()
+  assert.equal(polls.size, 1); const [[firstId, first]] = polls; assert.equal(first.delay, 1000)
+  polls.delete(firstId); first.fn(); assert.equal(calls.length, 11); assert.equal(polls.size, 0)
+  await flush(); assert.equal(polls.size, 0)  // a slow read never lets a second one start
+  calls[10].reject(new Error('offline')); await flush()
+  assert.equal(polls.size, 1)  // a failed read still schedules the next one
+  const [[againId, again]] = polls; polls.delete(againId); again.fn(); assert.equal(calls.length, 12)
+  cleanup(); calls[11].resolve(good); await flush()
+  assert.equal(polls.size, 0); assert.equal(intervals.size, 0)
+  context.state = 'Idle'
+  console.log('UI B64: the footer poll waits for each read to end, then waits 1 s (Working) before the next; failures continue; cleanup stops it')
 
   const apiOutput = { exports: {} }
   let ok = true, valid = false, bodyError
@@ -101,6 +120,6 @@ async function main() {
   await assert.rejects(apiOutput.exports.request('codex-runs?session=%251'), { name: 'AbortError' })
   bodyError = undefined
   console.log('UI B4: invalid successful footer JSON and timed out or aborted body reads reject; other callers and HTTP errors keep their behavior')
-  assert.equal(intervals.size, 0); assert.equal(timers.size, 0)
+  assert.equal(intervals.size, 0); assert.equal(timers.size, 0); assert.equal(polls.size, 0)
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

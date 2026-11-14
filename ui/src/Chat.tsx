@@ -832,10 +832,11 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   useEffect(() => {
     if (activePane.agent !== 'claude') return
     let live = true
+    let timer: ReturnType<typeof setTimeout> | undefined
     const read = () => {
-      if (!live || document.visibilityState !== 'visible') return
+      if (!live || document.visibilityState !== 'visible') return Promise.resolve()
       const sequence = ++footerReads.current.requested
-      api<Footer>(`footer?session=${encodeURIComponent(pane.id)}`).then(result => {
+      return api<Footer>(`footer?session=${encodeURIComponent(pane.id)}`).then(result => {
         if (!live || sequence < footerReads.current.applied) return
         footerReads.current.applied = sequence
         // No input box on screen (a dialog, a redraw): keep the chips, but not a card whose keys could reach the dialog.
@@ -844,11 +845,14 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
         setFooter({ key: footerId, value: next })
       }, () => {})
     }
-    readFooter.current = read
-    read()
-    const timer = setInterval(read, state === 'Working' ? 1000 : 5000)  // while Claude works, its verb, tokens and tool change every second
+    // The next read starts a set time after the last one ends, so on a slow link the reads never pile up (B64).
+    // While Claude works, its verb, tokens and tool change every second.
+    const delay = state === 'Working' ? 1000 : 5000
+    const poll = () => { void read().finally(() => { if (live) timer = setTimeout(poll, delay) }) }
+    readFooter.current = () => { void read() }
+    poll()
     return () => {
-      live = false; clearInterval(timer)
+      live = false; clearTimeout(timer)
       readFooter.current = () => {}
       if (footerReread.current !== null) clearTimeout(footerReread.current)
       footerReread.current = null
