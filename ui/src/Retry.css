@@ -1,6 +1,6 @@
 /* Shared Retry: see Retry.tsx. */
 .retry { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; vertical-align: middle; }
-.retry-button { gap: 5px; transition: transform .1s ease-out, background-color .12s, color .12s, opacity .12s; }
+.retry-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; white-space: nowrap; transition: transform .1s ease-out, background-color .12s, color .12s, opacity .12s; }
 .retry-button:active:not(:disabled) { transform: scale(.96); }
 .retry-button:disabled { cursor: progress; opacity: .75; }
 .retry-button.link-button:disabled { color: var(--muted); }

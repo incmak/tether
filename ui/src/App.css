@@ -880,7 +880,8 @@ button.live-chip:active { background: var(--line); }
 
 .reconnect-banner { display: flex; align-items: center; gap: 8px; padding: 8px max(16px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left)); background: color-mix(in srgb, var(--error) 12%, var(--surface)); color: var(--text); font-size: 13px; line-height: 1.4; border-bottom: 1px solid var(--line); }
 .reconnect-banner svg { flex: none; color: var(--error); }
-.reconnect-banner span { flex: 1; min-width: 0; }
+.reconnect-banner > span:not(.retry) { flex: 1; min-width: 0; }
+.reconnect-banner > .retry { flex: none; }
 .reconnect-banner button { flex: none; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; }
 .failed-message { opacity: 1; }
 .failed-message > span { opacity: .75; }
