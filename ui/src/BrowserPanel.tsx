@@ -129,6 +129,10 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [status, setStatus] = useState('')
   const [live, setLive] = useState(true)
   const [typing, setTyping] = useState(false)
+  // BrowserView is keyed by browser id, so switching browsers resets this choice.
+  const [windowView, setWindowView] = useState(false)
+  const windowViewRef = useRef(windowView)
+  useLayoutEffect(() => { windowViewRef.current = windowView }, [windowView])
   const [draft, setDraft] = useState<string | null>(null)
   const [stage, setStage] = useState({ width: 0, height: 0 })
   const [frame, setFrame] = useState<{ width: number; height: number } | null>(null)
@@ -216,7 +220,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   // The screen in use owns the size; never react to another viewer's size.
   function claimSize() {
     const tab = tabRef.current
-    if (!active || !tab || watching || tab.preset !== 'desktop' || stage.width < 50 || stage.height < 50 || noting) return
+    if (!active || !tab || watching || windowView || tab.preset !== 'desktop' || stage.width < 50 || stage.height < 50 || noting) return
     const width = Math.max(320, stage.width), height = Math.max(240, stage.height)
     if (Math.abs(width - tab.width) < 3 && Math.abs(height - tab.height) < 3) return
     void api<BrowserTab>('browser/device', { tab: tab.id, preset: 'desktop', width, height }).then(row => setTabs(list => list.map(item => item.id === row.id ? row : item))).catch(() => undefined)
@@ -231,7 +235,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       window.removeEventListener('focus', onActive)
       document.removeEventListener('visibilitychange', onActive)
     }
-  }, [active, tab?.id, tab?.preset, stage.width, stage.height, noting, watching]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, tab?.id, tab?.preset, stage.width, stage.height, noting, watching, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Frames: decode the newest one and skip any that arrive while one decodes.
   const pending = useRef<FrameMessage | null>(null)
@@ -270,6 +274,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     if (moved) draw()
   }
   function predict(dx: number, dy: number) {
+    if (windowViewRef.current) return
     const tab = tabRef.current, last = painted.current, size = frameRef.current
     if (!tab || tab.touch || scrolls.current.tab !== tab.id || !scrolls.current.works || !last || !size) {
       ahead.current.at = performance.now()  // still mark the turn so the next frame can learn that scrolling works
@@ -337,11 +342,11 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [transport, setTransport] = useState<'live' | 'sse'>(() => typeof WebSocket === 'function' ? 'live' : 'sse')
   const socketRef = useRef<{ stream: LiveStream; tab: string } | null>(null)
   useEffect(() => {
-    if (!active || !visible || !tabId || noting || !stage.width) return
+    if (!active || !visible || (!tabId && !windowView) || noting || !stage.width) return
     const gen = ++streamGen.current
     let again = 0
     const query = `tab=${encodeURIComponent(tabId)}&w=${streamWidth}&h=${streamHeight}&cssw=${Math.max(1, stage.width)}&cssh=${Math.max(1, stage.height)}${which === 'test' ? '' : `&browser=${which}`}`
-    if (transport === 'live') {
+    if (!windowView && transport === 'live') {
       const stream = openLive(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/mobile/api/browser/live?${query}`, {
         onPicture: (bitmap, meta) => { setLive(true); show(bitmap, meta, gen) },
         onTabs: state => apply(state as BrowserState),
@@ -362,7 +367,9 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     // The server sends the next frame only after this panel confirms the previous ones, so frames never queue
     // in the network and the picture stays close to the input.
     const sid = Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => byte.toString(16).padStart(2, '0')).join('')
-    const source = new EventSource(`/mobile/api/browser/stream?${query}&sid=${sid}`)
+    const source = new EventSource(windowView
+      ? `/mobile/api/browser/window?browser=signed&w=${streamWidth}&h=${streamHeight}&sid=${sid}`
+      : `/mobile/api/browser/stream?${query}&sid=${sid}`)
     source.addEventListener('frame', event => {
       if (gen !== streamGen.current) return
       const message = JSON.parse((event as MessageEvent).data)
@@ -371,6 +378,9 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     })
     source.addEventListener('tabs', event => apply(JSON.parse((event as MessageEvent).data)))
     source.addEventListener('closed', () => void load())
+    source.addEventListener('error', event => {
+      if (event instanceof MessageEvent) setStatus(JSON.parse(event.data).error)
+    })
     source.onopen = () => setLive(true)
     // EventSource connects again by itself after a network drop, but not after an error reply
     // (for example a tab that a server restart replaced). Then reload the tabs and open a new stream.
@@ -384,18 +394,22 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       }, 2000)
     }
     return () => { source.close(); clearTimeout(again); streamGen.current++; pending.current = null } // eslint-disable-line react-hooks/exhaustive-deps
-  }, [active, visible, tabId, noting, streamWidth, streamHeight, stage.width > 0, retry, transport]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, visible, tabId, noting, streamWidth, streamHeight, stage.width > 0, retry, transport, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Input: queue events, merge moves and wheel turns, and send one batch per animation frame.
   const queue = useRef<Gesture[]>([])
   const queueTab = useRef<string | null>(null)
+  const queueWindow = useRef(false)
   const sending = useRef(false)
   const scheduled = useRef(false)
   function push(...events: Gesture[]) {
     if (watchingRef.current) return
     // The queue belongs to one tab. Input for a new tab never goes to the old one.
-    const id = tabRef.current?.id ?? null
-    if (queueTab.current !== id) { queue.current = []; queueTab.current = id }
+    const wholeWindow = windowViewRef.current
+    const id = wholeWindow ? 'window' : tabRef.current?.id ?? null
+    if (queueTab.current !== id || queueWindow.current !== wholeWindow) {
+      queue.current = []; queueTab.current = id; queueWindow.current = wholeWindow
+    }
     for (const event of events) {
       const last = queue.current[queue.current.length - 1]
       if (last && last.type === event.type && event.type === 'move') queue.current[queue.current.length - 1] = event
@@ -406,23 +420,28 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
   async function flush() {
     const target = queueTab.current
+    const wholeWindow = queueWindow.current
     if (sending.current || !queue.current.length || !target) return
     // The live socket keeps input in order with no request per batch.
     const socket = socketRef.current
-    if (socket?.tab === target && socket.stream.ready()) {
+    if (!wholeWindow && socket?.tab === target && socket.stream.ready()) {
       while (queue.current.length) socket.stream.input(queue.current.splice(0, 200))
       return
     }
     sending.current = true
     const events = queue.current.splice(0, 200)
-    try { await api('browser/input', { tab: target, events }) } catch (error) { setStatus(errorText(error)) } finally {
+    try {
+      if (wholeWindow) await api('browser/window/input', { browser: 'signed', events })
+      else await api('browser/input', { tab: target, events })
+    } catch (error) { setStatus(errorText(error)) } finally {
       sending.current = false
       if (queue.current.length) void flush()
     }
   }
   // Canvas point to page CSS pixels.
   function pagePoint(event: { clientX: number; clientY: number }) {
-    const canvas = canvasRef.current, size = frameRef.current ?? (tabRef.current ? { width: tabRef.current.width, height: tabRef.current.height } : null)
+    const canvas = canvasRef.current, size = frameRef.current ?? (windowViewRef.current
+      ? { width: 2560, height: 1600 } : tabRef.current ? { width: tabRef.current.width, height: tabRef.current.height } : null)
     if (!canvas || !size) return { x: 0, y: 0 }
     const box = canvas.getBoundingClientRect()
     return { x: Math.round((event.clientX - box.left) / box.width * size.width), y: Math.round((event.clientY - box.top) / box.height * size.height) }
@@ -437,12 +456,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const pressed = useRef<{ button: string; x: number; y: number } | null>(null)
   const drag = useRef<{ id: number; x: number; y: number; start: { x: number; y: number }; moved: boolean } | null>(null)
   function onPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab) return
+    if (!tab && !windowView) return
     if (event.pointerType === 'mouse') keysRef.current?.focus({ preventScroll: true })
     event.currentTarget.setPointerCapture(event.pointerId)
     const point = pagePoint(event)
     // A finger on a Desktop tab scrolls; a tap clicks.
-    if (event.pointerType === 'touch' && !tab.touch) { drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, start: point, moved: false }; return }
+    if (event.pointerType === 'touch' && (windowView || !tab?.touch)) { drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, start: point, moved: false }; return }
     if (event.button > 2) return
     const now = performance.now(), last = lastDown.current
     const count = now - last.time < 500 && Math.abs(point.x - last.x) < 5 && Math.abs(point.y - last.y) < 5 ? Math.min(3, last.count + 1) : 1
@@ -451,7 +470,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     push({ type: 'down', ...point, button: BUTTONS[event.button] ?? 'left', buttons: event.buttons, clicks: count, modifiers: modifiers(event) })
   }
   function onPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab) return
+    if (!tab && !windowView) return
     const touch = drag.current
     if (touch && touch.id === event.pointerId) {
       const dx = event.clientX - touch.x, dy = event.clientY - touch.y
@@ -464,12 +483,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       return
     }
     // A phone or tablet tab gets only pressed moves (the server sends them as a finger drag); hover means nothing there.
-    if (tab.touch ? !event.buttons : event.pointerType === 'touch') return
+    if (!windowView && tab?.touch ? !event.buttons : event.pointerType === 'touch') return
     if (pressed.current) Object.assign(pressed.current, pagePoint(event))
     push({ type: 'move', ...pagePoint(event), button: event.buttons & 1 ? 'left' : event.buttons & 2 ? 'right' : 'none', buttons: event.buttons, modifiers: modifiers(event) })
   }
   function onPointerUp(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab) return
+    if (!tab && !windowView) return
     const touch = drag.current
     if (touch && touch.id === event.pointerId) {
       drag.current = null
@@ -485,7 +504,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     const canvas = canvasBox
     if (!canvas) return
     const wheel = (event: WheelEvent) => {
-      if (notingRef.current || !tabRef.current) return
+      if (notingRef.current || (!tabRef.current && !windowViewRef.current)) return
       event.preventDefault()
       const step = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? 800 : 1
       push({ type: 'wheel', ...pagePoint(event), dx: event.deltaX * step, dy: event.deltaY * step, modifiers: modifiers(event) })
@@ -509,13 +528,18 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
   // Leaving a tab: release keys and buttons there, and drop its queued input.
   useEffect(() => {
-    if (!tabId) return
+    if (!tabId && !windowView) return
     return () => {
-      const events = releases()
-      if (queueTab.current === tabId) queue.current = []
-      if (events.length) void api('browser/input', { tab: tabId, events }).catch(() => undefined)
+      // Blur can queue a release just before this cleanup. Send it to the old destination before dropping input.
+      const queued = queueWindow.current === windowView && queueTab.current === (windowView ? 'window' : tabId)
+        ? queue.current.filter(event => event.type === 'up' || event.type === 'keyup') : []
+      const events = [...queued, ...releases()]
+      queue.current = []
+      drag.current = null
+      if (events.length) void api(windowView ? 'browser/window/input' : 'browser/input',
+        windowView ? { browser: 'signed', events } : { tab: tabId, events }).catch(() => undefined)
     }
-  }, [tabId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tabId, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
   function onKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.key === 'Unidentified' || event.key === 'Process' || ['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return
     if (event.key === 'Escape') {
@@ -525,7 +549,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     }
     const command = event.ctrlKey || event.metaKey
     if (command && event.key.toLowerCase() === 'v') return // the paste event brings the text
-    if (event.key.length !== 1 && !KEYS.has(event.key)) return
+    if (event.key.length !== 1 && !KEYS.has(event.key) && !(windowView && /^F([1-9]|1[0-2])$/.test(event.key))) return
     event.preventDefault()
     event.stopPropagation() // the page owns this key; Tether's own shortcuts must not run
     const name = command ? COMMANDS[event.key.toLowerCase()] : undefined
@@ -683,10 +707,17 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
 
   // Fit the frame (or the tab's viewport before the first frame) inside the stage.
-  const size = frame ?? (tab ? { width: tab.width, height: tab.height } : null)
+  const size = windowView ? { width: 2560, height: 1600 } : frame ?? (tab ? { width: tab.width, height: tab.height } : null)
   const scale = size && stage.width && stage.height ? Math.min(stage.width / size.width, stage.height / size.height) : 0
   const view = size && scale ? { width: Math.floor(size.width * scale), height: Math.floor(size.height * scale) } : { width: 0, height: 0 }
   const presetLabel = presets.find(item => item.id === tab?.preset)?.label ?? 'Desktop'
+  function changeWindowView(value: boolean) {
+    setWindowView(value); setFrame(null); setStatus(''); deviceMenu.setOpen(false)
+    painted.current?.bitmap.close()
+    painted.current = null
+    reset()
+    canvasRef.current?.getContext('2d')?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
+  }
 
   const chosen = BROWSERS.find(item => item.id === which)!
   const switcher = <div className="browser-menu-anchor" ref={switchMenu.ref} onKeyDown={switchMenu.onKeyDown}>
@@ -715,7 +746,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     <MacPairing api={baseApi} connected={!!browsers.find(row => row.id === 'chrome')?.available} />
   </div>
 
-  return <div className="browser-panel" onKeyDown={event => { if (noting && event.key === 'Escape' && !event.defaultPrevented) stopNotes() }}>
+  return <div className={`browser-panel${which === 'signed' ? ' browser-signed' : ''}`} onKeyDown={event => { if (noting && event.key === 'Escape' && !event.defaultPrevented) stopNotes() }}>
     <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
       {switcher}
       {tabs.map(item => {
@@ -745,15 +776,15 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       <span className="browser-grow" />
       <button type="button" className="browser-icon" aria-label="Close notes" title="Close" onClick={stopNotes}><X size={17} /></button>
       <button type="button" className="browser-send" onClick={() => void sendToChat()}><Send size={16} /><span>Send to chat</span></button>
-    </div> : <form className="browser-bar" onSubmit={event => { event.preventDefault(); if (!watching) void navigate(draft ?? '') }}>
-      <button type="button" className="browser-icon" aria-label="Back" disabled={!nav.back || watching} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'back' })}><ArrowLeft size={17} /></button>
-      <button type="button" className="browser-icon" aria-label="Forward" disabled={!nav.forward || watching} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'forward' })}><ArrowRight size={17} /></button>
-      <button type="button" className="browser-icon" aria-label="Reload" disabled={!tab || watching} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'reload' })}><RotateCw size={16} /></button>
-      <input ref={urlRef} className="browser-url" aria-label="Address" readOnly={watching} placeholder="Address or port, like 8765" spellCheck={false} autoCapitalize="off" autoCorrect="off" enterKeyHint="go" inputMode="url"
+    </div> : <form className="browser-bar" onSubmit={event => { event.preventDefault(); if (!watching && !windowView) void navigate(draft ?? '') }}>
+      <button type="button" className="browser-icon" aria-label="Back" disabled={!nav.back || watching || windowView} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'back' })}><ArrowLeft size={17} /></button>
+      <button type="button" className="browser-icon" aria-label="Forward" disabled={!nav.forward || watching || windowView} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'forward' })}><ArrowRight size={17} /></button>
+      <button type="button" className="browser-icon" aria-label="Reload" disabled={!tab || watching || windowView} onClick={() => tab && void act('browser/history', { tab: tab.id, action: 'reload' })}><RotateCw size={16} /></button>
+      <input ref={urlRef} className="browser-url" aria-label="Address" readOnly={watching} disabled={windowView} placeholder="Address or port, like 8765" spellCheck={false} autoCapitalize="off" autoCorrect="off" enterKeyHint="go" inputMode="url"
         value={draft ?? shown(tab?.url ?? '')} onFocus={event => { setDraft(shown(tab?.url ?? '')); event.currentTarget.select() }} onBlur={() => setDraft(null)} onChange={event => setDraft(event.target.value)}
         onKeyDown={event => { if (event.key === 'Escape') { setDraft(null); event.currentTarget.blur() } }} />
       <div className="browser-menu-anchor" ref={deviceMenu.ref} onKeyDown={deviceMenu.onKeyDown}>
-        <button type="button" className="browser-icon" aria-label={`Device: ${presetLabel}`} title={`Device: ${presetLabel}`} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || watching} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
+        <button type="button" className="browser-icon" aria-label={`Device: ${presetLabel}`} title={`Device: ${presetLabel}`} aria-haspopup="menu" aria-expanded={deviceMenu.open} disabled={!tab || watching || windowView} onClick={() => deviceMenu.setOpen(!deviceMenu.open)}><DeviceIcon preset={tab?.preset ?? 'desktop'} /></button>
         {deviceMenu.open && <div className="browser-menu end" role="menu">
           {presets.map(item => <button key={item.id} type="button" role="menuitemradio" aria-checked={item.id === tab?.preset} autoFocus={item.id === tab?.preset} onClick={() => void setDevice(item.id)}>
             <DeviceIcon preset={item.id} /><span>{item.label}<small>{item.id === 'desktop' ? 'Fits the panel' : `${item.width} × ${item.height}`}</small></span>{item.id === tab?.preset && <Check size={16} />}
@@ -761,10 +792,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
         </div>}
       </div>
       <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>
-      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={!frame} onClick={startNotes}><PenLine size={17} /></button>
+      {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} onClick={() => changeWindowView(!windowView)}><AppWindow size={17} /></button>}
+      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={!frame || windowView} onClick={startNotes}><PenLine size={17} /></button>
     </form>}
 
-    {tab?.mode === 'saved' && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} />{signedNote(host)}</> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
+    {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
+      <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host)}</span>
+      {!windowView && <button type="button" className="browser-window-link" onClick={() => changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
+    </> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
     {tab?.mode === 'agent' && <div className="browser-agent" role="note">
       <Bot size={14} aria-hidden="true" />
       <span>{watching ? `${owner ?? 'An agent'} uses this tab. You watch.` : `You control this tab. ${owner ?? 'The agent'} can still act.`}</span>
@@ -781,7 +816,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {!frame && tab && <p className="browser-wait"><span><Spinner /> {live ? 'Loading the page…' : 'Connecting…'}</span></p>}
+      {!frame && (tab || windowView) && <p className="browser-wait"><span><Spinner /> {live ? windowView ? 'Loading the Chrome window…' : 'Loading the page…' : 'Connecting…'}</span></p>}
       <textarea ref={keysRef} className="browser-keys" aria-label="Keys for the page. Press Escape twice to leave." defaultValue={SENTINEL} autoCapitalize="off" autoCorrect="off" spellCheck={false}
         onFocus={() => setTyping(true)} onBlur={() => { setTyping(false); const events = releases(); if (events.length) push(...events) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}
         onInput={event => { if (!(event.nativeEvent as InputEvent).isComposing) syncText() }} onCompositionEnd={syncText}

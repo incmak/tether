@@ -67,7 +67,7 @@ def ack(sid, seq):
         flow.ack(seq)
     return {'ok': True}
 POST_NAMES = {'ack', 'new', 'close', 'navigate', 'history', 'input', 'device', 'agents', 'agents/setup', 'ask/dismiss',
-              'signed/allow', 'signed/deny', 'signed/end', 'signed/dismiss'}
+              'signed/allow', 'signed/deny', 'signed/end', 'signed/dismiss', 'window/input'}
 
 
 def handles(path):
@@ -103,6 +103,8 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             if 'sid' in query:
                 css['sid'] = query['sid'][0]
             stream(handler, the_browser, query.get('tab', [''])[0], _int(query, 'w', 1280), _int(query, 'h', 800), browser_id, **css)
+        elif name == 'window':
+            window(handler, the_browser, _int(query, 'w', 1280), _int(query, 'h', 800), query.get('sid', [None])[0])
         elif name == 'live':
             css = {'css_size': (_int(query, 'cssw', 0), _int(query, 'cssh', 0))} if 'cssw' in query or 'cssh' in query else {}
             browser_live.serve(handler, the_browser, query.get('tab', [''])[0], _int(query, 'w', 1280),
@@ -142,6 +144,9 @@ def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_brows
         tab = body.get('tab')
         if name == 'ack':
             handler.respond(200, ack(body.get('sid'), body.get('seq')))
+            return
+        if name == 'window/input':
+            handler.respond(200, _tag(the_browser.window_input(body.get('events')), browser_id))
             return
         if name.startswith('signed/'):
             proxy = the_proxy or browser_cdp.PROXY
@@ -215,6 +220,8 @@ def _tag(result, browser_id):
 
 
 def _user_only(browser_id, name):
+    if name in ('window', 'window/input') and browser_id != 'signed':
+        raise ValueError('The whole-window view is only for the signed-in browser.')
     if browser_id in ('signed', 'chrome') and name in ('agents', 'agents/setup', 'ask/dismiss'):
         raise ValueError('Agents cannot access the signed-in browser.')
 
@@ -340,6 +347,66 @@ def stream(handler, the_browser, target, width, height, browser_id='test', css_s
                 if FLOWS.get(sid) is flow:
                     del FLOWS[sid]
         the_browser.unwatch(tab, (width, height), css_size)
+
+
+def window(handler, the_browser, width, height, sid=None):
+    """User-only display capture. Metadata stays in display pixels even when the JPEG is scaled."""
+    if not the_browser.signed:
+        raise ValueError('The whole-window view is only for the signed-in browser.')
+    if sid is not None and not SID.fullmatch(sid):
+        raise ValueError('Invalid stream id.')
+    the_browser.window_watch(width, height)
+    flow = None
+    try:
+        handler.send_response(200)
+        for name, value in (('Content-Type', 'text/event-stream; charset=utf-8'), ('Cache-Control', 'no-store'),
+                            ('X-Accel-Buffering', 'no'), ('X-Content-Type-Options', 'nosniff'), ('Connection', 'close')):
+            handler.send_header(name, value)
+        handler.end_headers()
+        handler.close_connection = True
+        handler.wfile.write(b'retry: 1500\n\n')
+        handler.wfile.flush()
+        if sid is not None:
+            flow = Flow()
+            with FLOWS_LOCK:
+                FLOWS[sid] = flow
+        started = wrote = next_frame = time.monotonic()
+        seen, last_jpeg = 0, None
+        while time.monotonic() - started < STREAM_LIFETIME:
+            time.sleep(max(0, next_frame - time.monotonic()))
+            if flow:
+                flow.wait_room(ACK_WAIT)
+            frame = the_browser.display.wait_frame(seen, 1.0)
+            if frame:
+                seen, _, _, jpeg = frame
+                if jpeg != last_jpeg:
+                    data = {'seq': seen, 'width': the_browser.display.size[0], 'height': the_browser.display.size[1],
+                            'top': 0, 'browser': 'signed', 'window': True, 'jpeg': jpeg}
+                    if flow:
+                        flow.sending(seen)
+                    handler.wfile.write(('event: frame\ndata: ' + json.dumps(data) + '\n\n').encode())
+                    next_frame = time.monotonic() + 0.1
+                    last_jpeg, wrote = jpeg, time.monotonic()
+            if time.monotonic() - wrote >= KEEPALIVE:
+                handler.wfile.write(b'event: idle\ndata: {"browser":"signed"}\n\n')
+                wrote = time.monotonic()
+            handler.wfile.flush()
+            the_browser.touch()
+    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+        return
+    except RuntimeError as exc:
+        # Headers are already sent: keep capture failures inside the SSE protocol.
+        try:
+            handler.wfile.write(('event: error\ndata: ' + json.dumps({'error': str(exc)}) + '\n\n').encode())
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass
+    finally:
+        if flow:
+            with FLOWS_LOCK:
+                if FLOWS.get(sid) is flow:
+                    del FLOWS[sid]
+        the_browser.window_unwatch()
 
 
 def _int(query, key, default):

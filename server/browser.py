@@ -298,7 +298,7 @@ def launch(chrome, profile, extra=(), *, headed=False, env=None):
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     for folder in (profile.parent, profile):  # mkdir's mode does not apply to folders that already exist
         folder.chmod(0o700)
-    args = [chrome, *(['--disable-blink-features=AutomationControlled'] if headed else ['--headless=new']),
+    args = [chrome, *(['--disable-blink-features=AutomationControlled', '--window-position=0,0'] if headed else ['--headless=new']),
             '--remote-debugging-pipe', '--user-data-dir=' + str(profile),
             '--no-first-run', '--no-default-browser-check', '--disable-sync', '--mute-audio', '--password-store=basic',
             '--window-size=%d,%d' % DESKTOP, '--force-device-scale-factor=2', *extra, 'about:blank']
@@ -708,6 +708,36 @@ class Browser:
         return {'ok': True}
 
     # screencast ------------------------------------------------------------------------------------------------
+    def window_watch(self, width, height):
+        if not self.signed:
+            raise BrowserError('The whole-window view is only for the signed-in browser.')
+        with self.lock:
+            self.ensure()
+            try:
+                return self.display.watch(width, height)
+            except RuntimeError as exc:
+                raise BrowserError(str(exc)) from exc
+
+    def window_unwatch(self):
+        if not self.signed:
+            raise BrowserError('The whole-window view is only for the signed-in browser.')
+        with self.lock:  # no ensure(): a closing stream must never start Chrome again
+            try:
+                return self.display.unwatch()
+            except RuntimeError as exc:
+                raise BrowserError(str(exc)) from exc
+
+    def window_input(self, events):
+        if not self.signed:
+            raise BrowserError('The whole-window view is only for the signed-in browser.')
+        with self.lock:
+            self.ensure()
+            self.touch()
+            try:
+                return self.display.input(events)
+            except RuntimeError as exc:
+                raise BrowserError(str(exc)) from exc
+
     def watch(self, target, max_width, max_height, css_size=None):
         """Register a viewer; start the screencast when it is the first. Returns the Tab."""
         self.ensure()

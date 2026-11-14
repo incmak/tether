@@ -4,6 +4,15 @@
 .browser-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .browser-switch > svg:last-child { color: var(--muted); }
 .browser-menu button:disabled { opacity: .55; cursor: not-allowed; }
+.browser-signed .browser-saved { flex-wrap: wrap; }
+.browser-signed .browser-saved > svg { flex: none; }
+.browser-signed .browser-saved > span { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.browser-window-link { min-height: 24px !important; padding: 2px 0; color: var(--accent); text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+@container (max-width: 420px) {
+  /* Keep every toolbar control reachable at 320px, including the touch keyboard. */
+  .browser-signed .browser-bar { flex-wrap: wrap; }
+  .browser-signed .browser-bar > .browser-url { flex-basis: calc(100% - 144px); }
+}
 
 /* Mac Chrome with no tab: pairing and paired Macs (MacPairing.tsx). */
 .mac-pairing { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 28px 16px; text-align: center; }
