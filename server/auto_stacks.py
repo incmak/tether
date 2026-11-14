@@ -15,14 +15,18 @@ import paths
 
 ROLE_PREFIX = re.compile(r'^(?:advisor(?: 2)?|review|reviewer)\s*:\s*', re.I)
 SENTENCE = re.compile(r'[.?!;:,]\s|[?!]$')
-WORDS = 4
+WORDS = 3
+# A title that starts with one of these, or speaks to "you", is a request ("Can you fix this"), not a goal name.
+REQUEST = frozenset('can could would will should shall please pls how what why when where who which is are am do does '
+                    'did i i\'m im we let\'s lets hey hi hello help ok okay yes no thanks'.split())
+SPEAKER = frozenset('you your you\'re yourself u'.split())
 CHARACTERS = 32
 FALLBACK_GOAL = 'Work'
 FALLBACK_TASK = 'Task'
 
 
 def short_name(text):
-    """A clean stack name from a title, or None: 1 to 4 words, no cut-off ("…") or sentence. A slug ("desktop-nav",
+    """A clean stack name from a title, or None: 1 to 3 words, no cut-off ("…"), sentence or request. A slug ("desktop-nav",
     "feature/tab-icons") reads as words ("Desktop nav", "Tab icons"). The first letter is upper case."""
     if not isinstance(text, str):
         return None
@@ -32,7 +36,10 @@ def short_name(text):
     if ' ' not in text:
         text = ' '.join(part for part in re.split(r'[-_]+', text.rsplit('/', 1)[-1]) if part)
     text = text.rstrip('.').strip()
-    if not text or len(text.split()) > WORDS or len(text) > CHARACTERS:
+    words = text.lower().split()
+    if not words or len(words) > WORDS or len(text) > CHARACTERS:
+        return None
+    if words[0] in REQUEST or SPEAKER.intersection(words):
         return None
     if any(ord(char) < 32 or char == '\x7f' for char in text):
         return None

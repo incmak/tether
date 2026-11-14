@@ -85,42 +85,64 @@ def _start_group(body, caller, run, *, folder='', branch=None):
     """Yield the group id for a new tab ("" = Unstacked), under the auto stack rules (auto_stacks.py). It may make a
     group and move the caller into it; when the start fails, the caller goes back and an empty new group goes away.
     branch: the --worktree branch of a separate task."""
-    made, moved = None, False
+    state = {'made': None, 'moved': None}  # moved: the group id the caller moved into
     with groups.LOCK():
-        session_id, current = groups.group_of_pane(caller['id'], run)
-        if 'group' in body:
-            found = next((g for g in groups.read(session_id, run)
-                          if g['name'].lower() == groups.clean_name(body['group']).lower()), None)
-            group = groups.find_or_create(session_id, body['group'], run)
-            made = group if group is not None and found is None else None
-            if group is not None and current is None and branch is None:
-                moved = groups.auto_move(session_id, caller['id'], group['id'], run)
-            group_id = group['id'] if group is not None else ''
-        elif branch is not None:
-            name = auto_stacks.task_name(body, branch, delegate.task_name(body.get('message') or ''))
-            made = groups.create_unique(session_id, name, run)
-            group_id = made['id']
-        elif current is not None:
-            group_id = current['id']
-        elif groups.placed_by_user(caller['id'], run):
-            group_id = ''
-        else:
-            made = groups.create_unique(session_id, auto_stacks.goal_name(caller, folder), run)
-            moved = groups.auto_move(session_id, caller['id'], made['id'], run)
-            group_id = made['id']
+        try:
+            session_id, current = groups.group_of_pane(caller['id'], run)
+            group_id = _pick_group(body, caller, run, session_id, current, folder, branch, state)
+        except BaseException:
+            _undo_group(caller, run, state)
+            raise
     try:
         yield group_id
     except BaseException:
         with groups.LOCK():
-            try:
-                if moved:
-                    groups.move(session_id, caller['id'], '', run)
-                if made is not None:
-                    groups.remove(session_id, made['id'], run)
-            except (groups.GroupError, OSError, subprocess.SubprocessError):
-                pass  # the start error is the one to report
+            _undo_group(caller, run, state)
         raise
 
+
+def _pick_group(body, caller, run, session_id, current, folder, branch, state):
+    if 'group' in body:
+        found = next((g for g in groups.read(session_id, run)
+                      if g['name'].lower() == groups.clean_name(body['group']).lower()), None)
+        group = groups.find_or_create(session_id, body['group'], run)
+        if group is None:
+            return ''
+        state['made'] = (session_id, group['id']) if found is None else None
+        if current is None and branch is None and groups.auto_move(session_id, caller['id'], group['id'], run):
+            state['moved'] = (session_id, group['id'])
+        return group['id']
+    if branch is not None:
+        name = auto_stacks.task_name(body, branch, delegate.task_name(body.get('message') or ''))
+        made = groups.create_unique(session_id, name, run)
+        state['made'] = (session_id, made['id'])
+        return made['id']
+    if current is not None:
+        return current['id']
+    if groups.placed_by_user(caller['id'], run):
+        return ''
+    made = groups.create_unique(session_id, auto_stacks.goal_name(caller, folder), run)
+    state['made'] = (session_id, made['id'])
+    if groups.auto_move(session_id, caller['id'], made['id'], run):
+        state['moved'] = (session_id, made['id'])
+    return made['id']
+
+
+def _undo_group(caller, run, state):
+    """After a failed start: move the caller out of the group Tether moved it into, unless the user has moved it since,
+    then drop the group Tether made if it is empty. Errors are ignored: the start error is the one to report."""
+    try:
+        if state['moved'] is not None and not groups.placed_by_user(caller['id'], run):
+            session_id, group = groups.group_of_pane(caller['id'], run)
+            if group is not None and (session_id, group['id']) == state['moved']:
+                groups.move(session_id, caller['id'], '', run)
+    except (groups.GroupError, OSError, subprocess.SubprocessError):
+        pass
+    try:
+        if state['made'] is not None:
+            groups.remove(*state['made'], run)
+    except (groups.GroupError, OSError, subprocess.SubprocessError):
+        pass
 
 def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
     credential = handler.headers.get('X-Tether-Hook', '')

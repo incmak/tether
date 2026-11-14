@@ -92,7 +92,9 @@ class AutoNameTests(unittest.TestCase):
                  'Automation tether . Can we have…': None, 'you know all my work and…': None,
                  'There are 2 issues. I will paste': None, 'can you check this?': None,
                  'Root - Edgar submission live integration': None, '': None, None: None, 'a\x07b': None,
-                 'Release.': 'Release', 'x' * 33: None}
+                 'Release.': 'Release', 'x' * 33: None, 'Can you fix this': None, 'Fix this for you': None,
+                 'please add search': None, 'Fix login bug': 'Fix login bug', 'Desktop back nav fix': None,
+                 'feature/fix-tab-icon-order': None}
         for text, expected in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(auto_stacks.short_name(text), expected)
@@ -103,6 +105,7 @@ class AutoNameTests(unittest.TestCase):
         self.assertEqual(auto_stacks.goal_name({'pane_name': 'lets add search sort and other…', 'worktree': 'search-sort'},
                                                '/x/y'), 'Search sort')
         self.assertEqual(auto_stacks.goal_name({'pane_name': 'fix this please, now…'}, '/srv/apps/brisk-tag'), 'Brisk tag')
+        self.assertEqual(auto_stacks.goal_name({'pane_name': 'Can you fix this'}, '/srv/project'), 'Project')
         self.assertEqual(auto_stacks.goal_name({}, home), 'Work')
         self.assertEqual(auto_stacks.goal_name({}, ''), 'Work')
 
@@ -447,6 +450,23 @@ class TmuxTests(Bundles):
         with self.assertRaises(RuntimeError):
             with agent_tabs._start_group({'group': 'Docs'}, caller, self.run_tmux):
                 raise RuntimeError('launch failed')
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
+
+    def test_rollback_keeps_a_move_the_user_made_during_launch(self):
+        caller = {'id': self.a1, 'pane_name': 'Docs'}
+        mine = groups.create(self.a, 'User choice', self.run_tmux)
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({}, caller, self.run_tmux):
+                groups.move(self.a, self.a1, mine['id'], self.run_tmux, by_user=True)
+                raise RuntimeError('launch failed')
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['User choice'], mine['id']))
+
+    def test_setup_failure_removes_the_new_stack(self):
+        caller = {'id': self.a1, 'pane_name': 'Docs'}
+        with mock.patch.object(groups, 'auto_move', side_effect=groups.GroupError(404, 'gone')):
+            with self.assertRaises(groups.GroupError):
+                with agent_tabs._start_group({}, caller, self.run_tmux):
+                    self.fail('setup failed, so no start')
         self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
 
     def test_free_name_numbers_taken_and_reserved_names(self):
