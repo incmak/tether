@@ -287,11 +287,24 @@ class Attention:
             self.digest['sent'] = today
             self._save()
         asks = self.waiting()
-        if not asks:
+        review_count = 0
+        try:
+            import lessons
+            review = lessons.review(now=now.timestamp())
+            if review['due']:
+                review_count = review['total'] if review['reason'] == 'time' else review['new'] + review['disputed']
+        except Exception:  # A lesson review must not stop the existing digest.
+            pass
+        if not asks and not review_count:
             return None
-        oldest = age_text(max(0, self.clock() - asks[0]['since']))
-        count = len(asks)
-        body = f'{count} tab{"s" if count != 1 else ""} wait{"" if count != 1 else "s"} on you, oldest {oldest}.'
+        if asks:
+            oldest = age_text(max(0, self.clock() - asks[0]['since']))
+            count = len(asks)
+            body = f'{count} tab{"s" if count != 1 else ""} wait{"" if count != 1 else "s"} on you, oldest {oldest}.'
+            if review_count:
+                body += f' {review_count} lesson{"s" if review_count != 1 else ""} to review.'
+        else:
+            body = f'Lessons to review: {review_count}.'
         return {'title': 'Waiting on you', 'body': body, 'tag': 'tether-attention', 'priority': 'important',
                 'silent': False, 'url': '/chat/?go=attention'}
 

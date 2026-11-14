@@ -25,7 +25,16 @@ let autonomy = { levels, global: 2, level: 2, source: 'global', project: null, r
   catalog: {
     claude: { latest: { launch: 'fable', slug: 'claude-fable-5-2', name: 'Fable 5.2' }, models: [{ slug: 'claude-fable-5-2', name: 'Fable 5.2', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { slug: 'claude-mythos-5-2', name: 'Mythos 5.2', family: 'mythos', available: false, access: 'no-access', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }, { slug: 'claude-opus-5-5', name: 'Opus 5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] }], new_families: [], source: 'claude-code', changed: { from: 'Fable 5.1', to: 'Fable 5.2', at: now - 3600 } },
     codex: { latest: { launch: 'gpt-6.1-sol', slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' }, models: [{ slug: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }, { slug: 'gpt-6-luna', name: 'GPT-6 Luna', efforts: ['low', 'medium'] }], new_families: [], source: 'codex', changed: null } },
-  learning: { enabled: true, global: [{ id: 'aaaa1111', text: 'When you change UI, check it at 390 px before you report done.', kind: 'avoid', source: 'user', agent: 'codex', hits: 3, created: now - 86400 * 3, last_hit: now - 3600, stuck: true }] } }
+  learning: { enabled: true, global: [{ id: 'aaaa1111', text: 'When you change UI, check it at 390 px before you report done.', kind: 'avoid', source: 'user', agent: 'codex', hits: 3, created: now - 86400 * 3, last_hit: now - 3600, stuck: true, status: 'confirmed' }],
+    review: { due: true, reason: 'disputed', new: 1, disputed: 1, total: 3 } } }
+const disputedLesson = { id: 'bbbb2222', text: 'When a test is slow, skip it in CI and report done.', kind: 'keep', source: 'user', agent: 'claude', hits: 1, created: now - 86400 * 5, last_hit: now - 86400 * 5,
+  status: 'trial', quote: 'perfect, just skip that slow test', tab: 'Build fix', disputes: [{ pane: '%12', reason: 'The CI docs say skipped tests hide failures; the project rule asks for all tests.', at: now - 600 }], disputed: true, project: 'e89e1e21b318', project_name: 'Tether',
+  flags: [{ type: 'conflict', with: 'cccc3333' }] }
+const staleLesson = { id: 'cccc3333', text: 'When a test is slow, run it in CI and do not skip it.', kind: 'avoid', source: 'user', agent: 'codex', hits: 1, created: now - 86400 * 40, last_hit: now - 86400 * 40,
+  status: 'trial', quote: 'never skip tests', tab: 'Tests', disputes: [], disputed: false, project: 'e89e1e21b318', project_name: 'Tether', flags: [{ type: 'conflict', with: 'bbbb2222' }] }
+let reviewFail = false
+let reviewState = { due: true, reason: 'disputed', new: 1, disputed: 1, total: 3, last_review: now - 86400 * 20, snoozed_until: 0,
+  groups: [{ key: 'disputed', lessons: [disputedLesson] }, { key: 'stale', lessons: [staleLesson] }, { key: 'other', lessons: [{ ...autonomy.learning.global[0], project: null, project_name: null, flags: [] }] }] }
 const fixture = {
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
@@ -105,7 +114,10 @@ async function main() {
             if (body.action === 'ping') setup = { ...setup, ping: { ...setup.ping, state: 'on', preset: body.preset, fields: body.fields, base_url: body.base_url } }
             return route.fulfill({ json: body.action === 'ping-test' ? { ...setup, test: { ok: true, code: 0, detail: '' } } : setup })
           }
+          if (endpoint === 'autonomy/review') { reviewState = { ...reviewState, due: false }; return route.fulfill({ json: reviewState }) }
           if (endpoint === 'autonomy/lessons') {
+            const kept = body.keep || body.keep_global
+            if (kept) reviewState = { ...reviewState, groups: reviewState.groups.map(group => ({ ...group, lessons: group.lessons.map(item => item.id === kept ? { ...item, status: 'confirmed', disputes: [], disputed: false } : item) })) }
             const learning = { ...autonomy.learning, ...(typeof body.enabled === 'boolean' ? { enabled: body.enabled } : {}), global: autonomy.learning.global.filter(item => item.id !== body.remove_global) }
             autonomy = { ...autonomy, learning }; return route.fulfill({ json: autonomy })
           }
@@ -115,6 +127,7 @@ async function main() {
         }
         if (endpoint === 'autonomy/setup') return route.fulfill({ json: setup })
         if (endpoint === 'passkeys') return route.fulfill({ json: { passkeys: keys, here: keys.length } })
+        if (endpoint === 'autonomy/review') return reviewFail ? route.fulfill({ status: 500, json: { error: 'Tether could not read the lessons.' } }) : route.fulfill({ json: reviewState })
         if (endpoint.startsWith('autonomy')) return route.fulfill({ json: autonomy })
         if (endpoint.startsWith('codex-level')) return route.fulfill({ json: { level: 0, global: 0, levels: [], project: null, models: [] } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
@@ -318,10 +331,49 @@ async function main() {
       check(`${at} switch posts enabled false`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.enabled === false))
       await learnSwitch.click()
       await page.waitForTimeout(300)
+      reviewState = { ...reviewState, due: true }
+      await page.getByRole('button', { name: 'Review', exact: true }).click()
+      const reviewSheet = page.getByRole('dialog', { name: 'Review lessons' })
+      await reviewSheet.waitFor()
+      await reviewSheet.getByText('Questioned by an agent').waitFor()
+      check(`${at} review shows the reason`, await reviewSheet.getByText('An agent questioned a lesson.').isVisible())
+      check(`${at} review groups: disputed, stale, other`, await reviewSheet.getByRole('heading', { name: /Seen once, not repeated in 30 days/ }).isVisible() && await reviewSheet.getByRole('heading', { name: /Other lessons/ }).isVisible())
+      check(`${at} review shows the agent reason and your words`, await reviewSheet.getByText(/skipped tests hide failures/).isVisible() && await reviewSheet.getByText('You said: “perfect, just skip that slow test”').isVisible())
+      check(`${at} review flags a possible conflict`, await reviewSheet.getByText(/^May conflict with/).first().isVisible())
+      check(`${at} review offers snooze when due`, await reviewSheet.getByRole('button', { name: 'Remind me in 3 days' }).isVisible())
+      check(`${at} no overflow in the review`, await reviewSheet.evaluate(sheet => [...sheet.querySelectorAll('*')].every(node => node.scrollWidth <= node.clientWidth + 1 || getComputedStyle(node).overflowX !== 'visible' || node.getBoundingClientRect().right <= sheet.getBoundingClientRect().right + 1)))
+      await page.screenshot({ path: path.join(SHOTS, `lessons-review-${width}.png`) })
+      mark0 = posts.length
+      await reviewSheet.getByRole('button', { name: 'Keep' }).first().click()
+      await reviewSheet.getByText('Kept').waitFor()
+      check(`${at} keep posts project and id`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.keep === 'bbbb2222' && post.body.project === 'e89e1e21b318'))
+      // An agent questions the kept lesson again and the next load fails: the error stays with a retry, and the lesson
+      // offers Keep again instead of the stale "Kept".
+      reviewState = { ...reviewState, groups: reviewState.groups.map(group => ({ ...group, lessons: group.lessons.map(item => item.id === 'bbbb2222' ? disputedLesson : item) })) }
+      reviewFail = true
+      await reviewSheet.getByRole('button', { name: `Remove the lesson: ${staleLesson.text}` }).click()
+      await reviewSheet.getByRole('alert').waitFor()
+      check(`${at} review keeps a failed reload visible`, (await reviewSheet.getByRole('alert').innerText()).includes('could not read the lessons'))
+      reviewFail = false
+      await reviewSheet.getByRole('button', { name: 'Try again' }).click()
+      await reviewSheet.getByRole('alert').waitFor({ state: 'detached' })
+      check(`${at} a questioned lesson offers Keep again`, await reviewSheet.getByRole('button', { name: 'Keep' }).first().isVisible() && !(await reviewSheet.getByText('Kept').isVisible()))
+      await reviewSheet.getByRole('button', { name: 'Finish review' }).click()
+      await reviewSheet.waitFor({ state: 'hidden' })
+      check(`${at} finish posts done`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/review' && post.body.action === 'done'))
       const calls = await page.evaluate(() => window.__webauthn)
       check(`${at} every passkey call asks for user verification with byte challenges`, calls.length >= 4 && calls.every(call => call.uv === 'required' && call.challenge === 32 && call.ids.every(Boolean)), JSON.stringify(calls))
       await page.keyboard.press('Escape').catch(() => {})
     }
+    // The digest link (?go=attention) opens the lesson review when no tab waits.
+    const sessions = fixture.sessions
+    fixture.sessions = { sessions: [], default_thread: 't1' }
+    reviewState = { ...reviewState, due: true }
+    await page.goto(`${origin}/chat/?go=attention`, { waitUntil: 'load' })
+    const fromDigest = page.getByRole('dialog', { name: 'Review lessons' })
+    await fromDigest.waitFor({ timeout: 5000 }).catch(() => {})
+    check('digest link opens the lesson review', await fromDigest.isVisible())
+    fixture.sessions = sessions
     check('no unmocked requests', !unexpected.size, [...unexpected].join(', '))
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {

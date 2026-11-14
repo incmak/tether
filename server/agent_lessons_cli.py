@@ -6,7 +6,6 @@ import re
 import subprocess
 import sys
 
-import codex_level
 import lessons
 import paths
 
@@ -25,9 +24,13 @@ def arguments(argv):
     kind.add_argument('--keep', dest='kind', action='store_const', const='keep')
     add.add_argument('--source', choices=('user', 'reviewer'), default='user')
     add.add_argument('--new', dest='force_new', action='store_true')
+    add.add_argument('--quote', default='')
     add.add_argument('text')
     for action in ('reinforce', 'propose-global'):
         actions.add_parser(action).add_argument('id')
+    dispute = actions.add_parser('dispute')
+    dispute.add_argument('id')
+    dispute.add_argument('reason')
     actions.add_parser('list')
     return parser.parse_args(argv)
 
@@ -48,13 +51,17 @@ def context():
     lessons.path(pid)
     command = shown('#{pane_current_command}').lower()
     agent = command if command in ('claude', 'codex') else ''
-    return pid, agent
+    try:
+        tab = shown('#{@chat_name}')
+    except (ValueError, OSError, subprocess.SubprocessError):
+        tab = ''
+    return pid, agent, pane, tab
 
 
 def main(argv=None):
     try:
         args = arguments(argv)
-        pid, agent = context()
+        pid, agent, pane, tab = context()
         if not lessons.enabled():
             print(json.dumps({'status': 'off'}))
             return 8
@@ -62,15 +69,21 @@ def main(argv=None):
             result = {'lessons': lessons.entries(pid)}
         elif args.action == 'add':
             text = sys.stdin.read() if args.text == '-' else args.text
-            result = lessons.add(pid, text, args.kind, args.source, agent, args.force_new)
+            result = lessons.add(pid, text, args.kind, args.source, agent, args.force_new,
+                                 quote=args.quote, tab=tab, pane=pane)
         else:
             if not re.fullmatch(r'[0-9a-f]{8}', args.id):
                 raise ValueError('Choose a lesson ID.')
-            row = (lessons.reinforce(pid, args.id) if args.action == 'reinforce'
-                   else lessons.propose_global(pid, args.id))
+            if args.action == 'reinforce':
+                row = lessons.reinforce(pid, args.id, pane=pane)
+            elif args.action == 'dispute':
+                row = lessons.dispute(pid, args.id, pane, args.reason)
+            else:
+                row = lessons.propose_global(pid, args.id)
             if row is None:
                 raise ValueError('That lesson is gone.')
-            result = {'status': 'reinforced' if args.action == 'reinforce' else 'proposed', 'lesson': row}
+            status = {'reinforce': 'reinforced', 'dispute': 'disputed', 'propose-global': 'proposed'}[args.action]
+            result = {'status': status, 'lesson': row}
         print(json.dumps(result))
         return 9 if result.get('status') == 'similar' else 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

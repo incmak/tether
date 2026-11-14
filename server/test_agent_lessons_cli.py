@@ -24,7 +24,7 @@ class Cli(unittest.TestCase):
             self.enterContext(patch.object(paths, name, root / name.lower()))
         (paths.TETHER / 'projects' / PID).mkdir(parents=True)
         self.enterContext(patch.dict(os.environ, TMUX_PANE='%7'))
-        self.values = {'#{@project}': PID, '#{@tether_helper}': '', '#{pane_current_command}': 'codex'}
+        self.values = {'#{@project}': PID, '#{@tether_helper}': '', '#{pane_current_command}': 'codex', '#{@chat_name}': 'Review'}
         self.run = self.enterContext(patch.object(cli.subprocess, 'run', side_effect=self.process))
 
     def process(self, command, **options):
@@ -76,3 +76,33 @@ class Cli(unittest.TestCase):
         for error in (OSError('missing'), subprocess.TimeoutExpired('tmux', 5)):
             self.run.side_effect = error
             self.assertEqual(self.invoke(['list'])[0], 2)
+
+    def test_quote_tab_pane_dispute_and_independent_reinforcement(self):
+        args = ['add', '--avoid', '--quote', '-', 'When tests fail, inspect the exact error.']
+        code, result = self.invoke(args)
+        row = result['lesson']
+        self.assertEqual((code, row['quote'], row['tab'], row['first_pane']), (0, '-', 'Review', '%7'))
+        identifier = row['id']
+        self.assertEqual(self.invoke(['reinforce', identifier])[1]['lesson']['status'], 'trial')
+        self.assertEqual(self.invoke(['dispute', identifier, 'Tests show a different result.'])[1]['status'], 'disputed')
+        self.assertEqual(self.invoke(['dispute', identifier, 'Another reason.']),
+                         (2, {'error': 'This tab already disputed this lesson.'}))
+        with patch.object(cli, 'context', return_value=(PID, 'codex', '%8', 'Other tab')):
+            self.assertEqual(self.invoke(['reinforce', identifier])[1]['lesson']['status'], 'confirmed')
+        self.assertTrue(lessons.entries(PID)[0]['disputed'])
+
+    def test_helper_refuses_every_write(self):
+        self.values['#{@tether_helper}'] = 'review'
+        for args in (['add', '--keep', 'When tests pass, keep the output.'], ['reinforce', 'abcd1234'],
+                     ['propose-global', 'abcd1234'], ['dispute', 'abcd1234', 'Evidence differs.']):
+            self.assertEqual(self.invoke(args), (2, {'error': 'Helper tabs cannot record lessons.'}))
+        self.assertFalse(lessons.path(PID).exists())
+
+    def test_missing_tab_name_falls_back_to_empty(self):
+        def unnamed(command, **options):
+            if command[-1] == '#{@chat_name}':
+                return SimpleNamespace(returncode=1, stdout='')
+            return self.process(command, **options)
+        self.run.side_effect = unnamed
+        row = self.invoke(['add', '--keep', 'When checks pass, keep the output.'])[1]['lesson']
+        self.assertEqual(row['tab'], '')

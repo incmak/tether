@@ -1,7 +1,7 @@
 // Attention mode (server/attention.py): the sidebar "Waiting on you" box, the header "Open the oldest" button (a pill
 // with a bottom sheet on a phone), the Handled and Remind me tomorrow chips under the last reply, and the daily summary setting.
 import { useEffect, useId, useRef, useState } from 'react'
-import { ArrowDownWideNarrow, ArrowUpNarrowWide, Check, Clock, GalleryVerticalEnd, Hand, X } from 'lucide-react'
+import { ArrowDownWideNarrow, ArrowUpNarrowWide, Check, Clock, GalleryVerticalEnd, Hand, ListChecks, X } from 'lucide-react'
 import type { WaitOrder } from './prefs'
 import type { Api, Ask, Pane } from './api'
 import { errorText } from './api'
@@ -17,6 +17,9 @@ const seenText = (ask: Ask) => ask.opened ? 'Opened, not answered' : 'Not opened
 
 /** The sort of a Waiting on you list. items stay oldest first everywhere else ("Open the oldest" uses items[0]). */
 export interface WaitSort { order: WaitOrder; onOrder: (order: WaitOrder) => void }
+/** The lessons review entry: one quiet row for all projects, after the tabs. */
+export interface ReviewEntry { label: string; onOpen: () => void }
+
 export const ordered = (items: Waiting[], order: WaitOrder = 'oldest') => order === 'newest' ? [...items].reverse() : items
 
 /** The sort button: one icon that shows the current order and switches it. */
@@ -30,16 +33,16 @@ export function SortButton({ order, onOrder, className = '' }: WaitSort & { clas
 
 /** The tabs that wait on you, oldest first. limit: rows before "+N more" (0 shows all). No asks: no box.
  *  variant "list": the sidebar form, a plain section inside the session list's scroll area, one line of text per row. */
-export function WaitingBox({ items, sessions, selected, limit = 3, variant = 'box', sort, onOpen, onDeck }: { items: Waiting[]; sessions: Session[]; selected?: string; limit?: number; variant?: 'box' | 'list'; sort?: WaitSort; onOpen: (pane: Pane) => void; onDeck?: () => void }) {
+export function WaitingBox({ items, sessions, selected, limit = 3, variant = 'box', sort, review, onOpen, onDeck }: { items: Waiting[]; sessions: Session[]; selected?: string; limit?: number; variant?: 'box' | 'list'; sort?: WaitSort; review?: ReviewEntry; onOpen: (pane: Pane) => void; onDeck?: () => void }) {
   const now = useNow()
   const id = useId()
   const [all, setAll] = useState(false)
-  if (!items.length) return null
+  if (!items.length && !review) return null
   const list = variant === 'list'
   const sorted = ordered(items, sort?.order)
   const shown = limit && !all ? sorted.slice(0, limit) : sorted
   return <section className={list ? 'waiting-box waiting-list' : 'waiting-box'} aria-labelledby={id}>
-    <h2 className="waiting-title" id={id}><Hand size={list ? 13 : 14} aria-hidden="true" />Waiting on you<span className="waiting-count">{list ? '· ' : ''}{items.length}</span>{sort && <SortButton {...sort} />}{onDeck && (list
+    <h2 className="waiting-title" id={id}><Hand size={list ? 13 : 14} aria-hidden="true" />Waiting on you<span className="waiting-count">{list ? '· ' : ''}{items.length + (review ? 1 : 0)}</span>{sort && items.length > 1 && <SortButton {...sort} />}{onDeck && items.length > 0 && (list
       ? <button type="button" className="icon-button waiting-sort" aria-label="Answer one by one" title="Answer one by one" onClick={onDeck}><GalleryVerticalEnd size={15} aria-hidden="true" /></button>
       : <button type="button" className="waiting-deck-button" onClick={onDeck}>One by one</button>)}</h2>
     {shown.map(({ pane, ask }) => {
@@ -55,6 +58,11 @@ export function WaitingBox({ items, sessions, selected, limit = 3, variant = 'bo
         {!list && <span className="waiting-seen">{seen}</span>}
       </button>
     })}
+    {review && <button type="button" className="waiting-row waiting-review" title={list ? review.label : undefined} aria-label={`Review lessons: ${review.label}`} onClick={review.onOpen}>
+      <ListChecks size={14} className="waiting-review-icon" aria-hidden="true" />
+      <span className="waiting-name">Review lessons</span>
+      {!list && <span className="waiting-seen">{review.label}</span>}
+    </button>}
     {!!limit && items.length > limit && <button type="button" className="waiting-more" aria-expanded={all} onClick={() => setAll(!all)}>{all ? 'Show fewer' : `+${items.length - limit} more`}</button>}
   </section>
 }

@@ -2,7 +2,7 @@
 // right answer control: a reply box for a reply ask, or "Open tab" for a prompt that waits in the terminal
 // (approval, plan, question). It opens from the Waiting on you list, and by itself for a new urgent ask.
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, Check, CircleAlert, ExternalLink, Send, X } from 'lucide-react'
+import { ArrowRight, Check, CircleAlert, ExternalLink, ListChecks, Send, X } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { errorText } from './api'
 import { askAction } from './attention'
@@ -14,6 +14,7 @@ import { age } from './needs'
 import { useNow } from './attention'
 import { chatTitle } from './Sidebar'
 import type { Session } from './Sidebar'
+import type { ReviewEntry } from './Attention'
 import './ActionDeck.css'
 
 const KIND: Record<string, string> = { reply: 'Asks you', approval: 'Needs approval', plan: 'Plan to approve', question: 'Asks a question' }
@@ -21,7 +22,7 @@ const KIND: Record<string, string> = { reply: 'Asks you', approval: 'Needs appro
 /** Urgent asks first, then oldest first. */
 export const deckOrder = (items: Waiting[]) => [...items].sort((a, b) => Number(!!b.ask.urgent) - Number(!!a.ask.urgent) || a.ask.since - b.ask.since)
 
-export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: { api: Api; items: Waiting[]; sessions: Session[]; onOpen: (pane: Pane) => void; onClose: () => void; onUpdate: () => void }) {
+export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUpdate }: { api: Api; items: Waiting[]; sessions: Session[]; review?: ReviewEntry; onOpen: (pane: Pane) => void; onClose: () => void; onUpdate: () => void }) {
   const modal = useModal(true, onClose)
   const now = useNow()
   // The deck keeps the order it opened with, so a card does not jump while you type. New asks join at the end.
@@ -38,8 +39,11 @@ export function ActionDeck({ api, items, sessions, onOpen, onClose, onUpdate }: 
   if (!card) {
     return <dialog {...modal} className="sheet action-deck" aria-labelledby="deck-title">
       <div className="sheet-heading deck-head"><h2 id="deck-title">Waiting on you</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X size={18} /></button></div>
-      <div className="deck-empty" role="status"><Check size={22} aria-hidden="true" /><p>{status || 'Nothing waits on you.'}</p></div>
-      <div className="deck-actions"><button type="button" className="primary" onClick={onClose}>Done</button></div>
+      <div className="deck-empty" role="status"><Check size={22} aria-hidden="true" /><p>{status || 'Nothing waits on you.'}</p>
+        {review && <p className="deck-hint">Lessons are ready to review: {review.label}.</p>}</div>
+      <div className="deck-actions">
+        {review && <button type="button" className="secondary" onClick={() => { onClose(); review.onOpen() }}><ListChecks size={15} aria-hidden="true" />Review lessons</button>}
+        <button type="button" className="primary" onClick={onClose}>Done</button></div>
     </dialog>
   }
 

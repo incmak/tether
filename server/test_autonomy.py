@@ -281,8 +281,10 @@ class Hook(Base):
                              stdout='' if args[-1] == '#{@tether_helper}' else PID))
             out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/fixture', 'TMUX_PANE': '%7'}, tmux, agent='codex'))
         text = out['hookSpecificOutput']['additionalContext']
-        self.assertEqual(len(lessons.for_prompt(PID)), 8)
-        self.assertEqual([len(row['text']) for row in lessons.for_prompt(PID)], [150] * 8)
+        selected = lessons.for_prompt(PID)
+        rows = selected['confirmed'] + selected['trial']
+        self.assertEqual(len(rows), 8)
+        self.assertEqual([len(row['text']) for row in rows], [150] * 8)
         self.assertIn('Lessons from past feedback', text)
         self.assertLess(len(text), 9000)
         self.assertIn('Autonomy level 5', text)
@@ -528,7 +530,7 @@ class Http(Base):
         handler.deny = mock.Mock(return_value=False)
         handler.respond = mock.Mock()
         with mock.patch.object(autonomy, 'post') as post:
-            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons'):
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons', autonomy.PATH + '/review'):
                 handler.path = route
                 handler.headers.update({'Origin': 'http://phone.test', 'X-Codex-Mobile': '1'})
                 handler.deny.return_value = False
@@ -550,7 +552,7 @@ class Http(Base):
         handler.deny = mock.Mock(return_value=False)
         handler.respond = mock.Mock()
         with mock.patch.object(autonomy, 'get') as get:
-            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons'):
+            for route in (autonomy.PATH, autonomy.PATH + '/setup', autonomy.PATH + '/decisions', autonomy.PATH + '/lessons', autonomy.PATH + '/review'):
                 handler.path = route
                 self.assertTrue(autonomy.handles(route + '?project=' + PID))
                 handler.deny.return_value = False
@@ -639,14 +641,14 @@ class Learning(Base):
         return lessons.add(PID, text, kind, 'user', 'codex', force_new=True)['lesson']
 
     def test_every_level_learns_and_keeps_order_and_agent_memory(self):
-        self.add()
-        self.add('When checks pass, preserve the useful evidence.', 'keep')
+        avoid = self.add()
+        keep = self.add('When checks pass, preserve the useful evidence.', 'keep')
         for agent in ('claude', 'codex'):
             for level in range(6):
                 text = autonomy.rules({'level': level, 'source': 'project'}, PID, agent, prompt='wrong again?')
                 self.assertIn('Learn from feedback.', text)
-                self.assertIn('- Avoid: When checks fail', text)
-                self.assertIn('- Keep doing: When checks pass', text)
+                self.assertIn(f'- Avoid ({avoid["id"]}): When checks fail', text)
+                self.assertIn(f'- Keep doing ({keep["id"]}): When checks pass', text)
                 self.assertEqual('Do this as well as your own memory.' in text, agent == 'claude')
                 needles = [autonomy.RULES[level], 'Learn from feedback.', 'This message may correct',
                            autonomy.LESSONS, autonomy.SAFETY, autonomy.LAST]
@@ -686,9 +688,10 @@ class Learning(Base):
         self.assertIn('This message may correct', out['hookSpecificOutput']['additionalContext'])
 
     def test_api_learning_keys_and_all_user_actions(self):
-        self.assertEqual(autonomy.state()['learning'], {'enabled': True, 'global': []})
+        review = {'due': False, 'reason': None, 'new': 0, 'disputed': 0, 'total': 0}
+        self.assertEqual(autonomy.state()['learning'], {'enabled': True, 'global': [], 'review': review})
         self.assertEqual(autonomy.state(PID)['learning'],
-                         {'enabled': True, 'global': [], 'lessons': [], 'path': str(lessons.path(PID))})
+                         {'enabled': True, 'global': [], 'review': review, 'lessons': [], 'path': str(lessons.path(PID))})
         row = self.add()
         route = autonomy.PATH + '/lessons'
         self.assertTrue(autonomy.handles(route))
@@ -713,10 +716,94 @@ class Learning(Base):
             autonomy.post(handler)
             self.assertEqual(handler.status, 400, handler.body)
         row = self.add()
+        lessons.keep(PID, row['id'])
         lessons.promote(PID, row['id'])
         handler = Handler(route, {'remove_global': row['id']})
         autonomy.post(handler)
         self.assertEqual((handler.status, handler.body['learning']['global']), (200, []))
+
+    def test_prompt_sections_ids_disputes_and_quote_stays_private(self):
+        row = lessons.add(PID, 'When tests fail, inspect each error.', 'avoid', 'user', 'codex',
+                          quote='Only the user interface may show this quote.')['lesson']
+        rules = lambda: autonomy.rules({'level': 4, 'source': 'project'}, PID, agent='codex')
+        text = rules()
+        self.assertIn('Seen once, apply only when the situation clearly matches:', text)
+        self.assertNotIn('Confirmed:', text)
+        self.assertIn('--quote', text)
+        self.assertNotIn(row['quote'], text)
+        self.assertIn('The user can be wrong:', text)
+        self.assertIn(f'dispute ID "why"', text)
+        lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
+        text = rules()
+        self.assertNotIn(f'- Avoid ({row["id"]})', text)
+        self.assertIn(f'More lessons: {lessons.path(PID)}.', text)
+        lessons.keep(PID, row['id'])
+        self.assertIn('Confirmed:', rules())
+        lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
+        text = rules()
+        self.assertNotIn('Confirmed:', text)
+        self.assertIn(f'- Avoid ({row["id"]}): {row["text"]} (disputed)', text)
+
+    def test_keep_actions_and_one_action_rule(self):
+        row = self.add()
+        route = autonomy.PATH + '/lessons'
+        lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
+        handler = Handler(route, {'project': PID, 'keep': row['id']})
+        autonomy.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        kept = handler.body['learning']['lessons'][0]
+        self.assertEqual((kept['status'], kept['disputes']), ('confirmed', []))
+        lessons.promote(PID, row['id'])
+        handler = Handler(route, {'keep_global': row['id']})
+        autonomy.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        self.assertEqual(handler.body['learning']['global'][0]['status'], 'confirmed')
+        for body in ({'project': PID, 'keep': '00000000'}, {'keep_global': '00000000'}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body['error']), (404, 'That lesson is gone.'))
+        for body in ({'keep': row['id']}, {'project': PID, 'keep_global': row['id']},
+                     {'project': PID, 'keep': row['id'], 'remove': row['id']},
+                     {'keep_global': row['id'], 'enabled': True}, {'keep_global': []}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual(handler.status, 400, handler.body)
+
+    def test_review_route_get_done_snooze_and_bad_bodies(self):
+        route = autonomy.PATH + '/review'
+        self.assertTrue(autonomy.handles(route + '?unused=1'))
+        handler = Handler(route)
+        autonomy.get(handler)
+        self.assertEqual((handler.status, handler.body['due'], handler.body['groups']), (200, False, []))
+        row = self.add()
+        lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
+        handler = Handler(route, {'action': 'snooze'})
+        autonomy.post(handler)
+        self.assertEqual((handler.status, handler.body['due']), (200, False))
+        self.assertGreater(handler.body['snoozed_until'], handler.body['last_review'])
+        handler = Handler(route, {'action': 'done'})
+        autonomy.post(handler)
+        self.assertEqual((handler.status, handler.body['snoozed_until']), (200, 0))
+        self.assertEqual(handler.body['reason'], 'disputed')
+        for body in ({}, [], None, {'action': 'bad'}, {'action': []}, {'action': 'done', 'extra': True}):
+            handler = Handler(route, body)
+            autonomy.post(handler)
+            self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done or snooze.'}))
+        handler = Handler(route, {})
+        handler.rfile = io.BytesIO(b'{x')
+        autonomy.post(handler)
+        self.assertEqual((handler.status, handler.body), (400, {'error': 'Choose done or snooze.'}))
+
+    def test_review_summary_is_small_and_errors_do_not_break_state(self):
+        self.add()
+        summary = autonomy.state(PID)['learning']['review']
+        self.assertEqual(set(summary), {'due', 'reason', 'new', 'disputed', 'total'})
+        self.assertEqual(summary['total'], 1)
+        for error in (ValueError('bad file'), OSError('disk error'), RuntimeError('review unavailable')):
+            with mock.patch.object(lessons, 'review', side_effect=error):
+                result = autonomy.state(PID)
+                self.assertIsNone(result['learning']['review'])
+                self.assertEqual(len(result['learning']['lessons']), 1)
 
     def test_recheck_and_unavailable_reviewer(self):
         with mock.patch.object(model_catalog, 'recheck') as recheck:
@@ -740,6 +827,7 @@ class LessonApproval(PasskeyCase):
     def test_promotion_requires_bound_passkey_and_preserves_source(self):
         (paths.TETHER / 'projects' / PID).mkdir(parents=True)
         row = lessons.add(PID, 'When checks fail, read every error.', 'avoid', 'reviewer', 'codex')['lesson']
+        lessons.keep(PID, row['id'])
         payload = {'project': PID, 'promote': row['id']}
         route = autonomy.PATH + '/lessons'
         with mock.patch.object(model_catalog.shutil, 'which', return_value=None), \

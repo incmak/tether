@@ -23,8 +23,12 @@ export interface CatalogModel {
 export interface Lesson {
   id: string; text: string; kind: 'avoid' | 'keep'; source: 'user' | 'reviewer' | 'agent'; agent: string
   hits: number; created: number; last_hit: number; proposed_global?: boolean; stuck?: boolean
+  // trial: seen once, weighs less until it repeats in another tab or a day later, or the user keeps it.
+  status?: 'trial' | 'confirmed'; quote?: string; tab?: string
+  disputes?: { pane: string; reason: string; at: number }[]; disputed?: boolean
 }
-export interface Learning { enabled: boolean; global: Lesson[]; lessons?: Lesson[]; path?: string }
+export interface ReviewSummary { due: boolean; reason: 'disputed' | 'new' | 'time' | null; new: number; disputed: number; total: number }
+export interface Learning { enabled: boolean; global: Lesson[]; lessons?: Lesson[]; path?: string; review?: ReviewSummary | null }
 export interface ProviderCatalog {
   latest: { launch: string; slug: string; name: string } | null
   models: CatalogModel[]

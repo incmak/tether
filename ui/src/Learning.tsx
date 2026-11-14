@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { Globe, Pencil, Trash2 } from 'lucide-react'
+import { Check, Globe, ListChecks, Pencil, Trash2 } from 'lucide-react'
 import { Loading } from './Skeleton'
 import { errorText } from './api'
 import type { Api } from './api'
 import { withApproval } from './approval'
 import { useAutonomy } from './Autonomy'
 import type { Learning, Lesson } from './Autonomy'
+import { LessonsReview } from './LessonsReview'
+import { reviewReason } from './lessonsReview'
 
 // Learning from feedback (server: lessons.py, agent_lessons_cli.py). When the user corrects an agent, the agent writes
 // an "avoid" lesson; when the user confirms a choice, a "keep" lesson. The autonomy hook gives the best lessons to
@@ -19,8 +21,10 @@ function when(seconds: number) {
   return new Date(seconds * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 }
 
-function meta(lesson: Lesson) {
-  const parts = [SOURCE[lesson.source] ?? 'From the agent']
+function meta(lesson: Lesson, where?: string) {
+  const parts = where ? [where] : []
+  parts.push(SOURCE[lesson.source] ?? 'From the agent')
+  if (lesson.tab) parts.push(`in ${lesson.tab}`)
   if (AGENT[lesson.agent]) parts.push(`written by ${AGENT[lesson.agent]}`)
   parts.push(lesson.hits > 1 ? `${lesson.hits} times, last ${when(lesson.last_hit)}` : when(lesson.created))
   return parts.join(' · ')
@@ -33,6 +37,7 @@ export function LearningSettings({ api }: { api: Api }) {
   const [failure, setFailure] = useState('')
   const learning = data?.learning
   const [now] = useState(() => Date.now() / 1000)
+  const [review, setReview] = useState(false)
   async function send(key: string, body: Record<string, unknown>) {
     setBusy(key); setFailure('')
     try { await api('autonomy/lessons', body); await refresh() }
@@ -45,7 +50,10 @@ export function LearningSettings({ api }: { api: Api }) {
       <label className="switch-row"><span><strong>Learn from your feedback</strong>
         <small>When you correct an agent, it saves a lesson to avoid the mistake. When you confirm a choice, it saves a lesson to keep doing it. Claude and Codex get the lessons of the project with each prompt.</small></span>
         <input type="checkbox" role="switch" checked={learning.enabled} disabled={!!busy} onChange={event => void send('enabled', { enabled: event.target.checked })} /></label>
-      <p className="setting-note">Lessons are hints. They never give agents more power, and your request and the safety rules always win. Each project lists its lessons in Projects, where you can edit or remove them.</p>
+      <p className="setting-note">Lessons are hints. They never give agents more power, and your request and the safety rules always win. A lesson seen once counts less until it repeats or you keep it. When your correction conflicts with the docs or tests, the agent says so and does not save a lesson until you confirm.</p>
+      <div className="review-entry"><span><strong>Review all lessons</strong><small>{learning.review?.due ? `${reviewReason(learning.review)}. ` : ''}Tether asks you every 14 days, after 5 new lessons, or when an agent questions one.</small></span>
+        <button type="button" className={learning.review?.due ? 'primary' : 'secondary'} onClick={() => setReview(true)}><ListChecks size={15} aria-hidden="true" />Review</button></div>
+      {review && <LessonsReview api={api} onClose={() => setReview(false)} onChange={() => void refresh()} />}
       <h4 className="helper-group-title" id="lessons-global">Lessons for all projects</h4>
       {learning.global.length ? <ul className="lesson-list" aria-labelledby="lessons-global">{learning.global.map(lesson => <li key={lesson.id} className="lesson">
         <LessonText lesson={lesson} now={now} />
@@ -55,13 +63,18 @@ export function LearningSettings({ api }: { api: Api }) {
   </section>
 }
 
-function LessonText({ lesson, now }: { lesson: Lesson; now: number }) {
+export function LessonText({ lesson, now, where }: { lesson: Lesson; now: number; where?: string }) {
   const fresh = now - lesson.created < DAY
+  const trial = lesson.status === 'trial'
   return <span className="lesson-text">
     <span className="lesson-tags"><span className={`lesson-kind lesson-${lesson.kind}`}>{lesson.kind === 'avoid' ? 'Avoid' : 'Keep doing'}</span>
+      {trial && <span className="lesson-flag" title="Counts less until it repeats or you keep it">Seen once</span>}
       {fresh && <span className="lesson-flag">New</span>}
+      {lesson.disputed && <span className="lesson-flag lesson-stuck">Questioned</span>}
       {lesson.stuck && <span className="lesson-flag lesson-stuck">Did not stick</span>}</span>
-    <strong>{lesson.text}</strong><small>{meta(lesson)}</small>
+    <strong>{lesson.text}</strong>
+    {lesson.quote && <small className="lesson-quote">You said: “{lesson.quote}”</small>}
+    <small>{meta(lesson, where)}</small>
     {lesson.stuck && <small className="lesson-hint">You corrected this {lesson.hits} times. A rule in the project's AGENTS.md or CLAUDE.md is stronger than a lesson.</small>}
   </span>
 }
@@ -95,7 +108,8 @@ export function ProjectLessons({ api, project, learning, onChange }: { api: Api;
         <LessonText lesson={lesson} now={now} />
         <div className="lesson-actions">
           <button type="button" className="icon-button" aria-label={`Edit the lesson: ${lesson.text}`} disabled={!!busy} onClick={() => setEditing({ id: lesson.id, text: lesson.text })}><Pencil size={16} aria-hidden="true" /></button>
-          <button type="button" className="icon-button" aria-label={`Use in all projects: ${lesson.text}`} title="Use in all projects" disabled={!!busy} onClick={() => void send(lesson.id, { project, promote: lesson.id }, true)}><Globe size={16} aria-hidden="true" /></button>
+          {(lesson.status === 'trial' || lesson.disputed) && <button type="button" className="icon-button" aria-label={`Keep the lesson: ${lesson.text}`} title="Keep: it still holds" disabled={!!busy} onClick={() => void send(lesson.id, { project, keep: lesson.id })}><Check size={16} aria-hidden="true" /></button>}
+          <button type="button" className="icon-button" aria-label={`Use in all projects: ${lesson.text}`} title={lesson.status === 'trial' || lesson.disputed ? 'Keep the lesson first' : 'Use in all projects'} disabled={!!busy || lesson.status === 'trial' || !!lesson.disputed} onClick={() => void send(lesson.id, { project, promote: lesson.id }, true)}><Globe size={16} aria-hidden="true" /></button>
           <button type="button" className="icon-button" aria-label={`Remove the lesson: ${lesson.text}`} disabled={!!busy} onClick={() => void send(lesson.id, { project, remove: lesson.id })}><Trash2 size={16} aria-hidden="true" /></button>
         </div>
       </>}

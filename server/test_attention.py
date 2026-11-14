@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import attention
+import lessons
 
 
 class Clock:
@@ -42,6 +43,7 @@ class AttentionTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / 'attention.json'
+        self.review = self.enterContext(mock.patch.object(lessons, 'review', return_value={'due': False}))
         self.clock = Clock()
         self.on_urgent = mock.Mock()
         self.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
@@ -293,6 +295,41 @@ class AttentionTest(unittest.TestCase):
         self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15, 0)))
         with self.assertRaises(ValueError):
             self.store.set_digest(True, 24)
+
+
+    def test_digest_includes_lesson_review_with_or_without_asks(self):
+        for asks in (False, True):
+            for reason, count in (('disputed', 7), ('new', 7), ('time', 20)):
+                with self.subTest(asks=asks, reason=reason):
+                    self.store.set_digest(True, 9)
+                    self.store.digest['sent'] = None
+                    self.review.return_value = {'due': True, 'reason': reason, 'new': 5, 'disputed': 2, 'total': 20}
+                    if asks:
+                        self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
+                        self.world.observe(entry())
+                    payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5))
+                    expected = (f'1 tab waits on you, oldest 1 minutes. {count} lessons to review.' if asks
+                                else f'Lessons to review: {count}.')
+                    self.assertEqual(payload['body'], expected)
+                    self.assertEqual(payload['url'], '/chat/?go=attention')
+                    self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 15)))
+
+    def test_digest_review_count_of_one_is_singular(self):
+        self.store.set_digest(True, 9)
+        self.review.return_value = {'due': True, 'reason': 'disputed', 'new': 0, 'disputed': 1, 'total': 4}
+        self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        payload = self.store.digest_due(datetime(2026, 11, 8, 9, 5))
+        self.assertEqual(payload['body'], '1 tab waits on you, oldest 1 minutes. 1 lesson to review.')
+
+    def test_digest_review_error_keeps_previous_behavior(self):
+        self.store.set_digest(True, 9)
+        self.review.side_effect = RuntimeError('review unavailable')
+        self.assertIsNone(self.store.digest_due(datetime(2026, 11, 8, 9)))
+        self.world.turn('%1', 'Next: choose.\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        payload = self.store.digest_due(datetime(2026, 11, 9, 9))
+        self.assertEqual(payload['body'], '1 tab waits on you, oldest 1 minutes.')
 
 
 class Handler:
