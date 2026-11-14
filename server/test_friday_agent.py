@@ -58,8 +58,86 @@ class AudioPrerollTests(unittest.TestCase):
         self.assertEqual(buffer.push('late audio', 1), [])
         self.assertEqual(buffer.push('late control'), [])
 
+    def test_adaptive_target_is_clamped_and_read_only(self):
+        buffer = friday.AudioPreroll(.15, max_hold=.6)
+        buffer.set_target(10)
+        self.assertEqual(buffer.target, .6)
+        self.assertEqual(buffer.push('a', .2), [])
+        self.assertEqual(buffer.push('b', .2), [])
+        self.assertEqual(buffer.push('c', .2), ['a', 'b', 'c'])
+        buffer.set_target(-1)
+        self.assertEqual(buffer.target, .15)
+        with self.assertRaises(AttributeError):
+            buffer.target = 1
+        self.assertEqual(friday.AudioPreroll(.15, max_hold=.01).max_hold, .15)
+        self.assertEqual(friday.AudioPreroll(.15, max_hold=10).max_hold, 4)
+
+    def test_disabled_adaptation_ignores_target(self):
+        buffer = friday.AudioPreroll(.15)
+        buffer.set_target(1)
+        self.assertEqual(buffer.target, .15)
+        self.assertEqual(buffer.push('a', .15), ['a'])
+
+    def test_wait_releases_below_target_from_first_audio(self):
+        buffer = friday.AudioPreroll(.15, max_hold=1, max_wait=2)
+        buffer.set_target(1)
+        self.assertEqual(buffer.push('start', now=0), ['start'])
+        self.assertEqual(buffer.push('a', .05, now=10), [])
+        self.assertEqual(buffer.push('b', .05, now=11.9), [])
+        self.assertEqual(buffer.push('c', .05, now=12), ['a', 'b', 'c'])
+        self.assertEqual(friday.AudioPreroll(.15, max_wait=10).max_wait, 4)
+        self.assertEqual(friday.AudioPreroll(.15, max_wait=-1).max_wait, 0)
+
+    def test_wait_needs_timestamps_and_positive_limit(self):
+        for wait, first, later in ((0, 0, 10), (1, None, 10), (1, 0, None)):
+            buffer = friday.AudioPreroll(.15, max_hold=1, max_wait=wait)
+            buffer.set_target(1)
+            self.assertEqual(buffer.push('a', .05, now=first), [])
+            self.assertEqual(buffer.push('b', .05, now=later), [])
+            self.assertEqual(buffer.finish(), ['a', 'b'])
+
+    def test_adaptive_control_order_and_close(self):
+        buffer = friday.AudioPreroll(.15, max_hold=.5)
+        buffer.set_target(.5)
+        self.assertEqual(buffer.push('start'), ['start'])
+        self.assertEqual(buffer.push('a', .25), [])
+        self.assertEqual(buffer.push('control'), [])
+        self.assertEqual(buffer.push('b', .25), ['a', 'control', 'b'])
+        self.assertEqual(buffer.push('stop'), ['stop'])
+        buffer = friday.AudioPreroll(.15, max_hold=1)
+        buffer.set_target(1)
+        buffer.push('a', .2)
+        buffer.close()
+        self.assertEqual(buffer.finish(), [])
+        self.assertEqual(buffer.push('late', 1, now=10), [])
+
 
 class FridayRulesTests(unittest.TestCase):
+    def test_preroll_target_uses_slowest_available_speed(self):
+        target = friday.preroll_target
+        self.assertEqual(target(.15, 100, None, None, 0, 0), .15)
+        self.assertEqual(target(.15, 100, None, 2, .3, .1), .15)
+        self.assertAlmostEqual(target(.15, 100, None, .5, 0, 0), 3.25)
+        self.assertAlmostEqual(target(.15, 100, .1, .5, .3, 1), 7)
+        self.assertAlmostEqual(target(.15, 100, .1, .2, .3, 1), 8)
+        self.assertEqual(target(.15, 100, None, None, .299, 10), .15)
+        self.assertEqual(target(.15, 100, None, None, .3, 0), .15)
+        self.assertEqual(target(.15, 100, None, None, .3, .3), .15)
+        self.assertAlmostEqual(target(.15, 100, None, None, .3, 1), 4.55)
+        self.assertEqual(target(.15, 1, .01, 0, 0, 0), .15)
+
+    def test_preroll_env_limits_default_invalid_values(self):
+        self.assertEqual(friday.preroll_limits({}), (1.5, 2))
+        for value in ('', 'bad', '-1', 'nan', 'inf', '-inf', None):
+            with self.subTest(value=value):
+                self.assertEqual(friday.preroll_limits({
+                    'TETHER_FRIDAY_PREROLL_MAX': value,
+                    'TETHER_FRIDAY_PREROLL_WAIT': value}), (1.5, 2))
+        self.assertEqual(friday.preroll_limits({'TETHER_FRIDAY_PREROLL_MAX': '0',
+            'TETHER_FRIDAY_PREROLL_WAIT': '0'}), (0, 0))
+        self.assertEqual(friday.preroll_limits({'TETHER_FRIDAY_PREROLL_MAX': '.8',
+            'TETHER_FRIDAY_PREROLL_WAIT': '1.2'}), (.8, 1.2))
+
     def test_audio_slack_counts_late_frames_before_adding_audio(self):
         made, slack = friday.audio_slack(0, 0, 4800, 24000, 1)
         self.assertAlmostEqual(made, .1)
@@ -674,6 +752,94 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             await stream.aclose()
             with self.assertRaises(StopAsyncIteration):
                 await anext(stream)
+
+    async def test_adaptive_tts_updates_estimates_only_after_completion(self):
+        session = SimpleNamespace(turn=4, tts_ttfb=None)
+        service = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
+        self.assertIsNone(service.tts_speed)
+        self.assertIsNone(service.tts_per_char)
+        clock = [10.0]
+        audio = SimpleNamespace(audio=b'\0' * 4800, sample_rate=24000, num_channels=1)
+
+        async def source(*args):
+            for at in (10, 10.5, 11, 11.5):
+                clock[0] = at
+                yield audio
+
+        with patch.object(self.rt.PocketTTSService, 'run_tts', source), \
+                patch.dict(friday.os.environ, {'TETHER_FRIDAY_PREROLL': '.15',
+                    'TETHER_FRIDAY_PREROLL_MAX': '1.5', 'TETHER_FRIDAY_PREROLL_WAIT': '2'}), \
+                patch.object(friday.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch('builtins.print') as log:
+            output = [frame async for frame in service.run_tts('A long sentence.', 'context')]
+            self.assertEqual(output, [audio] * 4)
+            self.assertAlmostEqual(service.tts_speed, .4 / 1.5)
+            self.assertAlmostEqual(service.tts_per_char, .4 / 16)
+            data = json.loads(log.call_args.args[0][len('Friday tts '):])
+            self.assertEqual(data['speed'], .267)
+            self.assertEqual(data['hold_ms'], 150)
+            # The next sentence uses the prior estimate, then averages new data.
+            clock[0] = 9
+            output = [(clock[0], frame) async for frame in service.run_tts('Short text', 'context')]
+            self.assertEqual(output[0][0], 10.5)
+            self.assertAlmostEqual(service.tts_per_char, (.025 + .04) / 2)
+            old = (service.tts_speed, service.tts_per_char)
+            clock[0] = 9
+            stream = service.run_tts('Interrupted sentence', 'context')
+            await anext(stream)
+            await stream.aclose()
+            self.assertEqual((service.tts_speed, service.tts_per_char), old)
+
+    async def test_tts_live_target_rises_and_wall_limit_releases_audio(self):
+        for wait, release, target in ((2, 12, 1500), (.75, 11, 1400)):
+            with self.subTest(wait=wait):
+                session = SimpleNamespace(turn=4, tts_ttfb=None)
+                service = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
+                service.tts_speed, service.tts_per_char = .8, .1
+                clock = [9.0]
+                audio = SimpleNamespace(audio=b'\0' * 4800, sample_rate=24000, num_channels=1)
+
+                async def source(*args):
+                    yield 'start'
+                    for at in (10, 10.5, 11, 11.5, 12):
+                        clock[0] = at
+                        yield audio
+                        if at == 10:
+                            yield 'control'
+                    yield 'stop'
+
+                with patch.object(self.rt.PocketTTSService, 'run_tts', source), \
+                        patch.dict(friday.os.environ, {'TETHER_FRIDAY_PREROLL': '.15',
+                            'TETHER_FRIDAY_PREROLL_MAX': '1.5',
+                            'TETHER_FRIDAY_PREROLL_WAIT': str(wait)}), \
+                        patch.object(friday.time, 'monotonic', side_effect=lambda: clock[0]), \
+                        patch('builtins.print') as log:
+                    output = [(clock[0], frame) async for frame in service.run_tts(
+                        'Interrupted sentence', 'context')]
+                self.assertEqual([frame for _, frame in output],
+                                 ['start', audio, 'control', audio, audio, audio, audio, 'stop'])
+                self.assertEqual(output[1][0], release)
+                data = json.loads(log.call_args.args[0][len('Friday tts '):])
+                self.assertEqual(data['hold_ms'], target)
+                self.assertEqual(data['speed'], .25)
+                self.assertAlmostEqual(service.tts_speed, .525)
+                self.assertAlmostEqual(service.tts_per_char, .0625)
+
+    async def test_tts_short_interval_and_text_do_not_train_estimates(self):
+        session = SimpleNamespace(turn=4, tts_ttfb=None)
+        service = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
+
+        async def source(*args):
+            yield SimpleNamespace(audio=b'\0' * 480, sample_rate=24000, num_channels=1)
+
+        with patch.object(self.rt.PocketTTSService, 'run_tts', source), \
+                patch('builtins.print') as log:
+            output = [frame async for frame in service.run_tts('Hi.', 'context')]
+        self.assertEqual(len(output), 1)
+        self.assertIsNone(service.tts_speed)
+        self.assertIsNone(service.tts_per_char)
+        data = json.loads(log.call_args.args[0][len('Friday tts '):])
+        self.assertIsNone(data['speed'])
 
     async def test_offer_replaces_session_even_when_close_hangs(self):
         import httpx

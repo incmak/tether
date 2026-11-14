@@ -7,6 +7,8 @@ under paths.HOME/.local/share/tether/friday-models. Pocket uses models/hf as
 HF_HOME with HF_HUB_OFFLINE=1. WebRTC audio uses direct host-candidate UDP.
 TETHER_FRIDAY_TTS_THREADS overrides Pocket's default of 2 torch threads.
 TETHER_FRIDAY_PREROLL buffers 0.15 seconds before playback (0 disables; clamped to 0..1).
+TETHER_FRIDAY_PREROLL_MAX caps adaptive audio hold (default 1.5s; 0 disables; max 4s).
+TETHER_FRIDAY_PREROLL_WAIT caps wall wait after first audio (default 2.0s; 0 disables; max 4s).
 TETHER_FRIDAY_VOICE selects the Pocket voice (default: lola).
 TETHER_FRIDAY_BRAIN (local/gemini), TETHER_FRIDAY_GCP_PROJECT, TETHER_FRIDAY_GEMINI_MODEL,
 TETHER_FRIDAY_GEMINI_EFFORT configure the brain. TETHER_FRIDAY_VAD_STOP defaults to 0.5s.
@@ -77,24 +79,45 @@ REQUEST_TIMEOUT = 9.0
 _closing_tasks = set()
 
 
+PREROLL_PER_CHAR = 0.065
+PREROLL_EMA = 0.5
+PREROLL_MIN_LIVE = 0.3
+
+
 class AudioPreroll:
     """Hold the first audio and following controls until enough audio is ready."""
 
-    def __init__(self, seconds):
+    def __init__(self, seconds, max_hold=0.0, max_wait=0.0):
         self.seconds = max(0.0, min(1.0, seconds))
+        self.max_hold = max(self.seconds, min(4.0, max_hold)) if max_hold else 0.0
+        self.max_wait = max(0.0, min(4.0, max_wait))
+        self._target = self.seconds
+        self.first_held_time = None
         self.audio = 0.0
         self.held = []
         self.ready = self.seconds == 0
         self.closed = False
 
-    def push(self, frame, duration=0.0):
+    @property
+    def target(self):
+        return self._target
+
+    def set_target(self, seconds):
+        if self.max_hold > 0:
+            self._target = max(self.seconds, min(self.max_hold, seconds))
+
+    def push(self, frame, duration=0.0, now=None):
         if self.closed:
             return []
         if self.ready or (not self.held and duration == 0):
             return [frame]
+        if not self.held:
+            self.first_held_time = now
         self.held.append(frame)
         self.audio += duration
-        if self.audio >= self.seconds:
+        if (self.audio >= self.target or (now is not None
+                and self.first_held_time is not None and self.max_wait > 0
+                and now - self.first_held_time >= self.max_wait)):
             self.ready = True
             return self._flush()
         return []
@@ -116,6 +139,29 @@ class AudioPreroll:
 def audio_slack(made, elapsed, audio_bytes, sample_rate, num_channels):
     """Return audio seconds made and slack before the next PCM16 frame."""
     return made + audio_bytes / 2 / num_channels / sample_rate, made - elapsed
+
+
+def preroll_target(base, chars, per_char, prior_speed, made, live_elapsed):
+    """Return the audio seconds to hold before playback."""
+    total = chars * (per_char or PREROLL_PER_CHAR)
+    live_speed = made / live_elapsed if made >= PREROLL_MIN_LIVE and live_elapsed > 0 else None
+    speeds = [speed for speed in (live_speed, prior_speed) if speed is not None]
+    if not speeds or min(speeds) >= 1:
+        return base
+    return max(base, total * (1 - min(speeds)))
+
+
+def preroll_limits(env):
+    """Read finite, nonnegative adaptive limits; invalid values use defaults."""
+    def parse(name, default):
+        try:
+            value = float(env.get(name, default))
+        except (ValueError, TypeError):
+            return default
+        return value if math.isfinite(value) and value >= 0 else default
+
+    return (parse('TETHER_FRIDAY_PREROLL_MAX', 1.5),
+            parse('TETHER_FRIDAY_PREROLL_WAIT', 2.0))
 
 
 def filter_net_stats(data):
@@ -573,6 +619,8 @@ def runtime_types():
                 sample_rate=model.sample_rate,
                 settings=self.Settings(model=None, voice=voice_name(os.environ), language=Language.EN))
             self._model, self._voice_state, self.session = model, voice, session
+            self.tts_speed = None
+            self.tts_per_char = None
             self.voice_turn = 0
             self.voice_count = 0
             self.voice_open = self.voice_client = self.voice_cancelled = False
@@ -696,7 +744,10 @@ def runtime_types():
             playback_start = last_audio = None
             preroll_ms = 0.0
             first_audio = None
-            preroll = AudioPreroll(float(os.environ.get('TETHER_FRIDAY_PREROLL', '0.15')))
+            max_hold, max_wait = preroll_limits(os.environ)
+            preroll = AudioPreroll(float(os.environ.get('TETHER_FRIDAY_PREROLL', '0.15')),
+                                   max_hold, max_wait)
+            completed = False
             made = worst = 0.0
             underruns = 0
             turn = self.session.turn
@@ -718,7 +769,10 @@ def runtime_types():
                         if slack < 0:
                             underruns += 1
                             worst = min(worst, slack)
-                    frames = preroll.push(frame, duration)
+                        if not preroll.ready:
+                            preroll.set_target(preroll_target(preroll.seconds, len(text),
+                                self.tts_per_char, self.tts_speed, made, last_audio - first_audio))
+                    frames = preroll.push(frame, duration, now=last_audio if duration else None)
                     if frames and first_audio is not None and playback_start is None:
                         playback_start = time.monotonic()
                         preroll_ms = (playback_start - first_audio) * 1000
@@ -730,13 +784,26 @@ def runtime_types():
                     preroll_ms = (playback_start - first_audio) * 1000
                 for held in frames:
                     yield held
+                completed = True
             finally:
                 preroll.close()
                 if made:
+                    elapsed = last_audio - first_audio
+                    speed = made / elapsed if elapsed > .2 else None
+                    if completed:
+                        if speed is not None:
+                            self.tts_speed = (speed if self.tts_speed is None else
+                                self.tts_speed + PREROLL_EMA * (speed - self.tts_speed))
+                        if len(text) >= 8:
+                            per_char = made / len(text)
+                            self.tts_per_char = (per_char if self.tts_per_char is None else
+                                self.tts_per_char + PREROLL_EMA * (per_char - self.tts_per_char))
                     gen = last_audio - start
                     data = {'turn': turn, 'audio': round(made, 3), 'gen': round(gen, 3),
                             'rtf': round(gen / made, 3), 'underruns': underruns,
                             'preroll_ms': round(preroll_ms, 3),
+                            'hold_ms': round(preroll.target * 1000, 1),
+                            'speed': round(speed, 3) if speed is not None else None,
                             'worst_gap_ms': round(-worst * 1000, 3), 'chars': len(text)}
                     print('Friday tts ' + json.dumps(data, separators=(',', ':')), file=sys.stderr, flush=True)
 
