@@ -47,6 +47,16 @@ CODEX_HOOKS = Path(os.environ.get('MOBILE_TMUX_CODEX_HOOKS') or
 ANTIGRAVITY = HOME / '.gemini/antigravity-cli'
 
 
+def work():
+    """The work board's project list (work_items.py). Read at call time: tests move TETHER."""
+    return TETHER / 'work'
+
+
+def items():
+    """Work items, by project prefix. Codex tabs get write access to this folder only (project_launch.py)."""
+    return TETHER / 'items'
+
+
 def private_file(name):
     """A file under the config folder (owner-only data such as the access token and push keys)."""
     return CONFIG / name

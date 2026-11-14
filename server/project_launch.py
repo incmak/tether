@@ -116,18 +116,30 @@ def codex_has_own_instructions():
     return re.search(r'^\s*developer_instructions\s*=', text, re.M) is not None
 
 
+def codex_folders():
+    """--add-dir for the backlog and work item folders: the sandbox blocks `tether backlog` and `tether item` writes
+    without them. Given even when the user has own instructions."""
+    import backlog
+    import paths
+    out = []
+    for place in (backlog.folder(), paths.items()):
+        place.mkdir(mode=0o700, parents=True, exist_ok=True)
+        out += ['--add-dir', str(place)]
+    return out
+
+
 def codex_args(pid, args, group=None):
-    if any(arg in CODEX_PLAIN or 'developer_instructions' in arg for arg in args) or codex_has_own_instructions():
+    if any(arg in CODEX_PLAIN for arg in args):
         return args
+    folder_args = codex_folders() if pid else []
+    if any('developer_instructions' in arg for arg in args) or codex_has_own_instructions():
+        return [*folder_args, *args]
     text = ''
-    folder_args = []
     if pid:
         import backlog
         import projects
         text = projects.render(pid, 'codex', group=group, backlog_project=backlog.project_name())
         record_revision(pid, group)
-        backlog.folder().mkdir(mode=0o700, parents=True, exist_ok=True)
-        folder_args = ['--add-dir', str(backlog.folder())]  # the sandbox blocks the backlog command's writes without it
     if os.environ.get('TETHER_CDP_URL'):
         from agent_browser_cli import note
         text = text + '\n\n' + note() if text else note()

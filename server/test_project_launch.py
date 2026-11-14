@@ -57,24 +57,31 @@ class UnitTests(unittest.TestCase):
     def test_codex_gets_the_notes_part_even_for_an_empty_project(self):
         args = project_launch.codex_args(PID, ['resume', '--last'])
         folder = str(backlog.folder())
-        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, 'resume', '--last']))
+        items = str(paths.items())
+        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, '--add-dir', items, 'resume', '--last']))
+        self.assertTrue(paths.items().is_dir())
         self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
         projects.set_instructions(PID, 'Use "pnpm".\nNo emoji 🙂', 0)
         args = project_launch.codex_args(PID, ['resume', '--last'])
         self.assertEqual(args[0], '-c')
-        self.assertEqual(args[2:], ['--add-dir', folder, 'resume', '--last'])
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, 'resume', '--last'])
         key, _, value = args[1].partition('=')
         self.assertEqual(key, 'developer_instructions')
         self.assertIn('Use "pnpm".', tomllib.loads('v = ' + value)['v'])
 
     def test_codex_plain_cases(self):
         projects.set_instructions(PID, 'x', 0)
-        for args in (['exec', 'hi'], ['e', 'hi'], ['login'], ['-c', 'developer_instructions="mine"'], ['--help'], ['review']):
+        for args in (['exec', 'hi'], ['e', 'hi'], ['login'], ['--help'], ['review']):
             self.assertEqual(project_launch.codex_args(PID, args), args)
+        # Own instructions: Tether adds none, but the item and backlog folders still open, so `tether item` works.
+        folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items())]
+        mine = ['-c', 'developer_instructions="mine"']
+        self.assertEqual(project_launch.codex_args(PID, mine), [*folders, *mine])
         (paths.CODEX).mkdir()
         (paths.CODEX / 'config.toml').write_text('model = "x"\ndeveloper_instructions = "own"\n')
-        self.assertEqual(project_launch.codex_args(PID, []), [])
+        self.assertEqual(project_launch.codex_args(PID, []), folders)
+        self.assertEqual(project_launch.codex_args('', []), [])
 
     def test_hook_prints_context_or_nothing(self):
         def run_hook(pid):
@@ -216,7 +223,8 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(pane, f'{pid}:0')
         argv = self.run_in_pane(f'{launcher} codex resume --last')
         folder = str(self.temp / 'tether/backlog')
-        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, 'resume', '--last', '1']))  # the Notes part, even with no instructions
+        items = str(self.temp / 'tether/items')
+        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, '--add-dir', items, 'resume', '--last', '1']))  # the Notes part, even with no instructions
         with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
             projects.set_instructions(pid, 'Use pnpm.', 0)
         argv = self.run_in_pane(f'{launcher} codex resume --last')
