@@ -370,6 +370,12 @@ class Cli(Base):
         self.assertEqual((code, result['status']), (0, 'decided'))
         self.assertEqual([command[2] for command, _ in self.tab_calls()], ['send', 'start', 'wait'])
 
+    def test_parse_ignores_footer_after_needs_user(self):
+        parsed = cli.parse_reply('ANSWER: Use A.\nCONFIDENCE: high\nEVIDENCE: a.py\nNEEDS_USER: no\n\nNeeds you: no')
+        self.assertEqual((parsed['confidence'], parsed['needs_user']), ('high', False))
+        parsed = cli.parse_reply('ANSWER: Use A.\nCONFIDENCE: high\nEVIDENCE: a.py\nNEEDS_USER: yes (pricing)\n\nNeeds you: no')
+        self.assertTrue(parsed['needs_user'])
+
     def test_session_fallback_is_safe_and_does_not_log_project(self):
         self.project = '../../outside'
         self.assertEqual(self.invoke()[0], 0)

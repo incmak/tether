@@ -87,8 +87,10 @@ def parse_reply(raw):
     for index, label in enumerate(labels):
         end = labels[index + 1].start() if index + 1 < len(labels) else len(raw)
         fields[label[1].upper()] = raw[label.end():end].strip()
-    confidence = fields.get('CONFIDENCE', '').lower()
-    needs = fields.get('NEEDS_USER', '')
+    # Agents may end a reply with a footer of their own (for example a "Needs you:" line), so the one-word fields
+    # stop at the first line and NEEDS_USER stops at the first blank line.
+    confidence = fields.get('CONFIDENCE', '').split('\n', 1)[0].strip().lower()
+    needs = re.split(r'\n\s*\n', fields.get('NEEDS_USER', ''), maxsplit=1)[0].strip()
     complete = (all(fields.get(key) for key in ('ANSWER', 'CONFIDENCE', 'EVIDENCE', 'NEEDS_USER'))
                 and confidence in ('high', 'medium', 'low') and re.fullmatch(r'(yes|no)(?:\s*\(.*\))?', needs, re.I | re.S))
     return {'answer': fields.get('ANSWER', ''), 'evidence': fields.get('EVIDENCE', ''),
