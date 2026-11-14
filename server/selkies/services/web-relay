@@ -1,0 +1,2 @@
+#!/usr/bin/with-contenv bash
+exec s6-setuidgid abc /lsiopy/bin/python3 -u /tether/sock_relay.py /sock/web.sock 3000

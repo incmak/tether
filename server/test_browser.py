@@ -391,6 +391,12 @@ class RouteTests(unittest.TestCase):
         handler = FakeHandler('/mobile/api/browser/tabs')
         browser_api.get(handler, self.browser)
         self.assertEqual(handler.replies[0][0], 200)
+        self.assertNotIn('nav', handler.replies[0][1])
+        target = self.browser.order[0]
+        handler = FakeHandler('/mobile/api/browser/tabs?tab=' + target)  # the live view polls with its tab
+        browser_api.get(handler, self.browser)
+        self.assertEqual(handler.replies[0][1]['nav'], {'back': True, 'forward': True})
+        self.assertEqual(handler.replies[0][1]['tabs'][0]['title'], 'Title set by script')
         handler = FakeHandler('/mobile/api/browser/navigate', {'tab': 'T1', 'url': 'javascript:alert(1)'})
         browser_api.post(handler, self.browser)
         self.assertEqual(handler.replies[0][0], 400)

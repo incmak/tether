@@ -161,6 +161,132 @@ class AuthTests(unittest.TestCase):
         self.assertIn('GET /terminal/live/?arg=%241 HTTP/1.1', seen[0])
         self.assertNotIn(auth.COOKIE, seen[0])   # the sign-in cookie is not handed on to ttyd
 
+    def live_listener(self):
+        http = ThreadingHTTPServer(('127.0.0.1', 0), server.BrowserLiveOriginHandler)
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.addCleanup(http.server_close)
+        self.addCleanup(http.shutdown)
+        return http.server_address[1]
+
+    def live_request(self, port, method, path, headers=None):
+        connection = http.client.HTTPConnection('127.0.0.1', port)
+        connection.request(method, path, headers=dict({'Host': 'phone.test:7698'}, **(headers or {})))
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response, data
+
+    def fake_container(self, answers):
+        """A Unix socket that stands in for the container: it records each request and sends the next answer."""
+        import socket
+        import tempfile
+        from types import SimpleNamespace
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = folder.name + '/web.sock'
+        upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        upstream.bind(path)
+        upstream.listen(4)
+        self.addCleanup(upstream.close)
+        seen = []
+
+        def serve():
+            for answer in answers:
+                connection, _ = upstream.accept()
+                seen.append(connection.recv(4096).decode())
+                connection.sendall(answer)
+                if b'101 Switching' in answer:
+                    seen.append(connection.recv(4096))
+                    connection.sendall(b'\x81\x02hi')
+                connection.close()
+        threading.Thread(target=serve, daemon=True).start()
+        return SimpleNamespace(web_auth=lambda: 'Basic c2VjcmV0', web_sock=path), seen
+
+    def test_main_origin_never_serves_the_live_view(self):
+        import browser
+        container, seen = self.fake_container([b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'])
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        with mock.patch.object(browser.BROWSER, 'container', container):
+            response, body = self.request('GET', '/browser/live/index.html', headers={'Cookie': cookie})
+        self.assertNotEqual((response.status, body), (200, b'ok'))
+        self.assertEqual(seen, [])
+
+    def test_live_origin_serves_only_the_live_view_after_sign_in(self):
+        import browser
+        hostile = (b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: tether=planted; Path=/\r\n'
+                   b'set-cookie2: x=1\r\nClear-Site-Data: "cookies"\r\nX-Frame-Options: DENY\r\n'
+                   b"Content-Security-Policy: frame-ancestors *\r\nAccess-Control-Allow-Origin: *\r\n"
+                   b'X-Kept: yes\r\n Set-Cookie: folded=1\r\nNoColon\r\n\r\nok')
+        container, seen = self.fake_container([hostile])
+        port = self.live_listener()
+        with mock.patch.object(browser.BROWSER, 'container', container):
+            self.assertEqual(self.live_request(port, 'GET', '/browser/live/')[0].status, 401)
+            cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+            for path in ('/chat/', '/mobile/api/sessions', '/mobile/login', '/terminal/live/', '/'):
+                self.assertEqual(self.live_request(port, 'GET', path, {'Cookie': cookie})[0].status, 404, path)
+            self.assertEqual(self.live_request(port, 'POST', '/mobile/api/message', {'Cookie': cookie})[0].status, 404)
+            refused, _ = self.live_request(port, 'GET', '/browser/live/', {'Cookie': cookie, 'Origin': 'http://phone.test'})
+            self.assertEqual(refused.status, 403)  # Tether's main origin is a different origin here
+            self.assertEqual(seen, [])
+            response, body = self.live_request(port, 'GET', '/browser/live/index.html', {
+                'Cookie': cookie, 'Authorization': 'Basic bWluZQ==', 'Origin': 'http://phone.test:7698',
+                'Tailscale-User-Login': 'owner@example.com'})
+        self.assertEqual((response.status, body), (200, b'ok'))
+        self.assertIn('GET /browser/live/index.html HTTP/1.1', seen[0])
+        self.assertNotIn(auth.COOKIE, seen[0])  # Tether's cookie stays here
+        self.assertNotIn('owner@example.com', seen[0])
+        self.assertIn('Authorization: Basic c2VjcmV0', seen[0])  # only the container's own password goes on
+        self.assertNotIn('bWluZQ==', seen[0])
+        names = [name.lower() for name, _ in response.getheaders()]
+        for dropped in ('set-cookie', 'set-cookie2', 'clear-site-data', 'x-frame-options', 'access-control-allow-origin'):
+            self.assertNotIn(dropped, names)
+        self.assertEqual(response.getheader('X-Kept'), 'yes')
+        self.assertEqual(response.getheader('Content-Security-Policy'),
+                         'frame-ancestors https://phone.test http://phone.test:%d https://phone.test:%d' % (server.MAIN_PORT, server.MAIN_PORT))
+        self.assertNotIn('folded', str(response.getheaders()))
+
+    def test_live_origin_filters_the_websocket_answer_then_pipes_frames(self):
+        import browser
+        import socket
+        container, seen = self.fake_container([b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n'
+                                               b'Connection: Upgrade\r\nSet-Cookie: a=1\r\n\r\n'])
+        port = self.live_listener()
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        with mock.patch.object(browser.BROWSER, 'container', container):
+            client = socket.create_connection(('127.0.0.1', port), timeout=5)
+            client.sendall(('GET /browser/live/api/websockets HTTP/1.1\r\nHost: phone.test:7698\r\nCookie: %s\r\n'
+                            'Connection: Upgrade\r\nUpgrade: websocket\r\nOrigin: http://phone.test:7698\r\n\r\n' % cookie).encode())
+            data = b''
+            while not data.endswith(b'hi'):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b'\r\n\r\n' in data and not data.endswith(b'hi'):
+                    client.sendall(b'\x81\x80mask')
+            client.close()
+        head = data.split(b'\r\n\r\n', 1)[0]
+        self.assertTrue(head.startswith(b'HTTP/1.1 101'))
+        self.assertNotIn(b'Set-Cookie', head)
+        self.assertIn(b'Connection: Upgrade', seen[0].encode())
+        self.assertTrue(data.endswith(b'\x81\x02hi'))
+        self.assertEqual(seen[1], b'\x81\x80mask')
+
+    def test_live_ancestors_allow_only_the_main_origin(self):
+        self.assertEqual(server.live_ancestors('phone.example.test:7698'),
+                         'https://phone.example.test http://phone.example.test:%d https://phone.example.test:%d' % ((server.MAIN_PORT,) * 2))
+        for bad in ('', 'evil.test x', "a'b", '[::1]:7698'):
+            self.assertEqual(server.live_ancestors(bad), "'none'", bad)
+
+    def test_panel_browser_live_view_without_a_container_is_unavailable(self):
+        import browser
+        port = self.live_listener()
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        with mock.patch.object(browser.BROWSER, 'container', None):
+            reply, body = self.live_request(port, 'GET', '/browser/live/', {'Cookie': cookie})
+            self.assertEqual(reply.status, 503)
+            self.assertIn('text/html', reply.getheader('Content-Type'))  # the frame shows it and loads again
+            self.assertIn(b'http-equiv="refresh"', body)
 
 if __name__ == '__main__':
     unittest.main()

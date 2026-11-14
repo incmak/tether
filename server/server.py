@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import gzip
+import html
 import hashlib
 import json
 import logging
@@ -99,7 +100,9 @@ import approval
 import custom_layouts
 import backgrounds
 import codex_runs
+import browser
 import browser_api
+import browser_container
 import mac_browser
 import browser_cdp
 import updates
@@ -111,6 +114,20 @@ STATIC_ASSETS = {'/mobile/' + p.name: p.read_bytes() for p in [*(ROOT / 'vendor'
 TERMINAL_ASSETS = {'html': (ROOT / 'termius.html').read_text(), 'js': (ROOT / 'termius.js').read_text()}
 CONFIG = paths.private_file('default_conversation.json')
 TTYD_PORT = int(os.environ.get('MOBILE_TMUX_TTYD_PORT', '7682'))
+MAIN_PORT = int(os.environ.get('MOBILE_TMUX_PORT', '7683'))
+# Container response headers that act on the whole host or would let the container pick who frames it.
+LIVE_DROPPED_HEADERS = {'set-cookie', 'set-cookie2', 'clear-site-data', 'content-security-policy',
+                        'content-security-policy-report-only', 'x-frame-options', 'access-control-allow-origin',
+                        'access-control-allow-credentials', 'refresh'}
+
+
+def live_ancestors(host):
+    """The frame-ancestors source list for the live view: only Tether's main origin on the same host may frame it.
+    That is https on the default port (tailscale serve) or the main port itself (a direct connection)."""
+    name = urlsplit('//' + host).hostname or ''
+    if not re.fullmatch(r'[a-z0-9.-]{1,253}', name):
+        return "'none'"
+    return 'https://%s http://%s:%d https://%s:%d' % (name, name, MAIN_PORT, name, MAIN_PORT)
 SEND_LOCK = threading.Lock()
 side_question.SEND_LOCK = SEND_LOCK  # the copy key waits for a message that Tether types
 WATCHING = {}
@@ -1426,8 +1443,64 @@ class Handler(BaseHTTPRequestHandler):
             lines.append('Connection: close')
         self.pipe_upstream(upstream, lines)
 
-    def pipe_upstream(self, upstream, lines, body=False):
-        """Relay an HTTP request and then pipe bytes, including WebSocket frames."""
+    def proxy_browser_live(self):
+        """Pass /browser/live/ (the Selkies client of the panel browser, WebSocket included) to the container's
+        Unix socket. Only BrowserLiveOriginHandler calls this, on its own port: the container sends the page, so it
+        must not share an origin with Tether's pages and APIs. Tether's cookie and identity headers stay here; the
+        container's own password is added instead. live_head() filters the container's response headers."""
+        origin = self.headers.get('Origin')
+        if origin and not auth.same_origin(origin, self.headers.get('Host', '')):
+            self.respond(403, {'error': 'Reload the page and try again.'})
+            return
+        container = browser.BROWSER.container
+        secret = container.web_auth() if container is not None else None
+        if secret is None:
+            self.live_wait('The panel browser is not running.')
+            return
+        upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        upstream.settimeout(5)
+        try:
+            upstream.connect(str(container.web_sock))
+        except OSError:
+            upstream.close()
+            self.live_wait('The panel browser is starting.')
+            return
+        upgrading = 'upgrade' in self.headers.get('Connection', '').lower()
+        lines = ['%s %s HTTP/1.1' % (self.command, self.path)]
+        lines += ['%s: %s' % (key, value) for key, value in self.headers.items()
+                  if key.lower() not in ('cookie', 'authorization', 'connection', 'tailscale-user-login',
+                                         'tailscale-user-name', 'tailscale-user-profile-pic')
+                  or (key.lower() == 'connection' and upgrading)]
+        lines.append('Authorization: ' + secret)
+        if not upgrading:
+            lines.append('Connection: close')  # one response per connection, so live_head() sees every head
+        self.pipe_upstream(upstream, lines, response_head=self.live_head)
+
+    def live_head(self, head):
+        """The container's response head without headers that act on Tether's site, and with Tether's own frame rule.
+        Cookies and Clear-Site-Data reach the whole host (all ports), so they could sign the person out or plant a
+        cookie. Folded lines (leading space) and lines without a colon are dropped too, so nothing can hide a header."""
+        lines = head.decode('latin-1').split('\r\n')
+        kept = [lines[0]] + [line for line in lines[1:] if line and line[0] not in ' \t' and ':' in line
+                             and line.split(':', 1)[0].strip().lower() not in LIVE_DROPPED_HEADERS]
+        kept.append('Content-Security-Policy: frame-ancestors ' + live_ancestors(self.headers.get('Host', '')))
+        return ('\r\n'.join(kept) + '\r\n\r\n').encode('latin-1')
+
+    def live_wait(self, text):
+        """503 for the live view. The panel's frame shows this page, which loads the view again after 2 s."""
+        if self.command != 'GET' or 'upgrade' in self.headers.get('Connection', '').lower():
+            self.respond(503, {'error': text})
+            return
+        page = ('<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2">'
+                '<meta name="viewport" content="width=device-width">'
+                '<style>body{margin:0;display:grid;place-items:center;height:100vh;font:13.5px system-ui,sans-serif;'
+                'color:#6b6b6b;background:#fff}@media(prefers-color-scheme:dark){body{color:#a3a3a3;background:#1a1a1a}}'
+                '</style><p role="status">%s Trying again…</p>' % html.escape(text))
+        self.respond(503, page, 'text/html')
+
+    def pipe_upstream(self, upstream, lines, body=False, response_head=None):
+        """Relay an HTTP request and then pipe bytes, including WebSocket frames. response_head(bytes) -> bytes, when
+        given, rewrites the first response head (status line and headers, without the blank line)."""
         with upstream:
             upstream.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
             if body:
@@ -1467,6 +1540,19 @@ class Handler(BaseHTTPRequestHandler):
                             upstream.sendall(data)
                             left -= len(data)
                 except (ValueError, OSError):
+                    return
+            if response_head is not None:
+                data = b''
+                try:
+                    upstream.settimeout(30)
+                    while b'\r\n\r\n' not in data:
+                        chunk = upstream.recv(65536)
+                        if not chunk or len(data) + len(chunk) > 65536:
+                            return
+                        data += chunk
+                    head, rest = data.split(b'\r\n\r\n', 1)
+                    self.connection.sendall(response_head(head) + rest)
+                except OSError:
                     return
             upstream.settimeout(None)
             pair = {self.connection: upstream, upstream: self.connection}
@@ -2697,6 +2783,37 @@ class OfficeOriginHandler(Handler):
     do_POST = do_PUT = do_HEAD = do_DELETE = do_OPTIONS = do_PATCH = do_GET
 
 
+class BrowserLiveOriginHandler(Handler):
+    """The panel browser's live view (Selkies, /browser/live/) on its own port, so its origin differs from Tether's.
+    A page from the container can then never read Tether's pages or call its APIs with the person's sign-in. This
+    listener serves nothing else."""
+
+    def do_GET(self):
+        if not self.path.startswith(browser_container.LIVE_PREFIX):
+            self.respond(404, {'error': 'Not found'})
+            return
+        if not (auth.signed_in(self.headers.get('Cookie'))
+                or auth.tailscale_signed_in(self.headers.get('Tailscale-User-Login'), self.client_address[0])):
+            self.respond(401, {'error': 'Sign in required.'})
+            return
+        self.proxy_browser_live()
+
+    do_POST = do_PUT = do_HEAD = do_DELETE = do_OPTIONS = do_PATCH = do_GET
+
+
+def start_browser_live_origin(host):
+    import browser
+    if browser.BROWSER.container is None:
+        return None
+    try:
+        http = ThreadingHTTPServer((host, browser_container.LIVE_PORT), BrowserLiveOriginHandler)
+    except OSError as exc:
+        logging.getLogger(__name__).warning('Browser live view listener did not start: %s', type(exc).__name__)
+        return None
+    threading.Thread(target=http.serve_forever, name='browser-live-listener', daemon=True).start()
+    return http
+
+
 def start_office_origin(host):
     config = office_addon.load()
     if config is None:
@@ -2744,4 +2861,5 @@ if __name__ == '__main__':
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()
     start_office_origin(host)
+    start_browser_live_origin(host)
     ThreadingHTTPServer((host, port), Handler).serve_forever()

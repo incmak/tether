@@ -22,7 +22,7 @@ type Mode = 'private' | 'saved'
 // (controller 'user'); Stop gives the agent its own viewport back.
 interface BrowserTab { id: string; url: string; title: string; preset: string; mode: Mode | 'agent'; width: number; height: number; touch: boolean; owner?: { pane: string | null } | null; controller?: 'user' | 'agent' }
 interface Preset { id: string; label: string; width: number; height: number; touch: boolean }
-interface BrowserState { tabs: BrowserTab[]; presets: Preset[]; nav?: { back: boolean; forward: boolean }; browsers?: BrowserAvailability[] }
+interface BrowserState { tabs: BrowserTab[]; presets: Preset[]; nav?: { back: boolean; forward: boolean }; browsers?: BrowserAvailability[]; live?: string; live_port?: number | null; live_run?: string | null }
 interface FrameMessage { seq: number; width: number; height: number; jpeg: string; scrollOffsetX?: number; scrollOffsetY?: number }
 type Gesture = Record<string, string | number | string[]>
 type Tool = 'point' | 'pen' | 'rect' | 'text'
@@ -128,6 +128,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [failure, setFailure] = useState('')
   const [status, setStatus] = useState('')
   const [live, setLive] = useState(true)
+  // The browser runs in a Selkies container: a Desktop tab shows its real window as video (state.live is the path).
+  // The video page has its own origin (state.live_port), so a page from the container cannot reach Tether.
+  const [liveBase, setLiveBase] = useState<{ path: string; port: number; run: string } | null>(null)
+  const [liveReady, setLiveReady] = useState(false)
+  // 'down': the live port did not answer, so the panel uses the picture stream and says why.
+  const [liveReach, setLiveReach] = useState<'checking' | 'ok' | 'down'>('checking')
   const [typing, setTyping] = useState(false)
   // BrowserView is keyed by browser id, so switching browsers resets this choice.
   const [windowView, setWindowView] = useState(false)
@@ -152,6 +158,11 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const watchingRef = useRef(watching)
   useLayoutEffect(() => { watchingRef.current = watching }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
+  // Phone and tablet tabs keep the picture stream: they need Chrome's device emulation at the panel's scale.
+  const liveWanted = !!liveBase && tab?.preset === 'desktop' && !windowView
+  const liveMode = liveWanted && liveReach !== 'down'
+  const liveView = liveMode && !noting
+  const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
 
   const stageRef = useRef<HTMLDivElement | null>(null)
   // The stage mounts late in Your Chrome (after the pairing card), so observe the element itself, not the load.
@@ -176,6 +187,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     if (state.presets) setPresets(state.presets)
     if (state.nav) setNav(state.nav)
     if (state.browsers) setBrowsers(state.browsers)
+    const path = state.live ?? null, port = state.live_port ?? 0, run = state.live_run ?? ''
+    setLiveBase(old => !path || !port ? null : old && old.path === path && old.port === port && old.run === run ? old : { path, port, run })
   }
   function choose(id: string) {
     setCurrent(id)
@@ -342,7 +355,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [transport, setTransport] = useState<'live' | 'sse'>(() => typeof WebSocket === 'function' ? 'live' : 'sse')
   const socketRef = useRef<{ stream: LiveStream; tab: string } | null>(null)
   useEffect(() => {
-    if (!active || !visible || (!tabId && !windowView) || noting || !stage.width) return
+    if (!active || !visible || (!tabId && !windowView) || noting || liveMode || !stage.width) return
     const gen = ++streamGen.current
     let again = 0
     const query = `tab=${encodeURIComponent(tabId)}&w=${streamWidth}&h=${streamHeight}&cssw=${Math.max(1, stage.width)}&cssh=${Math.max(1, stage.height)}${which === 'test' ? '' : `&browser=${which}`}`
@@ -394,7 +407,35 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       }, 2000)
     }
     return () => { source.close(); clearTimeout(again); streamGen.current++; pending.current = null } // eslint-disable-line react-hooks/exhaustive-deps
-  }, [active, visible, tabId, noting, streamWidth, streamHeight, stage.width > 0, retry, transport, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, visible, tabId, noting, liveMode, streamWidth, streamHeight, stage.width > 0, retry, transport, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The live view has no picture stream to bring tab titles and history, so ask for them while it shows.
+  // Each poll also keeps the browser from stopping as idle. A new tab, or this screen coming back, brings it to the front.
+  useEffect(() => {
+    if (!active || !visible || !liveMode || !tabId) return
+    let stopped = false
+    void api('browser/show', { tab: tabId }).catch(error => { if (!stopped) setStatus(errorText(error)) })
+    const poll = () => api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}`).then(state => { if (!stopped) { apply(state); setFailure('') } }, () => undefined)
+    const timer = window.setInterval(() => void poll(), 2000)
+    void poll()
+    return () => { stopped = true; clearInterval(timer) }
+  }, [active, visible, liveMode, tabId]) // eslint-disable-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- A new container run loads a new page.
+  useEffect(() => setLiveReady(false), [liveBase?.run])
+  // Check that the live port answers before the frame shows it: a frame cannot tell the panel that its page failed.
+  // A port that does not answer is a setup gap (tailscale serve), so say so and keep the picture stream.
+  useEffect(() => {
+    if (!active || !visible || !liveWanted || !liveSrc) return
+    const control = new AbortController()
+    let stopped = false
+    const timer = window.setTimeout(() => control.abort(), 8000)
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- A new check starts; a working view stays up meanwhile.
+    setLiveReach(old => old === 'ok' ? old : 'checking')
+    fetch(liveSrc, { mode: 'no-cors', credentials: 'include', cache: 'no-store', signal: control.signal })
+      .then(() => { if (!stopped) setLiveReach('ok') }, () => { if (!stopped) setLiveReach('down') })
+      .finally(() => clearTimeout(timer))
+    return () => { stopped = true; clearTimeout(timer); control.abort() }
+  }, [active, visible, liveWanted, liveSrc, tabId, liveBase?.run])
 
   // Input: queue events, merge moves and wheel turns, and send one batch per animation frame.
   const queue = useRef<Gesture[]>([])
@@ -620,9 +661,39 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
 
   // Notes: draw on a still copy of the frame, then hand the PNG to this pane's composer.
-  function startNotes() {
-    if (!canvasRef.current?.width) return
+  const [grabbing, setGrabbing] = useState(false)
+  async function startNotes() {
+    if (liveMode) {
+      // The live view is video in a frame, so take one picture of the page from Chrome first.
+      setGrabbing(true); setStatus('Taking a picture of the page…')
+      const ok = await grabFrame()
+      setGrabbing(false)
+      if (!ok) { setStatus('Could not take a picture of the page. Try again.'); return }
+    } else if (!canvasRef.current?.width) return
     setShapes([]); setLabel(null); setTool('pen'); setStatus(''); setNoting(true)
+  }
+  function grabFrame() {
+    const target = tabRef.current?.id
+    if (!target) return Promise.resolve(false)
+    const gen = ++streamGen.current
+    const sid = Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => byte.toString(16).padStart(2, '0')).join('')
+    const source = new EventSource(`/mobile/api/browser/stream?tab=${encodeURIComponent(target)}&w=${streamWidth}&h=${streamHeight}&cssw=${Math.max(1, stage.width)}&cssh=${Math.max(1, stage.height)}${which === 'test' ? '' : `&browser=${which}`}&sid=${sid}`)
+    return new Promise<boolean>(resolve => {
+      const finish = (ok: boolean) => { source.close(); clearTimeout(timer); resolve(ok) }
+      const timer = window.setTimeout(() => finish(false), 10000)
+      source.addEventListener('frame', event => {
+        source.close()
+        const message = JSON.parse((event as MessageEvent).data)
+        const binary = atob(message.jpeg)
+        const bytes = new Uint8Array(binary.length)
+        for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+        createImageBitmap(new Blob([bytes], { type: 'image/jpeg' })).then(bitmap => {
+          if (gen !== streamGen.current || tabRef.current?.id !== target) { bitmap.close(); finish(false); return }
+          show(bitmap, message, gen); draw(); finish(true)
+        }, () => finish(false))
+      })
+      source.addEventListener('error', () => { if (source.readyState === EventSource.CLOSED) finish(false) })
+    })
   }
   function stopNotes() { setNoting(false); setShapes([]); setLabel(null) }
   const drawing = useRef<Shape | null>(null)
@@ -794,7 +865,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       </div>
       <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching && !windowView} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>
       {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} onClick={() => changeWindowView(!windowView)}><AppWindow size={17} /></button>}
-      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={!frame || windowView} onClick={startNotes}><PenLine size={17} /></button>
+      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={(!frame && !liveMode) || windowView || grabbing} onClick={() => void startNotes()}><PenLine size={17} /></button>
     </form>}
 
     {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
@@ -808,7 +879,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     </div>}
 
     <div className={typing ? 'browser-stage typing' : 'browser-stage'} ref={stageSlot} tabIndex={-1} aria-label="Page">
-      <div className="browser-screen" style={view}>
+      <div className="browser-screen" style={view} hidden={liveView}>
         <canvas ref={canvasSlot} className="browser-canvas" aria-hidden="true" style={view}
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => { drag.current = null; const press = pressed.current; pressed.current = null; if (press) push({ type: 'up', x: press.x, y: press.y, button: press.button, buttons: 0, clicks: 1, modifiers: 0 }) }} onContextMenu={event => event.preventDefault()}
           onMouseDown={event => event.preventDefault() /* keep focus in the keys box, not the stage */} />
@@ -817,12 +888,17 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {!frame && (tab || windowView) && <p className="browser-wait"><span><Spinner /> {live ? windowView ? 'Loading the Chrome window…' : 'Loading the page…' : 'Connecting…'}</span></p>}
+      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} className="browser-live" src={liveSrc} hidden={noting}
+        title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
+        referrerPolicy="no-referrer" onLoad={() => setLiveReady(true)} />}
+      {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}
+      {(liveView ? !liveReady : !frame && (tab || windowView)) && <p className="browser-wait"><span><Spinner /> {live || liveView ? windowView ? 'Loading the Chrome window…' : 'Loading the page…' : 'Connecting…'}</span></p>}
       <textarea ref={keysRef} className="browser-keys" aria-label="Keys for the page. Press Escape twice to leave." defaultValue={SENTINEL} autoCapitalize="off" autoCorrect="off" spellCheck={false}
         onFocus={() => setTyping(true)} onBlur={() => { setTyping(false); const events = releases(); if (events.length) push(...events) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}
         onInput={event => { if (!(event.nativeEvent as InputEvent).isComposing) syncText() }} onCompositionEnd={syncText}
         onPaste={event => { event.preventDefault(); const text = event.clipboardData.getData('text/plain'); if (text) push({ type: 'text', text: text.slice(0, 20000) }) }} />
     </div>
-    <p className="browser-status" role="status">{status || (typing ? 'Keys go to the page. Press Esc twice to leave.' : !live && frame ? 'Connecting again…' : '')}</p>
+    <p className="browser-status" role="status">{status || (typing ? 'Keys go to the page. Press Esc twice to leave.' : !live && frame && !liveMode ? 'Connecting again…'
+      : liveWanted && liveReach === 'down' ? `Live video is off: port ${liveBase?.port} did not answer. Showing pictures instead.` : '')}</p>
   </div>
 }

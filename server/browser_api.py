@@ -66,7 +66,7 @@ def ack(sid, seq):
     if flow:
         flow.ack(seq)
     return {'ok': True}
-POST_NAMES = {'ack', 'new', 'close', 'navigate', 'history', 'input', 'device', 'agents', 'agents/setup', 'ask/dismiss',
+POST_NAMES = {'ack', 'new', 'close', 'show', 'navigate', 'history', 'input', 'device', 'agents', 'agents/setup', 'ask/dismiss',
               'signed/allow', 'signed/deny', 'signed/end', 'signed/dismiss', 'window/input'}
 
 
@@ -95,6 +95,14 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             handler.respond(200, _agent_state(_proxy(the_proxy), the_setup))
         elif name == 'tabs':
             state = the_browser.list_tabs()
+            target = query.get('tab', [''])[0]
+            if target and target in the_browser.tabs:  # the live view has no stream, so its poll asks for these
+                the_browser.refresh(the_browser.tabs[target])
+                state = the_browser.state()
+                try:
+                    state['nav'] = the_browser.nav_state(target)
+                except browser.BrowserError:
+                    state['nav'] = {'back': False, 'forward': False}
             state['browsers'] = _browsers(the_browser if browser_id == 'test' else None,
                                         the_browser if browser_id == 'signed' else signed_browser)
             handler.respond(200, _tag(state, browser_id))
@@ -183,6 +191,8 @@ def post(handler, the_browser=None, the_proxy=None, the_setup=None, signed_brows
             result = the_browser.new_tab(body.get('url') or 'about:blank', body.get('mode') or None)
         elif name == 'close':
             result = the_browser.close_tab(tab)
+        elif name == 'show':
+            result = the_browser.show(tab)
         elif name == 'navigate':
             result = the_browser.navigate(tab, body.get('url'))
         elif name == 'history':

@@ -19,6 +19,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+import browser_container
 import paths
 import procinfo
 from browser_display import VirtualDisplay
@@ -362,7 +363,10 @@ class Browser:
     """One panel browser. Public methods start it when needed and are safe to call from any thread."""
 
     def __init__(self, launcher=launch, chrome_finder=None, profile=None, clock=time.monotonic,
-                 *, signed=False, display=None):
+                 *, signed=False, display=None, container=None):
+        self.container = container  # browser_container.Container: Chromium runs there and Selkies streams it
+        if container is not None:
+            launcher, chrome_finder = container.launch, lambda: 'container'
         self.launcher, self.clock = launcher, clock
         self.chrome_finder = chrome_finder or (find_signed_chrome if signed else find_chrome)
         self.profile = profile if profile is not None else (SIGNED_PROFILE if signed else PROFILE)
@@ -435,7 +439,7 @@ class Browser:
                 self.agent_proxy.browser_stopped()
             conn, pid = self.conn, self.pid
             self.conn = self.pid = None
-            if conn and not conn.closed:
+            if conn and not conn.closed and self.container is None:  # the container's watchdog would restart it
                 try:
                     conn.call('Browser.close', timeout=3)
                 except BrowserError:
@@ -446,6 +450,8 @@ class Browser:
                 conn._shut()
             if self.display:
                 self.display.stop()
+            if self.container is not None:
+                self.container.stop()
             self._reset()
 
     def _reset(self):
@@ -499,6 +505,8 @@ class Browser:
         self.tabs[target], self.by_session[session] = tab, tab
         self.order.append(target)
         self.conn.call('Page.enable', session=session)
+        if self.container is not None:
+            self._fullscreen(tab)
         self._apply_preset(tab, 'desktop')
         if mode == 'agent':
             self._agent_size(tab)
@@ -525,6 +533,25 @@ class Browser:
             self._navigate(tab, url)
         return tab
 
+    def _fullscreen(self, tab):
+        """Each private context opens its own window; fullscreen hides that window's toolbar (--kiosk covers only the
+        first window). Tether's tab bar and address bar replace Chrome's."""
+        try:
+            window = self.conn.call('Browser.getWindowForTarget', {'targetId': tab.target})['windowId']
+            self.conn.call('Browser.setWindowBounds', {'windowId': window, 'bounds': {'windowState': 'fullscreen'}})
+        except (BrowserError, KeyError, TypeError):
+            pass  # a tab that closed meanwhile
+
+    def show(self, target):
+        """Bring a tab's window to the front of the streamed screen (Selkies shows whatever is on top)."""
+        self.ensure()
+        with self.lock:
+            tab = self.tab(target)
+            self.conn.call('Target.activateTarget', {'targetId': tab.target})
+            self.conn.call('Page.bringToFront', session=tab.session)
+            tab.last_input = self.clock()
+        return {'ok': True}
+
     def tab(self, target):
         tab = self.tabs.get(target)
         if tab is None:
@@ -534,6 +561,8 @@ class Browser:
     def state(self):
         with self.lock:
             state = {'running': self.running(), 'version': self.version,
+                     **({'live': browser_container.LIVE_PREFIX, 'live_port': browser_container.LIVE_PORT, 'live_run': getattr(self.container, 'run_id', None)}
+                        if self.container is not None else {}),
                     'tabs': [self.tabs[target].row() for target in self.order if target in self.tabs],
                     'presets': [{'id': key, 'label': value['label'], 'width': value['width'], 'height': value['height'],
                                  'touch': value['mobile']} for key, value in PRESETS.items()]}
@@ -671,8 +700,11 @@ class Browser:
             width = _clamp(width, 320, 2560, DESKTOP[0])
             height = _clamp(height, 240, 1600, DESKTOP[1])
             tab.size = (width, height)
-            self.conn.call('Emulation.setDeviceMetricsOverride',
-                           {'width': width, 'height': height, 'deviceScaleFactor': spec['scale'], 'mobile': False}, session)
+            if self.container is not None:  # the page fills its fullscreen window; Selkies sizes the screen to the panel
+                self.conn.call('Emulation.clearDeviceMetricsOverride', session=session)
+            else:
+                self.conn.call('Emulation.setDeviceMetricsOverride',
+                               {'width': width, 'height': height, 'deviceScaleFactor': spec['scale'], 'mobile': False}, session)
             self.conn.call('Emulation.setTouchEmulationEnabled', {'enabled': False}, session)
             self.conn.call('Emulation.setEmitTouchEventsForMouse', {'enabled': False}, session)
             # An empty override restores the native UA, including on relayed tabs without a cached desktop UA.
@@ -756,7 +788,7 @@ class Browser:
                 if tab.viewers == 1:
                     with tab.changed:
                         tab.frame = None  # a previous viewing interval cannot supply this viewer's first frame
-                if self.signed:  # headed Chrome paints only the front tab
+                if self.signed or self.container:  # headed Chrome paints only the front tab
                     self.conn.call('Page.bringToFront', session=tab.session)
                 size = self._cast_size(tab)
                 if tab.casting != size:
@@ -798,7 +830,7 @@ class Browser:
         page with endless CSS animations kept the software compositor drawing full 2x frames: two Tether chat tabs
         used 87% CPU, and 7% when minimized. Agent tabs stay visible: Playwright waits on requestAnimationFrame,
         which a hidden page does not run. The headed signed browser paints only its front tab already."""
-        if (tab.parked or tab.viewers or tab.mode == 'agent' or self.signed or not self.running()
+        if (tab.parked or tab.viewers or tab.mode == 'agent' or self.signed or self.container or not self.running()
                 or self.tabs.get(tab.target) is not tab):
             return
         try:
@@ -1104,7 +1136,7 @@ def frame_event(frame, browser_id='test'):
     return ('event: frame\ndata: ' + head[:-1] + ',"jpeg":"' + data + '"}\n\n').encode()
 
 
-BROWSER = Browser()
+BROWSER = Browser(container=browser_container.default('test'))
 SIGNED_BROWSER = Browser(chrome_finder=find_signed_chrome, profile=SIGNED_PROFILE, signed=True)
 
 
