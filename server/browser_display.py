@@ -48,6 +48,13 @@ KEYSYMS.update(dict(zip(
      'asciicircum underscore grave braceleft bar braceright asciitilde').split())))
 
 
+def _combo(mods):
+    """CDP modifier bits as xdotool names. Chrome here runs on Linux, so a Mac's Cmd (Meta) acts as Ctrl:
+    Cmd+L, Cmd+A, Cmd+C and Cmd+Z then do what the user expects."""
+    names = [name for bit, name in ((1, 'alt'), (2, 'ctrl'), (4, 'ctrl'), (8, 'shift')) if mods & bit]
+    return list(dict.fromkeys(names))
+
+
 class VirtualDisplay:
     size = (2560, 1600)
 
@@ -67,6 +74,8 @@ class VirtualDisplay:
         self.capture_ended = True
         self.input_lock = threading.Lock()
         self.held_keys = {}
+        self.wheel_rest = [0.0, 0.0]
+        self.fitted = False
 
     @staticmethod
     def _terminate(process):
@@ -153,16 +162,33 @@ class VirtualDisplay:
         self._fit_window()
 
     def _fit_window(self):
-        """Chrome keeps the window place it saved in the profile (it opened at 20,20), so move it to fill the display."""
+        """Chrome keeps the window place it saved in the profile (it opened at 20,20), so move the main window to
+        fill the display. Once per display start, and only the largest window: popups such as a sign-in window
+        keep their own size and place."""
         executable = shutil.which('xdotool')
-        if not executable or not self.environment:
+        if self.fitted or not executable or not self.environment:
             return
+        env = dict(os.environ, **self.environment)
         try:
-            subprocess.run([executable, 'search', '--onlyvisible', '--class', 'google-chrome',
-                            'windowmove', '%@', '0', '0', 'windowsize', '%@', str(self.size[0]), str(self.size[1])],
-                           env=dict(os.environ, **self.environment), stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-        except (OSError, subprocess.SubprocessError):
+            found = subprocess.run([executable, 'search', '--onlyvisible', '--class', 'google-chrome'], env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+            best, area = None, 0
+            for window in found.stdout.split():
+                if not window.isdigit():
+                    continue
+                shape = subprocess.run([executable, 'getwindowgeometry', '--shell', window], env=env,
+                                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+                values = dict(line.split('=', 1) for line in shape.stdout.splitlines() if '=' in line)
+                size = int(values.get('WIDTH', '0') or 0) * int(values.get('HEIGHT', '0') or 0)
+                if size > area:
+                    best, area = window, size
+            if best is None:
+                return  # no window yet: try again on the next watch
+            subprocess.run([executable, 'windowmove', best, '0', '0', 'windowsize', best, str(self.size[0]), str(self.size[1])],
+                           env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5)
+            self.fitted = True
+        except (OSError, ValueError, subprocess.SubprocessError):
             pass  # a misplaced window is still usable
 
     def unwatch(self):
@@ -190,6 +216,7 @@ class VirtualDisplay:
             raise ValueError('Invalid input.')
         args = []
         held = dict(self.held_keys)
+        wheel = list(self.wheel_rest)
         for event in events:
             _, params = input_command(event)
             kind = event['type']
@@ -201,9 +228,14 @@ class VirtualDisplay:
                     if button:
                         args += ['mousedown' if kind == 'down' else 'mouseup', str(button)]
                 elif kind == 'wheel':
-                    for delta, negative, positive in ((params['deltaY'], 4, 5), (params['deltaX'], 6, 7)):
-                        if delta:
-                            args += ['click', str(negative if delta < 0 else positive)] * max(1, min(10, int(abs(delta) / 100)))
+                    # One X wheel click scrolls about 100 px. Keep the rest for the next batch, so a trackpad's
+                    # many small deltas add up instead of each becoming a full click.
+                    for axis, delta, negative, positive in ((1, params['deltaY'], 4, 5), (0, params['deltaX'], 6, 7)):
+                        total = wheel[axis] + delta
+                        clicks = max(-10, min(10, int(total / 100)))
+                        wheel[axis] = max(-100.0, min(100.0, total - clicks * 100))
+                        if clicks:
+                            args += ['click', str(negative if clicks < 0 else positive)] * abs(clicks)
             elif kind == 'text':
                 if '\0' in params['text']:
                     raise ValueError('Invalid text.')
@@ -220,11 +252,9 @@ class VirtualDisplay:
                     if not mods & 7:
                         args += ['type', '--delay', '0', '--args', '1', '--', key]
                     elif symbol:
-                        combo = [name for bit, name in ((1, 'alt'), (2, 'ctrl'), (4, 'super'), (8, 'shift')) if mods & bit]
-                        args += ['key', '+'.join([*combo, symbol])]
+                        args += ['key', '+'.join([*_combo(mods), symbol])]
                 elif symbol:
-                    combo = [name for bit, name in ((1, 'alt'), (2, 'ctrl'), (4, 'super'), (8, 'shift'))
-                             if mods & bit and key not in ('Alt', 'Control', 'Meta', 'Shift')]
+                    combo = [] if key in ('Alt', 'Control', 'Meta', 'Shift') else _combo(mods)
                     chord = '+'.join([*combo, symbol])
                     if kind == 'keydown':
                         if key in held and held[key] != chord:
@@ -244,6 +274,7 @@ class VirtualDisplay:
             except (OSError, subprocess.SubprocessError) as exc:
                 raise RuntimeError('Could not send input to the Chrome window.') from exc
         self.held_keys = held
+        self.wheel_rest = wheel
         return {'ok': True}
 
     @staticmethod
@@ -321,3 +352,5 @@ class VirtualDisplay:
                 self.folder = None
             self.environment = None
         self.held_keys = {}
+        self.wheel_rest = [0.0, 0.0]
+        self.fitted = False  # a new Chrome window opens at its saved place

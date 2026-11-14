@@ -15,7 +15,7 @@ async function main() {
     import '/chat/src/index.css';
     import {BrowserPanel} from '/chat/src/BrowserPanel.tsx';
     import '/chat/src/App.css';
-    const tab = {id:'fixture', title:'Fixture tab', url:'about:blank', mode:'saved', preset:'desktop', width:1280, height:800, touch:false};
+    const tab = {id:'fixture', title:'Fixture tab', url:'about:blank', mode:'saved', preset:'desktop', width:1280, height:800, touch:false, ...(window.fixtureTab || {})};
     const api = async (path, body) => {
       window.calls.push({path, body});
       if (path.startsWith('browser/tabs')) return {tabs:[tab], presets:[{id:'desktop',label:'Desktop',width:1280,height:800}], nav:{back:true,forward:true}};
@@ -42,7 +42,7 @@ async function main() {
     }] })
     await server.listen()
     browser = await chromium.launch({ executablePath: process.env.MOBILE_TMUX_CHROME || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] })
-    for (const [width, height, touch] of [[1280, 900, false], [768, 1024, true], [320, 700, true]]) {
+    for (const [width, height, touch, agent] of [[1280, 900, false], [768, 1024, true], [320, 700, true], [768, 1024, true, true]]) {
       const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch, serviceWorkers: 'block' })
       const page = await context.newPage()
       page.setDefaultTimeout(15000)
@@ -50,6 +50,7 @@ async function main() {
       page.on('pageerror', error => errors.push(error.message))
       // Block all API requests, so a test can never reach the configured live proxy.
       await page.route('**/mobile/**', route => route.fulfill({ json: { name: 'fixture' } }))
+      if (agent) await page.addInitScript(() => { window.fixtureTab = { mode: 'agent', controller: 'agent' } })
       await page.addInitScript(() => {
         localStorage.setItem('tether-browser-which', 'signed')
         window.calls = []; window.sockets = []; window.sources = []
@@ -81,6 +82,21 @@ async function main() {
       await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/chat/window-fixture/`, { timeout: 60000 })
       const toggle = page.getByRole('button', {name:'Show the whole Chrome window', exact:true})
       try { await toggle.waitFor() } catch (error) { console.error(errors, await page.locator('body').innerText()); throw error }
+      if (agent) {
+        // An agent tab blocks input to that tab, never to the whole window: a Chrome dialog must stay usable.
+        await toggle.click()
+        await page.waitForFunction(() => window.sources.some(source => source.url.includes('/browser/window?')))
+        await page.evaluate(() => window.emitFrame())
+        await page.waitForFunction(() => document.querySelector('.browser-canvas').width === 640)
+        const agentBox = await page.locator('.browser-canvas').boundingBox()
+        await page.mouse.click(agentBox.x + agentBox.width / 2, agentBox.y + agentBox.height / 2)
+        await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/window/input' && call.body.events.some(event => event.type === 'down')))
+        assert(await page.getByRole('button', {name:'Type into the page', exact:true}).isEnabled())
+        assert.deepEqual(errors, [])
+        console.log('Browser window: agent tab, whole-window input still works')
+        await context.close()
+        continue
+      }
       await page.getByRole('button', {name:'Dialog not showing? Show the whole window', exact:true}).click()
       await page.waitForFunction(() => window.sources.some(source => source.url.includes('/browser/window?')))
       assert.equal(await toggle.getAttribute('aria-pressed'), 'true')

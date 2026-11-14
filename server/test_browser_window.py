@@ -250,25 +250,59 @@ class WindowRouteTests(unittest.TestCase):
 
 
 class WindowPlacementTests(unittest.TestCase):
-    def test_watch_moves_chrome_to_fill_the_display(self):
-        display = VirtualDisplay()
-        display.environment = {'DISPLAY': ':999', 'XAUTHORITY': '/fixture/auth'}
-        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
-                patch.object(browser_display.subprocess, 'run') as run:
-            display._fit_window()
-        self.assertEqual(run.call_args.args[0], ['/fixture/xdotool', 'search', '--onlyvisible', '--class', 'google-chrome',
-                                                 'windowmove', '%@', '0', '0', 'windowsize', '%@', '2560', '1600'])
-        self.assertEqual(run.call_args.kwargs['env']['DISPLAY'], ':999')
-        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
-                patch.object(browser_display.subprocess, 'run', side_effect=subprocess.TimeoutExpired('x', 5)):
-            display._fit_window()  # a misplaced window is not an error
-
     def test_unwatch_never_starts_chrome(self):
         signed = browser.Browser(signed=True, display=Mock())
         signed.ensure = Mock()
         signed.window_unwatch()
         signed.ensure.assert_not_called()
         signed.display.unwatch.assert_called_once_with()
+
+
+class WindowReviewFixTests(unittest.TestCase):
+    def setUp(self):
+        self.display = VirtualDisplay()
+        self.display.environment = {'DISPLAY': ':999', 'XAUTHORITY': '/fixture/auth'}
+
+    def send(self, events):
+        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
+                patch.object(browser_display.subprocess, 'run') as run:
+            self.display.input(events)
+        return run.call_args.args[0] if run.called else []
+
+    def test_small_wheel_deltas_add_up(self):
+        wheel = {'type': 'wheel', 'x': 50, 'y': 60, 'dx': 0, 'dy': 30}
+        clicks = [self.send([wheel]).count('5') for _ in range(7)]
+        self.assertEqual(clicks, [0, 0, 0, 1, 0, 0, 1])  # 30 px a batch: one click per 100 px
+        up = self.send([dict(wheel, dy=-250)])
+        self.assertEqual((up.count('4'), up.count('5')), (2, 0))
+
+    def test_cmd_acts_as_ctrl(self):
+        args = self.send([{'type': 'keydown', 'key': 'l', 'modifiers': 4},
+                          {'type': 'keydown', 'key': 'a', 'modifiers': 6},
+                          {'type': 'keydown', 'key': 'ArrowLeft', 'modifiers': 4}, {'type': 'keyup', 'key': 'ArrowLeft'}])
+        self.assertEqual(args[1:], ['key', 'ctrl+l', 'key', 'ctrl+a', 'keydown', 'ctrl+Left', 'keyup', 'ctrl+Left'])
+        self.assertNotIn('super', ' '.join(args))
+
+    def test_fit_moves_only_the_largest_window_once(self):
+        shapes = {'11': 'WIDTH=400\nHEIGHT=300\n', '22': 'WIDTH=2559\nHEIGHT=1599\n', '33': 'WIDTH=800\nHEIGHT=600\n'}
+        def run(args, **kwargs):
+            if args[1] == 'search':
+                return Mock(stdout='11\n22\n33\n')
+            if args[1] == 'getwindowgeometry':
+                return Mock(stdout=shapes[args[-1]])
+            return Mock(stdout='')
+        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
+                patch.object(browser_display.subprocess, 'run', side_effect=run) as spawn:
+            self.display._fit_window()
+            self.display._fit_window()
+        moves = [call.args[0] for call in spawn.call_args_list if call.args[0][1] == 'windowmove']
+        self.assertEqual(moves, [['/fixture/xdotool', 'windowmove', '22', '0', '0', 'windowsize', '22', '2560', '1600']])
+
+    def test_fit_waits_for_a_window(self):
+        with patch.object(browser_display.shutil, 'which', return_value='/fixture/xdotool'), \
+                patch.object(browser_display.subprocess, 'run', return_value=Mock(stdout='')):
+            self.display._fit_window()
+        self.assertFalse(self.display.fitted)
 
 
 if __name__ == '__main__':

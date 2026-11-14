@@ -403,7 +403,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const sending = useRef(false)
   const scheduled = useRef(false)
   function push(...events: Gesture[]) {
-    if (watchingRef.current) return
+    // An agent tab blocks input to that tab only; the whole window is not one tab, and its dialogs must stay usable.
+    if (watchingRef.current && !windowViewRef.current) return
     // The queue belongs to one tab. Input for a new tab never goes to the old one.
     const wholeWindow = windowViewRef.current
     const id = wholeWindow ? 'window' : tabRef.current?.id ?? null
@@ -791,7 +792,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           </button>)}
         </div>}
       </div>
-      <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>
+      <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching && !windowView} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>
       {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} onClick={() => changeWindowView(!windowView)}><AppWindow size={17} /></button>}
       <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={!frame || windowView} onClick={startNotes}><PenLine size={17} /></button>
     </form>}
