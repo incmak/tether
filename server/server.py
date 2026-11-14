@@ -1065,10 +1065,40 @@ def window_limit(query):
 
 
 def with_version(payload):
-    """Add a short hash of the chat payload. A client that already shows this version passes it to the stream as
-    `have`, and the stream answers `event: same` instead of sending the payload again (B63)."""
-    payload['version'] = hashlib.sha1(json.dumps(payload).encode()).hexdigest()[:20]
-    return payload
+    """A frozen copy of the chat payload plus `version`, a short hash of it. A client that already shows this version
+    passes it to the stream as `have`, and the stream answers `event: same` instead of sending the payload again (B63).
+    The payload is serialized once: cached message objects can change in place while another thread reads them,
+    so the version, the body sent and the delta base (B66) must all come from the same snapshot."""
+    text = json.dumps(payload)
+    frozen = json.loads(text)
+    frozen['version'] = hashlib.sha1(text.encode()).hexdigest()[:20]
+    return frozen
+
+
+def chat_delta(old, new):
+    """What changed from payload `old` to payload `new`, both with versions, for a stream that opted in (B66).
+    The client applies it only to the screen that shows version `base`:
+      set: top-level keys with a new value; unset: keys that went away;
+      messages: new list = old[drop:drop + keep] + tail (absent when the list did not change).
+    Values compare as JSON text: Python's == treats True and 1 as equal, the page does not."""
+    delta = {'base': old['version'], 'version': new['version'], 'set': {}, 'unset': [key for key in old if key not in new]}
+    before, after = old.get('messages'), new.get('messages')
+    lists = isinstance(before, list) and isinstance(after, list)
+    for key, value in new.items():
+        if key == 'version' or (key == 'messages' and lists):
+            continue
+        if key not in old or json.dumps(old[key]) != json.dumps(value):
+            delta['set'][key] = value
+    if lists:
+        was, now = [json.dumps(message) for message in before], [json.dumps(message) for message in after]
+        if was != now:
+            # The window slides: find where the new list starts in the old one, then how far the two agree.
+            drop = was.index(now[0]) if now and now[0] in was else len(was)
+            keep = 0
+            while keep < len(now) and drop + keep < len(was) and was[drop + keep] == now[keep]:
+                keep += 1
+            delta['messages'] = {'drop': drop, 'keep': keep, 'tail': after[keep:]}
+    return delta
 
 
 def chat_payload(config, shell_mode=False, limit=DEFAULT_WINDOW, preview=False):
@@ -1250,9 +1280,10 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):  # the player stopped or seeked
                 pass
 
-    def stream_chat(self, identifier, shell_mode, limit=DEFAULT_WINDOW, lifetime=600, preview=False, have=''):
+    def stream_chat(self, identifier, shell_mode, limit=DEFAULT_WINDOW, lifetime=600, preview=False, have='', deltas=False):
         """Server-sent events: push a fresh chat payload whenever something the chat view depends on changes.
-        have: the version the client already shows. When the first payload has that version, send `event: same`."""
+        have: the version the client already shows. When the first payload has that version, send `event: same`.
+        deltas: after the first event, send `event: delta` (see chat_delta) when it is shorter than the payload."""
         config = choose(identifier)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -1276,7 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
         with WATCHING_LOCK:
             WATCHING[watched] = WATCHING.get(watched, 0) + 1
         started = discovered = full = wrote = time.monotonic()
-        signature = last_body = screen = None
+        signature = last_body = last_payload = screen = None
         sampled = 0.0
         working = False
         try:
@@ -1295,10 +1326,20 @@ class Handler(BaseHTTPRequestHandler):
                         signature, full = current, now
                         payload = chat_payload(config, shell_mode, limit, preview=True) if preview else chat_payload(config, shell_mode, limit)
                         working = payload.get('state') == 'Working'
-                        body = json.dumps(with_version(payload))
+                        payload = with_version(payload)  # one frozen snapshot: version, body and delta base agree
+                        body = json.dumps(payload)
                         if body != last_body:
-                            first, last_body = last_body is None, body
-                            send(('event: same\ndata: ' + json.dumps({'version': have}) + '\n\n').encode() if first and have and payload['version'] == have else ('data: ' + body + '\n\n').encode())
+                            sent = payload if deltas else None
+                            if last_body is None and have and payload['version'] == have:
+                                event = 'event: same\ndata: ' + json.dumps({'version': have})
+                            else:
+                                event = 'data: ' + body
+                                if last_payload is not None:
+                                    change = json.dumps(chat_delta(last_payload, sent))
+                                    if len(change) < len(body):
+                                        event = 'event: delta\ndata: ' + change
+                            last_body, last_payload = body, sent
+                            send((event + '\n\n').encode())
                             wrote = now
                 except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as exc:
                     if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
@@ -1821,7 +1862,8 @@ class Handler(BaseHTTPRequestHandler):
                 attention.get(self)
             elif path == '/mobile/api/stream':
                 query = parse_qs(urlsplit(self.path).query)
-                self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'], have=query.get('have', [''])[0][:64])
+                self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'], have=query.get('have', [''])[0][:64],
+                                 deltas=query.get('delta') == ['1'])
             elif path == '/mobile/api/sessions':
                 body, tag = sessions_listing()
                 headers = {'ETag': tag, 'Vary': 'Accept-Encoding, Sec-Fetch-Site'}

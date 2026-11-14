@@ -3,6 +3,31 @@ import type { RefObject } from 'react'
 import { errorText } from './api'
 import { useBackStep } from './backNav'
 
+type Delta = { base?: unknown; version?: unknown; set?: Record<string, unknown>; unset?: unknown; messages?: { drop?: unknown; keep?: unknown; tail?: unknown } }
+
+/** Apply a stream `delta` event (B66) to the data on screen. Returns undefined when it does not fit that data:
+ *  another version, or a message window that is too short. The caller then fetches the full data again. */
+export function applyDelta<T>(shown: T | undefined, delta: Delta): T | undefined {
+  const old = shown as Record<string, unknown> | undefined
+  if (!old || typeof old !== 'object' || !old.version || old.version !== delta.base || typeof delta.version !== 'string') return undefined
+  const next: Record<string, unknown> = { ...old }
+  if (delta.unset !== undefined) {
+    if (!Array.isArray(delta.unset)) return undefined
+    for (const key of delta.unset) if (typeof key === 'string') delete next[key]
+  }
+  for (const [key, value] of Object.entries(delta.set ?? {})) if (key !== '__proto__') next[key] = value
+  if (delta.messages) {
+    const { drop, keep, tail } = delta.messages
+    const messages = old.messages
+    if (!Array.isArray(messages) || !Array.isArray(tail) || !Number.isInteger(drop) || !Number.isInteger(keep)) return undefined
+    const start = drop as number, count = keep as number
+    if (start < 0 || count < 0 || start + count > messages.length) return undefined
+    next.messages = messages.slice(start, start + count).concat(tail)
+  }
+  next.version = delta.version
+  return next as T
+}
+
 // One request at a time. Abort obsolete requests and pause polling in hidden tabs.
 // `initial` shows saved data at once (no loading state) while the first fetch runs.
 /** streamPath: an SSE path that pushes new data. As a function, it gets the data on screen when the stream opens,
@@ -53,6 +78,18 @@ export function usePolling<T>(fetcher: (signal: AbortSignal) => Promise<T>, inte
         }
         active.current?.abort()  // an older fallback poll must not bring back an error banner
         received = Date.now(); setError(''); setLoading(false)
+      })
+      // B66: only what changed since the last event. It must fit the data on screen; if not, resync like a stale `same`.
+      current.addEventListener('delta', event => {
+        let next: T | undefined
+        try { next = applyDelta(shown.current, JSON.parse((event as MessageEvent<string>).data) as Delta) } catch { next = undefined }
+        if (next === undefined) {
+          current.close(); if (stream === current) stream = null
+          received = 0
+          return
+        }
+        active.current?.abort()  // an older poll must not overwrite a pushed update
+        received = Date.now(); shown.current = next; setData(next); setError(''); setLoading(false)
       })
       stream.addEventListener('idle', () => { if (received) received = Date.now() })
       stream.addEventListener('unavailable', () => { received = 0 })

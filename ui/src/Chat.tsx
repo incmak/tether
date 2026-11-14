@@ -235,7 +235,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     if (early) return early.data as ChatData
     return api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal)
   }, [api, chatQuery])
-  const streamPath = useCallback((shown?: ChatData) => `stream?${chatQuery}${shown?.version ? `&have=${encodeURIComponent(shown.version)}` : ''}`, [chatQuery])
+  const streamPath = useCallback((shown?: ChatData) => `stream?${chatQuery}&delta=1${shown?.version ? `&have=${encodeURIComponent(shown.version)}` : ''}`, [chatQuery])
   const { data, error, loading, refresh } = usePolling(fetchChat, 1500, streamPath, chatCache.get(pane.id))
   useEffect(() => { if (data) cacheChat(pane.id, data) }, [pane.id, data])
   const preview = useSteadyPreview(liveReplyPreview ? data?.preview?.text : undefined)

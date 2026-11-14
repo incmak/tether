@@ -103,6 +103,50 @@ async function main() {
   assert.equal(streams[opened].url, '/mobile/api/stream?have=v0', 'a failed fetch still opens the stream with the data on screen')
   cleanup()
   console.log('SSE hook B63: stream opens after the fetch with the shown version; same keeps it live')
+  // B66: a delta that fits the data on screen updates it with no poll; one that does not fit resyncs.
+  const { applyDelta } = output.exports
+  const plain = value => JSON.parse(JSON.stringify(value))  // objects made inside the vm have another Object prototype
+  const base = { version: 'v1', state: 'Idle', earlier: 0, approval: { a: 1 }, messages: [{ id: 0 }, { id: 1 }, { id: 2 }] }
+  const slid = applyDelta(base, { base: 'v1', version: 'v2', set: { earlier: 1, state: 'Working' }, unset: ['approval'], messages: { drop: 1, keep: 1, tail: [{ id: 3 }] } })
+  assert.deepEqual(plain(slid), { version: 'v2', state: 'Working', earlier: 1, messages: [{ id: 1 }, { id: 3 }] })
+  assert.equal(slid.messages[0], base.messages[1], 'kept messages keep their objects')
+  assert.equal(base.version, 'v1', 'the shown data is not changed in place')
+  assert.equal(applyDelta(base, { base: 'v1', version: 'v3', set: { preview: { text: 'x' } }, unset: [] }).messages, base.messages)
+  for (const bad of [
+    { base: 'v0', version: 'v2', set: {}, unset: [] },
+    { base: 'v1', set: {}, unset: [] },
+    { base: 'v1', version: 'v2', set: {}, unset: [], messages: { drop: 2, keep: 2, tail: [] } },
+    { base: 'v1', version: 'v2', set: {}, unset: [], messages: { drop: -1, keep: 1, tail: [] } },
+    { base: 'v1', version: 'v2', set: {}, unset: [], messages: { drop: 0, keep: 1, tail: null } },
+    { base: 'v1', version: 'v2', set: {}, unset: 'approval' },
+  ]) assert.equal(applyDelta(base, bad), undefined, JSON.stringify(bad))
+  assert.equal(applyDelta(undefined, { base: undefined, version: 'v2' }), undefined)
+  assert.equal(applyDelta({ messages: [] }, { base: undefined, version: 'v2' }), undefined, 'no version on screen: no delta')
+  const polluted = applyDelta(base, JSON.parse('{"base":"v1","version":"v2","set":{"__proto__":{"evil":1}},"unset":[]}'))
+  assert.equal(polluted.evil, undefined); assert.equal({}.evil, undefined)
+  let deltaShown = { version: 'd1', messages: [{ id: 1 }, { id: 2 }] }
+  output.exports.usePolling(async signal => { calls++; signals.push(signal); return deltaShown }, 1500, shown => `stream?delta=1&have=${shown?.version}`)
+  opened = streams.length
+  cleanup = effect(); await flush()
+  const live = streams[opened]
+  assert.equal(live.url, '/mobile/api/stream?delta=1&have=d1')
+  live.listeners.get('same')({ data: '{"version":"d1"}' })
+  const beforeDelta = calls
+  live.listeners.get('delta')({ data: JSON.stringify({ base: 'd1', version: 'd2', set: { state: 'Working' }, unset: [], messages: { drop: 1, keep: 1, tail: [{ id: 3 }] } }) })
+  assert.deepEqual(plain(states.at(-3)), { version: 'd2', messages: [{ id: 2 }, { id: 3 }], state: 'Working' })
+  live.listeners.get('delta')({ data: JSON.stringify({ base: 'd2', version: 'd3', set: {}, unset: ['state'] }) })
+  assert.deepEqual(plain(states.at(-3)), { version: 'd3', messages: [{ id: 2 }, { id: 3 }] }, 'deltas chain on the last applied one')
+  await tick(); assert.equal(calls, beforeDelta, 'deltas keep the stream live: no poll')
+  live.listeners.get('delta')({ data: JSON.stringify({ base: 'd2', version: 'd4', set: {}, unset: [] }) })
+  assert.equal(live.closed, true, 'a delta for another version closes the stream')
+  assert.equal(states.at(-3).version, 'd3', 'and does not change the screen')
+  deltaShown = { version: 'd5', messages: [] }
+  await tick(); assert.equal(calls, beforeDelta + 1, 'the next tick fetches the full data')
+  assert.equal(streams.at(-1).url, '/mobile/api/stream?delta=1&have=d5')
+  streams.at(-1).listeners.get('delta')({ data: 'not json' })
+  assert.equal(streams.at(-1).closed, true, 'a broken delta resyncs too')
+  cleanup()
+  console.log('SSE hook B66: deltas apply on the shown version, chain, and resync when they do not fit')
   delete windowMock.EventSource
   output.exports.usePolling(async () => { calls++; return {} }, 1500, 'stream?session=unsupported')
   const streamCount = streams.length, callCount = calls
