@@ -200,6 +200,20 @@ class UnitTests(unittest.TestCase):
         (base / 'split' / 'src').mkdir()
         self.config(f'[projects."{os.path.realpath(base / "split")}"]\ntrust_level = "trusted"\n')
         self.assertFalse(project_launch.codex_writable([], str(base / 'split' / 'src')), 'no worktree metadata')
+        self.config(f'[projects."{os.path.realpath(main)}"]\ntrust_level = "trusted"\n')
+        self.assertFalse(project_launch.codex_writable(['--full-auto'], str(linked)), 'Codex rejects the flag')
+        registration = Path(os.path.realpath(main / '.git' / 'worktrees' / 'linked'))
+        for name in ('gitdir', 'commondir'):
+            original = (registration / name).read_bytes()
+            (self.temp / name).write_bytes(original)
+            (registration / name).unlink()
+            (registration / name).symlink_to(self.temp / name)
+            self.assertFalse(project_launch.codex_writable([], str(linked)), f'{name} as a symlink')
+            (registration / name).unlink()
+            (registration / name).write_bytes(original)
+            self.assertTrue(project_launch.codex_writable([], str(linked)))
+        (registration / 'gitdir').write_bytes((registration / 'gitdir').read_bytes() + b' ' * 70000)
+        self.assertFalse(project_launch.codex_writable([], str(linked)), 'gitdir over 64 KiB')
 
     def test_writable_round_three_cli_project_overrides(self):
         repo = self.temp / 'repo'

@@ -118,7 +118,8 @@ def codex_has_own_instructions():
 
 SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
 SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
-WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}  # Codex 0.166 rejects --full-auto
+WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}
+UNKNOWN_FLAGS = {'--full-auto'}  # removed from Codex: 0.166 and 0.169 reject it
 UNSURE = object()
 
 
@@ -153,24 +154,29 @@ def _toml(path):
         return None
 
 
+def _read(path):
+    """A git metadata file as Codex reads it (git-utils/src/trust.rs read_metadata_file): a regular file,
+    not a symlink, at most 64 KiB. Anything else gives ''."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024:
+            return ''
+        data = path.read_bytes()
+    except OSError:
+        return ''
+    if len(data) > 64 * 1024:
+        return ''
+    try:
+        return data.decode().strip()
+    except UnicodeDecodeError:
+        return ''
+
+
 def _gitdir(dot_git):
     """The folder a .git file points to ("gitdir: PATH"), or None."""
-    try:
-        if dot_git.stat().st_size > 64 * 1024:
-            return None
-        text = dot_git.read_text().strip()
-    except (OSError, UnicodeDecodeError):
-        return None
+    text = _read(dot_git)
     if not text.startswith('gitdir:') or not text[len('gitdir:'):].strip():
         return None
     return dot_git.parent / text[len('gitdir:'):].strip()
-
-
-def _read(path):
-    try:
-        return path.read_text().strip()
-    except (OSError, UnicodeDecodeError):
-        return ''
 
 
 def _repo_root(cwd):
@@ -268,6 +274,8 @@ def codex_writable(args, cwd=None):
     gives False: Codex then starts without --add-dir, as before."""
     if '--' in args:
         args = args[:args.index('--')]  # after --, everything is the prompt
+    if any(arg in UNKNOWN_FLAGS for arg in args):
+        return False  # Codex stops with "unexpected argument"
     if _managed():
         return False  # system requirements apply after any sandbox choice, even --yolo or --sandbox
     for i, arg in enumerate(args):
