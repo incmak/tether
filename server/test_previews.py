@@ -131,7 +131,12 @@ class PreviewTests(unittest.TestCase):
                 previews.Path = lambda value: link if value.startswith('/tmp/claude-') else original(value)
                 self.assertIsNone(previews.scratch_root())
                 previews.Path = lambda value: real if value.startswith('/tmp/claude-') else original(value)
-                self.assertEqual(previews.scratch_root(), real)
+                self.assertEqual(previews.scratch_root(), real.resolve())
+                # A symlinked ancestor (macOS /tmp) is fine: the root comes back resolved.
+                alias = Path(other) / 'tmp-alias'
+                alias.symlink_to(Path(other))
+                previews.Path = lambda value: alias / 'claude-real' if value.startswith('/tmp/claude-') else original(value)
+                self.assertEqual(previews.scratch_root(), real.resolve())
             finally:
                 previews.Path = original
 

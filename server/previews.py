@@ -52,7 +52,12 @@ def scratch_root():
         info = root.lstat()
     except OSError:
         return None
-    return root if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() else None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return None
+    try:
+        return root.resolve(strict=True)  # Files are compared by their resolved paths (/tmp may be a symlink).
+    except (OSError, RuntimeError):
+        return None
 
 
 class Previews:
