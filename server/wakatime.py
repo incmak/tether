@@ -147,12 +147,12 @@ class Tracker:
             self.last = {'at': self.clock(), 'ok': not error, 'error': error}
         return result
 
-    def heartbeat(self, entry):
-        """Queue one heartbeat for a tab. Returns why it did not, or ''. entry is a sessions() row."""
+    def heartbeat(self, folder):
+        """Queue one heartbeat for a tab's folder (server.tab_folder). Returns why it did not, or ''."""
         on, _agents = enabled()
         if not on:
             return 'off'
-        folder = entry.get('cwd') or ''
+        folder = folder or ''
         if not folder.startswith('/') or not os.path.isdir(folder):
             return 'no-folder'
         binary = self.find()
@@ -167,6 +167,8 @@ class Tracker:
                 self.sent = {key: value for key, value in self.sent.items() if now - value < SAME_PROJECT}
 
         def send():
+            if not enabled()[0]:  # the person turned it off while this job waited
+                return
             name, detected = project(folder, self.run)
             argv = [binary, '--entity', folder, '--entity-type', 'file', '--category', CATEGORY, '--time', f'{now:.3f}',
                     '--plugin', PLUGIN, '--sync-ai-disabled', '--project' if detected else '--alternate-project', name]
@@ -183,7 +185,11 @@ class Tracker:
             return False
         self.synced = self.clock()
         argv = ['nice', '-n', '10', binary] if shutil.which('nice') else [binary]
-        return self._queue(lambda: self._call(argv + ['--sync-ai-activity', '--plugin', PLUGIN], SYNC_TIMEOUT))
+
+        def sync():
+            if enabled() == (True, True):  # the person may have turned it off while this job waited
+                self._call(argv + ['--sync-ai-activity', '--plugin', PLUGIN], SYNC_TIMEOUT)
+        return self._queue(sync)
 
     def _refresh_today(self, binary):
         result = self._call([binary, '--today', '--plugin', PLUGIN, '--sync-ai-disabled'], TIMEOUT, record=False)
@@ -212,8 +218,8 @@ def get(handler):
     handler.respond(200, TRACKER.status())
 
 
-def post(handler, sessions):
-    """{pane}: the person used this tab now."""
+def post(handler, sessions, folder):
+    """{pane}: the person used this tab now. folder(entry) is the tab's resolved folder (server.tab_folder)."""
     try:
         size = int(handler.headers.get('Content-Length', '0') or 0)
         if not 0 < size <= 1024:
@@ -229,5 +235,5 @@ def post(handler, sessions):
     if entry is None:
         handler.respond(200, {'sent': False, 'reason': 'gone'})
         return
-    reason = TRACKER.heartbeat(entry)
+    reason = TRACKER.heartbeat(folder(entry))
     handler.respond(200, {'sent': not reason, 'reason': reason})

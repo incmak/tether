@@ -2174,7 +2174,7 @@ class Handler(BaseHTTPRequestHandler):
             codex_level.post(self)
             return
         if wakatime.handles(self.path):
-            wakatime.post(self, sessions)
+            wakatime.post(self, sessions, tab_folder)
             return
         if codex_trust.handles(self.path):
             codex_trust.post(self, choose=choose, agent_folder=agent_folder, chat_folder=chat_folder,

@@ -1,6 +1,7 @@
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -38,12 +39,12 @@ class Base(unittest.TestCase):
 class HeartbeatTest(Base):
     def test_off_by_default_sends_nothing(self):
         self.prefs = {}
-        self.assertEqual(self.tracker.heartbeat({'cwd': self.folder.name}), 'off')
+        self.assertEqual(self.tracker.heartbeat(self.folder.name), 'off')
         self.assertEqual(self.tracker.observe(), False)
         self.assertEqual(self.calls, [])
 
     def test_sends_one_heartbeat_for_the_tab_folder_without_parsing_transcripts(self):
-        self.assertEqual(self.tracker.heartbeat({'cwd': self.folder.name}), '')
+        self.assertEqual(self.tracker.heartbeat(self.folder.name), '')
         self.drain()
         argv = self.calls[0]
         self.assertEqual(argv[0], '/bin/wakatime-cli')
@@ -55,24 +56,24 @@ class HeartbeatTest(Base):
         self.assertNotIn('--key', argv)  # the CLI reads the key from its own config
 
     def test_same_folder_waits_two_minutes(self):
-        self.tracker.heartbeat({'cwd': self.folder.name})
+        self.tracker.heartbeat(self.folder.name)
         self.drain()
         self.now[0] += 60
-        self.assertEqual(self.tracker.heartbeat({'cwd': self.folder.name}), 'recent')
+        self.assertEqual(self.tracker.heartbeat(self.folder.name), 'recent')
         self.now[0] += 61
-        self.assertEqual(self.tracker.heartbeat({'cwd': self.folder.name}), '')
+        self.assertEqual(self.tracker.heartbeat(self.folder.name), '')
         self.drain()
         self.assertEqual(len(self.calls), 2)
 
     def test_refuses_missing_folder_and_missing_cli(self):
-        self.assertEqual(self.tracker.heartbeat({'cwd': ''}), 'no-folder')
-        self.assertEqual(self.tracker.heartbeat({'cwd': self.folder.name + '/gone'}), 'no-folder')
+        self.assertEqual(self.tracker.heartbeat(''), 'no-folder')
+        self.assertEqual(self.tracker.heartbeat(self.folder.name + '/gone'), 'no-folder')
         tracker = wakatime.Tracker(run=self.fake_run, clock=lambda: self.now[0], find=lambda: None)
-        self.assertEqual(tracker.heartbeat({'cwd': self.folder.name}), 'no-cli')
+        self.assertEqual(tracker.heartbeat(self.folder.name), 'no-cli')
 
     def test_folder_outside_git_is_only_a_fallback_name(self):
         self.git = Result(128, '')
-        self.tracker.heartbeat({'cwd': self.folder.name})
+        self.tracker.heartbeat(self.folder.name)
         self.drain()
         argv = self.calls[0]
         self.assertNotIn('--project', argv)
@@ -80,10 +81,33 @@ class HeartbeatTest(Base):
 
     def test_cli_error_is_reported_not_raised(self):
         self.tracker.run = lambda argv, **_: self.git if argv[0] == 'git' else Result(104)
-        self.tracker.heartbeat({'cwd': self.folder.name})
+        self.tracker.heartbeat(self.folder.name)
         self.drain()
         self.assertEqual(self.tracker.last['ok'], False)
         self.assertIn('API key', self.tracker.last['error'])
+
+
+class OptOutTest(Base):
+    def test_jobs_queued_before_opt_out_send_nothing(self):
+        self.prefs['wakatimeAgents'] = True
+        gate = threading.Event()
+        self.tracker._queue(gate.wait)  # hold the worker so the next jobs wait in the queue
+        self.assertEqual(self.tracker.heartbeat(self.folder.name), '')
+        self.assertTrue(self.tracker.observe())
+        self.prefs = {}
+        gate.set()
+        self.drain()
+        self.assertEqual(self.calls, [])
+
+    def test_agent_sync_queued_then_agents_switch_off(self):
+        self.prefs['wakatimeAgents'] = True
+        gate = threading.Event()
+        self.tracker._queue(gate.wait)
+        self.assertTrue(self.tracker.observe())
+        self.prefs = {'wakatime': True}
+        gate.set()
+        self.drain()
+        self.assertEqual(self.calls, [])
 
 
 class TodayTest(Base):
@@ -153,18 +177,22 @@ class Handler:
 class PostTest(Base):
     def test_unknown_pane_and_bad_body(self):
         handler = Handler({'pane': '%9'})
-        wakatime.post(handler, lambda: [{'id': '%1', 'cwd': self.folder.name}])
+        wakatime.post(handler, lambda: [{'id': '%1', 'cwd': self.folder.name}], lambda entry: entry['cwd'])
         self.assertEqual(handler.out, (200, {'sent': False, 'reason': 'gone'}))
         handler = Handler(b'[]')
-        wakatime.post(handler, lambda: [])
+        wakatime.post(handler, lambda: [], lambda entry: entry['cwd'])
         self.assertEqual(handler.out[0], 400)
 
-    def test_known_pane_sends(self):
+    def test_known_pane_sends_for_the_resolved_tab_folder(self):
+        # tmux still reports the start folder; the agent (or a `!cd`) moved the tab to another one.
+        moved = tempfile.TemporaryDirectory()
+        self.addCleanup(moved.cleanup)
         handler = Handler({'pane': '%1'})
         with mock.patch.object(wakatime, 'TRACKER', self.tracker):
-            wakatime.post(handler, lambda: [{'id': '%1', 'cwd': self.folder.name}])
+            wakatime.post(handler, lambda: [{'id': '%1', 'cwd': self.folder.name}], lambda entry: moved.name)
         self.assertEqual(handler.out, (200, {'sent': True, 'reason': ''}))
         self.drain()
+        self.assertEqual(self.calls[0][self.calls[0].index('--entity') + 1], moved.name)
 
 
 if __name__ == '__main__':
