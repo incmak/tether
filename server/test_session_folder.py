@@ -247,7 +247,8 @@ class WorktreeDiscovery(unittest.TestCase):
                 '%2\t$1\trepo\t2.0\t102\t/work\t123\tAdvisor 2: Fix\tlightbulb\t\t\t\tsecond-advisor',
                 '%3\t$1\trepo\t3.0\t103\t/work\t123\tTab\tbug\t\t\t\tboss',
                 '%4\t$1\trepo\t4.0\t104\t/work\t\t\t\t\t\t%1\tadvisor',
-                '%5\t$1\trepo\t5.0\t105\t/work\t123\tOld\tbug\t\t\t'])
+                '%5\t$1\trepo\t5.0\t105\t/work\t123\tOld\tbug\t\t\t',
+                '%6\t$1\trepo\t6.0\t106\t/work\t123\tReview: Fix\teye\t\t\t\treviewer'])
             run = Mock(return_value=subprocess.CompletedProcess([], 0, lines, ''))
             with patch.object(agents, 'HOME', Path(folder)), \
                     patch.object(agents.pane_view, 'zoom_repair_all'), \
@@ -257,7 +258,9 @@ class WorktreeDiscovery(unittest.TestCase):
                 entries = agents.discover({}, run)
         self.assertEqual([(entry['id'], entry.get('role'), entry['pane_name'], entry['cwd']) for entry in entries],
                          [('%1', 'advisor', 'Advisor: Fix', '/work'), ('%2', 'advisor', 'Advisor 2: Fix', '/work'),
-                          ('%3', None, 'Tab', '/work'), ('%5', None, 'Old', '/work')])
+                          ('%3', None, 'Tab', '/work'), ('%5', None, 'Old', '/work'), ('%6', None, 'Review: Fix', '/work')])
+        # A reviewer is a helper (quick_tab.py skips it) but keeps no role, so tab_brief.py still names it.
+        self.assertEqual([entry.get('helper') for entry in entries], [None, None, None, None, 'reviewer'])
         self.assertTrue(run.call_args.args[0][-1].endswith('#{@zoom_for}\t#{@tether_role}'))
 
     def test_group_field_is_read_and_old_lines_have_none(self):

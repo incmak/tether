@@ -191,6 +191,8 @@ def discover(config, run):
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
             if role in ('advisor', 'second-advisor'):
                 entry['role'] = 'advisor'
+            elif role == 'reviewer':
+                entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
             live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
             if live:
                 project = re.sub(r'[^a-zA-Z0-9]', '-', live['cwd'])

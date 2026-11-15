@@ -9,7 +9,7 @@ import { useModal, usePolling } from './hooks'
 import { startTrial } from './lookTrial'
 import { TrialBar } from './TrialBar'
 import type { Anchor } from './hooks'
-import { goBack, goForward, setPlace, setPlaceHandler, setViewOpener, useNavAvailability } from './backNav'
+import { goBack, goForward, setPlace, setPlaceHandler, setSearchOpener, setViewOpener, useNavAvailability } from './backNav'
 import { BACK_KEY, FORWARD_KEY, isNavKey } from './navKeys'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
@@ -88,6 +88,7 @@ import { WorkSheet } from './WorkBoard'
 import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
 import { useActivityPing } from './activityPing'
+import { useQuickCreate } from './QuickToast'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
 
@@ -312,6 +313,8 @@ function App() {
     })
     return () => setViewOpener(null)
   }, [])
+  // The extension's "Open Tether search" key (#search) opens search like ⌥Space; /chat/?go=search does too.
+  useEffect(() => { setSearchOpener(() => setGo('search')); return () => setSearchOpener(null) }, [])
   // Mouse buttons 4 and 5 go Back and Forward inside Tether. Stop the browser's own step, so it cannot leave the app.
   useEffect(() => {
     const mouse = (event: MouseEvent) => {
@@ -532,6 +535,8 @@ function App() {
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
+    // Like ⌥Space: inside another dialog (Settings), search does not open over it.
+    else if (go === 'search') setMenu(current => document.querySelector('dialog[open]') ? current : 'commands')
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})
@@ -715,6 +720,8 @@ function App() {
     setDrawer(false)
     leaveHome()
   }
+  // The search menu's "Add to the backlog" and "Start a new tab" rows, and their toast.
+  const quick = useQuickCreate({ api, agent: prefs.mainModel, sessions, onOpen: openPane })
   const archiveTab = (target: Pane) => {
     const owner = sessions.find(session => session.panes.some(item => item.id === target.id))
     if (!owner) return
@@ -988,7 +995,8 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} create={quick.create} />}
+    {quick.toast}
     {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}

@@ -13,8 +13,11 @@ function compile(file) {
 function makeHistory() {
   const listeners = []
   const tasks = []
-  const entries = [{ state: null }]
+  const hashListeners = []
+  const base = 'https://tether.test/chat/'
+  const entries = [{ state: null, url: base }]
   let at = 0
+  const location = { get href() { return entries[at].url }, get hash() { return new URL(entries[at].url).hash } }
   // Like a browser, the pointer and history.state change only when the traversal task runs.
   const go = step => tasks.push(() => {
     if (at + step < 0 || at + step >= entries.length) return
@@ -24,13 +27,21 @@ function makeHistory() {
   const history = {
     get state() { return entries[at].state },
     get length() { return entries.length },
-    pushState(state) { entries.splice(at + 1); entries.push({ state: structuredClone(state) }); at++ },
-    replaceState(state) { entries[at] = { state: structuredClone(state) } },
+    pushState(state, _, url) { const now = entries[at].url; entries.splice(at + 1); entries.push({ state: structuredClone(state), url: url ? String(url) : now }); at++ },
+    replaceState(state, _, url) { entries[at] = { state: structuredClone(state), url: url ? String(url) : entries[at].url } },
     back() { go(-1) },
     forward() { go(1) },
   }
+  // The extension's tabs.update to a new hash: a same-page navigation. A new entry with no state, Forward entries
+  // dropped, then popstate (null state) and hashchange.
+  const hashNav = hash => {
+    const url = new URL(entries[at].url); url.hash = hash
+    entries.splice(at + 1); entries.push({ state: null, url: String(url) }); at++
+    listeners.forEach(fn => fn({ state: null }))
+    hashListeners.forEach(fn => fn())
+  }
   const settle = () => { for (let n = 0; tasks.length && n < 50; n++) tasks.shift()() }
-  return { history, listeners, settle, entries, get at() { return at } }
+  return { history, location, listeners, hashListeners, hashNav, settle, entries, get at() { return at } }
 }
 
 function loadNav({ active = true } = {}) {
@@ -38,11 +49,11 @@ function loadNav({ active = true } = {}) {
   const store = new Map()
   const exports = {}
   runInNewContext(compile('backNav.ts'), {
-    exports, structuredClone, Number, String, Math, Set, Error, setTimeout: () => 0, clearTimeout: () => {},
-    history: h.history,
+    exports, structuredClone, Number, String, Math, Set, Error, URL, setTimeout: () => 0, clearTimeout: () => {},
+    history: h.history, location: h.location,
     navigator: { userActivation: { get isActive() { return active } } },
     sessionStorage: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) },
-    window: { addEventListener: (type, fn) => { if (type === 'popstate') h.listeners.push(fn) } },
+    window: { addEventListener: (type, fn) => { if (type === 'popstate') h.listeners.push(fn); if (type === 'hashchange') h.hashListeners.push(fn) } },
     require(name) {
       if (name === 'react') return { useEffect() {}, useLayoutEffect() {}, useRef: value => ({ current: value }), useSyncExternalStore: (_, get) => get() }
       throw Error(`Unexpected import: ${name}`)
@@ -206,7 +217,57 @@ const can = nav => nav.useNavAvailability()
   console.log('ok overlay close waits for the in-app Back')
 }
 
-// 10. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
+// 10. The extension's "Open Tether search" key (#search): no overlay closes, no Back step is added, search opens once.
+{
+  const { nav, h } = loadNav()
+  let opened = 0
+  nav.setSearchOpener(() => opened++)
+  nav.setPlace({ screen: 'home' }, { push: true })
+  nav.setPlace({ screen: 'chats', pane: '%1' }, { push: true })
+  nav.setPlace({ screen: 'files', pane: '%1' }, { push: true })
+  nav.goBack(); h.settle()
+  let closed = 0
+  nav.openOverlay(() => closed++, 'backlog:page')
+  const at = h.at
+  const before = h.entries[at].state
+  h.hashNav('#search'); h.settle()
+  assert.equal(opened, 1, 'search opens once (popstate, then hashchange finds no hash)')
+  assert.equal(closed, 0, 'the open overlay stays open')
+  assert.equal(h.at, at, 'back on the real entry')
+  assert.deepEqual(h.entries[at].state, before)
+  assert.equal(h.location.hash, '')
+  assert.equal(h.entries.length, at + 2, 'one spare entry after it')
+  assert.equal(h.entries[at + 1].url, 'https://tether.test/chat/', 'the spare entry has no hash')
+  assert.deepEqual({ ...can(nav) }, { back: true, forward: false }, 'Forward entries are gone, so in-app Forward is off')
+  // A second press replaces the spare entry: still no extra Back step.
+  h.hashNav('#search'); h.settle()
+  assert.equal(opened, 2)
+  assert.equal(h.entries.length, at + 2)
+  assert.equal(h.at, at)
+  // Browser Forward onto the spare entry comes straight back and opens nothing.
+  h.history.forward(); h.settle()
+  assert.equal(h.at, at)
+  assert.equal(opened, 2)
+  assert.equal(closed, 0)
+  console.log('ok #search opens search without a history step')
+}
+
+// 11. A page that loads with #search (a reload) keeps its entry and opens search.
+{
+  const { nav, h } = loadNav()
+  nav.setPlace({ screen: 'home' }, { push: true })
+  h.history.replaceState(h.history.state, '', 'https://tether.test/chat/#search')
+  let opened = 0
+  nav.setSearchOpener(() => opened++)
+  h.settle()
+  assert.equal(opened, 1)
+  assert.equal(h.at, 0, 'no Back: the app stays open')
+  assert.equal(h.location.hash, '')
+  assert.equal(h.entries[0].state.tether, 1)
+  console.log('ok #search on load')
+}
+
+// 12. The keys: ⌘[ ⌘] on a Mac, Alt+← Alt+→ elsewhere; never in a text field or the terminal.
 {
   const exports = {}
   runInNewContext(compile('navKeys.ts'), { exports, require: name => { if (name === './keys') return { IS_MAC: false }; throw Error(name) } })

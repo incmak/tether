@@ -29,11 +29,13 @@ const GAP = 4, EDGE = 8, MAX_HEIGHT = 440
  * The app's dropdown, in place of a native select. A long list gets a search field.
  * A sheet's swipe, click and key handlers must not see what happens inside the panel.
  */
-export function SelectMenu({ id, value, options, onChange, label, icon, className = 'sm-field', disabled, minWidth = 220, searchLabel = 'Search', emptyText = 'Nothing matches.', triggerLabel, triggerTitle, onClosed }: {
+export function SelectMenu({ id, value, options, onChange, label, icon, className = 'sm-field', disabled, minWidth = 220, searchLabel = 'Search', emptyText = 'Nothing matches.', triggerLabel, triggerTitle, onClosed, openOnMount = false }: {
   id?: string; value: string; options: MenuOption[]; onChange: (value: string) => void; label?: string; icon?: ReactNode
   className?: string; disabled?: boolean; minWidth?: number; searchLabel?: string; emptyText?: string; triggerLabel?: string; triggerTitle?: string; onClosed?: () => void
+  /** Open the list as soon as the trigger appears, for a picker that a key or row opened. */
+  openOnMount?: boolean
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(openOnMount)
   const [query, setQuery] = useState('')
   const [activeValue, setActiveValue] = useState(value)
   const trigger = useRef<HTMLButtonElement>(null)

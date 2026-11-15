@@ -172,13 +172,10 @@ def codex_fast_model():
         return None
 
 
-def agent_output(agent, executable, entries, prompt=PROMPT):
-    return run_agent(agent, executable, prompt, model_input(entries), AGENT_TIMEOUT)
-
-
-def run_agent(agent, executable, prompt, content, timeout):
-    """One sandboxed, tool-less agent run: the prompt as the system prompt, the content as data. Returns its reply text."""
-    with tempfile.TemporaryDirectory(prefix='tether-groups-') as folder:
+def run_agent(agent, executable, prompt, content, timeout, started=None):
+    """One tool-free, settings-free agent CLI call in a fresh temporary folder. started(process) lets a caller kill a
+    call that a newer one replaces. A timeout kills the whole process group."""
+    with tempfile.TemporaryDirectory(prefix='tether-ask-') as folder:
         outfile = Path(folder) / 'groups.txt'
         if agent == 'claude':
             command = [executable, '-p', '--model', 'haiku', '--tools', '', '--setting-sources', '',
@@ -192,6 +189,8 @@ def run_agent(agent, executable, prompt, content, timeout):
                                    stdin=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        if started:
+            started(process)
         try:
             output, _ = process.communicate(input=content if agent == 'claude' else None, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -202,8 +201,12 @@ def run_agent(agent, executable, prompt, content, timeout):
             process.wait()
             raise
         if process.returncode:
-            raise ValueError('Agent failed to suggest groups.')
+            raise ValueError('The agent did not answer.')
         return output if agent == 'claude' else outfile.read_text(encoding='utf-8')
+
+
+def agent_output(agent, executable, entries, prompt=PROMPT):
+    return run_agent(agent, executable, prompt, model_input(entries), AGENT_TIMEOUT)
 
 
 def suggest(body):
