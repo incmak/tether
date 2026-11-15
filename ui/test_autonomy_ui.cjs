@@ -308,7 +308,7 @@ async function main() {
       // Keyboard: arrow keys move between agent radios.
       // The fieldset is disabled while the last save runs; a disabled radio cannot take focus.
       const codexRadio = sheet.getByRole('radio', { name: 'Codex', exact: true })
-      await codexRadio.evaluate(node => new Promise(resolve => { const tick = () => node.matches(':disabled') ? setTimeout(tick, 50) : resolve(); tick() }))
+      await page.waitForFunction(node => !node.matches(':disabled'), await codexRadio.elementHandle(), { timeout: 5000 }).catch(() => {})
       await codexRadio.focus()
       mark = advisorPosts().length
       await page.keyboard.press('ArrowRight')
