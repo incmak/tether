@@ -1912,6 +1912,9 @@ button.live-chip:active { background: var(--line); }
 .group-tab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
 .group-tab.drop-over { background: color-mix(in srgb, var(--accent) 14%, transparent); border-radius: var(--radius) var(--radius) 0 0; }
 .group-name { max-width: 20ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-tab.dragging { opacity: .5; }
+.group-tab[draggable="true"] { cursor: grab; }
+.group-row-error { align-self: center; margin: 0 8px; font-size: 12px; white-space: nowrap; }
 .group-tab .group-count { color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .group-add { display: grid; place-items: center; flex-shrink: 0; width: 34px; color: var(--muted); }
 .group-add:hover { color: var(--text); }

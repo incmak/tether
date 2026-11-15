@@ -137,6 +137,21 @@ class ValidationTests(unittest.TestCase):
         delegate.validate(body(thread=None, review=True), [entry(thread=None)])
 
 
+class CheckPlaceTests(unittest.TestCase):
+    def test_delegate_place_rules(self):
+        for body in ({'cwd': '/a', 'worktree': 'b'}, {'stack': 'A', 'group': 'g0123abcd'}, {'group': 'Login'},
+                     {'group': 3}, {'stack': 4}):
+            with self.assertRaises(ValueError):
+                delegate.check_place(body)
+        for body in ({}, {'group': ''}, {'group': 'g0123abcd'}, {'stack': 'Login'}, {'cwd': '/a'}, {'worktree': 'b'}):
+            delegate.check_place(body)
+
+    def test_agent_tab_fields_stay_valid_in_validate(self):
+        # An agent tab sends --stack as a name in "group", and may send cwd with a worktree.
+        entries = [{'id': '%1', 'agent': 'claude', 'thread': None}]
+        delegate.validate({'session': '%1', 'agent': 'claude', 'message': 'x', 'group': 'Login', 'cwd': '/a', 'worktree': 'b'}, entries)
+
+
 class FirstTaskTests(unittest.TestCase):
     MODELS = {'claude': [{'id': 'opus', 'label': 'Opus'}], 'codex': [{'id': 'gpt-x', 'label': 'GPT X'}]}
 

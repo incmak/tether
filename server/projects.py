@@ -388,7 +388,7 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'Start other tabs only for a reviewer or advisor that watches the work, or a task the user wants to steer.\n'
                  f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
                  'Options: `--review-it` (this tab reviews each turn of the new tab), `--reviews-me` (the new tab reviews this tab), '
-                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, `--stack GOAL` (1–3 words; new tabs join this session\'s stack by themselves; GOAL only names it the first time). '
+                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, `--stack GOAL` (1–3 words; names the new tab. It opens in this tab\'s stack, or in none; `--stack Unstacked` = none). '
                  '`stop --worker %N [--reviewer %N]` ends a review; `list` shows this tab\'s links. '
                  '`link --worker %N --reviewer %N` makes one open tab review another. '
                  'Start your review reply with APPROVED when nothing is wrong. '

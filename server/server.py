@@ -2577,6 +2577,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/delegate':
                 entries = sessions()
+                delegate.check_place(body)
                 entry = delegate.validate(body, entries)
                 folder = agent_folder(entry)
                 chosen = chat_folder(body['cwd']) if 'cwd' in body else None

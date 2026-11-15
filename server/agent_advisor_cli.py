@@ -40,8 +40,7 @@ def arguments(argv):
     ask = actions.add_parser('ask')
     ask.add_argument('--critical', action='store_true')
     ask.add_argument('--timeout', type=int, default=600)
-    ask.add_argument('--stack', metavar='NAME', help="your goal in 1 to 3 words. A new advisor tab joins the stack of this main session by itself; "
-                     "NAME only names that stack the first time")
+    ask.add_argument('--stack', metavar='NAME', help="your goal in 1 to 3 words. It names the advisor tab; the tab opens in your stack, or in no stack")
     ask.add_argument('question')
     args = parser.parse_args(argv)
     if not 60 <= args.timeout <= 600:

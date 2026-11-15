@@ -106,7 +106,7 @@ class ProjectTests(unittest.TestCase):
             'not raw tmux. Options: `--review-it` '
             '(this tab reviews each turn of the new tab), '
             '`--reviews-me` (the new tab reviews this tab), ', text)
-        self.assertIn("`--stack GOAL` (1–3 words; new tabs join this session's stack by themselves; GOAL only names it the first time)", text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
         self.assertIn(
             'Start your review reply with APPROVED when nothing is wrong. '
             '`send --pane %N "text"` (`-` = stdin) steers a tab you started. '

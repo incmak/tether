@@ -206,7 +206,7 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(group, 'gabcdef12')  # from the auto stack rules
             self.assertEqual(name, 'Task')  # the tab name from the auto stack rules
             self.assertEqual((owner['owner_pane'], owner['root_pane']), (entry['id'], entry['id']))
-            self.assertEqual(self.stack_calls[-1][2], {'folder': str(self.root)})
+            self.assertEqual(self.stack_calls[-1][2], {})
             self.assertIs(entry, self.entries[0])
             self.assertEqual((body['thread'], body['agent']), (THREAD, 'codex'))
             self.assertEqual((folder, cwd), (str(self.root), str(self.root)))
@@ -274,7 +274,7 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(kwargs['owner']['owner_pane'], self.entries[0]['id'])
             self.assertEqual(kwargs['owner']['root_pane'], self.entries[0]['id'])
             self.assertEqual((kwargs['group'], kwargs['name']), ('gabcdef12', 'Task'))
-            self.assertEqual(self.stack_calls[-1][2], {'folder': str(self.root), 'branch': made['branch']})
+            self.assertEqual(self.stack_calls[-1][2], {'branch': made['branch']})
             return '%15', 'task'
         with patch.object(agent_tabs.worktrees, 'from_body', side_effect=make), \
                 patch.object(delegate, 'start', side_effect=start):

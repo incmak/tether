@@ -9,7 +9,7 @@ import projects
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
-WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange')}  # server.py TMUX_WRITES
+WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange', 'reorder')}  # server.py TMUX_WRITES
 
 
 def handles(path):
@@ -73,7 +73,7 @@ def post(handler, run=subprocess.run):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise ValueError('Invalid request.')
-        if name not in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange'):
+        if name not in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange', 'reorder'):
             raise groups.GroupError(404, 'Not found')
         session_id = _session(body.get('session'))
         if name == 'create':
@@ -81,7 +81,9 @@ def post(handler, run=subprocess.run):
             return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
                                            by_user=True)}
         if name == 'arrange':
-            return {'groups': groups.arrange(session_id, body.get('stacks'), run)}
+            return {'groups': groups.arrange(session_id, body.get('stacks', []), run, body.get('unstack', []))}
+        if name == 'reorder':
+            return {'groups': groups.reorder(session_id, body.get('groups'), run)}
         if name == 'move':
             group_id = body.get('group')
             groups.move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run,

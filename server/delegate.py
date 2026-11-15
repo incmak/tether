@@ -71,14 +71,6 @@ def validate(body, entries, models=None):
     if body.get('effort') is not None and body['effort'] not in efforts:
         raise ValueError('Choose an effort from the list.')
     review = normalize_review(body.get('review', False))
-    if 'cwd' in body and 'worktree' in body:
-        raise ValueError('Choose a folder or a new worktree, not both.')
-    if 'stack' in body and 'group' in body:
-        raise ValueError('Choose a stack or a new stack name, not both.')
-    if 'group' in body and not (body['group'] == '' or (isinstance(body['group'], str) and re.fullmatch(r'g[0-9a-f]{8}', body['group']))):
-        raise ValueError('Choose a stack.')
-    if 'stack' in body and not isinstance(body['stack'], str):
-        raise ValueError('Enter a stack name.')
     if 'worktree' in body and review == 'new':
         raise ValueError("A reviewer tab stays in this tab's folder, so it can see the work. Turn off the new worktree or the new tab review.")
     message = body.get('message')
@@ -278,6 +270,19 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
                          reviewer_thread=thread if isinstance(thread, str) and UUID.fullmatch(thread) else None,
                          name=name, agent=agent)
     return pane, name
+
+
+def check_place(body):
+    """The place fields of POST /mobile/api/delegate (the New tab and New stack popovers): cwd or worktree, and a stack
+    id (group) or a new stack name (stack). Agent tabs use other rules: there "group" is a --stack name."""
+    if 'cwd' in body and 'worktree' in body:
+        raise ValueError('Choose a folder or a new worktree, not both.')
+    if 'stack' in body and 'group' in body:
+        raise ValueError('Choose a stack or a new stack name, not both.')
+    if 'group' in body and not (body['group'] == '' or (isinstance(body['group'], str) and re.fullmatch(r'g[0-9a-f]{8}', body['group']))):
+        raise ValueError('Choose a stack.')
+    if 'stack' in body and not isinstance(body['stack'], str):
+        raise ValueError('Enter a stack name.')
 
 
 def first_task(value, models=None):

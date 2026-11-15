@@ -866,6 +866,7 @@ function App() {
       onStart: (group, from) => void split('right', from, group),
       onContext: group => setProject({ session: owner.id, group: group.id }),
       onNewStack: (from, at) => setNewStack({ pane: from, at: view ? at : undefined }),
+      mainModel: prefs.mainModel,
     } : undefined
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}

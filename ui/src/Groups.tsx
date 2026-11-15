@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, FolderInput, FolderOutput, Pencil, Plus, ScrollText, Sparkles, Trash2, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, FolderInput, FolderOutput, Pencil, Plus, ScrollText, Sparkles, Trash2, X } from 'lucide-react'
 import { Spinner } from './Skeleton'
 import type { Api, GroupInfo, Pane } from './api'
 import { errorText } from './api'
@@ -46,8 +46,35 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
   useEffect(() => { if (groups?.length) rememberTab(session.id, current, pane.id) }, [groups?.length, session.id, current, pane.id])
   const [menu, setMenu] = useState<{ place: Place; at?: Anchor } | null>(null)
   const [picking, setPicking] = useState(false)
-  const places = placesOf(session.panes, groups)
-  if (places.length < 2) return <>{children}</>
+  // Drag a stack to reorder it, like a tab (a mouse drags at once; the stack menu has Move left and Move right too).
+  // `order` is the stack order shown while a drag runs and until the saved order comes back.
+  const [dragged, setDragged] = useState<string | null>(null)
+  const [preview, setPreview] = useState<{ ids: string[]; base: string } | null>(null)
+  const [error, setError] = useState('')
+  const saved = (groups ?? []).map(group => group.id).join()
+  const order = preview?.base === saved ? preview.ids : null  // a saved or outside change of the order ends the preview
+  const setOrder = (ids: string[] | null) => setPreview(ids && { ids, base: saved })
+  const all = placesOf(session.panes, groups)
+  if (all.length < 2) return <>{children}</>
+  const places = order ? [...all.filter(place => !place.id), ...order.flatMap(id => all.filter(place => place.id === id))] : all
+  const over = (event: React.DragEvent<HTMLButtonElement>, target: Place) => {
+    if (!dragged || !target.id) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    if (target.id === dragged) return
+    const box = event.currentTarget.getBoundingClientRect()
+    const ids = places.filter(place => place.id && place.id !== dragged).map(place => place.id)
+    const at = ids.indexOf(target.id) + (event.clientX > box.left + box.width / 2 ? 1 : 0)
+    const next = [...ids.slice(0, at), dragged, ...ids.slice(at)]
+    if (next.join() !== places.filter(place => place.id).map(place => place.id).join()) setOrder(next)
+  }
+  const drop = () => {
+    const ids = order
+    setDragged(null)
+    if (!ids || ids.join() === saved) { setOrder(null); return }
+    setError('')
+    api('groups/reorder', { session: session.id, groups: ids }).then(onUpdate, failure => { setOrder(null); setError(errorText(failure)) })
+  }
 
   const here = places.find(place => place.id === current) ?? places[0]
   const go = (place: Place, at?: Anchor) => {
@@ -62,9 +89,13 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
         const state = topState(place.panes, hooks.seen, hooks.selected)
         const word = STATE_WORD[state]
         return <button key={place.id || 'main'} type="button" data-group-drop={place.id} aria-current={place.id === here.id ? 'true' : undefined}
-          className={place.id === here.id ? 'group-tab active' : 'group-tab'}
+          className={['group-tab', place.id === here.id ? 'active' : '', dragged === place.id ? 'dragging' : ''].filter(Boolean).join(' ')}
+          draggable={!!place.id && places.length > 2}
+          onDragStart={event => { if (!place.id) return; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', place.name); setDragged(place.id) }}
+          onDragOver={event => over(event, place)} onDrop={event => { if (dragged) { event.preventDefault(); drop() } }}
+          onDragEnd={() => { if (dragged) { setDragged(null); setOrder(null) } }}
           aria-label={`${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${word ? `, ${word}` : ''}`}
-          title={place.id ? `${place.name}. Right-click for stack actions.` : 'Tabs that are in no stack'}
+          title={place.id ? `${place.name}. Drag to reorder. Right-click for stack actions.` : 'Tabs that are in no stack'}
           onClick={event => go(place, anchorOf(event))}
           onContextMenu={event => { if (!place.id) return; event.preventDefault(); setMenu({ place, at: anchorOf(event) }) }}>
           <span className={`state-dot ${STATE_DOT[state]}`} aria-hidden="true" />
@@ -72,6 +103,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
           <span className="group-count" aria-hidden="true">{place.panes.length}</span>
         </button>
       })}
+      {error && <p className="error group-row-error" role="alert">{error}</p>}
       <button type="button" className="group-add" aria-label="New stack" title="New stack" aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); hooks.onNewStack(pane, { x: box.right - 392, y: box.bottom + 6 }) }}><Plus size={16} /></button>
     </nav>
     <div className="group-strip">
@@ -86,7 +118,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
     {picking && <GroupSwitcher api={api} onUpdate={onUpdate} session={session} places={places} current={here.id} hooks={hooks}
       onPick={place => { setPicking(false); go(place) }} onMenu={place => { setPicking(false); setMenu({ place }) }}
       onNew={() => { setPicking(false); hooks.onNewStack(pane) }} onClose={() => setPicking(false)} />}
-    {menu && <GroupMenu api={api} session={session} place={menu.place} at={menu.at} from={pane} hooks={hooks} onClose={() => setMenu(null)} onDone={() => { setMenu(null); onUpdate() }} />}
+    {menu && <GroupMenu api={api} session={session} place={menu.place} order={places.filter(place => place.id).map(place => place.id)} at={menu.at} from={pane} hooks={hooks} onClose={() => setMenu(null)} onDone={() => { setMenu(null); onUpdate() }} />}
   </>
 }
 
@@ -122,8 +154,8 @@ function GroupSwitcher({ api, onUpdate, session, places, current, hooks, onPick,
 }
 
 /** The menu of one group: start a tab, rename, context, ungroup, close all tabs, remove. */
-function GroupMenu({ api, session, place, at, from, hooks, onClose, onDone }: {
-  api: Api; session: Session; place: Place; at?: Anchor; from: Pane; hooks: GroupHooks; onClose: () => void; onDone: () => void
+function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDone }: {
+  api: Api; session: Session; place: Place; order: string[]; at?: Anchor; from: Pane; hooks: GroupHooks; onClose: () => void; onDone: () => void
 }) {
   const group = session.groups?.find(item => item.id === place.id)
   const [mode, setMode] = useState<'menu' | 'rename' | 'close'>('menu')
@@ -142,6 +174,16 @@ function GroupMenu({ api, session, place, at, from, hooks, onClose, onDone }: {
     try { await action(); onDone() } catch (failure) { setError(errorText(failure)); setPending(false) }
   }
   const nameError = mode === 'rename' ? groupNameError(name, session.groups, group.id) : ''
+  // Move left/right (up/down in the phone sheet): the one-tap way to reorder, beside dragging (WCAG 2.5.7).
+  // `order` is the order the stack row shows, which can run ahead of the saved order just after a drag.
+  const ids = order
+  const index = ids.indexOf(group.id)
+  const shift = (by: -1 | 1) => {
+    const next = [...ids]
+    next.splice(index, 1)
+    next.splice(index + by, 0, group.id)
+    void run(() => api('groups/reorder', { session: session.id, groups: next }))
+  }
   // Agents that a close would stop in the middle of a turn, or that wait on you.
   const busy = all.filter(item => item.state === 'Working' || needsYou(item.state))
   const endsSession = count > 0 && count === session.panes.length + hooks.hidden.length
@@ -166,8 +208,12 @@ function GroupMenu({ api, session, place, at, from, hooks, onClose, onDone }: {
           <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(closeAll)}>{pending ? 'Closing…' : `Close ${tabs}`}</button></div>
         </div>
       : <div className="action-list">
-          {!count && <button disabled={pending} onClick={() => { onClose(); hooks.onStart(group.id, from) }}><Plus size={18} />Start a tab here</button>}
+          <button disabled={pending} onClick={() => { onClose(); hooks.onStart(group.id, from) }}><Plus size={18} />New tab here</button>
           <button disabled={pending} onClick={() => setMode('rename')}><Pencil size={18} />Rename stack</button>
+          {ids.length > 1 && <>
+            <button disabled={pending || index <= 0} onClick={() => shift(-1)}>{at ? <ArrowLeft size={18} /> : <ArrowUp size={18} />}{at ? 'Move left' : 'Move up'}</button>
+            <button disabled={pending || index >= ids.length - 1} onClick={() => shift(1)}>{at ? <ArrowRight size={18} /> : <ArrowDown size={18} />}{at ? 'Move right' : 'Move down'}</button>
+          </>}
           <button disabled={pending} onClick={() => { onClose(); hooks.onContext(group) }}><ScrollText size={18} />Stack context</button>
           <hr />
           {count > 0 && <button disabled={pending} title={`Move ${tabs} to Unstacked. No agent stops.`} onClick={() => void run(() => api('groups/ungroup', { session: session.id, group: group.id }))}><FolderOutput size={18} />Unstack<small>{tabs} to Unstacked</small></button>}
@@ -204,7 +250,7 @@ export function NewGroup({ api, session, pane, mainModel, onClose, onDone }: { a
   </form>
 }
 
-interface StackSuggestion { groups: { name: string; sessions: string[] }[]; source: 'claude' | 'codex' | 'llm' | 'folder' }
+interface StackSuggestion { groups: { name: string; sessions: string[] }[]; unstacked?: string[]; source: 'claude' | 'codex' | 'llm' | 'folder' }
 
 /**
  * "Suggest stacks": ask the main AI model (then the local model, then folders) to sort the session's tabs into stacks.
@@ -216,6 +262,9 @@ export function SuggestStacks({ api, session, mainModel, onBack, onDone }: { api
   const [suggestion, setSuggestion] = useState<StackSuggestion | null>(null)
   const [error, setError] = useState('')
   const titles = new Map(session.panes.map(item => [item.id, chatTitle(item, session)]))
+  // Tabs the suggestion leaves in no stack. Only the ones in a stack now move.
+  const loose = (suggestion?.unstacked ?? []).filter(id => { const item = session.panes.find(other => other.id === id); return item && groupOf(item, session.groups) })
+  const changes = !!suggestion && (suggestion.groups.length > 0 || loose.length > 0)
   async function suggest() {
     setAsking(true); setError(''); setSuggestion(null)
     try {
@@ -228,7 +277,7 @@ export function SuggestStacks({ api, session, mainModel, onBack, onDone }: { api
   async function apply(found: StackSuggestion) {
     setApplying(true); setError('')
     try {
-      const made = await api<{ groups: GroupInfo[] }>('groups/arrange', { session: session.id, stacks: found.groups.map(group => ({ name: group.name, panes: group.sessions })) })
+      const made = await api<{ groups: GroupInfo[] }>('groups/arrange', { session: session.id, stacks: found.groups.map(group => ({ name: group.name, panes: group.sessions })), unstack: loose })
       onDone(made.groups.length)
     } catch (failure) { setError(errorText(failure)); setApplying(false) }
   }
@@ -238,16 +287,19 @@ export function SuggestStacks({ api, session, mainModel, onBack, onDone }: { api
       <p className="suggest-note">Sort the {session.panes.length} tabs of {session.name} into stacks by task. Nothing moves until you apply.</p>
       <button type="button" className="secondary suggest-button" disabled={asking} onClick={() => void suggest()}>{asking ? <Spinner size={16} /> : <Sparkles size={16} />}{asking ? 'Suggesting stacks… about 15 seconds' : 'Suggest stacks'}</button>
     </>}
-    {suggestion && (suggestion.groups.length
+    {suggestion && (changes
       ? <>
-          <p className="suggest-note">{source} Apply moves these tabs. A stack with the same name is reused. Other tabs stay where they are.</p>
-          <ul className="suggest-list">{suggestion.groups.map(group => <li key={group.name}><strong>{group.name}</strong><span>{group.sessions.map(id => titles.get(id) ?? id).join(', ')}</span></li>)}</ul>
+          <p className="suggest-note">{source} Apply moves these tabs, with their reviewers and advisors. A stack with the same name is reused. A stack left with no tabs is removed.</p>
+          <ul className="suggest-list">
+            {suggestion.groups.map(group => <li key={group.name}><strong>{group.name}</strong><span>{group.sessions.map(id => titles.get(id) ?? id).join(', ')}</span></li>)}
+            {loose.length > 0 && <li><strong>Unstacked</strong><span>{loose.map(id => titles.get(id) ?? id).join(', ')}</span></li>}
+          </ul>
         </>
-      : <p className="suggest-note">No stacks to suggest. Each stack needs 2 or more tabs that belong together.</p>)}
+      : <p className="suggest-note">No stacks to suggest. A stack needs 2 or more tabs that share one goal.</p>)}
     {error && <p className="error" role="alert">{error}</p>}
     <div className="sheet-buttons">
       <button type="button" className="secondary" disabled={applying} onClick={suggestion ? () => setSuggestion(null) : onBack}>{suggestion ? 'Discard' : 'Back'}</button>
-      {suggestion && suggestion.groups.length > 0 && <button type="button" className="primary" disabled={applying} onClick={() => void apply(suggestion)}>{applying ? 'Applying…' : 'Apply stacks'}</button>}
+      {suggestion && changes && <button type="button" className="primary" disabled={applying} onClick={() => void apply(suggestion)}>{applying ? 'Applying…' : 'Apply stacks'}</button>}
     </div>
   </section>
 }

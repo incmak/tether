@@ -336,13 +336,26 @@ class SuggestGroupsTests(unittest.TestCase):
         self.reply('Main: 3 8\nDocs: 12')
         value = suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs})
         self.assertEqual(value['source'], 'llm')
-        self.assertEqual(value['groups'][0], {'name': 'Main tabs', 'sessions': ['%3', '%8']})
+        self.assertEqual(value['groups'], [{'name': 'Main tabs', 'sessions': ['%3', '%8']}])
+        self.assertEqual(value['unstacked'], ['%12'], 'a one-tab stack is dropped: that tab stays in no stack')
         payload = json.loads(self.urlopen.call_args.args[0].data)
         self.assertEqual(payload['messages'][0]['content'], suggest_groups.TABS_PROMPT)
         for body in ({'kind': 'tabs', 'tabs': [session('$3')]}, {'kind': 'tabs', 'sessions': tabs},
                      {'kind': 'other', 'sessions': []}):
             with self.assertRaises(ValueError):
                 suggest_groups.suggest(body)
+
+    def test_tabs_none_answer_and_leftovers_go_to_unstacked(self):
+        tabs = [session('%3', name='Login'), session('%8', '/b', name='Auth'), session('%12', '/c', name='Docs')]
+        self.reply('NONE')
+        self.assertEqual(suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs}),
+                         {'groups': [], 'source': 'llm', 'unstacked': ['%3', '%8', '%12']})
+        self.reply('Work: 3 8')
+        self.assertEqual(suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs}),
+                         {'groups': [{'name': 'Work', 'sessions': ['%3', '%8']}], 'source': 'llm', 'unstacked': ['%12']})
+        self.assertEqual(suggest_groups.suggest({'kind': 'tabs', 'tabs': []}),
+                         {'groups': [], 'source': 'folder', 'unstacked': []})
+        self.assertIn('fewer stacks than tabs', suggest_groups.TABS_PROMPT)
 
     def test_empty_sessions_do_not_call_model(self):
         self.assertEqual(suggest_groups.suggest({'sessions': []}), {'groups': [], 'source': 'folder'})

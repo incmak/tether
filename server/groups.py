@@ -463,6 +463,23 @@ def remove(session_id, group_id, run=subprocess.run):
     _archive(group)
 
 
+def reorder(session_id, ids, run=subprocess.run):
+    """Put the stacks in the order of ids (the user dragged a stack). Ids of stacks that went meanwhile are skipped;
+    stacks missing from ids (made meanwhile) keep their place after the listed ones. Returns the stacks in the new order."""
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 50 or not all(isinstance(i, str) and GROUP.fullmatch(i) for i in ids):
+        raise GroupError(400, 'Send the stack ids in their new order.')
+    with LOCK():
+        groups = read(session_id, run)
+        by_id = {g['id']: g for g in groups}
+        listed = [by_id[i] for i in dict.fromkeys(ids) if i in by_id]
+        if not listed:
+            raise GroupError(404, 'Those stacks are gone. Refresh and try again.')
+        order = listed + [g for g in groups if g not in listed]
+        if order != groups:
+            write(session_id, order, run)
+    return order
+
+
 def find_or_create(session_id, name, run=subprocess.run, auto=True):
     """The group with that name (any case), made (auto: as a Tether stack) when missing. Unstacked gives None."""
     name = clean_name(name)
@@ -473,12 +490,16 @@ def find_or_create(session_id, name, run=subprocess.run, auto=True):
         return found or create(session_id, name, run, auto=auto)
 
 
-def arrange(session_id, plan, run=subprocess.run):
+def arrange(session_id, plan, run=subprocess.run, unstack=()):
     """Apply suggested stacks: plan is [{"name": ..., "panes": [pane ids]}]. A stack with that name (any case) is reused,
-    else made. Each listed tab moves there as if the user moved it. Unlisted tabs and other stacks stay as they are.
-    Returns the stacks that got tabs, in plan order."""
-    if not isinstance(plan, list) or not 1 <= len(plan) <= 20:
+    else made (as the user's). Each listed tab moves there as if the user moved it, and a helper tab goes with its owner.
+    The tabs in unstack go to no stack (Unstacked). Other tabs stay where they are. A stack that the apply leaves empty
+    is removed. Returns the stacks that got tabs, in plan order."""
+    if (not isinstance(plan, list) or len(plan) > 20 or not isinstance(unstack, (list, tuple)) or len(unstack) > 200
+            or not plan and not unstack):
         raise GroupError(400, 'Send 1 to 20 stacks.')
+    if not all(isinstance(pane, str) and PANE.fullmatch(pane) for pane in unstack):
+        raise GroupError(400, 'Choose a tab.')
     wanted, seen = [], set()
     for item in plan:
         if not isinstance(item, dict) or not isinstance(item.get('panes'), list) or not 1 <= len(item['panes']) <= 200:
@@ -496,22 +517,67 @@ def arrange(session_id, plan, run=subprocess.run):
         wanted.append((name, panes))
     with LOCK():
         groups = read(session_id, run)
-        live = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}')
+        live = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}\t#{@group}\t#{@tether_helper}')
         _check(live, GONE_SESSION)
-        here = set(live.stdout.split())
-        made = []
+        old, owner = {}, {}
+        for line in live.stdout.splitlines():
+            pane, label, record = (line.split('\t', 2) + ['', ''])[:3]
+            old[pane] = label
+            try:
+                found = json.loads(record).get('owner_pane') if record else None
+            except (ValueError, AttributeError):
+                found = None
+            if isinstance(found, str) and found != pane:
+                owner[pane] = found
+        target = {}  # pane -> stack name ('' = Unstacked), from the plan; a tab that closed meanwhile is skipped
+        for pane in unstack:
+            if pane in old and pane not in seen:
+                target[pane] = ''
         for name, panes in wanted:
-            panes = [pane for pane in panes if pane in here]  # a tab that closed meanwhile is skipped
+            for pane in panes:
+                if pane in old:
+                    target[pane] = name
+
+        def worker(pane):
+            # A helper tab (reviewer, advisor, worker) follows its owner, at any depth, while the owner is in this session.
+            seen = {pane}
+            while owner.get(pane) in old and owner[pane] not in seen:
+                pane = owner[pane]
+                seen.add(pane)
+            return pane
+        for pane in old:
+            root = worker(pane)
+            if root != pane:
+                if root in target:
+                    target[pane] = target[root]
+                else:
+                    target.pop(pane, None)  # its owner stays where it is, so it stays too
+        made, place = [], {}
+        for name, _ in wanted:
+            panes = [pane for pane in old if target.get(pane) == name]
             if not panes:
                 continue
             group = next((g for g in groups if g['name'].lower() == name.lower()), None)
             if group is None:
-                group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6)}
+                group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6), 'by': 'user'}
                 groups.append(group)
                 write(session_id, groups, run)
             for pane in panes:
                 _label(pane, group['id'], run, by_user=True)
+                place[pane] = group['id']
             made.append(group)
+        for pane in old:
+            if target.get(pane) == '':
+                _label(pane, '', run, by_user=True)
+                place[pane] = ''
+        # A stack that this apply left with no tabs goes away; its context bundle goes to the archive.
+        after = {pane: place[pane] if pane in place else label for pane, label in old.items()}
+        emptied = {label for label in old.values() if label} - set(after.values())
+        gone = [g for g in groups if g['id'] in emptied]
+        if gone:
+            write(session_id, [g for g in groups if g['id'] not in emptied], run)
+    for group in gone:
+        _archive(group)
     return made
 
 
