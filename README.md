@@ -145,6 +145,12 @@ To rotate the token, remove `~/.config/mobile-tmux/token` and restart the servic
 Treat the token like an SSH key. Shell commands run as the server user.
 Report security problems privately; see [SECURITY.md](SECURITY.md).
 
+Passkey approvals (Settings › Setup) guard requests that raise agent power, such as a higher autonomy level.
+They stop requests through the Tether API. They do not stop a process that runs as your user: agents run as that user, so they can change Tether's files directly.
+For the same reason, the first passkey needs no approval: no local check can tell you from an agent.
+When the first passkey is added, or the last passkey is removed, Tether sends a push notice and, when it is set up, an urgent ping.
+If you did not make that change, remove the passkey in Settings › Setup and check your agents.
+
 Attachments use random names in the owner-only `~/.cache/mobile-tmux/uploads/` folder and expire after a week.
 The agent receives the file path. It may request permission to read that folder.
 The upload endpoint does not serve files back; authenticated file previews use separate checks for paths, types, and secrets.

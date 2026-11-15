@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import auth
 import paths
 import push
+import urgent_ping
 
 PATH = '/mobile/api/passkeys'
 ACTIONS = ('setup-hook', 'setup-ping', 'decision-save', 'lesson-promote', 'level-raise', 'passkey-add', 'passkey-remove', 'codex-trust')
@@ -256,15 +257,32 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _notice(verb, name):
+def _notice(verb, name, left):
+    """Tell every device about a passkey change; the first add and the last removal also go to the urgent channel.
+
+    Trust on first use is deliberate: agents run as the same user, so no local proof can tell the owner from an
+    agent. The alert lets the owner see a first passkey, or an emptied store, that they did not make.
+    """
+    alarm = left == (1 if verb == 'added' else 0)
+    if alarm:
+        body = (f'First passkey added to Tether: {name}. If you did not add it, remove it in Settings › Setup.'
+                if verb == 'added' else
+                f'Last passkey removed from Tether: {name}. '
+                'Actions that need a passkey stay blocked until you add one.')
+    else:
+        body = (f'A passkey was added to Tether: {name}' if verb == 'added'
+                else f'A passkey was removed from Tether: {name}')
     try:
         # Do not generate push keys when push is not configured.
         if push.available() and push.KEYS.exists():
-            push.send_all({'title': 'Tether', 'body': f'A passkey was {verb} to Tether: {name}'
-                           if verb == 'added' else f'A passkey was removed from Tether: {name}',
-                           'tag': 'passkeys', 'url': '/chat/'})
+            push.send_all({'title': 'Tether', 'body': body, 'tag': 'passkeys', 'url': '/chat/'})
     except Exception:  # A push failure must not undo a passkey change.
         pass
+    if alarm:
+        try:
+            urgent_ping.send({'pane': '', 'name': 'Passkeys', 'next': body})
+        except Exception:  # Nor may an urgent ping failure.
+            pass
 
 
 def enroll(handler, name, credential, approval=None):
@@ -323,7 +341,8 @@ def enroll(handler, name, credential, approval=None):
             serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)),
             'sign_count': count, 'name': name, 'created': _now(), 'last_used': None, 'rp_id': host})
         _write(data)
-    _notice('added', name)
+        left = len(data['passkeys'])
+    _notice('added', name, left)
 
 
 def remove(handler, passkey_id, approval):
@@ -335,7 +354,8 @@ def remove(handler, passkey_id, approval):
             raise ValueError('Choose a passkey.')
         data['passkeys'].remove(row)
         _write(data)
-    _notice('removed', row['name'])
+        left = len(data['passkeys'])
+    _notice('removed', row['name'], left)
 
 
 def handles(path):

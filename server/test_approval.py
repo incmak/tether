@@ -79,6 +79,7 @@ class PasskeyCase(unittest.TestCase):
                   for name in ('CONFIG', 'TETHER', 'CLAUDE', 'CODEX')),
                 mock.patch.object(approval, '_CHALLENGES', {}),
                 mock.patch.object(approval.push, 'available', return_value=False),
+                mock.patch.object(approval.urgent_ping, 'send', return_value=False),
                 mock.patch.object(codex_level, 'models', return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -350,12 +351,42 @@ class Ceremonies(PasskeyCase):
                 mock.patch.object(approval.push, 'KEYS', keyfile), \
                 mock.patch.object(approval.push, 'send_all') as send:
             self.add()
-            self.assertEqual(send.call_args.args[0]['body'], 'A passkey was added to Tether: Phone')
+            self.assertEqual(send.call_args.args[0]['body'], 'First passkey added to Tether: Phone. '
+                             'If you did not add it, remove it in Settings › Setup.')
             send.side_effect = OSError('offline')
             identifier = approval._b64(self.identifier)
             approval.remove(self.handler, identifier, self.assertion('passkey-remove', {'id': identifier}))
-            self.assertEqual(send.call_args.args[0]['body'], 'A passkey was removed from Tether: Phone')
+            self.assertEqual(send.call_args.args[0]['body'], 'Last passkey removed from Tether: Phone. '
+                             'Actions that need a passkey stay blocked until you add one.')
             self.assertEqual(approval.status('tether.test')['here'], 0)
+
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
+    def test_first_passkey_and_emptied_store_also_send_an_urgent_ping(self):
+        # Trust on first use stays (agents run as the same user), so the owner must hear about a first passkey,
+        # including one added after something emptied the store outside Tether.
+        ping = approval.urgent_ping.send
+        self.add()
+        self.assertEqual(ping.call_args.args[0], {'pane': '', 'name': 'Passkeys', 'next': 'First passkey added to '
+                         'Tether: Phone. If you did not add it, remove it in Settings › Setup.'})
+        second = self.registration(name='Laptop', identifier=b'other')
+        second['approval'] = self.assertion('passkey-add', {'name': 'Laptop'})
+        approval.post(Handler(body=second))
+        payload = {'id': approval._b64(b'other')}
+        approval.remove(self.handler, payload['id'], self.assertion('passkey-remove', payload))
+        self.assertEqual(ping.call_count, 1)  # Neither the second add nor a non-last removal is urgent.
+        (paths.CONFIG / 'passkeys.json').unlink()  # Emptied outside Tether: the next add is a first add again.
+        self.identifier = b'again'
+        self.add(name='Agent?')
+        self.assertEqual(ping.call_count, 2)
+        self.assertIn('First passkey added to Tether: Agent?.', ping.call_args.args[0]['next'])
+        identifier = approval._b64(b'again')
+        approval.remove(self.handler, identifier, self.assertion('passkey-remove', {'id': identifier}))
+        self.assertEqual(ping.call_count, 3)
+        self.assertIn('Last passkey removed from Tether: Agent?.', ping.call_args.args[0]['next'])
+        ping.side_effect = OSError('offline')
+        self.identifier = b'third'
+        self.add(name='Phone')  # An urgent ping failure must not undo the passkey.
+        self.assertEqual(approval.status('tether.test')['here'], 1)
 
     def test_http_validation_and_body_limit(self):
         for body in ([], {}, {'op': 'unknown'}, {'op': 'options', 'kind': 'create', 'action': 'setup-hook', 'payload': {}},
