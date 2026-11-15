@@ -19,7 +19,8 @@ type PingState = {
 interface SetupState { hook: HookState; ping: PingState; test?: { ok: boolean; code: number | null; detail: string } }
 export interface SavedAnswer { id: string; date: string; question: string; answer: string }
 
-const SPACES = ['team', 'qa', 'release', 'bots']
+// 'dm' is the BriskBot approver's 1:1 chat with the bot. The others are team channels.
+const SPACES = [{ value: 'dm', label: 'Direct chat' }, ...['team', 'qa', 'release', 'bots'].map(value => ({ value, label: value }))]
 
 /** Settings › Agents: the two setup steps autonomy needs, each applied only after approval. */
 export function AutonomySetup({ api }: { api: Api }) {
@@ -92,10 +93,12 @@ function PingStep({ ping, busy, ready, apply }: { ping: PingState; busy: boolean
   const preset = ping.presets.find(item => item.id === 'briskbot')
   const [open, setOpen] = useState(false)
   const [mention, setMention] = useState(ping.fields.mention ?? '')
-  const [space, setSpace] = useState(ping.fields.space ?? 'team')
-  const valid = /^[A-Za-z0-9._@-]{1,64}$/.test(mention.trim())
+  const [space, setSpace] = useState(ping.fields.space ?? 'dm')
+  const direct = space === 'dm'
+  const valid = direct || /^[A-Za-z0-9._@-]{1,64}$/.test(mention.trim())
   const on = ping.state === 'on'
-  const note = on ? `On. ${preset?.name ?? 'The bot'} posts in ${ping.fields.space ?? 'the channel'} and mentions @${ping.fields.mention ?? ''}.`
+  const note = on ? (ping.fields.space === 'dm' ? `On. ${preset?.name ?? 'The bot'} sends urgent asks to the approver in a 1:1 chat.`
+      : `On. ${preset?.name ?? 'The bot'} posts in ${ping.fields.space ?? 'the channel'} and mentions @${ping.fields.mention ?? ''}.`)
     : preset?.available ? 'Off. Urgent asks show only in Tether.'
     : 'Off. BriskBot is not installed on this server. For another service, edit urgent-ping.json in the Tether config folder.'
   const editing = open && preset?.available
@@ -111,17 +114,19 @@ function PingStep({ ping, busy, ready, apply }: { ping: PingState; busy: boolean
     </div>
     {editing && <form className="setup-review" onSubmit={event => {
       event.preventDefault()
-      if (valid) void apply({ action: 'ping', preset: 'briskbot', fields: { mention: mention.trim(), space }, base_url: location.origin }, 'Urgent pings are on. Send a test to check.').then(ok => { if (ok) setOpen(false) })
+      if (valid) void apply({ action: 'ping', preset: 'briskbot', fields: direct ? { space } : { mention: mention.trim(), space }, base_url: location.origin }, 'Urgent pings are on. Send a test to check.').then(ok => { if (ok) setOpen(false) })
     }}>
       <div className="project-size-row">
+        <label htmlFor="ping-space">Send to</label>
+        <SelectMenu id="ping-space" label="Send to" value={space} onChange={setSpace} options={SPACES} />
+      </div>
+      {!direct && <div className="project-size-row">
         <label htmlFor="ping-mention">Mention</label>
         <input id="ping-mention" type="text" autoComplete="off" autoCapitalize="off" spellCheck={false} maxLength={64} placeholder="Your BriskBot name" value={mention} disabled={busy} onChange={event => setMention(event.target.value)} />
-      </div>
-      <div className="project-size-row">
-        <label htmlFor="ping-space">Channel</label>
-        <SelectMenu id="ping-space" value={space} onChange={setSpace} options={SPACES.map(value => ({ value, label: value }))} />
-      </div>
-      <p>When an agent marks a question urgent, BriskBot posts it in <strong>{space}</strong> and mentions <strong>@{mention.trim() || '…'}</strong>, with a link to the tab. The limit is 1 ping per tab every 10 minutes and 6 per hour. Tether saves this in <code>urgent-ping.json</code>.</p>
+      </div>}
+      <p>When an agent marks a question urgent, {direct
+        ? <>BriskBot sends it to the approver in a <strong>1:1 chat</strong>, with a link to the tab.</>
+        : <>BriskBot posts it in <strong>{space}</strong> and mentions <strong>@{mention.trim() || '…'}</strong>, with a link to the tab.</>} The limit is 1 ping per tab every 10 minutes and 6 per hour. Tether saves this in <code>urgent-ping.json</code>.</p>
       {!ready && <p className="setup-need-key">Add a passkey above first.</p>}
       <div className="sheet-buttons">
         <button type="button" className="secondary" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>

@@ -45,7 +45,7 @@ class Base(unittest.TestCase):
         return json.loads((paths.CONFIG / 'urgent-ping.json').read_text())
 
     def save(self, **changes):
-        values = dict(preset='briskbot', fields={'mention': 'user@example.test'}, base_url='https://tether.test')
+        values = dict(preset='briskbot', fields={'mention': 'user@example.test', 'space': 'team'}, base_url='https://tether.test')
         setup.save_ping(**dict(values, **changes))
 
 
@@ -157,14 +157,29 @@ class Ping(Base):
         self.assertIn('Question|Choose?', argv)
         self.assertIn('Open the tab|https://tether.test/mobile/#session=%2512', argv)
 
+    def test_dm_needs_no_mention_and_is_the_default(self):
+        # The 1:1 chat always reaches the BriskBot approver, so a mention is dropped, even a bad one.
+        for fields in ({}, {'space': 'dm'}, {'space': 'dm', 'mention': 'a;sh'}, {'mention': 'user'}):
+            with self.subTest(fields=fields):
+                self.save(fields=fields)
+                config = self.config()
+                self.assertEqual(config['fields'], {'space': 'dm'})
+                self.assertEqual(config['command'], [sys.executable, str(self.script), '{title}', 'Needs you',
+                    '--space', 'dm', '--urgent', '--tone', 'attention', '--topic', 'tether-urgent:{pane}',
+                    '--force', '--line', 'Question|{question}', '--button', 'Open the tab|{url}'])
+                self.assertNotIn('--mention', config['command'])
+        self.assertEqual(setup.ping_status()['fields'], {'space': 'dm'})
+        argv = urgent_ping._argv({'pane': '%3', 'name': 'Tab', 'next': 'Go?'})
+        self.assertEqual(argv[argv.index('--space') + 1], 'dm')
+
     def test_bad_mentions_spaces_fields_and_presets_do_not_write(self):
         for mention in (None, [], '', 'a b', 'a;sh', '-x\n', 'x' * 65, 'Ü'):
             with self.subTest(mention=mention), self.assertRaises(ValueError):
-                self.save(fields={'mention': mention})
-        for space in (None, [], 'other', 'Team', ''):
+                self.save(fields={'mention': mention, 'space': 'team'})
+        for space in (None, [], 'other', 'Team', 'DM', ''):
             with self.subTest(space=space), self.assertRaises(ValueError):
                 self.save(fields={'mention': 'user', 'space': space})
-        for fields in (None, [], 'user', {}):
+        for fields in (None, [], 'user'):
             with self.subTest(fields=fields), self.assertRaises(ValueError):
                 self.save(fields=fields)
         for preset in ('other', None, []):

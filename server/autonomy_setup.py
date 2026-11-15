@@ -17,7 +17,8 @@ import urgent_ping
 _LOCK = threading.Lock()
 _LAST_TEST = None
 MENTION = re.compile(r'[A-Za-z0-9._@-]{1,64}')
-SPACES = ('team', 'qa', 'release', 'bots')
+# 'dm' is the approver's 1:1 chat with BriskBot; it needs no mention. The others are channels.
+SPACES = ('dm', 'team', 'qa', 'release', 'bots')
 
 
 def _hook_entry():
@@ -134,11 +135,13 @@ def save_ping(preset, fields, base_url):
         raise ValueError('Choose an available ping preset.')
     if not isinstance(fields, dict):
         raise ValueError('Enter the ping fields.')
-    mention, space = fields.get('mention'), fields.get('space', 'team')
-    if not isinstance(mention, str) or not MENTION.fullmatch(mention):
-        raise ValueError('Enter a mention of 1 to 64 letters, numbers, dots, underscores, @ signs or hyphens.')
+    mention, space = fields.get('mention'), fields.get('space', 'dm')
     if space not in SPACES:
-        raise ValueError('Choose team, qa, release or bots.')
+        raise ValueError('Choose dm, team, qa, release or bots.')
+    if space == 'dm':
+        mention = None
+    elif not isinstance(mention, str) or not MENTION.fullmatch(mention):
+        raise ValueError('Enter a mention of 1 to 64 letters, numbers, dots, underscores, @ signs or hyphens.')
     try:
         if not isinstance(base_url, str) or any(char.isspace() or ord(char) < 32 for char in base_url):
             raise ValueError
@@ -150,11 +153,12 @@ def save_ping(preset, fields, base_url):
     except ValueError:
         raise ValueError('Enter an http or https base URL with a host and no userinfo, query or fragment.') from None
     command = [sys.executable, str(_briskbot_path()), '{title}', 'Needs you', '--space', space,
-               '--mention', mention, '--urgent', '--tone', 'attention', '--topic', 'tether-urgent:{pane}',
-               '--force', '--line', 'Question|{question}', '--button', 'Open the tab|{url}']
+               *(['--mention', mention] if mention else []), '--urgent', '--tone', 'attention',
+               '--topic', 'tether-urgent:{pane}', '--force', '--line', 'Question|{question}',
+               '--button', 'Open the tab|{url}']
+    saved = {'space': space, **({'mention': mention} if mention else {})}
     with _LOCK:
-        _write_ping({'enabled': True, 'preset': preset, 'fields': {'mention': mention, 'space': space},
-                     'command': command, 'base_url': base_url})
+        _write_ping({'enabled': True, 'preset': preset, 'fields': saved, 'command': command, 'base_url': base_url})
 
 
 def disable_ping():
