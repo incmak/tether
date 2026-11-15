@@ -14,6 +14,7 @@ import helper_close
 import helper_tabs
 import paths
 import review_links
+import self_close
 import worktrees
 from terminal_input import UUID, live_status
 
@@ -61,11 +62,15 @@ def link_pair(body, entries, last_reply):
     return {'linked': True}
 
 
-def close_tab(body, caller, entries, run, status):
+def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     """Close a tab this tab started or reviews, after its work is done. A working tab stays open."""
+    if body.get('self') is True:
+        # The user asked this tab to close. fresh skips the status cache for the last check before the close.
+        return self_close.schedule(caller, run, status, sessions=sessions, lock=lock,
+                                   fresh=lambda entry: auto_resume.overlay(entry, live_status(entry)))
     pane = helper_tabs._pane(body)
     if pane == caller['id']:
-        raise ValueError('A tab cannot close itself. Ask the tab that started it.')
+        raise ValueError('To close this tab when the user asks, run `close --self`.')
     exists, record = helper_tabs.load(pane, run)
     if not exists:
         raise ValueError('That session has ended. Select another tab.')
@@ -291,7 +296,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                     raise ValueError('That review link is not on this tab.')
             result = 200, {'stopped': review_links.remove(worker, reviewer)}
         elif action == 'close':
-            result = 200, close_tab(body, caller, entries, run, status)
+            result = 200, close_tab(body, caller, entries, run, status, sessions, lock)
         elif action == 'list':
             links = review_links.reviewed_by()
             by_pane = {entry['id']: entry for entry in entries}

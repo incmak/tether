@@ -425,7 +425,7 @@ class AgentTabsTests(unittest.TestCase):
         self.link(worker='%13', reviewer='%12')
         stranger = {'owner_pane': '%14', 'owner_thread': None, 'helper_thread': None}
         cases = [
-            (dict(target='%12'), 400, 'A tab cannot close itself.'),
+            (dict(target='%12'), 400, 'run `close --self`'),
             (dict(target='bad'), 400, 'Select a helper tab.'),
             (dict(exists=False), 400, 'That session has ended.'),
             (dict(target='%14', record=stranger), 400, 'not a helper of this tab'),
@@ -441,6 +441,14 @@ class AgentTabsTests(unittest.TestCase):
                 forget.assert_not_called()
         self.assertEqual(self.kills(), [])
         self.assertEqual(review_links.reviewed_by(), {'%13': ['%12']})
+
+    def test_close_self_schedules_this_tab_and_kills_nothing_now(self):
+        self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
+        with patch.object(agent_tabs.self_close, 'schedule', return_value={'closing': '%12', 'when': 'after this reply ends'}) as schedule:
+            result = self.request({'action': 'close', 'self': True})
+        self.assertEqual(result, (200, {'closing': '%12', 'when': 'after this reply ends'}))
+        self.assertEqual(schedule.call_args.args[0]['id'], '%12')
+        self.assertEqual(self.kills(), [])
 
     def test_close_by_owner_after_thread_change_is_stale(self):
         self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
