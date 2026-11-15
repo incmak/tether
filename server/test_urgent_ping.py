@@ -164,6 +164,9 @@ class UrgentPingTest(unittest.TestCase):
                 self.assertTrue(url.path.startswith(manifest['scope']), url.path)
                 self.assertEqual(url.fragment, '')
                 self.assertEqual(urllib.parse.parse_qs(url.query), {'session': [pane]})
+        # An app that is already open must load the link's URL, or it shows the last tab. Chrome on Android has no
+        # launchQueue, so focus-existing would drop ?session=.
+        self.assertEqual(manifest.get('launch_handler'), {'client_mode': 'navigate-existing'})
 
     def test_test_ping_names_no_real_tab(self):
         # A real pane id (such as %0) would open someone else's tab from the test card.
