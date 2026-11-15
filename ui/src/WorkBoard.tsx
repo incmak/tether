@@ -103,9 +103,10 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   const hasWork = projects.length > 0 || hasBacklog
   const editing = form?.kind === 'project' && form.name ? projects.find(entry => entry.name === form.name) : undefined
   const items = found((board?.items ?? []).filter(item => onBoard(item, now) && (project === 'all' || item.project === project)))
-  const matches = items.filter(item => showHold || item.stage !== 'hold').length + cards.length
   const shown = board && { ...board, items }
   const asking = decisions(shown).length
+  // The match count of the view on screen: questions in Needs you; cards in shown columns on the board.
+  const matches = view === 'needs' ? asking : items.filter(item => showHold || item.stage !== 'hold').length + cards.length
   const holds = items.filter(item => item.stage === 'hold').length
   const opened = board?.items.find(item => item.id === openId)
   const openedCard = board?.backlog?.items.find(card => card.id === openId)
@@ -202,19 +203,23 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
           {columns.map(column => {
             const list = items.filter(item => item.stage === column.stage).sort(ranked(order(column.stage)))
             const backlog = cards.filter(card => card.stage === column.stage).sort(ranked(backlogOrder))
-            const all = expanded.includes(column.stage) || backlog.length <= BACKLOG_CAP + 1
+            // A search shows every match in one ranked list. Without one, backlog cards follow the items and are capped.
+            const all = words.length > 0 || expanded.includes(column.stage) || backlog.length <= BACKLOG_CAP + 1
             const shownCards = all ? backlog : backlog.slice(0, BACKLOG_CAP)
             const more = backlog.length - shownCards.length
+            const entries: (WorkItem | BacklogCard)[] = [...list, ...shownCards]
+            if (words.length) entries.sort((a, b) => (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0))
             return <section key={column.stage} className={`work-col ${column.stage}`} aria-labelledby={`work-col-${column.stage}`}>
               <h3 id={`work-col-${column.stage}`} className="work-col-head"><span>{STAGE_LABEL[column.stage]}</span><span className="badge">{list.length + backlog.length}</span><span className="work-col-hint">{column.hint}</span></h3>
-              {list.length + backlog.length ? <ul className="work-col-list">{list.map(item => item.stage === 'needs' && item.ask
-                ? <DecisionCard key={`${item.id}:${item.ask.id}`} scope="board" item={item} prefix={prefixOf(board, item)} panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={open} onDetails={entry => setOpenId(entry.id)} />
-                : <li key={item.id}><BoardCard item={item} prefix={prefixOf(board, item)} panes={panes} now={now} onDetails={() => setOpenId(item.id)} /></li>)}
-                {shownCards.map(card => <li key={card.id}><BacklogBoardCard card={card} now={now} onDetails={() => setOpenId(card.id)} /></li>)}</ul>
+              {entries.length ? <ul className="work-col-list">{entries.map(entry => 'area' in entry
+                ? <li key={entry.id}><BacklogBoardCard card={entry} now={now} onDetails={() => setOpenId(entry.id)} /></li>
+                : entry.stage === 'needs' && entry.ask
+                ? <DecisionCard key={`${entry.id}:${entry.ask.id}`} scope="board" item={entry} prefix={prefixOf(board, entry)} panes={panes} busy={answers.locked(entry)} onAnswer={answers.answer} onOpen={open} onDetails={item => setOpenId(item.id)} />
+                : <li key={entry.id}><BoardCard item={entry} prefix={prefixOf(board, entry)} panes={panes} now={now} onDetails={() => setOpenId(entry.id)} /></li>)}</ul>
                 : <p className="work-col-empty">Nothing here.</p>}
               {more > 0 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => [...list, column.stage])}>
                 Show {more} more backlog items<span className="visually-hidden"> in {STAGE_LABEL[column.stage]}</span></button>}
-              {all && backlog.length > BACKLOG_CAP + 1 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => list.filter(stage => stage !== column.stage))}>
+              {!words.length && all && backlog.length > BACKLOG_CAP + 1 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => list.filter(stage => stage !== column.stage))}>
                 Show fewer<span className="visually-hidden"> backlog items in {STAGE_LABEL[column.stage]}</span></button>}
             </section>
           })}

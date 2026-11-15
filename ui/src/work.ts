@@ -135,32 +135,41 @@ export const backlogOrder = (a: BacklogCard, b: BacklogCard) =>
 // The board's search: the same matcher as the sidebar, ⌘K and the backlog (search.ts).
 // Title and ID count double. Project, stage, links, tabs and source match fuzzy too.
 // The question, history and backlog notes match whole words only, so long text adds no noise.
-const searchFields = new WeakMap<WorkItem | BacklogCard, Field[]>()
+// IDs and links sit in their own fields: a word shaped like an ID ("b1", "t-21") matches them exactly, not as a prefix.
+interface SearchFields { text: Field[]; ids: Field[]; idList: string[]; links: string[] }
+const searchFields = new WeakMap<WorkItem | BacklogCard, SearchFields>()
 function fieldsOf(entry: WorkItem | BacklogCard) {
   let fields = searchFields.get(entry)
   if (fields) return fields
   fields = 'area' in entry
-    ? [field(2, entry.title, entry.id), field(1, 'backlog', entry.area, STAGE_LABEL[entry.stage], entry.source),
-      exactField(1, ...entry.details, entry.doing, entry.done)]
-    : [field(2, entry.title, entry.id, ...(entry.jira?.tickets ?? [])),
-      field(1, entry.project, STAGE_LABEL[entry.stage], ...entry.refs, ...entry.tabs.flatMap(tab => [tab.name, tab.stack, tab.session]), entry.source),
-      exactField(1, entry.ask?.q, ...(entry.ask?.options ?? []), ...entry.history.map(line => line.text))]
+    ? { text: [field(2, entry.title), field(1, 'backlog', entry.area, STAGE_LABEL[entry.stage], entry.source), exactField(1, ...entry.details, entry.doing, entry.done)],
+      ids: [field(2, entry.id)], idList: [entry.id], links: [] }
+    : { text: [field(2, entry.title),
+        field(1, entry.project, STAGE_LABEL[entry.stage], ...entry.tabs.flatMap(tab => [tab.name, tab.stack, tab.session]), entry.source),
+        exactField(1, entry.ask?.q, ...(entry.ask?.options ?? []), ...entry.history.map(line => line.text))],
+      ids: [field(2, entry.id, ...(entry.jira?.tickets ?? [])), field(1, ...entry.refs)], idList: [entry.id], links: [...entry.refs, ...(entry.jira?.tickets ?? [])] }
   searchFields.set(entry, fields)
   return fields
 }
 
-// An ID alone (T-21, B12, B-12, SHOP-77) finds that item and the items that link to it, not T-210 or B120.
+// A word shaped like an ID: T-21, B12, B-12, SHOP-77. It also matches ordinary text, like covid-19 in a title.
 const ID = /^(?:[a-z]{1,5}-\d+|b\d+)$/
 const sameId = (a: string, b: string) => { const norm = (id: string) => id.toLowerCase().replace(/^b-(?=\d)/, 'b'); return norm(a) === norm(b) }
 
-/** The search score of an item or backlog card for these query words (searchWords). 0: no query. null: no match. */
+/** The search score of an item or backlog card for these query words (searchWords). 0: no query. null: no match.
+ * An ID alone, like T-21 or B12, finds that item and the items that link to it, not T-210 or B120. */
 export function workScore(entry: WorkItem | BacklogCard, words: string[]): number | null {
   if (!words.length) return 0
-  if (words.length === 1 && ID.test(words[0])) {
-    const word = words[0]
-    if (sameId(entry.id, word)) return 10
-    // A link to it: a ref, or a Jira ticket like SHOP-77.
-    return 'refs' in entry && [...entry.refs, ...(entry.jira?.tickets ?? [])].some(ref => sameId(ref, word)) ? 5 : null
+  const fields = fieldsOf(entry)
+  let total = 0
+  for (const word of words) {
+    let score: number | null
+    if (ID.test(word)) {
+      // The item itself ranks first, then the items that link to it (a ref, or a Jira ticket), then text matches.
+      score = fields.idList.some(id => sameId(id, word)) ? 10 : fields.links.some(link => sameId(link, word)) ? 8 : scoreWords(fields.text, [word])
+    } else score = scoreWords([...fields.text, ...fields.ids], [word])
+    if (score === null) return null
+    total += score
   }
-  return scoreWords(fieldsOf(entry), words)
+  return total
 }

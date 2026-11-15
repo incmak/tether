@@ -43,7 +43,10 @@ assert.equal(score(login, 't-21'), 10, 'An ID alone finds that item')
 assert.equal(score(item('T-210', 'Other'), 't-21'), null, 'not T-210')
 assert.equal(score(voice, 'b-12'), 10, 'B-12 is B12')
 assert.equal(score(card('B120', 'Other'), 'b12'), null, 'not B120')
-assert.equal(score(login, 'b12'), 5, 'An item that links to the ID shows too, below it')
+assert.equal(score(login, 'b12'), 8, 'An item that links to the ID shows too, below it')
+assert.ok(score(item('T-5', 'Fix covid-19 form'), 'covid-19') !== null, 'A word shaped like an ID still matches title text')
+assert.ok(score(item('T-6', 'Accept utf-8 names'), 'utf-8') !== null)
+assert.equal(score(card('B10', 'Other'), 'b1'), null, 'An ID word is not an ID prefix')
 assert.ok(score(voice, 'b12 voice') !== null, 'An ID in a longer query is a plain word')
 
 // Speed: 500 items and 500 cards, two typo words, after warm-up.
