@@ -92,10 +92,61 @@ class PreviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.issue(str(self.scratch / 's/scratchpad/report.html'))
 
+    def test_hidden_files_and_root_pages_are_refused(self):
+        hidden = {'home/proj/site/.git/config': b'[core]', 'home/proj/site/.cache/page.html': b'<p>', 'home/proj/site/.notes': b'n',
+                  'home/index.html': b'<p>', 'claude-1000/top.html': b'<p>'}
+        for name, data in hidden.items():
+            (self.base / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.base / name).write_bytes(data)
+        folder = self.issue('site/index.html')['url'].rsplit('/', 1)[0]
+        for name in ('.git/config', '.notes', '.cache/page.html'):
+            self.assertEqual(self.get(folder + '/' + name).status, 404, name)
+        # The link opens the page's whole folder: never the home or scratchpad folder itself, never a hidden folder.
+        for name in (str(self.home / 'index.html'), str(self.scratch / 'top.html'), 'site/.cache/page.html'):
+            with self.assertRaises(ValueError, msg=name):
+                self.issue(name)
+
+    def test_a_symlink_swapped_in_after_the_check_is_not_followed(self):
+        folder = self.issue('site/index.html')['url'].rsplit('/', 1)[0]
+        real_find = self.previews.find
+
+        def swap(url_path):
+            found = real_find(url_path)
+            found[0].unlink()
+            found[0].symlink_to(self.base / 'outside/page.html')
+            return found
+        self.previews.find = swap
+        answer = self.get(folder + '/sub/style.css')
+        self.assertEqual(answer.status, 404)
+        self.assertNotIn(b'<p>', answer.wfile.getvalue())
+
+    def test_scratch_root_must_be_a_real_folder_of_this_user(self):
+        with tempfile.TemporaryDirectory() as other:
+            link = Path(other) / 'claude-link'
+            link.symlink_to(self.home)
+            real = Path(other) / 'claude-real'
+            real.mkdir()
+            original = previews.Path
+            try:
+                previews.Path = lambda value: link if value.startswith('/tmp/claude-') else original(value)
+                self.assertIsNone(previews.scratch_root())
+                previews.Path = lambda value: real if value.startswith('/tmp/claude-') else original(value)
+                self.assertEqual(previews.scratch_root(), real)
+            finally:
+                previews.Path = original
+
+    def test_pages_may_load_their_own_modules_and_data(self):
+        link = self.issue('site/index.html')
+        headers = self.get(link['url'].rsplit('/', 1)[0] + '/app.js').headers
+        self.assertEqual(headers['Access-Control-Allow-Origin'], '*')
+        self.assertNotIn('Access-Control-Allow-Credentials', headers)
+
     def test_links_expire_and_folders_share_one_token(self):
         first = self.issue('site/index.html')
         self.assertEqual(first['url'].rsplit('/', 1)[0], self.issue('site/index.html')['url'].rsplit('/', 1)[0])
-        self.assertNotEqual(first['url'].rsplit('/', 1)[0], self.issue('other.html')['url'].rsplit('/', 1)[0])
+        (self.home / 'proj/other').mkdir()
+        (self.home / 'proj/other/page.html').write_bytes(b'<p>')
+        self.assertNotEqual(first['url'].rsplit('/', 1)[0], self.issue('other/page.html')['url'].rsplit('/', 1)[0])
         self.now[0] += previews.LIFETIME + 1
         expired = self.get(first['url'])
         self.assertEqual(expired.status, 410)

@@ -15,8 +15,8 @@ type Link = { key: string; url?: string; error?: string }
 
 /** A page an agent made, in a drawer: a Claude artifact's local copy or an HTML file. Phone: a sheet that leaves the top
  * of the chat in view, with a full-screen switch. Wider screens: a full-screen modal with a phone-width switch.
- * onSource: show the page's HTML as text. */
-export function PreviewDrawer({ api, session, target, close, onSource }: { api: Api; session: string; target: PreviewTarget | null; close: () => void; onSource?: (path: string) => void }) {
+ * onSource: show the page's HTML as text, read from the preview link (it also works for scratchpad pages). */
+export function PreviewDrawer({ api, session, target, close, onSource }: { api: Api; session: string; target: PreviewTarget | null; close: () => void; onSource?: (path: string, url: string) => void }) {
   const modal = useModal(!!target, close)
   const key = target ? `${session}\n${target.path}` : ''
   const [link, setLink] = useState<Link | null>(null)
@@ -44,7 +44,7 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
       <p className="preview-sub" title={target.path}>{remote ? 'Claude artifact · local copy' : <bdi>{name}</bdi>}</p>
       <div className="preview-actions">
         <button type="button" className="icon-button preview-wide-only" aria-pressed={narrow} aria-label="Phone width" title="Phone width" onClick={() => setNarrow(!narrow)}>{narrow ? <Monitor size={18} /> : <Smartphone size={18} />}</button>
-        {onSource && <button type="button" className="icon-button" aria-label="View source" title="View source" onClick={() => onSource(target.path)}><Code2 size={18} /></button>}
+        {onSource && <button type="button" className="icon-button" aria-label="View source" title="View source" disabled={!current?.url} onClick={() => current?.url && onSource(target.path, current.url)}><Code2 size={18} /></button>}
         <button type="button" className="icon-button" aria-label="Reload" title="Reload" disabled={!current?.url} onClick={reload}><RotateCw size={18} /></button>
         <button type="button" className="icon-button preview-phone-only" aria-pressed={full} aria-label="Full screen" title={full ? 'Leave full screen' : 'Full screen'} onClick={() => setFull(!full)}>{full ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
         {outside && <a className="icon-button" href={outside} target="_blank" rel="noreferrer" aria-label={remote ? 'Open on claude.ai' : 'Open in browser'} title={remote ? 'Open on claude.ai' : 'Open in browser'}><ExternalLink size={18} /></a>}

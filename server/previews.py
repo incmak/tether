@@ -3,7 +3,7 @@
 POST /mobile/api/preview {session, path} checks the file with the rules of media_files.resolve and returns a link
 /mobile/preview/<token>/<name>. The token opens the page's folder for a set time, so the page's own scripts, styles and
 images load by their relative paths. Each file is checked again with the same rules: home folder only, no private
-folders, no files that may hold secrets. One more folder is allowed: Claude Code's own scratchpad folder
+folders, no hidden files, no files that may hold secrets. One more folder is allowed: Claude Code's own scratchpad folder
 (/tmp/claude-<uid>), where Claude writes most of the pages it publishes as artifacts.
 
 The token is the only key: a sandboxed frame has an opaque origin, so the browser does not send the SameSite=Strict
@@ -11,6 +11,7 @@ Tether cookie with the page's requests. Every response carries `Content-Security
 an opaque origin even when it is opened in its own browser tab: it cannot read Tether's cookies, storage or API."""
 import os
 import secrets
+import stat
 import threading
 import time
 from pathlib import Path
@@ -35,8 +36,10 @@ TYPES = {
 }
 # The page may run scripts, forms, pop-ups and downloads, but never in Tether's origin.
 SANDBOX = 'sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads'
+# A sandboxed page has an opaque origin, so its module scripts and fetch() calls are cross-origin requests: they need
+# CORS. The answer never allows credentials; the token in the path is the only key.
 HEADERS = {'Content-Security-Policy': SANDBOX, 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
-           'Cache-Control': 'no-store'}
+           'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*'}
 
 
 def scratch_root():
@@ -45,10 +48,11 @@ def scratch_root():
         return None
     root = Path('/tmp/claude-%d' % os.getuid())
     try:
-        root = root.resolve(strict=True)
-        return root if root.stat().st_uid == os.getuid() else None
+        # lstat: a symlink in /tmp must not make another folder (~/.ssh) the scratchpad.
+        info = root.lstat()
     except OSError:
         return None
+    return root if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() else None
 
 
 class Previews:
@@ -60,23 +64,33 @@ class Previews:
         self.tokens = {}  # token -> (folder, expires)
 
     def resolve(self, name, folder):
-        """media_files.resolve, with Claude's scratchpad folder as a second home."""
+        """(file, root): media_files.resolve, with Claude's scratchpad folder as a second home. No hidden folders or files."""
         root = self.scratch()
+        home = Path(self.home or os.path.expanduser('~')).resolve()
+        path = None
         if root:
             try:
-                path = Path(os.path.expanduser(name))
-                path = (path if path.is_absolute() else Path(folder or os.path.expanduser('~')) / path).resolve(strict=True)
-                if root in path.parents:
-                    return media_files.resolve(str(path), folder, root, text_limit=None)
+                found = Path(os.path.expanduser(name))
+                found = (found if found.is_absolute() else Path(folder or home) / found).resolve(strict=True)
+                if root in found.parents:
+                    path, _ = media_files.resolve(str(found), folder, root, text_limit=None)
             except (OSError, RuntimeError):
                 pass
-        return media_files.resolve(name, folder, self.home, text_limit=None)
+        if path is None:
+            root = home
+            path, _ = media_files.resolve(name, folder, root, text_limit=None)
+        if any(part.startswith('.') for part in path.relative_to(root).parts):
+            raise ValueError('Tether does not preview hidden files.')
+        return path, root
 
     def issue(self, name, folder):
         """A preview link for the HTML file `name` (relative to the tab's folder). ValueError with a message for the phone."""
-        path, _ = self.resolve(name, folder)
+        path, root = self.resolve(name, folder)
         if path.suffix.lower() not in PAGE_SUFFIXES:
             raise ValueError('Tether previews HTML pages only.')
+        # The link opens the page's whole folder, so a page directly in the home or scratchpad folder is refused.
+        if path.parent == root:
+            raise ValueError('Move the page into its own folder to preview it.')
         now = self.clock()
         with self.lock:
             self.tokens = {key: value for key, value in self.tokens.items() if value[1] > now}
@@ -105,11 +119,30 @@ class Previews:
         if '\0' in relative or relative.startswith('/') or any(part == '..' for part in relative.split('/')):
             raise ValueError('That file is outside the preview folder.')
         path, _ = self.resolve(str(folder / relative), str(folder))
-        if path != folder and folder not in path.parents:
+        if folder not in path.parents:
             raise ValueError('That file is outside the preview folder.')
-        if path.stat().st_size > MAX_BYTES:
-            raise ValueError('That file is too large to preview.')
         return path, TYPES.get(path.suffix.lower(), 'application/octet-stream')
+
+
+def read(path):
+    """The bytes of a checked file. Each folder is opened without following symlinks, so a symlink put in place after
+    the check (a race) cannot point the read at another file. ValueError or OSError when it fails."""
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        file_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    finally:
+        os.close(fd)
+    with os.fdopen(file_fd, 'rb') as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('That is not a file.')
+        if info.st_size > MAX_BYTES:
+            raise ValueError('That file is too large to preview.')
+        return handle.read(MAX_BYTES + 1)[:MAX_BYTES]
 
 
 PREVIEWS = Previews()
@@ -121,7 +154,7 @@ def serve(handler, previews=None):
     path = handler.path.split('?', 1)[0].split('#', 1)[0]
     try:
         found, kind = previews.find(path)
-        data = found.read_bytes()
+        data = read(found)
         status = 200
     except LookupError as exc:
         status, data, kind = 410, page(str(exc)), 'text/html; charset=utf-8'

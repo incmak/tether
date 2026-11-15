@@ -16,7 +16,8 @@ const RichEditor = lazy(() => import('./RichEditor'))
 
 /** repo: false when the file is known to be outside a Git repository. Markdown there opens in the formatted editor.
  *  edit: open straight in the editor; Done then closes the viewer. */
-export type TextFile = { path: string; url: string; line?: number; repo?: boolean; edit?: boolean }
+/** readOnly: show the text without the edit controls (the source of a previewed page). */
+export type TextFile = { path: string; url: string; line?: number; repo?: boolean; edit?: boolean; readOnly?: boolean }
 const MAX_LINES = 20000
 /** Larger files open read-only. The server takes up to 3 MB of JSON. */
 const MAX_EDIT_BYTES = 2 * 1024 * 1024
@@ -98,7 +99,7 @@ export function TextViewer({ file, close, onShow }: { file: TextFile | null; clo
     if (row) row.scrollIntoView({ block: 'center' })
     else body.current?.scrollTo(0, 0)
   }, [current, target, preview, edit])
-  const canEdit = !!current?.editable && !!current.bytes && current.bytes.length <= MAX_EDIT_BYTES && lines.length <= MAX_LINES
+  const canEdit = !file?.readOnly && !!current?.editable && !!current.bytes && current.bytes.length <= MAX_EDIT_BYTES && lines.length <= MAX_LINES
 
   const startEdit = async () => {
     if (!file || !current?.bytes || current.text === undefined) return

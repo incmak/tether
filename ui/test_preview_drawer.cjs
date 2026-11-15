@@ -1,4 +1,4 @@
-// The preview drawer: Claude artifact cards, artifact links, HTML file chips and localhost links in a chat.
+// The preview drawer: Claude artifact cards, artifact links, HTML file chips and a plain localhost link in a chat.
 // Run against an existing build (DIST). Every API request stays in this page's fixtures.
 const http = require('node:http')
 const fs = require('node:fs/promises')
@@ -179,8 +179,14 @@ async function main() {
         await page.getByRole('button', { name: 'Open site/index.html' }).click()
         await frameShows()
         if (await drawer.locator('h2').innerText() !== 'index.html') errors.push('the file title is wrong')
-        if (await drawer.getByRole('button', { name: 'View source' }).count() !== 1) errors.push('no View source')
         if (!(await drawer.getByRole('link', { name: 'Open in browser' }).getAttribute('href')).includes('/mobile/preview/token123/index.html')) errors.push('Open in browser has the wrong link')
+        // View source reads the preview link (it also works for scratchpad pages) and offers no edit.
+        await drawer.getByRole('button', { name: 'View source' }).click()
+        const source = page.locator('dialog[open]').filter({ hasText: 'Made by an agent' }).filter({ hasNot: page.locator('iframe') })
+        await source.waitFor({ timeout: 5000 }).catch(() => errors.push('View source does not show the HTML'))
+        if (await source.getByRole('button', { name: 'Edit' }).count()) errors.push('the page source can be edited')
+        await page.keyboard.press('Escape')
+        await source.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => errors.push('the source viewer does not close'))
         await closeDrawer()
         await page.getByRole('button', { name: 'Open site/broken.html' }).click()
         const alert = drawer.getByRole('alert')
@@ -190,11 +196,9 @@ async function main() {
         if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-error.png`) })
         await closeDrawer()
 
-        // 6. A localhost link opens in the shared browser, which can reach the server.
-        await page.getByRole('button', { name: /^Open http:\/\/localhost:5173\/ in the shared browser/ }).click()
-        await page.waitForTimeout(200)
-        const opened = posts.find(post => post.endpoint === 'browser/new')
-        if (opened?.body.url !== 'http://localhost:5173/') errors.push(`the shared browser got ${JSON.stringify(opened?.body)}`)
+        // 6. A localhost link stays a plain link: the shared browser cannot reach the host's loopback (port proxy: backlog).
+        const local = page.getByRole('link', { name: 'the dev server' })
+        if (await local.getAttribute('href') !== 'http://localhost:5173/' || await local.getAttribute('target') !== '_blank') errors.push('the localhost link changed')
 
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
         if (overflow > 0) errors.push(`the page scrolls sideways by ${overflow} px`)

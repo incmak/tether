@@ -56,7 +56,7 @@ import { LiveTerminal } from './Terminal'
 import { WORKSPACE_QUERY } from './workspace'
 import { useHost } from './host'
 import { ReviewLinks } from './ReviewLinks'
-import { agentBrowserItems, useAgentBrowser, watchTab } from './AgentBrowser'
+import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
 import { PreviewDrawer } from './PreviewDrawer'
 import { PreviewOpener, artifactsOf } from './preview'
 import type { PreviewTarget } from './preview'
@@ -862,16 +862,12 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     else if (kind === 'pdf') window.open(url, '_blank', 'noopener')
     else setOpened({ name: path, url, kind })
   }, [activePane.id, host, setTextFile, setOfficeFile, setOpened, setPreviewPage])
-  // Pages agents made: a Claude artifact opens its local copy in the drawer; a local server opens in the shared browser.
+  // Pages agents made: a Claude artifact opens its local copy in the drawer.
   const artifacts = useMemo(() => artifactsOf(messages), [messages])
   const previewActions = useMemo(() => ({
     open: setPreviewPage,
     artifactFor: (url: string) => artifacts.get(url),
-    openServer: (url: string) => {
-      api<{ id: string }>('browser/new', { url })
-        .then(tab => watchTab(tab.id, activePane.id), (failure: unknown) => setOpened({ name: url, url, error: `The shared browser cannot open this page. ${errorText(failure)}` }))
-    },
-  }), [api, artifacts, activePane.id, setOpened, setPreviewPage])
+  }), [artifacts, setPreviewPage])
   // Desktop: "Show in Files" opens the explorer at the file's folder with the file selected. A relative path is in the pane's folder.
   const showInFiles = (path: string | null, close: () => void) => {
     if (!path || typeof matchMedia !== 'function' || !matchMedia(WORKSPACE_QUERY).matches) return undefined
@@ -1148,6 +1144,6 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />
     <TextViewer file={textFile} close={() => setTextFile(null)} onShow={showInFiles(textFile?.path ?? null, () => setTextFile(null))} />
     <OfficeViewer file={officeFile} close={() => setOfficeFile(null)} onShow={showInFiles(officeFile?.path ?? null, () => setOfficeFile(null))} />
-    <PreviewDrawer api={api} session={activePane.id} target={previewPage} close={() => setPreviewPage(null)} onSource={path => setTextFile({ path, url: `/mobile/api/file?session=${encodeURIComponent(activePane.id)}&path=${encodeURIComponent(path)}` })} />
+    <PreviewDrawer api={api} session={activePane.id} target={previewPage} close={() => setPreviewPage(null)} onSource={(path, url) => setTextFile({ path, url, readOnly: true })} />
   </section></PreviewOpener.Provider></FilePane.Provider></TabOpener.Provider></MediaOpener.Provider></AssistantRuntimeProvider>
 }

@@ -3,7 +3,7 @@ import { fileChecks } from './fileChecks'
 import { useIsMarkdownCodeBlock } from '@assistant-ui/react-markdown'
 import type { Pane } from './api'
 import { tabTarget } from './tabLinks'
-import { PreviewOpener, artifactUrl, localServer } from './preview'
+import { PreviewOpener, artifactUrl } from './preview'
 
 // Paths an agent names in a reply (`shots/row-menu.png`, [clip](out/demo.mp4), src/App.tsx:42) open on the phone through
 // GET /mobile/api/file. the server decides what may open: home folder only, no secrets. Media, text and Office files open in Tether;
@@ -128,15 +128,12 @@ export function Link({ href = '', children, ...props }: React.ComponentProps<'a'
   return <WebLink {...props} href={href}>{children}</WebLink>
 }
 
-// A claude.ai artifact this chat published opens its local copy in the preview drawer. A server on the Tether machine
-// (localhost) opens in the shared browser, which can reach it. Other links open in a new browser tab.
+// A claude.ai artifact this chat published opens its local copy in the preview drawer. Other links open in a new browser tab.
 function WebLink({ href = '', children, ...props }: React.ComponentProps<'a'>) {
   const preview = useContext(PreviewOpener)
   const remote = artifactUrl(href)
   const artifact = remote ? preview?.artifactFor(remote) : undefined
-  const server = localServer(href)
   if (preview && artifact) return <FileLink open={() => preview.open({ path: artifact.path, title: artifact.title, remote: artifact.url })} label={`Preview ${artifact.title}`}>{children}</FileLink>
-  if (preview && server) return <FileLink open={() => preview.openServer(server)} label={`Open ${server} in the shared browser`}>{children}</FileLink>
   return <a {...props} href={href} target="_blank" rel="noreferrer"><InsideLink.Provider value>{children}</InsideLink.Provider></a>
 }
 
