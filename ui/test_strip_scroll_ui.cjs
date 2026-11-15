@@ -216,6 +216,35 @@ async function main() {
     const t3 = await box('.chat-header .chat-title')
     wheels = await swipe(1, { x: t3.x + t3.width / 2, y: t3.y + t3.height / 2 })
     check('phone width: no change', await selected() === '%2' && none(wheels), JSON.stringify(wheels))
+    // 11. B147: a press on the add button, or a gap of the strip, is not a tab drag. The chat panel
+    // around the strip also has data-pane; a move after the press must not drag the whole panel.
+    sessions = few
+    await open(1280)
+    const add = await box('.pane-tabs .tab-add')
+    const panelMoved = () => page.evaluate(() => { const p = document.querySelector('.chat-panel'); return p.style.transform || getComputedStyle(p).transform !== 'none' ? p.style.transform || getComputedStyle(p).transform : '' })
+    await page.mouse.move(add.x + add.width / 2, add.y + add.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(add.x + add.width / 2 - 40, add.y + add.height / 2, { steps: 4 })
+    const pressMove = await panelMoved()
+    await page.mouse.up()
+    check('press on + and move 40 px: the chat panel does not move', !pressMove && !(await page.locator('.pane-tabs .dragging').count()), pressMove)
+    const strip = await box(TABS)
+    const gap = { x: Math.min(add.x + add.width + 40, strip.x + strip.width - 4), y: add.y + add.height / 2 }
+    const gapOk = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.matches('.pane-tabs'), gap)
+    await page.mouse.move(gap.x, gap.y)
+    await page.mouse.down()
+    await page.mouse.move(gap.x - 60, gap.y, { steps: 4 })
+    const gapMove = await panelMoved()
+    await page.mouse.up()
+    check('press on an empty part of the strip and move 60 px: the chat panel does not move', gapOk && !gapMove, `${gapOk} ${gapMove}`)
+    await page.mouse.move(add.x + add.width / 2, add.y + add.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(add.x + add.width / 2 - 10, add.y + add.height / 2, { steps: 2 })
+    await page.mouse.move(add.x + add.width / 2, add.y + add.height / 2, { steps: 2 })
+    await page.mouse.up()
+    check('press on +, small move, release on +: the new-task popover opens', await page.locator('.pane-tabs .tab-add').getAttribute('aria-expanded') === 'true')
+    await page.keyboard.press('Escape')
+    sessions = many
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})

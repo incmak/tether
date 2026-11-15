@@ -191,7 +191,12 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
   useEffect(() => {
     const box = strip.current
     if (!box) return
-    const tabOf = (target: EventTarget | null) => (target as Element | null)?.closest<HTMLElement>('[data-pane]')
+    // Only a tab of this strip. The chat panel around the strip also has data-pane, so a press on
+    // the add button or a gap must not start a drag of the whole panel.
+    const tabOf = (target: EventTarget | null) => {
+      const tab = (target as Element | null)?.closest<HTMLElement>('[data-pane]')
+      return tab?.parentElement === box ? tab : null
+    }
     const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
     const timers = new Map<HTMLElement, number>()
     let clickTimer = 0
