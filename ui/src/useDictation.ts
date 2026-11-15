@@ -135,7 +135,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
-      reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
+      const mixed = !!spoken && hinglish(spoken)
+      reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started, ...(mixed ? { detail: 'hinglish' } : {}) })
       let notice = message
       if (notice === undefined && !handsFree) {
         if (second && deaf) notice = `This device's speech service heard nothing twice, so Tether uses the server voice here for 24 hours. Tap the mic and speak again. (speech: ${trail.join(' ')})`
@@ -151,8 +152,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
         return
       }
       // Words came: show them now, then let the server convert the same audio. Parakeet takes the project word hints
-      // (tmux, Tether, Codex); browser speech cannot, so it writes "t-marks" for tmux. English only: Parakeet is English.
-      if (spoken && kept && /^en\b/i.test(lang)) {
+      // (tmux, Tether, Codex); browser speech cannot, so it writes "t-marks" for tmux. English only: Parakeet is English,
+      // and it turned Hinglish that Chrome wrote well into nonsense ("mujhe lagta hai" -> "Mujilakta has", 2026-11-15).
+      if (spoken && kept && /^en\b/i.test(lang) && !mixed) {
         keepBackup = true
         cleanup(); setText(next); setListening(false)
         if (notice !== undefined) setError(notice)
@@ -418,6 +420,17 @@ function speechConstructor() {
 
 function recorderType() {
   return ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find(kind => MediaRecorder.isTypeSupported(kind))
+}
+
+// Common Hindi and Urdu words as browser speech writes them in Latin letters. None is a common English word,
+// so two different ones mark Hinglish or Urdu speech; one alone ("ke", "bhai") can be a name.
+const HINDI_WORDS = new Set(('hai hain nahi nahin karo kare karna karte karta kariye kijiye mujhe mera meri mere tum tumhe aap '
+  + 'yeh woh kya kyun kaise aur ko ki ke ka mein bhai abhi phir tak thoda bahut bohat lekin hua hui ho tha thi '
+  + 'jana chahiye dobara bolo wala wali accha acha theek thik haan sab kuch kal aaj').split(' '))
+
+export function hinglish(text: string) {
+  if (/[\u0900-\u097F\u0600-\u06FF]/.test(text)) return true  // Devanagari or Urdu script
+  return new Set(text.toLowerCase().split(/[^a-z]+/).filter(word => HINDI_WORDS.has(word))).size >= 2  // two different words
 }
 
 // How long the box waits for the server text before it keeps the browser text. Parakeet converts 3 s of speech in
