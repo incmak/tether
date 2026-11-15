@@ -1699,6 +1699,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_chat_ui(self, path):
         """Serve the Tether UI from CHAT_UI_ROOT; API requests still need the sign-in cookie."""
+        opened = re.fullmatch(r'/chat/open/(\d{1,9})/?', path)
+        if opened:
+            # B25: urgent pings link here, not to /chat/?session=. Chrome on Android only brings a running app to the
+            # front when the link sits in the same folder as the open page; a link in its own folder makes it load.
+            self.send_response(302)
+            self.send_header('Location', '/chat/?session=%25' + opened.group(1))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         root = CHAT_UI_ROOT.resolve()
         target = (root / unquote(path[len('/chat/'):])).resolve()
         if root not in target.parents and target != root:

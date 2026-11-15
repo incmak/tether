@@ -99,7 +99,7 @@ class UrgentPingTest(unittest.TestCase):
                            'base_url': 'https://tether.test///'})
         self.assertTrue(self.send('%12', name='Build tab'))
         self.runner.assert_called_once_with(
-            ['ping-tool', 'Tether: Build tab', 'Q=Choose?', 'https://tether.test/chat/?session=%2512', '%12', '{unknown}'],
+            ['ping-tool', 'Tether: Build tab', 'Q=Choose?', 'https://tether.test/chat/open/12', '%12', '{unknown}'],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
         self.assertTrue(self.workers[0].daemon)
 
@@ -181,14 +181,18 @@ class UrgentPingTest(unittest.TestCase):
         # The PWA scope is /chat/ and the chat UI reads ?session=. A link outside the scope opens a browser tab instead.
         self.write_config({'command': ['ping-tool', '{url}'], 'base_url': 'https://tether.test'})
         manifest = json.loads((Path(urgent_ping.__file__).parent.parent / 'ui' / 'public' / 'manifest.webmanifest').read_text())
-        for pane in ('%12', '%1&x=#y'):
+        # A tmux pane gets its own folder (/chat/open/N): Chrome on Android only brings a running app to the front
+        # for a link in the open page's folder (/chat/?session=), so the app kept showing its last tab.
+        for pane, path in (('%12', '/chat/open/12'), ('%308', '/chat/open/308')):
             with self.subTest(pane=pane):
                 url = urllib.parse.urlsplit(urgent_ping._argv({'pane': pane})[1])
+                self.assertEqual((url.path, url.query, url.fragment), (path, '', ''))
                 self.assertTrue(url.path.startswith(manifest['scope']), url.path)
-                self.assertEqual(url.fragment, '')
-                self.assertEqual(urllib.parse.parse_qs(url.query), {'session': [pane]})
-        # An app that is already open must load the link's URL, or it shows the last tab. Chrome on Android has no
-        # launchQueue, so focus-existing would drop ?session=.
+        # Any other id keeps the ?session= form, escaped.
+        url = urllib.parse.urlsplit(urgent_ping._argv({'pane': '%1&x=#y'})[1])
+        self.assertEqual((url.path, url.fragment), ('/chat/', ''))
+        self.assertEqual(urllib.parse.parse_qs(url.query), {'session': ['%1&x=#y']})
+        # An app that is already open must load the link's URL, or it shows the last tab.
         self.assertEqual(manifest.get('launch_handler'), {'client_mode': 'navigate-existing'})
 
     def test_test_ping_names_no_real_tab(self):

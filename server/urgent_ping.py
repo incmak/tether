@@ -5,6 +5,7 @@ an optional base_url. Run `python3 urgent_ping.py test` to check delivery.
 """
 from collections import deque
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -40,13 +41,19 @@ def _config():
 
 
 def _url(base_url, pane):
-    """Link to the tab inside the installed app's scope (/chat/), in the ?session= form the chat UI reads.
+    """Link to the tab inside the installed app's scope (/chat/).
 
     A link outside the scope (the old /mobile/#session= form) opens a browser tab instead of the installed app.
+    A tmux pane (%N) links to /chat/open/N, which the server redirects to /chat/?session=%N. Chrome on Android
+    only brings a running app to the front for a link in the open page's folder (/chat/?session=), so the app
+    kept its last tab; a link in its own folder makes the app load it.
     """
     if not base_url:
         return ''
-    return base_url.rstrip('/') + '/chat/' + ('?session=' + quote(pane, safe='') if pane else '')
+    base = base_url.rstrip('/') + '/chat/'
+    if re.fullmatch(r'%\d{1,9}', pane or ''):
+        return base + 'open/' + pane[1:]
+    return base + ('?session=' + quote(pane, safe='') if pane else '')
 
 
 def _argv(ask, security=False):

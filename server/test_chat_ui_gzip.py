@@ -43,6 +43,20 @@ class ChatUIGzipTests(unittest.TestCase):
         self.assertEqual(int(headers['Content-Length']), len(body))
         return handler.send_response.call_args.args[0], headers, body
 
+    def test_open_link_redirects_to_the_tab(self):
+        # B25: urgent pings link to /chat/open/N so a running Android app loads the link; the UI reads ?session=.
+        for path, pane in (('/chat/open/308', '308'), ('/chat/open/7/', '7')):
+            with self.subTest(path=path):
+                status, headers, body = self.request(path)
+                self.assertEqual((status, body), (302, b''))
+                self.assertEqual(headers['Location'], '/chat/?session=%25' + pane)
+        # Anything else under open/ is an ordinary app path: the app loads, with no redirect.
+        for path in ('/chat/open/', '/chat/open/x1', '/chat/open/1/2', '/chat/open/%2F%2Fevil.test'):
+            with self.subTest(path=path):
+                status, headers, body = self.request(path)
+                self.assertEqual((status, body), (200, self.index))
+                self.assertNotIn('Location', headers)
+
     def test_gzip_body_and_headers(self):
         status, headers, body = self.request(encoding='gzip, br')
         self.assertEqual(status, 200)
