@@ -22,6 +22,13 @@ const fixture = {
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null }, 'work/board': { projects: [], items: [] },
 }
 
+// With stacks, the strip sits inside .group-strip (Groups.tsx). %1 to %3 are in "Ship", %4 is unstacked.
+let stacked = null
+const stackedSessions = {
+  sessions: [...[first, second, third].map(item => ({ ...item, group: 'g1' })), pane('%4', 'Loose end')],
+  default_thread: 't1', groups: { $1: [{ id: 'g1', name: 'Ship', project: '' }] },
+}
+
 async function main() {
   let browser, page, server, failed = 0
   const pageErrors = []
@@ -55,6 +62,7 @@ async function main() {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
+        if (endpoint === 'sessions' && stacked) return route.fulfill({ json: stacked })
         return route.fulfill({ json: fixture[endpoint] || {} })
       }
       // The shared browser may run on another host: serve dist from here, not through the local server.
@@ -74,6 +82,11 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: true, voiceSound: false, ...off ? { headerSwipe: false } : {} }))
       // Bubble phase on window: runs after the header's own listener, so defaultPrevented shows its decision.
       window.__wheels = []
+      // A trackpad stamps its events 16 ms apart, even when the page is busy. page.mouse.wheel stamps the time of
+      // sending, so a slow remount after a step would look like the end of the gesture. Capture on window runs
+      // before the header's listener and gives each sideways event the trackpad's time.
+      window.__clock = null
+      addEventListener('wheel', event => { if (window.__clock != null && event.deltaX) { window.__clock += 16; Object.defineProperty(event, 'timeStamp', { value: window.__clock }) } }, { capture: true, passive: true })
       addEventListener('wheel', event => { if (event.deltaX) window.__wheels.push(event.defaultPrevented) }, { passive: true })
     })
     const selected = () => page.locator('[role="tab"][aria-selected="true"]').first().getAttribute('data-pane')
@@ -81,7 +94,7 @@ async function main() {
     // One swipe: the finger part and its momentum, then a pause so the next swipe is a new gesture.
     const swipe = async (sign, at) => {
       await page.mouse.move(at.x, at.y)
-      await page.evaluate(() => { window.__wheels = [] })
+      await page.evaluate(() => { window.__wheels = []; window.__clock = Math.max(performance.now(), (window.__clock ?? 0) + 400) })
       for (const dx of finger) await page.mouse.wheel(sign * dx, 0)
       await page.waitForTimeout(260)
       return page.evaluate(() => window.__wheels)
@@ -116,6 +129,15 @@ async function main() {
     await open(1280, '&off')
     let wheels = await swipe(1, await centre('.chat-header .chat-title'))
     check('setting off: the header swipe passes through (Back/Forward)', await selected() === '%2' && wheels.length > 0 && wheels.every(value => !value), JSON.stringify(wheels))
+    // Review finding: with stacks, a swipe over the nested strip steps within the stack and is cancelled.
+    stacked = stackedSessions
+    await open(1280)
+    await page.locator('.group-strip .pane-tabs').waitFor()
+    wheels = await swipe(1, await centre('.group-strip .pane-tabs [data-pane="%2"]'))
+    check('stacks: a swipe over the strip in .group-strip opens the next tab, cancelled', await selected() === '%3' && wheels.length === finger.length && wheels.every(Boolean), `${await selected()} ${JSON.stringify(wheels)}`)
+    wheels = await swipe(1, await centre('.group-strip .pane-tabs'))
+    check('stacks: at the last tab of the stack the swipe stays put (no jump to another stack)', await selected() === '%3' && wheels.every(Boolean), `${await selected()} ${JSON.stringify(wheels)}`)
+    stacked = null
     // The setting: on by default, a labelled switch in Settings › Sessions & chat that works with the keyboard at 320 px.
     await open(1280)
     await page.locator('button[aria-label="Settings"]').first().click()

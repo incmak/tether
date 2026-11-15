@@ -7,7 +7,7 @@ const ts = require('typescript')
 
 const mod = {}
 runInNewContext(ts.transpileModule(readFileSync('src/tabSwipe.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports: mod, Math, Infinity })
-const { createTabSwipe, THRESHOLD, QUIET_MS } = mod
+const { createTabSwipe, THRESHOLD, QUIET_MS, REVERSE } = mod
 
 // Feed deltas 16 ms apart from `start`. Returns the steps and how many events were handled (preventDefault).
 function feed(wheel, deltas, { start = 0, gap = 16, dy = 0, deltaMode = 0, ctrlKey = false } = {}) {
@@ -66,6 +66,9 @@ const negate = list => list.map(dx => -dx)
   assert.deepEqual(quick.steps, [1, 1])
   const back = feed(createTabSwipe(), [...swipe, 26, 22, 18, ...negate(swipe)])
   assert.deepEqual(back.steps, [1, -1], 'a swipe the other way during momentum')
+  // Review finding: one pixel the other way in the momentum is noise, not a swipe back.
+  assert.deepEqual(feed(createTabSwipe(), [...swipe, 26, 22, -1, 18, 15, 12, -2, 10, 8, 6]).steps, [1], 'noise against the lock')
+  assert.deepEqual(feed(createTabSwipe(), [...swipe, 26, 22, -1, 18, 15, -1, -1, -1, 12, 8, -REVERSE + 1, 6, 4]).steps, [1], 'scattered noise does not add up')
   console.log('ok second swipe')
 }
 

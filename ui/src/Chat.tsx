@@ -38,7 +38,7 @@ import type { OfficeFile } from './OfficeViewer'
 import type { ToolSummary } from './api'
 import { StatusStack } from './StatusStack'
 import { PaneTabs, movePill } from './PaneTabs'
-import { SWIPE_SKIP, SWIPE_ZONE, markTabStep, tabSwipe } from './tabSwipe'
+import { SWIPE_PARENTS, SWIPE_SKIP, SWIPE_ZONE, markTabStep, tabSwipe } from './tabSwipe'
 import { WorktreeMark } from './Worktree'
 import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
@@ -468,10 +468,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       for (const part of zone) part.removeEventListener('wheel', wheel as EventListener)
       zone = [...panel.querySelectorAll(SWIPE_ZONE)]
       for (const part of zone) part.addEventListener('wheel', wheel as EventListener, { passive: false })
+      for (const parent of panel.querySelectorAll(SWIPE_PARENTS)) observer.observe(parent, { childList: true })
     }
-    attach()
     const observer = new MutationObserver(attach)  // the stack row and the strip come and go with the tabs
     observer.observe(panel, { childList: true })
+    attach()
     return () => { observer.disconnect(); for (const part of zone) part.removeEventListener('wheel', wheel as EventListener) }
   }, [headerSwipe])
   const swipeCancel = () => {
