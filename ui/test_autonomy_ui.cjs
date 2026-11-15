@@ -226,7 +226,8 @@ async function main() {
       await page.getByRole('button', { name: 'Add passkey' }).click()
       await page.getByText('Passkey added.', { exact: false }).waitFor()
       check(`${at} passkey enrolled`, keys.length === 1 && keys[0].id === 'cred-1', JSON.stringify(keys))
-      check(`${at} passkey count shows`, await page.getByText('1 passkey approves changes').isVisible())
+      // The count comes from the passkey list, read again after the add.
+      check(`${at} passkey count shows`, await page.getByText('1 passkey approves changes').waitFor({ timeout: 5000 }).then(() => true, () => false))
       check(`${at} hook preview shows the command`, (await page.locator('.setup-review pre').innerText()).includes('autonomy.py hook'))
       check(`${at} no page overflow (setup review)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-setup-review-${width}.png`) })
@@ -305,7 +306,10 @@ async function main() {
       last = await settle(advisorPosts, mark)
       check(`${at} effort the model lacks resets to auto`, last && last.main.model === 'gpt-6-luna' && last.main.effort === 'auto', JSON.stringify(last))
       // Keyboard: arrow keys move between agent radios.
-      await sheet.getByRole('radio', { name: 'Codex', exact: true }).focus()
+      // The fieldset is disabled while the last save runs; a disabled radio cannot take focus.
+      const codexRadio = sheet.getByRole('radio', { name: 'Codex', exact: true })
+      await codexRadio.evaluate(node => new Promise(resolve => { const tick = () => node.matches(':disabled') ? setTimeout(tick, 50) : resolve(); tick() }))
+      await codexRadio.focus()
       mark = advisorPosts().length
       await page.keyboard.press('ArrowRight')
       last = await settle(advisorPosts, mark)
