@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import advisor_log
 import paths
 import projects
 import projects_api
@@ -233,6 +234,50 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(missing.status, 404)
         self.assertEqual(json.loads((projects.bundle(pid) / 'project.json').read_text())['name'], 'web')
 
+
+    def test_advisor_log_routes_merge_older_lines_and_check_ids(self):
+        folder = projects.bundle(PID)
+        folder.mkdir(parents=True)
+        entry = advisor_log.make('Which cache?\nSecond line', {'status': 'ask_user', 'answer': 'Ask the user.\n' + 'x' * 600,
+                                                                 'evidence': 'docs/cache.md'}, 'claude', 'fable', now=time.time())
+        older = ['- 2026-01-02 03:04 [decided] Q: Old question -> A: Old answer (codex gpt)',
+                 '- 2026-01-02 03:04 [error] Q: Same minute -> A:  (claude fable)',
+                 'not a log line', '- 2026-01-02 03:05 [weird] Q: Bad status -> A: x (claude fable)']
+        (folder / 'advisor-log.md').write_text('\n'.join(older + [advisor_log.line(entry)]) + '\n')
+        (folder / 'advisor-log.jsonl').write_text(json.dumps(entry) + '\n')
+
+        listed = Handler(f'/mobile/api/projects/advisor-log?project={PID}')
+        projects_api.get(listed, Run())
+        self.assertEqual(listed.status, 200, listed.body)
+        rows = listed.body['entries']
+        self.assertEqual([(row['status'], row['full']) for row in rows], [('ask_user', True), ('error', False), ('decided', False)])
+        self.assertEqual(rows[0]['question'], 'Which cache? Second line')
+        self.assertEqual(len(rows[0]['answer']), advisor_log.PREVIEW_ANSWER)
+        self.assertEqual((rows[2]['question'], rows[2]['answer'], rows[2]['agent'], rows[2]['model'], rows[2]['id']),
+                         ('Old question', 'Old answer', 'codex', 'gpt', ''))
+        self.assertEqual(listed.body['keep'], 200)
+
+        one = Handler(f'/mobile/api/projects/advisor-entry?project={PID}&id={entry["id"]}')
+        projects_api.get(one, Run())
+        self.assertEqual((one.status, one.body), (200, entry))
+        for path, status in ((f'advisor-entry?project={PID}&id=0123456789ab', 404), (f'advisor-entry?project={PID}&id=..%2Fx', 404),
+                             ('advisor-log?project=..%2F..%2Fetc', 400), ('advisor-entry?id=0123456789ab', 400)):
+            bad = Handler('/mobile/api/projects/' + path)
+            projects_api.get(bad, Run())
+            self.assertEqual(bad.status, status, path)
+
+    def test_advisor_log_is_empty_without_files_and_ignores_links(self):
+        empty = Handler(f'/mobile/api/projects/advisor-log?project={PID}')
+        projects_api.get(empty, Run())
+        self.assertEqual((empty.status, empty.body['entries']), (200, []))
+        folder = projects.bundle(PID)
+        folder.mkdir(parents=True)
+        secret = Path(self.home) / 'secret.md'
+        secret.write_text('- 2026-01-02 03:04 [decided] Q: private -> A: private (claude fable)\n')
+        (folder / 'advisor-log.md').symlink_to(secret)
+        linked = Handler(f'/mobile/api/projects/advisor-log?project={PID}')
+        projects_api.get(linked, Run())
+        self.assertEqual(linked.body['entries'], [])
 
 if __name__ == '__main__':
     unittest.main()

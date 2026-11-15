@@ -6,9 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import time
 
 import advisor
+import advisor_log
 import codex_level
 import paths
 
@@ -185,18 +185,9 @@ def ask(settings, args, key, replies):
 
 
 def log(pid, question, result, settings):
-    path = paths.TETHER / 'projects' / pid / 'advisor-log.md'
-    try:
-        lines = path.read_text(encoding='utf-8').splitlines()
-    except FileNotFoundError:
-        lines = []
-    question = ' '.join(question.split())[:200]
-    answer = ' '.join(result.get('answer', '').split())[:300]
     main = settings['main']
     model = advisor.resolve(main['agent'], main['model']) if main['agent'] != 'none' else 'latest'
-    lines.append(f'- {time.strftime("%Y-%m-%d %H:%M")} [{result["status"]}] Q: {question} -> A: {answer} '
-                 f'({main["agent"]} {model or "default"})')
-    advisor._write(path, '\n'.join(lines[-200:]) + '\n')
+    advisor_log.append(paths.TETHER / 'projects' / pid, advisor_log.make(question, result, main['agent'], model or 'default'))
 
 
 def main(argv=None):

@@ -1731,6 +1731,37 @@ button.live-chip:active { background: var(--line); }
 .session-title .project-mark { flex: none; color: var(--muted); }
 .session-title .project-mark.stale { color: var(--attention); }
 
+/* Advisor decisions (AdvisorLog.tsx). A status is an icon in a tinted disc plus its word, never color alone. */
+.advisor-log { --adv-decided: var(--done); --adv-ask_user: var(--attention); --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
+.advisor-detail { --adv-decided: var(--done); --adv-ask_user: var(--attention); --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
+.settings-group .advisor-filter { margin: 0 0 8px; padding: 0; border: 0; min-width: 0; }
+/* No visible legend, so no 84 px indent like other Settings rows (that rule is 0,4,0: match it). */
+.settings-group .advisor-filter.choice .segmented { margin-left: 0; }
+.advisor-filter .segmented label { flex: 1 1 auto; }
+.advisor-filter .segmented span { min-height: 40px; display: flex; align-items: center; justify-content: center; padding-inline: 6px; font-size: 13px; white-space: nowrap; }
+.advisor-status { flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: var(--st); background: color-mix(in srgb, var(--st) 15%, transparent); }
+.advisor-word { font-weight: 600; color: var(--st); }
+.advisor-status.decided, .advisor-word.decided { --st: var(--adv-decided); }
+.advisor-status.ask_user, .advisor-word.ask_user { --st: var(--adv-ask_user); }
+.advisor-status.timeout, .advisor-word.timeout { --st: var(--adv-timeout); }
+.advisor-status.error, .advisor-word.error { --st: var(--adv-error); }
+.advisor-status.off, .advisor-word.off { --st: var(--adv-off); }
+.advisor-list li { align-items: stretch; }
+.advisor-row { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; margin: 0 -4px; border: 0; border-radius: var(--radius); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.advisor-row:hover:not(:disabled) { background: var(--hover); }
+.advisor-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.advisor-row-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.advisor-row-text small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.advisor-question { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.advisor-answer { color: var(--muted); font-size: 14px; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.advisor-answer.empty { font-style: italic; }
+.advisor-skeleton .sk-row { align-items: flex-start; min-height: 64px; padding: 10px 0; }
+.advisor-facts { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.advisor-part { margin: 0 0 14px; }
+.advisor-part h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.advisor-text { margin: 0; font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.advisor-text.error { color: var(--error); }
+
 /* Codex level (CodexLevel.tsx): five steps in the Settings segmented control, the chosen step's rule under it. */
 .settings-group .codex-level .segmented span { font-variant-numeric: tabular-nums; }
 .settings-group .codex-level-note { clear: both; margin: 8px 0 0; }
