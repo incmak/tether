@@ -12,6 +12,7 @@ import projects
 
 PREFIX = '/mobile/api/projects/'
 BODY_LIMIT = 262144
+BACKLOG_BODY_LIMIT = 1 << 20  # the whole backlog text in one save (backlog.LIMIT)
 # Who added an item from the browser: the chat where the text was selected (agent_backlog_cli.py source).
 SOURCE = re.compile(r"(claude|codex)(?: · (?:tmux \$[0-9]+|pane %[0-9]+|chat [A-Za-z0-9_-]{1,80}))*")
 
@@ -56,7 +57,7 @@ def post(handler, home=None):
 
     def work():
         size = int(handler.headers.get('Content-Length', '0') or 0)
-        if not 0 < size <= BODY_LIMIT:
+        if not 0 < size <= (BACKLOG_BODY_LIMIT if name == 'backlog' else BODY_LIMIT):
             raise projects.ProjectError(413, 'Invalid request.')
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):

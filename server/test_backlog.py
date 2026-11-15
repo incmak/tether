@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import os
 import re
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,8 +75,10 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(len(self.text()), backlog.LIMIT + 1)
 
     def test_a_full_list_fits_in_a_request_in_any_language(self):
-        body = json.dumps({'text': '語' * backlog.LIMIT, 'version': 'x' * 64}, ensure_ascii=False).encode()
-        self.assertLessEqual(len(body), projects_api.BODY_LIMIT)
+        for char in ('語', '\U0001F600'):  # 3 and 4 bytes in UTF-8
+            body = json.dumps({'text': char * backlog.LIMIT, 'version': 'x' * 64}, ensure_ascii=False).encode()
+            self.assertLessEqual(len(body), projects_api.BACKLOG_BODY_LIMIT)
+        self.assertGreater(backlog.LIMIT, 60000)  # the list held 60,000 characters on 15 Nov 2026
 
     def test_links_are_refused(self):
         backlog.folder().mkdir(parents=True)
@@ -181,6 +184,29 @@ class BacklogTests(unittest.TestCase):
         bad = Handler('/mobile/api/projects/backlog', {'text': 5, 'version': got.body['version']})
         projects_api.post(bad)
         self.assertEqual(bad.status, 400)
+
+    def test_long_runs_of_spaces_save_fast(self):
+        """A full list of spaces once held the backlog lock for minutes: the patterns ran in quadratic time."""
+        spaces = ' ' * (backlog.LIMIT // 3 - 20)
+        text = f'# x{spaces}y\n- [ ] {spaces}x (claude{spaces}\n'
+        started = time.monotonic()
+        saved = backlog.save(text, backlog.read()['version'])
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue(saved['text'].endswith(' #B1\n'))
+
+    def test_too_long_is_refused_before_it_is_parsed(self):
+        with mock.patch.object(backlog, 'with_ids') as parse, self.assertRaises(projects.ProjectError):
+            backlog.save('x' * (backlog.LIMIT + 1), backlog.read()['version'])
+        parse.assert_not_called()
+
+    def test_only_the_backlog_save_takes_a_large_body(self):
+        text = '- [ ] ' + '語' * 100000 + '\n'  # over the 262,144-byte body limit of the other routes
+        saved = Handler('/mobile/api/projects/backlog', {'text': text, 'version': backlog.read()['version']})
+        projects_api.post(saved)
+        self.assertEqual(saved.status, 200)
+        added = Handler('/mobile/api/projects/backlog-add', {'text': '語' * 100000})
+        projects_api.post(added)
+        self.assertEqual(added.status, 413)
 
     def test_friday_adds_and_starts_without_a_version(self):
         added = Handler('/mobile/api/projects/backlog-add', {'text': 'Try the dark theme'})

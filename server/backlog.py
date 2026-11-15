@@ -18,13 +18,16 @@ from pathlib import Path
 import paths
 from projects import ProjectError, _read, _write, invalid
 
-# A request body is at most 262,144 bytes (projects_api.py). 60,000 characters fit in any language.
-LIMIT = 60000
+# A backlog save is at most 1 MiB (projects_api.py BACKLOG_BODY_LIMIT). 200,000 characters fit in any language,
+# 4 bytes each at most in UTF-8, with room for the JSON around them.
+LIMIT = 200000
 VERSIONS = 50
-HEADING = re.compile(r'#{1,6}\s+(.*?)\s*$')
+# The patterns below run on every line of a text the browser sends. Each runs in linear time: no match can start
+# inside a run of spaces, and nothing lazy meets a trailing \s*. Long runs of spaces took seconds before (15 Nov 2026).
+HEADING = re.compile(r'#{1,6}\s+(\S(?:.*\S)?|)\s*$')
 ITEM = re.compile(r'[-*] \[([ xX])\] (.*)$')
-SOURCE = re.compile(r'\s*\((?:claude|codex)(?: · [^()·]+)*\)\s*$')
-ID = re.compile(r'\s+#B([0-9]+)\s*$')  # every item ends with its ID, like #B12. The UI gives IDs the same way (backlogItems.ts).
+SOURCE = re.compile(r'(?<!\s)\s*\((?:claude|codex)(?: · [^()·]+)*\)\s*$')
+ID = re.compile(r'(?<!\s)\s+#B([0-9]+)\s*$')  # every item ends with its ID, like #B12. The UI gives IDs the same way (backlogItems.ts).
 ID_QUERY = re.compile(r'#?[Bb]([0-9]+)')
 STATUS = re.compile(r'\s+- (?:Doing|Done):')
 WORKTREE = re.compile(r'gitdir:\s*(.+?)/\.git/worktrees/')
@@ -124,6 +127,8 @@ def save(text, version):
         raise invalid('Invalid backlog text.')
     if not isinstance(version, str):
         raise invalid('Reload the backlog and try again.')
+    if len(text) > LIMIT:  # before any parsing: IDs only make the text longer
+        raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     with _locked():
         current = read()
         if current['version'] != version:
