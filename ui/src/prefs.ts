@@ -11,6 +11,8 @@ import type { Look, SavedLook } from './layouts'
 export type WaitOrder = 'oldest' | 'newest'
 export interface Prefs {
   autoResume: boolean
+  wakatime: boolean  // send activity time to WakaTime (ActivityTime.tsx, server/wakatime.py); off until turned on
+  wakatimeAgents: boolean  // also let wakatime-cli count agent transcripts
   pinned: string[]
   sidePins: SidePin[]
   order: string[]
@@ -87,7 +89,7 @@ export interface ArchivedTab { thread: string | null; dir: string }
 export interface SidePin { pane: string; note?: string }
 const KEY = 'tmux-chat.prefs.v1'
 const CLEARED_KEEP = 2 * 86400  // Match CLEARED_KEEP in server/prefs_sync.py (seconds).
-const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto' }
+const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto', wakatime: false, wakatimeAgents: false }
 
 function keptDrafts(drafts: Record<string, Draft>) {
   const now = Date.now() / 1000
@@ -111,7 +113,7 @@ function load(): Prefs {
   return { ...prefs, drafts: keptDrafts(prefs.drafts) }
 }
 
-const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel'] as const
+const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'wakatime', 'wakatimeAgents'] as const
 type Shared = Partial<Pick<Prefs, typeof SYNCED[number]>>
 const PENDING_KEY = 'tmux-chat.prefs.pending'
 

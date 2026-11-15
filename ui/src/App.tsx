@@ -88,6 +88,7 @@ import { DecisionsGroup, useDecisionAnswers } from './WorkItems'
 import { WorkSheet } from './WorkBoard'
 import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
+import { useActivityPing } from './activityPing'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
 
@@ -203,6 +204,7 @@ function App() {
   const previousSelection = useRef<SelectionSnapshot>({ sessions: [] })
   const orderedSessions = useMemo(() => sortByPrefs(sessions, prefs.order), [sessions, prefs.order])
   const pane = selectPane(orderedSessions, prefs.selected, previousSelection.current, data?.default_thread, prefs.lastPane)
+  useActivityPing(api, pane?.id, prefs.wakatime)
   useLayoutEffect(() => {
     if (!data) return
     const previous = previousSelection.current
