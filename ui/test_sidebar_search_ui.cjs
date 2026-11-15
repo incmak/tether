@@ -70,7 +70,7 @@ async function main() {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
       if (!sessionStorage.getItem('kept')) { localStorage.clear(); sessionStorage.setItem('kept', '1') }
       localStorage.setItem('tmux-chat.prefs.synced', '1')
-      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false }))
+      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, sideMode: 'sessions' }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
     let root
@@ -81,7 +81,7 @@ async function main() {
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
       // Release notes was the last-used tab, so a plain click on the session would open it.
-      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' }, '%6': { thread: 't6', dir: '/srv/notes' } } })))
+      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, sideMode: 'sessions', lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' }, '%6': { thread: 't6', dir: '/srv/notes' } } })))
       await page.reload({ waitUntil: 'load' })
       root = page.locator(width < 800 ? 'dialog.drawer' : 'aside.sidebar')
       if (width < 800) await page.getByRole('button', { name: 'Open sessions' }).first().click()
