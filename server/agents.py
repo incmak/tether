@@ -132,6 +132,29 @@ def codex_database():
     return connection
 
 
+_transcripts = {}
+
+
+def claude_transcript(cwd, session):
+    """The file Claude writes for this session.
+
+    Claude names a new session's folder after its working folder, but a resumed session keeps writing
+    to the folder where it began (another working folder, or the Mac path of a session moved to Linux).
+    So the folder named after the current working folder is only the first guess: else find the file by its id.
+    """
+    guess = HOME / '.claude/projects' / re.sub(r'[^a-zA-Z0-9]', '-', cwd) / (session + '.jsonl')
+    if guess.is_file():
+        return guess
+    known = _transcripts.get(session)
+    if known and known.is_file():
+        return known
+    found = next(history.transcript_files(session), None)
+    if not found:
+        return guess  # a new session writes its first line here
+    _transcripts[session] = found[0]
+    return found[0]
+
+
 def discover(config, run):
     pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
@@ -195,8 +218,7 @@ def discover(config, run):
                 entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
             live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
             if live:
-                project = re.sub(r'[^a-zA-Z0-9]', '-', live['cwd'])
-                transcript = HOME / '.claude/projects' / project / (live['sessionId'] + '.jsonl')
+                transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
                              registry=live['registry'], writable=True, owner_pid=live['pid'],
                              process_start=process_start(live['pid']),
