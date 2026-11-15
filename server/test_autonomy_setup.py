@@ -155,7 +155,7 @@ class Ping(Base):
         argv = urgent_ping._argv({'pane': '%12', 'name': 'Tab', 'next': 'Choose?'})
         self.assertEqual(argv[2:4], ['Tether: Tab', 'Needs you'])
         self.assertIn('Question|Choose?', argv)
-        self.assertIn('Open the tab|https://tether.test/chat/?session=%2512', argv)
+        self.assertIn('Open the tab|https://tether.test/chat/open/12', argv)
 
     def test_dm_needs_no_mention_and_is_the_default(self):
         # The 1:1 chat always reaches the BriskBot approver, so a mention is dropped, even a bad one.

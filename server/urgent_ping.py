@@ -13,6 +13,7 @@ import time
 from urllib.parse import quote
 
 import paths
+import teams_replies
 
 _LOCK = threading.Lock()
 _PANES = {}
@@ -103,6 +104,10 @@ def send(ask, *, clock=time.monotonic, runner=subprocess.run):
         if pane in _PANES or len(_SENT) >= 6:
             print(f'Urgent ping rate limit: dropped pane {pane}', file=sys.stderr)
             return False
+        # A BriskBot dm card in a known conversation: the answer comes back to this tab.
+        reply_key = teams_replies.open_key(pane, ask.get('thread')) if teams_replies.reader(_config()) is not None else None
+        if reply_key:
+            argv = argv + ['--reply-key', reply_key]
         worker = threading.Thread(target=_run, args=(argv, runner), daemon=True)
         worker.start()
         _PANES[pane] = now

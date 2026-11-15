@@ -78,6 +78,8 @@ import media_files
 import previews
 import dev_previews
 import repo_panel
+import teams_replies
+import urgent_ping
 import files
 import office_addon
 import auth
@@ -1171,6 +1173,11 @@ def review_send(config, message, state=None):
     if stashed:
         restore_check(config, stashed)
     return result
+
+
+def teams_answer(text, item):
+    """Deliver one Teams answer (B126) to its tab through the broadcast guards; returns the result row."""
+    return broadcast.deliver(text, [item], entries=sessions, status=live_status, send=send_text)['results'][0]
 
 
 def broadcast_message(body):
@@ -3197,6 +3204,7 @@ if __name__ == '__main__':
     groups.HOLD = auto_resume.restoring  # no auto stack dissolves while saved tabs come back
     threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty and root-only auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
+    threading.Thread(target=teams_replies.watch, args=(urgent_ping._config, teams_answer), daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()
     start_office_origin(host)

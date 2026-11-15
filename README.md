@@ -151,6 +151,13 @@ For the same reason, the first passkey needs no approval: no local check can tel
 When the first passkey is added, or the last passkey is removed, Tether sends a push notice and an urgent ping, when one is set up. The urgent ping goes out even when urgent pings are switched off.
 If you did not add that first passkey, Settings cannot remove it: removal needs a passkey you hold. Delete `~/.config/mobile-tmux/passkeys.json` on the Tether host, add your own passkey, and check your agents.
 
+Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings › Agents › Urgent pings in Teams, Send to: Direct chat), each card gets a reply box.
+Type the answer in the box and select **Send to the tab**, or quote-reply the card.
+Tether reads the answer back with `chat-replies.py` (next to `post-update.py`) and types it into the tab that asked, as `[Answer from Teams] …`.
+It sends the answer only when that tab still shows the same conversation, and not while the tab waits on an approval or a picker or has an unsent draft.
+BriskBot then shows the result in the chat. A card takes answers for one day; after that, answer in Tether.
+The reply keys are kept in the owner-only `~/.cache/mobile-tmux/teams-replies.json`.
+
 Attachments use random names in the owner-only `~/.cache/mobile-tmux/uploads/` folder and expire after a week.
 The agent receives the file path. It may request permission to read that folder.
 The upload endpoint does not serve files back; authenticated file previews use separate checks for paths, types, and secrets.
