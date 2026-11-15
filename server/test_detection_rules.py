@@ -57,11 +57,16 @@ ORIGINALS = [
     ('terminal_replies', ('codex', 'REPLIES_CONTEXT'), 'CONTEXT_LINE', (r'.*·\s*Context\b'), 0),
     ('terminal_replies', ('antigravity', 'BANNER_END'), 'AGY_BANNER_END', (r'^\s*─{3,}'), 0),
     ('prompt_actions', ('codex', 'REPORT_RULE'), 'RULE', (r'^\s*[─━═-]{3,}\s*$'), 0),
-    ('side_question', ('claude', 'SIDE_RULE'), 'RULE', (r'^▔{20,}\s*$'), 0),
+    ('side_question', ('claude', 'SIDE_RULE'), 'RULE', (r'^(?:▔{20,}.*|.*\s▔)\s*$'), 0),
     ('side_question', ('claude', 'SIDE_QUESTION'), 'QUESTION', (r'^\s*/btw\s+(\S.*)$'), 0),
     ('side_question', ('claude', 'SIDE_FOOTER'), 'FOOTER', (r'(?:^|· )Esc to close$'), 0),
     ('side_question', ('claude', 'SIDE_COPY'), 'COPY', (r'\bc to copy\b|\bCopied to clipboard\b'), 0),
     ('side_question', ('claude', 'SIDE_FORK'), 'FORK', (r'\bf to fork\b'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_RULE'), 'RULE', (r'^(?:▔{3,}.*|.*\s▔)\s*$'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_MORE'), 'MORE', (r'^\s*([↑↓])\s+(\d+)\s+more\s*$'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_HINT'), 'HINT', (r'(\S+(?: ?\+ ?\S+)?(?:/\S+)*)\s+(?:to|for)\s+(\S.*)'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_FACT'), 'FACT', (r'^(\S[^:]{0,40}:)\s+(\S.*)$'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_PERCENT'), 'PERCENT', (r'(\d{1,3})% used'), 0),
 ]
 
 

@@ -1,0 +1,45 @@
+[38;5;246m  ⎿  [39mCouldn't install the Claude Code extension in [1mVS Code[0m:
+     Command failed with ENOENT: code --force --install-extension anthropic.claude-code
+     Executable not found in $PATH: "code"
+     To install it yourself, see [94mhttps://code.claude.com/docs/en/vs-code#install-the-extension[39m
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/privacy-settings[39m
+[38;5;246m[49m  ⎿  [39m"Help improve our AI models" set to false.
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/effort[39m
+[38;5;246m[49m  ⎿  [39mCancelled
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+
+[38;5;246m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mDisabled auto-compact
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/skills[39m [49m
+[38;5;246m  ⎿  [39mNo changes
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mEnabled auto-compact
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+
+[38;5;246m❯[39m [38;5;231m/model[39m [49m
+[38;5;246m  ⎿  [39mKept model as [38;5;153mHaiku 5.5[39m
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mDisabled auto-compact
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+[49m
+[38;5;246m[48;5;237m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mEnabled auto-compact
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/memory[39m [49m
+[38;5;246m  ⎿  [39mCancelled memory editing
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◐ medium · /effort[38;5;153m ▔
+[39m   [1m[38;5;44mBackground[0m
+
+   [38;5;246mNo tasks currently running[39m
+
+   [38;5;153m❯[39m [38;5;153mEarlier in this session (0)[39m
+
+   [3m[38;5;246m↑/↓ to select · Esc to close[0m

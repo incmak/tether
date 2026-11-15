@@ -1,0 +1,45 @@
+
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/privacy-settings[39m
+[38;5;246m[49m  ⎿  [39m"Help improve our AI models" set to false.
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/effort[39m
+[38;5;246m[49m  ⎿  [39mCancelled
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+
+[38;5;246m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mDisabled auto-compact
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/skills[39m [49m
+[38;5;246m  ⎿  [39mNo changes
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/config[39m
+[38;5;246m[49m  ⎿  [39mEnabled auto-compact
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◐ medium · /effort[38;5;153m ▔
+[39m   [1m[38;5;153mPlugins[0m [1;7m Discover [0m  Installed   Marketplaces   Errors   Stats
+
+   [1mDiscover plugins[0m[38;5;246m (1/6106)[39m
+   [2m╭────────────────────────────────────────────────────────────────────────────────────────────╮[0m
+   [2m│[0m [38;5;246m⌕ Search…[39m                                                                                  [2m│[0m
+   [2m╰────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+    [1m[38;5;153mAll 6106[0m[38;5;246m · Anthropic Directory 3729 · claude-community 2282 · claude-plugins-official 312  [39m
+    [38;5;246m(ctrl+s to filter by marketplace)[39m
+
+   [38;5;153m❯ [39m◯ frontend-design[38;5;246m · Anthropic Directory · 1.3M installs[39m
+       [38;5;246mFrontend design skill for UI/UX implementation[39m
+
+     ◯ Superpowers[38;5;246m · Anthropic Directory · 1.1M installs[39m
+       [38;5;246mCore skills library for Claude Code: TDD, debugging, collab…[39m
+
+     ◯ code-review[38;5;246m · Anthropic Directory · 477.6K installs[39m
+       [38;5;246mAutomated code review for pull requests using multiple spec…[39m
+
+     ◯ context7[38;5;246m · Anthropic Directory · 441.5K installs[39m
+       [38;5;246mUpstash Context7 MCP server for up-to-date documentation lo…[39m
+
+     ◯ skill-creator[38;5;246m · Anthropic Directory · 429K installs[39m
+       [38;5;246mCreate new skills, improve existing skills, and measure ski…[39m
+     [38;5;246m↓ 6101 more[39m
+
+   [3m[38;5;246mType to search · Space to toggle · Enter to view · Esc to go back[0m

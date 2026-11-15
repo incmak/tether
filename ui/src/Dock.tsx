@@ -1,11 +1,12 @@
 import { Loading } from './Skeleton'
 import { VoiceField } from './VoiceField'
 import { PermissionsPanel } from './Permissions'
+import { DialogCard } from './DialogCard'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Search, Clock3, Check, Terminal, X, RefreshCw, Gauge, SquareTerminal, Layers } from 'lucide-react'
 import { TextMessagePartProvider } from '@assistant-ui/react'
 import { errorText, goalStatusLabel } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, Choice, Footer, FooterTask, LiveState, Pane, PromptAction } from './api'
+import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Footer, FooterTask, LiveState, Pane, PromptAction } from './api'
 import { useModal, usePolling } from './hooks'
 import { agentNames } from './Sidebar'
 import { Linked, PanelText, PanelPre, CopyButton, Markdown } from './Messages'
@@ -49,7 +50,7 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
   </div>
 }
 
-export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onAsk, onAskEngage, onType, onFocusReply, permissionsTab }: { plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
+export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
   onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
@@ -96,6 +97,12 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
     if (option.free) { focusBox(); return }
     setPicked(option.id); try { await onChoose(kind, option, approval, option.id === keepPlanning?.id ? feedback.trim() || undefined : undefined) } finally { setPicked(null) }
     if (chat(option)) focusBox() }
+  // A Claude slash-command dialog (/mcp, /config, /resume ...): its rows, tabs and keys as controls.
+  const dialog = !approval && !plan && attention?.reason === 'dialog' ? attention.dialog : undefined
+  if (dialog) return <section ref={root} className="choice-dock dialog-dock open" aria-label={`${agent} · ${dialog.title}`}>
+    <div className="choice-head"><span className="choice-mark" />{agent} · {dialog.title}</div>
+    <DialogCard dialog={dialog} disabled={disabled} onAction={onDialog ?? (async action => { await onKey(action.action === 'key' ? action.key : 'Escape'); return null })} />
+  </section>
   if (side) return <section ref={root} className="choice-dock side-dock open" aria-label={`${agent} side question`}>
     <div className="choice-head"><span className="choice-mark" />{agent} · Side question</div>
     <p className="side-question">{side.question}</p>

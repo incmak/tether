@@ -1,0 +1,45 @@
+
+● Earlier chat line
+● Earlier chat line
+● Earlier chat line
+
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/memory[39m [49m
+[38;5;246m  ⎿  [39mCancelled memory editing
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/resume[39m [49m
+[38;5;246m  ⎿  [39mResume cancelled
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/ide[39m
+[38;5;246m[49m  ⎿  [39mCouldn't install the Claude Code extension in [1mVS Code[0m:
+     Command failed with ENOENT: code --force --install-extension anthropic.claude-code
+     Executable not found in $PATH: "code"
+     To install it yourself, see [94mhttps://code.claude.com/docs/en/vs-code#install-the-extension[39m
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/privacy-settings[39m
+[38;5;246m[49m  ⎿  [39m"Help improve our AI models" set to false.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;211mIDE extension install failed (see /status for info)[38;5;153m ▔
+[39m   [1mEffort[0m
+
+                   Faster                             Smarter
+                   [38;5;246m──────────[1m[39m▲[0m[38;5;246m───────────────────────────────[39m      [1mUltracode[0m  [38;5;246moff[39m
+                   [38;5;246mlow[39m     [1m[38;5;114mmedium[0m     [38;5;246mhigh[39m     [38;5;246mxhigh[39m      [38;5;246mmax[39m      [38;5;246mTab to toggle[39m
+
+                                  [38;5;246mThe default effort for this model[39m
+
+
+   [38;5;246m←/→ to adjust · Enter to confirm · s for this session only · Esc to cancel[39m

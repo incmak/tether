@@ -2074,7 +2074,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
                          '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
@@ -2635,6 +2635,20 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             subprocess.run([paths.TMUX, 'send-keys', '-t', config['id'], key],
                                            check=True, capture_output=True, timeout=5)
+                self.respond(200, {'accepted': True})
+                return
+            if self.path == '/mobile/api/dialog':
+                # One action of a Claude dialog card. claude_dialog reads the screen again and sends only keys the dialog offers.
+                if config['agent'] != 'claude':
+                    raise ValueError('Dialogs are for Claude sessions.')
+                import claude_dialog
+                try:
+                    with SEND_LOCK:
+                        verify(config)
+                        claude_dialog.act(config, body)
+                except claude_dialog.Changed as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/menu':

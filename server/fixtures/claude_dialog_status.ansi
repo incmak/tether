@@ -1,0 +1,45 @@
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+[38;5;153m[49m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◐ medium · /effort[38;5;153m ▔
+[39m   [1m[38;5;153mSettings[0m [1m[38;5;16m[48;5;153m Status [0m  Config   Usage   Stats
+
+   [1mVersion:[0m           2.1.325
+   [1mSession name:[0m      [38;5;246m/rename to add a name[39m
+   [1mSession ID:[0m        00000000-0000-0000-0000-000000000000
+   [1mSession kind:[0m      interactive
+   [1mPeer address:[0m      uds:/run/user/1000/cc-socks/1469672.sock
+   [1mcwd:[0m               /srv/u/Documents/projects
+   [1mLogin method:[0m      Claude Ultra account
+   [1mOrganization:[0m      person@example.com's Organization
+   [1mEmail:[0m             person@example.com
+   [1mCloud sessions:[0m    GitHub connected
+   [1m [0m
+   [1mModel:[0m             haiku (claude-haiku-5-5)
+   [1mIDE:[0m               [38;5;211m✘[39m Couldn't install the Claude Code extension in VS Code: Command failed
+                      with ENOENT: code --force --install-extension anthropic.claude-code
+                      Executable not found in $PATH: "code"
+                      To install it yourself, see
+                      https://code.claude.com/docs/en/vs-code#install-the-extension
+   [1mMCP servers:[0m       [38;5;114m8 connected[39m, [38;5;220m1 need auth[39m [38;5;246m· /mcp[39m
+   [1mSetting sources:[0m   User settings
+   [1mAuto mode server:[0m  Enabled
+
+   [38;5;246mEsc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

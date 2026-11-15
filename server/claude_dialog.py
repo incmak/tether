@@ -1,0 +1,578 @@
+"""Claude Code's slash-command dialogs (/mcp, /config, /resume, /status ...), read as data for a Tether card.
+
+Claude Code 2.1.325 draws each dialog below a row of "▔" and keeps it out of the transcript: the screen is the only
+source. The parser keeps what the dialog shows as blocks (list, facts, meter, scale, search box, text) and reads the
+keys from the dialog's own footer. The keys a browser may send are only the keys that footer offers (see `allowed`).
+A dialog taller than the pane has its top rows in the scrollback; `read` then asks tmux for them.
+"""
+import hashlib
+import re
+import subprocess
+import time
+
+import choice_state
+import detection_rules
+import paths
+
+RULE = detection_rules.pattern('claude', 'DIALOG_RULE')
+MORE = detection_rules.pattern('claude', 'DIALOG_MORE', groups=2)
+HINT = detection_rules.pattern('claude', 'DIALOG_HINT', groups=2)
+FACT = detection_rules.pattern('claude', 'DIALOG_FACT', groups=2)
+PERCENT = detection_rules.pattern('claude', 'DIALOG_PERCENT', groups=1)
+MARKS = '✔✓⚠✘✗◯◉☐☑●○×'
+CURSORS = '❯›'
+HISTORY = 200        # scrollback rows read for a dialog taller than the pane
+MAX_ROWS = 260
+MARGIN = 4           # a dialog row ends this many columns before the pane edge, or earlier
+INDENT = 3           # every dialog row starts at this column or later; chat rows and the input box start left of it
+KEYS = {'enter': ('Enter', 'Enter'), 'return': ('Enter', 'Enter'), 'esc': ('Escape', 'Esc'), 'escape': ('Escape', 'Esc'),
+        'space': ('Space', 'Space'), 'tab': ('Tab', 'Tab'), 'shift+tab': ('BTab', 'Shift+Tab'),
+        '↑': ('Up', '↑'), '↓': ('Down', '↓'), '←': ('Left', '←'), '→': ('Right', '→'),
+        'up': ('Up', '↑'), 'down': ('Down', '↓'), 'left': ('Left', '←'), 'right': ('Right', '→'),
+        '⇧←': ('S-Left', 'Shift+←'), '⇧→': ('S-Right', 'Shift+→')}
+STEP = .15           # seconds between a key and the next look at the screen
+
+
+def _key(token):
+    """(tmux key, label) for one key name of a footer hint, or None. "Type" stands for text entry."""
+    low = token.lower()
+    if low in KEYS:
+        return KEYS[low]
+    if low == 'type':
+        return ('', 'Type')
+    if match := re.fullmatch(r'ctrl\s?\+\s?([a-z])', low):
+        return ('C-' + match[1], 'Ctrl+' + match[1].upper())
+    if re.fullmatch(r'[a-z/?]', token):  # a capital letter is a different key; no dialog of 2.1.325 uses one
+        return (token, token)
+    return None
+
+
+def hints(text):
+    """Key hints of one footer text ("↑/↓ to navigate · Enter to confirm · Esc to cancel"), or None when any part is
+    not a hint. Each hint: the keys it names and the effect in Claude's own words."""
+    found = []
+    for part in re.split(r'\s+[·•]\s+|,\s+', ' '.join(text.split())):
+        match = HINT.fullmatch(part)
+        keys = [_key(token) for token in ([match[1]] if match[1] == '/' else match[1].split('/'))] if match else [None]
+        if not all(keys):
+            return None
+        found.append({'keys': [{'key': key, 'label': label} for key, label in keys], 'effect': match[2].strip(), 'text': part})
+    return found or None
+
+
+def _dim(style, tone):
+    return style['dim'] or style['fg'] in tone
+
+
+def _plain(row, tone):
+    """True when a row has text and none of it is secondary (dim) text."""
+    text, styles = row
+    return any(not _dim(style, tone) for char, style in zip(text, styles) if char != ' ')
+
+
+def _all_dim(row, tone):
+    text, styles = row
+    return bool(text.strip()) and all(_dim(style, tone) for char, style in zip(text, styles) if char != ' ')
+
+
+def _cells(row, tone, start=0):
+    """Split a row at gaps of two spaces, and where main text turns into secondary text."""
+    text, styles = row
+    cells, current, gap, dim = [], '', 0, None
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == ' ':
+            gap += 1
+            continue
+        now = _dim(styles[index], tone)
+        if current and (gap >= 2 or dim is not None and now != dim and gap >= 1):
+            cells.append((current, dim))
+            current = ''
+        elif current and gap:
+            current += ' ' * gap
+        current += char
+        gap, dim = 0, now
+    if current:
+        cells.append((current, dim))
+    return cells
+
+
+def _wrapped(previous, following, width):
+    """True when `following` continues `previous`: its first word did not fit on the row before."""
+    words = following.split()
+    return bool(words and previous.strip()) and len(previous.rstrip()) + 1 + len(words[0]) > width - MARGIN
+
+
+def _join(previous, following, width):
+    """Join a wrapped row. A word longer than the pane (an id, a URL) is cut at the edge, with no space."""
+    cut = len(previous.rstrip()) >= width - MARGIN + 1 and ' ' not in following.strip() and len(previous.split()[-1]) >= 16
+    return previous + ('' if cut else ' ') + following.strip()
+
+
+def _title(row, tone):
+    """The dialog's first row: its title, a note in secondary text, and its tabs when it has them."""
+    text, styles = row
+    emphasis = [bool(style['reverse'] or style['bg'] is not None) for style in styles]
+    parts = [(match.group().strip(), match.start(), match.end()) for match in re.finditer(r'\S(?:.*?\S)?(?= {2,}|$)', text)]
+    if any(emphasis) and len(parts) >= 1:
+        # The active tab is drawn " Config " with a background (the tab row has focus) or in reverse (the body has it).
+        first = next(index for index, flag in enumerate(emphasis) if flag)
+        last = len(emphasis) - 1 - emphasis[::-1].index(True)
+        active = text[first:last + 1].strip()
+        head = text[:first].strip()
+        tail = text[last + 1:].strip()
+        names = [name for name in re.split(r' {2,}', head) if name] + [active] + [name for name in re.split(r' {2,}', tail) if name]
+        # "Settings  Status": with the first tab active only one space parts it from the title.
+        bold = ''.join(char for char, style in zip(text, styles[:first]) if style['bold']).strip()
+        title = bold if bold and head.startswith(bold) else names[0]
+        rest = head[len(title):].strip()
+        tabs = [name for name in re.split(r' {2,}', rest) if name] + [active] + [name for name in re.split(r' {2,}', tail) if name]
+        if title and len(tabs) >= 2 and len(set(tabs)) == len(tabs):
+            return {'title': title, 'tabs': tabs, 'tab': active, 'tab_focus': any(style['bg'] is not None for style in styles)}
+    cells = _cells(row, tone)
+    main = ' '.join(cell for cell, dim in cells if not dim) or text.strip()
+    note = ' '.join(cell for cell, dim in cells if dim) if any(not dim for _, dim in cells) else ''
+    return {'title': main, 'note': note}
+
+
+def _footer(rows):
+    """(start, hints) of the key hints that end the dialog. They are the last rows of the last paragraph; a narrow
+    pane wraps them."""
+    end = len(rows)
+    start = end
+    while start > 0 and rows[start - 1][0].strip() and end - start < 6:
+        start -= 1
+    for index in range(start, end):
+        found = hints(' '.join(row[0].strip() for row in rows[index:end]))
+        if found:
+            return index, found
+    return end, []
+
+
+def _item(row, tone, column, cursor):
+    text, _ = row
+    body = text[column:]
+    mark = ''
+    if body[:1] in MARKS and body[1:2] == ' ':
+        mark, column = body[0], column + 2
+    cells = _cells(row, tone, column)
+    if not cells:
+        return None
+    label = cells[0][0]
+    value = re.sub(r'^[·•]\s*', '', '  '.join(cell for cell, _ in cells[1:]))
+    return {'text': label, 'value': value, 'mark': mark, 'detail': '', 'selected': cursor}
+
+
+def _scale(rows, index, tone):
+    """Claude's /effort slider: a pointer row and the row of level names under it. The current level is bold."""
+    if index + 1 >= len(rows) or '▲' not in rows[index][0]:
+        return None
+    text, styles = rows[index + 1]
+    bar = re.search(r'[─━▲]+', rows[index][0])
+    options, value = [], None
+    for match in re.finditer(r'\S+', text):
+        if match.start() > bar.end() + 3:
+            break
+        options.append(match.group())
+        if any(style['bold'] for style in styles[match.start():match.end()]):
+            value = match.group()
+    if len(options) < 2 or value is None:
+        return None
+    return {'type': 'scale', 'options': options, 'value': value, '_end': bar.end()}
+
+
+def parse(frame):
+    """The dialog in one styled frame (tmux capture-pane -e), or None."""
+    rows = choice_state._rows(frame)
+    while rows and not rows[-1][0].strip():
+        rows.pop()
+    rule = next((index for index in range(len(rows) - 1, -1, -1) if RULE.match(rows[index][0])), None)
+    if rule is None or not 1 <= len(rows) - rule - 1 <= MAX_ROWS:
+        return None
+    width = len(rows[rule][0])
+    rows = rows[rule + 1:]
+    if any(text.strip() and len(text) - len(text.lstrip()) < INDENT for text, _ in rows):
+        return None  # chat or the input box below the rule: that dialog is closed
+    first = next((index for index, row in enumerate(rows) if row[0].strip()), None)
+    if first is None:
+        return None
+    start, found = _footer(rows)
+    # Secondary text has the colour of the key hints (it depends on the theme). Without hints, the usual greys.
+    tone = {(5, 246), (5, 244), (5, 245), 90}
+    if found and start < len(rows):
+        tone |= {style['fg'] for char, style in zip(*rows[start]) if char != ' ' and style['fg'] is not None}
+    head = _title(rows[first], tone)
+    if head.get('tabs') and first + 1 < start and rows[first + 1][0].strip() and not any(
+            style['bold'] or style['reverse'] or style['bg'] is not None for style in rows[first + 1][1]) and (
+            len(rows[first][0].rstrip()) + 3 + len(rows[first + 1][0].strip().split('  ')[0]) > width - MARGIN):
+        more_tabs = [name for name in re.split(r' {2,}', rows[first + 1][0].strip()) if name]
+        if not set(more_tabs) & set(head['tabs']):
+            head['tabs'] += more_tabs  # a narrow pane wraps the tab row
+            first += 1
+    if not head['title'] or head['title'][0] in CURSORS + '/':
+        return None  # "/btw ..." is the side question; a cursor row is a list with no title
+    body = rows[first + 1:start]
+    cursor_rows = [index for index, (text, styles) in enumerate(body)
+                   if (match := re.match(r'^(\s*)[' + CURSORS + r'] ', text)) and not _dim(styles[match.end(1)], tone)]
+    marker_rows = [index for index, (text, _) in enumerate(body) if re.match(r'^\s*[' + CURSORS + r'] ', text)]
+    column = None
+    focus = 'list'
+    if cursor_rows:
+        column = len(re.match(r'^\s*[' + CURSORS + r'] ', body[cursor_rows[-1]][0]).group())
+    elif len(marker_rows) == 1:
+        # A dim cursor: the search box has the focus, and the cursor shows where Enter or ↓ goes.
+        column = len(re.match(r'^\s*[' + CURSORS + r'] ', body[marker_rows[0]][0]).group())
+        cursor_rows, focus = marker_rows, 'search'
+    blocks, extra = [], []
+    current = None   # the open list block
+    previous = None  # the last item, while no blank row came after it
+    index = 0
+
+    def text_block(line, dim, mono, raw=None, source=None):
+        last = blocks[-1] if blocks else None
+        if last and last['type'] == 'text' and not last.get('_closed') and (
+                (mono or last['mono']) and last['dim'] == dim or _wrapped(last['_rows'][-1], line, width)):
+            last['lines'].append(line)
+            last['mono'] = last['mono'] or mono
+            last['dim'] = last['dim'] and dim
+            last['_rows'].append(source if source is not None else line)
+        else:
+            blocks.append({'type': 'text', 'lines': [line], 'dim': dim, 'mono': mono, '_rows': [source if source is not None else line]})
+        blocks[-1].setdefault('_raw', []).append(raw if raw is not None else line)
+
+    while index < len(body):
+        row = body[index]
+        text, styles = row
+        indent = len(text) - len(text.lstrip())
+        stripped = text.strip()
+        if not stripped:
+            previous = None
+            if blocks and blocks[-1]['type'] == 'text':
+                blocks[-1]['_closed'] = True
+            index += 1
+            continue
+        if stripped[0] == '╭' and index + 2 < len(body) and body[index + 2][0].strip()[:1] == '╰':
+            inner = body[index + 1]
+            field = re.sub(r'^\s*│\s?|\s*│\s*$', '', inner[0])
+            icon = field.lstrip().startswith('⌕')
+            value = field.lstrip().lstrip('⌕').strip()
+            holder = _all_dim((value, inner[1][inner[0].find(value):inner[0].find(value) + len(value)]), tone) if value else False
+            blocks.append({'type': 'search', 'placeholder': value if holder or value.endswith('…') else '',
+                           'value': '' if holder or value.endswith('…') else value, 'focused': focus == 'search' or not column,
+                           '_icon': icon})
+            current = previous = None
+            index += 3
+            continue
+        scale = _scale(body, index, tone)
+        if scale:
+            end = scale.pop('_end')
+            labels = [cell for cell, _ in _cells(body[index - 1], tone)] if index and body[index - 1][0].strip() else []
+            if blocks and blocks[-1]['type'] == 'text' and labels and blocks[-1]['lines'][-1].split() == ' '.join(labels).split():
+                blocks[-1]['lines'].pop()
+                if not blocks[-1]['lines']:
+                    blocks.pop()
+            scale['ends'] = labels[:2] if len(labels) == 2 else []
+            blocks.append(scale)
+            side = []
+            for offset in (0, 1):
+                for cell, dim in _cells(body[index + offset], tone, min(end + 3, len(body[index + offset][0]))):
+                    keys = hints(cell)
+                    extra.extend(keys) if keys else side.append(cell)
+            if side:
+                blocks.append({'type': 'text', 'lines': [' '.join(side)], 'dim': False, 'mono': False, '_closed': True})
+            current = previous = None
+            index += 2
+            continue
+        more = MORE.match(text)
+        if more and column is not None:
+            if current is None:
+                current = {'type': 'list', 'items': [], 'more_above': 0, 'more_below': 0}
+                blocks.append(current)
+            current['more_above' if more[1] == '↑' else 'more_below'] = int(more[2])
+            previous = None
+            index += 1
+            continue
+        marker = re.match(r'^(\s*)([' + CURSORS + r'↑↓]) (?=\S)', text) if column is not None else None
+        if marker and len(marker.group()) != column:
+            marker = None
+        if column is not None and (marker or indent >= column):
+            if current is None or blocks[-1] is not current:
+                current = {'type': 'list', 'items': [], 'more_above': 0, 'more_below': 0}
+                blocks.append(current)
+            deeper = indent > column and not marker
+            dim = _all_dim(row, tone)
+            if previous is not None and (deeper or dim):
+                previous['detail'] = (previous['detail'] + ' ' + stripped).strip()
+            elif deeper and not current['items']:
+                text_block(stripped, dim, False)
+                blocks[-1], blocks[-2] = blocks[-2], blocks[-1]
+            elif not marker and (dim or styles[indent]['bold'] and stripped[0] not in MARKS):
+                current['items'].append({'heading': ' '.join(stripped.split())})
+                previous = None
+            else:
+                item = _item(row, tone, column, index in cursor_rows)
+                if item:
+                    if marker and marker[2] in '↑↓':
+                        current['more_above' if marker[2] == '↑' else 'more_below'] = -1
+                    current['items'].append(item)
+                    previous = item
+            index += 1
+            continue
+        current = previous = None
+        if any(style['bg'] is not None for char, style in zip(text, styles) if char in ' █▉▊▋▌▍▎▏') or re.match(r'^[█▉▊▋▌▍▎▏]+\s*$', stripped):
+            # A usage bar. A wide pane puts "25% used" on the same row, a narrow pane on the next one.
+            label = re.sub(r'^[█▉▊▋▌▍▎▏\s]+', '', stripped)
+            after = next((at for at in (index + 1, index + 2) if at < len(body) and body[at][0].strip()), None)
+            if not label and after is not None and PERCENT.search(body[after][0]):
+                label = body[after][0].strip()
+                index = after
+            percent = PERCENT.search(label)
+            if percent:
+                blocks.append({'type': 'meter', 'percent': min(100, int(percent[1])), 'text': label})
+                index += 1
+                continue
+        if any(style['reverse'] or style['bg'] is not None for char, style in zip(text, styles) if char != ' '):
+            # A second tab row inside the body ("Overview  Models" in Stats). Tether shows it; it has no key hint.
+            names = [name for name in re.split(r' {2,}', stripped) if name]
+            active = ''.join(char for char, style in zip(text, styles) if style['reverse'] or style['bg'] is not None).strip()
+            if len(names) >= 2 and active in names:
+                blocks.append({'type': 'tabs', 'tabs': names, 'tab': active})
+                index += 1
+                continue
+        columns = [re.fullmatch(r'([^:]{1,30}): (\S.*)', cell) for cell in re.split(r' {2,}', stripped)]
+        if len(columns) >= 2 and all(columns):
+            last = blocks[-1] if blocks else None
+            if not (last and last['type'] == 'facts' and not last.get('_closed')):
+                last = {'type': 'facts', 'rows': []}
+                blocks.append(last)
+            last['rows'].extend({'label': column[1].strip(), 'value': column[2].strip()} for column in columns)
+            index += 1
+            continue
+        fact = FACT.match(stripped)
+        pair = re.fullmatch(r'(\S(?:.*?\S)?) {2,}(\S.*)', stripped)
+        if fact and not (styles[indent]['bold'] or _all_dim(row, tone) and not fact[2].startswith('http')):
+            fact = None
+        if not fact and pair and ' ' * 2 not in pair[2] and styles[indent]['bold'] and not all(style['bold'] for char, style in zip(text, styles) if char != ' '):
+            fact = (None, pair[1], pair[2])  # "Help improve our AI models      false": a label and its value
+        if fact and not re.search(r' {2,}\S+.*:\s', fact[2]):
+            last = blocks[-1] if blocks else None
+            if not (last and last['type'] == 'facts' and not last.get('_closed')):
+                last = {'type': 'facts', 'rows': []}
+                blocks.append(last)
+            value = fact[2].strip()
+            if key := re.fullmatch(r'(.*?)\s+((?:Tab|Space|Enter) to \w+)', value):
+                extra.extend(hints(key[2]) or [])  # "Ultracode  off  Tab to toggle"
+                value = key[1].strip()
+            last['rows'].append({'label': fact[1].rstrip(':').strip(), 'value': value})
+            index += 1
+            continue
+        if (blocks and blocks[-1]['type'] == 'facts' and not blocks[-1].get('_closed') and not styles[indent]['bold'] and index
+                and body[index - 1][0].strip() and (indent > INDENT or _wrapped(body[index - 1][0], stripped, width))):
+            # A long value wraps under its label, or at the pane edge.
+            if side := hints(stripped):
+                extra.extend(side)  # "Tab to toggle" under "Ultracode  off"
+                index += 1
+                continue
+            glue = '' if _join(body[index - 1][0], stripped, width) == body[index - 1][0] + stripped else ' '
+            blocks[-1]['rows'][-1]['value'] += glue + stripped
+            index += 1
+            continue
+        if blocks and blocks[-1]['type'] == 'facts':
+            blocks[-1]['_closed'] = True
+        dim = _all_dim(row, tone)
+        if all(style['bold'] for char, style in zip(text, styles) if char != ' ') and not re.search(r' {2,}', stripped):
+            blocks.append({'type': 'heading', 'text': stripped})
+        else:
+            inline = hints(stripped) if dim else None
+            tail = None
+            if dim and not inline and ' · ' in stripped:
+                # "102 skills · enter/space to cycle, / to search, t to sort, Esc to close" (it can wrap).
+                span = index
+                while span + 1 < len(body) and body[span + 1][0].strip() and _all_dim(body[span + 1], tone):
+                    span += 1
+                joined = ' '.join(line[0].strip() for line in body[index:span + 1])
+                lead, _, rest = joined.partition(' · ')
+                tail = hints(rest)
+                if tail and any(key['key'] == 'Escape' for hint in tail for key in hint['keys']):
+                    extra.extend(tail)
+                    text_block(lead, True, False)
+                    index = span + 1
+                    continue
+            if inline:
+                extra.extend(inline)
+            else:
+                text_block(stripped, dim, bool(re.search(r'\S {2,}\S|[░▒▓█·─│]{3,}', stripped)), text[INDENT:].rstrip(), text)
+        index += 1
+    for block in blocks:
+        block.pop('_closed', None)
+        block.pop('_icon', None)
+        raw = block.pop('_raw', None)
+        sources = block.pop('_rows', None)
+        if block['type'] == 'text' and block['mono'] and raw:
+            block['lines'] = raw
+        elif block['type'] == 'text':
+            joined = block['lines'][0]
+            for at in range(1, len(block['lines'])):
+                joined = _join(sources[at - 1], block['lines'][at], width)[len(sources[at - 1]) - len(joined):] if False else (
+                    joined + ('' if _join(sources[at - 1], block['lines'][at], width) == sources[at - 1] + block['lines'][at].strip() else ' ') + block['lines'][at])
+            block['lines'] = [joined]
+    blocks = [block for block in blocks if block['type'] != 'list' or block['items'] or block['more_above'] or block['more_below']]
+    keys = found + [hint for hint in extra if hint['text'] not in {known['text'] for known in found}]
+    return {**head, 'blocks': blocks, 'hints': keys, 'focus': focus if column is not None else 'none',
+            'text': '\n'.join(text[INDENT:] if text.strip() else '' for text, _ in rows[first:]).strip('\n')}
+
+
+def dialog_id(dialog):
+    return hashlib.sha256(('dialog\0' + dialog['title']).encode()).hexdigest()
+
+
+def capture(entry, run=subprocess.run, history=0):
+    command = [paths.TMUX, 'capture-pane', '-e', '-p', '-t', entry['id']]
+    if history:
+        command += ['-S', '-' + str(history)]
+    return choice_state.OSC.sub('', run(command, check=True, capture_output=True, text=True, timeout=5).stdout)
+
+
+def tall(frame):
+    """True when the frame can be the lower part of a dialog whose top row left the pane: no rule row, every row
+    indented like a dialog, and key hints at the end."""
+    rows = choice_state._rows(frame)
+    while rows and not rows[-1][0].strip():
+        rows.pop()
+    if not rows or any(RULE.match(text) for text, _ in rows):
+        return False
+    if any(text.strip() and len(text) - len(text.lstrip()) < INDENT for text, _ in rows):
+        return False
+    return bool(_footer(rows)[1])
+
+
+def read(entry, frame=None, run=subprocess.run):
+    """The dialog the pane shows now, or None. `frame`: a styled capture of the visible pane the caller already has."""
+    if frame is None:
+        frame = capture(entry, run)
+    found = parse(frame)
+    if found is None and tall(frame):
+        found = parse(capture(entry, run, HISTORY))
+    return found
+
+
+def allowed(dialog):
+    """tmux keys the dialog's own footer offers. Esc always closes; a list always takes the arrow keys."""
+    keys = {key['key'] for hint in dialog['hints'] for key in hint['keys'] if key['key']}
+    keys.add('Escape')
+    if any(block['type'] == 'list' for block in dialog['blocks']):
+        keys.update(('Up', 'Down'))
+    if dialog.get('tab_focus'):
+        keys.update(('Left', 'Right'))
+    return keys
+
+
+def _items(dialog):
+    return [item for block in dialog['blocks'] if block['type'] == 'list' for item in block['items'] if 'heading' not in item]
+
+
+class Changed(RuntimeError):
+    """The dialog on screen is not the one the browser acted on."""
+
+
+def act(entry, body, run=subprocess.run, sleep=time.sleep):
+    """Do one action of the card on the real dialog. The caller holds SEND_LOCK and has verified the pane.
+
+    Actions: key (one of `allowed`), row (move the cursor to a list row), tab (open a tab), scale (set the slider),
+    filter (replace the text of the search box). Each step reads the screen again; a dialog that closed or changed
+    stops the action.
+    """
+    def look():
+        dialog = read(entry, run=run)
+        if dialog is None or dialog['title'] != body.get('title'):
+            raise Changed('The dialog changed. Review it before you try again.')
+        return dialog
+
+    def press(*keys, literal=False):
+        run([paths.TMUX, 'send-keys', *(['-l'] if literal else []), '-t', entry['id'], *keys], check=True, capture_output=True, timeout=5)
+        sleep(STEP)
+
+    dialog = look()
+    action = body.get('action')
+    if action == 'key':
+        key = body.get('key')
+        if key not in allowed(dialog):
+            raise ValueError('This dialog does not offer that key.')
+        press(key)
+        return
+    if action == 'row':
+        label, row = body.get('label'), body.get('row')
+        if not isinstance(label, str) or not isinstance(row, int) or isinstance(row, bool):
+            raise ValueError('Choose a row first.')
+        stuck = 0
+        for _ in range(60):
+            items = _items(dialog)
+            places = [index for index, item in enumerate(items) if item['text'] == label]
+            at = next((index for index, item in enumerate(items) if item['selected']), None)
+            if not places or at is None:
+                raise Changed('That row is no longer in the list. Review the dialog.')
+            target = min(places, key=lambda index: abs(index - row))
+            if at == target and dialog['focus'] == 'list':
+                return
+            before = dialog['text']
+            press('Down' if at <= target and not (at == target and dialog['focus'] != 'search') else 'Up')
+            dialog = look()
+            stuck = stuck + 1 if dialog['text'] == before and dialog['focus'] != 'list' else 0
+            if stuck >= 2:
+                break
+        raise RuntimeError('Could not move to that row. Use the terminal for this dialog.')
+    if action == 'tab':
+        want = body.get('tab')
+        if want not in (dialog.get('tabs') or []):
+            raise ValueError('This dialog has no such tab.')
+        for _ in range(len(dialog['tabs']) * 2 + 6):
+            if dialog.get('tab') == want:
+                return
+            if want not in (dialog.get('tabs') or []):
+                break
+            offered = {key['key']: hint['effect'] for hint in dialog['hints'] for key in hint['keys']}
+            to_tabs = next((key for key, effect in offered.items() if re.search(r'\btabs?\b', effect) and key not in ('Left', 'Right', 'Tab')), None)
+            if dialog.get('tab_focus'):
+                press('Right' if dialog['tabs'].index(want) > dialog['tabs'].index(dialog['tab']) else 'Left')
+            elif to_tabs:
+                press(to_tabs)
+            elif '/' in offered and re.search(r'search|filter', offered['/']):
+                press('/')  # the list has the focus; the search box leads to the tab row
+            elif 'Tab' not in offered and not any(re.search(r'\bchange\b', effect) for effect in offered.values()):
+                press('Tab')
+            else:
+                break
+            dialog = look()
+        raise RuntimeError('Could not open that tab. Use the terminal for this dialog.')
+    if action == 'scale':
+        want = body.get('value')
+        for _ in range(12):
+            scale = next((block for block in dialog['blocks'] if block['type'] == 'scale'), None)
+            if scale is None or want not in scale['options']:
+                raise ValueError('This dialog has no such level.')
+            if scale['value'] == want:
+                return
+            press('Right' if scale['options'].index(want) > scale['options'].index(scale['value']) else 'Left')
+            dialog = look()
+        raise RuntimeError('Could not set that level. Use the terminal for this dialog.')
+    if action == 'filter':
+        text = body.get('text')
+        if not isinstance(text, str) or len(text) > 80 or any(ord(char) < 32 or ord(char) == 127 for char in text):
+            raise ValueError('Search text can have at most 80 characters and no control characters.')
+        box = next((block for block in dialog['blocks'] if block['type'] == 'search'), None)
+        offered = {key['key']: hint['effect'] for hint in dialog['hints'] for key in hint['keys']}
+        typing = any(key['label'] == 'Type' for hint in dialog['hints'] for key in hint['keys'])
+        if box is None or not (typing or '/' in offered):
+            raise ValueError('This dialog has no search box that Tether can type in.')
+        if not typing:
+            press('/')
+            dialog = look()
+            box = next((block for block in dialog['blocks'] if block['type'] == 'search'), None)
+            if box is None or not any(key['label'] == 'Type' for hint in dialog['hints'] for key in hint['keys']):
+                raise RuntimeError('Could not open the search box. Use the terminal for this dialog.')
+        if box['value']:
+            press(*['BSpace'] * len(box['value']))
+        if text:
+            press(text, literal=True)
+        return
+    raise ValueError('Unknown dialog action.')
