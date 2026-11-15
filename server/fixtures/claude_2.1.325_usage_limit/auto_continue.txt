@@ -1,0 +1,30 @@
+✻ Cogitated for 29s · done 8:27 PM · 1 shell, 1 monitor still running
+
+● Background command "Watch Teams for CI cards (10-minute run)" failed with exit code 124
+
+  Searched for 1 pattern, ran 1 shell command
+
+● You reached your usage limit, so I stop here.
+
+  Done:
+  - The last CI-card run ended with no card. I re-armed the CI-card watch (b856g169u). It ends in about 10 minutes.
+  - The Chat watch (bdq2rtq7v) still runs. Its 30-minute window ends soon.
+  - Chat is checked up to 2026-11-15T13:36:43Z. No new report panes were needed.
+
+  Left:
+  - Neither watch can re-arm itself after its window ends. When the limit resets, send "Start the Chat watch" to arm
+    both again.
+
+  Needs you: yes
+
+● Usage limit reached · continuing automatically at 9:30pm · esc to cancel
+
+✻ Cooked for 7s · done 8:35 PM · 1 shell, 1 monitor still running
+                                                                                                 5% until auto-compact
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── Chat watch ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Usage limit reached · limit resets 9:30pm · clau.de/wrap-up
+    Continuing automatically at 9:30pm · Esc to cancel · /usage-credits to continue now
+  Opus 5.5 | ctx 16% (158k/1000k) | 5h 99% | 7d 88% | projects
+  ⏵⏵ auto mode on · 1 shell, 1 monitor

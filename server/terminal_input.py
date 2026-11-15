@@ -591,14 +591,13 @@ def login_progress(entry, screen, now=None):
 
 def hint_rows(lines, agent):
     """The last 8 rows, where a key hint ("press Enter", "Esc to cancel") means the screen waits on the user.
-    Claude Code hides its input box while a prompt or dialog waits, so with the box on screen every row above it is
-    chat: the reply, a ✦ Heads up card, a notice. Their words are not a prompt, so only the box and the rows under it count."""
+    Claude Code hides its input box while a prompt or dialog waits. With the box on screen nothing waits on the user:
+    rows above it are chat (the reply, a ✦ Heads up card, a notice) and rows under it are the footer (status line,
+    mode, and notices such as "Continuing automatically at 9:30pm · Esc to cancel"). So no row counts then."""
     import footer  # footer imports this module
-    start = max(0, len(lines) - 8)
-    anchor = footer.input_anchor(lines) if agent == 'claude' else None
-    if anchor is not None:
-        start = max(start, anchor - 1)  # the rule over the ❯ row
-    return lines[start:]
+    if agent == 'claude' and footer.input_anchor(lines) is not None:
+        return []
+    return lines[-8:]
 
 
 def attention(entry, screen, working, now=None, login_screen=None, styled_screen=None, dialog=None):

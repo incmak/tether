@@ -73,6 +73,35 @@ class HeadsUpAttentionTests(unittest.TestCase):
         self.assertEqual((self.attention(screen) or {}).get('reason'), 'prompt')
 
 
+class FooterAttentionTests(unittest.TestCase):
+    """Rows under a visible input box are Claude's footer. A key hint there is a notice, not a question."""
+    entry = {'id': '%1', 'agent': 'claude'}
+
+    def setUp(self):
+        self.enterContext(patch.dict(terminal._attention_seen, clear=True))
+        self.screen = (FIXTURES / 'claude_2.1.325_usage_limit' / 'auto_continue.txt').read_text()
+
+    def attention(self, screen):
+        terminal.attention(self.entry, screen, False, now=0)
+        return terminal.attention(self.entry, screen, False, now=100)
+
+    def test_usage_limit_that_continues_automatically_waits_on_nobody(self):
+        self.assertIsNone(self.attention(self.screen))
+
+    def test_other_key_hints_in_the_footer_wait_on_nobody(self):
+        footer = '    Continuing automatically at 9:30pm · Esc to cancel · /usage-credits to continue now'
+        for hint in ('Press Enter to continue', 'press any key to retry', '↑/↓ to navigate · (y/n)'):
+            with self.subTest(hint=hint):
+                terminal._attention_seen.clear()
+                self.assertIsNone(self.attention(self.screen.replace(footer, '    ' + hint)))
+
+    def test_the_same_hint_with_the_input_box_hidden_still_opens_a_panel(self):
+        lines = self.screen.splitlines()
+        box = next(index for index, line in enumerate(lines) if line.startswith('❯'))
+        screen = '\n'.join(lines[:box - 1] + ['', '  Press Enter to continue · Esc to cancel'])
+        self.assertEqual((self.attention(screen) or {}).get('reason'), 'prompt')
+
+
 class PermissionsAttentionTests(unittest.TestCase):
     entry = {'id': '%permissions', 'agent': 'claude'}
 
