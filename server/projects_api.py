@@ -53,7 +53,8 @@ def get(handler, run=subprocess.run, home=None):
             found = advisor_log.find(projects.bundle(query.get('project')), query.get('id'))
             if found is None:
                 raise projects.ProjectError(404, 'That advisor entry is gone. The log keeps the last 200 asks.')
-            return found
+            # cut: the fields over limit characters (none for real asks; older entries have no list).
+            return dict(found, cut=found.get('cut', []), limit=advisor_log.FULL)
         if name == 'backlog':  # command: what an agent runs, for the prompt the UI sends with an item
             return dict(backlog.numbered(), command=f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}')
         raise projects.ProjectError(404, 'Not found')

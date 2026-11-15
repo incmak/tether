@@ -4,8 +4,12 @@ Two files in the project folder, one entry per ask, the last KEEP entries each:
 - advisor-log.md: one short line per ask, which agents read. The question and the answer are cut.
 - advisor-log.jsonl: the full ask (question, answers, evidence, error), so the Project sheet can show it.
 
-Asks from before the JSONL file exist only as Markdown lines. The sheet shows them as cut entries."""
+Asks from before the JSONL file exist only as Markdown lines. The sheet shows them as cut entries.
+Each append holds an flock on .advisor-log.lock, so asks from two tabs at once both stay in both files."""
+import contextlib
+import fcntl
 import json
+import os
 import re
 import secrets
 import time
@@ -14,10 +18,14 @@ import advisor
 
 KEEP = 200
 LINE_QUESTION, LINE_ANSWER = 200, 300  # the cuts in the Markdown line
-FULL = 8000  # the most characters Tether keeps of one text field
+# The most characters Tether keeps of one text field. It is above the longest field the CLI can make, so a real ask
+# is never cut: an answer is one tab reply (helper_tabs.MAX_REPLY, 100,000), the evidence joins two replies, and the
+# question is one argument (Linux MAX_ARG_STRLEN, 131,072 bytes). It only bounds a damaged or hostile input.
+FULL = 250_000
 PREVIEW_QUESTION, PREVIEW_ANSWER = 300, 400  # the list shows one and two lines; the rest loads on open
 STATUSES = ('decided', 'ask_user', 'timeout', 'error', 'off')
 ID = re.compile(r'[0-9a-f]{12}')
+LAST_TIME = 253402300799  # 9999-12-31 23:59:59 UTC: time.localtime and strftime work up to here
 LINE = re.compile(r'- (\d{4}-\d\d-\d\d \d\d:\d\d) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
 
 
@@ -25,9 +33,13 @@ def _flat(text, limit):
     return ' '.join(str(text or '').split())[:limit]
 
 
-def _cut(text, limit=FULL):
+def _cut(text, field, cut):
     text = str(text or '')
-    return text if len(text) <= limit else text[:limit - 1] + '…'
+    if len(text) <= FULL:
+        return text
+    if field not in cut:
+        cut.append(field)
+    return text[:FULL - 1] + '…'
 
 
 def line(entry):
@@ -38,14 +50,18 @@ def line(entry):
 
 
 def make(question, result, agent, model, now=None):
-    """One entry from an ask and its result (agent_advisor_cli.result_for). The raw replies stay out."""
-    return {'id': secrets.token_hex(6), 'time': int(time.time() if now is None else now), 'status': result['status'],
-            'question': _cut(question), 'answer': _cut(result.get('answer', '')),
-            'confidence': result.get('confidence', ''), 'evidence': _cut(result.get('evidence', '')),
-            'error': _cut(result.get('error', ''), 2000), 'agent': agent, 'model': model,
-            'advisors': [{'role': item.get('role', ''), 'agent': item.get('agent', ''), 'model': item.get('model') or '',
-                          'answer': _cut(item.get('answer', '')), 'confidence': item.get('confidence', '')}
-                         for item in result.get('advisors', [])]}
+    """One entry from an ask and its result (agent_advisor_cli.result_for). The raw replies stay out. cut names each
+    field that was over FULL, so the sheet can say so."""
+    cut = []
+    entry = {'id': secrets.token_hex(6), 'time': int(time.time() if now is None else now), 'status': result['status'],
+             'question': _cut(question, 'question', cut), 'answer': _cut(result.get('answer', ''), 'answer', cut),
+             'confidence': result.get('confidence', ''), 'evidence': _cut(result.get('evidence', ''), 'evidence', cut),
+             'error': _cut(result.get('error', ''), 'error', cut), 'agent': agent, 'model': model,
+             'advisors': [{'role': item.get('role', ''), 'agent': item.get('agent', ''), 'model': item.get('model') or '',
+                           'answer': _cut(item.get('answer', ''), 'advisors', cut), 'confidence': item.get('confidence', '')}
+                          for item in result.get('advisors', [])]}
+    entry['cut'] = cut
+    return entry
 
 
 def _lines(path):
@@ -59,7 +75,7 @@ def _lines(path):
 
 def _valid(entry):
     return (isinstance(entry, dict) and isinstance(entry.get('id'), str) and ID.fullmatch(entry['id'])
-            and isinstance(entry.get('time'), int) and entry.get('status') in STATUSES
+            and type(entry.get('time')) is int and 0 <= entry['time'] <= LAST_TIME and entry.get('status') in STATUSES
             and all(isinstance(entry.get(key), str) for key in ('question', 'answer', 'agent', 'model')))
 
 
@@ -68,19 +84,32 @@ def _entries(folder):
     for text in _lines(folder / 'advisor-log.jsonl'):
         try:
             entry = json.loads(text)
-        except ValueError:
-            continue  # a damaged line: skip it, keep the rest
+        except (ValueError, RecursionError, OverflowError):
+            continue  # a damaged line (bad JSON, or nested too deep to read): skip it, keep the rest
         if _valid(entry):
             found.append(entry)
     return found
 
 
+@contextlib.contextmanager
+def _locked(folder):
+    """One writer at a time, across processes: each ask runs in its own agent_advisor_cli.py."""
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle = os.open(folder / '.advisor-log.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(handle)  # also releases the lock
+
+
 def append(folder, entry):
-    """Add the entry to both files. Each file keeps its last KEEP entries."""
-    lines = _lines(folder / 'advisor-log.md') + [line(entry)]
-    advisor._write(folder / 'advisor-log.md', '\n'.join(lines[-KEEP:]) + '\n')
-    kept = [json.dumps(item) for item in _entries(folder)[-(KEEP - 1):]] + [json.dumps(entry)]
-    advisor._write(folder / 'advisor-log.jsonl', '\n'.join(kept) + '\n')
+    """Add the entry to both files under one lock. Each file keeps its last KEEP entries."""
+    with _locked(folder):
+        lines = _lines(folder / 'advisor-log.md') + [line(entry)]
+        advisor._write(folder / 'advisor-log.md', '\n'.join(lines[-KEEP:]) + '\n')
+        kept = [json.dumps(item) for item in _entries(folder)[-(KEEP - 1):]] + [json.dumps(entry)]
+        advisor._write(folder / 'advisor-log.jsonl', '\n'.join(kept) + '\n')
 
 
 def _legacy(text):

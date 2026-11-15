@@ -13,7 +13,7 @@ export type AdvisorStatus = 'decided' | 'ask_user' | 'timeout' | 'error' | 'off'
 export interface AdvisorRow { id: string; time: number; status: AdvisorStatus; question: string; answer: string; agent: string; model: string; full: boolean }
 interface AdvisorReply { role: string; agent: string; model: string; answer: string; confidence: string }
 interface AdvisorEntry { id: string; time: number; status: AdvisorStatus; question: string; answer: string; agent: string; model: string
-  confidence: string; evidence: string; error: string; advisors: AdvisorReply[] }
+  confidence: string; evidence: string; error: string; advisors: AdvisorReply[]; cut: string[]; limit: number }
 interface AdvisorLogData { entries: AdvisorRow[]; keep: number }
 
 type Filter = 'all' | 'ask_user' | 'decided' | 'errors'
@@ -86,6 +86,15 @@ export function AdvisorLog({ log, disabled, focus, onOpen }: { log: ReturnType<t
   </section>
 }
 
+// The server keeps every text in full up to a hard cap far above what the advisor CLI can produce (advisor_log.FULL).
+const CUT_NAMES: Record<string, string> = { question: 'the question', answer: 'the answer', evidence: 'the evidence', error: 'the error', advisors: 'the advisor answers' }
+function cutNote(entry: AdvisorEntry) {
+  const names = (entry.cut ?? []).map(field => CUT_NAMES[field] ?? field)
+  if (!names.length) return ''
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+  return `Tether kept the first ${entry.limit.toLocaleString('en-US')} characters of ${list}.`
+}
+
 function Text({ label, children }: { label: string; children: string }) {
   return <section className="advisor-part"><h4>{label}</h4><p className="advisor-text">{children}</p></section>
 }
@@ -114,6 +123,7 @@ export function AdvisorDecision({ api, project, row, onBack }: { api: Api; proje
     {error ? <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => { setError(''); setAttempt(attempt + 1) }}><RotateCw size={14} aria-hidden="true" />Retry</button></p>
     : row.full && !entry ? <div className="skeleton" aria-busy="true"><span className="sk-label" role="status">Loading the decision</span><p className="advisor-text" aria-hidden="true"><BoneLines count={4} /></p></div>
     : <>
+      {entry && cutNote(entry) && <p className="setting-note advisor-cut">{cutNote(entry)}</p>}
       {!row.full && <p className="setting-note">Older entry. Tether kept only the first 200 characters of the question and the first 300 of the answer.</p>}
       <Text label="Question">{shown.question}</Text>
       {entry?.error && <section className="advisor-part"><h4>Error</h4><p className="advisor-text error">{entry.error}</p></section>}

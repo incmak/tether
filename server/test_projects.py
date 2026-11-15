@@ -259,7 +259,12 @@ class ProjectTests(unittest.TestCase):
 
         one = Handler(f'/mobile/api/projects/advisor-entry?project={PID}&id={entry["id"]}')
         projects_api.get(one, Run())
-        self.assertEqual((one.status, one.body), (200, entry))
+        self.assertEqual((one.status, one.body), (200, dict(entry, limit=advisor_log.FULL)))
+        del entry['cut']  # an entry written before the cut list
+        (folder / 'advisor-log.jsonl').write_text(json.dumps(entry) + '\n')
+        older_entry = Handler(f'/mobile/api/projects/advisor-entry?project={PID}&id={entry["id"]}')
+        projects_api.get(older_entry, Run())
+        self.assertEqual(older_entry.body['cut'], [])
         for path, status in ((f'advisor-entry?project={PID}&id=0123456789ab', 404), (f'advisor-entry?project={PID}&id=..%2Fx', 404),
                              ('advisor-log?project=..%2F..%2Fetc', 400), ('advisor-entry?id=0123456789ab', 400)):
             bad = Handler('/mobile/api/projects/' + path)
@@ -278,6 +283,16 @@ class ProjectTests(unittest.TestCase):
         linked = Handler(f'/mobile/api/projects/advisor-log?project={PID}')
         projects_api.get(linked, Run())
         self.assertEqual(linked.body['entries'], [])
+
+    def test_advisor_log_route_answers_when_a_line_is_hostile(self):
+        folder = projects.bundle(PID)
+        folder.mkdir(parents=True)
+        entry = advisor_log.make('Which cache?', {'status': 'decided', 'answer': 'File.'}, 'claude', 'fable', now=time.time())
+        huge = dict(entry, id='aaaaaaaaaaaa', time=10 ** 100)
+        (folder / 'advisor-log.jsonl').write_text('\n'.join([json.dumps(huge), '[' * 20000 + ']' * 20000, json.dumps(entry)]) + '\n')
+        listed = Handler(f'/mobile/api/projects/advisor-log?project={PID}')
+        projects_api.get(listed, Run())
+        self.assertEqual((listed.status, [row['id'] for row in listed.body['entries']]), (200, [entry['id']]))
 
 if __name__ == '__main__':
     unittest.main()

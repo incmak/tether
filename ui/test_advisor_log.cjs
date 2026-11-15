@@ -21,10 +21,11 @@ const rows = [
   { id: '', time: now - 86400 * 3, status: 'decided', question: 'Old question from the cut Markdown log', answer: 'Old answer, cut at 300 characters', agent: 'claude', model: 'fable', full: false },
 ]
 const entries = {
-  aaaaaaaaaaa1: { ...rows[0], confidence: 'medium', evidence: 'docs/brand.md has no rule for empty states.', error: '', advisors: [{ role: 'main', agent: 'claude', model: 'fable', answer: 'This is a taste choice. Ask the user.', confidence: 'medium' }] },
-  aaaaaaaaaaa2: { ...rows[1], question: longQuestion, answer: longAnswer, confidence: 'high', evidence: 'server/export.py\nui/src/Export.tsx', error: '',
+  // The server cut this answer at its hard cap (advisor_log.FULL): the detail must say so.
+  aaaaaaaaaaa1: { ...rows[0], cut: ['answer', 'advisors'], limit: 250000, confidence: 'medium', evidence: 'docs/brand.md has no rule for empty states.', error: '', advisors: [{ role: 'main', agent: 'claude', model: 'fable', answer: 'This is a taste choice. Ask the user.', confidence: 'medium' }] },
+  aaaaaaaaaaa2: { ...rows[1], cut: [], limit: 250000, question: longQuestion, answer: longAnswer, confidence: 'high', evidence: 'server/export.py\nui/src/Export.tsx', error: '',
     advisors: [{ role: 'main', agent: 'claude', model: 'fable', answer: longAnswer, confidence: 'high' }, { role: 'second', agent: 'codex', model: 'gpt', answer: 'Agree: stream it.', confidence: 'high' }] },
-  aaaaaaaaaaa5: { ...rows[4], confidence: '', evidence: '', error: '', advisors: [] },
+  aaaaaaaaaaa5: { ...rows[4], cut: [], limit: 250000, confidence: '', evidence: '', error: '', advisors: [] },
 }
 const project = { id: PID, name: 'web', revision: 1, budget: 4000, budget_min: 1000, budget_max: 10000, instructions: '', pins: [], notes: [], preview: '', chars: 120, folder: '/srv/projects/' + PID, session_name: 'web' }
 const levels = [0, 1, 2, 3, 4].map(level => ({ level, name: `Level ${level}`, summary: 'Rules for this level.' }))
@@ -120,6 +121,26 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `${name}-dark.png`) })
       await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
     }
+    // WCAG 2.2 1.4.3: each text in a row against the background it sits on (every ancestor layer composited), 4.5:1.
+    const contrast = (root, selector) => root.evaluate((node, selector) => {
+      const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1
+      const ctx = canvas.getContext('2d', { willReadFrequently: true })
+      const paint = (layers) => {
+        ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 1, 1)
+        for (const color of layers) { ctx.fillStyle = '#fff'; ctx.fillStyle = color; ctx.fillRect(0, 0, 1, 1) }
+        return [...ctx.getImageData(0, 0, 1, 1).data].slice(0, 3)
+      }
+      const lum = rgb => { const c = rgb.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] }
+      return [...node.querySelectorAll(selector)].map(el => {
+        const layers = []
+        for (let at = el; at; at = at.parentElement) layers.unshift(getComputedStyle(at).backgroundColor)
+        const back = paint(layers), text = paint([...layers, getComputedStyle(el).color])
+        const [hi, lo] = [lum(back), lum(text)].sort((a, b) => b - a)
+        return { text: el.textContent.trim().slice(0, 24), ratio: Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100 }
+      })
+    }, selector)
+    const ROW_TEXT = '.advisor-word, .advisor-row-text small, .advisor-question, .advisor-answer'
+    const lowContrast = list => list.filter(item => item.ratio < 4.5).map(item => `${item.text} ${item.ratio}`).join('; ')
     for (const [width, height] of sizes) {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
@@ -150,6 +171,20 @@ async function main() {
       check(`${at} no sheet overflow (list)`, !sheetOverflow)
       const targets = await section.locator('.advisor-row, .advisor-filter .segmented span').evaluateAll(els => els.map(el => el.getBoundingClientRect().height))
       check(`${at} targets at least 24 px tall`, targets.every(h => h >= 24), targets.join(','))
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(theme => { document.documentElement.dataset.theme = theme }, theme)
+        await page.mouse.move(0, 0)
+        const rest = await contrast(section, ROW_TEXT)
+        check(`${at} ${theme} text contrast at least 4.5:1`, rest.length >= rows.length * 4 && !lowContrast(rest), lowContrast(rest) || `${rest.length} texts`)
+        const hovered = []
+        for (let index = 0; index < rows.length; index++) {
+          await section.locator('.advisor-row').nth(index).hover()
+          hovered.push(...await contrast(section.locator('.advisor-row').nth(index), ROW_TEXT))
+        }
+        check(`${at} ${theme} text contrast on hover at least 4.5:1`, !lowContrast(hovered), lowContrast(hovered))
+      }
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+      await page.mouse.move(0, 0)
       await section.scrollIntoViewIfNeeded()
       await shot(`list-${width}`)
 
@@ -185,6 +220,19 @@ async function main() {
       await page.keyboard.press('Enter')  // on Back
       await section.locator('.advisor-row').first().waitFor()
       check(`${at} Back focuses the row it came from`, await page.evaluate(() => document.activeElement?.dataset?.key === 'aaaaaaaaaaa2'))
+
+      // An entry over the server's cap says which text was cut, and where.
+      await section.locator('.advisor-row').first().click()
+      await detail.getByText('Evidence').waitFor()
+      const cutNote = await detail.locator('.advisor-cut').innerText().catch(() => '')
+      check(`${at} cut entry says what was cut`, cutNote === 'Tether kept the first 250,000 characters of the answer and the advisor answers.', cutNote)
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(theme => { document.documentElement.dataset.theme = theme }, theme)
+        const facts = await contrast(detail, '.advisor-facts .advisor-word, .advisor-facts > span:not(.advisor-status), .advisor-part h4, .advisor-text, .advisor-cut')
+        check(`${at} ${theme} detail contrast at least 4.5:1`, facts.length >= 5 && !lowContrast(facts), lowContrast(facts) || `${facts.length} texts`)
+      }
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+      await detail.getByRole('button', { name: 'All decisions' }).click()
 
       // An older Markdown line opens without a request and says it is cut.
       await section.locator('.advisor-row').last().click()

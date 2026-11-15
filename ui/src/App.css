@@ -1732,8 +1732,11 @@ button.live-chip:active { background: var(--line); }
 .session-title .project-mark.stale { color: var(--attention); }
 
 /* Advisor decisions (AdvisorLog.tsx). A status is an icon in a tinted disc plus its word, never color alone. */
-.advisor-log { --adv-decided: var(--done); --adv-ask_user: var(--attention); --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
-.advisor-detail { --adv-decided: var(--done); --adv-ask_user: var(--attention); --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
+/* The words are 12 px text, so each needs 4.5:1 (WCAG 2.2 1.4.3) on the section, the sheet and a hovered row. Plain
+   --done (3.9:1) and --attention (4.5:1) miss that in the light theme; 40% of --text darkens them there and lightens
+   them in the dark theme (both 5.5:1 or more). test_advisor_log.cjs measures every word. */
+.advisor-log, .advisor-detail { --adv-decided: color-mix(in srgb, var(--done) 60%, var(--text)); --adv-ask_user: color-mix(in srgb, var(--attention) 60%, var(--text));
+  --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
 .settings-group .advisor-filter { margin: 0 0 8px; padding: 0; border: 0; min-width: 0; }
 /* No visible legend, so no 84 px indent like other Settings rows (that rule is 0,4,0: match it). */
 .settings-group .advisor-filter.choice .segmented { margin-left: 0; }
@@ -1748,7 +1751,8 @@ button.live-chip:active { background: var(--line); }
 .advisor-status.off, .advisor-word.off { --st: var(--adv-off); }
 .advisor-list li { align-items: stretch; }
 .advisor-row { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; margin: 0 -4px; border: 0; border-radius: var(--radius); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.advisor-row:hover:not(:disabled) { background: var(--hover); }
+/* A lighter hover than --hover, so --muted dates and answers keep 4.5:1 on it. */
+.advisor-row:hover:not(:disabled) { background: color-mix(in srgb, var(--hover) 45%, transparent); }
 .advisor-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .advisor-row-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
 .advisor-row-text small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

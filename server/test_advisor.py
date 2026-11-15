@@ -540,7 +540,7 @@ class Cli(Base):
         self.assertEqual((folder / 'advisor-log.md').read_text(), advisor_log.line(entry) + '\n')
         self.assertEqual([item['id'] for item in advisor_log.listing(folder)], [entry['id']])
 
-    def test_jsonl_caps_entries_skips_damaged_lines_and_cuts_long_text(self):
+    def test_jsonl_caps_entries_skips_damaged_lines_and_keeps_long_text(self):
         folder = paths.TETHER / 'projects' / PID
         old = [json.dumps(advisor_log.make(f'old {index}', {'status': 'decided', 'answer': 'yes'}, 'claude', 'fable', now=index))
                for index in range(205)]
@@ -550,8 +550,7 @@ class Cli(Base):
         entries = [json.loads(text) for text in (folder / 'advisor-log.jsonl').read_text().splitlines()]
         self.assertEqual(len(entries), 200)
         self.assertEqual(entries[0]['question'], 'old 6')
-        self.assertEqual(len(entries[-1]['answer']), advisor_log.FULL)
-        self.assertTrue(entries[-1]['answer'].endswith('…'))
+        self.assertEqual((entries[-1]['answer'], entries[-1]['cut']), ('b' * 9000, []))
 
     def test_error_entry_keeps_the_error_text(self):
         self.wait_reply = 123  # not a string: the CLI refuses the reply
