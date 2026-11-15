@@ -627,6 +627,46 @@ class TmuxTests(Bundles):
             groups.drop_lone_auto(run)
             self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
 
+    def test_cleanup_moves_keep_a_root_only_stack_that_a_later_move_needs(self):  # review 1, finding 1
+        import auto_stacks_cleanup
+        run = self.run_tmux
+        x, y = (terminal_input.new_window_after(self.a1, run, group='') for _ in range(2))
+        self.helper(x, self.a1)
+        self.helper(y, self.a2)
+        one = groups.create(self.a, 'One', run, pane=self.a1, auto=True, root=self.a1)
+        two = groups.create(self.a, 'Two', run, pane=self.a2, auto=True, root=self.a2)
+        groups.move(self.a, x, two['id'], run)
+        result = {'session': self.a, 'root_threads': {self.a1: None, self.a2: None}, 'mark_auto': [], 'roots': {},
+                  'made': [], 'notes': [], 'drops': [], 'renames': [],
+                  'moves': [{'pane': x, 'from': two['id'], 'to': one['id'], 'root': self.a1},
+                            {'pane': y, 'from': '', 'to': two['id'], 'root': self.a2}]}
+        self.assertEqual(auto_stacks_cleanup.apply(result, run), [])
+        self.assertEqual([self.label(p) for p in (self.a1, x, self.a2, y)], [one['id']] * 2 + [two['id']] * 2)
+
+    def test_unknown_start_markers_keep_the_stack(self):  # review 1, finding 2
+        run = self.run_tmux
+        made = self.family()
+        self.tmux('kill-pane', '-t', self.a2)
+        self.tmux('set-option', '-t', self.a, groups.STARTS, 'not json')
+        self.assertTrue(groups.starting(self.a, made, run))
+        self.assertEqual(groups.drop_lone_auto(run), [])
+        failing = lambda args, **kw: (subprocess.CompletedProcess(args, 1, '', 'tmux failed') if 'show-options' in args
+                                      else run(args, **kw))
+        self.tmux('set-option', '-u', '-t', self.a, groups.STARTS)
+        self.assertFalse(groups.drop_if_alone(self.a, made, failing), 'a failed marker read refuses')
+        self.assertEqual(self.status(lambda: groups.start_begin(self.a, made, failing)), 500)
+        self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')], 'a readable, empty marker list frees it')
+
+    def test_restore_keeps_even_an_empty_auto_stack(self):  # review 1, finding 3
+        run = self.run_tmux
+        made = self.family()
+        with mock.patch.object(groups, 'HOLD', lambda: True):
+            groups.move(self.a, self.a2, None, run, by_user=True)
+            groups.move(self.a, self.a1, None, run, by_user=True)
+            self.assertFalse(groups.drop_if_alone(self.a, made, run))
+        self.assertEqual(self.names(self.a), ['Billing'])
+        self.assertTrue(groups.drop_if_alone(self.a, made, run))
+
     def test_two_helpers_of_one_root_at_once_give_one_stack(self):  # concurrency, threads and processes
         import threading
         run = self.run_tmux
