@@ -607,11 +607,11 @@ class ProcessTasksTests(unittest.TestCase):
 
     def test_monitor_without_output_file_takes_state_from_its_process(self):
         self.write(self.main, self.task_start('monitor1', name='Monitor', command='tail -f log', description='Watch log'))
-        with patch.object(subagents.task_process, 'find', return_value=777) as find:
+        with patch.object(subagents.task_process, 'running', return_value=True) as running:
             task = self.listed_tasks()['monitor1']
         self.assertEqual((task['kind'], task['state'], task['description']), ('monitor', 'running', 'Watch log'))
-        self.assertEqual(find.call_args.args[2], None)
-        with patch.object(subagents.task_process, 'find', return_value=None):
+        self.assertEqual(running.call_args.args[1]['command'], 'tail -f log')
+        with patch.object(subagents.task_process, 'running', return_value=False):
             self.assertEqual(self.listed_tasks()['monitor1']['state'], 'finished')
             subagents.task_process.record(subagents.task_process.key(self.tasks.resolve(), 'monitor1'))
             task = self.listed_tasks()['monitor1']
@@ -619,9 +619,9 @@ class ProcessTasksTests(unittest.TestCase):
 
     def test_monitor_from_dead_process_is_stopped_without_a_process_scan(self):
         self.write(self.main, self.task_start('monitor1', name='Monitor', command='tail -f log', seconds=-400))
-        with patch.object(subagents.task_process, 'find') as find:
+        with patch.object(subagents.task_process, 'running') as running:
             task = self.listed_tasks()['monitor1']
-        find.assert_not_called()
+        running.assert_not_called()
         self.assertEqual(task['state'], 'stopped')
 
     def test_shell_killed_by_tether_reads_stopped_not_failed(self):

@@ -87,6 +87,25 @@ class FindTests(unittest.TestCase):
             self.assertIsNone(task_process.find(100, task, None, 1000))
         self.assertIsNone(task_process.find(100, task, None, 1000, pids=[300]))
 
+    def test_twin_monitors_both_list_as_running(self):
+        # find refuses twins for a signal; the listing must still show both as running.
+        self.procs.add(300, args=wrapped('watch it'), start=999)
+        self.procs.add(301, args=wrapped('watch it'), start=999.5)
+        task = {'kind': 'monitor', 'command': 'watch it'}
+        self.assertIsNone(task_process.find(100, task, None, 1000))
+        self.assertTrue(task_process.running(100, task, 1000))
+        self.assertTrue(task_process.running(100, task, 1000, pids=[300, 301]))
+
+    def test_running_needs_a_matching_child_group_leader(self):
+        task = {'kind': 'monitor', 'command': 'watch it'}
+        self.procs.add(300, parent=999, args=wrapped('watch it'), start=999)  # Another session's monitor.
+        self.procs.add(301, group=100, args=wrapped('watch it'), start=999)  # Not a group leader.
+        self.procs.add(302, args=wrapped('watch other'), start=999)
+        self.procs.add(303, args=wrapped('watch it'), start=900)  # Outside the start window.
+        self.assertFalse(task_process.running(100, task, 1000, pids=[300, 301, 302, 303]))
+        self.assertFalse(task_process.running(100, {'command': ''}, 1000))
+        self.assertFalse(task_process.running(100, task, None))
+
     def test_quoting_matches_posix_single_quotes(self):
         self.assertEqual(task_process.quoted("a'b"), "'a'\\''b'")
 

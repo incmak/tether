@@ -109,6 +109,19 @@ def find(owner_pid, task, output, started, pids=None):
     return process if same(process) else None
 
 
+def running(owner_pid, task, started, pids=None):
+    """True when at least one live process runs this monitor's command near its start time.
+
+    For the listing only, never for a signal. Same-command twins all count as running: the
+    listing reads a finished monitor's state from Claude's own end notification first, so only
+    monitors without one get here. Showing a live twin as finished would hide its Stop button."""
+    command = task.get('command')
+    if not isinstance(command, str) or not command.strip() or started is None:
+        return False
+    candidates = children(owner_pid) if pids is None else pids
+    return any(_child_of(pid, owner_pid) and _group_leader(pid) and _runs(pid, command, started) for pid in candidates)
+
+
 def _alive(pid, ticks):
     try:
         return procinfo.start_ticks(pid) == ticks and procinfo.stat_fields(pid)[0] not in ('Z', 'X')

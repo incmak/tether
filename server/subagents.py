@@ -630,7 +630,7 @@ def _monitors(config, tasks_dir, starts, notifications, ledger, seen, now, since
                         pids = task_process.children(config['owner_pid'])
                     except (OSError, ValueError):
                         pids = []
-                alive = task_process.find(config['owner_pid'], start, None, stamp, pids=pids) is not None
+                alive = task_process.running(config['owner_pid'], start, stamp, pids=pids)
                 state, summary = ('running', None) if alive else ('finished', None)
         if task_process.key(tasks_dir, identifier) in ledger and state != 'running':
             state, summary = 'stopped', STOPPED_BY_TETHER
