@@ -1,18 +1,24 @@
 """Microsoft Graph for the work board feeds (Teams channels, an email folder), with Mak's own Entra app.
 
 Delegated access only: Tether reads what the signed-in account can read. `tether graph connect --tenant <id>
---client <app id>` signs in with the device code flow and saves the connection in paths.private_file('graph.json'),
+--client <app id>` signs in with the authorization code flow and PKCE (a temporary redirect to 127.0.0.1) and saves the connection in paths.private_file('graph.json'),
 mode 600: tenant, app id, the refresh token, the scopes and the account name. The tokens stay in this module: they
 never go to the board, an item event, a log line or a command line. The server only reads the file, and writes it
 back when Microsoft rotates the refresh token.
 
 Requests: https only, to login.microsoftonline.com and graph.microsoft.com, no redirects, a 10 s timeout each and a
 total deadline per poll (the jira_client watchdog). Only GETs go to Graph."""
+import base64
 import contextlib
 import fcntl
+import hashlib
+import hmac
+import html
+import http.server
 import json
 import os
 import re
+import secrets
 import stat
 import threading
 import time
@@ -286,27 +292,112 @@ class Client:
         return out
 
 
-def device_start(tenant, client, scopes, open_url=None):
-    """Step 1 of sign-in: Microsoft's user code and where to type it."""
-    caller = Client({'tenant': tenant, 'client': client, 'refresh': ''}, open_url=open_url, deadline=30)
-    return caller._call(f'{LOGIN}/{tenant}/oauth2/v2.0/devicecode', {'client_id': client, 'scope': ' '.join(scopes)})
+def pkce():
+    """(verifier, challenge): RFC 7636 S256. The verifier stays in this process; only the challenge leaves it."""
+    verifier = secrets.token_urlsafe(72)  # 96 characters of A-Z a-z 0-9 - _
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('ascii')).digest()).rstrip(b'=').decode()
+    return verifier, challenge
 
 
-def device_finish(tenant, client, code, interval=5, expires=900, open_url=None, sleep=time.sleep, clock=time.monotonic):
-    """Step 2: wait for the sign-in. Returns Microsoft's token answer; raises GraphError when declined or expired."""
-    end = clock() + min(expires, 900)
-    while clock() < end:
-        sleep(interval)
-        caller = Client({'tenant': tenant, 'client': client, 'refresh': ''}, open_url=open_url, deadline=30)
+def redirect_uri(port):
+    """The app registers http://localhost (Mobile and desktop applications); Entra ignores the port of a localhost
+    redirect when it matches one."""
+    return f'http://localhost:{port}'
+
+
+def authorize_url(tenant, client, scopes, port, state, challenge):
+    return f'{LOGIN}/{tenant}/oauth2/v2.0/authorize?' + urllib.parse.urlencode({
+        'client_id': client, 'response_type': 'code', 'redirect_uri': redirect_uri(port), 'response_mode': 'query',
+        'scope': ' '.join(scopes), 'state': state, 'code_challenge': challenge, 'code_challenge_method': 'S256',
+        'prompt': 'select_account'}, quote_via=urllib.parse.quote)
+
+
+PAGE = ('<!doctype html><meta charset="utf-8"><title>Tether</title>'
+        '<p style="font:16px system-ui;margin:2em">{}</p>')
+
+
+class Listener:
+    """The temporary redirect target: one HTTP server on 127.0.0.1:port for one sign-in answer. Each request runs on
+    its own daemon thread with a 5 s socket timeout, so an idle or slow client never holds up the wait; the wait
+    ends at its own deadline. Other requests, and answers whose state is not this sign-in's, get a 400 and the wait
+    goes on. Nothing it receives is logged."""
+
+    def __init__(self, port):
+        found, done, lock = self.found, self.done, self.lock = {}, threading.Event(), threading.Lock()
+
+        class Answer(http.server.BaseHTTPRequestHandler):
+            timeout = 5  # seconds per socket read
+
+            def do_GET(self):
+                parts = urllib.parse.urlsplit(self.path)
+                query = urllib.parse.parse_qs(parts.query)
+                state = (query.get('state') or [''])[0]
+                with lock:
+                    wanted = found.get('state', '')
+                    ours = (bool(wanted) and parts.path in ('', '/') and not done.is_set()
+                            and hmac.compare_digest(state.encode(), wanted.encode()))
+                    if ours and query.get('code'):
+                        found['code'] = query['code'][0]
+                    elif ours:
+                        found['error'] = ' '.join(filter(None, [(query.get('error') or [''])[0],
+                                                                (query.get('error_description') or [''])[0]]))
+                    if ours:
+                        done.set()
+                if not ours:
+                    return self._page(400, 'This is not the answer to the sign-in that Tether is waiting for.')
+                if 'code' in found:
+                    return self._page(200, 'Signed in. You can close this tab and go back to the terminal.')
+                return self._page(400, 'The sign-in did not finish. The terminal says why.')
+
+            def _page(self, code, text):
+                body = PAGE.format(html.escape(text)).encode()
+                self.send_response(code)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Referrer-Policy', 'no-referrer')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):  # the query holds the code
+                pass
+
+        class Server(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False  # a slow client's thread never delays the end of the wait
+
         try:
-            return caller._call(f'{LOGIN}/{tenant}/oauth2/v2.0/token', {
-                'client_id': client, 'grant_type': 'urn:ietf:params:oauth:grant-type:device_code', 'device_code': code})
-        except GraphError as exc:
-            text = str(exc)
-            if 'AADSTS70016' in text or 'authorization_pending' in text:
-                continue
-            if 'slow_down' in text:
-                interval += 5
-                continue
-            raise
-    raise GraphError('The code expired before the sign-in finished. Run tether graph connect again.')
+            self.server = Server(('127.0.0.1', port), Answer)
+        except OSError as exc:
+            raise GraphError(f'Tether cannot listen on 127.0.0.1:{port} ({exc.strerror or exc}). '
+                             'Choose another port with --port.') from None
+        self.port = self.server.server_address[1]
+
+    def wait(self, state, timeout=300):
+        """The code of the answer with this state. Raises GraphError on a refusal or after timeout seconds."""
+        with self.lock:
+            self.found.clear()
+            self.found['state'] = state
+        loop = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.2}, daemon=True)
+        loop.start()
+        try:
+            answered = self.done.wait(timeout)
+        finally:
+            self.server.shutdown()
+            self.server.server_close()
+        with self.lock:
+            if not answered:
+                raise GraphError('No sign-in answer came in time. Run tether graph connect again.')
+            if 'error' in self.found:
+                raise GraphError(f'Microsoft refused the sign-in: {self.found["error"][:300] or "no reason given"}.')
+            return self.found['code']
+
+
+def redeem(tenant, client, code, verifier, port, scopes, open_url=None):
+    """Swap the code for tokens. A public client: no secret, the PKCE verifier proves the sign-in is ours."""
+    caller = Client({'tenant': tenant, 'client': client, 'refresh': ''}, open_url=open_url, deadline=30)
+    caller._secrets.update({code, verifier})
+    return caller._call(f'{LOGIN}/{tenant}/oauth2/v2.0/token', {
+        'client_id': client, 'grant_type': 'authorization_code', 'code': code, 'redirect_uri': redirect_uri(port),
+        'code_verifier': verifier, 'scope': ' '.join(scopes)})

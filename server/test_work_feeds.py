@@ -1,12 +1,19 @@
+import base64
+import hashlib
 import io
 import json
 import os
+import re
+import socket
 import stat
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -811,16 +818,11 @@ class GraphClient(Home):
 
 class Cli(Home):
     def args(self, **extra):
-        return mock.Mock(tenant=TENANT, client=CLIENT, feeds='mail', **extra)
+        return mock.Mock(tenant=TENANT, client=CLIENT, feeds='mail', port=0, **extra)
 
-    def test_connect_saves_after_sign_in_and_account(self):
+    def sign_in(self, answers, browser, wait=5):
+        """Run connect with a real listener on a free port; browser(url) plays the browser after the page is shown."""
         sent = []
-        answers = [Response(200, {'device_code': 'dev-1', 'user_code': 'ABC-123', 'interval': 1, 'expires_in': 60,
-                                  'verification_uri': 'https://microsoft.com/devicelogin'}),
-                   http_error(400, {'error': 'authorization_pending'}),
-                   Response(200, {'access_token': 'acc', 'refresh_token': 'ref', 'expires_in': 3600,
-                                  'scope': 'User.Read Mail.ReadBasic'}),
-                   Response(200, {'displayName': 'Mak', 'userPrincipalName': 'mak@brisk.example'})]
 
         def open_url(request, timeout):
             sent.append(request)
@@ -828,25 +830,121 @@ class Cli(Home):
             if isinstance(found, Exception):
                 raise found
             return found
-        with mock.patch('sys.stdout', new_callable=io.StringIO) as out:
-            self.assertEqual(agent_feed_cli.connect(self.args(), open_url=open_url, sleep=lambda s: None), 0)
-        self.assertIn('ABC-123', out.getvalue())
-        self.assertNotIn('ref', out.getvalue().replace('refused', ''))
+
+        class Out(io.StringIO):
+            def write(self, text):
+                found = re.search(r'https://login\.microsoftonline\.com/\S+', text)
+                if found:
+                    threading.Thread(target=browser, args=(found.group(0),), daemon=True).start()
+                return super().write(text)
+        with mock.patch('sys.stdout', new_callable=Out) as out, \
+                mock.patch('sys.stderr', new_callable=io.StringIO) as err, mock.patch.object(agent_feed_cli, 'WAIT', wait):
+            code = agent_feed_cli.connect(self.args(), open_url=open_url)
+        return code, out.getvalue(), err.getvalue(), sent
+
+    @staticmethod
+    def answer(url, **query):
+        """The browser follows Microsoft's redirect: GET http://localhost:PORT/?... with the page's state."""
+        sent = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        port = urllib.parse.urlsplit(sent['redirect_uri'][0]).port
+        query.setdefault('state', sent['state'][0])
+        try:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/?' + urllib.parse.urlencode(query), timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def test_connect_saves_after_sign_in_and_account(self):
+        answers = [Response(200, {'access_token': 'acc', 'refresh_token': 'ref', 'expires_in': 3600,
+                                  'scope': 'User.Read Mail.ReadBasic'}),
+                   Response(200, {'displayName': 'Mak', 'userPrincipalName': 'mak@brisk.example'})]
+        pages = {}
+
+        def browser(url):
+            pages['url'] = url
+            pages['forged'] = self.answer(url, code='evil', state='not-this-sign-in')  # ignored, the wait goes on
+            pages['real'] = self.answer(url, code='the-code')
+        code, out, err, sent = self.sign_in(answers, browser)
+        self.assertEqual(code, 0, err)
+        self.assertEqual((pages['forged'], pages['real']), (400, 200))
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(pages['url']).query)
+        self.assertEqual((query['response_type'], query['code_challenge_method'], query['scope']),
+                         (['code'], ['S256'], ['offline_access User.Read Mail.ReadBasic']))
+        self.assertRegex(query['redirect_uri'][0], r'^http://localhost:\d+$')
+        token = urllib.parse.parse_qs(sent[0].data.decode())
+        self.assertEqual((token['grant_type'], token['code'], token['redirect_uri']),
+                         (['authorization_code'], ['the-code'], query['redirect_uri']))
+        self.assertNotIn('client_secret', token)
+        verifier = token['code_verifier'][0]
+        self.assertEqual(query['code_challenge'][0], base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode())
+        self.assertTrue(43 <= len(verifier) <= 128)
+        self.assertNotIn(verifier, out)
+        self.assertIn('ssh -N -L', out)
+        self.assertNotIn('ref', out.replace('redirect', '').replace('refused', ''))
         saved, _ = graph_client.load()
         self.assertEqual((saved['refresh'], saved['account'], saved['granted']),
                          ('ref', 'mak@brisk.example', ['User.Read', 'Mail.ReadBasic']))
         self.assertEqual(saved['scopes'], ['offline_access', 'User.Read', 'Mail.ReadBasic'])
-        self.assertIn('scope=offline_access+User.Read+Mail.ReadBasic', sent[0].data.decode())
 
     def test_declined_sign_in_saves_nothing(self):
-        answers = [Response(200, {'device_code': 'dev-1', 'user_code': 'ABC-123', 'interval': 1, 'expires_in': 60}),
-                   http_error(400, {'error': 'access_denied', 'error_description': 'AADSTS70000 declined'})]
-        with mock.patch('sys.stdout', new_callable=io.StringIO), mock.patch('sys.stderr', new_callable=io.StringIO):
-            code = agent_feed_cli.connect(self.args(), open_url=lambda r, timeout: (
-                (_ for _ in ()).throw(answers.pop(0)) if isinstance(answers[0], Exception) else answers.pop(0)),
-                sleep=lambda s: None)
-        self.assertEqual(code, 1)
+        code, _, err, sent = self.sign_in([], lambda url: self.answer(
+            url, error='access_denied', error_description='AADSTS65004 declined'))
+        self.assertEqual((code, sent), (1, []))
+        self.assertIn('AADSTS65004', err)
         self.assertFalse(graph_client.config_path().exists())
+
+    def test_no_answer_in_time_saves_nothing(self):
+        code, _, err, sent = self.sign_in([], lambda url: None, wait=1)
+        self.assertEqual((code, sent), (1, []))
+        self.assertIn('No sign-in answer', err)
+        self.assertFalse(graph_client.config_path().exists())
+
+    def test_redeem_error_hides_the_code_and_verifier(self):
+        def browser(url):
+            self.answer(url, code='the-code')
+        code, _, err, _ = self.sign_in([http_error(400, {'error': 'invalid_grant',
+                                                          'error_description': 'bad the-code'})], browser)
+        self.assertEqual(code, 1)
+        self.assertNotIn('the-code', err)
+        self.assertFalse(graph_client.config_path().exists())
+
+    def test_idle_and_slow_clients_do_not_hold_the_wait(self):
+        listener = graph_client.Listener(0)
+        idle, slow = socket.create_connection(('127.0.0.1', listener.port)), \
+            socket.create_connection(('127.0.0.1', listener.port))
+        slow.sendall(b'GET /?state=x')  # a request line that never ends
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(graph_client.GraphError, 'No sign-in answer'):
+                listener.wait('the-state', 0.5)
+        finally:
+            idle.close()
+            slow.close()
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_answer_comes_while_another_client_is_idle(self):
+        listener = graph_client.Listener(0)
+        idle = socket.create_connection(('127.0.0.1', listener.port))
+
+        def browser():
+            time.sleep(0.2)
+            urllib.request.urlopen(f'http://127.0.0.1:{listener.port}/?state=the-state&code=c1', timeout=5).close()
+        threading.Thread(target=browser, daemon=True).start()
+        try:
+            self.assertEqual(listener.wait('the-state', 5), 'c1')
+        finally:
+            idle.close()
+
+    def test_port_in_use(self):
+        with socket.socket() as busy:
+            busy.bind(('127.0.0.1', 0))
+            busy.listen()
+            with mock.patch('sys.stderr', new_callable=io.StringIO) as err, mock.patch('sys.stdout', new_callable=io.StringIO):
+                code = agent_feed_cli.connect(mock.Mock(tenant=TENANT, client=CLIENT, feeds='mail',
+                                                        port=busy.getsockname()[1]))
+        self.assertEqual(code, 1)
+        self.assertIn('--port', err.getvalue())
 
     def test_bad_feeds_option(self):
         with mock.patch('sys.stderr', new_callable=io.StringIO):
