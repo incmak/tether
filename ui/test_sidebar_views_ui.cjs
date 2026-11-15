@@ -217,6 +217,14 @@ async function main() {
     await page.waitForTimeout(200)
     check('the open sixth row still shows when folded', await page.locator(`${SIDE} .catchup-row[aria-current="page"]`, { hasText: 'Done 6' }).count() === 1 && await more.textContent() === '+1 more', await more.textContent())
 
+    // Six finished turns with the sixth open: all six show, with no "+0 more".
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), ...[1, 2, 3, 4, 5, 6].map(n => pane(`%4${n}`, '$5', `Done ${n}`, `done:0.${n}`, { finished: NOW - n * 60 }))], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, n: 6 })
+    await page.locator(`${SIDE} .catchup-more`).click()
+    await page.locator(`${SIDE} .catchup-row`, { hasText: 'Done 6' }).click()
+    await page.waitForTimeout(200)
+    check('six rows with the sixth open: all show, no more button', (await texts(`${SIDE} .catchup-row`)).length === 6 && await page.locator(`${SIDE} .catchup-more`).count() === 0)
+
     // An approval with no ask: the row opens the tab; the deck (which answers asks) is not offered.
     sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
     await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })

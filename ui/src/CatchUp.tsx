@@ -55,7 +55,8 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
   const working = runningPanes(sessions).filter(item => item.pane.state === 'Working')
   const markRead = () => update(current => ({ seen: { ...current.seen, ...Object.fromEntries(unread.map(pane => [pane.id, pane.finished ?? now])) } }))
   // The open row always shows, also past the first five.
-  const shownFinished = allFinished ? finished : finished.filter((pane, at) => at < FINISHED_SHOWN || pane.id === selected)
+  const folded = finished.filter((pane, at) => at < FINISHED_SHOWN || pane.id === selected), hidden = finished.length - folded.length
+  const shownFinished = allFinished ? finished : folded
   return <div className="catchup">
     {waiting > 0 || review ? <section className="catchup-part" aria-labelledby={ids.needs}>
       <h2 className="catchup-head" id={ids.needs}><span className="catchup-mark need" aria-hidden="true" />Needs you<span className="catchup-count">· {waiting}</span>
@@ -76,7 +77,7 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
         <span className="catchup-age"><span className="visually-hidden">finished </span>{age(pane.finished ?? now, now)}</span>
         <span className="catchup-next">{sessions.find(session => session.id === pane.tmux_session)?.name}</span>
       </button></li>)}</ul>
-      {finished.length > FINISHED_SHOWN && <button type="button" className="catchup-more" aria-expanded={allFinished} onClick={() => setAllFinished(!allFinished)}>{allFinished ? 'Show fewer' : `+${finished.length - shownFinished.length} more`}</button>}
+      {hidden > 0 && <button type="button" className="catchup-more" aria-expanded={allFinished} onClick={() => setAllFinished(!allFinished)}>{allFinished ? 'Show fewer' : `+${hidden} more`}</button>}
     </section>}
     {!waiting && !review && !finished.length && <p className="catchup-empty"><Check size={16} aria-hidden="true" />You are caught up.</p>}
     {working.length > 0 && <section className="catchup-part">
