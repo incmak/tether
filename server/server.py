@@ -268,7 +268,7 @@ def monitor_notices():
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
         try:
-            coordinator.FEED.observe(entries, shared_status, review_send, last_reply)
+            coordinator.FEED.observe(entries, shared_status, coordinator_send, last_reply)
         except Exception as exc:  # the coordinator feed must never stop the monitor
             print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
         try:
@@ -1172,12 +1172,31 @@ def submit(message, config=None):
     if not config.get('writable', True):
         raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
     with SEND_LOCK:
-        wrapped, marker = continuations.prepare(config, message)
-        if marker:
-            continuations.stage(config, wrapped, marker)
-        terminal_submit(config, wrapped)
-        if marker:
-            continuations.sent(config, marker)
+        submit_locked(message, config)
+
+
+def submit_locked(message, config):
+    """submit for a caller that holds SEND_LOCK already."""
+    wrapped, marker = continuations.prepare(config, message)
+    if marker:
+        continuations.stage(config, wrapped, marker)
+    terminal_submit(config, wrapped)
+    if marker:
+        continuations.sent(config, marker)
+
+
+def coordinator_send(config, message):
+    """The coordinator feed's send. Under the send lock it reads the state again and sends only to an idle tab. It never
+    moves a draft: a draft in the input makes terminal_submit refuse. False = not idle now, try again later."""
+    if not config.get('writable', True) or not SEND_LOCK.acquire(timeout=2):
+        return False
+    try:
+        if fresh_status(config).get('state') != 'Idle':
+            return False
+        submit_locked(message, config)
+        return True
+    finally:
+        SEND_LOCK.release()
 
 
 def send_text(config, message, state=None):
@@ -2445,7 +2464,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == coordinator.PATH:
                 coordinator.serve(self, body, sessions=sessions, run=subprocess.run, status=shared_status,
-                                  send=review_send, last_reply=last_reply, timeline=timeline)
+                                  send=send_text, last_reply=last_reply, timeline=timeline)
                 return
             if self.path == '/mobile/api/preview':
                 try:

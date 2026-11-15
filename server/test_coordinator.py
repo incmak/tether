@@ -40,6 +40,7 @@ class World:
         self.replies = {'%2': 'Fixed the login test.\n\nNeeds you: no'}
         self.sent = []
         self.fail = None
+        self.busy = False   # the fresh read under the send lock finds the coordinator at work
         self.now = 1000.0
         self.feed = coordinator.Feed(clock=lambda: self.now)
 
@@ -50,9 +51,11 @@ class World:
         state = self.states.get(entry['id'], 'Idle')
         return state if isinstance(state, dict) else {'state': state}
 
-    def send(self, entry, message, state):
+    def send(self, entry, message, state=None):
         if self.fail:
             raise self.fail
+        if self.busy:
+            return False
         self.sent.append((entry['id'], message))
         return 'submitted'
 
@@ -278,6 +281,107 @@ class Feed(unittest.TestCase):
         self.world.entries = [entry for entry in self.world.entries if entry['id'] != '%1']
         self.wait_for_send()
         self.assertEqual((self.world.sent, self.world.feed.queues), ([], {}))
+
+
+    # Delivery checks everything again: a check made when the update was queued may be out of date.
+    def test_a_changed_report_setting_applies_to_queued_updates(self):
+        for mode in ('off', 'needs'):
+            with self.subTest(mode=mode):
+                self.world.act('%1', action='events', events='all')
+                self.world.run_turn('%2')
+                self.world.act('%1', action='events', events=mode)
+                self.wait_for_send()
+                self.assertEqual(self.world.sent, [])
+
+    def test_a_prompt_that_changed_is_not_reported_as_the_old_one(self):
+        self.world.states['%2'] = {'state': 'Approval', 'approval': {'id': 'a1', 'text': 'Bash command\nrm -r build'}}
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE)     # approval a1 is queued
+        self.world.tick(coordinator.JOIN - 3)
+        self.world.states['%2'] = {'state': 'Input needed', 'attention': {'id': 'q1', 'question': 'Which branch?'}}
+        self.world.tick(3)                      # the flush time, before question q1 settles
+        self.assertEqual(self.world.sent, [])
+        self.wait_for_send()
+        self.assertEqual(len(self.world.sent), 1)
+        self.assertNotIn('rm -r build', self.world.sent[0][1])
+        self.assertIn('Which branch?', self.world.sent[0][1])
+
+    def test_a_tab_of_unknown_state_keeps_its_update(self):
+        self.world.run_turn('%2')
+        for state in ('Unknown', 'Unavailable'):
+            self.world.states['%2'] = state
+            self.wait_for_send()
+            self.assertEqual(self.world.sent, [])
+        self.world.states['%2'] = 'Idle'
+        self.world.tick()
+        self.assertEqual(len(self.world.sent), 1)
+        self.assertIn('%2', self.world.sent[0][1])
+
+    def test_a_coordinator_that_moves_or_starts_a_new_chat_drops_its_updates(self):
+        for change in ({'tmux_session': '$1'}, {'transcript': 'new-chat.jsonl'}):
+            with self.subTest(change=change):
+                world = self.world = World()
+                world.act('%1', action='claim')
+                world.tick()
+                world.run_turn('%2')
+                world.entries[0].update(change)
+                world.entries.append(tab('%4', coordinator='all'))  # a new coordinator in session $0
+                self.wait_for_send()
+                self.assertEqual([pane for pane, _ in world.sent], [])
+
+    def test_a_tab_that_moves_or_starts_a_new_chat_is_not_reported(self):
+        for change in ({'tmux_session': '$1'}, {'transcript': 'new-chat.jsonl'}, {'helper': 'reviewer'}):
+            with self.subTest(change=change):
+                world = self.world = World()
+                world.act('%1', action='claim')
+                world.tick()
+                world.run_turn('%2')
+                world.entries[1].update(change)
+                self.wait_for_send()
+                self.assertEqual(world.sent, [])
+
+    def test_a_coordinator_found_busy_under_the_send_lock_gets_the_update_later(self):
+        self.world.run_turn('%2')
+        self.world.busy = True
+        self.wait_for_send()
+        self.assertEqual(self.world.sent, [])
+        self.world.busy = False
+        self.world.tick()
+        self.assertEqual(len(self.world.sent), 1)
+
+
+class ServerSend(unittest.TestCase):
+    """server.coordinator_send: a fresh state read under the send lock, and a send that refuses a draft."""
+    entry = {'id': '%1', 'agent': 'claude', 'writable': True}
+
+    def setUp(self):
+        import server
+        import terminal_input
+        self.server, self.terminal = server, terminal_input
+        self.stash = self.enterContext(patch.object(server, 'stash_quiet_draft'))
+
+    def fresh(self, state):
+        def read(entry):
+            self.assertTrue(self.server.SEND_LOCK.locked())
+            return {'state': state}
+        return patch.object(self.server, 'fresh_status', side_effect=read)
+
+    def test_a_draft_refuses_the_send_and_is_not_moved(self):
+        with self.fresh('Idle'), patch.object(self.server, 'terminal_submit',
+                                               side_effect=self.terminal.DraftError('draft')) as submit:
+            with self.assertRaises(self.terminal.DraftError):
+                self.server.coordinator_send(self.entry, 'update')
+        submit.assert_called_once()
+        self.stash.assert_not_called()
+        self.assertFalse(self.server.SEND_LOCK.locked())
+
+    def test_only_an_idle_coordinator_gets_the_update(self):
+        for state, sent in (('Working', False), ('Approval', False), ('Unknown', False), ('Idle', True)):
+            with self.subTest(state=state), self.fresh(state), \
+                    patch.object(self.server, 'terminal_submit') as submit:
+                self.assertEqual(self.server.coordinator_send(self.entry, 'update'), sent)
+                self.assertEqual(submit.called, sent)
+        self.assertFalse(self.server.SEND_LOCK.locked())
 
 
 class Cli(unittest.TestCase):

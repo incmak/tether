@@ -38,6 +38,7 @@ JOIN = 15           # wait this long for more updates before a send
 GAP = 30            # least time between two sends to one coordinator
 RETRY = 60          # after a failed send
 MAX_EVENTS = 20
+KNOWN = ('Idle', 'Working', 'Approval', 'Input needed')   # other states (Unknown, Unavailable) may change back
 SEND_LOCK = threading.Lock()
 
 
@@ -268,9 +269,9 @@ class Feed:
             record['worked'] = None
             reply = last_reply(entry)
             asks, _ = attention.reply_ask(reply) if reply.strip() else (None, '')
-            return {'kind': 'asks' if asks == 'yes' else 'done', 'text': push.reply_summary(reply, SUMMARY)}
+            return {'kind': 'asks' if asks == 'yes' else 'done', 'text': push.reply_summary(reply, SUMMARY), 'token': None}
         waits = needs.summary(info)
-        return {'kind': 'needs', 'text': f'{waits["kind"]}: {waits["text"]}' if waits else ''}
+        return {'kind': 'needs', 'text': f'{waits["kind"]}: {waits["text"]}' if waits else '', 'token': token}
 
     def observe(self, entries, status, send, last_reply):
         now = self.clock()
@@ -298,42 +299,66 @@ class Feed:
                 event = self._event(entry, info, last_reply, now)
             except Exception:  # one odd pane must not stop the feed
                 continue
-            if event is None or target[1] == 'off' or (target[1] == 'needs' and event['kind'] == 'done'):
+            if event is None or not wanted(event, target[1]):
                 continue
-            queue = self.queues.setdefault(target[0], {'events': [], 'sent_at': None, 'retry_at': None})
+            coordinator = by_pane[target[0]]
+            queue = self.queues.get(target[0])
+            if queue is None or queue['session'] != coordinator.get('tmux_session') or queue['chat'] != coordinator.get('transcript'):
+                queue = self.queues[target[0]] = {'events': [], 'sent_at': None, 'retry_at': None,
+                                                  'session': coordinator.get('tmux_session'), 'chat': coordinator.get('transcript')}
             queue['events'] = [old for old in queue['events'] if old['pane'] != entry['id']]
-            queue['events'].append(dict(event, pane=entry['id'], name=name_of(entry), at=now))
+            queue['events'].append(dict(event, pane=entry['id'], name=name_of(entry), at=now,
+                                        session=entry.get('tmux_session'), chat=entry.get('transcript')))
             del queue['events'][:-MAX_EVENTS]
-        for pane, queue in self.queues.items():
-            self._flush(by_pane[pane], found[pane][1], queue, by_pane, statuses, status, send, now)
+        for pane, queue in list(self.queues.items()):
+            self._flush(pane, by_pane[pane], found[pane][1], queue, by_pane, statuses, status, send, now)
 
-    def _flush(self, coordinator, mode, queue, by_pane, statuses, status, send, now):
-        events = queue['events']
+    def _flush(self, pane, coordinator, mode, queue, by_pane, statuses, status, send, now):
+        """Every check runs again at delivery: the report setting, the session and chat of both tabs, and the state and
+        prompt of each tab. A check made when the update was queued may be out of date by now."""
+        if queue['session'] != coordinator.get('tmux_session') or queue['chat'] != coordinator.get('transcript'):
+            del self.queues[pane]   # the coordinator moved to another session or started a new chat
+            return
+        events = queue['events'] = [event for event in queue['events'] if wanted(event, mode)]
         if not events or now - events[-1]['at'] < JOIN and now - events[0]['at'] < 4 * JOIN:
             return
         if queue['sent_at'] is not None and now - queue['sent_at'] < GAP:
             return
         if queue['retry_at'] is not None and now < queue['retry_at']:
             return
-        # A tab that no longer waits on the user, or that works again, has nothing to report.
-        live = []
+        live, held = [], []
         for event in events:
-            state = (statuses.get(event['pane']) or {}).get('state')
-            if event['pane'] in by_pane and (state in ('Approval', 'Input needed') if event['kind'] == 'needs'
-                                             else state == 'Idle'):
+            entry = by_pane.get(event['pane'])
+            if (entry is None or entry.get('tmux_session') != event['session'] or entry.get('transcript') != event['chat']
+                    or entry['id'] in marks([entry]) or entry.get('role') or entry.get('helper')):
+                continue    # the tab closed, moved, started a new chat or took another role
+            info = statuses.get(event['pane'])
+            state = (info or {}).get('state')
+            if state not in KNOWN:
+                held.append(event)  # not sure of this tab now: keep the update and look again on the next tick
+                continue
+            if event['kind'] == 'needs':
+                waiting = {'Approval': 'approval', 'Input needed': 'attention'}.get(state)
+                if waiting and (info.get(waiting) or {}).get('id') == event['token']:
+                    live.append(event)
+            elif state == 'Idle':
                 live.append(event)
-        queue['events'] = events = live
-        if not events:
+        queue['events'] = live + held
+        if not live:
             return
         try:
-            state = status(coordinator).get('state')
-            if state != 'Idle':
-                return
-            send(coordinator, message(events, mode), state)
+            # The cached state skips a busy coordinator cheaply; send reads it again under the send lock.
+            sent = status(coordinator).get('state') == 'Idle' and send(coordinator, message(live, mode))
         except Exception:  # a draft in the input, a prompt on screen, a closed pane: try again later
             queue['retry_at'] = now + RETRY
             return
-        queue.update(events=[], sent_at=now, retry_at=None)
+        if sent:
+            queue.update(events=held, sent_at=now, retry_at=None)
+
+
+def wanted(event, mode):
+    """True when the coordinator's report setting asks for this update."""
+    return mode == 'all' or mode == 'needs' and event['kind'] != 'done'
 
 
 FEED = Feed()
