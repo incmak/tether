@@ -144,6 +144,8 @@ async function main() {
     // Voice fix was read when you left it, so Alt+Down goes on to the working list.
     await page.keyboard.press('Alt+ArrowDown')
     await page.waitForTimeout(300)
+    await page.locator(`${SIDE} .catchup .running-list button`, { hasText: 'Sidebar build' }).waitFor()
+    check('the read row does not come back', await page.locator(`${SIDE} .catchup-row`, { hasText: 'Voice fix' }).count() === 0)
     check('Alt+Down skips the read row and reaches the working list', await title() === 'Sidebar build' && await page.locator(`${SIDE} .catchup-row`, { hasText: 'Voice fix' }).count() === 0, await title())
     // Mark all as read empties Finished. (New prefs in the address start from fresh storage, so the turn is unread again.)
     await open('%3', 1280, 800, { sideMode: 'catchup' })
@@ -204,6 +206,17 @@ async function main() {
     sessions = calm
     await open('%3', 1280, 800)
     check('nothing waits: "You are caught up."', (await page.locator(`${SIDE} .catchup-empty`).textContent()).includes('You are caught up.') && await page.locator(`${SIDE} .side-mode-count`).count() === 0)
+    // Seven finished turns: five show, and the open sixth one shows too.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), ...[1, 2, 3, 4, 5, 6, 7].map(n => pane(`%4${n}`, '$5', `Done ${n}`, `done:0.${n}`, { finished: NOW - n * 60 }))], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })
+    const more = page.locator(`${SIDE} .catchup-more`)
+    check('five finished rows show, the rest behind "+2 more"', (await texts(`${SIDE} .catchup-row`)).length === 5 && await more.textContent() === '+2 more')
+    await more.click()
+    await page.locator(`${SIDE} .catchup-row`, { hasText: 'Done 6' }).click()
+    await more.click()
+    await page.waitForTimeout(200)
+    check('the open sixth row still shows when folded', await page.locator(`${SIDE} .catchup-row[aria-current="page"]`, { hasText: 'Done 6' }).count() === 1 && await more.textContent() === '+1 more', await more.textContent())
+
     // An approval with no ask: the row opens the tab; the deck (which answers asks) is not offered.
     sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
     await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })

@@ -26,6 +26,8 @@ async function open(browser, viewport, theme, fail) {
   const context = await browser.newContext({ viewport, colorScheme: theme, serviceWorkers: 'block' })
   const chunks = [], errors = []
   let navigations = 0
+  // The Sessions view lists the session with its icon, which loads lucide's dynamic chunk.
+  await context.addInitScript(() => { if (!localStorage.getItem('tmux-chat.prefs.v1')) localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ sideMode: 'sessions' })) })
   await context.route(`${ORIGIN}/**`, route => {
     const url = new URL(route.request().url())
     if (url.pathname.startsWith('/mobile/api/')) {
