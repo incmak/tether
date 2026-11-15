@@ -17,6 +17,7 @@ import agent_tabs
 import auto_stacks
 import groups
 import groups_api
+import helper_close
 import paths
 import project_launch
 import projects
@@ -471,7 +472,7 @@ class TmuxTests(Bundles):
         # A tab that closes: the sweep removes the empty auto stack and keeps the user stack.
         again = self.start_group({}, {'id': self.b1, 'pane_name': 'Beta'})
         self.tmux('set-option', '-p', '-u', '-t', self.b1, '@group')
-        self.assertEqual(groups.drop_empty_auto(run), [(self.b, 'Beta')])
+        self.assertEqual(groups.drop_lone_auto(run), [(self.b, 'Beta')])
         self.assertEqual((self.names(self.b), self.names(self.a)), ([], ['Mine']))
         self.assertNotEqual(again, '')
 
@@ -484,8 +485,147 @@ class TmuxTests(Bundles):
         self.assertEqual(groups.read(self.a, run)[0]['by'], 'user', 'the maker is recorded')
         self.assertEqual(self.status(lambda: groups.rename(self.a, made, 'Again', run, by_user=False)), 409)
         groups.move(self.a, self.a1, None, run, by_user=True)
-        self.assertEqual(groups.drop_empty_auto(run), [])
+        self.assertEqual(groups.drop_lone_auto(run), [])
         self.assertEqual(self.names(self.a), ['Payments'], 'a user stack is never removed')
+
+    # Dissolve: a Tether-made stack with only its main session left goes; the root goes to Unstacked (spec stack-dissolve)
+    def family(self):
+        """A stack made by a1's first helper a2: [a1 (root), a2 (helper)]. Returns the group id."""
+        self.helper(self.a2, self.a1)
+        made = self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1, 'pane_name': 'Billing'}])
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (made, made))
+        return made
+
+    def test_last_helper_moving_out_dissolves_the_root_only_stack(self):  # rules 1 and 3: move out
+        run = self.run_tmux
+        made = self.family()
+        pid = groups.read(self.a, run)[0]['project']
+        groups.context(self.a, made, run)
+        groups.move(self.a, self.a2, None, run, by_user=True)
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''), 'the root is back in Unstacked')
+        self.assertFalse(groups.placed_by_user(self.a1, run), 'Tether moved the root, not the user')
+        self.assertEqual(len(list((projects.root() / '.archive').glob(pid + '-*'))), 1, 'its context is archived')
+
+    def test_last_helper_closing_dissolves_at_once_and_in_the_sweep(self):  # rules 1 and 3: close
+        run = self.run_tmux
+        made = self.family()
+        with mock.patch.object(helper_close.auto_resume, 'forget_pane'):
+            helper_close.close_pane(self.a2, run)
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''), 'the close dissolves it at once')
+        # A tab that ends by itself: the 30 s sweep.
+        b2 = terminal_input.new_window_after(self.b1, run)
+        self.helper(b2, self.b1)
+        again = self.start_group({}, {'id': b2, 'pane_name': 'Worker'}, [{'id': self.b1, 'pane_name': 'Beta'}])
+        self.assertNotEqual(again, '')
+        self.tmux('kill-pane', '-t', b2)
+        self.assertEqual(groups.drop_lone_auto(run), [(self.b, 'Beta')])
+        self.assertEqual((self.names(self.b), self.label(self.b1)), ([], ''))
+        self.assertNotEqual(made, again)
+
+    def test_dissolve_waits_while_auto_resume_restores(self):
+        run = self.run_tmux
+        self.family()
+        self.tmux('kill-pane', '-t', self.a2)
+        with mock.patch.object(groups, 'HOLD', lambda: True):
+            self.assertEqual(groups.drop_lone_auto(run), [])
+        self.assertEqual(self.names(self.a), ['Billing'], 'helpers may still come back')
+        self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')])
+
+    def test_user_stacks_old_stacks_and_user_placed_roots_stay(self):  # rule 2
+        run = self.run_tmux
+        made = self.family()
+        groups.move(self.a, self.a1, made, run, by_user=True)  # the user put the root there by hand
+        groups.move(self.a, self.a2, None, run)
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Billing'], made), 'a root the user placed stays')
+        # A user stack, an old stack (no maker) and an auto stack without a recorded root hold one tab each.
+        self.tmux('set-option', '-p', '-u', '-t', self.a1, '@group_by')
+        groups.write(self.a, [{'id': made, 'name': 'Billing', 'project': '', 'by': 'user'}], run)
+        self.assertFalse(groups.drop_if_alone(self.a, made, run))
+        groups.write(self.a, [{'id': made, 'name': 'Billing', 'project': ''}], run)
+        self.assertFalse(groups.drop_if_alone(self.a, made, run))
+        groups.write(self.a, [{'id': made, 'name': 'Billing', 'project': '', 'auto': True}], run)
+        self.assertEqual(groups.drop_lone_auto(run), [])
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Billing'], made))
+        # One tab that is not the root (the root closed or the user moved it out): not this rule.
+        groups.write(self.a, [{'id': made, 'name': 'Billing', 'project': '', 'auto': True, 'root': self.a2}], run)
+        self.assertEqual(groups.drop_lone_auto(run), [])
+        self.assertEqual(self.label(self.a1), made)
+
+    def test_a_start_in_flight_keeps_the_stack(self):  # rule 4: between create and the new tab's @group
+        run = self.run_tmux
+        caller = {'id': self.a1, 'pane_name': 'Billing'}
+        with agent_tabs._start_group({}, caller, run) as (group, root, name):
+            self.assertEqual(groups.panes_in(self.a, group, run), [self.a1], 'root-only while the tab launches')
+            self.assertEqual(groups.drop_lone_auto(run), [])
+            self.assertFalse(groups.drop_if_empty(self.a, group, run))
+            new = terminal_input.new_window_after(self.a1, run, group=group)
+        self.assertEqual(self.names(self.a), ['Billing'])
+        self.assertEqual(self.label(new), group)
+        self.assertEqual(self.tmux('show-options', '-qv', '-t', self.a, groups.STARTS).stdout.strip(), '',
+                         'the marker goes when the start ends')
+        # A later helper of the same root, while the first helper closes: the stack stays for the new one.
+        self.helper(new, self.a1)
+        with agent_tabs._start_group({}, caller, run) as (again, root, name):
+            self.assertEqual(again, group)
+            self.tmux('kill-pane', '-t', new)
+            self.assertEqual(groups.drop_lone_auto(run), [])
+            later = terminal_input.new_window_after(self.a1, run, group=again)
+        self.assertEqual((self.names(self.a), self.label(later)), (['Billing'], group))
+
+    def test_another_process_sees_a_start_in_flight(self):  # rule 4 across processes, and the expiry
+        run = self.run_tmux
+        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
+        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
+        sweep = ['import groups', 'print(groups.drop_lone_auto())']
+        with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+            out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual((out.returncode, out.stdout.strip()), (0, '[]'), out.stderr)
+            with mock.patch.object(groups.time, 'time', lambda: 10 ** 12):  # a marker its process never ended
+                self.assertFalse(groups.starting(self.a, group, run))
+        self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')], 'no helper came: it dissolves after')
+
+    def test_a_failed_start_on_a_root_only_stack_dissolves_it(self):
+        run = self.run_tmux
+        made = self.family()
+        self.tmux('kill-pane', '-t', self.a2)
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+                self.assertEqual(group, made)
+                raise RuntimeError('launch failed')
+        self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')])
+        self.assertEqual(groups._starts(self.a, run), {})
+
+    def test_dissolve_and_start_at_once_give_one_stack_and_keep_the_helper(self):  # rule 3 race
+        import threading
+        run = self.run_tmux
+        for _ in range(5):
+            self.family()
+            self.tmux('kill-pane', '-t', self.a2)  # the last helper closed: root-only
+            self.a2 = terminal_input.new_window_after(self.a1, run, group='')
+            barrier, new = threading.Barrier(2), []
+
+            def start():
+                barrier.wait()
+                with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+                    new.append(terminal_input.new_window_after(self.a1, run, group=group))
+
+            def sweep():
+                barrier.wait()
+                groups.drop_lone_auto(run)
+            workers = [threading.Thread(target=start), threading.Thread(target=sweep)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(30)
+            stacks = groups.read(self.a, run)
+            self.assertEqual(len(stacks), 1, 'never two stacks, never none with a helper')
+            self.assertEqual((self.label(self.a1), self.label(new[0])), (stacks[0]['id'], stacks[0]['id']),
+                             'the root and the new helper are in the one stack')
+            groups.drop_lone_auto(run)
+            self.tmux('kill-pane', '-t', new[0])
+            groups.drop_lone_auto(run)
+            self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
 
     def test_two_helpers_of_one_root_at_once_give_one_stack(self):  # concurrency, threads and processes
         import threading

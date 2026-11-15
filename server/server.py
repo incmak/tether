@@ -2882,8 +2882,9 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
                     auto_resume.forget_pane(pane, run=subprocess.run)
-                    subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
-                                   capture_output=True, timeout=5)
+                    with groups.closing(pane):  # its auto stack goes when empty or root-only
+                        subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
+                                       capture_output=True, timeout=5)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -3013,7 +3014,8 @@ if __name__ == '__main__':
         'display_dir': lambda entry: home_path(tab_folder(entry)),
         'on_change': forget_sessions,
     }, daemon=True).start()
-    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty auto stacks go
+    groups.HOLD = auto_resume.restoring  # no auto stack dissolves while saved tabs come back
+    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty and root-only auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()

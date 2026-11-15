@@ -86,22 +86,38 @@ def _start_group(body, caller, run, entries=(), *, folder='', branch=None):
     (auto_stacks.py). It may make the root's stack and move the root and the caller into it; when the start fails, they
     go back and an empty new stack goes away. branch: the --worktree branch."""
     state = {'made': None, 'moved': [], 'before': set()}  # moved: [(pane, (session id, group id))] that Tether moved
+    token = None
     with groups.LOCK():
         try:
             session_id, current = groups.group_of_pane(caller['id'], run)
             group_id, root, stack_goal = _pick_group(body, caller, run, entries, session_id, current, folder, state)
+            if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
+                token = groups.start_begin(session_id, group_id, run)
         except BaseException:
             _undo_group(run, state)
             raise
-    name = auto_stacks.helper_tab_name(role=body.get('role'), review=delegate.normalize_review(body.get('review', False)) == 'new',
-                                       name=body.get('name'), branch=branch, stack=body.get('group'),
-                                       message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
     try:
+        name = auto_stacks.helper_tab_name(role=body.get('role'),
+                                           review=delegate.normalize_review(body.get('review', False)) == 'new',
+                                           name=body.get('name'), branch=branch, stack=body.get('group'),
+                                           message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
         yield group_id, root, name
     except BaseException:
         with groups.LOCK():
+            _end_start(session_id, token, run)
+            token = None
             _undo_group(run, state)
         raise
+    finally:
+        _end_start(session_id, token, run)
+
+
+def _end_start(session_id, token, run):
+    try:
+        if token is not None:
+            groups.start_end(session_id, token, run)
+    except (groups.GroupError, OSError, subprocess.SubprocessError):
+        pass  # the marker expires (groups.START_LIMIT)
 
 
 def _owner(caller, root, entries):

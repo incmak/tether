@@ -7,7 +7,8 @@
   any depth, join the root's stack. A main session with no helpers stays in Unstacked.
 - --worktree does not make a stack of its own. --stack NAME only names the root's stack when it is made.
 - Stack name: the root's goal in Title Case (stack_name). Never a branch, folder, bare B-number or prompt fragment.
-- Tether marks the stacks it makes (groups.py "auto") and removes them when they are empty. A user rename clears it.
+- Tether marks the stacks it makes (groups.py "auto") and removes them when they are empty. When only the root is left
+  (its last helper closed or moved out), the root goes to Unstacked and the stack goes. A user rename clears "auto".
 - A tab the user placed by hand (@group_by user) never moves."""
 import re
 import subprocess
@@ -176,12 +177,12 @@ def named_by_user(pane, run=subprocess.run):
 
 
 def watch(run=subprocess.run, sleep=time.sleep, restoring=lambda: False):
-    """Service timer: remove Tether-made stacks whose last tab closed. It waits while auto-resume reopens tabs, whose
-    stacks are back before their tabs are."""
+    """Service timer: remove Tether-made stacks whose last tab closed, and dissolve those with only their root left. It
+    waits while auto-resume reopens tabs, whose stacks are back before their tabs are."""
     while True:
         try:
             if not restoring():
-                groups.drop_empty_auto(run)
+                groups.drop_lone_auto(run)
         except Exception:  # a tmux hiccup must not stop the timer
             pass
         sleep(SWEEP_EVERY)
