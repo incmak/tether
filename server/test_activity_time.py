@@ -249,8 +249,33 @@ class PublishTest(Base):
                 self.prefs = {}
             return self.git(argv, **kwargs)
         self.store.run = run
-        self.assertIn('did not push', self.store.publish())
+        self.assertIn('stopped the publish', self.store.publish())
         self.assertFalse([argv for argv in self.git_calls if 'push' in argv])
+
+    def test_turned_off_during_the_export_writes_nothing(self):
+        self.store.set_publish(str(self.out))
+        self.store.mark('you', 'a')
+        export = self.store.export
+        def slow_export():
+            data = export()
+            self.prefs = {}
+            return data
+        self.store.export = slow_export
+        self.assertIn('off', self.store.publish())
+        self.assertFalse((self.out / activity_time.FILE_NAME).exists())
+        self.assertFalse([argv for argv in self.git_calls if argv[3] in ('add', 'commit', 'push')])
+
+    def test_a_folder_cleared_during_publish_stops_it(self):
+        self.store.set_publish(str(self.out))
+        self.store.mark('you', 'a')
+        def run(argv, **kwargs):
+            if 'commit' in argv:
+                self.store._save_config(publish='')
+            return self.git(argv, **kwargs)
+        self.store.run = run
+        self.assertIn('folder changed', self.store.publish())
+        self.assertFalse([argv for argv in self.git_calls if 'push' in argv])
+        self.assertEqual(self.store.config()['published_revision'], 0)
 
     def test_a_mark_during_publish_stays_pending(self):
         self.store.set_publish(str(self.out))

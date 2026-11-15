@@ -374,15 +374,19 @@ class Store:
                 error = f'{FILE_NAME} in the publish folder is a link. Tether does not write through links.'
             elif not path.is_dir():
                 error = 'The publish folder is gone.'
-            elif not enabled()[0]:
-                error = 'Activity time is off, so Tether did not publish.'
             else:
                 snapshot = self.export()
-                _write_json(file, snapshot)
-                for step in (('add', '--', FILE_NAME), ('commit', '-q', '-m', 'Tether activity', '--', FILE_NAME), ('push', '-q')):
-                    if step[0] == 'push' and not enabled()[0]:
-                        error = 'Activity time was turned off, so Tether did not push.'
+                for step in (None, ('add', '--', FILE_NAME), ('commit', '-q', '-m', 'Tether activity', '--', FILE_NAME), ('push', '-q')):
+                    # Consent and the destination are checked again before each step: either can change mid-job.
+                    if not enabled()[0]:
+                        error = 'Activity time is off, so Tether stopped the publish.'
                         break
+                    if self.config()['publish'] != target:
+                        error = 'The publish folder changed, so Tether stopped the publish.'
+                        break
+                    if step is None:
+                        _write_json(file, snapshot)
+                        continue
                     result = self._git(path, *step)
                     if step[0] == 'commit' and result.returncode and 'nothing' in (result.stdout or '') + (result.stderr or ''):
                         continue  # no change since the last commit; still push an earlier unpushed one
@@ -391,7 +395,9 @@ class Store:
                         error = f'git {step[0]} failed: {detail or "code " + str(result.returncode)}'
                         break
             if not error:
-                self._save_config(published=started, published_revision=snapshot['revision'])
+                with self.lock:
+                    if self.config()['publish'] == target:
+                        self._save_config(published=started, published_revision=snapshot['revision'])
         self.last_publish = {'at': self.clock(), 'ok': not error, 'error': error}
         return error
 
