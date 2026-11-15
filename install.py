@@ -190,11 +190,13 @@ def legacy_settings(unit, units_dir):
     return port, environment
 
 
-def unit_text(description, command, environment, *, oneshot=False):
+def unit_text(description, command, environment, *, oneshot=False, priority=False):
     validate_unit_value(description)
     env = ''.join(f'Environment={quote(key + "=" + str(value))}\n' for key, value in sorted(environment.items()))
     service = 'Type=oneshot\n' if oneshot else ''
     restart = '' if oneshot else 'Restart=always\nRestartSec=3\n'
+    # priority: 10 times the default CPU share, so agent builds and tests do not slow the voice worker (load 40 seen).
+    restart += 'CPUWeight=1000\n' if priority else ''
     return (f'[Unit]\nDescription={description}\nAfter=network.target\n\n[Service]\n{service}'
             f'ExecStart={" ".join(quote(word, executable=True) for word in command)}\n{env}'
             f'{restart}\n[Install]\nWantedBy=default.target\n')
@@ -221,7 +223,7 @@ def unit_path(units_dir, name):
     return units_dir / (launchd_label(name) + '.plist' if DARWIN else name)
 
 
-def service_file(name, description, command, environment, oneshot=False):
+def service_file(name, description, command, environment, oneshot=False, priority=False):
     if TERMUX:
         prefix = Path(os.environ.get('PREFIX', '/data/data/com.termux/files/usr'))
         words = (['env', *(key + '=' + str(value) for key, value in sorted(environment.items()))]
@@ -229,7 +231,7 @@ def service_file(name, description, command, environment, oneshot=False):
         return (f'#!{prefix}/bin/sh\n# {description} (written by Tether install.py)\n'
                 f'exec 2>&1\nexec {shlex.join(words)}\n')
     if not DARWIN:
-        return unit_text(description, command, environment, oneshot=oneshot)
+        return unit_text(description, command, environment, oneshot=oneshot, priority=priority)
     label = launchd_label(name)
     log = str(Path.home() / 'Library/Logs/tether' / (label + '.log'))
     data = dict(Label=label, ProgramArguments=[str(word) for word in command],
@@ -240,6 +242,8 @@ def service_file(name, description, command, environment, oneshot=False):
         data.update(RunAtLoad=False, StartCalendarInterval={'Hour': 4, 'Minute': 17})
     else:
         data.update(RunAtLoad=True, KeepAlive=True, ThrottleInterval=3)
+    if priority:
+        data['ProcessType'] = 'Interactive'
     return plistlib.dumps(data).decode()
 
 
@@ -518,7 +522,7 @@ def make_plan(args, repo=ROOT, home=None):
             vpython = str(venv / 'bin/python')
             if not (venv / 'bin/python').exists():
                 commands.append([python, '-m', 'venv', str(venv)])
-            packages = ((['faster-whisper', 'av>=16,<17'] if options['voice'] else []) + (['pywebpush'] if options['push'] else [])
+            packages = ((['faster-whisper', 'av>=16,<17', 'onnx-asr[cpu,hub]'] if options['voice'] else []) + (['pywebpush'] if options['push'] else [])
                         + (['pillow'] if options['images'] else []))
             commands.append([vpython, '-m', 'pip', 'install', *packages])
             if options['push'] or options['images']:
@@ -542,7 +546,7 @@ def make_plan(args, repo=ROOT, home=None):
                     if 'TETHER_WHISPER_PROMPT' in voice_env:
                         break
                 files[UNIT_NAMES[2]] = service_file(UNIT_NAMES[2], 'Tether voice worker',
-                    [vpython, service_repo / 'server/transcribe_worker.py'], voice_env)
+                    [vpython, service_repo / 'server/transcribe_worker.py'], voice_env, priority=True)
         if build:
             commands.extend([['npm', 'ci'], ['npm', 'run', 'build']])
         files[UNIT_NAMES[0]] = service_file(UNIT_NAMES[0], 'Tether chat', [server_python, service_repo / 'server/server.py'], env)
