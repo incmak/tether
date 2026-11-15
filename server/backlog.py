@@ -142,6 +142,12 @@ def _finished(text, everything):
     return moved, lines, drop
 
 
+def _kept(text):
+    """The length of the text after every finished item moves to DONE.md: the most the list must hold."""
+    _, lines, drop = _finished(text, True)
+    return len('\n'.join(line for at, line in enumerate(lines) if at not in drop))
+
+
 def _archive(text, everything=False):
     """Move finished items in file order, with their detail lines, to DONE.md: past ARCHIVE_AT until the text is at
     ARCHIVE_TO or less, or all of them with everything. last-id keeps the moved IDs from being given again. DONE.md is
@@ -214,7 +220,7 @@ def save(text, version):
         raise invalid('Invalid backlog text.')
     if not isinstance(version, str):
         raise invalid('Reload the backlog and try again.')
-    if len(text) > LIMIT:  # before any parsing: IDs only make the text longer
+    if len(text) > LIMIT and _kept(text) > LIMIT:  # before the lock and the ID pass; finished items can move to DONE.md
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     with _locked():
         current = read()
@@ -228,7 +234,7 @@ def archive_done(dry_run=False):
     with _locked():
         current = read()['text']
         moved, lines, drop = _finished(current, True)
-        after = len('\n'.join(line for at, line in enumerate(lines) if at not in drop))
+        after = _kept(current)
         if moved and not dry_run:
             after = len(_replace(current, current, everything=True)['text'])
         return len(moved), len(current), after

@@ -129,6 +129,16 @@ class BacklogTests(unittest.TestCase):
         backlog.add('New')
         self.assertIn('- [ ] New #B5', self.text())
 
+    def test_a_save_over_the_limit_is_kept_when_its_finished_items_can_move(self):
+        done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n' for n in range(1, 41))
+        open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
+        text = done + open_part
+        self.assertGreater(len(text), backlog.LIMIT)
+        backlog.save(text, backlog.read()['version'])
+        self.assertEqual(self.text(), open_part)
+        with self.assertRaises(backlog.ProjectError):
+            backlog.save(open_part + '- [ ] Over ' + 'z' * 2000 + '\n', backlog.read()['version'])
+
     def test_details_after_a_blank_line_move_with_their_item(self):
         text = ('- [x] Old #B1\n  - first\n\n  - second\n\n- [ ] Open #B2\n  - ' + 'x' * backlog.ARCHIVE_AT + '\n')
         with mock.patch.object(backlog, 'ARCHIVE_TO', backlog.LIMIT):
