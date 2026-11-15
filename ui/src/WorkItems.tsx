@@ -6,19 +6,23 @@ import type { Api, Pane } from './api'
 import { RetryButton } from './Retry'
 import { useNow } from './attention'
 import { age } from './needs'
-import { answerItem, decisions, projectHue } from './work'
+import { answerItem, decisions, markWords, projectHue } from './work'
+import { Marked } from './Marked'
 import type { WorkBoard, WorkItem } from './work'
 import './Work.css'
 
 // "Decisions on items": work items whose agent asked Mak something. Each card answers in place; the answer goes to the
 // tab that asked. Home shows it first, and the desktop Needs you panel shows it above the tabs that wait for input.
 
-export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen, onDetails }: {
+export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen, onDetails, words = [] }: {
   scope: string; item: WorkItem; prefix: string; panes: Pane[]; busy: boolean
   onAnswer: (item: WorkItem, reply: { choice: string } | { text: string }) => Promise<boolean>; onOpen: (pane: Pane) => void
   onDetails?: (item: WorkItem) => void
+  /** The search words (searchWords) to mark on the card. */
+  words?: string[]
 }) {
   const now = useNow()
+  const hit = markWords(item, words)
   const [replying, setReplying] = useState(false)
   const [text, setText] = useState('')
   const ask = item.ask!
@@ -33,12 +37,12 @@ export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpe
     <div className="work-card-body">
       <span className="home-card-top">
         <span className={`work-swatch hue-${projectHue(prefix)}`} aria-hidden="true" />
-        <span className="work-id">{item.id}</span>
+        <span className="work-id">{hit.id ? <mark>{item.id}</mark> : item.id}</span>
         <span className="home-source">{item.project}</span>
         <span className="work-time" title="Asked">{age(ask.at, now)}</span>
       </span>
-      <h3 id={titleId} className="work-title">{item.title}</h3>
-      <p className="work-q">{ask.q}</p>
+      <h3 id={titleId} className="work-title"><Marked text={item.title} words={hit.title} /></h3>
+      <p className="work-q"><Marked text={ask.q} words={hit.title} fuzzy={false} /></p>
     </div>
     <div className="inbox-actions" role="group" aria-label={`Answer ${item.id}`}>
       {ask.options.map((option, index) => <button key={option} type="button" className={index === 0 ? 'inbox-yes' : undefined} disabled={busy}
@@ -98,9 +102,9 @@ export type DecisionAnswers = ReturnType<typeof useDecisionAnswers>
 
 /** The group. Hidden while nothing waits and no result shows; a failed load shows a retry, so a broken board does
  * not hide questions. */
-export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact, scope: named, onDetails, onBoard }: {
+export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact, scope: named, onDetails, onBoard, words }: {
   board?: WorkBoard; error: string; panes: Pane[]; answers: DecisionAnswers; onRefresh: () => unknown; onOpen: (pane: Pane) => void; compact?: boolean
-  scope?: string; onDetails?: (item: WorkItem) => void; onBoard?: () => void
+  scope?: string; onDetails?: (item: WorkItem) => void; onBoard?: () => void; words?: string[]
 }) {
   const items = decisions(board)
   const prefixes = new Map(board?.projects.map(project => [project.name, project.prefix]))
@@ -116,6 +120,6 @@ export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen
     <div role="status">{results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
     {error && <p className="work-error" role="alert"><span>{board ? 'Could not refresh work items. These questions can be out of date.' : 'Could not load work items.'} {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
     {items.length > 0 && <ul>{items.map(item => <DecisionCard key={`${item.id}:${item.ask!.id}`} scope={scope} item={item} prefix={prefixes.get(item.project) ?? item.id.split('-')[0]}
-      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} onDetails={onDetails} />)}</ul>}
+      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} onDetails={onDetails} words={words} />)}</ul>}
   </section>
 }

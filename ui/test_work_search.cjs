@@ -26,6 +26,11 @@ const login = item('T-21', 'Login fails on Safari', {
 })
 const voice = card('B12', 'Voice mode latency', { details: ['the worker restarts after a timeout'] })
 
+// markWords(): an ID word marks the ID and no title letters; other words mark the title.
+assert.deepEqual(work.markWords(login, words('t-21 lgin')), { title: ['lgin'], id: true })
+assert.deepEqual(work.markWords(login, words('b12 safari')), { title: ['safari'], id: false }, 'A link match marks no title letters')
+assert.deepEqual(work.markWords(card('C1', 'covid-19 rollout'), words('covid-19')), { title: ['covid-19'], id: false }, 'An ID-shaped word that matched text marks the text')
+assert.deepEqual(work.markWords(voice, words('B-12')), { title: [], id: true }, 'B-12 is B12')
 assert.equal(score(login, ''), 0, 'No query: everything shows')
 assert.ok(score(login, 'lgin') !== null, 'One typo in the title')
 assert.ok(score(voice, 'vml') !== null, 'Title initials')

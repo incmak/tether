@@ -155,7 +155,7 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
       {notes.length > 0 && <button type="button" className="backlog-done-toggle backlog-notes-toggle" aria-expanded={notesOpen} disabled={matchedNote} onClick={() => setShowNotes(!showNotes)}>
         <ChevronRight size={14} className={notesOpen ? 'open' : ''} aria-hidden="true" />Details · {notes.length}</button>}
       {visible.length > 0 && <ul className="backlog-details">{visible.map(detail => <li key={detail.line}>
-        {detail.done === undefined ? <span>{highlight(detail.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)}</span>
+        {detail.done === undefined ? <span>{highlight(detail.text, query, false).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)}</span>
           : <label className={`backlog-sub${detail.done ? ' done' : ''}`}><input type="checkbox" checked={detail.done} disabled={locked} onChange={event => actions.onDone(detail.raw, detail.line, event.target.checked)} /><span>{detail.text}</span></label>}
       </li>)}</ul>}
     </div>

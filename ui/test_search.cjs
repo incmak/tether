@@ -9,7 +9,7 @@ search._compile(ts.transpileModule(readFileSync('src/search.ts', 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, 'search.js')
 const output = { exports: search.exports }
-const { field, matchSessions, scoreWords, searchWords, wordScore } = output.exports
+const { field, marks, matchSessions, scoreWords, searchWords, wordScore } = output.exports
 const plain = map => Object.fromEntries([...map].map(([id, match]) => [id, match.tabs === 'all' ? 'all' : [...match.tabs]]))
 const find = query => plain(matchSessions(entries, searchWords(query)))
 
@@ -23,6 +23,19 @@ const entries = [
   ] },
   { id: 'blender', fields: session('Blender', '/srv/blender'), tabs: [{ id: '%3', fields: tab('Render', 'Claude') }] },
 ]
+
+// marks(): the letters each word matched, by the same rule as the score.
+const marked = (text, query, fuzzy) => marks(text, searchWords(query), fuzzy).map(([piece, hit]) => hit ? `[${piece}]` : piece).join('')
+assert.equal(marked('Voice mode latency', 'mode VOICE'), '[Voice] [mode] latency', 'Substrings, in any order and case')
+assert.equal(marked('revoice voice', 'voice'), 'revoice [voice]', 'A word start beats the first match inside a word')
+assert.equal(marked('Voice mode latency', 'vml'), '[V]oice [m]ode [l]atency', 'Initials mark the first letters')
+assert.equal(marked('Backlog search', 'bklg'), '[B]ac[kl]o[g] search', 'Close letters mark each letter')
+assert.equal(marked('Voice mode', 'vioce'), '[Voice] mode', 'A typo marks the word')
+assert.equal(marked('Voice mode', 'xyz'), 'Voice mode', 'No match: no marks')
+assert.equal(marked('Voice mode', 'vml', false), 'Voice mode', 'Exact text: no initials')
+assert.equal(marked('a.b c', '.'), 'a[.]b c', 'Query text is not a pattern')
+assert.equal(marked('Plain', ''), 'Plain')
+assert.equal(marked('İstanbul trip', 'trip'), 'İstanbul trip', 'Text that changes length in lower case gets no marks, not wrong ones')
 
 // A tab title finds its session, and only that tab shows. Case does not matter.
 assert.deepEqual(find('voice'), { tether: ['%1'] })

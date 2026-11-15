@@ -1,7 +1,7 @@
 // What the backlog shows: search, status, project, who added it, and the order. The file order stays the saved order;
 // a sort only changes what is shown, so drag-to-reorder works only in the file order with nothing filtered out.
 import type { Item, Note, Row } from './backlogItems'
-import { exactField, field, scoreWords, searchWords, wordScore } from './search'
+import { exactField, field, marks, scoreWords, searchWords, wordScore } from './search'
 import type { Field } from './search'
 
 export type StatusFilter = 'open' | 'doing' | 'done' | 'all'
@@ -130,10 +130,6 @@ export const canReorder = (view: View) => view.sort === 'manual' && !view.query.
 /** True when anything but the order narrows the list. */
 export const isFiltered = (view: View) => !!view.query.trim() || view.status !== 'open' || view.project !== null || view.who !== 'any'
 
-/** The parts of a title that match the query, for highlighting. Returns [text, matched] pieces. */
-export function highlight(text: string, query: string): [string, boolean][] {
-  const parts = searchWords(query).filter(part => !isRef(part)).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  if (!parts.length) return [[text, false]]
-  // A split on a capturing pattern puts the matches at the odd places.
-  return text.split(new RegExp(`(${parts.join('|')})`, 'i')).map((piece, at) => [piece, at % 2 === 1] as [string, boolean]).filter(([piece]) => piece)
-}
+/** The parts of a text that match the query, for highlighting: [text, matched] pieces (search.ts marks()).
+ * fuzzy false for the details, which match whole substrings only. An ID word finds its item, so it marks nothing. */
+export const highlight = (text: string, query: string, fuzzy = true) => marks(text, searchWords(query).filter(part => !isRef(part)), fuzzy)

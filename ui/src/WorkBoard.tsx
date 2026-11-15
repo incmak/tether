@@ -9,7 +9,8 @@ import { useNow } from './attention'
 import { useModal } from './hooks'
 import { searchWords } from './search'
 import { age } from './needs'
-import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, feedLabel, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage, workScore } from './work'
+import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, feedLabel, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage, markWords, workScore } from './work'
+import { Marked } from './Marked'
 import type { BacklogCard, JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
@@ -57,6 +58,8 @@ type Props = {
   onRefresh: () => unknown; onOpen: (pane: Pane) => void; onClose: () => void; start?: WorkView
   /** Open the Backlog page on a search, like B12. */
   onBacklog: (query: string) => void
+  /** Open on this search, with this item's drawer open (⌘K). */
+  find?: { query: string; item?: string }
 }
 // The project filter's value for backlog items. A colon keeps it apart from every project name.
 const BACKLOG = ':backlog'
@@ -66,19 +69,19 @@ const prefixOf = (board: WorkBoard | undefined, item: WorkItem) => board?.projec
 const order = (stage: Stage) => (a: WorkItem, b: WorkItem) => stage === 'needs' ? (a.ask?.at ?? a.updated) - (b.ask?.at ?? b.updated) : b.updated - a.updated
 const tabPath = (tab: WorkItem['tabs'][number]) => [tab.session, tab.stack, tab.name || tab.pane].filter(Boolean).join(' › ')
 
-export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen, onClose, start, onBacklog }: Props) {
+export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen, onClose, start, onBacklog, find }: Props) {
   const modal = useModal(true, onClose, undefined, { view: start ? `work:${start}` : 'work' })
   const now = useNow()
   const [view, setView] = useState<WorkView>(() => start ?? (decisions(board).length ? 'needs' : 'board'))
   const [chosen, setProject] = useState('all')
-  const [showHold, setShowHold] = useState(false)
+  const [showHold, setShowHold] = useState(() => !!find?.item && board?.items.find(item => item.id === find.item)?.stage === 'hold')
   const [openId, setOpenId] = useState<string | null>(null)
   // Columns that show every backlog card, not only the first BACKLOG_CAP.
   const [expanded, setExpanded] = useState<Stage[]>([])
   // A form over the sheet: add a project, a project's settings, or a new item. added: the last result line.
   const [form, setForm] = useState<{ kind: 'project'; name?: string } | { kind: 'item' } | null>(null)
   const [added, setAdded] = useState<{ text: string; ok: boolean } | null>(null)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(find?.query ?? '')
   const searchBox = useRef<HTMLInputElement>(null)
   // A reply closes only the form that sent it: Mak can cancel and open another form while a save runs.
   const sent = form
@@ -125,6 +128,14 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
     const opener = card?.matches('button') ? card : card?.querySelector<HTMLElement>('button[aria-haspopup="dialog"]')
     ;(opener ?? sheet.querySelector<HTMLElement>('.work-views [aria-pressed="true"]'))?.focus()
   }, [drawerId, modal.ref])
+  // ⌘K opens an item. Its drawer opens one frame after the sheet, so the drawer is the top dialog: a child's effect
+  // runs first, and a drawer shown on the first render would sit under the sheet (Escape would close the board).
+  const findItem = find?.item
+  useEffect(() => {
+    if (!findItem) return
+    const frame = requestAnimationFrame(() => setOpenId(findItem))
+    return () => cancelAnimationFrame(frame)
+  }, [findItem])
   // "/" goes to the search, unless a drawer or form over the board has the keys, or a field has them.
   useEffect(() => {
     const sheet = modal.ref.current
@@ -191,7 +202,7 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
         <button type="button" className="primary" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}>Add project</button>
       </div>}
       {board && view === 'needs' && hasWork && <>
-        <DecisionsGroup board={shown} error={error} panes={panes} answers={answers} onRefresh={onRefresh} onOpen={open} compact scope="sheet" onDetails={item => setOpenId(item.id)} />
+        <DecisionsGroup board={shown} error={error} panes={panes} answers={answers} onRefresh={onRefresh} onOpen={open} compact scope="sheet" onDetails={item => setOpenId(item.id)} words={words} />
         {!asking && (words.length ? <NoMatch query={query} onClear={() => setQuery('')} /> : <p className="work-empty">Nothing waits on you. An item shows here when its agent asks you something.</p>)}
       </>}
       {board && view === 'board' && hasWork && <>
@@ -212,10 +223,10 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
             return <section key={column.stage} className={`work-col ${column.stage}`} aria-labelledby={`work-col-${column.stage}`}>
               <h3 id={`work-col-${column.stage}`} className="work-col-head"><span>{STAGE_LABEL[column.stage]}</span><span className="badge">{list.length + backlog.length}</span><span className="work-col-hint">{column.hint}</span></h3>
               {entries.length ? <ul className="work-col-list">{entries.map(entry => 'area' in entry
-                ? <li key={entry.id}><BacklogBoardCard card={entry} now={now} onDetails={() => setOpenId(entry.id)} /></li>
+                ? <li key={entry.id}><BacklogBoardCard card={entry} now={now} words={words} onDetails={() => setOpenId(entry.id)} /></li>
                 : entry.stage === 'needs' && entry.ask
-                ? <DecisionCard key={`${entry.id}:${entry.ask.id}`} scope="board" item={entry} prefix={prefixOf(board, entry)} panes={panes} busy={answers.locked(entry)} onAnswer={answers.answer} onOpen={open} onDetails={item => setOpenId(item.id)} />
-                : <li key={entry.id}><BoardCard item={entry} prefix={prefixOf(board, entry)} panes={panes} now={now} onDetails={() => setOpenId(entry.id)} /></li>)}</ul>
+                ? <DecisionCard key={`${entry.id}:${entry.ask.id}`} scope="board" item={entry} prefix={prefixOf(board, entry)} panes={panes} busy={answers.locked(entry)} onAnswer={answers.answer} onOpen={open} onDetails={item => setOpenId(item.id)} words={words} />
+                : <li key={entry.id}><BoardCard item={entry} prefix={prefixOf(board, entry)} panes={panes} now={now} words={words} onDetails={() => setOpenId(entry.id)} /></li>)}</ul>
                 : <p className="work-col-empty">Nothing here.</p>}
               {more > 0 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => [...list, column.stage])}>
                 Show {more} more backlog items<span className="visually-hidden"> in {STAGE_LABEL[column.stage]}</span></button>}
@@ -263,17 +274,18 @@ function BoardBones() {
   </Skeleton>
 }
 
-function BoardCard({ item, prefix, panes, now, onDetails }: { item: WorkItem; prefix: string; panes: Pane[]; now: number; onDetails: () => void }) {
+function BoardCard({ item, prefix, panes, now, words, onDetails }: { item: WorkItem; prefix: string; panes: Pane[]; now: number; words: string[]; onDetails: () => void }) {
+  const hit = markWords(item, words)
   const live = new Set(panes.map(pane => pane.id))
   const links = item.tabs.length > 0 || item.refs.length > 0 || (item.qa && item.stage !== 'done') || !!item.jira
   return <button type="button" className="work-bcard" data-item={item.id} aria-haspopup="dialog" onClick={onDetails}>
     <span className="home-card-top">
       <span className={`work-swatch hue-${projectHue(prefix)}`} aria-hidden="true" />
-      <span className="work-id">{item.id}</span>
+      <span className="work-id">{hit.id ? <mark>{item.id}</mark> : item.id}</span>
       <span className="home-source">{item.project}</span>
       <span className="work-time" title="Last change">{age(item.updated, now)}</span>
     </span>
-    <span className="work-title">{item.title}</span>
+    <span className="work-title"><Marked text={item.title} words={hit.title} /></span>
     {links && <span className="work-links">
       {item.tabs.map(tab => <span key={tab.pane} className="work-link-tab"><span className={`work-tab-dot${live.has(tab.pane) ? '' : ' closed'}`} aria-hidden="true" />{tabPath(tab)}{!live.has(tab.pane) && <span className="visually-hidden"> (closed)</span>}</span>)}
       {item.refs.length > 0 && <span>{item.refs.join(', ')}</span>}

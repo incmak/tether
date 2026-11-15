@@ -165,6 +165,8 @@ function App() {
   const [agentsPage, setAgentsPage] = useState<false | 'list' | 'message'>(false)
   // The work page (WorkBoard.tsx): the sidebar, the command menu and /chat/?go=board open it.
   const [workSheet, setWorkSheet] = useState<false | WorkView>(false)
+  // ⌘K opens the board on a search, with one item's drawer open.
+  const [workFind, setWorkFind] = useState<{ query: string; item?: string } | undefined>()
   const markRead = useCallback((ids: string[]) => {
     const now = Date.now() / 1000
     update(current => ({ seen: { ...current.seen, ...Object.fromEntries(ids.map(id => [id, now])) } }))
@@ -350,6 +352,7 @@ function App() {
   const decisionCount = workDecisions(work.data).length
   const decisionAnswers = useDecisionAnswers(api, work.refresh)
   const openWork = (view: WorkView) => { setDrawer(false); setWorkSheet(view) }
+  const menuWork = useMemo(() => ({ board: work.data, error: work.error, open: (query: string, item?: string) => { setDrawer(false); setWorkFind({ query, item }); setWorkSheet('board') } }), [work.data, work.error])
   const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onBoard={() => openWork('board')} />
   const workMarks = useMemo(() => itemsByPane(work.data), [work.data])
   const workLinks = work.data && (work.data.projects.length > 0 || work.data.items.length > 0)
@@ -1005,11 +1008,11 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} create={quick.create} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} work={menuWork} create={quick.create} />}
     {quick.toast}
     {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     <UndoCenter api={api} onChanged={() => void refresh()} history={undoHistory} onHistory={setUndoHistory} />
-    {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
+    {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} find={workFind} onRefresh={work.refresh} onOpen={openPane} onClose={() => { setWorkSheet(false); setWorkFind(undefined) }}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}

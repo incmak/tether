@@ -156,6 +156,19 @@ function fieldsOf(entry: WorkItem | BacklogCard) {
 const ID = /^(?:[a-z]{1,5}-\d+|b\d+)$/
 const sameId = (a: string, b: string) => { const norm = (id: string) => id.toLowerCase().replace(/^b-(?=\d)/, 'b'); return norm(a) === norm(b) }
 
+/** What a card marks for these query words. title: the words that match by text. id: an ID word names the entry
+ * itself. An ID word that found the entry by its ID or a link marks no title letters. */
+export function markWords(entry: WorkItem | BacklogCard, words: string[]) {
+  const fields = fieldsOf(entry)
+  const title: string[] = []
+  let id = false
+  for (const word of words) {
+    if (ID.test(word) && fields.idList.some(entryId => sameId(entryId, word))) id = true
+    else if (!ID.test(word) || !fields.links.some(link => sameId(link, word))) title.push(word)
+  }
+  return { title, id }
+}
+
 /** The search score of an item or backlog card for these query words (searchWords). 0: no query. null: no match.
  * An ID alone, like T-21 or B12, finds that item and the items that link to it, not T-210 or B120. */
 export function workScore(entry: WorkItem | BacklogCard, words: string[]): number | null {

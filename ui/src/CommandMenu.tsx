@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CircleCheck, ClipboardList, CornerDownLeft, ListPlus, MapPin, Search, SquarePlus, SquareTerminal, Zap } from 'lucide-react'
+import { CircleCheck, ClipboardList, CornerDownLeft, ListPlus, MapPin, Search, SquareKanban, SquarePlus, SquareTerminal, Zap } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { useModal } from './hooks'
 import { keyLabel } from './keys'
@@ -8,6 +8,10 @@ import type { Session } from './Sidebar'
 import type { Prefs } from './prefs'
 import type { GroupInfo } from './api'
 import { field, matchSessions, scoreWords, searchWords } from './search'
+import { STAGE_LABEL, markWords, onBoard, workScore } from './work'
+import type { WorkBoard } from './work'
+import { Marked } from './Marked'
+import { useNow } from './attention'
 import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog } from './backlogItems'
 import { projectGroups, queryScore } from './backlogView'
@@ -20,9 +24,9 @@ import './CommandMenu.css'
 /** One command of the menu. Leave a command out when its action does not apply now. */
 export interface Command { label: string; key?: string; run: () => void }
 
-type Group = 'Panes' | 'Commands' | 'Backlog' | 'Create'
-/** keep: the row changes the menu and does not close it. */
-interface Row { id: string; group: Group; label: string; hint?: string; key?: string; dot?: string; done?: boolean; keep?: boolean; run: () => void }
+type Group = 'Panes' | 'Commands' | 'Work' | 'Backlog' | 'Create'
+/** keep: the row changes the menu and does not close it. marked: the label's words to mark; none: the query's words. */
+interface Row { id: string; group: Group; label: string; hint?: string; key?: string; dot?: string; done?: boolean; keep?: boolean; marked?: string[]; run: () => void }
 
 /** The last rows of a search: keep the query as a backlog item, or start an agent tab with it. */
 export interface Create {
@@ -45,11 +49,14 @@ interface Props {
   stacks?: Record<string, GroupInfo[]>
   /** Search the backlog too. `open` shows the backlog page with this search. */
   backlog?: { api: Api; open: (query: string) => void }
+  /** Search the work board's items too. `open` shows the board on this search, with this item open. */
+  work?: { board?: WorkBoard; error: string; open: (query: string, item?: string) => void }
   create?: Create
 }
 
 interface BacklogHit { ref: string; text: string; project: string; done: boolean; score: number }
 const BACKLOG_ROWS = 6
+const WORK_ROWS = 6
 
 /** The backlog, read once when the menu opens. text null: still loading; failed: why it did not load. */
 function useBacklogText(api: Api | undefined) {
@@ -66,7 +73,7 @@ function useBacklogText(api: Api | undefined) {
   return { text, failed }
 }
 
-const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Backlog: 'Backlog', Create: 'New' }
+const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Work: 'Work item', Backlog: 'Backlog', Create: 'New' }
 const defaultName = `${DEFAULT_SESSION} · ${DEFAULT_STACK}`
 
 /** The picker's rows: Tether's choice, the default, then each session with its stacks. */
@@ -85,7 +92,7 @@ function placeOptions(sessions: Session[]): { options: MenuOption[]; byValue: Ma
 }
 
 /** ⌘K or ⌥Space: go to a pane or session, run a command, or find a backlog item. Each command row shows its key, so the menu teaches the keys. */
-export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, groups, stacks, backlog, create }: Props) {
+export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, groups, stacks, backlog, work, create }: Props) {
   // Opening the menu keeps the Forward steps, so its Forward command can use them.
   const modal = useModal(true, onClose, undefined, { keepForward: true })
   const [query, setQuery] = useState('')
@@ -93,6 +100,7 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
   const [picking, setPicking] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   const { text: backlogText, failed: backlogFailed } = useBacklogText(backlog?.api)
+  const now = useNow()
   // Each item with its project, so a search for a project name finds its items.
   const backlogItems = useMemo(() => backlogText === null ? [] : projectGroups(parseBacklog(backlogText)).flatMap(group => group.items.map(item => ({ item, project: group.name }))), [backlogText])
   // The same index and scores as the sidebar search, built once while the menu is open.
@@ -125,15 +133,24 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
       const score = item.ref ? queryScore(item, words, project) : null
       return score === null ? [] : [{ ref: item.ref!, text: item.text, project, done: item.done, score: score - (item.done ? 100 : 0) }]
     }).sort((a, b) => b.score - a.score)
-    const backlogRows: Row[] = hits.slice(0, BACKLOG_ROWS).map(hit => ({ id: `backlog:${hit.ref}`, group: 'Backlog', label: hit.text, hint: [hit.ref, hit.project || 'Inbox', hit.done && 'Done'].filter(Boolean).join(' · '), done: hit.done, run: () => backlog!.open(hit.ref) }))
+    const backlogRows: Row[] = hits.slice(0, BACKLOG_ROWS).map(hit => ({ id: `backlog:${hit.ref}`, group: 'Backlog', label: hit.text, marked: wordList.filter(word => !/^b\d+$/.test(word)), hint: [hit.ref, hit.project || 'Inbox', hit.done && 'Done'].filter(Boolean).join(' · '), done: hit.done, run: () => backlog!.open(hit.ref) }))
     if (backlog && backlogText !== null) backlogRows.push({ id: 'backlog:search', group: 'Backlog', label: hits.length > BACKLOG_ROWS ? `See all ${hits.length} in the backlog` : `Search the backlog for “${words}”`, run: () => backlog.open(words) })
+    // Work items on the board match like the board's own search. Done items rank below open ones.
+    const workHits = (work?.board?.items ?? []).filter(item => onBoard(item, now)).flatMap(item => {
+      const score = workScore(item, wordList)
+      return score === null ? [] : [{ item, score: score - (item.stage === 'done' ? 100 : 0) }]
+    }).sort((a, b) => b.score - a.score)
+    const workRows: Row[] = workHits.slice(0, WORK_ROWS).map(({ item }) => ({ id: `work:${item.id}`, group: 'Work', label: item.title, marked: markWords(item, wordList).title,
+      hint: [item.id, item.project, STAGE_LABEL[item.stage]].join(' · '), done: item.stage === 'done', run: () => work!.open(words, item.id) }))
+    // No match: no "Search the work board" row. It would find nothing, and Enter would pick it over the backlog hits.
+    if (work && workHits.length) workRows.push({ id: 'work:search', group: 'Work', label: workHits.length > WORK_ROWS ? `See all ${workHits.length} on the work board` : `Search the work board for “${words}”`, run: () => work.open(words) })
     const createRows: Row[] = !create ? [] : [
       { id: 'create:backlog', group: 'Create', label: `Add “${words}” to the backlog`, run: () => create.onBacklog(words) },
       { id: 'create:tab', group: 'Create', label: `Start a new tab for “${words}”`, hint: 'Tether picks the place', run: () => create.onTab(words, { kind: 'auto' }) },
       { id: 'create:place', group: 'Create', label: `Start a new tab for “${words}” in…`, hint: 'Choose the session and stack', keep: true, run: () => setPicking(true) },
     ]
-    return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...backlogRows, ...createRows]
-  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index, create])
+    return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...workRows, ...backlogRows, ...createRows]
+  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index, work, now, create])
   const at = Math.min(active, Math.max(0, rows.length - 1))
   const words = query.trim()
   const pick = (row: Row | undefined) => { if (!row) return; if (!row.keep) onClose(); row.run() }
@@ -150,12 +167,14 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     document.getElementById(`command-${next}`)?.scrollIntoView({ block: 'nearest' })
   }
   const icon = (row: Row) => row.group === 'Panes' ? (row.dot ? <span className={`state-dot ${row.dot}`} /> : <SquareTerminal size={16} />)
+    : row.group === 'Work' ? (row.id === 'work:search' ? <Search size={16} /> : row.done ? <CircleCheck size={16} /> : <SquareKanban size={16} />)
     : row.group === 'Backlog' ? (row.id === 'backlog:search' ? <Search size={16} /> : row.done ? <CircleCheck size={16} /> : <ClipboardList size={16} />)
     : row.group === 'Create' ? (row.id === 'create:backlog' ? <ListPlus size={16} /> : row.id === 'create:place' ? <MapPin size={16} /> : <SquarePlus size={16} />)
     : <Zap size={16} />
   const searching = !!words
-  const matched = rows.some(row => row.group !== 'Create' && row.id !== 'backlog:search')
-  const placeholder = backlog ? 'Search panes, commands and the backlog' : 'Go to a pane or run a command'
+  const matched = rows.some(row => row.group !== 'Create' && row.id !== 'backlog:search' && row.id !== 'work:search')
+  const placeholder = backlog && work ? 'Search panes, commands, work and the backlog' : backlog ? 'Search panes, commands and the backlog' : 'Go to a pane or run a command'
+  const wordList = searchWords(words)
   return <dialog {...modal} className="sheet command-menu" aria-label="Search">
     <label className="command-search"><Search size={20} aria-hidden="true" />
       <input ref={input} autoFocus role="combobox" aria-expanded="true" aria-controls="command-list" aria-autocomplete="list" aria-activedescendant={rows.length ? `command-${at}` : undefined}
@@ -184,12 +203,13 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
         <div id={`command-${index}`} role="option" aria-selected={index === at} className={`command-row${index === at ? ' active' : ''}${row.done ? ' done' : ''}`}
           onMouseMove={() => { if (index !== at) setActive(index) }} onMouseDown={event => event.preventDefault()} onClick={() => pick(row)}>
           <span className="command-icon" aria-hidden="true">{icon(row)}</span>
-          <span className="command-label">{row.label}</span>
+          <span className="command-label">{row.group === 'Create' || row.id.endsWith(':search') ? row.label : <Marked text={row.label} words={row.marked ?? wordList} />}</span>
           {row.hint && <span className="command-hint">{row.hint}</span>}
           {row.key ? <kbd>{keyLabel(row.key)}</kbd> : <span className="command-type" aria-hidden="true">{TYPE[row.group]}</span>}
         </div>
       </div>)}
       {!rows.length && <p className="command-empty">Nothing matches “{query.trim()}”.</p>}
+      {searching && work && !work.board && <p className="command-note" role="status">{work.error ? 'Work items did not load.' : 'Searching work items…'}</p>}
       {searching && backlog && backlogText === null && <p className="command-note" role="status">{backlogFailed || 'Searching the backlog…'}</p>}
     </div>
     <div className="command-foot" aria-hidden="true">

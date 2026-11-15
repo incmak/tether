@@ -105,6 +105,48 @@ export function wordScore(f: Field, word: string): number | null {
   return null
 }
 
+// Where a word matches the field's text, by the rule that wordScore used: [start, end) ranges in the text.
+function wordRanges(f: Field, word: string): [number, number][] {
+  const text = f.text
+  let at = text.indexOf(word)
+  if (at >= 0) {
+    for (let next = at; next > 0; next = text.indexOf(word, next + 1)) if (BOUNDARY.test(text[next - 1])) { at = next; break }
+    return [[at, at + word.length]]
+  }
+  if (wordScore(f, word) === null) return []
+  const tokens = [...text.matchAll(/[\p{L}\p{N}]+/gu)].map(match => ({ start: match.index, text: match[0] }))
+  const first = f.initials.startsWith(word) ? 0 : word.length >= 3 ? f.initials.indexOf(word) : -1
+  if (first >= 0) return tokens.slice(first, first + word.length).map(token => [token.start, token.start + 1])
+  const span = word.length * 2 + 2
+  for (let start = text.indexOf(word[0]); start >= 0; start = text.indexOf(word[0], start + 1)) {
+    if (start > 0 && !BOUNDARY.test(text[start - 1])) continue
+    const found: [number, number][] = [[start, start + 1]]
+    for (let at = start + 1; at < text.length && at - start < span && found.length < word.length; at++) if (text[at] === word[found.length]) found.push([at, at + 1])
+    if (found.length === word.length) return found
+  }
+  const token = tokens.find(entry => oneTypo(word, entry.text))
+  return token ? [[token.start, token.start + token.text.length]] : []
+}
+
+/** The parts of a text that the query words match, for <mark>: [piece, matched] pairs in order. It marks the same
+ * letters the search matched: a substring, the initials ("vml"), the close letters ("bklg") or the word with a typo.
+ * fuzzy false: substrings only, as for an exactField. */
+export function marks(text: string, words: string[], fuzzy = true): [string, boolean][] {
+  const f = fuzzy ? field(1, text) : exactField(1, text)
+  // A few letters change length in lower case (İ): their offsets would not fit the shown text.
+  if (!words.length || f.text.length !== text.length) return text ? [[text, false]] : []
+  const hit = new Uint8Array(text.length)
+  for (const word of words) for (const [start, end] of wordRanges(f, word)) hit.fill(1, start, end)
+  const pieces: [string, boolean][] = []
+  for (let start = 0; start < text.length;) {
+    let end = start + 1
+    while (end < text.length && hit[end] === hit[start]) end++
+    pieces.push([text.slice(start, end), hit[start] === 1])
+    start = end
+  }
+  return pieces
+}
+
 function best(fields: Field[], word: string) {
   let top: number | null = null
   for (const f of fields) { const score = wordScore(f, word); if (score !== null && (top === null || score * f.weight > top)) top = score * f.weight }

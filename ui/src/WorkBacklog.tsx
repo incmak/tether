@@ -5,21 +5,23 @@ import type { Api } from './api'
 import { RetryButton } from './Retry'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { STAGE_LABEL, moveBacklog } from './work'
+import { STAGE_LABEL, markWords, moveBacklog } from './work'
+import { Marked } from './Marked'
 import type { BacklogCard, BacklogStage } from './work'
 
 // Backlog items on the work board (server: work_backlog.py). BACKLOG.md stays the record: a card shows one item, and
 // its drawer moves it between Ready, Building and Done. Everything else happens in the Backlog.
 
-export function BacklogBoardCard({ card, now, onDetails }: { card: BacklogCard; now: number; onDetails: () => void }) {
+export function BacklogBoardCard({ card, now, onDetails, words = [] }: { card: BacklogCard; now: number; onDetails: () => void; words?: string[] }) {
+  const hit = markWords(card, words)
   return <button type="button" className="work-bcard work-bcard-backlog" data-item={card.id} aria-haspopup="dialog" onClick={onDetails}>
     <span className="home-card-top">
       <ListTodo size={12} className="work-backlog-icon" aria-hidden="true" />
-      <span className="work-id">{card.id}</span>
+      <span className="work-id">{hit.id ? <mark>{card.id}</mark> : card.id}</span>
       <span className="home-source">Backlog · {card.area}</span>
       {card.stage === 'done' && card.doneAt && <span className="work-time" title="Done">{age(card.doneAt, now)}</span>}
     </span>
-    <span className="work-title">{card.title}</span>
+    <span className="work-title"><Marked text={card.title} words={hit.title} /></span>
     {card.stage === 'building' && card.doing && <span className="work-links"><span>Doing: {card.doing}</span></span>}
   </button>
 }

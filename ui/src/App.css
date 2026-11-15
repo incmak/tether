@@ -1370,6 +1370,7 @@ button.live-chip:active { background: var(--line); }
 .command-row.active .command-icon { color: var(--text); }
 .command-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .command-row.done .command-label { color: var(--muted); text-decoration: line-through; }
+.command-label mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; }
 .command-hint { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .command-type { flex: none; min-width: 4.6em; color: var(--muted); font-size: 12px; text-align: end; }
 .command-empty, .command-note { margin: 16px 10px; color: var(--muted); font-size: 14px; }
