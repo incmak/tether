@@ -147,20 +147,23 @@ def helper_tab_name(*, role=None, review=False, name=None, branch=None, stack=No
 
 def root_of(pane, thread_of, run=subprocess.run):
     """The main session of a tab: follow helper records to the tab no other tab started. A record whose owner now holds
-    another conversation (thread_of(pane) differs from owner_thread) is a broken link: the chain stops there.
+    another conversation (thread_of(pane) differs from owner_thread) is a broken link: the chain stops there. The stored
+    root_pane is a shortcut only when the owner link holds and the root still holds root_thread (or the root has closed).
     Returns a pane id. It may be a closed tab when the root has closed."""
     current, seen = pane, {pane}
     for _ in range(ROOT_DEPTH):
         exists, record = helper_tabs.load(current, run)
         if not exists or record is None:
             return current
-        root = record.get('root_pane')
-        if isinstance(root, str) and groups.PANE.fullmatch(root) and root != current:
-            return root
         owner = record['owner_pane']
         known = thread_of(owner)
         if owner in seen or (record.get('owner_thread') and known and known != record['owner_thread']):
-            return current
+            return current  # the owner now holds another conversation: this tab is its own root
+        root = record.get('root_pane')
+        if isinstance(root, str) and groups.PANE.fullmatch(root) and root != current and root not in seen:
+            now = thread_of(root)
+            if not (record.get('root_thread') and now and now != record['root_thread']):
+                return root
         seen.add(owner)
         current = owner
     return current

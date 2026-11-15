@@ -105,6 +105,8 @@ def _valid(item):
              'project': project if isinstance(project, str) and projects.ID.fullmatch(project) else ''}
     if item.get('auto') is True:
         group['auto'] = True  # Tether made it
+        if isinstance(item.get('root'), str) and PANE.fullmatch(item['root']):
+            group['root'] = item['root']  # the main session it holds (auto_stacks.py)
     elif item.get('by') == 'user':
         group['by'] = 'user'  # the user made or renamed it. Neither: made before makers were recorded (2026-11-15)
     return group
@@ -146,7 +148,9 @@ def session_name(session_id, run=subprocess.run):
 
 
 def _maker(group):
-    return {'auto': True} if group.get('auto') else {'by': 'user'} if group.get('by') == 'user' else {}
+    if group.get('auto'):
+        return dict({'auto': True}, **({'root': group['root']} if group.get('root') else {}))
+    return {'by': 'user'} if group.get('by') == 'user' else {}
 
 
 def write(session_id, groups, run=subprocess.run):
@@ -230,7 +234,7 @@ def _pane_in(session_id, pane, run):
         raise GroupError(404, 'That tab is in another session. Refresh the list and try again.')
 
 
-def create(session_id, name, run=subprocess.run, pane=None, by_user=False, auto=False):
+def create(session_id, name, run=subprocess.run, pane=None, by_user=False, auto=False, root=None):
     """Add a group at the end of the list. With pane, move that tab into it. by_user: the user asked (groups_api.py).
     auto: Tether made it for helper tabs (removed when it empties)."""
     name = clean_name(name)
@@ -243,6 +247,8 @@ def create(session_id, name, run=subprocess.run, pane=None, by_user=False, auto=
         group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6)}
         if auto:
             group['auto'] = True
+            if root:
+                group['root'] = root
         elif by_user:
             group['by'] = 'user'
         write(session_id, groups + [group], run)
@@ -263,6 +269,7 @@ def rename(session_id, group_id, name, run=subprocess.run, by_user=True):
         group['name'] = name
         if by_user:
             group.pop('auto', None)
+            group.pop('root', None)
             group['by'] = 'user'
         write(session_id, groups, run)
     if group['project']:
@@ -289,6 +296,11 @@ def _labelled(session_id, group_id, run):
     shown = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}\t#{@group}')
     _check(shown, GONE_SESSION)
     return [pane for pane, _, label in (line.partition('\t') for line in shown.stdout.splitlines()) if label == group_id]
+
+
+def panes_in(session_id, group_id, run=subprocess.run):
+    """The panes labelled with group_id in the session."""
+    return _labelled(session_id, group_id, run)
 
 
 def _archive(group):
@@ -365,10 +377,16 @@ def free_name(groups, name):
     return name
 
 
-def create_unique(session_id, name, run=subprocess.run):
-    """Auto stacks: a new Tether-made group under a free form of name ("Name 2" when "Name" is taken)."""
+def create_unique(session_id, name, run=subprocess.run, root=None):
+    """Auto stacks: a new Tether-made group under a free form of name ("Name 2" when "Name" is taken). root: the main
+    session it is for."""
     with LOCK():
-        return create(session_id, free_name(read(session_id, run), name), run, auto=True)
+        return create(session_id, free_name(read(session_id, run), name), run, auto=True, root=root)
+
+
+def of_root(session_id, root, run=subprocess.run):
+    """The Tether-made group that holds root's family, or None."""
+    return next((g for g in read(session_id, run) if g.get('auto') and g.get('root') == root), None)
 
 
 def auto_move(session_id, pane, group_id, run=subprocess.run):

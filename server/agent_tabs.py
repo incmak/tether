@@ -85,7 +85,7 @@ def _start_group(body, caller, run, entries=(), *, folder='', branch=None):
     """Yield (group id, root pane, new tab name) for a new helper tab ("" = Unstacked), under the auto stack rules
     (auto_stacks.py). It may make the root's stack and move the root and the caller into it; when the start fails, they
     go back and an empty new stack goes away. branch: the --worktree branch."""
-    state = {'made': None, 'moved': []}  # moved: [(pane, (session id, group id))] that Tether moved
+    state = {'made': None, 'moved': [], 'before': set()}  # moved: [(pane, (session id, group id))] that Tether moved
     with groups.LOCK():
         try:
             session_id, current = groups.group_of_pane(caller['id'], run)
@@ -104,7 +104,15 @@ def _start_group(body, caller, run, entries=(), *, folder='', branch=None):
         raise
 
 
+def _owner(caller, root, entries):
+    """The helper record of a new tab: its owner, and its root with the root's conversation (auto_stacks.root_of)."""
+    root_entry = next((entry for entry in entries if entry['id'] == root), caller if root == caller['id'] else {})
+    return dict(helper_tabs.new_record(caller), root_pane=root, root_thread=helper_tabs._thread(root_entry))
+
+
 def _move_in(session_id, pane, group_id, run, state):
+    if not state['moved'] and state['made'] is None:
+        state['before'] = set(groups.panes_in(session_id, group_id, run))
     if groups.auto_move(session_id, pane, group_id, run):
         state['moved'].append((pane, (session_id, group_id)))
 
@@ -126,8 +134,11 @@ def _pick_group(body, caller, run, entries, session_id, current, folder, state):
         root_group = root_group if root_alive else None
     movable = [pane for pane in dict.fromkeys([root if root_alive else None, caller['id']])
                if pane and not groups.placed_by_user(pane, run)]
+    family = groups.of_root(session_id, root, run) if root_group is None else None
     if root_group is not None:
         target = root_group
+    elif family is not None:
+        target = family  # the root's stack exists, but the root is not in it (the user moved it out): no second stack
     elif root != caller['id'] and current is not None:
         target = current  # the root left its stack or closed: the caller's stack is the family's
     else:
@@ -142,7 +153,7 @@ def _pick_group(body, caller, run, entries, session_id, current, folder, state):
         task = (auto_stacks.helper_tab_name(name=body.get('name'), message=body.get('message') or '')
                 if not body.get('role') and delegate.normalize_review(body.get('review', False)) != 'new' else None)
         stack = body.get('group') if isinstance(body.get('group'), str) else None
-        made = groups.create_unique(session_id, auto_stacks.stack_name(source, stack, task), run)
+        made = groups.create_unique(session_id, auto_stacks.stack_name(source, stack, task), run, root=root)
         state['made'] = (session_id, made['id'])
         target = made
     for pane in movable:  # a tab in no stack joins; a tab in another stack stays there
@@ -153,8 +164,18 @@ def _pick_group(body, caller, run, entries, session_id, current, folder, state):
 
 def _undo_group(run, state):
     """After a failed start: move each tab Tether moved back to Unstacked, unless the user has moved it since, then drop
-    the stack Tether made if it is empty. Errors are ignored: the start error is the one to report."""
+    the stack Tether made if it is empty and still Tether's. When another tab joined the stack meanwhile (a second start
+    for the same root), the family is there: the tabs stay. Errors are ignored: the start error is the one to report."""
+    moved = {pane for pane, _ in state['moved']}
+    joined = False
+    for session_id, group in {place for _, place in state['moved']}:
+        try:
+            joined = joined or bool(set(groups.panes_in(session_id, group, run)) - moved - state['before'])
+        except (groups.GroupError, OSError, subprocess.SubprocessError):
+            joined = True  # unknown: keep the tabs where they are
     for pane, place in reversed(state['moved']):
+        if joined:
+            break
         try:
             if not groups.placed_by_user(pane, run):
                 session_id, group = groups.group_of_pane(pane, run)
@@ -164,7 +185,7 @@ def _undo_group(run, state):
             pass
     try:
         if state['made'] is not None:
-            groups.remove(*state['made'], run)
+            groups.drop_if_empty(*state['made'], run)  # never a stack the user renamed meanwhile
     except (groups.GroupError, OSError, subprocess.SubprocessError):
         pass
 
@@ -214,7 +235,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                 pane, name = delegate.start(caller, request, directory, run=run,
                                             recent=lambda: snapshot(caller).get('messages') or [],
                                             cwd=made['path'], worktree=made['branch'],
-                                            owner=dict(helper_tabs.new_record(caller), root_pane=root), group=group,
+                                            owner=_owner(caller, root, fresh), group=group,
                                             name=title)
         handler.respond(201, {'pane': pane, 'name': name, 'worktree': made})
         return
@@ -236,7 +257,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                 pane, name = delegate.start(caller, request,
                                             directory if directory and os.path.isdir(directory) else str(paths.HOME),
                                             run=run, recent=lambda: snapshot(caller).get('messages') or [],
-                                            cwd=body.get('cwd'), owner=dict(helper_tabs.new_record(caller), root_pane=root),
+                                            cwd=body.get('cwd'), owner=_owner(caller, root, entries),
                                             group=group, name=title)
             result = 201, {'pane': pane, 'name': name}
         elif action == 'link':

@@ -541,6 +541,95 @@ class TmuxTests(Bundles):
                 raise RuntimeError('launch failed')
         self.assertEqual((self.names(self.a), self.label(self.a1)), (['User choice'], mine['id']))
 
+    def test_rollback_keeps_a_stack_the_user_renamed_during_launch(self):  # review finding 2
+        run = self.run_tmux
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Docs'}, run) as (group, root, name):
+                groups.rename(self.a, group, 'Mine', run)
+                raise RuntimeError('launch failed')
+        self.assertEqual(self.names(self.a), ['Mine'], 'a stack the user renamed is the user\'s: rollback keeps it')
+
+    def test_rollback_keeps_the_family_when_another_start_joined(self):  # review finding 4, overlap
+        run = self.run_tmux
+        self.helper(self.a2, self.a1)
+        with self.assertRaises(RuntimeError):
+            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+                joined = self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1}])
+                raise RuntimeError('launch failed')
+        self.assertEqual((joined, self.label(self.a1), self.label(self.a2)), (group, group, group))
+        self.assertEqual(self.names(self.a), ['Billing'])
+
+    def test_one_stack_per_root_when_the_user_takes_the_root_out(self):  # review finding 4
+        run = self.run_tmux
+        made = self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'})
+        self.assertEqual(groups.read(self.a, run)[0]['root'], self.a1, 'the stack records its root')
+        third = terminal_input.new_window_after(self.a2, run)
+        self.tmux('set-option', '-p', '-t', third, '@group', made)  # keeps the stack alive
+        groups.move(self.a, self.a1, None, run, by_user=True)
+        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'}), made)
+        self.helper(self.a2, self.a1)
+        self.assertEqual(self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1}]), made)
+        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Billing'], ''), 'no "Billing 2"')
+        groups.rename(self.a, made, 'Payments', run)
+        self.assertNotIn('root', groups.read(self.a, run)[0], 'a user stack is no family stack')
+
+    def test_a_stale_cached_root_is_not_used(self):  # review finding 3
+        run = self.run_tmux
+        one, two = '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'
+        self.helper(self.a2, self.a1, owner_thread=one, root_pane=self.b1)
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.a1: two}.get, run), self.a2, 'the owner link is broken')
+        self.helper(self.a2, self.a1, root_pane=self.b1, root_thread=one)
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: two}.get, run), self.a1, 'the root holds another chat')
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: one}.get, run), self.b1)
+        self.assertEqual(agent_tabs._owner({'id': self.a2, 'thread': one}, self.a1, [{'id': self.a1, 'thread': two}])
+                         ['root_thread'], two)
+
+    def cleanup_snapshot(self, entries=()):
+        import auto_stacks_cleanup
+        return auto_stacks_cleanup, auto_stacks_cleanup.snapshot(self.a, list(entries), self.run_tmux)
+
+    def test_cleanup_apply_skips_a_stack_the_user_renamed_after_the_plan(self):  # review finding 1
+        run = self.run_tmux
+        old = {'id': 'gaaaaaaaa', 'name': 'B45 advisor log', 'project': ''}
+        groups.write(self.a, [old], run)
+        self.tmux('set-option', '-p', '-t', self.a2, '@group', old['id'])
+        self.helper(self.a2, self.a1)
+        cleanup, snap = self.cleanup_snapshot([{'id': self.a1, 'pane_name': 'Billing'}])
+        result = cleanup.plan(snap, {old['id']})
+        self.assertEqual((len(result['moves']), result['mark_auto'], len(result['renames'])), (1, [old['id']], 1))
+        groups.rename(self.a, old['id'], 'Mine', run)  # the user, between the dry run and the run
+        skipped = cleanup.apply(result, run)
+        self.assertTrue(skipped)
+        self.assertEqual(groups.read(self.a, run), [dict(old, name='Mine', by='user')])
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), ('', old['id']), 'nothing moved')
+
+    def test_cleanup_apply_removes_a_proven_stack_it_empties(self):  # review finding 6
+        run = self.run_tmux
+        third = terminal_input.new_window_after(self.a2, run)
+        keep, drop = {'id': 'gaaaaaaaa', 'name': 'Helpers', 'project': ''}, {'id': 'gbbbbbbbb', 'name': 'Other', 'project': ''}
+        groups.write(self.a, [keep, drop], run)
+        self.tmux('set-option', '-p', '-t', self.a2, '@group', keep['id'])
+        self.tmux('set-option', '-p', '-t', third, '@group', drop['id'])
+        self.helper(self.a2, self.a1)
+        self.helper(third, self.a1)
+        cleanup, snap = self.cleanup_snapshot([{'id': self.a1, 'pane_name': 'Billing'}])
+        self.assertEqual(cleanup.apply(cleanup.plan(snap, {keep['id'], drop['id']}), run), [])
+        found = groups.read(self.a, run)
+        self.assertEqual([(g['name'], g.get('auto'), g.get('root')) for g in found], [('Helpers', True, self.a1)],
+                         'the old name is the --stack name, which comes before the tab name (rule 4)')
+        self.assertEqual({self.label(p) for p in (self.a1, self.a2, third)}, {keep['id']})
+
+    def test_cleanup_renames_in_a_safe_order(self):  # review finding 8
+        import auto_stacks_cleanup
+        run = self.run_tmux
+        made = [dict({'id': f'g0000000{n}', 'name': name, 'project': ''}, auto=True)
+                for n, name in enumerate(('One', 'Two', 'X', 'Y'), 1)]
+        groups.write(self.a, made, run)
+        renames = [{'group': 'g00000001', 'old': 'One', 'new': 'Two'}, {'group': 'g00000002', 'old': 'Two', 'new': 'Three'},
+                   {'group': 'g00000003', 'old': 'X', 'new': 'Y'}, {'group': 'g00000004', 'old': 'Y', 'new': 'X'}]
+        self.assertEqual(auto_stacks_cleanup._rename_all(self.a, renames, run), [])
+        self.assertEqual(self.names(self.a), ['Two', 'Three', 'Y', 'X'])
+
     def test_setup_failure_removes_the_new_stack(self):
         caller = {'id': self.a1, 'pane_name': 'Docs'}
         with mock.patch.object(groups, 'auto_move', side_effect=groups.GroupError(404, 'gone')):

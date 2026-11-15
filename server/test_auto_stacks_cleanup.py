@@ -1,5 +1,8 @@
 """The one-time cleanup plan (rule 8). plan() is pure: these tests give it a snapshot of one session."""
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import auto_stacks_cleanup as cleanup
 
@@ -22,7 +25,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(out['moves'], [{'pane': '%1', 'from': '', 'to': A}, {'pane': '%3', 'from': B, 'to': A}])
         self.assertEqual((out['drops'], out['notes']), ([B], [{'from': B, 'to': A}]))
         self.assertEqual(out['renames'], [{'group': A, 'old': 'B45 advisor log', 'new': 'Advisor Log'}])
-        self.assertEqual(out['mark_auto'], [A], 'the kept stack is marked Tether-made')
+        self.assertEqual(out['mark_auto'], [A, B], 'proven stacks are marked, the dropped one too (drop_if_empty)')
+        self.assertEqual(out['roots'], {A: '%1'})
         self.assertEqual(out['unproven'], [])
 
     def test_a_stack_without_proof_is_not_touched(self):
@@ -75,6 +79,22 @@ class PlanTests(unittest.TestCase):
         text, after = cleanup.report(cleanup.plan(s, {B}), 2, {B: 'agent command'})
         self.assertIn('NOT PROVEN, not touched: tether bugs', text)
         self.assertEqual(after, 1)
+
+
+class CopyNotesTests(unittest.TestCase):  # review finding 5
+    def test_a_taken_prefixed_name_gets_a_number_and_a_copy_is_made_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folders = {pid: Path(temp, pid) for pid in ('src', 'dst')}
+            (folders['src'] / 'notes').mkdir(parents=True)
+            (folders['dst'] / 'notes').mkdir(parents=True)
+            (folders['src'] / 'notes' / 'a.md').write_text('new')
+            (folders['dst'] / 'notes' / 'a.md').write_text('theirs')
+            (folders['dst'] / 'notes' / 'old-a.md').write_text('earlier copy of another stack')
+            with mock.patch.object(cleanup.projects, 'bundle', folders.get):
+                cleanup._copy_notes('src', 'dst', 'old')
+                cleanup._copy_notes('src', 'dst', 'old')
+            notes = {p.name: p.read_text() for p in (folders['dst'] / 'notes').iterdir()}
+        self.assertEqual(notes, {'a.md': 'theirs', 'old-a.md': 'earlier copy of another stack', 'old-2-a.md': 'new'})
 
 
 if __name__ == '__main__':

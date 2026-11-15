@@ -115,7 +115,7 @@ def plan(snap, proven=()):
         went = [move['to'] for move in moves if move['from'] == gid]
         if went:
             notes.append({'from': gid, 'to': max(dict.fromkeys(went), key=went.count)})
-    renames, taken = [], {names[g].lower() for g in order if g not in drops and g not in auto}
+    renames, owners, taken = [], {}, {names[g].lower() for g in order if g not in drops and g not in auto}
     for gid in [g for g in order if g in auto and g not in drops] + [m['key'] for m in made]:
         inside = [p for p in place if place[p] == gid]
         roots = {snap['roots'][p] for p in inside} & set(families)
@@ -126,6 +126,8 @@ def plan(snap, proven=()):
         task = next((auto_stacks.tab_task(snap['entries'].get(p) or {}) for p in helpers
                      if auto_stacks.tab_task(snap['entries'].get(p) or {})), None)
         source = _source(snap['entries'].get(root), panes[root]) if root else {}
+        if root:
+            owners[gid] = root  # groups.py "root": the main session the stack holds
         if not root and old is not None:
             name = auto_stacks.goal(old) or old  # several families, or none with a live root: tidy the name only
         else:
@@ -134,9 +136,9 @@ def plan(snap, proven=()):
         taken.add(name.lower())
         if name != old:
             renames.append({'group': gid, 'old': old, 'new': name})
-    mark = [g for g in order if g in auto and g not in drops and not next(x for x in snap['groups'] if x['id'] == g).get('auto')]
+    mark = [g for g in order if g in auto and not next(x for x in snap['groups'] if x['id'] == g).get('auto')]
     return {'session': snap['session'], 'moves': moves, 'made': made, 'drops': drops, 'notes': notes,
-            'renames': renames, 'mark_auto': mark, 'orphans': orphans, 'kept': kept, 'names': names,
+            'renames': renames, 'mark_auto': mark, 'roots': owners, 'orphans': orphans, 'kept': kept, 'names': names,
             'unproven': unproven}
 
 
@@ -170,41 +172,95 @@ def _copy_notes(source_pid, target_pid, label):
     target = projects.bundle(target_pid) / 'notes'
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
     for note in sorted(source.glob('*.md')):
-        out = target / note.name
-        if out.exists():
+        out, number = target / note.name, 1
+        while out.exists():
             if out.read_bytes() == note.read_bytes():
-                continue
-            out = target / f'{label}-{note.name}'
-        shutil.copy2(note, out)
+                break
+            number += 1
+            out = target / (f'{label}-{note.name}' if number == 2 else f'{label}-{number - 1}-{note.name}')
+        else:
+            shutil.copy2(note, out)
+
+
+def _step(action, *args):
+    """One change of apply. A step that tmux or the stack rules refuse (the user changed something since the plan) is
+    skipped and reported; the rest goes on."""
+    try:
+        action(*args)
+        return None
+    except (groups.GroupError, OSError, subprocess.SubprocessError) as exc:
+        return f'skipped {action.__name__}{tuple(a for a in args if isinstance(a, str))}: {exc}'
+
+
+def _rename_all(session_id, renames, run):
+    """Rename in an order where no new name is still in use: A -> B waits for B -> C. A loop (A -> B, B -> A) goes
+    through a free temporary name first."""
+    pending, skipped = [dict(r) for r in renames], []
+    while pending:
+        used = {g['id']: g['name'].lower() for g in groups.read(session_id, run)}
+        ready = next((r for r in pending
+                      if not any(name == r['new'].lower() and gid != r['group'] for gid, name in used.items())), None)
+        if ready is None:  # the first new name is held by another stack
+            first = pending[0]
+            holder = next(gid for gid, name in used.items() if name == first['new'].lower() and gid != first['group'])
+            error = None
+            if holder in {r['group'] for r in pending}:  # a loop (A -> B, B -> A): park the holder under a free name
+                park = groups.free_name([{'name': n} for n in used.values()], first['new'] + ' old')
+                error = _step(groups.rename, session_id, holder, park, run, False)
+                if error is None:
+                    continue
+            skipped.append(error or f"skipped rename to {first['new']}: a stack the user made holds that name")
+            pending.remove(first)
+            continue
+        pending.remove(ready)
+        skipped.append(_step(groups.rename, session_id, ready['group'], ready['new'], run, False))
+    return [s for s in skipped if s]
 
 
 def apply(result, run=subprocess.run):
-    session_id = result['session']
+    """Do the plan. It re-reads the stacks first and acts only on stacks that are still Tether's: a stack the user
+    renamed or made since the plan (by "user") is not marked, moved into, renamed or removed. Returns the skipped steps."""
+    session_id, skipped = result['session'], []
     with groups.LOCK():
         current = groups.read(session_id, run)
         for group in current:
-            if group['id'] in result['mark_auto']:
+            if group['id'] in result['mark_auto'] and group.get('by') != 'user':
                 group['auto'] = True
+            if group.get('auto') and result.get('roots', {}).get(group['id']):
+                group['root'] = result['roots'][group['id']]
         groups.write(session_id, current, run)
+        ours = {g['id'] for g in groups.read(session_id, run) if g.get('auto')}
+        skipped += [f"skipped {g}: no longer Tether's" for g in result['mark_auto'] if g not in ours]
         ids = {}
         for made in result['made']:
-            ids[made['key']] = groups.create_unique(session_id, 'Work', run)['id']
+            ids[made['key']] = groups.create_unique(session_id, 'Work', run, root=made['root'])['id']
+            ours.add(ids[made['key']])
         by_id = {g['id']: g for g in groups.read(session_id, run)}
         for note in result['notes']:
             target = by_id.get(ids.get(note['to'], note['to']))
             source = by_id.get(note['from'])
-            if source and target and source['project']:
+            if source and target and source['project'] and target['id'] in ours:
                 pid = target['project'] or groups.context(session_id, target['id'], run)
                 slug = ''.join(c if c.isalnum() else '-' for c in source['name'].lower()).strip('-') or 'stack'
                 _copy_notes(source['project'], pid, slug)
         for move in result['moves']:
-            if groups.placed_by_user(move['pane'], run):
-                continue  # the user moved it since the plan
-            groups.move(session_id, move['pane'], ids.get(move['to'], move['to']), run)
+            to = ids.get(move['to'], move['to'])
+            try:
+                now = groups.group_of_pane(move['pane'], run)[1]
+            except groups.GroupError as exc:
+                skipped.append(f"skipped move {move['pane']}: {exc}")
+                continue
+            if groups.placed_by_user(move['pane'], run) or (now['id'] if now else '') != (move['from'] or '') \
+                    or (move['from'] and move['from'] not in ours) or to not in ours:
+                skipped.append(f"skipped move {move['pane']}: it or its stack changed since the plan")
+                continue
+            skipped.append(_step(groups.move, session_id, move['pane'], to, run))
         for gid in result['drops']:
-            groups.drop_if_empty(session_id, gid, run)
-        for rename in result['renames']:
-            groups.rename(session_id, ids.get(rename['group'], rename['group']), rename['new'], run, by_user=False)
+            skipped.append(_step(groups.drop_if_empty, session_id, gid, run))
+        renames = [dict(r, group=ids.get(r['group'], r['group'])) for r in result['renames']]
+        skipped += [f"skipped rename {r['old']}: no longer Tether's" for r in renames if r['group'] not in ours]
+        skipped += _rename_all(session_id, [r for r in renames if r['group'] in ours], run)
+    return [s for s in skipped if s]
 
 
 def main(argv=None, run=subprocess.run):
@@ -234,7 +290,8 @@ def main(argv=None, run=subprocess.run):
         total_after += after
         print(text + '\n')
         if not args.dry_run:
-            apply(result, run)
+            for line in apply(result, run):
+                print('- ' + line)
     print(f"Total stacks: {total_before} -> {total_after}{' (dry run: nothing changed)' if args.dry_run else ''}")
     return 0
 
