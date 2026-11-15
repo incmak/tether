@@ -126,6 +126,14 @@ class Parse(unittest.TestCase):
         self.assertTrue(any(item['type'] == 'text' and item['mono'] for item in found['blocks']))
         self.assertEqual(dialog('help_commands')['tab'], 'Custom commands')
 
+    def test_body_text_that_looks_like_a_hint_is_no_footer(self):
+        # A short pane clips /help: its last rows are then part of the shortcut table.
+        lines = frame('help').rstrip().split('\n')
+        cut = next(index for index, line in enumerate(lines) if 'ctrl + t to toggle tasks' in line)
+        found = claude_dialog.parse('\n'.join(lines[:cut + 1]))
+        self.assertEqual(found['hints'], [])
+        self.assertEqual(claude_dialog.allowed(found), {'Escape', 'Left', 'Right'})
+
     def test_plugin_marks_and_wrapped_tab_row(self):
         for name in ('plugin', 'plugin_narrow'):
             found = dialog(name)

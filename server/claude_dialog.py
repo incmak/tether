@@ -146,7 +146,9 @@ def _footer(rows):
         start -= 1
     for index in range(start, end):
         found = hints(' '.join(row[0].strip() for row in rows[index:end]))
-        if found:
+        # Every dialog footer of 2.1.325 names Esc. Body text can look like a hint: a clipped /help shortcut table ends
+        # in "ctrl + t to toggle  ctrl + s to ↓".
+        if found and any(key['key'] == 'Escape' for hint in found for key in hint['keys']) and all(len(hint['effect']) <= 40 for hint in found):
             return index, found
     return end, []
 
