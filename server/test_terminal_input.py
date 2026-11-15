@@ -46,6 +46,26 @@ class NumberedDraftTests(unittest.TestCase):
                 self.assertEqual(terminal.attention(self.entry, screen, False, now=100)['reason'], 'menu')
 
 
+class HeadsUpAttentionTests(unittest.TestCase):
+    """A ✦ Heads up card is a side agent's note. Words in it ("before you press Enter") are not a terminal prompt."""
+    entry = {'id': '%1', 'agent': 'claude'}
+
+    def setUp(self):
+        self.enterContext(patch.dict(terminal._attention_seen, clear=True))
+        self.screen = (FIXTURES / 'claude_2.1.325_heads_up' / 'offer_press_enter.txt').read_text()
+
+    def attention(self, screen):
+        terminal.attention(self.entry, screen, False, now=0)
+        return terminal.attention(self.entry, screen, False, now=100)
+
+    def test_card_text_does_not_open_a_panel(self):
+        self.assertIsNone(self.attention(self.screen))
+
+    def test_press_enter_outside_a_card_still_opens_a_panel(self):
+        screen = self.screen.replace('✦ Heads up · ', 'Note · ')
+        self.assertEqual((self.attention(screen) or {}).get('reason'), 'prompt')
+
+
 class PermissionsAttentionTests(unittest.TestCase):
     entry = {'id': '%permissions', 'agent': 'claude'}
 

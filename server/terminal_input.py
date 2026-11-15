@@ -589,6 +589,19 @@ def login_progress(entry, screen, now=None):
     return {key: state[key] for key in ('phase', 'message')} if state['phase'] != 'waiting' else None
 
 
+def hint_rows(lines, agent):
+    """The last 8 rows, without a Claude ✦ Heads up card above the input box. The card is a side agent's prose
+    ("before you press Enter"), not a prompt; footer reads its own keys."""
+    import footer  # footer imports this module
+    rows = list(range(max(0, len(lines) - 8), len(lines)))
+    anchor = footer.input_anchor(lines) if agent == 'claude' else None
+    if anchor is not None:
+        start = next((at for at in reversed(range(anchor - 1)) if footer.HEADS_UP.match(lines[at])), None)
+        if start is not None and footer.heads_up(lines[start:anchor - 1]):
+            rows = [at for at in rows if not start <= at < anchor - 1]
+    return [lines[at] for at in rows]
+
+
 def attention(entry, screen, working, now=None, login_screen=None, styled_screen=None, dialog=None):
     """Catch-all for any screen that waits on the user but is not a recognized approval.
 
@@ -625,7 +638,7 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     elif dialog is not None:
         # A slash-command dialog (/mcp, /resume, /config ...), read as data: see claude_dialog.
         reason, tail = 'dialog', dialog['text'].splitlines()
-    elif INPUT_HINT.search(joined_lines(lines[-8:])):
+    elif INPUT_HINT.search(joined_lines(hint_rows(lines, entry['agent']))):
         reason = 'prompt'
     elif marker and not working and lines and not any(line.startswith(marker) for line in lines[-15:]):
         reason = 'no-input-box'

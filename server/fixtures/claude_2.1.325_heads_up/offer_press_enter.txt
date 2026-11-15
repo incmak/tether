@@ -1,0 +1,16 @@
+  make it faster. claude --help: --bare needs an API key, so it cannot cut the start time for a subscription login. Not
+  checked: Codex routing latency, and how long the toast stays open.
+  NEEDS_USER: no
+
+  Needs you: no
+
+✻ Churned for 4m 9s · done 7:18 AM
+                                                                                                                    [-]
+✦ Heads up · The plan sends your search text to Claude as soon as no result matches, before you press Enter.
+  1: Learn more   2: Knew this already   0: Dismiss
+                                                                                new task? /clear to save 126.9k tokens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Fable 5.2 | ctx 12% (120k/1000k) | 5h 13% | 7d 45% | search-anywhere | search-anywhere
+  ⏵⏵ auto mode on (shift+tab to cycle)
