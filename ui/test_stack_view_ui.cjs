@@ -118,7 +118,8 @@ async function main() {
     await page.locator('.chat-panel .group-tab[aria-current="true"]', { hasText: 'Ship' }).waitFor()
     const start = await scrolled(ROW)
     const middle = page.locator(`${ROW} .group-tab`, { hasText: 'Backlog and planning' })
-    await middle.scrollIntoViewIfNeeded()
+    // Clear of the 24 px edge fade (revealLeft): scrollIntoViewIfNeeded can leave it under the fade, which counts as not in view.
+    await middle.evaluate(element => element.scrollIntoView({ inline: 'center', block: 'nearest' }))
     const before = await scrolled(ROW)
     await middle.click()
     await page.locator('.chat-panel .group-tab[aria-current="true"]', { hasText: 'Backlog and planning' }).waitFor()

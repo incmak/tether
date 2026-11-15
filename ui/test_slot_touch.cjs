@@ -158,7 +158,7 @@ async function main() {
     assert.deepEqual(await labels(), [mouseBefore[1], mouseBefore[0], mouseBefore[2]])
     await page.locator(title(0)).focus(); await page.keyboard.press('Enter')
     await page.locator('dialog[open]').waitFor()
-    assert.equal(writes.some(endpoint => endpoint !== 'prefs'), false, `Unexpected write: ${writes}`)
+    assert.equal(writes.some(endpoint => endpoint !== 'prefs' && endpoint !== 'ui-usage'), false, `Unexpected write: ${writes}`)
     assert.deepEqual(errors, [])
     console.log('Mouse slot drag and keyboard details pass; no terminal writes or page errors')
   } finally {

@@ -14,6 +14,7 @@ const TARGET = '/workspace/app'
 const codexPane = { id: '%2', tmux_session: '$1', label: 'app:0.0', pane_name: 'Docs pass', agent: 'codex', dir: FOLDER, state: 'Idle', writable: true, thread: 't2', approval: null }
 const claudePane = { ...codexPane, id: '%1', label: 'app:0.1', pane_name: 'Plan', agent: 'claude', thread: 't1' }
 const fixture = {
+  undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
   sessions: { sessions: [claudePane, codexPane], default_thread: 't2' },
   chat: { messages: [], busy: false, thread: 't2', agent: 'codex', writable: true, session: '%2', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'gpt-test', mode: 'default', notices: [] },

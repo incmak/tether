@@ -5,7 +5,7 @@ const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -89,7 +89,7 @@ async function main() {
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           return route.fulfill({ json: fixture[endpoint] || {} })
         }
-        if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+        if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
       })
       await page.addInitScript(() => {
@@ -192,12 +192,13 @@ async function main() {
           if (pres !== 1) errors.push('want the tokens chart as the one terminal drawing')
           if (await card.getByRole('tab', { selected: true }).last().innerText() !== 'Models') errors.push('the Models view is not marked')
         }
-        for (const button of await card.getByRole('button').all()) {
-          const size = await button.boundingBox()
-          if (size && size.height < 24) errors.push(`button ${(await button.innerText()) || 'icon'} is ${Math.round(size.height)} px high`)
-        }
-        const wide = await card.evaluate(node => [...node.querySelectorAll('*')].filter(item => !item.closest('pre, .perm-tabs, .dlg-sr') && item.scrollWidth > item.clientWidth + 1 && getComputedStyle(item).overflowX === 'visible').length)
-        if (wide) errors.push(`${wide} elements are cut off sideways`)
+        // One round trip: the shared browser is remote, so a call per button made each case take seconds.
+        const short = await card.evaluate(node => [...node.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"]')]
+          .filter(button => { const box = button.getBoundingClientRect(); return box.width > 0 && box.height > 0 && box.height < 24 && !button.closest('[hidden], [aria-hidden="true"]') })
+          .map(button => `button ${button.innerText || 'icon'} is ${Math.round(button.getBoundingClientRect().height)} px high`))
+        errors.push(...short)
+        const wide = await card.evaluate(node => [...node.querySelectorAll('*')].filter(item => !item.closest('pre, .perm-tabs, .dlg-sr') && item.scrollWidth > item.clientWidth + 1 && getComputedStyle(item).overflowX === 'visible').map(item => `${item.tagName.toLowerCase()}.${[...item.classList].join('.')} "${item.textContent.slice(0, 40)}"`))
+        if (wide.length) errors.push(`${wide.length} elements are cut off sideways: ${wide.join('; ')}`)
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
         if (overflow > 0) errors.push(`the page scrolls sideways by ${overflow} px`)
         if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}.png`) })

@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-12/guided-setup/shots')
@@ -44,6 +44,7 @@ let reviewState = { due: true, reason: 'disputed', new: 1, disputed: 1, total: 3
   groups: [{ key: 'disputed', lessons: [disputedLesson] }, { key: 'stale', lessons: [staleLesson] }, { key: 'other', lessons: [{ ...autonomy.learning.global[0], project: null, project_name: null, flags: [] }] }],
   check: { state: 'idle' } }
 const fixture = {
+  undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
   sessions: { sessions: [paneA, paneB], default_thread: 't1' },
   chat: { messages: [], busy: false, thread: 't1', agent: 'claude', writable: true, session: '%1', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
@@ -153,7 +154,7 @@ async function main() {
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })
       }
-      if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+      if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
       unexpected.add(`${url.origin}${url.pathname}`)
       return route.abort('blockedbyclient')
     })

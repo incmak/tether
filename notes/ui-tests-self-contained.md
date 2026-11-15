@@ -136,3 +136,12 @@ All fixture servers, browser pages, and child processes from the successful suit
 The detached checkout remains in `.release-work/ui-tests-self-contained/checkout` at `759323a`.
 It retains the build and screenshot evidence. No process runs from that checkout.
 GitHub runs triggered by pushes are remote CI jobs; their status remains visible on GitHub.
+
+## Shared browser in a container (B88, 2026-11-15)
+
+- Since B89 the shared browser runs in a container. Its `127.0.0.1` is the container, not this host, on purpose.
+- Rule: a test page must not load the test's local server through the browser network. In a `page.route` handler, use
+  `serveLocal(route)` from `browser_test_helper.cjs`, not `route.continue()`. It fetches from the test process.
+- A test that measures this host's real network (timing, bytes, compression) calls `getBrowser({ local: true })`.
+  Today only `test_cold_load.cjs` does this.
+- `run_ui_tests.cjs` finds browser tests by `const { getBrowser, ... } = require('./browser_test_helper.cjs')`.

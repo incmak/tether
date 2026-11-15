@@ -172,7 +172,7 @@ async function main() {
       child.stdout.on('data', data => { stdout += data; if (/^\d+\n/.test(stdout)) finish(null, Number(stdout.split('\n')[0])) })
     })
     proxy = await throttle(port)
-    browser = await getBrowser()
+    browser = await getBrowser({ local: true })
     for (const [name, viewport, target, budget] of [
       ['desktop', { width: 1280, height: 900 }, port, number('BUDGET_DESKTOP_MS', 2000)],
       ['phone', { width: 390, height: 844 }, proxy.port, number('BUDGET_PHONE_MS', 4000)],

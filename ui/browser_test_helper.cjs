@@ -22,8 +22,10 @@ function sharedEndpoint(env = process.env) {
   return { url: `ws://127.0.0.1:${config.port}/cdp/${config.token}`, source: 'Tether browser config' }
 }
 
-async function getBrowser() {
-  const shared = sharedEndpoint()
+// local: true is for tests that measure this host's real network (timing, bytes, compression). The shared browser
+// runs in a container without access to this host's loopback, so those tests use local headless Chromium.
+async function getBrowser({ local = false } = {}) {
+  const shared = local ? null : sharedEndpoint()
   if (shared) {
     console.log(`Browser: shared Chromium via ${shared.source}`)
     try { return await chromium.connectOverCDP(shared.url, { timeout: 15000 }) } catch {
@@ -53,4 +55,10 @@ async function getBrowser() {
   throw new Error('No usable Chromium. Run npm ci, then npx playwright-core install --with-deps chromium in ui/, or start Tether with its agent browser enabled.')
 }
 
-module.exports = { getBrowser, sharedEndpoint }
+// The shared browser runs in a container and cannot reach this host's loopback (by design, B89).
+// Fetch a request to the test's local server from this process instead, so tests work in every browser.
+async function serveLocal(route) {
+  return route.fulfill({ response: await route.fetch() })
+}
+
+module.exports = { getBrowser, sharedEndpoint, serveLocal }

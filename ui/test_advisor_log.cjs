@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/advisor-log/shots')
@@ -32,6 +32,7 @@ const project = { id: PID, name: 'web', revision: 1, budget: 4000, budget_min: 1
 const levels = [0, 1, 2, 3, 4].map(level => ({ level, name: `Level ${level}`, summary: 'Rules for this level.' }))
 const pane = { id: '%1', tmux_session: '$1', label: 'Advisor log test', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 'adv-thread', approval: null }
 const fixture = {
+  undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
   sessions: { sessions: [pane], default_thread: pane.thread },
   chat: { messages: [{ id: 'm1', role: 'user', text: 'Hello', time: '2026-11-15T08:00:00Z' }], busy: false, thread: pane.thread, agent: 'claude', writable: true, session: pane.id, earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
@@ -81,6 +82,7 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (request.method() !== 'GET' && endpoint === 'prefs') return route.fulfill({ json: { prefs: {}, version: 1 } })
+        if (request.method() === 'POST' && endpoint === 'ui-usage') return route.fulfill({ json: { gen: '' } })
         if (request.method() !== 'GET') { unexpected.add(`POST ${endpoint}`); return route.fulfill({ status: 500, json: { error: 'no writes here' } }) }
         if (endpoint === 'projects/advisor-log') {
           asked.push(url.searchParams.get('project'))
@@ -96,7 +98,7 @@ async function main() {
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })
       }
-      if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+      if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
       unexpected.add(`${url.origin}${url.pathname}`)
       return route.abort('blockedbyclient')
     })

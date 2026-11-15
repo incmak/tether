@@ -2,7 +2,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/overlay-regression/shots')
@@ -45,7 +45,7 @@ function fixtures(state) {
     host: { name: 'Test server', office: false },
     catalog: { commands: [], plugins: [], mcp: [], note: '' },
     stream: {},
-    'codex-runs': { pane: '%1', running: 0, runs: [] }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
+    'codex-runs': { pane: '%1', running: 0, runs: [] }, undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null }, 'autonomy/review': { due: false, reason: null, new: 0, disputed: 0, total: 0, last_review: 0, snoozed_until: 0, groups: [] },
     'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
     'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
     usage: { claude: null, codex: null },
@@ -263,7 +263,7 @@ async function main() {
           return route.fulfill({ json: fixture[endpoint] || {} })
         }
         if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
-        if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+        if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         unexpected.add(`${url.origin}${url.pathname}`)
         return route.abort('blockedbyclient')
       })

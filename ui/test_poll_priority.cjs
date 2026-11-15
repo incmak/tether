@@ -50,7 +50,7 @@ const advance = async ms => {
 
 async function requestPriority() {
   const seen = []
-  const { request } = load('api.ts', {}, { fetch: async (url, init) => { seen.push({ url, init }); return { ok: true, status: 200, json: async () => ({}) } } })
+  const { request } = load('api.ts', {}, { fetch: async (url, init) => { seen.push({ url, init }); return { ok: true, status: 200, headers: new Headers(), json: async () => ({}) } } })
   await request('browser/agents', undefined, undefined, undefined, undefined, 'low')
   await request('sessions')
   await request('send', { text: 'x' })

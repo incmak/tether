@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
@@ -114,7 +114,7 @@ async function main() {
           }
           return route.fulfill({ json: fixture[endpoint] || {} })
         }
-        if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+        if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
         return route.abort('blockedbyclient')
       })
       await page.addInitScript(() => {

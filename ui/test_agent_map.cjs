@@ -3,7 +3,7 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/agent-map/shots')
@@ -33,6 +33,7 @@ const detail = id => ({ ...agents.find(item => item.id === id), prompt: 'Find th
 const messages = Array.from({ length: 12 }, (_, i) => ({ id: `m${i}`, role: i % 2 ? 'assistant' : 'user', text: `Message ${i + 1}.`, time: '2026-11-11T08:00:00Z' }))
 const pane = { id: '%1', tmux_session: '$1', label: 'Agent map test', agent: 'claude', dir: '/srv/project', state: 'Working', writable: true, thread: 'map-thread', approval: null }
 const fixture = {
+  undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
   sessions: { sessions: [pane], default_thread: pane.thread },
   chat: { messages, busy: true, thread: pane.thread, agent: 'claude', writable: true, session: pane.id, earlier: 0, limit: 100, state: 'Working', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
@@ -84,7 +85,7 @@ async function main() {
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })
       }
-      if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
+      if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
       unexpected.add(`${url.origin}${url.pathname}`)
       return route.abort('blockedbyclient')
     })

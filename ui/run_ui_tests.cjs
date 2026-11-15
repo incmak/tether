@@ -9,7 +9,7 @@ if (mode && !['--unit', '--browser'].includes(mode)) {
   process.exit(1)
 }
 const tests = fs.readdirSync(__dirname).filter(name => /^test_.*\.cjs$/.test(name)).sort().filter(name => {
-  const browser = /const\s*\{\s*getBrowser\s*\}\s*=\s*require\(['"]\.\/browser_test_helper\.cjs['"]\)/.test(fs.readFileSync(path.join(__dirname, name), 'utf8'))
+  const browser = /const\s*\{\s*getBrowser\b[^}]*\}\s*=\s*require\(['"]\.\/browser_test_helper\.cjs['"]\)/.test(fs.readFileSync(path.join(__dirname, name), 'utf8'))
   return !mode || (mode === '--browser' ? browser : !browser)
 })
 let passed = 0, failed = 0
