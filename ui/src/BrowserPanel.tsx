@@ -558,6 +558,23 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     canvas.addEventListener('wheel', wheel, { passive: false })
     return () => canvas.removeEventListener('wheel', wheel)
   }, [canvasBox]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Live view: Selkies sends each wheel event as whole wheel clicks, so a trackpad scrolled about 12 times too far.
+  // The live page hands wheel turns here instead (server/selkies/tether-wheel.js), and they go to Chrome with the
+  // exact pixels, like the picture view. Only this frame's page on the live origin may send them.
+  useEffect(() => {
+    if (!liveView || !liveSrc) return
+    const origin = new URL(liveSrc).origin
+    const number = (value: unknown, limit: number) => typeof value === 'number' && Number.isFinite(value) ? Math.max(-limit, Math.min(limit, value)) : 0
+    const onMessage = (event: MessageEvent) => {
+      const frame = liveFrameRef.current, tab = tabRef.current, data = event.data
+      if (!frame || event.source !== frame.contentWindow || event.origin !== origin || !tab) return
+      if (!data || typeof data !== 'object' || data.tether !== 'wheel' || notingRef.current) return
+      push({ type: 'wheel', x: Math.round(Math.max(0, number(data.x, 1)) * tab.width), y: Math.round(Math.max(0, number(data.y, 1)) * tab.height),
+        dx: number(data.dx, 10000), dy: number(data.dy, 10000), modifiers: (data.alt === true ? 1 : 0) | (data.meta === true ? 4 : 0) | (data.shift === true ? 8 : 0) })
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [liveView, liveSrc]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard: a hidden text box takes the keys. Keys with a meaning go as key events; phone keyboards send text.
   const lastEscape = useRef(0)

@@ -90,6 +90,22 @@ class ContainerTests(unittest.TestCase):
         self.assertNotIn('proxy_pass', text)
         self.assertFalse((browser_container.FILES / 'sock_relay.py').exists())
 
+    def test_live_page_hands_wheel_turns_to_the_panel(self):
+        # Selkies sends whole wheel clicks (a trackpad scrolled about 12 times too far); tether-wheel.js sends the
+        # turns to the panel instead. init-nginx rebuilds the web root from the dashboard folder, so mount them there.
+        self.container.start()
+        args = self.runner.ran('run')[0]
+        mounts = [arg for prev, arg in zip(args, args[1:]) if prev == '-v']
+        files, dashboard = browser_container.FILES, browser_container.DASHBOARD
+        self.assertIn('%s:%s/index.html:ro' % (files / 'dashboard-index.html', dashboard), mounts)
+        self.assertIn('%s:%s/tether-wheel.js:ro' % (files / 'tether-wheel.js', dashboard), mounts)
+        page = (files / 'dashboard-index.html').read_text()
+        self.assertIn('<script src="tether-wheel.js"></script>', page)
+        self.assertLess(page.index('tether-wheel.js'), page.index('type="module"'))  # runs before the Selkies client
+        script = (files / 'tether-wheel.js').read_text()
+        self.assertIn("tether: 'wheel'", script)
+        self.assertIn('capture: true', script)
+
     def test_each_start_gets_a_new_password_and_the_web_auth_matches_it(self):
         self.assertIsNone(self.container.web_auth())
         self.container.start()

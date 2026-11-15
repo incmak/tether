@@ -41,6 +41,9 @@ IMAGE = 'lscr.io/linuxserver/chromium@sha256:ff1b8235e20367c3b660d31892e14428687
 FILES = Path(__file__).resolve().parent / 'selkies'
 START_TIMEOUT = 90  # first start pulls nothing (pinned image is local) but Selkies and Chromium take 10-20 s
 LIVE_PREFIX = '/browser/live/'
+# The image's Selkies web client. init-nginx copies it to the web root at each start. dashboard-index.html is its
+# index.html with one more script (tether-wheel.js); it names the image's hashed asset files, so update it with IMAGE.
+DASHBOARD = '/usr/share/selkies/selkies-dashboard'
 # Tether serves the live view on this port only (server.BrowserLiveOriginHandler), so it has its own origin. Behind
 # tailscale serve, publish it too: tailscale serve --bg --https=7698 http://127.0.0.1:7698
 LIVE_PORT = int(os.environ.get('MOBILE_TMUX_BROWSER_LIVE_PORT', '7698'))
@@ -112,6 +115,10 @@ class Container:
                 '-e', 'SELKIES_UNIX_SOCKET=/sock/web.sock', '-e', 'SELKIES_ENABLE_BASIC_AUTH=true',
                 '-e', 'SELKIES_ALLOWED_ORIGINS=', '-e', 'SELKIES_WEB_ROOT=/usr/share/selkies/web',
                 '-v', '%s:/defaults/default.conf:ro' % (self.files / 'nginx-default.conf'),
+                # Wheel and trackpad turns go to the panel, which scrolls Chromium by the exact pixels (tether-wheel.js).
+                # init-nginx deletes and rebuilds the web root from this dashboard folder, so the files go there.
+                '-v', '%s:%s/index.html:ro' % (self.files / 'dashboard-index.html', DASHBOARD),
+                '-v', '%s:%s/tether-wheel.js:ro' % (self.files / 'tether-wheel.js', DASHBOARD),
                 '-v', '%s:/tether:ro' % self.files,
                 '-v', '%s:/usr/bin/wrapped-chromium:ro' % (self.files / 'wrapped-chromium'),
                 '-v', '%s:/sock' % self.sock_dir]
