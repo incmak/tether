@@ -38,6 +38,16 @@ def _config():
     return config if isinstance(config, dict) else {}
 
 
+def _url(base_url, pane):
+    """Link to the tab inside the installed app's scope (/chat/), in the ?session= form the chat UI reads.
+
+    A link outside the scope (the old /mobile/#session= form) opens a browser tab instead of the installed app.
+    """
+    if not base_url:
+        return ''
+    return base_url.rstrip('/') + '/chat/' + ('?session=' + quote(pane, safe='') if pane else '')
+
+
 def _argv(ask):
     config = _config()
     if config.get('enabled') is False:
@@ -49,7 +59,7 @@ def _argv(ask):
     pane = str(ask.get('pane') or '')
     values = {'{title}': 'Tether: ' + str(ask.get('name') or _name(pane) or pane),
               '{question}': str(ask.get('next') or ''), '{pane}': pane,
-              '{url}': base_url.rstrip('/') + '/mobile/#session=' + quote(pane, safe='') if base_url else ''}
+              '{url}': _url(base_url, pane)}
     argv = []
     for arg in command:
         for placeholder, value in values.items():
@@ -93,7 +103,7 @@ def send(ask, *, clock=time.monotonic, runner=subprocess.run):
 
 def run_test():
     """Run the configured test command in the foreground, shared by the API and CLI."""
-    argv = _argv({'pane': '%0', 'next': 'Test ping from Tether'})
+    argv = _argv({'pane': '', 'name': 'Test', 'next': 'Test ping from Tether'})  # no real tab: the link opens Tether
     if argv is None:
         return {'ok': False, 'code': None, 'detail': 'Urgent ping is off: no valid urgent-ping.json config.'}
     try:
