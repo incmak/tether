@@ -22,6 +22,15 @@
 .preview-error p { margin: 0 0 8px; }
 .preview-error-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin-top: 16px; }
 .preview-error-actions a { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+/* Dev servers: a one-line hint under the head, and the list of servers to pick from when a port does not answer. */
+.preview-hint { flex: none; margin: 0; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.preview-hint code { font-size: 12px; }
+.preview-error { max-height: 100%; overflow-y: auto; overflow-wrap: anywhere; }
+.preview-servers { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.preview-servers h3 { margin: 0 0 10px; font-family: inherit; font-size: 13px; font-weight: 600; color: var(--muted); }
+.preview-servers ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.preview-servers button { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; width: 100%; min-height: 44px; padding: 8px 14px; text-align: start; font-variant-numeric: tabular-nums; }
+.preview-servers small { color: var(--muted); font-size: 12px; }
 .preview-wide-only { display: none; }
 /* The phone sheet: the body area has the white page; the frame swallows touches, so only the head drags the sheet down. */
 @media (max-width: 599.98px) {

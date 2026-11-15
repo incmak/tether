@@ -3,7 +3,7 @@ import { fileChecks } from './fileChecks'
 import { useIsMarkdownCodeBlock } from '@assistant-ui/react-markdown'
 import type { Pane } from './api'
 import { tabTarget } from './tabLinks'
-import { PreviewOpener, artifactUrl } from './preview'
+import { PreviewOpener, artifactUrl, localUrl } from './preview'
 
 // Paths an agent names in a reply (`shots/row-menu.png`, [clip](out/demo.mp4), src/App.tsx:42) open on the phone through
 // GET /mobile/api/file. the server decides what may open: home folder only, no secrets. Media, text and Office files open in Tether;
@@ -112,6 +112,10 @@ export function InlineCode(props: React.ComponentProps<'code'>) {
   const { media, open } = useOpen(block ? '' : text)
   const inLink = useContext(InsideLink)
   const tab = useTab(block || media || inLink ? '' : text)
+  const preview = useContext(PreviewOpener)
+  // `http://localhost:5173/` or `localhost:5173` in code: the dev server opens in the preview drawer.
+  const local = preview && !block && !media && !inLink && !tab ? localUrl(text, true) : null
+  if (local) return <FileLink open={() => preview!.open(local)} label={`Preview ${local.path}`}><code {...props} /></FileLink>
   if (tab) return <FileLink open={tab.open} label={`Open the tab ${text}`}><code {...props} /></FileLink>
   if (!open || inLink) return <code {...props} className={media ? [props.className, 'file-chip'].filter(Boolean).join(' ') : props.className} />
   return <FileLink open={open} label={`${media?.kind === 'file' ? 'Download' : 'Open'} ${text}`}><code {...props} /></FileLink>
@@ -128,11 +132,14 @@ export function Link({ href = '', children, ...props }: React.ComponentProps<'a'
   return <WebLink {...props} href={href}>{children}</WebLink>
 }
 
-// A claude.ai artifact this chat published opens its local copy in the preview drawer. Other links open in a new browser tab.
+// A claude.ai artifact this chat published opens its local copy in the preview drawer. A link to a dev server on the
+// agent's machine (http://localhost:5173/) opens there too: the phone cannot reach that address. Other links open in a new browser tab.
 function WebLink({ href = '', children, ...props }: React.ComponentProps<'a'>) {
   const preview = useContext(PreviewOpener)
   const remote = artifactUrl(href)
   const artifact = remote ? preview?.artifactFor(remote) : undefined
+  const local = preview ? localUrl(href) : null
+  if (preview && local) return <FileLink open={() => preview.open(local)} label={`Preview ${local.path}`}>{children}</FileLink>
   if (preview && artifact) return <FileLink open={() => preview.open({ path: artifact.path, title: artifact.title, remote: artifact.url })} label={`Preview ${artifact.title}`}>{children}</FileLink>
   return <a {...props} href={href} target="_blank" rel="noreferrer"><InsideLink.Provider value>{children}</InsideLink.Provider></a>
 }

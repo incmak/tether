@@ -2,7 +2,9 @@ import { createContext } from 'react'
 import type { ChatMessage, ToolArtifact } from './api'
 
 /** A page to show in the preview drawer. path: the local HTML file. remote: the claude.ai link of a published artifact. */
-export interface PreviewTarget { path: string; title: string; remote?: string }
+export interface PreviewTarget { path: string; title: string; remote?: string; dev?: DevServer }
+/** A dev server on the agent's machine: its port, and the path to open on it. */
+export interface DevServer { port: number; path: string }
 
 /** Chat.tsx provides this: open a page in the drawer, find the local file of a claude.ai link. */
 export interface PreviewActions {
@@ -30,4 +32,20 @@ export function artifactsOf(messages: ChatMessage[]) {
   }
   walk(messages)
   return found
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::1]'])
+const BARE_LOCAL = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}(?:[/?#]\S*)?$/
+/** A link to a dev server on the agent's machine (http://localhost:5173/app), which the phone cannot open itself: the
+ *  preview drawer opens it through Tether (server/dev_previews.py). null for other links, and for a link with no port
+ *  or a system port (Tether forwards ports above 1024 only). bare: also read "localhost:5173", as agents write it in code. */
+export function localUrl(href: string, bare = false): PreviewTarget | null {
+  const text = href.trim()
+  if (/\s/.test(text) || text.length > 2048) return null
+  let url: URL
+  try { url = new URL(bare && BARE_LOCAL.test(text) ? `http://${text}` : text) } catch { return null }
+  const port = Number(url.port)
+  if (!/^https?:$/.test(url.protocol) || !LOCAL_HOSTS.has(url.hostname) || url.username || url.password || port <= 1024) return null
+  const path = url.pathname + url.search + url.hash
+  return { path: `localhost:${port}${path === '/' ? '' : path}`, title: `localhost:${port}`, dev: { port, path } }
 }
