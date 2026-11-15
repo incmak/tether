@@ -121,6 +121,19 @@ class Parse(unittest.TestCase):
         self.assertEqual(found['hints'][0]['effect'], 'tabs')
         self.assertEqual(claude_dialog.allowed(found), {'Up', 'r', 'C-s', 'Escape'})
         self.assertIsNone(claude_dialog.hints('↓ 16 more'))  # a list's overflow row is no key hint
+        self.assertIsNone(claude_dialog.hints('← opens agents true'))
+
+    def test_clipped_setting_row_is_no_footer(self):
+        # A /config list cut after "← opens agents   true": a setting label, not a focus hint.
+        lines = frame('config_list').rstrip().split('\n')
+        lines = lines[:next(index for index, line in enumerate(lines) if 'Auto-compact' in line) + 1] + ['     ↓ agents']
+        found = claude_dialog.parse('\n'.join(lines))
+        self.assertEqual(found['hints'], [])  # not grey: body text
+        self.assertNotIn('Down', claude_dialog.allowed(found) - {'Up', 'Down'})
+
+    def test_labels_with_a_dot_are_no_choice(self):
+        for name in ('usage_narrow', 'usage', 'plugin', 'plugin_narrow'):
+            self.assertFalse([item for item in dialog(name)['blocks'] if item['type'] == 'options'], name)
 
     def test_stats_date_range_shows_while_it_loads(self):
         self.assertEqual(block(dialog('stats_cycling'), 'options')['value'], 'Last 7 days')  # a spinner follows the row
@@ -166,6 +179,10 @@ class Parse(unittest.TestCase):
             self.assertEqual(items['/keybindings'], 'customize')
             self.assertFalse(any(item['type'] == 'text' and item['mono'] for item in found['blocks']), name)
         self.assertEqual(dialog('help_commands')['tab'], 'Custom commands')
+
+    def test_unknown_key_name_keeps_the_table_as_text(self):
+        rows = [('   ctrl + a to start     ctrl + c to quit', []), ('   enter to accept       ctrl + d to end', []), ('   ctrl + b to stop      ctrl + e to go', [])]
+        self.assertIsNone(claude_dialog._shortcuts(rows, 0))  # "enter to accept" would merge into "start"
 
     def test_clipped_shortcut_table_stays_text(self):
         lines = frame('help').rstrip().split('\n')
@@ -394,10 +411,26 @@ class Act(unittest.TestCase):
         self.assertEqual(terminal.sent, [['Down'], ['Tab']])
         self.act(terminal, title='Settings', action='subtab', tab='Overview')
         self.assertEqual(terminal.sent[2:], [['Tab']])
-        self.act(terminal, title='Settings', action='option', value='Last 30 days')
-        self.assertEqual(terminal.sent[3:], [['r'], ['r']])  # two steps on in the cycle; no wait for the slow load
         self.act(terminal, title='Settings', action='option', value='All time')
-        self.assertEqual(len(terminal.sent), 5)
+        self.assertEqual(len(terminal.sent), 3)  # already current
+
+    def test_date_range_waits_for_each_load(self):
+        def ranged(value):
+            text = frame('stats_body').replace('\x1b[1m\x1b[38;5;174mAll time\x1b[0m\x1b[38;5;246m · Last 7 days · Last 30 days\x1b[39m', '@')
+            assert '@' in text
+            parts = ['\x1b[1m\x1b[38;5;174m' + name + '\x1b[0m' if name == value else '\x1b[38;5;246m' + name + '\x1b[39m' for name in ('All time', 'Last 7 days', 'Last 30 days')]
+            return text.replace('@', '\x1b[38;5;246m · \x1b[39m'.join(parts))
+        frames = [ranged('All time'), ranged('Last 7 days'), ranged('Last 30 days')]
+        self.assertEqual([block(claude_dialog.parse(text), 'options')['value'] for text in frames], ['All time', 'Last 7 days', 'Last 30 days'])
+        terminal = Terminal(frames, {(0, 'r'): 1, (1, 'r'): 2, (2, 'r'): 0}, lag=6)  # each range shows late
+        self.act(terminal, title='Settings', action='option', value='Last 30 days')
+        self.assertEqual(terminal.sent, [['r'], ['r']])
+        self.act(terminal, title='Settings', action='option', value='Last 30 days')  # a second tap must not go on
+        self.assertEqual(len(terminal.sent), 2)
+        stuck = Terminal(frames)
+        with self.assertRaisesRegex(RuntimeError, 'still loads'):
+            self.act(stuck, title='Settings', action='option', value='Last 7 days')
+        self.assertEqual(stuck.sent, [['r']])
         with self.assertRaisesRegex(ValueError, 'no such choice'):
             self.act(terminal, title='Settings', action='option', value='Last year')
         with self.assertRaisesRegex(ValueError, 'no such choice'):

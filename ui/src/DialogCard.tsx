@@ -88,12 +88,21 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
       // One column per week, one row per weekday, as Claude Code draws it with shade characters.
       const weeks = Math.max(...block.rows.map(row => row.cells.length))
       const active = block.rows.reduce((count, row) => count + [...row.cells].filter(cell => cell !== '0').length, 0)
+      // The same facts as text, month by month, for people who cannot see the squares.
+      const LEVELS = ['none', 'light', 'medium', 'high', 'very high']
+      const summary = block.months.map(([offset, name], index) => {
+        const until = block.months[index + 1]?.[0] ?? weeks
+        const cells = block.rows.flatMap(row => [...row.cells.slice(offset, until)])
+        const days = cells.filter(cell => cell !== '0').length
+        return `${name}: ${days} active ${days === 1 ? 'day' : 'days'}${days ? `, busiest day ${LEVELS[Math.max(...cells.map(Number))]}` : ''}`
+      })
       return <figure key={at} className="dlg-heat" style={{ '--weeks': weeks } as CSSProperties}>
         <div className="dlg-heat-months" aria-hidden="true">{block.months.map(([offset, name], index) => <span key={index} style={{ gridColumn: `${offset + 1} / span 4` }}>{name}</span>)}</div>
-        <div className="dlg-heat-grid" role="img" aria-label={`Activity by day over ${weeks} weeks: ${active} active days. A darker square is a busier day.`}>
+        <div className="dlg-heat-grid" role="img" aria-label={`Activity by day over ${weeks} weeks: ${active} active days. The list after this chart gives each month.`}>
           {block.rows.map((row, day) => [...row.cells].map((cell, week) => <i key={`${day}-${week}`} data-level={cell} style={{ gridRow: day + 1, gridColumn: week + 1 }} />))}
         </div>
-        <figcaption>Less{['0', '1', '2', '3', '4'].map(level => <i key={level} data-level={level} />)}More</figcaption>
+        <figcaption aria-hidden="true">Less{['0', '1', '2', '3', '4'].map(level => <i key={level} data-level={level} />)}More</figcaption>
+        <ul className="dlg-sr" aria-label="Activity by month">{summary.map((line, index) => <li key={index}>{line}</li>)}</ul>
       </figure>
     }
     if (block.type === 'scale') return <div key={at} className="dlg-scale">

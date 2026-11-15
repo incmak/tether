@@ -168,6 +168,8 @@ async function main() {
           const square = await card.locator('.dlg-heat-grid i').first().boundingBox()
           if (square.width < 2.5) errors.push(`chart squares are ${square.width.toFixed(1)} px wide`)
           if (await card.getByRole('button', { name: /^(↑|↓)$/ }).count()) errors.push('focus arrows show as buttons')
+          const months = await card.getByRole('list', { name: 'Activity by month' }).getByRole('listitem').allInnerTexts()
+          if (months.length < 9 || !months.some(line => /: [1-9]\d* active days?, busiest day (light|medium|high|very high)/.test(line))) errors.push(`the chart has no text alternative: ${months.slice(-2).join(' / ')}`)
           await card.getByRole('radio', { name: 'Last 30 days' }).click()
           await card.getByRole('tab', { name: 'Models' }).click()
           await page.waitForTimeout(200)
@@ -182,7 +184,7 @@ async function main() {
           const size = await button.boundingBox()
           if (size && size.height < 24) errors.push(`button ${(await button.innerText()) || 'icon'} is ${Math.round(size.height)} px high`)
         }
-        const wide = await card.evaluate(node => [...node.querySelectorAll('*')].filter(item => !item.closest('pre, .perm-tabs') && item.scrollWidth > item.clientWidth + 1 && getComputedStyle(item).overflowX === 'visible').length)
+        const wide = await card.evaluate(node => [...node.querySelectorAll('*')].filter(item => !item.closest('pre, .perm-tabs, .dlg-sr') && item.scrollWidth > item.clientWidth + 1 && getComputedStyle(item).overflowX === 'visible').length)
         if (wide) errors.push(`${wide} elements are cut off sideways`)
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
         if (overflow > 0) errors.push(`the page scrolls sideways by ${overflow} px`)

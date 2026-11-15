@@ -67,7 +67,7 @@ ORIGINALS = [
     ('claude_dialog', ('claude', 'DIALOG_HINT'), 'HINT', (r'(\S+(?: ?\+ ?\S+)?(?:/\S+)*)\s+(?:to|for)\s+(\S.*)'), 0),
     ('claude_dialog', ('claude', 'DIALOG_FACT'), 'FACT', (r'^(\S[^:]{0,40}:)\s+(\S.*)$'), 0),
     ('claude_dialog', ('claude', 'DIALOG_PERCENT'), 'PERCENT', (r'(\d{1,3})% used'), 0),
-    ('claude_dialog', ('claude', 'DIALOG_MOVE'), 'MOVE', (r'([↑↓←→])\s+(\w[\w ]{0,20})'), 0),
+    ('claude_dialog', ('claude', 'DIALOG_MOVE'), 'MOVE', (r'([↑↓])\s+(\w+)'), 0),
 ]
 
 

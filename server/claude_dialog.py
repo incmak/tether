@@ -32,7 +32,7 @@ KEYS = {'enter': ('Enter', 'Enter'), 'return': ('Enter', 'Enter'), 'esc': ('Esca
         'up': ('Up', '↑'), 'down': ('Down', '↓'), 'left': ('Left', '←'), 'right': ('Right', '→'),
         '⇧←': ('S-Left', 'Shift+←'), '⇧→': ('S-Right', 'Shift+→')}
 STEP = .15           # seconds between a key and the next look at the screen
-CYCLE_STEP = .4      # seconds between presses of a key that cycles a choice
+CYCLE_SETTLE = 30    # looks at the screen (4.5 s) for a choice that loads data before it shows
 TYPE_STEP = .03      # seconds between typed characters
 SETTLE = 10          # looks at the screen after a key before the key counts as "did nothing"
 
@@ -70,6 +70,7 @@ def hints(text):
     return found or None
 
 
+GREYS = {(5, 246), (5, 244), (5, 245), 90}   # secondary text in Claude Code's themes
 MONTHS = {'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'}
 SHADES = '·░▒▓█'
 ENTRY_START = re.compile(r'(?<!\+ )(?<!\S)(?=(?:double tap|shift \+|ctrl \+|alt \+|backslash|/[a-z]+ (?:for|to)\b|[!/@] for\b))')
@@ -136,6 +137,8 @@ def _shortcuts(body, index):
             match = re.fullmatch(r'(.+?) (?:for|to) (.+)', entry.strip())
             if entry.strip() and not match:
                 return None
+            if match and re.search(r' (?:for|to) ', match[2]):
+                return None  # two entries in one: a key name this reader does not know starts the second
             if match:
                 items.append({'keys': match[1], 'effect': match[2]})
     return ({'type': 'shortcuts', 'items': items}, end) if len(items) >= 4 else None
@@ -245,7 +248,10 @@ def _footer(rows):
         found = hints(' '.join(row[0].strip() for row in rows[index:end]))
         # Every dialog footer of 2.1.325 names Esc, or an arrow that moves the focus ("↓ stats"). Body text can look
         # like a hint: a clipped /help shortcut table ends in "ctrl + t to toggle  ctrl + s to ↓".
-        if found and (any(key['key'] == 'Escape' for hint in found for key in hint['keys']) or any(hint.get('go') for hint in found)) and all(len(hint['effect']) <= 40 for hint in found):
+        escape = any(key['key'] == 'Escape' for hint in found or [] for key in hint['keys'])
+        # Without Esc only /stats is known: grey rows that name a focus move ("↓ stats", "↑ tabs · r to cycle dates").
+        grey = all(style['dim'] or style['fg'] in GREYS for text, styles in rows[index:end] for char, style in zip(text, styles) if char != ' ')
+        if found and (escape or grey and any(hint.get('go') for hint in found)) and all(len(hint['effect']) <= 40 for hint in found):
             return index, found
     return end, []
 
@@ -299,7 +305,7 @@ def parse(frame):
         return None
     start, found = _footer(rows)
     # Secondary text has the colour of the key hints (it depends on the theme). Without hints, the usual greys.
-    tone = {(5, 246), (5, 244), (5, 245), 90}
+    tone = set(GREYS)
     if found and start < len(rows):
         tone |= {style['fg'] for char, style in zip(*rows[start]) if char != ' ' and style['fg'] is not None}
     title_row = rows[first]
@@ -440,7 +446,7 @@ def parse(frame):
             index += 1  # the chart's legend; the card draws its own
             continue
         choices = [part.strip() for part in re.split(r' · ', re.sub(r'\s[✻✶✳✢✽*]$', '', stripped))]
-        if len(choices) >= 2 and styles[indent]['bold'] is not None:
+        if len(choices) >= 2 and any(hint.get('go') or re.search(r'\bcycle\b', hint['effect']) for hint in found):
             # "All time · Last 7 days · Last 30 days" (/stats): the bold one is current, the others are grey.
             spans, at = [], indent
             for choice in choices:
@@ -648,12 +654,12 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
                 [item['selected'] for item in _items(dialog)], [item['text'] for item in _items(dialog)][:1],
                 [block.get('value', block.get('tab')) for block in dialog['blocks'] if block['type'] in ('scale', 'search', 'tabs', 'options')])
 
-    def step(dialog, *keys, state=marks):
+    def step(dialog, *keys, state=marks, tries=SETTLE):
         """Press, then wait for Claude Code to draw the result. A decision on a screen that is not drawn yet presses
         the next key too early: the cursor then goes past its row, and a tab row wraps around."""
         before = state(dialog)
         press(*keys)
-        for _ in range(SETTLE):
+        for _ in range(tries):
             dialog = look()
             if state(dialog) != before:
                 break
@@ -740,13 +746,12 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             if enter:
                 key = enter
             elif action == 'option' and cycle:
-                # /stats loads a date range for seconds and shows the old one meanwhile. Waiting for each would hold
-                # SEND_LOCK that long, so press once per step of the cycle and let the card show the result.
-                count = (part[choices].index(want) - part[choices].index(part[name])) % len(part[choices])
-                for _ in range(count):
-                    press(cycle)
-                    sleep(CYCLE_STEP)
-                return
+                # /stats loads a date range for a while and shows the old one meanwhile. A second press on that old
+                # screen would go one range too far, so each press waits for its range; a slow load ends the action.
+                dialog, moved = step(dialog, cycle, tries=CYCLE_SETTLE)
+                if not moved:
+                    raise RuntimeError('The dialog still loads. Try again when it shows the new range.')
+                continue
             elif action == 'subtab' and 'Tab' not in offered and not any(re.search(r'\b(?:change|toggle)\b', effect) for effect in offered.values()):
                 key = 'Tab'  # not in the footer; checked on Claude Code 2.1.325
             else:
