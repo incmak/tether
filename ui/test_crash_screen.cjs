@@ -17,6 +17,8 @@ const fixtures = {
   'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
 }
+// Home reads the work board; an empty board, as a new install has.
+fixtures['work/board'] = { revision: 1, projects: [], items: [], stages: [] }
 const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.webmanifest': 'application/manifest+json' }
 
 // fail(url, count): true when this request should get a 404, to stand in for a chunk a deploy removed.
