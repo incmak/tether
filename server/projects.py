@@ -401,7 +401,7 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
     parts.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '
-                 '`--project NAME` files elsewhere. `list` shows the inbox and this project\'s open items.\n'
+                 '`--project NAME` files elsewhere. `list`: the inbox and this project\'s open items. `show B12`: its details.\n'
                  '- Add an item, without asking, for real work outside your task over about 5 minutes. No style nits or steps of your task.\n'
                  '- Work on an item only when the user asks. Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n')
     parts.append(f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '

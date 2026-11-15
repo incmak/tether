@@ -413,11 +413,14 @@ def _drop_status(lines, at):
     lines[at + 1:end] = [line for line in lines[at + 1:end] if not STATUS.match(line)]
 
 
-def start(query, who, project=''):
-    """Mark an open item as in progress, by whom. A second start replaces the first."""
+def start(query, who, project='', notes=None):
+    """Mark an open item as in progress, by whom. A second start replaces the first. The item's detail lines go
+    into notes, a list: read here, so an item that has no ID yet gives them too."""
     def change(lines):
         at = _match(lines, query, project)
         _drop_status(lines, at)
+        if notes is not None:
+            notes.extend(line for line in lines[at + 1:_item_end(lines, at)] if line.strip())
         lines.insert(at + 1, f'  - Doing: {_one_line(who) or "someone"}')
         return lines[at]
     return _change(change)
@@ -468,6 +471,68 @@ def list_open(project=''):
         if items:
             parts.append(f'{project}:\n' + '\n'.join(items))
     return '\n\n'.join(parts) or 'No open items.'
+
+
+def brief(line):
+    """An item's line for an agent: "B12 Fix login". Who added it and the checkbox stay in the file (show prints them)."""
+    found = ITEM.fullmatch(line)
+    if not found:
+        return line.strip()
+    number = ID.search(found[2])
+    return f'{"B" + number[1] + " " if number else ""}{_bare(found[2]).strip()}'
+
+
+def _worker(who):
+    """Who works on an item, short: "claude · pane %5". The tmux session and the chat stay in the file."""
+    parts = [part for part in who.split(' · ') if part and not part.startswith(('tmux ', 'chat '))]
+    return ' · '.join(parts) or who.strip()
+
+
+def _brief_block(lines, start, end):
+    """One line for each open item in these lines: its ID and title, who works on it, and how many detail lines it has."""
+    out = []
+    for at in range(start, end):
+        found = ITEM.fullmatch(lines[at])
+        if not found or found[1] != ' ':
+            continue
+        doing, more = '', 0
+        for row in lines[at + 1:min(_item_end(lines, at), end)]:
+            if not row.strip():
+                continue
+            if STATUS.match(row):
+                doing = _worker(row.split(':', 1)[1].strip()) if row.lstrip().startswith('- Doing:') else doing
+            else:
+                more += 1
+        out.append(f'- {brief(lines[at])}' + (f' [doing: {doing}]' if doing else '')
+                   + (f' [{more} detail line{"s" if more > 1 else ""}]' if more else ''))
+    return out
+
+
+def list_brief(project=''):
+    """What an agent's `list` prints: the inbox and its own project, one line for each open item. The detail lines
+    were two thirds of the full list (B74), and an agent needs them for the one item it works on: show prints them."""
+    lines = _lines(numbered()['text'])
+    parts = []
+    inbox = _brief_block(lines, *_section(lines, ''))
+    if inbox:
+        parts.append('Inbox:\n' + '\n'.join(inbox))
+    if project:
+        start, end = _section(lines, project)
+        items = _brief_block(lines, start, end) if start is not None else []
+        if items:
+            parts.append(f'{project}:\n' + '\n'.join(items))
+    if not parts:
+        return 'No open items.'
+    if any('detail line' in part for part in parts):
+        parts.append('The detail lines of an item: show B12.')
+    return '\n\n'.join(parts)
+
+
+def show(query, project=''):
+    """One item with all its lines, as the file has them. An ID finds a finished item too."""
+    lines = _lines(numbered()['text'])
+    at = _match(lines, query, project, need_open=False)
+    return '\n'.join(line for line in lines[at:_item_end(lines, at)] if line.strip())
 
 
 def summary(project, limit=5):

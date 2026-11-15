@@ -198,7 +198,22 @@ class BacklogTests(unittest.TestCase):
         self.assertNotIn('Secret', backlog.list_open('tether'))
         self.assertEqual(backlog.list_open('nothing'), 'Inbox:\n- [ ] Mine #B1\n  - why')
 
+    def test_brief_list_keeps_the_same_items_without_their_details(self):
+        backlog.save('- [ ] Mine (claude · tmux $1 · pane %2 · chat abc)\n  - Doing: codex · tmux $3 · pane %4 · chat def\n  - why\n\n  - after a blank line\n'
+                     '- [x] Old\n  - old detail\n\n## tether\n- [ ] Here\n  - Doing: someone\n- [x] Gone\n\n## other\n- [ ] Secret\n  - hidden\n',
+                     backlog.read()['version'])
+        self.assertEqual(backlog.list_brief('tether'), 'Inbox:\n- B1 Mine [doing: codex · pane %4] [2 detail lines]\n\n'
+                                                       'tether:\n- B3 Here [doing: someone]\n\nThe detail lines of an item: show B12.')
+        self.assertEqual(backlog.list_brief('other'), 'Inbox:\n- B1 Mine [doing: codex · pane %4] [2 detail lines]\n\n'
+                                                      'other:\n- B5 Secret [1 detail line]\n\nThe detail lines of an item: show B12.')
+        self.assertEqual(backlog.show('B1'), '- [ ] Mine (claude · tmux $1 · pane %2 · chat abc) #B1\n  - Doing: codex · tmux $3 · pane %4 · chat def\n'
+                                             '  - why\n  - after a blank line')
+        self.assertEqual(backlog.show('b2'), '- [x] Old #B2\n  - old detail')
+        with self.assertRaises(projects.ProjectError):
+            backlog.show('Secret', 'tether')  # words find an item only in the inbox and this project
+
     def test_list_with_nothing_open(self):
+        self.assertEqual(backlog.list_brief('tether'), 'No open items.')
         self.assertEqual(backlog.list_open('tether'), 'No open items.')
 
     def test_detail_and_done_find_one_item_in_scope(self):

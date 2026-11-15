@@ -50,12 +50,46 @@ class BacklogCliTests(unittest.TestCase):
     def test_list_detail_and_done(self):
         self.run_cli('add', '--agent', 'codex', 'Fix login')
         self.assertEqual(self.run_cli('detail', 'login', 'Happens on phones')[0], 0)
-        code, out, _ = self.run_cli('list')
+        code, out, _ = self.run_cli('list', '--details')
         self.assertEqual(code, 0)
         self.assertIn('tether:\n- [ ] Fix login', out)
         self.assertIn('  - Happens on phones', out)
-        self.assertEqual(self.run_cli('done', 'login')[0], 0)
+        self.assertEqual(self.run_cli('done', 'login'), (0, 'Done: B1 Fix login\n', ''))
         self.assertEqual(self.run_cli('list')[1].strip(), 'No open items.')
+
+    def test_list_is_one_line_for_each_item_and_show_has_the_rest(self):
+        """B74: the detail lines and who added an item were most of `list`. They stay one command away."""
+        self.assertEqual(self.run_cli('add', '--agent', 'codex', 'Fix login', '--detail', 'Happens on phones', '--detail', 'See auth.py')[1],
+                         'Added: B1 Fix login\n')
+        self.run_cli('add', '--agent', 'claude', 'Plain one')
+        self.assertEqual(self.run_cli('list'), (0, 'tether:\n- B1 Fix login [2 detail lines]\n- B2 Plain one\n\n'
+                                                   'The detail lines of an item: show B12.\n', ''))
+        whole = ('- [ ] Fix login (codex · tmux $7 · pane %12 · chat codex-thread) #B1\n  - Happens on phones\n  - See auth.py\n')
+        self.assertEqual(self.run_cli('show', 'B1'), (0, whole, ''))
+        self.assertEqual(self.run_cli('show', 'login')[1], whole)
+        # start hands the tab the details of its item; list then names who has it, without the chat or the tmux session
+        self.assertEqual(self.run_cli('start', 'B1', '--agent', 'claude')[1], 'Started: B1 Fix login\n  - Happens on phones\n  - See auth.py\n')
+        self.assertEqual(self.run_cli('start', 'B2', '--agent', 'claude')[1], 'Started: B2 Plain one\n')
+        self.assertIn('- B1 Fix login [doing: claude · pane %12] [2 detail lines]\n- B2 Plain one [doing: claude · pane %12]\n', self.run_cli('list')[1])
+        self.assertEqual(self.run_cli('reword', 'B2', 'Plainer')[1], 'Reworded: B2 Plainer\n')
+        self.assertEqual(self.run_cli('move', 'B2', 'other')[1], 'Moved to other: B2 Plainer\n')
+        # no detail lines anywhere: no hint. A finished item still shows, by ID; nothing matches: a clear error.
+        self.run_cli('done', 'B1', 'fixed')
+        self.run_cli('add', 'Third')
+        self.assertEqual(self.run_cli('list')[1], 'tether:\n- B3 Third\n')
+        self.assertIn('- [x] Fix login', self.run_cli('show', 'B1')[1])
+        code, out, err = self.run_cli('show', 'B99')
+        self.assertEqual((code, out), (1, ''))
+        self.assertIn('No item B99', err)
+
+    def test_start_prints_the_details_of_an_item_that_has_no_id_yet(self):
+        """An item typed into the file gets its ID when the file is next read. start must not need the ID."""
+        backlog.folder().mkdir(parents=True)
+        (backlog.folder() / 'BACKLOG.md').write_text('- [ ] Typed by hand\n  - Doing: codex · pane %1\n  - its why\n\n  - after a blank line\n- [ ] Other\n  - not this\n')
+        for query in ('Typed by hand', 'typed'):
+            code, out, _ = self.run_cli('start', query, '--agent', 'claude')
+            self.assertEqual((code, out.split('\n', 1)[1]), (0, '  - its why\n  - after a blank line\n'))
+        self.assertIn('- B1 Typed by hand [doing: claude · pane %12] [2 detail lines]\n- B2 Other [1 detail line]', self.run_cli('list')[1])
 
     def test_a_clear_error_for_no_match(self):
         code, _, err = self.run_cli('done', 'nothing')

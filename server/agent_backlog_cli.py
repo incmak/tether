@@ -56,7 +56,10 @@ def guess_agent():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    shown = commands.add_parser('list', help="the inbox and this project's open items")
+    shown = commands.add_parser('list', help="the inbox and this project's open items, one line each")
+    shown.add_argument('--details', action='store_true', help='with every detail line of every item (long)')
+    show = commands.add_parser('show', help='one item with all its detail lines')
+    show.add_argument('item', help='the item ID, like B12, or part of the item text')
     add = commands.add_parser('add', help='add an open item to this project')
     add.add_argument('--agent', choices=sorted(CHAT_ENV), help='who adds it; found from the tab when left out')
     add.add_argument('--detail', action='append', default=[], help='a line under the item: the why, the files, the case; repeat for more')
@@ -89,25 +92,30 @@ def main(argv=None):
         return 1
     try:
         if args.command == 'list':
-            print(backlog.list_open(project))
+            print(backlog.list_open(project) if args.details else backlog.list_brief(project))
+        elif args.command == 'show':
+            print(backlog.show(args.item, project))
         elif args.command == 'add':
-            print(f'Added: {backlog.add(args.text, source(args.agent or guess_agent()), project, args.detail)}')
+            print(f'Added: {backlog.brief(backlog.add(args.text, source(args.agent or guess_agent()), project, args.detail))}')
         elif args.command == 'reword':
-            print(f'Reworded: {backlog.reword(args.item, args.text, project)}')
+            print(f'Reworded: {backlog.brief(backlog.reword(args.item, args.text, project))}')
         elif args.command == 'move':
-            print(f'Moved to {args.to or "the inbox"}: {backlog.move(args.item, args.to, project)}')
+            print(f'Moved to {args.to or "the inbox"}: {backlog.brief(backlog.move(args.item, args.to, project))}')
         elif args.command == 'detail':
             backlog.add_detail(args.item, args.text, project)
             print('Added the detail.')
         elif args.command == 'start':
-            print(f'Started: {backlog.start(args.item, source(args.agent or guess_agent()), project)}')
+            notes = []  # the tab works on this item now: its detail lines, once, so it needs no second command
+            print(f'Started: {backlog.brief(backlog.start(args.item, source(args.agent or guess_agent()), project, notes))}')
+            if notes:
+                print('\n'.join(notes))
         elif args.command == 'archive':
             count, before, after = backlog.archive_done(args.dry_run)
             verb = 'Would move' if args.dry_run else 'Moved'
             print(f'{verb} {count} finished items to DONE.md. The backlog: {before:,} -> {after:,} characters.')
         else:
             who = source(args.agent or guess_agent())
-            print(f'Done: {backlog.mark_done(args.item, project, args.result, who)}')
+            print(f'Done: {backlog.brief(backlog.mark_done(args.item, project, args.result, who))}')
     except (ProjectError, OSError) as exc:
         print(f'Backlog error: {exc}', file=sys.stderr)
         return 1
