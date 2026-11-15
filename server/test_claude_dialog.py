@@ -112,6 +112,7 @@ class Parse(unittest.TestCase):
             self.assertEqual(block(found, 'scale'), {'type': 'scale', 'options': ['low', 'medium', 'high', 'xhigh', 'max'],
                                                      'value': 'medium', 'ends': ['Faster', 'Smarter']}, name)
             self.assertEqual(sorted(keys(found)), sorted(['Left', 'Right', 'Enter', 's', 'Escape', 'Tab']), name)
+            self.assertEqual(found['hints'][-1]['effect'], 'toggle Ultracode', name)
 
     def test_toggle_row_is_a_fact(self):
         found = dialog('privacy')
@@ -175,20 +176,28 @@ class Hints(unittest.TestCase):
 
 class Terminal:
     """A pane that shows frames; each key moves to the frame the test maps it to."""
-    def __init__(self, frames, moves=None, visible=None):
+    def __init__(self, frames, moves=None, visible=None, lag=0):
         self.frames, self.moves, self.at, self.sent, self.visible = frames, moves or {}, 0, [], visible
+        self.lag, self.wait, self.shown = lag, 0, 0  # lag: captures after a key that still show the old frame
 
     def __call__(self, command, **_):
         if command[1] == 'capture-pane':
-            text = self.frames[self.at]
+            if self.wait:
+                self.wait -= 1
+            else:
+                self.shown = self.at
+            text = self.frames[self.shown]
             if self.visible and '-S' not in command:
                 text = '\n'.join(text.splitlines()[-self.visible:])
             return subprocess.CompletedProcess(command, 0, stdout=text)
-        sent = [part for part in command[2:] if part not in ('-t', '%1')]
+        if '-l' in command:
+            assert command[-2] == '--' and len(command[-1]) <= 2, command  # text can never be read as a tmux option
+        sent = [part for part in command[2:] if part not in ('-t', '%1', '--')]
         self.sent.append(sent)
         if '-l' not in sent:
             for key in sent:
                 self.at = self.moves.get((self.at, key), self.at)
+            self.wait = self.lag
         return subprocess.CompletedProcess(command, 0, stdout='')
 
 
@@ -206,8 +215,26 @@ def moved(source, selected):
 
 
 class Act(unittest.TestCase):
-    def act(self, terminal, **body):
-        return claude_dialog.act(ENTRY, body, run=terminal, sleep=lambda _: None)
+    def act(self, terminal, mode=None, **body):
+        # The card echoes the mode of the dialog it showed; these tests act on the frame the terminal shows first.
+        if mode is None and body.get('action') in ('key', 'filter'):
+            found = claude_dialog.parse(terminal.frames[terminal.shown])
+            mode = found['mode'] if found else 'none'
+        return claude_dialog.act(ENTRY, {**body, 'mode': mode}, run=terminal, sleep=lambda _: None)
+
+    def test_key_goes_only_to_the_screen_the_person_saw(self):
+        # Enter selects in the search box of /config and changes a setting in its list. Both have the title "Settings".
+        seen = claude_dialog.parse(frame('config'))['mode']
+        self.assertNotEqual(seen, claude_dialog.parse(frame('config_list'))['mode'])
+        terminal = Terminal([frame('config_list')])
+        with self.assertRaises(claude_dialog.Changed):
+            self.act(terminal, mode=seen, title='Settings', action='key', key='Enter')
+        with self.assertRaises(claude_dialog.Changed):
+            claude_dialog.act(ENTRY, {'title': 'Settings', 'action': 'key', 'key': 'Enter'}, run=terminal, sleep=lambda _: None)
+        self.assertEqual(terminal.sent, [])
+        # Enter acts on the marked row: a cursor that moved in the terminal makes the card's Enter stale too.
+        self.assertNotEqual(claude_dialog.parse(frame('mcp'))['mode'], claude_dialog.parse(moved(frame('mcp'), 3))['mode'])
+        self.assertEqual(claude_dialog.parse(frame('mcp'))['mode'], claude_dialog.parse(frame('mcp'))['mode'])
 
     def test_key_must_be_offered(self):
         terminal = Terminal([frame('mcp')])
@@ -243,7 +270,7 @@ class Act(unittest.TestCase):
         terminal = Terminal([frame('mcp')])
         with self.assertRaisesRegex(RuntimeError, 'Could not move'):
             self.act(terminal, title='Manage MCP servers', action='row', row=2, label='scrut')
-        self.assertLessEqual(len(terminal.sent), 60)
+        self.assertEqual(len(terminal.sent), 2)  # two keys with no effect end it; SEND_LOCK is held for all of it
 
     def test_row_in_a_list_whose_search_box_has_the_focus(self):
         terminal = Terminal([frame('config'), frame('config_list')], {(0, 'Down'): 1})
@@ -265,10 +292,36 @@ class Act(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no such tab'):
             self.act(terminal, title='Settings', action='tab', tab='Billing')
 
+    def test_slow_redraw_does_not_press_a_key_twice(self):
+        # Right on the last tab wraps to the first one: a second Right on a stale screen would open the wrong tab.
+        frames = [frame('status'), frame('usage'), frame('stats')]
+        terminal = Terminal(frames, {(0, 'Right'): 1, (1, 'Right'): 2, (2, 'Right'): 0}, lag=3)
+        self.act(terminal, title='Settings', action='tab', tab='Stats')
+        self.assertEqual(terminal.sent, [['Right'], ['Right']])
+        rows = [moved(frame('mcp'), index) if index else frame('mcp') for index in range(3)]
+        terminal = Terminal(rows, {(0, 'Down'): 1, (1, 'Down'): 2, (2, 'Down'): 2}, lag=3)
+        self.act(terminal, title='Manage MCP servers', action='row', row=2, label='scrut')
+        self.assertEqual(terminal.sent, [['Down'], ['Down']])
+
     def test_tab_from_a_list_goes_through_the_search_box(self):
         terminal = Terminal([frame('config_list'), frame('config'), frame('status')], {(0, '/'): 1, (1, 'Up'): 2})
         self.act(terminal, title='Settings', action='tab', tab='Status')
         self.assertEqual(terminal.sent, [['/'], ['Up']])
+
+    def test_tab_key_cycles_forward_and_is_not_mixed_with_arrows(self):
+        # /plugin: Tab from a list goes to the next tab. On "Errors" the tab row has the focus; Left there goes back.
+        plugin = frame('plugin')
+        names = ['Discover', 'Installed', 'Marketplaces', 'Errors', 'Stats']
+
+        def tab(name, focus=False):
+            cells = [('\x1b[1m\x1b[48;5;153m ' if focus else '\x1b[1;7m ') + item + ' \x1b[0m' if item == name else ' ' + item + ' ' for item in names]
+            row = '\x1b[39m   \x1b[1m\x1b[38;5;153mPlugins\x1b[0m ' + ' '.join(cells)
+            return '\n'.join(row if 'Plugins\x1b[0m' in line else line for line in plugin.split('\n'))
+        frames = [tab('Marketplaces'), tab('Errors', True), tab('Stats', True), plugin]
+        self.assertEqual([claude_dialog.parse(text)['tab'] for text in frames], ['Marketplaces', 'Errors', 'Stats', 'Discover'])
+        terminal = Terminal(frames, {(0, 'Tab'): 1, (1, 'Tab'): 2, (2, 'Tab'): 3, (1, 'Left'): 0})
+        self.act(terminal, title='Plugins', action='tab', tab='Discover')
+        self.assertEqual(terminal.sent, [['Tab']] * 3)
 
     def test_tab_key_is_not_pressed_where_it_changes_a_value(self):
         terminal = Terminal([frame('config_list').replace('/ to search · ', '')])
@@ -290,20 +343,33 @@ class Act(unittest.TestCase):
     def test_filter_types_only_into_a_search_box(self):
         terminal = Terminal([frame('resume')])
         self.act(terminal, title='Resume session', action='filter', text='voice mode')
-        self.assertEqual(terminal.sent, [['-l', 'voice mode']])
+        self.assertEqual(terminal.sent, [['-l', char] for char in 'voice mode'])  # one call per character
         terminal = Terminal([frame('config_list'), frame('config')], {(0, '/'): 1})
         self.act(terminal, title='Settings', action='filter', text='compact')
-        self.assertEqual(terminal.sent, [['/'], ['-l', 'compact']])
+        self.assertEqual(terminal.sent, [['/'], *(['-l', char] for char in 'compact')])
+        terminal = Terminal([frame('resume')])
+        self.act(terminal, title='Resume session', action='filter', text='a;b')
+        self.assertEqual(terminal.sent[1], ['-l', '\\;'])  # tmux reads a lone ";" as its command separator
         with self.assertRaisesRegex(ValueError, 'no search box'):
             self.act(Terminal([frame('mcp')]), title='Manage MCP servers', action='filter', text='x')
+        terminal = Terminal([frame('resume')])
+        self.act(terminal, title='Resume session', action='filter', text='-R')  # "-R" as an option would reset the terminal
+        self.assertEqual(terminal.sent, [['-l', '-'], ['-l', 'R']])
         with self.assertRaisesRegex(ValueError, 'control characters'):
             self.act(Terminal([frame('resume')]), title='Resume session', action='filter', text='a\x1bb')
 
     def test_filter_replaces_the_old_text(self):
         typed = frame('resume').replace('\x1b[38;5;246m⌕ Search…\x1b[39m', '⌕ voice')
         self.assertEqual(block(claude_dialog.parse(typed), 'search')['value'], 'voice')
-        terminal = Terminal([typed])
-        self.act(terminal, title='Resume session', action='filter', text='')
+        terminal = Terminal([typed, frame('resume')], {(0, 'BSpace'): 1})
+        self.act(terminal, title='Resume session', action='filter', text='ab')
+        self.assertEqual(terminal.sent, [['BSpace'] * 5, ['-l', 'a'], ['-l', 'b']])
+
+    def test_filter_does_not_type_when_the_dialog_closed_after_the_old_text_went(self):
+        typed = frame('resume').replace('\x1b[38;5;246m⌕ Search…\x1b[39m', '⌕ voice')
+        terminal = Terminal([typed, '● Done.\n❯ \n'], {(0, 'BSpace'): 1})
+        with self.assertRaises(claude_dialog.Changed):
+            self.act(terminal, title='Resume session', action='filter', text='rm -rf')
         self.assertEqual(terminal.sent, [['BSpace'] * 5])
 
     def test_unknown_action(self):

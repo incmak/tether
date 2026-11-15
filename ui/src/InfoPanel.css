@@ -78,3 +78,6 @@
 .dlg-actions button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
 .dlg-actions button.primary kbd { border-color: color-mix(in srgb, var(--accent-text) 40%, transparent); color: var(--accent-text); }
 .dlg-error { margin: 0 16px; }
+.dlg-card button[aria-disabled="true"] { opacity: .6; cursor: default; }
+.dlg-card .dlg-list button[aria-disabled="true"] { opacity: 1; }
+.dlg-card button.primary[aria-disabled="true"] { opacity: .75; }

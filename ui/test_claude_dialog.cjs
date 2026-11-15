@@ -118,7 +118,7 @@ async function main() {
           await card.getByRole('button', { name: /^Cancel/ }).click()
           await page.waitForTimeout(200)
           if (actions().join() !== 'row:scrut,key:Enter,key:Down,key:Escape') errors.push(`actions sent: ${actions().join()}`)
-          if (sent.some(item => item.endpoint === 'dialog' && item.title !== 'Manage MCP servers')) errors.push('an action has no dialog title')
+          if (sent.some(item => item.endpoint === 'dialog' && (item.title !== 'Manage MCP servers' || item.mode !== dialog.mode))) errors.push('an action has no dialog title or mode')
           if (sent.find(item => item.action === 'row').row !== 2) errors.push('wrong row index')
         } else if (state === 'config') {
           await card.getByRole('tab', { name: 'Usage' }).click()
@@ -136,6 +136,8 @@ async function main() {
           if (await card.getByRole('radio').count() !== 5) errors.push('want 5 levels')
           if (await card.getByRole('radio', { checked: true }).innerText() !== 'medium') errors.push('wrong level is marked')
           await card.getByRole('radio', { name: 'high', exact: true }).click()
+          await page.waitForTimeout(300)
+          if (!await page.evaluate(() => document.activeElement?.getAttribute('role') === 'radio')) errors.push('the level button lost the keyboard focus')
           await card.getByRole('button', { name: /^This session only/ }).click()
           await page.waitForTimeout(200)
           if (actions().join() !== 'scale:high,key:s') errors.push(`actions sent: ${actions().join()}`)

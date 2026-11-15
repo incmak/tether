@@ -937,7 +937,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   async function dialogAction(attention: Attention, action: DialogAction) {
     if (acting) return null
     setActing(true)
-    try { await api('dialog', { session: pane.id, thread: data?.thread ?? null, title: attention.dialog?.title, ...action }); return null }
+    try { await api('dialog', { session: pane.id, thread: data?.thread ?? null, title: attention.dialog?.title, mode: attention.dialog?.mode, ...action }); return null }
     catch (failure) { return errorText(failure) }
     finally { await refresh(); setActing(false) }
   }

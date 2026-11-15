@@ -31,6 +31,8 @@ KEYS = {'enter': ('Enter', 'Enter'), 'return': ('Enter', 'Enter'), 'esc': ('Esca
         'up': ('Up', '↑'), 'down': ('Down', '↓'), 'left': ('Left', '←'), 'right': ('Right', '→'),
         '⇧←': ('S-Left', 'Shift+←'), '⇧→': ('S-Right', 'Shift+→')}
 STEP = .15           # seconds between a key and the next look at the screen
+TYPE_STEP = .03      # seconds between typed characters
+SETTLE = 10          # looks at the screen after a key before the key counts as "did nothing"
 
 
 def _key(token):
@@ -278,6 +280,8 @@ def parse(frame):
                 for cell, dim in _cells(body[index + offset], tone, min(end + 3, len(body[index + offset][0]))):
                     keys = hints(cell)
                     extra.extend(keys) if keys else side.append(cell)
+            for hint in extra[-1:] if side else []:
+                hint['effect'] += ' ' + side[0].split()[0]  # "Tab to toggle" beside "Ultracode  off": say what it toggles
             if side:
                 blocks.append({'type': 'text', 'lines': [' '.join(side)], 'dim': False, 'mono': False, '_closed': True})
             current = previous = None
@@ -361,7 +365,7 @@ def parse(frame):
                 blocks.append(last)
             value = fact[2].strip()
             if key := re.fullmatch(r'(.*?)\s+((?:Tab|Space|Enter) to \w+)', value):
-                extra.extend(hints(key[2]) or [])  # "Ultracode  off  Tab to toggle"
+                extra.extend({**hint, 'effect': hint['effect'] + ' ' + fact[1].rstrip(':').strip()} for hint in hints(key[2]) or [])  # "Ultracode  off  Tab to toggle"
                 value = key[1].strip()
             last['rows'].append({'label': fact[1].rstrip(':').strip(), 'value': value})
             index += 1
@@ -370,6 +374,7 @@ def parse(frame):
                 and body[index - 1][0].strip() and (indent > INDENT or _wrapped(body[index - 1][0], stripped, width))):
             # A long value wraps under its label, or at the pane edge.
             if side := hints(stripped):
+                side[0]['effect'] += ' ' + blocks[-1]['rows'][-1]['label']
                 extra.extend(side)  # "Tab to toggle" under "Ultracode  off"
                 index += 1
                 continue
@@ -418,7 +423,12 @@ def parse(frame):
             block['lines'] = [joined]
     blocks = [block for block in blocks if block['type'] != 'list' or block['items'] or block['more_above'] or block['more_below']]
     keys = found + [hint for hint in extra if hint['text'] not in {known['text'] for known in found}]
-    return {**head, 'blocks': blocks, 'hints': keys, 'focus': focus if column is not None else 'none',
+    focus = focus if column is not None else 'none'
+    # What a key does depends on the tab, the focus, the marked row and the hints: Enter selects in /config's search box
+    # and changes a setting in its list. The card sends this value back, so a key goes only to the screen the person saw.
+    marked = next((item['text'] for block in blocks if block['type'] == 'list' for item in block['items'] if item.get('selected')), '')
+    mode = hashlib.sha256('\0'.join([head['title'], head.get('tab') or '', focus, marked, *(hint['text'] for hint in keys)]).encode()).hexdigest()[:16]
+    return {**head, 'blocks': blocks, 'hints': keys, 'focus': focus, 'mode': mode,
             'text': '\n'.join(text[INDENT:] if text.strip() else '' for text, _ in rows[first:]).strip('\n')}
 
 
@@ -488,12 +498,38 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             raise Changed('The dialog changed. Review it before you try again.')
         return dialog
 
-    def press(*keys, literal=False):
-        run([paths.TMUX, 'send-keys', *(['-l'] if literal else []), '-t', entry['id'], *keys], check=True, capture_output=True, timeout=5)
+    def press(*keys):
+        run([paths.TMUX, 'send-keys', '-t', entry['id'], *keys], check=True, capture_output=True, timeout=5)
         sleep(STEP)
+
+    def type_text(text):
+        # One character per call: Claude Code's /resume search drops text that arrives in one burst (it reads as a
+        # paste). A lone ";" is tmux's command separator, so it goes escaped.
+        for char in text:
+            run([paths.TMUX, 'send-keys', '-l', '-t', entry['id'], '--', '\\;' if char == ';' else char], check=True, capture_output=True, timeout=5)
+            sleep(TYPE_STEP)
+        sleep(STEP)
+
+    def state(dialog):
+        return (dialog['text'], dialog.get('tab'), dialog.get('tab_focus'), dialog['focus'],
+                [item['selected'] for item in _items(dialog)], [block.get('value') for block in dialog['blocks']])
+
+    def step(dialog, *keys):
+        """Press, then wait for Claude Code to draw the result. A decision on a screen that is not drawn yet presses
+        the next key too early: the cursor then goes past its row, and a tab row wraps around."""
+        before = state(dialog)
+        press(*keys)
+        for _ in range(SETTLE):
+            dialog = look()
+            if state(dialog) != before:
+                break
+            sleep(STEP)
+        return dialog, state(dialog) != before
 
     dialog = look()
     action = body.get('action')
+    if action in ('key', 'filter') and body.get('mode') != dialog['mode']:
+        raise Changed('The dialog changed. Review it before you try again.')
     if action == 'key':
         key = body.get('key')
         if key not in allowed(dialog):
@@ -504,7 +540,7 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
         label, row = body.get('label'), body.get('row')
         if not isinstance(label, str) or not isinstance(row, int) or isinstance(row, bool):
             raise ValueError('Choose a row first.')
-        stuck = 0
+        idle = 0
         for _ in range(60):
             items = _items(dialog)
             places = [index for index, item in enumerate(items) if item['text'] == label]
@@ -514,35 +550,41 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             target = min(places, key=lambda index: abs(index - row))
             if at == target and dialog['focus'] == 'list':
                 return
-            before = dialog['text']
-            press('Down' if at <= target and not (at == target and dialog['focus'] != 'search') else 'Up')
-            dialog = look()
-            stuck = stuck + 1 if dialog['text'] == before and dialog['focus'] != 'list' else 0
-            if stuck >= 2:
+            # With the search box in focus the cursor only shows where Down goes: Down gives the list the focus.
+            dialog, moved = step(dialog, 'Down' if at < target or dialog['focus'] != 'list' else 'Up')
+            idle = 0 if moved else idle + 1
+            if idle >= 2:
                 break
         raise RuntimeError('Could not move to that row. Use the terminal for this dialog.')
     if action == 'tab':
         want = body.get('tab')
         if want not in (dialog.get('tabs') or []):
             raise ValueError('This dialog has no such tab.')
+        idle, cycle = 0, False
         for _ in range(len(dialog['tabs']) * 2 + 6):
             if dialog.get('tab') == want:
                 return
+            if idle >= 2:
+                break
             if want not in (dialog.get('tabs') or []):
                 break
             offered = {key['key']: hint['effect'] for hint in dialog['hints'] for key in hint['keys']}
             to_tabs = next((key for key, effect in offered.items() if re.search(r'\btabs?\b', effect) and key not in ('Left', 'Right', 'Tab')), None)
-            if dialog.get('tab_focus'):
-                press('Right' if dialog['tabs'].index(want) > dialog['tabs'].index(dialog['tab']) else 'Left')
+            if cycle:
+                key = 'Tab'  # Tab goes forward and wraps. An arrow after it would go back and forth (seen in /plugin).
+            elif dialog.get('tab_focus'):
+                key = 'Right' if dialog['tabs'].index(want) > dialog['tabs'].index(dialog['tab']) else 'Left'
             elif to_tabs:
-                press(to_tabs)
+                key = to_tabs
             elif '/' in offered and re.search(r'search|filter', offered['/']):
-                press('/')  # the list has the focus; the search box leads to the tab row
+                key = '/'  # the list has the focus; the search box leads to the tab row
             elif 'Tab' not in offered and not any(re.search(r'\bchange\b', effect) for effect in offered.values()):
-                press('Tab')
+                key = 'Tab'
             else:
                 break
-            dialog = look()
+            dialog, moved = step(dialog, key)
+            cycle = cycle or key == 'Tab' and moved
+            idle = 0 if moved else idle + 1
         raise RuntimeError('Could not open that tab. Use the terminal for this dialog.')
     if action == 'scale':
         want = body.get('value')
@@ -552,8 +594,9 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
                 raise ValueError('This dialog has no such level.')
             if scale['value'] == want:
                 return
-            press('Right' if scale['options'].index(want) > scale['options'].index(scale['value']) else 'Left')
-            dialog = look()
+            dialog, moved = step(dialog, 'Right' if scale['options'].index(want) > scale['options'].index(scale['value']) else 'Left')
+            if not moved:
+                break
         raise RuntimeError('Could not set that level. Use the terminal for this dialog.')
     if action == 'filter':
         text = body.get('text')
@@ -565,14 +608,16 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
         if box is None or not (typing or '/' in offered):
             raise ValueError('This dialog has no search box that Tether can type in.')
         if not typing:
-            press('/')
-            dialog = look()
+            dialog, _ = step(dialog, '/')
             box = next((block for block in dialog['blocks'] if block['type'] == 'search'), None)
             if box is None or not any(key['label'] == 'Type' for hint in dialog['hints'] for key in hint['keys']):
                 raise RuntimeError('Could not open the search box. Use the terminal for this dialog.')
         if box['value']:
-            press(*['BSpace'] * len(box['value']))
+            dialog, _ = step(dialog, *['BSpace'] * len(box['value']))
+            box = next((block for block in dialog['blocks'] if block['type'] == 'search'), None)
+            if box is None or box['value'] or not any(key['label'] == 'Type' for hint in dialog['hints'] for key in hint['keys']):
+                raise RuntimeError('Could not clear the search box. Use the terminal for this dialog.')
         if text:
-            press(text, literal=True)
+            type_text(text)
         return
     raise ValueError('Unknown dialog action.')

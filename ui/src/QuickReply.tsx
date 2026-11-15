@@ -68,7 +68,7 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
     if (!data || disabled || writing.current) return null
     writing.current = true
     setBusy(true)
-    try { await api('dialog', { session: pane.id, thread: data.thread ?? null, title: attention.dialog?.title, ...action }); return null }
+    try { await api('dialog', { session: pane.id, thread: data.thread ?? null, title: attention.dialog?.title, mode: attention.dialog?.mode, ...action }); return null }
     catch (failure) { return errorText(failure) }
     finally { writing.current = false; setBusy(false); await refresh() }
   }

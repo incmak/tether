@@ -23,6 +23,8 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     setBusy(id); setFailed('')
     try { setFailed(await onAction(action) ?? '') } finally { setBusy('') }
   }
+  // A control that is off for a moment keeps the keyboard focus: a real `disabled` would drop the focus to the page.
+  const off = disabled || !!busy
   const hasList = dialog.blocks.some(block => block.type === 'list')
   const hasScale = dialog.blocks.some(block => block.type === 'scale')
   const canType = dialog.hints.some(hint => hint.keys.some(key => key.label === 'Type' || key.key === '/'))
@@ -55,7 +57,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   const row = (item: DialogItem, at: number) => {
     const mark = item.mark ? MARKS[item.mark] : undefined
     return <li key={at}>
-      <button type="button" className={item.selected ? 'current' : ''} aria-current={item.selected || undefined} disabled={disabled || !!busy}
+      <button type="button" className={item.selected ? 'current' : ''} aria-current={item.selected || undefined} aria-disabled={off || undefined}
         onClick={() => void act(`row-${at}`, { action: 'row', row: at, label: item.text })}>
         {item.mark && <span className={`dlg-mark ${mark?.[0] ?? ''}`} role="img" aria-label={mark?.[1] ?? item.mark}>{item.mark}</span>}
         <span className="dlg-row-text"><strong>{item.text}</strong>{item.detail && <small>{item.detail}</small>}</span>
@@ -73,7 +75,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     if (block.type === 'tabs') return <p key={at} className="dlg-subtabs" aria-label="Views">{block.tabs.map(tab => <span key={tab} className={tab === block.tab ? 'current' : ''} aria-current={tab === block.tab || undefined}>{tab}</span>)}</p>
     if (block.type === 'scale') return <div key={at} className="dlg-scale">
       <div role="radiogroup" aria-label={dialog.title}>
-        {block.options.map(option => <button key={option} type="button" role="radio" aria-checked={option === block.value} disabled={disabled || !!busy}
+        {block.options.map(option => <button key={option} type="button" role="radio" aria-checked={option === block.value} aria-disabled={off || undefined}
           onClick={() => void act(`scale-${option}`, { action: 'scale', value: option })}>{busy === `scale-${option}` ? '…' : option}</button>)}
       </div>
       {block.ends.length === 2 && <p className="dlg-scale-ends" aria-hidden="true"><span>{block.ends[0]}</span><span>{block.ends[1]}</span></p>}
@@ -83,9 +85,9 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
       const search = () => { if (canType && query.trim() !== block.value) void act('filter', { action: 'filter', text: query.trim() }) }
       return <div key={at} className="dlg-search" role="search">
         <label><Search size={16} aria-hidden="true" />
-          <input type="search" aria-label={(block.placeholder || 'Search').replace(/…$/, '')} enterKeyHint="search" maxLength={80} autoCapitalize="none" spellCheck={false} placeholder={block.placeholder || 'Search…'} value={query} disabled={disabled || !canType}
+          <input type="search" aria-label={(block.placeholder || 'Search').replace(/…$/, '')} enterKeyHint="search" maxLength={80} autoCapitalize="none" spellCheck={false} placeholder={block.placeholder || 'Search…'} value={query} readOnly={disabled || !canType} aria-disabled={disabled || !canType || undefined}
             onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); search() } }} /></label>
-        <button type="button" disabled={disabled || !canType || !!busy || query.trim() === block.value} onClick={search}>{busy === 'filter' ? 'Searching…' : 'Search'}</button>
+        <button type="button" aria-disabled={off || !canType || query.trim() === block.value || undefined} onClick={search}>{busy === 'filter' ? 'Searching…' : 'Search'}</button>
       </div>
     }
     let index = dialog.blocks.slice(0, at).reduce((count, earlier) => count + (earlier.type === 'list' ? earlier.items.filter(item => 'text' in item).length : 0), 0)
@@ -99,7 +101,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   // would return, and the button would move away under the finger. So a press on a button leaves the focus in the box.
   return <div className="dlg-card" onMouseDown={event => { if (document.activeElement instanceof HTMLInputElement && (event.target as Element).closest('button')) event.preventDefault() }}>
     {dialog.tabs && <div ref={tabRow} className="perm-tabs" role="tablist" aria-label={`${dialog.title} tabs`}>
-      {dialog.tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === dialog.tab} aria-busy={busy === `tab-${tab}` || undefined} disabled={disabled || !!busy}
+      {dialog.tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === dialog.tab} aria-busy={busy === `tab-${tab}` || undefined} aria-disabled={off || undefined}
         onClick={() => { if (tab !== dialog.tab) void act(`tab-${tab}`, { action: 'tab', tab }) }}>{tab}</button>)}
     </div>}
     {dialog.note && <p className="dlg-text dim">{dialog.note}</p>}
@@ -107,7 +109,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     {!dialog.blocks.length && <p className="dlg-text dim">Loading…</p>}
     {hasList && <p className="dlg-text dim dlg-help">Tap a row to move the mark to it. The buttons act on the marked row.</p>}
     <div className="info-actions dlg-actions" role="group" aria-label="Dialog keys">
-      {buttons.map(button => <button key={button.id} type="button" className={button.primary ? 'primary' : ''} disabled={disabled || !!busy} aria-busy={busy === button.id || undefined}
+      {buttons.map(button => <button key={button.id} type="button" className={button.primary ? 'primary' : ''} aria-disabled={off || undefined} aria-busy={busy === button.id || undefined}
         aria-label={button.kbd ? undefined : ({ Up: 'Move up', Down: 'Move down', Left: 'Left', Right: 'Right' } as Record<string, string>)[button.key]}
         onClick={() => void act(button.id, { action: 'key', key: button.key })}><span>{button.label}</span>{button.kbd && <kbd>{button.kbd}</kbd>}</button>)}
     </div>

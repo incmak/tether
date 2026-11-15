@@ -180,7 +180,7 @@ export type DialogBlock = { type: 'text'; lines: string[]; dim: boolean; mono: b
   | { type: 'search'; placeholder: string; value: string; focused: boolean }
   | { type: 'list'; items: (DialogItem | { heading: string })[]; more_above: number; more_below: number }
 export interface DialogHint { keys: { key: string; label: string }[]; effect: string; text: string }
-export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; text: string }
+export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; mode: string; text: string }
 export type DialogAction = { action: 'key'; key: string } | { action: 'row'; row: number; label: string } | { action: 'tab'; tab: string } | { action: 'scale'; value: string } | { action: 'filter'; text: string }
 export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side' | 'dialog'; permissions?: PermissionsDialog; dialog?: ClaudeDialog;
   /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
