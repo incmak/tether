@@ -339,13 +339,25 @@ class Feed(unittest.TestCase):
             self.assertEqual(len(self.world.sent), count)
         self.assertIn('NEW command', self.world.sent[-1][1])
 
+    def test_a_prompt_that_only_wraps_again_gives_one_report(self):
+        self.approval('%2', 'ls -a')
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE)
+        self.wait_for_send()
+        self.world.states['%2']['approval']['text'] = 'Bash command ls\n-a'   # the pane is wider or narrower now
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE)
+        self.wait_for_send()
+        self.assertEqual(len(self.world.sent), 1)
+
     def test_prompt_identity_uses_the_id_else_the_kind_and_content(self):
         identity = coordinator.prompt_identity
         self.assertIsNone(identity({'state': 'Idle'}))
         self.assertEqual(identity({'state': 'Approval', 'approval': {'id': 'a1', 'text': 'x'}}),
                          identity({'state': 'Approval', 'approval': {'id': 'a1', 'text': 'y'}}))
-        same = [identity({'state': 'Approval', 'approval': {'id': None, 'text': text}}) for text in ('ls  -a', 'ls -a')]
-        self.assertEqual(same[0], same[1])
+        same = {identity({'state': 'Approval', 'approval': {'id': None, 'text': text, 'options': [text]}})
+                for text in ('Bash command ls  -a', 'Bash command\nls -a', 'Bash command\tls -a', ' Bash command\r\n ls -a\n')}
+        self.assertEqual(len(same), 1)
         self.assertNotEqual(identity({'state': 'Approval', 'approval': {'id': None, 'text': 'ls'}}),
                             identity({'state': 'Approval', 'approval': {'id': None, 'text': 'rm'}}))
         self.assertNotEqual(identity({'state': 'Approval', 'approval': {'text': 'ls'}}),

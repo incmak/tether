@@ -365,9 +365,21 @@ def prompt_identity(info):
     prompt = info.get(waiting) if isinstance(info.get(waiting), dict) else {}
     if prompt.get('id') is not None:
         return (waiting, 'id', str(prompt['id']))
-    content = re.sub(r'\s+', ' ', json.dumps({key: value for key, value in prompt.items() if key != 'id'},
-                                             sort_keys=True, ensure_ascii=False, default=str))
+    content = json.dumps(_plain({key: value for key, value in prompt.items() if key != 'id'}),
+                         sort_keys=True, ensure_ascii=False, default=str)
     return (waiting, 'content', hashlib.sha256(content.encode()).hexdigest())
+
+
+def _plain(value):
+    """value with every string's whitespace (spaces, tabs, line breaks) cut to single spaces: a prompt that only wraps
+    in another way is the same prompt. Runs before JSON encoding, which would escape the line breaks and tabs."""
+    if isinstance(value, str):
+        return ' '.join(value.split())
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
 
 
 def wanted(event, mode):
