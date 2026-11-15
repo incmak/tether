@@ -17,12 +17,13 @@ ENTRIES = [
     tab('%3', session='$2', label='site:1.0', agent='codex', pane_name='Hero copy'),
     tab('%4', session='$2', label='site:2.0', role='advisor', pane_name='Advisor: secret plan'),
     tab('%5', session='$3', label='tether-login-claude:1.0'),
+    tab('%6', session='$2', label='site:3.0', helper='reviewer', pane_name='Review: secret fix'),
 ]
 GROUPS = {'$1': [{'id': 'g1', 'name': 'Billing'}]}
 
 
 def folder_of(entry):
-    return {'%1': '/Users/someone/apps/work', '%3': '/Users/someone/apps/site'}.get(entry['id'], '')
+    return {'%1': quick_tab.HOME + '/apps/work', '%3': quick_tab.HOME + '/apps/site'}.get(entry['id'], '')
 
 
 class Process:
@@ -58,6 +59,24 @@ class PlacesTest(unittest.TestCase):
         self.assertEqual(text, 'Task: Fix it now\n\nPlaces:\n1 | work | apps/work | a b [31m')
         self.assertNotIn('/Users/', text)
 
+    def test_paths_in_names_and_titles_keep_only_their_last_part(self):
+        entries = [tab('%1', label='/Users/alice/x:1.0', pane_name='/Users/alice/private-repo'),
+                   tab('%2', pane_name='~/notes/plan.md and A/B test'),
+                   tab('%3', pane_name=r'C:\\Users\\bob\\taxes')]
+        text = quick_tab.model_input('Fix /srv/app', quick_tab.places(entries, {}, folder_of))
+        self.assertEqual(text.splitlines()[-1], '1 | x | apps/work | private-repo; plan.md and A/B test; taxes')
+        self.assertIn('Task: Fix /srv/app', text, "The user's own query stays as typed")
+        for secret in ('alice', 'notes', 'bob', 'Users'):
+            self.assertNotIn(secret, text.splitlines()[-1])
+
+    def test_folders_never_name_home_or_its_parents(self):
+        home = '/Users/someone'
+        self.assertEqual(quick_tab.short_folder('/Users/someone/apps/work/sub', home), 'work/sub')
+        self.assertEqual(quick_tab.short_folder('/Users/someone', home), '')
+        self.assertEqual(quick_tab.short_folder('/Users', home), '')
+        self.assertEqual(quick_tab.short_folder('/srv/data/proj', home), 'proj')
+        self.assertEqual(quick_tab.short_folder('', home), '')
+
 
 class ParseTest(unittest.TestCase):
     def test_accepts_one_number_from_the_list(self):
@@ -76,8 +95,10 @@ class PickAgentTest(unittest.TestCase):
         which = {'claude': '/bin/claude', 'codex': '/bin/codex'}.get
         self.assertEqual(quick_tab.pick_agent('none', which), (None, None))
         self.assertEqual(quick_tab.pick_agent('auto', which), ('claude', '/bin/claude'))
-        self.assertEqual(quick_tab.pick_agent('codex', which), ('codex', '/bin/codex'))
-        self.assertEqual(quick_tab.pick_agent('codex', {'claude': '/bin/claude'}.get), (None, None))
+        self.assertEqual(quick_tab.pick_agent('claude', which), ('claude', '/bin/claude'))
+        # Codex never routes: its tools cannot all be turned off, so it could read local files.
+        self.assertEqual(quick_tab.pick_agent('codex', which), (None, None))
+        self.assertEqual(quick_tab.pick_agent('auto', {'codex': '/bin/codex'}.get), (None, None))
         with self.assertRaises(ValueError):
             quick_tab.pick_agent('gpt', which)
 
@@ -121,6 +142,9 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(router.route({'query': 'x', 'agent': 'none'}, ENTRIES, GROUPS, folder_of)['source'],
                          'default')
         self.assertEqual(router.route({'query': 'x', 'agent': 'auto'}, [], {}, folder_of)['source'], 'default')
+        codex = router.route({'query': 'x', 'agent': 'codex'}, ENTRIES, GROUPS, folder_of)
+        self.assertEqual((codex['place'], codex['source']), (None, 'default'))
+        self.assertIn('only with Claude', codex['why'])
         self.assertEqual(calls, [])
 
     def test_checks_the_query(self):
@@ -143,6 +167,8 @@ class StarterTest(unittest.TestCase):
         self.folder = tempfile.mkdtemp()
         self.now = 1000.0
         self.commands = []
+        self.moved = {}
+        self.kill_fails = False
         self.patches = [
             mock.patch.object(quick_tab.delegate, 'start', side_effect=self.fake_start),
             mock.patch.object(quick_tab.prefs_sync, 'session_folder', return_value=self.folder),
@@ -166,7 +192,10 @@ class StarterTest(unittest.TestCase):
     def tmux(self, command, **_):
         self.commands.append(command)
         if 'display-message' in command:
-            return SimpleNamespace(returncode=0, stdout='$7\n' if command[4] == '%90' else '$1\n', stderr='')
+            live = {'%90': '$7', **{entry['id']: entry['tmux_session'] for entry in ENTRIES}, **self.moved}
+            return SimpleNamespace(returncode=0, stdout=live.get(command[4], '$1') + '\n', stderr='')
+        if 'kill-pane' in command and self.kill_fails:
+            raise subprocess.TimeoutExpired(command, 5)
         return SimpleNamespace(returncode=0, stdout='', stderr='')
 
     def test_starts_in_the_chosen_stack_from_a_tab_of_that_stack(self):
@@ -195,6 +224,42 @@ class StarterTest(unittest.TestCase):
         self.assertEqual(self.starter.start(body, ENTRIES, GROUPS, folder_of), first)
         self.mocks[0].assert_not_called()
 
+    def test_refuses_when_the_anchor_left_the_session(self):
+        self.moved = {'%2': '$9'}
+        with self.assertRaisesRegex(ValueError, 'session changed'):
+            self.starter.start({'request': 'req-00010', 'message': 'x', 'session': '$1', 'group': 'g1'},
+                               ENTRIES, GROUPS, folder_of)
+        self.mocks[0].assert_not_called()
+
+    def test_a_failed_cleanup_still_records_the_started_tab(self):
+        self.kill_fails = True
+        body = {'request': 'req-00011', 'message': 'x', 'default': True}
+        first = self.starter.start(body, ENTRIES, GROUPS, folder_of)
+        self.mocks[0].reset_mock()
+        self.assertEqual(self.starter.start(body, ENTRIES, GROUPS, folder_of), first)
+        self.mocks[0].assert_not_called()
+
+    def test_an_unclear_launch_failure_blocks_a_second_launch(self):
+        for error in (subprocess.TimeoutExpired(['tmux'], 5), RuntimeError('Could not split the pane.')):
+            with self.subTest(error=type(error).__name__):
+                self.mocks[0].side_effect = error
+                body = {'request': f'req-unclear-{type(error).__name__}', 'message': 'x', 'session': '$1', 'group': ''}
+                with self.assertRaisesRegex(ValueError, 'may have started'):
+                    self.starter.start(body, ENTRIES, GROUPS, folder_of)
+                self.mocks[0].side_effect = self.fake_start
+                self.mocks[0].reset_mock()
+                with self.assertRaisesRegex(ValueError, 'may have started'):
+                    self.starter.start(body, ENTRIES, GROUPS, folder_of)
+                self.mocks[0].assert_not_called()
+
+    def test_a_checked_input_error_allows_a_retry(self):
+        self.mocks[0].side_effect = ValueError('Choose an absolute path to an existing directory.')
+        body = {'request': 'req-00012', 'message': 'x', 'session': '$1', 'group': ''}
+        with self.assertRaisesRegex(ValueError, 'absolute path'):
+            self.starter.start(body, ENTRIES, GROUPS, folder_of)
+        self.mocks[0].side_effect = self.fake_start
+        self.assertEqual(self.starter.start(body, ENTRIES, GROUPS, folder_of)['pane'], '%50')
+
     def test_refuses_bad_places(self):
         bad = [
             {'request': 'short', 'message': 'x', 'session': '$1', 'group': ''},
@@ -212,6 +277,7 @@ class StarterTest(unittest.TestCase):
 
     def test_default_uses_existing_general_session(self):
         entries = [*ENTRIES, tab('%8', session='$4', label='General:1.0', agent='')]
+        self.moved = {'%8': '$4'}
         answer = self.starter.start({'request': 'req-00006', 'message': 'x', 'default': True}, entries, GROUPS,
                                     lambda entry: self.folder)
         self.mocks[2].assert_called_once_with('$4', 'Triage', self.tmux)

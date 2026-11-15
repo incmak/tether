@@ -48,7 +48,8 @@ export function useQuickCreate({ api, agent, sessions, onOpen }: Options): { cre
     if (!live.current) return
     setToast(old => {
       if (typeof value === 'function') return old?.id === id ? value(old) : old
-      return old && old.id > id ? old : { id, ...value }
+      // Only the newest action may set a new toast: a late result must not bring back a dismissed or newer toast.
+      return id === next.current ? { id, ...value } : old
     })
   }, [])
 

@@ -79,6 +79,22 @@ async function main() {
   await assert.rejects(again.undo(), /changed since it was added/)
   assert.match(file.text, /Edited/)
 
+  // Another client adds the same text while this save runs: Undo removes this save's item, never theirs.
+  file = { text: '- [ ] Old #B1\n', version: 'w1', limit: 100000, next_id: 2 }
+  let raced = false
+  const racing = async (path, body) => {
+    if (body && !raced) {
+      raced = true
+      file = { text: '- [ ] Old #B1\n- [ ] Same #B2\n', version: 'w2', limit: 100000, next_id: 3 }
+    }
+    return store(path, body)
+  }
+  conflict = false
+  const mine = await backlog.addToBacklog(racing, 'Same')
+  assert.equal(mine.ref, 'B3', 'Its own item, not the equal one another client saved first')
+  await mine.undo()
+  assert.equal(file.text, '- [ ] Old #B1\n- [ ] Same #B2\n', 'Undo leaves the other client item')
+
   // addedItem finds only a new open line with the same text.
   assert.equal(backlog.addedItem('- [ ] A #B1\n', '- [ ] A #B1\n- [ ] A #B2\n', 'A').ref, 'B2')
   assert.equal(backlog.addedItem('- [ ] A #B1\n', '- [ ] A #B1\n', 'A'), undefined)

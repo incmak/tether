@@ -191,6 +191,32 @@ async function main() {
     check('the picked place skips the AI', !calls.some(call => call.endpoint === 'quick-tab/route') && calls[0].body.session === '$2' && calls[0].body.group === '', JSON.stringify(calls))
     await toast.getByRole('button', { name: 'Dismiss' }).click()
 
+    // "Let Tether choose" in the picker asks the AI, like Enter on the row.
+    calls.length = 0
+    await searchFor('Tune the reverb', 'Start a new tab for “Tune the reverb”')
+    await page.keyboard.press('Tab')
+    await listbox.waitFor()
+    await page.getByRole('option', { name: /Let Tether choose/ }).click()
+    await toast.getByText(/^Started “Tune the reverb”/).waitFor()
+    check('"Let Tether choose" in the picker routes, then starts', calls[0]?.endpoint === 'quick-tab/route' && calls.some(call => call.endpoint === 'quick-tab/start'), JSON.stringify(calls))
+    await toast.getByRole('button', { name: 'Dismiss' }).click()
+
+    // An older action that finishes late must not bring back a toast after a newer one was dismissed.
+    calls.length = 0
+    routeDelay = 1500
+    await searchFor('Slow first task', 'Start a new tab for “Slow first task”')
+    await page.keyboard.press('Enter')
+    await toast.getByText(/Choosing a place for “Slow first task”/).waitFor()
+    await searchFor('Quick second task', 'Start a new tab for “Quick second task”')
+    await page.keyboard.press('Tab')
+    await listbox.waitFor()
+    await page.getByRole('option', { name: /General · Triage/ }).click()
+    await toast.getByText(/^Started “Quick second task”/).waitFor()
+    await toast.getByRole('button', { name: 'Dismiss' }).click()
+    await page.waitForTimeout(2500)
+    check('a late older result shows no toast', (await toast.count()) === 0 && calls.filter(call => call.endpoint === 'quick-tab/start').length === 2, JSON.stringify(calls.map(call => call.endpoint)))
+    routeDelay = 0
+
     // → at the end of the text opens the picker too; Escape returns to the search field.
     await searchFor('Check audio', 'Start a new tab for “Check audio”')
     await page.keyboard.press('ArrowRight')
@@ -220,7 +246,10 @@ async function main() {
       await page.setViewportSize({ width, height })
       const long = 'A long task name that keeps going past the edge of a small phone screen'
       await searchFor(long, `Start a new tab for “${long}”`)
-      check(`${width}px menu fits`, !(await overflow()) && (await menu.boundingBox()).width <= width)
+      const menuBox = await menu.boundingBox()
+      check(`${width}px menu fits`, !(await overflow()) && menuBox.width <= width)
+      const hints = await menu.locator('.command-foot kbd').evaluateAll(nodes => nodes.map(node => { const box = node.getBoundingClientRect(); return [box.left, box.right] }))
+      check(`${width}px key hints stay inside the menu`, hints.length > 0 && hints.every(([left, right]) => left >= menuBox.x - 0.5 && right <= menuBox.x + menuBox.width + 0.5), JSON.stringify({ hints, menuBox }))
       await page.keyboard.press('Tab')
       await listbox.waitFor()
       const box = await listbox.boundingBox()

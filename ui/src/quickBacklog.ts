@@ -8,8 +8,9 @@ import type { Change, Item } from './backlogItems'
 interface Saved { text: string; version: string; limit: number; next_id?: number }
 const RETRIES = 3
 
-/** Apply a change to the newest backlog. A 409 means someone saved first: read the file again and apply it there. */
-async function save(api: Api, change: Change): Promise<Saved> {
+/** Apply a change to the newest backlog. A 409 means someone saved first: read the file again and apply it there.
+ * Returns the saved file and the text it was saved over, so a caller can tell its own change from others. */
+async function save(api: Api, change: Change): Promise<{ saved: Saved; base: string }> {
   let base = await api<Saved>(BACKLOG_PATH)
   for (let attempt = 0; attempt < RETRIES; attempt += 1) {
     const value = change(base.text)
@@ -17,7 +18,7 @@ async function save(api: Api, change: Change): Promise<Saved> {
     const numbered = withIds(value, base.next_id)
     if (keptLength(numbered) > base.limit) throw new Error(`The backlog is full (${base.limit.toLocaleString()} characters). Delete some items first.`)
     try {
-      return await api<Saved>(BACKLOG_PATH, { text: numbered, version: base.version })
+      return { saved: await api<Saved>(BACKLOG_PATH, { text: numbered, version: base.version }), base: base.text }
     } catch (failure) {
       if (!(failure instanceof ApiError && failure.status === 409)) throw failure
       base = await api<Saved>(BACKLOG_PATH)
@@ -37,9 +38,9 @@ export function addedItem(before: string, after: string, text: string): Item | u
 
 /** Add the text as a new inbox item. Returns its ID (B12) and an undo that removes that exact line again. */
 export async function addToBacklog(api: Api, text: string) {
-  const before = await api<Saved>(BACKLOG_PATH)
-  const saved = await save(api, addItem(text))
-  const item = addedItem(before.text, saved.text, text)
+  // Compare with the exact text this save replaced: an equal item another client added earlier is already in it.
+  const { saved, base } = await save(api, addItem(text))
+  const item = addedItem(base, saved.text, text)
   const undo = async () => {
     if (!item) throw new Error('The new item was not found.')
     const fresh = await api<Saved>(BACKLOG_PATH)

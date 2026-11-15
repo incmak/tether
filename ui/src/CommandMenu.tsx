@@ -173,7 +173,7 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     </label>
     {picking && create && words && <div className="command-place">
       <span className="command-place-label" id="command-place-label">Start “{words}” in</span>
-      <SelectMenu openOnMount value="auto" options={placeRows} onChange={choose} label="Place for the new tab" className="sm-field command-place-field" minWidth={300}
+      <SelectMenu openOnMount value="" options={placeRows} onChange={choose} label="Place for the new tab" className="sm-field command-place-field" minWidth={300}
         searchLabel="Search sessions and stacks" emptyText="No session or stack matches." triggerLabel="Choose a place" icon={<MapPin size={13} aria-hidden="true" />}
         onClosed={() => { setPicking(false); requestAnimationFrame(() => input.current?.focus()) }} />
     </div>}
