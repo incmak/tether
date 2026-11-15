@@ -185,9 +185,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       const server = recorded.audio.size ? await serverText(recorded.audio, refineLimit(seconds)) : null
       if (cancelled) return
       if (cleanupRecording.current === cancel) cleanupRecording.current = null
-      // One Hindi word ("push kar do") is not proof of Hinglish, but Parakeet's answer is: on Hinglish it shares few words
-      // with the browser text ("Push cardoo."); on English with a name ("Ask Rahul ke…") most words match.
-      const foreign = !!server?.text && hindiWords(spoken) > 0 && shared(spoken, server.text) < 0.5
+      // Parakeet is English only. When it drops a Hindi word that the browser heard ("deploy kar do please" became
+      // "Deploy Cardo please."), the browser text is closer to what was said.
+      const foreign = !!server?.text && dropsHindi(spoken, server.text)
       const used = foreign ? 'hinglish' : server?.text ? 'server' : server?.late ? 'late' : 'browser'
       const next = server?.text && !foreign ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
       setText(next); finish(next)
@@ -445,10 +445,10 @@ export function hinglish(text: string) {
   return /[\u0900-\u097F\u0600-\u06FF]/.test(text) || hindiWords(text) >= 2  // Devanagari or Urdu script, or two different words
 }
 
-// The part of the browser words that the server text also has.
-export function shared(browser: string, server: string) {
-  const words = latinWords(browser), heard = new Set(latinWords(server))
-  return words.length ? words.filter(word => heard.has(word)).length / words.length : 1
+// True when the server text lost a Hindi word that the browser text has.
+export function dropsHindi(browser: string, server: string) {
+  const heard = new Set(latinWords(server))
+  return latinWords(browser).some(word => HINDI_WORDS.has(word) && !heard.has(word))
 }
 
 // How long the box waits for the server text before it keeps the browser text. Parakeet converts 3 s of speech in
