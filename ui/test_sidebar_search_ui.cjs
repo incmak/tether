@@ -88,6 +88,8 @@ async function main() {
       const search = root.getByRole('searchbox', { name: 'Search sessions' })
       await search.waitFor()
       await root.locator('.session-groups .session-title').first().waitFor()
+      // The server prefs archive Old notes after the first paint: wait for them before searching.
+      await root.locator('.session-groups .pane-children .pane-child-name', { hasText: 'Old notes' }).waitFor({ state: 'detached' })
       await search.fill('voice')
       check(`${at} tab title finds its session`, JSON.stringify(await sessionTitles()) === JSON.stringify(['tether']), JSON.stringify(await sessionTitles()))
       check(`${at} only the matching tab shows`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Voice mode latency'), JSON.stringify(await tabs()))
@@ -109,6 +111,24 @@ async function main() {
       check(`${at} words split over session and tab`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Release notes'), JSON.stringify(await tabs()))
       await search.fill('tether')
       check(`${at} session name shows every tab`, (await tabs()).length === 3, JSON.stringify(await tabs()))
+      // Fuzzy: initials, a typo, close letters.
+      for (const word of ['vml', 'vioce', 'ltncy']) {
+        await search.fill(word)
+        check(`${at} fuzzy "${word}" finds the voice tab`, (await tabs())[0]?.startsWith('Voice mode latency'), JSON.stringify(await tabs()))
+      }
+      if (width >= 800) {
+        // ⌘K reads the same index: the same words find the same tab, also by its stack.
+        await search.fill('')
+        for (const word of ['voice', 'vml', 'audio']) {
+          await page.keyboard.press('Control+k')
+          const menu = page.locator('dialog.command-menu')
+          await menu.getByRole('combobox').fill(word)
+          const first = await menu.locator('.command-row').first().innerText()
+          check(`⌘K "${word}" ranks the voice tab first`, first.includes('Voice mode latency'), first)
+          await page.keyboard.press('Escape')
+          await menu.waitFor({ state: 'hidden' })
+        }
+      }
       await search.fill('nothing like this')
       check(`${at} empty result says no match`, await root.getByText('No sessions or tabs match.').first().isVisible())
       check(`${at} no page overflow`, !(await overflow()))

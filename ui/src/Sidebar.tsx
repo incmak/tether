@@ -34,8 +34,8 @@ import { WaitingBox } from './Attention'
 import type { ReviewEntry } from './Attention'
 import { waitingAsks } from './attention'
 import { HOLD_MS } from './gesture'
-import { matchSessions, searchText, searchWords } from './sessionSearch'
-import type { SearchEntry } from './sessionSearch'
+import { field, matchSessions, searchWords } from './search'
+import type { SearchEntry, SessionMatch } from './search'
 
 // The avatars layout variant (layouts.css) shows a round avatar per session and tab: up to two initials, a colour from the name.
 const initials = (name: string) => (name.match(/[\p{L}\p{N}]+/gu) ?? ['?']).slice(0, 2).map(word => [...word][0]).join('').toUpperCase()
@@ -99,6 +99,21 @@ export const paneIndex = (pane: Pane) => pane.label.includes(':') ? pane.label.s
 export const shownIndex = (pane: Pane) => pane.pane_name || pane.agent_name ? '' : paneIndex(pane)
 /** The tmux session name: the label without the window.pane suffix it gets when the session has more than one pane. */
 export const sessionName = (pane: Pane) => pane.label.includes(':') ? pane.label.slice(0, pane.label.lastIndexOf(':')) : pane.label
+
+/**
+ * The search index of the sidebar and the ⌘K menu, so both find the same tabs.
+ * A session matches on its name, folder and custom group; a tab on its title, tmux name, agent, stack and worktree.
+ * An archived tab is its own entry, with its session's fields and its own. Build it once per data change.
+ */
+export function searchIndex(sessions: Session[], archivedTabs: Pane[], prefs: Pick<Prefs, 'groups' | 'groupOf'>, stacks?: Record<string, GroupInfo[]>): [SearchEntry[], SearchEntry[]] {
+  const groupNames = new Map(prefs.groups.map(group => [group.id, group.name]))
+  const stacksOf = new Map(Object.entries(stacks ?? {}).map(([id, list]) => [id, new Map(list.map(stack => [stack.id, stack.name]))]))
+  const tabFields = (pane: Pane) => [field(2, paneTitle(pane), pane.tmux_pane_name), field(1, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)]
+  const sessionFields = (id: string, name: string, dir: string) => [field(2, name), field(1, dir, groupNames.get(prefs.groupOf[id] ?? ''))]
+  const live = sessions.map(session => ({ id: session.id, fields: sessionFields(session.id, session.name, session.dir), tabs: session.panes.map(pane => ({ id: pane.id, fields: tabFields(pane) })) }))
+  const hidden = archivedTabs.map(pane => ({ id: pane.id, fields: sessionFields(pane.tmux_session, sessionName(pane), pane.dir), tabs: [{ id: pane.id, fields: tabFields(pane) }] }))
+  return [live, hidden]
+}
 
 export function groupSessions(panes: Pane[], hide?: (pane: Pane) => boolean): Session[] {
   const byId = new Map<string, Pane[]>()
@@ -445,22 +460,16 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
     return () => { drawerScrollTop = scroll; observer.disconnect(); nav.removeEventListener('scroll', save) }
   }, [drawer, search])
   const manual = prefs.sort === 'manual'
-  // The search text is built once per data change; each keystroke only scans it.
-  const groupNames = useMemo(() => new Map(prefs.groups.map(group => [group.id, group.name])), [prefs.groups])
-  const [index, archivedIndex] = useMemo(() => {
-    const stacksOf = new Map(Object.entries(stacks ?? {}).map(([id, list]) => [id, new Map(list.map(stack => [stack.id, stack.name]))]))
-    const tabText = (pane: Pane) => searchText(paneTitle(pane), pane.tmux_pane_name, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)
-    const sessionText = (id: string, name: string, dir: string) => searchText(name, dir, groupNames.get(prefs.groupOf[id] ?? ''))
-    const live: SearchEntry[] = sessions.map(session => ({ id: session.id, text: sessionText(session.id, session.name, session.dir), tabs: session.panes.map(pane => ({ id: pane.id, text: tabText(pane) })) }))
-    // An archived tab is its own entry: its session's text and its own.
-    const hidden: SearchEntry[] = archivedTabs.map(pane => ({ id: pane.id, text: sessionText(pane.tmux_session, sessionName(pane), pane.dir), tabs: [{ id: pane.id, text: tabText(pane) }] }))
-    return [live, hidden]
-  }, [sessions, archivedTabs, stacks, groupNames, prefs.groupOf])
-  const matches = useMemo(() => search ? matchSessions(index, searchWords(search)) : null, [index, search])
-  const archivedMatches = useMemo(() => search ? matchSessions(archivedIndex, searchWords(search)) : null, [archivedIndex, search])
-  const visible = sortSessions(sessions, prefs, selected).filter(session => !matches || matches.has(session.id))
+  // The index is built once per data change; each keystroke only scores it.
+  const { groups: customGroups, groupOf } = prefs
+  const [index, archivedIndex] = useMemo(() => searchIndex(sessions, archivedTabs, { groups: customGroups, groupOf }, stacks), [sessions, archivedTabs, stacks, customGroups, groupOf])
+  const words = useMemo(() => searchWords(search), [search])
+  const matches = useMemo(() => search ? matchSessions(index, words) : null, [index, words, search])
+  const archivedMatches = useMemo(() => search ? matchSessions(archivedIndex, words) : null, [archivedIndex, words, search])
+  // During a search the best match comes first in each group.
+  const visible = matches ? sortSessions(sessions, prefs, selected).filter(session => matches.has(session.id)).sort((a, b) => matches.get(b.id)!.score - matches.get(a.id)!.score) : sortSessions(sessions, prefs, selected)
   const archived = visible.filter(session => isArchived(session, prefs.archived))
-  const hiddenTabs = archivedTabs.filter(pane => !archivedMatches || archivedMatches.has(pane.id))
+  const hiddenTabs = archivedMatches ? archivedTabs.filter(pane => archivedMatches.has(pane.id)).sort((a, b) => archivedMatches.get(b.id)!.score - archivedMatches.get(a.id)!.score) : archivedTabs
   const live = visible.filter(session => !isArchived(session, prefs.archived))
   // A session that needs you moves to the top group, out of its usual group, so it shows once.
   const needs = live.filter(session => status(session.panes, prefs.seen, selected).kind === 'approval')
@@ -562,7 +571,7 @@ function projectMark(mark: ProjectMark | undefined) {
   return <BookMarked size={11} className={`project-mark ${stale ? 'stale' : ''}`} aria-label={stale ? 'Project changed. Restart its agents to apply.' : 'Has project context'} />
 }
 
-function SessionList({ matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, 'all' | Set<string>> | null }) {
+function SessionList({ matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
   const list = useRef<HTMLUListElement>(null)
   const dragging = useRef<string | null>(null)
   const [preview, setPreview] = useState<string[] | null>(null)
@@ -627,7 +636,7 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
       const state = status(session.panes, prefs.seen, selected)
       // During a search each session shows its matching tabs, open, and the session row opens the first match (not the last-used tab).
       const only = matches?.get(session.id)
-      const tabs = only instanceof Set ? session.panes.filter(pane => only.has(pane.id)) : session.panes
+      const tabs = !only ? session.panes : (only.tabs instanceof Set ? session.panes.filter(pane => only.tabScores.has(pane.id)) : [...session.panes]).sort((a, b) => only.tabScores.get(b.id)! - only.tabScores.get(a.id)!)
       const target = (only ? undefined : session.panes.find(pane => pane.id === prefs.lastPane[session.id])) ?? tabs[0]
       const archived = isArchived(session, prefs.archived)
       // A session with several panes is open by default; its heading folds the pane rows away.
