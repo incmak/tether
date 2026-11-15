@@ -83,6 +83,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
     else setMenu({ place, at })  // an empty group: its menu offers "Start a tab here"
   }
   const waiting = waitingElsewhere(places, current)
+  const movable = places.filter(place => place.id).length > 1  // two named stacks can swap, with or without Unstacked
   return <>
     <nav className="group-row" aria-label={`Stacks of ${session.name}`}>
       {places.map(place => {
@@ -90,7 +91,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
         const word = STATE_WORD[state]
         return <button key={place.id || 'main'} type="button" data-group-drop={place.id} aria-current={place.id === here.id ? 'true' : undefined}
           className={['group-tab', place.id === here.id ? 'active' : '', dragged === place.id ? 'dragging' : ''].filter(Boolean).join(' ')}
-          draggable={!!place.id && places.length > 2}
+          draggable={!!place.id && movable}
           onDragStart={event => { if (!place.id) return; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', place.name); setDragged(place.id) }}
           onDragOver={event => over(event, place)} onDrop={event => { if (dragged) { event.preventDefault(); drop() } }}
           onDragEnd={() => { if (dragged) { setDragged(null); setOrder(null) } }}

@@ -113,8 +113,8 @@ function FolderBrowser({ id, api, start, onPick }: { id: string; api: Api; start
   const matches = useMemo(() => shown?.folders?.filter(name => name.toLowerCase().includes(query)) ?? [], [shown, query])
   const recent = recentFolders(places).filter(path => path !== folder)
   const enter = (path: string) => { setFolder(path); setFilter(''); setError(''); setMaking(null) }
-  async function make(event: React.FormEvent) {
-    event.preventDefault()
+  // A div, not a form: this field sits inside the New tab / session form, and Enter here must not submit that form.
+  async function make() {
     const name = making?.trim()
     if (!name) return
     setPending(true); setError('')
@@ -149,11 +149,14 @@ function FolderBrowser({ id, api, start, onPick }: { id: string; api: Api; start
         : !matches.length ? <li className="create-note">{query ? `No folder here matches “${filter.trim()}”.` : 'No folders here.'}</li>
         : matches.map(name => <li key={name}><button type="button" onClick={() => enter(joinPath(folder, name))}><FolderOpen size={15} aria-hidden="true" />{name}</button></li>)}
     </ul>
-    {making !== null && <form className="create-mkdir" onSubmit={make}>
+    {making !== null && <div className="create-mkdir" role="group" aria-label="New folder">
       <input autoFocus value={making} maxLength={255} placeholder="Folder name" aria-label="New folder name" disabled={pending} onChange={event => setMaking(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setMaking(null) } }} />
-      <button className="secondary" disabled={pending || !making.trim()}>{pending ? 'Making…' : 'Make'}</button>
-    </form>}
+        onKeyDown={event => {
+          if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setMaking(null) }
+          else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (!pending) void make() }
+        }} />
+      <button type="button" className="secondary" disabled={pending || !making.trim()} onClick={() => void make()}>{pending ? 'Making…' : 'Make'}</button>
+    </div>}
     {error && <p className="error create-hint" role="alert">{error}</p>}
     <div className="create-browser-foot">
       {making === null && <button type="button" className="ghost" disabled={!shown || !!shown.error} onClick={() => setMaking('')}><FolderPlus size={15} />New folder</button>}

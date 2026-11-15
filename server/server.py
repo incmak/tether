@@ -2162,7 +2162,7 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self)
+            groups_api.post(self, sessions=sessions)
             return
         if codex_level.handles(self.path):
             codex_level.post(self)

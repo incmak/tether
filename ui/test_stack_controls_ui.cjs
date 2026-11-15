@@ -22,7 +22,7 @@ const fixture = {
   'files/places': { pinned: [], sessions: [{ session: '%2', cwd: '/srv/project' }, { session: '%3', cwd: '/srv/api' }], disk: null },
   'files/list': { path: '/srv', entries: [{ name: 'project', dir: true, size: null, modified: null, kind: 'folder' }, { name: 'api', dir: true, size: null, modified: null, kind: 'folder' }, { name: 'notes.txt', dir: false, size: 3, modified: null, kind: 'text' }], truncated: false },
   'suggest-groups': { groups: [{ name: 'Login', sessions: ['%2', '%3'] }], unstacked: ['%1', '%4'], source: 'llm' },
-  'suggest-name': { names: ['Login work', 'Auth'], source: 'llm' },
+  'suggest-name': { names: ['Login work', 'Auth'], source: 'llm' }, 'files/mkdir': { name: 'fresh' },
   'work/board': { revision: 1, projects: [], items: [], stages: [] },
   'groups/reorder': { groups: stacks }, 'groups/arrange': { groups: [stacks[0]] },
 }
@@ -78,7 +78,20 @@ async function main() {
     check('1280: the stack row shows Unstacked and three stacks', await page.locator('.group-row .group-tab').count() === 4)
     check('1280: stacks can be dragged, Unstacked cannot', await stack('Gamma').getAttribute('draggable') === 'true' && await stack('Unstacked').getAttribute('draggable') === 'false')
     const alpha = await stack('Alpha').boundingBox()
-    await stack('Gamma').dragTo(stack('Alpha'), { targetPosition: { x: 4, y: alpha.height / 2 } })
+    // HTML5 drag events with one DataTransfer, sent in the order Chromium sends them. Native mouse drags do not
+    // reach the page in every shared-browser mode, so the test sends the events the browser would send.
+    await page.evaluate(({ x, y }) => {
+      const tabs = [...document.querySelectorAll('.group-row .group-tab')]
+      const from = tabs.find(tab => tab.textContent.includes('Gamma')), to = tabs.find(tab => tab.textContent.includes('Alpha'))
+      const data = new DataTransfer()
+      const send = (target, type, at) => target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: data, clientX: at.x, clientY: at.y }))
+      const box = from.getBoundingClientRect()
+      send(from, 'dragstart', { x: box.x + box.width / 2, y: box.y + box.height / 2 })
+      return new Promise(resolve => requestAnimationFrame(() => {
+        send(to, 'dragenter', { x, y }); send(to, 'dragover', { x, y })
+        requestAnimationFrame(() => { send(to, 'drop', { x, y }); requestAnimationFrame(() => { send(from, 'dragend', { x, y }); resolve() }) })
+      }))
+    }, { x: alpha.x + 4, y: alpha.y + alpha.height / 2 })
     await page.waitForTimeout(300)
     check('1280: a drag saves the new stack order', JSON.stringify(posted('groups/reorder').at(-1)) === JSON.stringify({ session: '$1', groups: ['g00000003', 'g00000001', 'g00000002'] }), JSON.stringify(posted('groups/reorder')))
     const shown = await page.locator('.group-row .group-tab .group-name').allTextContents()
@@ -108,7 +121,26 @@ async function main() {
     await create.locator('.create-folders button', { hasText: 'api' }).click()
     await create.getByRole('button', { name: /^Use / }).click()
     check('1280: the chosen folder shows in the row', (await create.locator('.create-folder-path').textContent()).endsWith('/api'))
+    // New folder sits inside the New stack form: Enter makes the folder and does not submit New stack.
+    await create.getByLabel('Stack name').fill('Fresh work')
+    const before = posts.length
+    await create.locator('.create-folder-row').click()
+    await create.getByRole('button', { name: 'New folder' }).click()
+    await create.getByLabel('New folder name').fill('fresh')
+    await create.getByLabel('New folder name').press('Enter')
+    await create.locator('.create-crumbs [aria-current="location"]', { hasText: 'fresh' }).waitFor({ state: 'visible' })
+    const sent = posts.slice(before).map(item => item.endpoint)
+    check('1280: Enter in New folder makes the folder only', sent.join() === 'files/mkdir' && await create.isVisible(), sent.join())
     await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+
+    // Two stacks and no loose tab: the stacks can still be dragged.
+    const full = fixture.sessions
+    fixture.sessions = { ...full, sessions: full.sessions.filter(item => item.group && item.group !== 'g00000003'), groups: { $1: stacks.slice(0, 2) } }
+    await page.goto(`${origin}/chat/?session=%252`, { waitUntil: 'load' })
+    await stack('Beta').waitFor({ state: 'visible' })
+    check('1280: two stacks with an empty Unstacked can be dragged', await stack('Alpha').getAttribute('draggable') === 'true' && await stack('Beta').getAttribute('draggable') === 'true')
+    fixture.sessions = full
 
     // Phone: the stack sheet, Suggest stacks with tabs that go back to Unstacked.
     for (const width of [390, 320]) {

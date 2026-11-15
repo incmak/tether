@@ -310,6 +310,31 @@ class TmuxTests(Bundles):
         self.assertTrue(groups.placed_by_user(self.a2, run))
         self.assertEqual(self.status(lambda: groups.arrange(self.a, [], run, unstack=['a1'])), 400)
 
+    def test_arrange_keeps_an_emptied_stack_while_a_helper_start_is_in_flight(self):
+        run = self.run_tmux
+        old = groups.create(self.a, 'Old', run, pane=self.a2, auto=True)
+        token = groups.start_begin(self.a, old['id'], run)
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a2]}], run)
+        self.assertIn(old['id'], [g['id'] for g in groups.read(self.a, run)], 'a helper launch is about to fill it')
+        self.assertFalse(groups.drop_if_empty(self.a, old['id'], run))
+        groups.start_end(self.a, token, run)
+        self.assertTrue(groups.drop_if_empty(self.a, old['id'], run), 'the start ended with no tab there: it goes')
+
+    def test_arrange_helper_follows_owner_only_while_the_owner_holds_the_same_conversation(self):
+        run = self.run_tmux
+        one, two = '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'
+        self.tmux('new-window', '-t', self.a + ':')
+        a3 = [pane for pane in self.panes(self.a) if pane not in (self.a1, self.a2)][0]
+        self.tmux('set-option', '-p', '-t', a3, '@tether_helper', json.dumps(
+            {'owner_pane': self.a1, 'owner_thread': one, 'sent_at': 1}))
+        made = groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run, thread_of={self.a1: two}.get)
+        self.assertEqual(self.label(a3), '', 'the owner holds another conversation: the helper stays')
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run, thread_of={self.a1: one}.get)
+        self.assertEqual(self.label(a3), made[0]['id'], 'same conversation: the helper follows')
+        groups.move(self.a, a3, '', run)
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run)
+        self.assertEqual(self.label(a3), made[0]['id'], 'conversation unknown: the link holds')
+
     def test_reorder_puts_stacks_in_the_given_order(self):
         run = self.run_tmux
         one, two, three = (groups.create(self.a, name, run, by_user=True) for name in ('One', 'Two', 'Three'))
@@ -914,6 +939,14 @@ class TmuxTests(Bundles):
         bad = Handler(f'{groups_api.PREFIX}context?session={self.a.replace("$", "%24")}&group=gffffffff')
         groups_api.get(bad, run, self.home)
         self.assertEqual(bad.status, 404)
+        # arrange reads each tab's conversation from sessions(): a helper whose owner changed conversations stays.
+        self.tmux('set-option', '-p', '-t', self.a2, '@tether_helper', json.dumps(
+            {'owner_pane': self.a1, 'owner_thread': '11111111-1111-4111-8111-111111111111', 'sent_at': 1}))
+        listing = [{'id': self.a1, 'thread': '22222222-2222-4222-8222-222222222222'}, {'id': self.a2, 'thread': 'bad'}]
+        handler = Handler(groups_api.PREFIX + 'arrange', {'session': self.a, 'stacks': [{'name': 'Work', 'panes': [self.a1]}]})
+        groups_api.post(handler, run, sessions=lambda: listing)
+        self.assertEqual(handler.status, 200, handler.body)
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (handler.body['groups'][0]['id'], ''))
 
 
 class CliAndServerTests(unittest.TestCase):

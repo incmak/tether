@@ -490,11 +490,12 @@ def find_or_create(session_id, name, run=subprocess.run, auto=True):
         return found or create(session_id, name, run, auto=auto)
 
 
-def arrange(session_id, plan, run=subprocess.run, unstack=()):
+def arrange(session_id, plan, run=subprocess.run, unstack=(), thread_of=lambda pane: None):
     """Apply suggested stacks: plan is [{"name": ..., "panes": [pane ids]}]. A stack with that name (any case) is reused,
     else made (as the user's). Each listed tab moves there as if the user moved it, and a helper tab goes with its owner.
     The tabs in unstack go to no stack (Unstacked). Other tabs stay where they are. A stack that the apply leaves empty
-    is removed. Returns the stacks that got tabs, in plan order."""
+    is removed, unless a helper start is about to fill it. thread_of(pane): the conversation the tab holds now, or None.
+    Returns the stacks that got tabs, in plan order."""
     if (not isinstance(plan, list) or len(plan) > 20 or not isinstance(unstack, (list, tuple)) or len(unstack) > 200
             or not plan and not unstack):
         raise GroupError(400, 'Send 1 to 20 stacks.')
@@ -524,11 +525,17 @@ def arrange(session_id, plan, run=subprocess.run, unstack=()):
             pane, label, record = (line.split('\t', 2) + ['', ''])[:3]
             old[pane] = label
             try:
-                found = json.loads(record).get('owner_pane') if record else None
-            except (ValueError, AttributeError):
+                found = json.loads(record) if record else None
+            except ValueError:
                 found = None
-            if isinstance(found, str) and found != pane:
-                owner[pane] = found
+            found = found if isinstance(found, dict) else {}
+            link, linked_thread = found.get('owner_pane'), found.get('owner_thread')
+            if isinstance(link, str) and link != pane:
+                known = thread_of(link)
+                # The owner now holds another conversation: the link is broken, and this tab is its own root
+                # (the same rule as auto_stacks.root_of).
+                if not (linked_thread and known and known != linked_thread):
+                    owner[pane] = link
         target = {}  # pane -> stack name ('' = Unstacked), from the plan; a tab that closed meanwhile is skipped
         for pane in unstack:
             if pane in old and pane not in seen:
@@ -573,9 +580,11 @@ def arrange(session_id, plan, run=subprocess.run, unstack=()):
         # A stack that this apply left with no tabs goes away; its context bundle goes to the archive.
         after = {pane: place[pane] if pane in place else label for pane, label in old.items()}
         emptied = {label for label in old.values() if label} - set(after.values())
-        gone = [g for g in groups if g['id'] in emptied]
+        # A stack that a helper start is about to fill stays (the start marker, start_begin).
+        gone = [g for g in groups if g['id'] in emptied and not starting(session_id, g['id'], run)]
         if gone:
-            write(session_id, [g for g in groups if g['id'] not in emptied], run)
+            dropped = {g['id'] for g in gone}
+            write(session_id, [g for g in groups if g['id'] not in dropped], run)
     for group in gone:
         _archive(group)
     return made

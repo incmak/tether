@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import groups
 import projects
+from terminal_input import UUID
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
@@ -63,7 +64,17 @@ def get(handler, run=subprocess.run, home=None):
     _answer(handler, work)
 
 
-def post(handler, run=subprocess.run):
+def _threads(sessions):
+    """thread_of(pane) for arrange: the conversation each tab holds now (sessions(): server.py's tab list)."""
+    found = {}
+    for entry in sessions():
+        thread = entry.get('thread')
+        if isinstance(thread, str) and UUID.fullmatch(thread):
+            found[entry.get('id')] = thread
+    return found.get
+
+
+def post(handler, run=subprocess.run, sessions=lambda: []):
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
@@ -81,7 +92,8 @@ def post(handler, run=subprocess.run):
             return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
                                            by_user=True)}
         if name == 'arrange':
-            return {'groups': groups.arrange(session_id, body.get('stacks', []), run, body.get('unstack', []))}
+            return {'groups': groups.arrange(session_id, body.get('stacks', []), run, body.get('unstack', []),
+                                             _threads(sessions))}
         if name == 'reorder':
             return {'groups': groups.reorder(session_id, body.get('groups'), run)}
         if name == 'move':
