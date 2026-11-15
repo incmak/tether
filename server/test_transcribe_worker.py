@@ -214,6 +214,23 @@ class ParakeetTest(unittest.TestCase):
         self.assertEqual(len(self.vad.recognize.call_args.args[0]), 4 * worker.RATE)  # from 7.0 s to 11.0 s
         self.assertNotIn('rec-12345', worker.RECORDINGS)
 
+    def test_final_without_vad_speech_retries_loud_audio_in_pieces(self):
+        self.segments()
+        self.plain.recognize.side_effect = [' tether ', ' tmux ']
+        with mock.patch.object(worker, 'decode_audio', return_value=[0.05] * 25 * worker.RATE), \
+                mock.patch.object(worker, 'level', return_value=(0.05, 0.05)), mock.patch('sys.stderr'):
+            self.assertEqual(worker.transcribe(b'x'), ('Tether tmux', 25.0))
+        self.assertEqual([len(call.args[0]) for call in self.plain.recognize.call_args_list], [20 * worker.RATE, 5 * worker.RATE])
+
+    def test_no_retry_for_silence_or_live_passes(self):
+        self.segments()
+        with mock.patch.object(worker, 'decode_audio', return_value=[0.0] * 4 * worker.RATE), mock.patch('sys.stderr'):
+            with mock.patch.object(worker, 'level', return_value=(0.002, 0.001)):
+                self.assertEqual(worker.transcribe(b'x'), ('', 4.0))
+            with mock.patch.object(worker, 'level', return_value=(0.05, 0.05)):
+                self.assertEqual(worker.transcribe(b'x', live=True, key='rec-live1'), ('', 4.0))
+        self.plain.recognize.assert_not_called()
+
     def test_transcribe_uses_parakeet_and_limits_phrases(self):
         with mock.patch.object(worker, 'decode_audio', return_value=[0.0] * 31 * worker.RATE):
             with self.assertRaises(worker.PhraseTooLong):

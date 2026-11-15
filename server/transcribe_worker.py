@@ -88,6 +88,7 @@ LIVE_LOCK = threading.Lock()
 RATE = 16000
 COMMIT_AFTER = 4.0  # seconds of audio not yet converted by the accurate model before a background pass starts
 KEEP_TAIL = 2.5  # never commit a word that ends in the last seconds: the user may be mid-word
+QUIET_PEAK = 0.01  # a final pass with no VAD speech is retried without VAD when the audio peaks at this level or above (-40 dBFS)
 PAUSE = 0.15  # seconds of quiet between two words that make a good place to cut
 RECORDING_ID = re.compile(r'[A-Za-z0-9-]{8,64}')
 # Guards for the accurate model. One temperature: the default retries each 30 s window at up to six temperatures,
@@ -240,6 +241,21 @@ def parakeet_segments(samples, wait=True):
         PARAKEET_LOCK.release()
 
 
+def plain_text(samples):
+    """The Parakeet text of samples without VAD, in pieces of 20 s or less (the model's memory grows with the clip)."""
+    step = 20 * RATE
+    with PARAKEET_LOCK:
+        return spell(join(*(PARAKEET[0].recognize(samples[at:at + step]).strip() for at in range(0, len(samples), step))))
+
+
+def level(samples):
+    """(peak, RMS) of samples, for the log: a silent mic shows about 0."""
+    import numpy as np  # here, not at the top: the CI server tests run without numpy and stub faster-whisper
+    if not len(samples):
+        return 0.0, 0.0
+    return float(np.abs(samples).max()), float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+
+
 def parakeet(samples, key=None, live=False, phrase=False):
     """The Parakeet text of samples. key: like the Whisper path, a live request keeps the text of the speech that ended
     KEEP_TAIL seconds or more before the end of the clip (VAD cuts at a 0.5 s pause, so that speech cannot change);
@@ -282,7 +298,14 @@ def transcribe(audio, live=False, key=None, phrase=False):
         length = len(samples) / RATE
         if phrase and length > 30:
             raise PhraseTooLong('Live phrases must be 30 seconds or shorter.')
-        return parakeet(samples, key, live, phrase), length
+        text = parakeet(samples, key, live, phrase)
+        if not text and not live and not phrase:
+            # VAD found no speech. Quiet or far speech can still be there: the first Mac rescue (2026-11-15) lost 13.9 s here.
+            peak, rms = level(samples)
+            if peak >= QUIET_PEAK:
+                text = plain_text(samples)
+            print('no VAD speech: peak=%.3f rms=%.4f retry words=%d' % (peak, rms, len(text.split())), file=sys.stderr, flush=True)
+        return text, length
     if phrase:
         samples = decode_audio(io.BytesIO(audio), sampling_rate=RATE)
         length = len(samples) / RATE
