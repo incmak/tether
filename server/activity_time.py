@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -68,14 +69,22 @@ def project(path, run=subprocess.run):
     return Path(path).name or 'home'
 
 
-def seconds(minutes):
-    """Seconds of work in a sorted list of epoch minutes: one minute each, plus gaps of up to GAP minutes."""
-    total, previous = 0, None
+def covered(minutes):
+    """The minutes of work in a sorted list of marked epoch minutes: each marked minute, plus the minutes of a gap
+    of up to GAP minutes before it. Split by day after this step, so a gap across midnight still counts."""
+    out, previous = [], None
     for minute in minutes:
-        gap = minute - previous if previous is not None else 1
-        total += 60 * (gap if gap <= GAP else 1)
+        if previous is not None and minute - previous <= GAP:
+            out.extend(range(previous + 1, minute + 1))
+        elif minute != previous:
+            out.append(minute)
         previous = minute
-    return total
+    return out
+
+
+def seconds(minutes):
+    """Seconds of work in a sorted list of epoch minutes."""
+    return 60 * len(covered(minutes))
 
 
 def zone_of(name):
@@ -90,10 +99,20 @@ def zone_name(zone):
 
 
 def _write_json(path, data):
+    """Write through a new, exclusive temporary file, then rename it over the path. The rename replaces a link at
+    the path itself; it never writes through one."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    temp.write_text(json.dumps(data, separators=(',', ':'), sort_keys=True))
-    os.replace(temp, path)
+    fd, temp = tempfile.mkstemp(prefix=f'.{path.name}.', suffix='.tmp', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            handle.write(json.dumps(data, separators=(',', ':'), sort_keys=True))
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        raise
 
 
 def _read_json(path):
@@ -127,7 +146,8 @@ class Store:
                 'since': _number(data.get('since')),
                 'publish': data.get('publish') if isinstance(data.get('publish'), str) else '',
                 'published': _number(data.get('published')) or 0,
-                'changed': _number(data.get('changed')) or 0}
+                'revision': int(_number(data.get('revision')) or 0),
+                'published_revision': int(_number(data.get('published_revision')) or 0)}
 
     def _save_config(self, **changes):
         with self.lock:
@@ -172,24 +192,24 @@ class Store:
         return self.days[day]
 
     def mark(self, who, name, at=None):
-        """Mark the minute `at` (epoch seconds) for a project. Returns True when the minute is new."""
-        now = self.clock()
-        minute = int((now if at is None else at) // 60)
+        """Mark the minute `at` (epoch seconds) for a project. Returns True when the minute is new. Checks consent
+        here, at the write, so a switch turned off during a project lookup still stops the mark."""
+        minute = int((self.clock() if at is None else at) // 60)
         day = datetime.datetime.fromtimestamp(minute * 60, datetime.timezone.utc).strftime('%Y-%m-%d')
         name = (name or 'home')[:100]
         with self.lock:
+            if not enabled()[0 if who == 'you' else 1]:
+                return False
             data = self._load_day(day)
             minutes = data[who].setdefault(name, [])
-            if minute in minutes[-5:] or minute in minutes:
+            if minute in minutes:
                 return False
             minutes.append(minute)
             minutes.sort()
             _write_json(self._day_file(day), data)
             config = self.config()
-            if config['since'] is None:
-                self._save_config(since=minute * 60, changed=now)
-            elif now - config['changed'] >= 60 or config['changed'] <= config['published']:
-                self._save_config(changed=now)
+            self._save_config(revision=config['revision'] + 1,
+                              **({'since': minute * 60} if config['since'] is None or minute * 60 < config['since'] else {}))
         return True
 
     def human(self, path, zone=''):
@@ -200,8 +220,7 @@ class Store:
             return 'no-folder'
         if zone and zone_of(zone) and self.config()['zone'] != zone:
             self._save_config(zone=zone)
-        self.mark('you', self.project_of(path))
-        return ''
+        return '' if self.mark('you', self.project_of(path)) or enabled()[0] else 'off'
 
     def observe(self, entries, status, tab_folder):
         """Monitor loop: mark this minute for each project with a Working agent tab. Returns the count of new marks."""
@@ -252,30 +271,41 @@ class Store:
         start = datetime.datetime.fromtimestamp(config['since'], zone).date()
         if recent:
             start = max(start, today - datetime.timedelta(days=recent - 1))
-        first_utc = (start - datetime.timedelta(days=1)).isoformat()
-        by_day = {}
-        for who, projects in self._all_minutes(first_utc).items():
-            for name, minutes in projects.items():
-                for minute in minutes:
-                    day = datetime.datetime.fromtimestamp(minute * 60, zone).date()
-                    if start <= day <= today:
-                        by_day.setdefault(day, {}).setdefault(who, {}).setdefault(name, set()).add(minute)
+        first_utc = (start - datetime.timedelta(days=2)).isoformat()  # marks just before start bridge gaps into it
         out = {}
         day = start
         while day <= today:
-            parts = by_day.get(day, {})
-            row = {}
-            for who, total_key, project_key in (('you', 'seconds', 'projects'), ('agents', 'agent_seconds', 'agent_projects')):
-                projects = parts.get(who, {})
-                row[total_key] = seconds(sorted(set().union(*projects.values()))) if projects else 0
-                row[project_key] = {name: seconds(sorted(minutes)) for name, minutes in sorted(projects.items())}
-            out[day.isoformat()] = row
+            out[day.isoformat()] = {'seconds': 0, 'projects': {}, 'agent_seconds': 0, 'agent_projects': {}}
             day += datetime.timedelta(days=1)
+        day_of = {}  # zone offsets change on quarter hours at most, so one lookup per quarter hour
+
+        def add(minutes, row_key, name=None):
+            for minute in covered(minutes):
+                quarter, rest = divmod(minute, 15)
+                base = day_of.get(quarter)
+                if base is None:
+                    base = day_of[quarter] = datetime.datetime.fromtimestamp(quarter * 900, zone)
+                row = out.get((base + datetime.timedelta(minutes=rest)).date().isoformat())
+                if row is None:
+                    continue
+                if name is None:
+                    row[row_key] += 60
+                else:
+                    row[row_key][name] = row[row_key].get(name, 0) + 60
+
+        everything = self._all_minutes(first_utc)
+        for who, total_key, project_key in (('you', 'seconds', 'projects'), ('agents', 'agent_seconds', 'agent_projects')):
+            projects = everything[who]
+            for name, minutes in sorted(projects.items()):
+                add(sorted(set(minutes)), project_key, name)
+            add(sorted(set().union(*projects.values())) if projects else [], total_key)
         return out
 
     def export(self):
+        with self.lock:  # the revision is read first, so a later mark always stays pending
+            revision = self.config()['revision']
         return {'version': 1, 'source': 'tether', 'zone': zone_name(self.zone()), 'gap_minutes': GAP,
-                'generated': int(self.clock()), 'days': self.summary()}
+                'generated': int(self.clock()), 'revision': revision, 'days': self.summary()}
 
     def status(self):
         on, agents = enabled()
@@ -295,7 +325,7 @@ class Store:
                 'publish': {'folder': config['publish'].replace(home, '~', 1) if config['publish'] else '',
                             'file': FILE_NAME, 'busy': self.publishing, 'last': self.last_publish,
                             'published': config['published'] or None,
-                            'pending': bool(config['publish']) and config['changed'] > config['published']}}
+                            'pending': bool(config['publish']) and config['revision'] > config['published_revision']}}
 
     # Publishing
     def set_publish(self, value):
@@ -338,14 +368,21 @@ class Store:
             path = Path(target)
             started = self.clock()
             file = path / FILE_NAME
+            snapshot = None
             error = ''
             if file.is_symlink():
                 error = f'{FILE_NAME} in the publish folder is a link. Tether does not write through links.'
             elif not path.is_dir():
                 error = 'The publish folder is gone.'
+            elif not enabled()[0]:
+                error = 'Activity time is off, so Tether did not publish.'
             else:
-                _write_json(file, self.export())
+                snapshot = self.export()
+                _write_json(file, snapshot)
                 for step in (('add', '--', FILE_NAME), ('commit', '-q', '-m', 'Tether activity', '--', FILE_NAME), ('push', '-q')):
+                    if step[0] == 'push' and not enabled()[0]:
+                        error = 'Activity time was turned off, so Tether did not push.'
+                        break
                     result = self._git(path, *step)
                     if step[0] == 'commit' and result.returncode and 'nothing' in (result.stdout or '') + (result.stderr or ''):
                         continue  # no change since the last commit; still push an earlier unpushed one
@@ -354,7 +391,7 @@ class Store:
                         error = f'git {step[0]} failed: {detail or "code " + str(result.returncode)}'
                         break
             if not error:
-                self._save_config(published=started)
+                self._save_config(published=started, published_revision=snapshot['revision'])
         self.last_publish = {'at': self.clock(), 'ok': not error, 'error': error}
         return error
 
@@ -362,10 +399,11 @@ class Store:
         """Start a background publish when due. Returns True when one started."""
         config = self.config()
         with self.lock:
-            if not config['publish'] or self.publishing:
+            # Consent always applies; force only skips the schedule.
+            if not config['publish'] or self.publishing or not enabled()[0]:
                 return False
             if not force:
-                if not enabled()[0] or config['changed'] <= config['published']:
+                if config['revision'] <= config['published_revision']:
                     return False
                 last = (self.last_publish or {}).get('at') or config['published']
                 if self.clock() - last < PUBLISH_EVERY:
@@ -419,6 +457,9 @@ def post(handler, path, sessions, tab_folder):
                 STORE.set_publish(body['folder'])
         except ValueError as exc:
             handler.respond(400, {'error': str(exc)})
+            return
+        if body.get('now') is True and not enabled()[0]:
+            handler.respond(409, {'error': 'Turn on Keep activity time first. Tether publishes only while it is on.'})
             return
         started = STORE.maybe_publish(force=True) if body.get('now') is True else False
         handler.respond(200, {**STORE.status(), 'started': started})

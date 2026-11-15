@@ -91,7 +91,7 @@ function PublishForm({ api, status, onStatus }: { api: Api; status: ActivityStat
     {saved && !notice && !(last && !last.ok) && <p className="setting-note" role="status">{status.publish.busy ? 'Publishing…' : status.publish.published ? `Published ${when(status.publish.published)}.${status.publish.pending ? ' New time waits for the next publish.' : ''}` : 'Not published yet.'}</p>}
     <div className="activity-actions">
       <button className="secondary" disabled={pending || folder.trim() === saved}>{pending ? 'Please wait…' : 'Save folder'}</button>
-      {saved && <button type="button" className="secondary" disabled={busy || folder.trim() !== saved} onClick={() => void send({ now: true }, '')}>Publish now</button>}
+      {saved && <button type="button" className="secondary" disabled={busy || folder.trim() !== saved || !status.enabled} title={status.enabled ? undefined : 'Turn on Keep activity time to publish.'} onClick={() => void send({ now: true }, '')}>Publish now</button>}
     </div>
   </form>
 }
