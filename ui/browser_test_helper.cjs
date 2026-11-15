@@ -57,8 +57,12 @@ async function getBrowser({ local = false } = {}) {
 
 // The shared browser runs in a container and cannot reach this host's loopback (by design, B89).
 // Fetch a request to the test's local server from this process instead, so tests work in every browser.
+// Redirects cannot work: the browser does not route the request that follows a fulfilled 3xx, and a followed one
+// would serve the final body at the first URL, so relative links break. Fail clearly instead.
 async function serveLocal(route) {
-  return route.fulfill({ response: await route.fetch() })
+  const response = await route.fetch()
+  if (response.url() !== route.request().url()) throw new Error(`serveLocal: ${route.request().url()} redirects to ${response.url()}; serve the final URL directly`)
+  return route.fulfill({ response })
 }
 
 module.exports = { getBrowser, sharedEndpoint, serveLocal }

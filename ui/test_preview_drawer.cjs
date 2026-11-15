@@ -108,7 +108,7 @@ async function main() {
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           if (endpoint === 'dev-preview') {
-            const full = posts.at(-1)?.body.port === 5200 && !released  // the pool is full only for the new app
+            const full = posts.findLast(post => post.endpoint === 'dev-preview')?.body.port === 5200 && !released  // the pool is full only for the new app; other posts (ui-usage) may come after
             return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
               assigned: [{ port: 7700, dev_port: 5174 }, { port: 7701, dev_port: 3000 }], free: full ? 0 : 8 } })
           }

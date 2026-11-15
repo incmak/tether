@@ -60,7 +60,8 @@ async function zoom(run, scale) {
 }
 
 async function main() {
-  const browser = await getBrowser()
+  // Pinch zoom needs a CDP session, which the shared browser's proxy does not allow: use a local browser.
+  const browser = await getBrowser({ local: true })
   const results = []
   const check = async (name, fn) => {
     try { await fn(); results.push(`ok ${name}`) } catch (error) { results.push(`FAIL ${name}: ${error.message.split('\n')[0]}`); process.exitCode = 1 }

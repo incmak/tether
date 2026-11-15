@@ -193,9 +193,9 @@ async function main() {
           if (await card.getByRole('tab', { selected: true }).last().innerText() !== 'Models') errors.push('the Models view is not marked')
         }
         // One round trip: the shared browser is remote, so a call per button made each case take seconds.
-        const short = await card.evaluate(node => [...node.querySelectorAll('button, [role="button"], [role="radio"], [role="tab"]')]
+        const short = await card.evaluate(node => [...node.querySelectorAll('button, input:is([type="button"], [type="submit"], [type="reset"], [type="image"]), [role="button"], [role="radio"], [role="tab"]')]
           .filter(button => { const box = button.getBoundingClientRect(); return box.width > 0 && box.height > 0 && box.height < 24 && !button.closest('[hidden], [aria-hidden="true"]') })
-          .map(button => `button ${button.innerText || 'icon'} is ${Math.round(button.getBoundingClientRect().height)} px high`))
+          .map(button => `button ${button.innerText || button.value || 'icon'} is ${Math.round(button.getBoundingClientRect().height)} px high`))
         errors.push(...short)
         const wide = await card.evaluate(node => [...node.querySelectorAll('*')].filter(item => !item.closest('pre, .perm-tabs, .dlg-sr') && item.scrollWidth > item.clientWidth + 1 && getComputedStyle(item).overflowX === 'visible').map(item => `${item.tagName.toLowerCase()}.${[...item.classList].join('.')} "${item.textContent.slice(0, 40)}"`))
         if (wide.length) errors.push(`${wide.length} elements are cut off sideways: ${wide.join('; ')}`)
