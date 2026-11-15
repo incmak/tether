@@ -479,6 +479,8 @@ def board():
 def find(item_id):
     """(project name, item) for an id like T-022. The prefix names the project."""
     found = ITEM_ID.fullmatch(item_id.strip().upper()) if isinstance(item_id, str) else None
+    if isinstance(item_id, str) and re.fullmatch(r'[Bb]-?[0-9]{1,6}', item_id.strip()):
+        raise invalid(f'{item_id.strip()} is a backlog item. Change it with agent_backlog_cli.py.')
     if not found:
         raise invalid('Write an item id like T-022.')
     record = next((p for p in registry()['projects'] if p['prefix'] == found[1]), None)

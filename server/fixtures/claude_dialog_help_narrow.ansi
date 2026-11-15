@@ -1,0 +1,62 @@
+
+           [1mClaude Code[0m [38;5;246mv2.1.325[39m
+● Earlier chat line
+● Earlier chat line
+● Earlier chat line
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◐ medium · /effort[38;5;153m ▔
+[39m   [1m[38;5;110mHelp[0m [1m[38;5;16m[48;5;110m General [0m  Commands
+    Custom commands
+
+
+   Claude understands your codebase,
+   makes edits with your permission, and
+   executes commands — right from your
+   terminal.
+
+   [38;5;246mNew here? Run [38;5;153m/powerup[38;5;246m to learn the [39m
+   [38;5;246mfeatures most people miss.[39m
+
+   [1mShortcuts[0m
+   ! for      double tap esc  ctrl +
+   shell      to clear        shift + _
+   mode       input           to undo
+   / for      shift + tab to  ctrl + z to
+   commands   auto-accept     suspend
+   @ for      edits           ctrl + v to
+   file       ctrl + x =/-    paste
+   paths      to change       images
+   /btw for   effort          alt + p to
+   side       ctrl + o for    switch
+   question   verbose output  model
+              ctrl + t to     ctrl + s to
+              toggle tasks    stash
+              backslash (\)   prompt
+              + return (⏎)    ctrl + g to
+              for newline     edit in
+                              $EDITOR
+                              /keybinding
+                              s to
+                              customize
+
+
+   For more help: https://code.claude.com
+   /docs/en/overview
+
+   [38;5;246mSomething else? Use /feedback to [39m
+   [38;5;246mreport bugs or request features.[39m
+
+   [3m[38;5;246mEsc to cancel[0m

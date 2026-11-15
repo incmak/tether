@@ -28,6 +28,8 @@ export interface Prefs {
   handsFree: boolean
   // The floating agents bubble (this device only; its place is kept in its own key).
   agentBubble: boolean
+  /** Desktop: a two-finger trackpad swipe over a chat's tab strip or stack row scrolls it, not Back/Forward (this device). */
+  headerSwipe: boolean
   /** Panel sizes in px per layout key: a panel name for a column width, "top"/"bottom" for an edge row. This device. */
   panelSizes: Record<string, Record<string, number>>
   /** Closed layout panels per layout key (the sessions sidebar and the inbox use the desk instead). This device. */
@@ -85,7 +87,7 @@ export interface ArchivedTab { thread: string | null; dir: string }
 export interface SidePin { pane: string; note?: string }
 const KEY = 'tmux-chat.prefs.v1'
 const CLEARED_KEEP = 2 * 86400  // Match CLEARED_KEEP in server/prefs_sync.py (seconds).
-const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto' }
+const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto' }
 
 function keptDrafts(drafts: Record<string, Draft>) {
   const now = Date.now() / 1000

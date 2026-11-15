@@ -1,0 +1,45 @@
+
+[38;5;246m  ⎿  [39mNo changes
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[38;5;153mSettings[0m  Status  [1;7m Config [0m  Usage   Stats
+
+   [2m╭────────────────────────────────────────────────────────────────────────────────────────────╮[0m
+   [2m│[0m [38;5;246m⌕ Search settings…[39m                                                                         [2m│[0m
+   [2m╰────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+
+   [38;5;153m❯[39m [38;5;153mAuto-compact[39m                                    [38;5;153mtrue[39m
+     Idle compaction                                 true
+     Continue automatically at usage limit           true
+     Switch models when a message is flagged         Ask each time[38;5;246m ›[39m
+     Show tips                                       true
+     Claude-drafted feedback                         notify
+     Reduce motion                                   false
+     Thinking mode                                   [38;5;246mtrue[39m
+     [38;5;246mThinking can't be turned off for Haiku 5.5[39m
+     Prompt suggestions                              true
+     Session recap                                   true
+     Rewind code (checkpoints)                       true
+     Dynamic workflows                               true
+     Ultracode keyword trigger                       true
+     Dynamic workflow size                           medium (default)
+     Artifacts                                       true
+     Verbose output                                  false
+     Terminal progress bar                           false
+     Show turn duration                              true
+     Time format                                     auto[38;5;246m ›[39m
+     Default permission mode                         Auto
+     Worktree base ref                               fresh
+     Use auto mode during plan                       true
+     Respect .gitignore in file picker               true
+     Skip the /copy picker                           false
+     Copy on select                                  true
+     Auto-scroll                                     true
+     Open agents view by default                     false
+     ← opens agents                                  true
+     Auto-update channel                             latest[38;5;246m ›[39m
+     Theme                                           Auto (match terminal)[38;5;246m ›[39m
+     Local notifications                             iTerm2 (OSC 9)
+     Push when actions required                      false
+     [38;5;246m↓ 16 more[39m
+
+   [38;5;246mEnter/Space to change · / to search · Esc to close[39m

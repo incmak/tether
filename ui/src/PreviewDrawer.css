@@ -1,0 +1,38 @@
+/* Preview drawer (PreviewDrawer.tsx). Phone: a sheet that leaves the top 8% of the chat in view, with a full-screen switch.
+ * Wider screens: a full-screen modal (Mak does not want a side drawer). */
+.sheet.preview-drawer { display: none; flex-direction: column; height: 92dvh; max-height: none; max-width: none; padding: 0; overflow: hidden; background: var(--surface); }
+.sheet.preview-drawer[open] { display: flex; }
+.preview-drawer.full { height: 100dvh; border-radius: 0; }
+.preview-drawer.full .preview-grip { display: none; }
+.preview-grip { flex: none; width: 36px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--line); }
+/* Head: the title and Close on the first row, the source and the tools on the second. */
+.preview-head { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "name name close" "sub actions actions"; align-items: center; column-gap: 4px; padding: 6px 6px 4px 16px; border-bottom: 1px solid var(--line); touch-action: pan-x; }
+.preview-drawer .preview-name { grid-area: name; margin: 0; font-family: inherit; font-size: 16px; font-weight: 600; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-sub { grid-area: sub; min-width: 0; margin: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-close { grid-area: close; }
+.preview-actions { grid-area: actions; display: flex; align-items: center; gap: 2px; }
+.preview-drawer.full .preview-head { padding-top: max(10px, env(safe-area-inset-top)); }
+.preview-actions .icon-button:disabled { opacity: .4; }
+.preview-body { position: relative; flex: 1; min-height: 0; background: #fff; display: flex; justify-content: center; padding-bottom: env(safe-area-inset-bottom); }
+.preview-body iframe { flex: 1; width: 100%; height: 100%; border: 0; background: #fff; color-scheme: normal; }
+.preview-body.narrow { background: var(--bg); padding: 16px 0; }
+.preview-body.narrow iframe { flex: none; width: 390px; max-width: 100%; border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.preview-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--surface); color: var(--muted); font-size: 14px; }
+.preview-error { align-self: center; max-width: 420px; padding: 24px; text-align: center; color: var(--text); background: var(--surface); }
+.preview-error p { margin: 0 0 8px; }
+.preview-error-actions { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin-top: 16px; }
+.preview-error-actions a { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.preview-wide-only { display: none; }
+/* The phone sheet: the body area has the white page; the frame swallows touches, so only the head drags the sheet down. */
+@media (max-width: 599.98px) {
+  .preview-actions .icon-button { width: 40px; height: 40px; }
+}
+@media (min-width: 600px) {
+  .sheet.preview-drawer { inset: 0; width: 100vw; height: 100dvh; margin: 0; border-radius: 0; border: 0; transform: none; }
+  .sheet.preview-drawer[open] { animation: preview-in 180ms ease-out; }
+  .preview-grip, .preview-phone-only { display: none; }
+  .preview-head { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "name actions close" "sub actions close"; column-gap: 8px; padding: 10px 10px 10px 18px; }
+  .preview-wide-only { display: inline-flex; }
+}
+@keyframes preview-in { from { opacity: 0; transform: scale(.985); } }
+@media (prefers-reduced-motion: reduce) { .sheet.preview-drawer[open] { animation: none; } }

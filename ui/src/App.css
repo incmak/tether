@@ -906,6 +906,16 @@ button.live-chip:active { background: var(--line); }
 .sent-image-gone { display: flex; flex-direction: column; justify-content: center; gap: 4px; width: 132px; height: 96px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--muted); font-size: 12px; }
 .sent-image-gone span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-images button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius); }
+.tool-artifacts { display: grid; gap: 6px; list-style: none; margin: 4px 0 0; padding: 0; max-width: 560px; }
+.tool-artifacts li { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.tool-artifacts .artifact-main { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; min-height: 48px; padding: 6px 4px 6px 12px; color: inherit; text-align: left; background: none; border: 0; border-radius: var(--radius); }
+.tool-artifacts .artifact-main > svg { flex: none; color: var(--accent); }
+.tool-artifacts .artifact-main > span { display: grid; min-width: 0; }
+.tool-artifacts bdi { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.tool-artifacts small { color: var(--muted); font-size: 12px; }
+.tool-artifacts .icon-button { flex: none; margin-right: 2px; }
+.tool-artifacts .artifact-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (hover: hover) { .tool-artifacts button.artifact-main:hover { background: var(--hover); } }
 .tool-toggle { display: flex; align-items: center; gap: 8px; min-height: var(--control-lg); max-width: 100%; padding: 6px 5px; border-radius: var(--radius-sm); color: inherit; text-align: left; font-size: inherit; }
 .tool-toggle > svg { flex-shrink: 0; }
 .tool-toggle > span { min-width: 0; }
@@ -1210,16 +1220,16 @@ button.live-chip:active { background: var(--line); }
   .text-viewer-head { padding-top: 12px; }
 }
 /* Bars above the composer line up with the message column and the composer on wide screens. */
-/* A docked agent or pin tab (26px) owns a 32px column at its screen edge. The cards and the composer stop before it,
+/* A docked agent or pin tab (26px) that overlaps the chat foot (dockedBubble.ts sets data-gutter) owns a 32px column at its screen edge. The cards and the composer stop before it,
    so a tab never covers a card's scrollbar, text, or controls. */
-.app-shell:has(> .agent-bubble.left) { --tab-gutter-left: 32px; }
-.app-shell:has(> .agent-bubble.right) { --tab-gutter-right: 32px; }
+.app-shell:has(> .agent-bubble.left[data-gutter]) { --tab-gutter-left: 32px; }
+.app-shell:has(> .agent-bubble.right[data-gutter]) { --tab-gutter-right: 32px; }
 .notice-stack, .heads-up, .choice-dock, .working-line, .status-stack { max-width: 780px; margin-left: max(12px, (100% - 780px) / 2, var(--tab-gutter-left, 0px)); margin-right: max(12px, (100% - 780px) / 2, var(--tab-gutter-right, 0px)); }
 /* The notice tray tucks under the message box, 14px in from its sides. */
 .notice-stack { max-width: 752px; margin-left: max(26px, (100% - 752px) / 2, var(--tab-gutter-left, 0px) + 14px); margin-right: max(26px, (100% - 752px) / 2, var(--tab-gutter-right, 0px) + 14px); }
 /* The composer area is centred at 808px with 14px padding; its padding takes up the rest of the tab column. */
-.app-shell:has(> .agent-bubble.left) .chat-panel:not(.shell-page) .composer-area { padding-left: max(14px, env(safe-area-inset-left), var(--tab-gutter-left) - max(0px, (100% - 808px) / 2)); }
-.app-shell:has(> .agent-bubble.right) .chat-panel:not(.shell-page) .composer-area { padding-right: max(14px, env(safe-area-inset-right), var(--tab-gutter-right) - max(0px, (100% - 808px) / 2)); }
+.app-shell:has(> .agent-bubble.left[data-gutter]) .chat-panel:not(.shell-page) .composer-area { padding-left: max(14px, env(safe-area-inset-left), var(--tab-gutter-left) - max(0px, (100% - 808px) / 2)); }
+.app-shell:has(> .agent-bubble.right[data-gutter]) .chat-panel:not(.shell-page) .composer-area { padding-right: max(14px, env(safe-area-inset-right), var(--tab-gutter-right) - max(0px, (100% - 808px) / 2)); }
 .search-key { display: none; }
 @media (hover: hover) and (pointer: fine) { .sidebar-search:not(:focus-within) .search-key { display: inline-flex; } }
 .sidebar-search input:not(:placeholder-shown) + .search-key { display: none; }
@@ -1377,11 +1387,15 @@ button.live-chip:active { background: var(--line); }
 .shortcuts-note { font-size: 13px; color: var(--muted); }
 .shortcuts-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin: 18px 0 16px; }
 .shortcuts-groups h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; color: var(--muted); }
-.shortcuts-groups dl { margin: 0; }
-.shortcuts-groups dl > div { display: flex; align-items: center; gap: 10px; min-height: 34px; border-bottom: 1px solid var(--line); }
-.shortcuts-groups dt { flex: 1; font-size: 13.5px; line-height: 1.35; }
-.shortcuts-groups dd { margin: 0; }
-.shortcuts-groups kbd { font: 12px ui-monospace, SFMono-Regular, monospace; color: var(--text); white-space: nowrap; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 2px 6px; background: var(--bg); }
+.shortcuts-rows { margin: 0; }
+.shortcuts-rows > div { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.shortcuts-rows dt { flex: 1; font-size: 13.5px; line-height: 1.35; }
+.shortcuts-rows dd { margin: 0; }
+.shortcuts-rows kbd { font: 12px ui-monospace, SFMono-Regular, monospace; color: var(--text); white-space: nowrap; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 2px 6px; background: var(--bg); }
+.shortcuts-filter { display: flex; align-items: center; gap: 6px; height: 36px; margin-top: 14px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); }
+.shortcuts-filter:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.shortcuts-filter input { flex: 1; min-width: 0; height: 100%; min-height: 0; margin: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; box-shadow: none; }
+.shortcuts-empty { margin: 18px 0; color: var(--muted); font-size: 14px; }
 .shortcuts-sheet .hint { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
 @media (max-width: 760px) { .shortcuts-groups { grid-template-columns: minmax(0, 1fr); gap: 18px; } }
 
@@ -1717,6 +1731,41 @@ button.live-chip:active { background: var(--line); }
 .session-title .project-mark { flex: none; color: var(--muted); }
 .session-title .project-mark.stale { color: var(--attention); }
 
+/* Advisor decisions (AdvisorLog.tsx). A status is an icon in a tinted disc plus its word, never color alone. */
+/* The words are 12 px text, so each needs 4.5:1 (WCAG 2.2 1.4.3) on the section, the sheet and a hovered row. Plain
+   --done (3.9:1) and --attention (4.5:1) miss that in the light theme; 40% of --text darkens them there and lightens
+   them in the dark theme (both 5.5:1 or more). test_advisor_log.cjs measures every word. */
+.advisor-log, .advisor-detail { --adv-decided: color-mix(in srgb, var(--done) 60%, var(--text)); --adv-ask_user: color-mix(in srgb, var(--attention) 60%, var(--text));
+  --adv-timeout: var(--error); --adv-error: var(--error); --adv-off: var(--muted); }
+.settings-group .advisor-filter { margin: 0 0 8px; padding: 0; border: 0; min-width: 0; }
+/* No visible legend, so no 84 px indent like other Settings rows (that rule is 0,4,0: match it). */
+.settings-group .advisor-filter.choice .segmented { margin-left: 0; }
+.advisor-filter .segmented label { flex: 1 1 auto; }
+.advisor-filter .segmented span { min-height: 40px; display: flex; align-items: center; justify-content: center; padding-inline: 6px; font-size: 13px; white-space: nowrap; }
+.advisor-status { flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; color: var(--st); background: color-mix(in srgb, var(--st) 15%, transparent); }
+.advisor-word { font-weight: 600; color: var(--st); }
+.advisor-status.decided, .advisor-word.decided { --st: var(--adv-decided); }
+.advisor-status.ask_user, .advisor-word.ask_user { --st: var(--adv-ask_user); }
+.advisor-status.timeout, .advisor-word.timeout { --st: var(--adv-timeout); }
+.advisor-status.error, .advisor-word.error { --st: var(--adv-error); }
+.advisor-status.off, .advisor-word.off { --st: var(--adv-off); }
+.advisor-list li { align-items: stretch; }
+.advisor-row { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 10px; padding: 10px 4px; margin: 0 -4px; border: 0; border-radius: var(--radius); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+/* A lighter hover than --hover, so --muted dates and answers keep 4.5:1 on it. */
+.advisor-row:hover:not(:disabled) { background: color-mix(in srgb, var(--hover) 45%, transparent); }
+.advisor-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.advisor-row-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.advisor-row-text small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.advisor-question { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.advisor-answer { color: var(--muted); font-size: 14px; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+.advisor-answer.empty { font-style: italic; }
+.advisor-skeleton .sk-row { align-items: flex-start; min-height: 64px; padding: 10px 0; }
+.advisor-facts { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.advisor-part { margin: 0 0 14px; }
+.advisor-part h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.advisor-text { margin: 0; font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.advisor-text.error { color: var(--error); }
+
 /* Codex level (CodexLevel.tsx): five steps in the Settings segmented control, the chosen step's rule under it. */
 .settings-group .codex-level .segmented span { font-variant-numeric: tabular-nums; }
 .settings-group .codex-level-note { clear: both; margin: 8px 0 0; }
@@ -1870,6 +1919,8 @@ button.live-chip:active { background: var(--line); }
 .group-add { display: grid; place-items: center; flex-shrink: 0; width: 34px; color: var(--muted); }
 .group-add:hover { color: var(--text); }
 .group-strip { display: contents; }
+/* Desktop strip scroll (stripScroll.ts, Settings): a swipe stops at the strip's end, not Back/Forward on the root. */
+@media (min-width: 900px) and (hover: hover) and (pointer: fine) { .chat-panel[data-strip-scroll] :is(.group-row, .pane-tabs) { overscroll-behavior-x: contain; } }
 .group-switch { display: none; }
 .group-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--attention); color: var(--bg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .group-crumb { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

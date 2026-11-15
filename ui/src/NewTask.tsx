@@ -12,6 +12,8 @@ import { keyLabel } from './keys'
 import { useDictation } from './useDictation'
 import { WORKTREE_TIMEOUT, WorktreeField } from './Worktree'
 import type { MadeWorktree } from './Worktree'
+import { CodexTrustCard } from './CodexTrust'
+import { useCodexTrust } from './codexTrustState'
 import './NewTask.css'
 
 type Worker = 'claude' | 'codex'
@@ -72,6 +74,7 @@ export function NewTask({ api, pane, at, onClose, onEmpty, onCreated, onOpen, on
   // A phone keyboard would cover the popover: focus the field only with a mouse or trackpad.
   useEffect(() => { if (typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches) field.current?.focus() }, [])
   const agentPane = pane.agent === 'claude' || pane.agent === 'codex'
+  const trust = useCodexTrust(api, agent === 'codex' ? { mode: 'new', session: pane.id, worktree: branch !== null } : null)
   const canContext = agentPane && !!pane.thread && UUID.test(pane.thread)
   const canReview = agentPane && pane.writable
   const canReviewNew = canReview && canContext
@@ -168,6 +171,7 @@ export function NewTask({ api, pane, at, onClose, onEmpty, onCreated, onOpen, on
         </div>
       </div>
       {review !== 'new' && <WorktreeField api={api} session={pane.id} value={worktree} onChange={value => { setWorktree(value); if (error) setError('') }} disabled={pending} />}
+      <CodexTrustCard trust={trust} />
       {agentPane && <div className="task-options">
         <div className="task-review">
           <strong id="task-review-label">Review</strong>

@@ -9,6 +9,8 @@ from unittest import mock
 fake = types.ModuleType('faster_whisper')
 fake.WhisperModel = mock.MagicMock()
 fake.decode_audio = mock.MagicMock()
+import os
+os.environ['TETHER_VOICE_ENGINE'] = 'whisper'  # never load or download Parakeet in tests
 with mock.patch.dict(sys.modules, {'faster_whisper': fake}):
     import transcribe_worker as worker
 
@@ -177,6 +179,97 @@ class PhraseTest(unittest.TestCase):
             with mock.patch.object(worker, 'transcribe', return_value=('hi', 1.0)) as transcribe:
                 worker.Handler.do_POST(self.request(phrase=phrase))
             transcribe.assert_called_once_with(b'x', live=False, key='recording-123', phrase=False)
+
+
+class ParakeetTest(unittest.TestCase):
+    """The Parakeet path: worker.PARAKEET is (plain model, model with VAD)."""
+    def setUp(self):
+        self.plain, self.vad = mock.MagicMock(), mock.MagicMock()
+        patches = [mock.patch.object(worker, 'PARAKEET', (self.plain, self.vad)), mock.patch.dict(worker.RECORDINGS, clear=True),
+                   mock.patch.object(worker, 'HINTS', worker.HINTS)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def segments(self, *items):
+        self.vad.recognize.return_value = [NS(end=end, text=text) for end, text in items]
+
+    def test_final_joins_vad_segments_and_skips_empty_ones(self):
+        self.segments((1.0, ' hello '), (2.0, ' '), (3.0, 'there'))
+        self.assertEqual(worker.parakeet([0.0] * 4 * worker.RATE), 'hello there')
+        self.plain.recognize.assert_not_called()
+
+    def test_phrase_uses_the_whole_clip_without_vad(self):
+        self.plain.recognize.return_value = ' split the pane '
+        self.assertEqual(worker.parakeet([0.0] * worker.RATE, phrase=True), 'split the pane')
+        self.vad.recognize.assert_not_called()
+
+    def test_live_keeps_settled_speech_and_final_converts_only_the_rest(self):
+        samples = [0.0] * 10 * worker.RATE
+        self.segments((3.0, 'one'), (7.0, 'two'), (9.5, 'three'))  # 7.0 ends 3 s before the end: settled; 9.5 does not
+        self.assertEqual(worker.parakeet(samples, key='rec-12345', live=True), 'one two three')
+        self.assertEqual(worker.RECORDINGS['rec-12345'].done, (7.0, 'one two'))
+        self.segments((2.5, 'three four'))
+        self.assertEqual(worker.parakeet([0.0] * 11 * worker.RATE, key='rec-12345'), 'one two three four')
+        self.assertEqual(len(self.vad.recognize.call_args.args[0]), 4 * worker.RATE)  # from 7.0 s to 11.0 s
+        self.assertNotIn('rec-12345', worker.RECORDINGS)
+
+    def test_final_without_vad_speech_retries_loud_audio_in_pieces(self):
+        self.segments()
+        self.plain.recognize.side_effect = [' tether ', ' tmux ']
+        with mock.patch.object(worker, 'decode_audio', return_value=[0.05] * 25 * worker.RATE), \
+                mock.patch.object(worker, 'level', return_value=(0.05, 0.05)), mock.patch('sys.stderr'):
+            self.assertEqual(worker.transcribe(b'x'), ('Tether tmux', 25.0))
+        self.assertEqual([len(call.args[0]) for call in self.plain.recognize.call_args_list], [20 * worker.RATE, 5 * worker.RATE])
+
+    def test_no_retry_for_silence_or_live_passes(self):
+        self.segments()
+        with mock.patch.object(worker, 'decode_audio', return_value=[0.0] * 4 * worker.RATE), mock.patch('sys.stderr'):
+            with mock.patch.object(worker, 'level', return_value=(0.002, 0.001)):
+                self.assertEqual(worker.transcribe(b'x'), ('', 4.0))
+            with mock.patch.object(worker, 'level', return_value=(0.05, 0.05)):
+                self.assertEqual(worker.transcribe(b'x', live=True, key='rec-live1'), ('', 4.0))
+        self.plain.recognize.assert_not_called()
+
+    def test_transcribe_uses_parakeet_and_limits_phrases(self):
+        with mock.patch.object(worker, 'decode_audio', return_value=[0.0] * 31 * worker.RATE):
+            with self.assertRaises(worker.PhraseTooLong):
+                worker.transcribe(b'x', phrase=True)
+            self.plain.recognize.assert_not_called()
+            self.segments((2.0, 'hi'))
+            self.assertEqual(worker.transcribe(b'x'), ('hi', 31.0))
+
+    def test_hints_fix_spelling_and_keep_sentence_capitals(self):
+        worker.HINTS = worker.hints('tmux, Codex, Tailscale, repo, API, split the pane.')
+        self.assertEqual(worker.spell('Run Tmux on tail scale, then ask codex about the Api.'), 'Run tmux on Tailscale, then ask Codex about the API.')
+        self.assertEqual(worker.spell('Repo is clean. Tmux is up, push the Repo'), 'Repo is clean. Tmux is up, push the repo')
+        self.assertEqual(worker.spell('a reposition'), 'a reposition')
+        worker.HINTS = worker.hints('JSON, Tailscale')
+        self.assertEqual(worker.spell('Please leave JS on. Restart tail scale.'), 'Please leave JS on. Restart Tailscale.')
+
+    def test_busy_preview_without_a_recording_returns_at_once(self):
+        with worker.PARAKEET_LOCK:
+            self.assertEqual(worker.parakeet([0.0] * worker.RATE, live=True), '')
+        self.vad.recognize.assert_not_called()
+
+    def test_busy_preview_returns_the_text_so_far_and_final_waits_for_the_recording(self):
+        item = worker.recording('rec-busy-01')
+        item.done = (3.0, 'so far')
+        with worker.PARAKEET_LOCK:  # another recording's final pass runs
+            self.assertEqual(worker.parakeet([0.0] * 9 * worker.RATE, key='rec-busy-01', live=True), 'so far')
+        self.vad.recognize.assert_not_called()
+        item.lock.acquire()  # a preview of the same recording runs; the final pass must wait, then reuse its text
+        result = []
+        thread = worker.threading.Thread(target=lambda: result.append(worker.parakeet([0.0] * 9 * worker.RATE, key='rec-busy-01')))
+        thread.start()
+        thread.join(0.2)
+        self.assertTrue(thread.is_alive())
+        item.done = (7.0, 'so far and more')
+        self.segments((1.5, 'end'))
+        item.lock.release()
+        thread.join(2)
+        self.assertEqual(result, ['so far and more end'])
+        self.assertEqual(len(self.vad.recognize.call_args.args[0]), 2 * worker.RATE)
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@ const ANSWER = '| Command | Use |\n|---|---|\n| `ls -la` | List all files, inclu
 const DRAWN = '┌────────┬─────────┐\n│ Command │ Use │\n└────────┴─────────┘\n- Press Tab to autocomplete file names.'
 
 function fixtures(state) {
-  const attention = state === 'saved' ? null : { id: 'side-1', reason: 'side', requiresResponse: false, question: QUESTION,
+  const attention = ['saved', 'stale', 'fresh', 'other'].includes(state) ? null : { id: 'side-1', reason: 'side', requiresResponse: false, question: QUESTION,
     text: state === 'answering' ? '' : state === 'drawn' ? DRAWN : ANSWER, pending: state === 'answering',
     markdown: state === 'answer', fork: state === 'answer' }
   const pane = { id: '%1', tmux_session: '$1', label: 'Side test', agent: 'claude', dir: '/srv/project', state: 'Idle',
@@ -23,7 +23,7 @@ function fixtures(state) {
   return {
     sessions: { sessions: [pane], default_thread: pane.thread },
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
-      state: 'Idle', approval: null, attention },
+      state: ['stale', 'fresh', 'other'].includes(state) ? 'Working' : 'Idle', approval: null, attention },
     footer: { observed: true, model: 'Claude', mode: 'default', notices: [] },
     prefs: { prefs: {}, version: 1 }, 'projects/marks': {}, 'projects/backlog': { text: '' }, 'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false }, host: { name: 'Test server', office: false },
@@ -60,7 +60,7 @@ async function main() {
     browser = await getBrowser()
     const context = browser.contexts()[0]
     if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
-    for (const state of ['answering', 'answer', 'drawn', 'saved']) for (const width of [320, 390, 1280]) {
+    for (const state of ['answering', 'answer', 'drawn', 'saved', 'stale', 'fresh', 'other']) for (const width of [320, 390, 1280]) {
       const name = `${state}-${width}`, errors = [], keys = [], pageErrors = []
       const fixture = fixtures(state)
       if (page) await page.close().catch(() => {})
@@ -84,9 +84,16 @@ async function main() {
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
         return route.abort('blockedbyclient')
       })
+      // A message sent while Claude works shows as a "Queued" bubble. /btw runs at once, so its bubble must leave.
+      const waiting = { stale: ['/btw what are you working on', 12000], fresh: ['/btw what are you working on', 500], other: ['/compact', 12000] }[state]
+      await page.addInitScript(waiting => {
+        if (waiting) localStorage.setItem('tether.pending.test', JSON.stringify({ '%1': [{ id: 1, text: waiting[0], key: waiting[0], seen: 0, at: Date.now() - waiting[1], thread: 'side-thread' }] }))
+      }, waiting)
       await page.addInitScript(() => {
         if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('Fixture disables service workers'))
+        const waiting = localStorage.getItem('tether.pending.test')
         localStorage.clear()
+        if (waiting) localStorage.setItem('tether.pending', waiting)
         localStorage.setItem('tmux-chat.prefs.synced', '1')
         localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light', voiceOff: true, voiceSound: false, sidePins: [], look: { layout: 'classic', surface: 'flat', backdrop: 'ember' } }))
       })
@@ -94,7 +101,13 @@ async function main() {
         await page.setViewportSize({ width, height: 800 })
         await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
         await page.waitForSelector('.composer textarea')
-        if (state === 'saved') {
+        if (waiting) {
+          await page.waitForTimeout(600)
+          const bubble = page.locator('.pending-message')
+          if (state === 'stale' && await bubble.count()) errors.push('an answered /btw still shows as queued')
+          if (state === 'fresh' && !(await bubble.innerText()).includes('Asking')) errors.push('a new /btw does not say Asking')
+          if (state === 'other' && !(await bubble.innerText()).includes('Queued')) errors.push('a queued /compact lost its bubble')
+        } else if (state === 'saved') {
           const saved = page.locator('.side-message')
           await saved.waitFor()
           if (await page.locator('.side-dock').count()) errors.push('a card shows with no overlay open')

@@ -608,7 +608,104 @@ async function main() {
     s.h.unmount()
     assert.equal(await final, 'Base'); assert.equal(env.streams[0].track.stops, 1); assert.equal(env.calls.length, 0)
   }
+  {
+    // Words from speech on desktop: the box shows them at once, then the server text of the same audio replaces them.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { text: 'Base' })
+    env.delayed = deferred()
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['ask thar to split t-marks', true]); env.advance(3000); s.render().stop()
+    await flush()
+    assert.equal(s.text(), 'Base ask thar to split t-marks'); assert.equal(s.render().transcribing, true)
+    const sent = env.calls.filter(call => call.path === '/mobile/api/transcribe')
+    assert.equal(sent.length, 1); assert.equal(sent[0].options.body.size, 5); assert.equal(sent[0].options.headers['X-Live'], undefined)
+    env.delayed.resolve('Ask Tether to split tmux slash pane')
+    assert.equal(await final, 'Base Ask Tether to split tmux/pane'); assert.equal(s.text(), 'Base Ask Tether to split tmux/pane')
+    assert.equal(s.render().transcribing, false); assert.equal(s.render().error, '')
+    assert.deepEqual(env.voiceReports.map(report => report.event), ['ok', 'refine'])
+    assert.equal(env.voiceReports[1].detail, 'used=server browser=5 server=7 audio=3.0s')
+    assert.equal(env.streams[0].track.stops, 1); assert.equal(env.focus, 1)
+    s.h.unmount(); assert.equal(env.timers.size, 0)
+  }
+  {
+    // A slow server: after the limit the browser text stays. Hands-free sends once, after the choice.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { handsFree: true })
+    env.delayed = deferred()
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['hello there', true]); env.advance(4000); s.render().stop(); await flush()
+    assert.equal(s.done(), 0)
+    env.fire(3600)
+    assert.equal(await final, 'hello there'); await flush()
+    assert.equal(s.done(), 1); assert.equal(s.render().error, '')
+    assert.equal(env.voiceReports.at(-1).detail, 'used=late browser=2 server=0 audio=4.0s')
+    s.h.unmount()
+  }
+  {
+    // The mic button during the server step keeps the browser text; an empty server answer keeps it too.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    env.delayed = deferred()
+    await s.render().toggle(); await flush(); let final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['keep this', true]); env.advance(2000); s.render().stop(); await flush()
+    s.render().cancelConverting()
+    assert.equal(await final, 'keep this'); assert.equal(env.voiceReports.at(-1).detail, 'used=browser browser=2 server=0 audio=2.0s')
+    env.delayed = null; env.result = ''
+    await s.render().toggle(); await flush(); final = s.render().finalText()
+    env.records[1].data(); env.recognitions[1].result(['and this', true]); env.advance(2000); s.render().stop()
+    assert.equal(await final, 'keep this and this'); assert.equal(s.render().error, '')
+    s.h.unmount()
+  }
+  {
+    // Review: unmount during the server step aborts it, settles the send and changes nothing later.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env, { handsFree: true })
+    env.delayed = deferred()
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['hello there', true]); env.advance(2000); s.render().stop(); await flush()
+    const sent = env.calls.find(call => call.path === '/mobile/api/transcribe')
+    s.h.unmount()
+    assert.equal(sent.options.signal.aborted, true); assert.equal(await final, 'hello there')
+    env.delayed.resolve('late words'); await flush()
+    assert.equal(s.text(), 'hello there'); assert.equal(s.done(), 0); assert.equal(env.timers.size, 0)
+  }
+  {
+    // Review: a tap during the server step does not start a second dictation that the old text would overwrite.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    env.delayed = deferred()
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['first words', true]); env.advance(2000); s.render().stop(); await flush()
+    await s.render().toggle(); await flush()
+    assert.equal(env.recognitions.length, 1); assert.equal(s.render().listening, false)
+    env.delayed.resolve('First words.')
+    assert.equal(await final, 'First words.')
+    s.h.unmount()
+  }
+  {
+    // Review: a quiet mic meter does not skip the server step when speech heard words.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA }), s = setup(env)
+    class Quiet {
+      createAnalyser() { return { fftSize: 0, getFloatTimeDomainData() {} } }
+      createMediaStreamSource() { return { connect() {} } }
+      close() { return Promise.resolve() }
+    }
+    env.globals.window.AudioContext = Quiet; env.result = 'Soft words.'
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['soft words', true]); env.advance(2000); s.render().stop()
+    assert.equal(await final, 'Soft words.')
+    s.h.unmount()
+  }
+  {
+    // Parakeet is English only: other languages keep the browser text and send nothing.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'hi-IN' }), s = setup(env)
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['namaste', true]); env.advance(2000); s.render().stop()
+    assert.equal(await final, 'namaste'); await flush()
+    assert.equal(env.calls.length, 0); assert.equal(env.streams[0].track.stops, 1)
+    s.h.unmount()
+  }
+  {
+    const { refineLimit } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
+    assert.equal(refineLimit(0), 3000); assert.equal(refineLimit(10), 4500); assert.equal(refineLimit(120), 8000)
+  }
   console.log('Speech: desktop backup converts a deaf tap, closes on words or a quick tap, carries into the fallback, and survives a mic failure pass')
+  console.log('Speech: desktop server text replaces browser words, falls back after the limit, on cancel, on empty text and for other languages pass')
 
   const closedEnv = speechEnvironment(), closed = setup(closedEnv, { text: 'Base' })
   await closed.render().toggle(); const closedFinal = closed.render().finalText(), speech = closedEnv.recognitions[0]

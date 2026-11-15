@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Pane } from './api'
+import type { Api, Pane } from './api'
 import { ImageViewer } from './ImageViewer'
 import type { Media } from './ImageViewer'
 import { mediaPath, saveFile } from './MediaLink'
@@ -8,6 +8,8 @@ import type { TextFile } from './TextViewer'
 import { OfficeViewer } from './OfficeViewer'
 import type { OfficeFile } from './OfficeViewer'
 import { useHost } from './host'
+import { PreviewDrawer } from './PreviewDrawer'
+import type { PreviewTarget } from './preview'
 
 export type { PanelProps } from './panels'
 
@@ -43,17 +45,20 @@ export function usePanelPoll(load: (signal: AbortSignal) => Promise<void>, ms: n
 export const folderQuery = (pane: Pane, folder: string | null) => `session=${encodeURIComponent(pane.id)}${folder ? `&folder=${encodeURIComponent(folder)}` : ''}`
 
 /** Open a file the way chat does: text and Office files in their viewers, media in the media viewer, PDFs in a new tab. GET /mobile/api/file decides what may open. */
-export function useFileOpener(pane: Pane) {
+export function useFileOpener(pane: Pane, api: Api) {
   const host = useHost()
   const [media, setMedia] = useState<Media | null>(null)
   const [text, setText] = useState<TextFile | null>(null)
   const [office, setOffice] = useState<OfficeFile | null>(null)
+  const [page, setPage] = useState<PreviewTarget | null>(null)
+  const fileUrl = useCallback((path: string) => `/mobile/api/file?session=${encodeURIComponent(pane.id)}&path=${encodeURIComponent(path)}`, [pane.id])
   const open = useCallback(async (path: string) => {
     const url = `/mobile/api/file?session=${encodeURIComponent(pane.id)}&path=${encodeURIComponent(path)}`
     const name = path.split('/').pop() || path
     const kind = mediaPath(path)?.kind
     if (!kind) { setMedia({ name, url, error: 'Tether opens files with an extension only.' }); return }
     if (kind === 'text') { setText({ path, url }); return }
+    if (kind === 'html') { setPage({ path, title: name }); return }
     try {
       const check = await fetch(url, { headers: { Range: 'bytes=0-0' } })
       if (!check.ok) { const body = await check.json().catch(() => null) as { error?: string } | null; setMedia({ name, url, error: body?.error ?? 'Tether cannot open this file.' }); return }
@@ -68,6 +73,7 @@ export function useFileOpener(pane: Pane) {
     <ImageViewer image={media} close={() => setMedia(null)} />
     <TextViewer file={text} close={() => setText(null)} />
     <OfficeViewer file={office} close={() => setOffice(null)} />
+    <PreviewDrawer api={api} session={pane.id} target={page} close={() => setPage(null)} onSource={path => setText({ path, url: fileUrl(path) })} />
   </>
   return [open, viewers] as const
 }

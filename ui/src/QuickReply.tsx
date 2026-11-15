@@ -2,7 +2,7 @@ import { Loading } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowUp } from 'lucide-react'
 import { ApiError, errorText } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, Choice, Pane, PromptAction } from './api'
+import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Pane, PromptAction } from './api'
 import { ChoiceDock } from './Dock'
 import { usePolling } from './hooks'
 import { agentNames, agoSeconds, paneTitle } from './Sidebar'
@@ -64,6 +64,14 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
     } finally { writing.current = false; setBusy(false) }
   }
   // A key from a read-only panel's footer, by action id. It does not answer anything, so the pin stays open.
+  async function dialogAction(attention: Attention, action: DialogAction) {
+    if (!data || disabled || writing.current) return null
+    writing.current = true
+    setBusy(true)
+    try { await api('dialog', { session: pane.id, thread: data.thread ?? null, title: attention.dialog?.title, mode: attention.dialog?.mode, ...action }); return null }
+    catch (failure) { return errorText(failure) }
+    finally { writing.current = false; setBusy(false); await refresh() }
+  }
   async function promptAction(attention: Attention, action: PromptAction) {
     if (!data || disabled || writing.current) return null
     writing.current = true
@@ -109,7 +117,7 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
         : data.plan ? <div className="side-pin-plan"><p>{agent} wants you to review a plan.</p><button type="button" className="primary" disabled={disabled} onClick={onOpen}>Open chat</button></div>
         : <>
           {(approval || attention) && <ChoiceDock key={approval?.id ?? attention?.id ?? 'choice'} approval={approval} attention={attention} plan={data.plan} agent={agent} disabled={disabled}
-            onChoose={choose} onKey={key => { void write('key', { key }, true) }} onAction={action => promptAction(attention!, action)} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} }, true)} onFocusReply={() => input.current?.focus()} />}
+            onChoose={choose} onKey={key => { void write('key', { key }, true) }} onAction={action => promptAction(attention!, action)} onDialog={action => dialogAction(attention!, action)} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} }, true)} onFocusReply={() => input.current?.focus()} />}
           {reply && <form className="side-pin-reply-field" onSubmit={event => { event.preventDefault(); send() }}>
             <textarea ref={input} rows={1} maxLength={4000} placeholder={`Message ${title}`} aria-label={`Message ${title}`} value={text} disabled={disabled}
               onChange={event => setText(event.target.value)} onKeyDown={event => {

@@ -1,0 +1,11 @@
+/* Trust a folder for Codex: the same card shape as .cli-update (App.css), but the text wraps, because the path matters. */
+.codex-trust { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px 12px; padding: 10px 10px 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); }
+.codex-trust > svg { flex: none; margin-top: 2px; color: var(--attention); }
+.codex-trust > span { flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 14px; }
+.codex-trust small { color: var(--muted); font-size: 12px; }
+.codex-trust code { font-size: 12px; }
+.codex-trust-path { overflow-wrap: anywhere; color: var(--text); }
+.codex-trust-error { color: var(--error) !important; }
+.codex-trust > button { flex: none; align-self: center; display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); margin-left: auto; }
+.status-content .codex-trust { margin: 0; }
+.codex-trust[role='status'] > svg { color: var(--done); }

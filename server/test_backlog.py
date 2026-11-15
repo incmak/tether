@@ -86,7 +86,7 @@ class BacklogTests(unittest.TestCase):
         self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
         self.assertIn('- [ ] Inbox open #B60', kept)
         self.assertIn('- [x] Newest done #B62', done)
-        self.assertIn('- [x] Open web item #B61\n  - Done: shipped', kept)
+        self.assertRegex(kept, r'- \[x\] Open web item #B61\n  - Done: [0-9-]+ [0-9:]+ · shipped')
         self.assertNotIn('Old 1 #B1', kept)
         self.assertTrue(done.startswith('# Finished backlog items'))
         self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Newest done #B62\n  - Done: ok\n- \[x\] Old 1 #B1\n  - Done: word')
@@ -210,14 +210,14 @@ class BacklogTests(unittest.TestCase):
             backlog.mark_done('secret', 'tether')
         backlog.add_detail('LOGIN', 'second', 'tether')
         backlog.mark_done('Fix login', 'tether')
-        self.assertEqual(self.text(), '- [x] Fix login (codex · chat a) #B1\n  - first\n  - second\n- [ ] Fix upload #B2\n\n## other\n- [ ] Fix secret #B3\n')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - first\n  - second\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix upload #B2\n\n## other\n- \[ \] Fix secret #B3\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.mark_done('Fix login', 'tether')
 
     def test_an_exact_match_beats_a_longer_one(self):
         backlog.save('- [ ] Fix\n- [ ] Fix login\n', backlog.read()['version'])
         backlog.mark_done('fix')
-        self.assertEqual(self.text(), '- [x] Fix #B1\n- [ ] Fix login #B2\n')
+        self.assertRegex(self.text(), r'^- \[x\] Fix #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · finished\n- \[ \] Fix login #B2\n$')
 
     def test_versions_keep_a_direct_overwrite_and_stay_limited(self):
         state = backlog.save('- [ ] One\n', backlog.read()['version'])
@@ -368,7 +368,7 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(self.text(), '- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why\n')
         self.assertEqual(backlog.list_open(), 'Inbox:\n- [ ] Fix login (codex · chat a) #B1\n  - Doing: claude · pane %5 · chat y\n  - why')
         backlog.mark_done('B1', result='fixed in 1234abc', who='claude · chat y')
-        self.assertEqual(self.text(), '- [x] Fix login (codex · chat a) #B1\n  - why\n  - Done: fixed in 1234abc (claude · chat y)\n')
+        self.assertRegex(self.text(), r'^- \[x\] Fix login \(codex · chat a\) #B1\n  - why\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · fixed in 1234abc \(claude · chat y\)\n$')
         with self.assertRaises(projects.ProjectError):
             backlog.start('B1', 'claude')
 
@@ -385,7 +385,7 @@ class BacklogTests(unittest.TestCase):
             self.assertEqual(agent_backlog_cli.main(['start', 'B1']), 0)
             self.assertIn('  - Doing: claude · chat abc', self.text())
             self.assertEqual(agent_backlog_cli.main(['done', 'B1', 'shipped in PR 9']), 0)
-        self.assertEqual(self.text(), '- [x] Fix it #B1\n  - Done: shipped in PR 9 (claude · chat abc)\n')
+        self.assertRegex(self.text(), r'^- \[x\] Fix it #B1\n  - Done: \d{4}-\d\d-\d\d \d\d:\d\d · shipped in PR 9 \(claude · chat abc\)\n$')
 
     def test_reword_and_move_keep_the_id_source_and_details(self):
         backlog.save('## other-app\n- [ ] A long title (claude · chat a) #B1\n  - Doing: claude\n\n## tether\n- [ ] Other #B2\n', backlog.read()['version'])
@@ -404,6 +404,127 @@ class BacklogTests(unittest.TestCase):
             self.assertEqual(agent_backlog_cli.main(['add', 'Chat links', '--detail', 'why one', '--detail', 'why two', '--project', 'tether']), 0)
             self.assertEqual(agent_backlog_cli.main(['reword', 'B1', 'Chat links for every file type']), 0)
         self.assertEqual(self.text(), '## tether\n- [ ] Chat links for every file type (claude · chat abc) #B1\n  - why one\n  - why two\n')
+
+
+
+class BoardTests(unittest.TestCase):
+    """The backlog's items as work board cards, and moves from the board (work_backlog.py)."""
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patch = mock.patch.object(paths, 'TETHER', Path(temp.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+        today = time.strftime('%Y-%m-%d %H:%M')
+        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        self.text = (f'- [ ] Inbox item (codex · chat a) #B1\n  - why it matters\n\n'
+                     f'## tether\n- [ ] Started #B2\n  - Doing: claude · pane %4\n  - [ ] a sub step\n'
+                     f'- [x] Shipped #B3\n  - Done: {today} · in 1234abc (claude)\n'
+                     f'- [x] Ticked by hand #B4\n- [x] Long ago #B5\n  - Done: {old} · old\n'
+                     f'- [ ] No id yet\n')
+        (backlog.folder()).mkdir(parents=True)
+        (backlog.folder() / 'BACKLOG.md').write_text(self.text)
+
+    def file(self):
+        return (backlog.folder() / 'BACKLOG.md').read_text()
+
+    def card(self, ref):
+        return next(c for c in backlog.board_items() if c['id'] == ref)
+
+    def test_cards_come_from_items_with_ids_and_reading_writes_nothing(self):
+        cards = backlog.board_items()
+        self.assertEqual(self.file(), self.text)
+        self.assertEqual([(c['id'], c['area'], c['stage']) for c in cards],
+                         [('B1', 'Inbox', 'ready'), ('B2', 'tether', 'building'), ('B3', 'tether', 'done')])
+        first, started, shipped = cards
+        self.assertEqual((first['title'], first['source'], first['details']), ('Inbox item', 'codex · chat a', ['why it matters']))
+        self.assertEqual((started['doing'], started['details']), ('claude · pane %4', ['a sub step']))
+        self.assertEqual(shipped['done'], 'in 1234abc (claude)')
+        self.assertLess(abs(shipped['doneAt'] - time.time()), 120)
+        self.assertEqual([c['rank'] for c in cards], [0, 1, 2])
+        self.assertTrue(all(0 < c['version'] < 2 ** 53 for c in cards))
+
+    def test_a_change_to_the_item_changes_only_its_version(self):
+        before = {c['id']: c['version'] for c in backlog.board_items()}
+        (backlog.folder() / 'BACKLOG.md').write_text(self.text.replace('why it matters', 'why it matters a lot'))
+        after = {c['id']: c['version'] for c in backlog.board_items()}
+        self.assertNotEqual(before['B1'], after['B1'])
+        self.assertEqual(before['B2'], after['B2'])
+
+    def test_moves_between_ready_building_and_done(self):
+        card = backlog.set_stage('B1', 'building', self.card('B1')['version'])
+        self.assertEqual((card['stage'], card['doing']), ('building', 'Mak'))
+        self.assertIn('#B1\n  - Doing: Mak\n  - why it matters\n', self.file())
+        card = backlog.set_stage('b-2', 'ready', self.card('B2')['version'])
+        self.assertEqual((card['stage'], card['doing'], card['details']), ('ready', None, ['a sub step']))
+        card = backlog.set_stage('B2', 'done', card['version'])
+        self.assertEqual(card['stage'], 'done')
+        self.assertRegex(self.file(), r'- \[x\] Started #B2\n  - \[ \] a sub step\n  - Done: [0-9-]+ [0-9:]+ · finished \(Mak\)\n')
+        card = backlog.set_stage('B3', 'ready', self.card('B3')['version'])
+        self.assertEqual((card['stage'], card['done']), ('ready', None))
+        self.assertIn('- [ ] Shipped #B3\n- [x] Ticked', self.file())
+        self.assertIn('- [ ] No id yet #B6\n', self.file())  # a write gives IDs, as every write does
+
+    def test_a_move_to_the_same_stage_changes_nothing(self):
+        backlog.set_stage('B2', 'building', self.card('B2')['version'])
+        backlog.set_stage('B3', 'done', self.card('B3')['version'])
+        self.assertEqual(self.file(), self.text)
+
+    def test_refuses_a_stale_version_other_stages_and_bad_ids(self):
+        version = self.card('B1')['version']
+        backlog.add_detail('B1', 'an agent wrote this')
+        with self.assertRaises(projects.ProjectError) as caught:
+            backlog.set_stage('B1', 'done', version)
+        self.assertEqual(caught.exception.status, 409)
+        for ref, stage, why in (('B1', 'review', 'Ready, Building or Done'), ('B99', 'done', 'No item B99'),
+                                ('T-1', 'done', 'like B12'), ('B1', 'done', 'Reload')):
+            with self.assertRaises(projects.ProjectError) as caught:
+                backlog.set_stage(ref, stage, 'x' if why == 'Reload' else 1)
+            self.assertIn(why, str(caught.exception))
+        self.assertNotIn('[x] Inbox item', self.file())
+
+
+    def test_status_lines_after_a_blank_line_belong_to_the_item(self):
+        text = '- [ ] Spaced #B1\n  - why\n\n  - Doing: claude\n- [ ] Again #B2\n  - why\n\n  - Done: long ago\n'
+        (backlog.folder() / 'BACKLOG.md').write_text(text)
+        self.assertEqual(self.card('B1')['stage'], 'building')
+        card = backlog.set_stage('B1', 'ready', self.card('B1')['version'])
+        self.assertEqual((card['stage'], card['doing']), ('ready', None))
+        card = backlog.set_stage('B2', 'done', self.card('B2')['version'])  # the old Done line goes; the new one counts
+        self.assertEqual((card['stage'], card['done']), ('done', 'finished (Mak)'))
+        self.assertNotIn('long ago', self.file())
+
+    def test_the_archive_keeps_this_weeks_done_items_on_the_board(self):
+        filler = 'word ' * 200
+        old = ''.join(f'- [x] Old {n} #B{n + 10}\n  - Done: {filler}\n' for n in range(60))
+        (backlog.folder() / 'BACKLOG.md').write_text(self.text + old)
+        self.assertGreater(len(self.file()), backlog.ARCHIVE_AT)
+        card = backlog.set_stage('B1', 'done', self.card('B1')['version'])
+        self.assertEqual(card['stage'], 'done')
+        self.assertNotIn('gone', card)
+        kept, done = self.file(), (backlog.folder() / 'DONE.md').read_text()
+        self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
+        self.assertIn('- [x] Shipped #B3', kept)  # done today: it stays
+        self.assertIn('Old 0 #B10', done)
+        self.assertNotIn('Inbox item', done)
+
+    def test_the_last_done_line_counts_for_the_card_and_the_archive(self):
+        today = time.strftime('%Y-%m-%d %H:%M')
+        old = time.strftime('%Y-%m-%d %H:%M', time.localtime(time.time() - 8 * 86400))
+        twice = f'- [x] Done twice #B9\n  - Done: {old} · first\n  - Done: {today} · again\n'
+        filler = ''.join(f'- [x] Old {n} #B{n + 10}\n  - Done: ' + 'word ' * 200 + '\n' for n in range(60))
+        (backlog.folder() / 'BACKLOG.md').write_text(twice + filler)
+        self.assertEqual(self.card('B9')['done'], 'again')
+        backlog.add('Push it past the archive size')
+        self.assertIn('Done twice #B9', self.file())
+        self.assertEqual(self.card('B9')['stage'], 'done')
+
+    def test_this_weeks_done_items_move_too_when_the_list_would_not_fit(self):
+        today = time.strftime('%Y-%m-%d %H:%M')
+        done = ''.join(f'- [x] Done {n} ' + 'x' * 900 + f' #B{n}\n  - Done: {today} · ok\n' for n in range(1, 41))
+        open_part = '- [ ] Open ' + 'y' * (backlog.LIMIT - 1000) + ' #B41\n'
+        backlog.save(done + open_part, backlog.read()['version'])
+        self.assertEqual(self.file(), open_part)
 
 
 if __name__ == '__main__':

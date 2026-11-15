@@ -538,6 +538,12 @@ def overlay(entry, status):
     return dict(status, state='Stopped')
 
 
+def restoring():
+    """True while saved tabs wait to resume or are resuming. Their stacks must not look empty then (auto_stacks.watch)."""
+    with _lock:
+        return any(tab['state'] in ('pending', 'resuming') for tab in _read()['tabs'].values())
+
+
 def notice():
     with _lock:
         tabs = [{key: tab[key] for key in ('thread', 'agent', 'name', 'folder', 'error', 'state')}

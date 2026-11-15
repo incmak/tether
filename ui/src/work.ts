@@ -31,7 +31,17 @@ export interface GraphLink { connected: boolean; account?: string; mail?: boolea
 /** One project's feed as Tether reads it. by agent: the project's own agent reads it and Tether does not. waiting: not
  * read yet. off: the feed cannot run until Mak acts (error says what to do). errors: failed reads in a row. */
 export interface FeedState { by: 'tether' | 'agent'; status: 'ok' | 'off' | 'error' | 'waiting'; at: number | null; error: string; errors: number; items: number }
-export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink; graph?: GraphLink; feeds?: Record<string, FeedState> }
+export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink; graph?: GraphLink; feeds?: Record<string, FeedState>; backlog?: BacklogCards }
+/** A BACKLOG.md item on the board (server: work_backlog.py). The file stays the record. area: its section, or Inbox.
+ * rank: its place in the file. doing, done: the text of its Doing and Done lines. doneAt: from a dated Done line;
+ * ticked items without one stay off the board. version: of the item's own lines. */
+export interface BacklogCard {
+  id: string; project: string; area: string; title: string; rank: number; stage: BacklogStage; source: string
+  doing: string | null; done: string | null; doneAt: number | null; details: string[]; version: number
+}
+export type BacklogStage = 'ready' | 'building' | 'done'
+/** error: the backlog could not be read; the rest of the board still shows. */
+export interface BacklogCards { items: BacklogCard[]; error: string }
 /** A Build answer, or Start fix tab, opens a fix tab. When it does not start, the item stays Ready and why says so. */
 export interface FixResult { started: boolean; why: string }
 export interface AnswerResult { item: WorkItem; sent: boolean; why: string; fix?: FixResult }
@@ -96,3 +106,18 @@ export function itemsByPane(board?: WorkBoard) {
     for (const tab of item.tabs) marks[tab.pane] = { id: item.id, stage: item.stage }
   return marks
 }
+
+/** Move a backlog item: Ready (reopen, or stop Doing), Building (a Doing line) or Done (ticked, with a dated Done line). */
+export const moveBacklog = (api: Api, card: BacklogCard, stage: BacklogStage) =>
+  api<{ item: BacklogCard }>('work/stage', { item: card.id, stage, version: card.version })
+
+/** Backlog cards the board shows: Done ones for a week, like work items. */
+export const backlogOnBoard = (board: WorkBoard | undefined, now: number) =>
+  (board?.backlog?.items ?? []).filter(card => card.stage !== 'done' || !card.doneAt || now - card.doneAt < 7 * DAY)
+
+/** Backlog cards a column shows before "Show more". Ready can hold dozens. */
+export const BACKLOG_CAP = 5
+
+/** Ready and Building in file order (the person's own order); Done newest first. */
+export const backlogOrder = (a: BacklogCard, b: BacklogCard) =>
+  a.stage === 'done' && b.stage === 'done' ? (b.doneAt ?? 0) - (a.doneAt ?? 0) : a.rank - b.rank

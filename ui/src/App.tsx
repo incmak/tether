@@ -59,7 +59,7 @@ import { CommandMenu } from './CommandMenu'
 import type { Command } from './CommandMenu'
 import { Shortcuts } from './Shortcuts'
 import { StatusBar } from './StatusBar'
-import { toggleTerminal, toggleVoice } from './keys'
+import { IS_MAC, toggleTerminal, toggleVoice } from './keys'
 import { copyPaneName, nameKindOf } from './CopyNames'
 import { Rail } from './Rail'
 import type { Screen } from './Rail'
@@ -148,7 +148,7 @@ function App() {
   }
   // Phone (or no workspace): "Watch" on an agent's browser card opens the browser full screen.
   const [browserSheet, setBrowserSheet] = useState(false)
-  // Desktop workspace: the ⌘K command menu or the ? shortcuts sheet.
+  // The ⌘K command menu, or the ⌘/ shortcuts sheet (any screen).
   const [menu, setMenu] = useState<'commands' | 'shortcuts' | null>(null)
   // Home-screen shortcuts open /chat/?go=attention|new|usage (manifest.webmanifest).
   const [go, setGo] = useState(() => new URL(location.href).searchParams.get('go'))
@@ -588,6 +588,19 @@ function App() {
         setMenu(current => current === 'commands' ? null : document.querySelector('dialog[open]') ? current : 'commands')
         return
       }
+      // ⌘/ opens or closes the keyboard shortcuts from any screen, also over another sheet: no sheet uses the key. ⌘? stays with the Mac Help menu.
+      // Off a Mac, Ctrl+/ in the terminal stays there: it is undo (^_) in a shell.
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'Slash' && (IS_MAC || !(event.target as Element | null)?.closest?.('.xterm'))) {
+        event.preventDefault()
+        setMenu(current => current === 'shortcuts' ? null : 'shortcuts')
+        return
+      }
+      // ? does the same when no text box or sheet has focus.
+      if (event.key === '?' && !typing && !event.ctrlKey && !event.metaKey && !event.altKey && !document.querySelector('dialog[open]')) {
+        event.preventDefault()
+        setMenu('shortcuts')
+        return
+      }
       // ⌥B opens the backlog sheet and ⌥⇧B the backlog page, also from a text field. ⌘B is the sidebar. Read event.code: Alt+B types ∫ on a Mac.
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyB' && !document.querySelector('dialog[open]')) {
         event.preventDefault()
@@ -630,7 +643,6 @@ function App() {
         const act = (run: () => void) => { event.preventDefault(); run() }
         if (mod && !event.altKey && !event.shiftKey && event.code === 'KeyB') return act(rail.toggleSidebar)
         if (event.altKey && !mod && !event.shiftKey && event.code === 'KeyN') return act(() => setNewSession(true))
-        if (event.key === '?' && !typing && !mod && !event.altKey) return act(() => setMenu('shortcuts'))
       }
       if (slots && !document.querySelector('dialog[open]')) {
         // Browsers keep Cmd+1-9, Cmd+W and Cmd+N, so slot keys use Alt. Read event.code: Alt+letter types a symbol on a Mac.
@@ -831,7 +843,7 @@ function App() {
     // After the menu closes: its own entry goes first, then the step.
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
     ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
-    { label: 'Keyboard shortcuts', key: '?', run: () => setMenu('shortcuts') },
+    { label: 'Keyboard shortcuts', key: '⌘/', run: () => setMenu('shortcuts') },
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
     { label: 'Plan usage', run: () => setPlanSheet(true) },
@@ -855,7 +867,7 @@ function App() {
     } : undefined
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}
-      groupHooks={groupHooks} onDropGroup={onDropGroup} askBar={ask && target.writable ? <AskChips api={api} pane={target} ask={ask} onDone={setNotice} onUpdate={() => void refresh()} /> : undefined} allPanes={panes} sidePin={sidePin} liveReplyPreview={prefs.liveReplyPreview} key={target.id} pane={target} session={owner} api={api} onMenu={() => setDrawer(true)} onUpdate={() => void refresh()} draft={prefs.drafts[target.id]?.text ?? ''} setDraft={text => setDraft(target.id, text)} onOpenPane={openPane} onSessionActions={at => { if (owner) { setMenuAt(view ? at : undefined); setActionsDelete(false); setActions(owner.id) } }} onPaneActions={(id, at) => { setMenuAt(view ? at : undefined); setPaneActions(id) }} onSplit={direction => void split(direction, target)} onFork={() => void fork(target)} onContinued={id => void openNewPane(id).catch(error => setNotice(errorText(error)))} onReorder={ids => { if (owner) update(current => ({ paneOrder: { ...current.paneOrder, [owner.id]: reorderPanes(groupSessions(panes).find(item => item.id === owner.id)!.panes, current.paneOrder[owner.id], ids) } })) }} micOk={!prefs.voiceOff} chime={prefs.voiceSound} readAloud={prefs.readAloud} handsFree={prefs.handsFree} slot={slot} running={running} />
+      groupHooks={groupHooks} onDropGroup={onDropGroup} askBar={ask && target.writable ? <AskChips api={api} pane={target} ask={ask} onDone={setNotice} onUpdate={() => void refresh()} /> : undefined} allPanes={panes} sidePin={sidePin} liveReplyPreview={prefs.liveReplyPreview} headerSwipe={prefs.headerSwipe} key={target.id} pane={target} session={owner} api={api} onMenu={() => setDrawer(true)} onUpdate={() => void refresh()} draft={prefs.drafts[target.id]?.text ?? ''} setDraft={text => setDraft(target.id, text)} onOpenPane={openPane} onSessionActions={at => { if (owner) { setMenuAt(view ? at : undefined); setActionsDelete(false); setActions(owner.id) } }} onPaneActions={(id, at) => { setMenuAt(view ? at : undefined); setPaneActions(id) }} onSplit={direction => void split(direction, target)} onFork={() => void fork(target)} onContinued={id => void openNewPane(id).catch(error => setNotice(errorText(error)))} onReorder={ids => { if (owner) update(current => ({ paneOrder: { ...current.paneOrder, [owner.id]: reorderPanes(groupSessions(panes).find(item => item.id === owner.id)!.panes, current.paneOrder[owner.id], ids) } })) }} micOk={!prefs.voiceOff} chime={prefs.voiceSound} readAloud={prefs.readAloud} handsFree={prefs.handsFree} slot={slot} running={running} />
   }
   // Layouts (layouts.ts, layouts.css): the grid shows on the wide workspace screen only. Home, Files, Share and the
   // phone keep today's arrangement and take only the colours and the Style. Classic adds no attribute and no style.
@@ -962,9 +974,10 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} backlog={menuBacklog} />}
-    {(view || (wide && home)) && menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
-    {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} />}
+    {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
+    {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
+      onBacklog={query => setBacklog({ mode: 'page', query })} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}
     {updated && <div className="update-banner" role="status"><span>A new version of Tether is ready.</span><button type="button" onClick={reload}>Reload</button></div>}

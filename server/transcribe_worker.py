@@ -13,6 +13,14 @@ MOBILE_TMUX_WHISPER_THREADS (8), MOBILE_TMUX_TRANSCRIBE_PORT (7684), MOBILE_TMUX
 MOBILE_TMUX_WHISPER_LIVE_MODEL (base.en: the fast model for text shown while the user still speaks),
 MOBILE_TMUX_WHISPER_BEAM (1: the final pass's beam size; 5 was 1.7x slower with the same text on test clips).
 
+Engine: Parakeet (NVIDIA's parakeet-tdt-0.6b-v2 in ONNX int8, through onnx-asr) when onnx-asr is installed:
+    VIRTUAL_ENV=... uv pip install 'onnx-asr[cpu,hub]'
+Whisper pads every clip to 30 s, so a 3 s clip took 2.6 s on 8 cores; Parakeet converts only the real audio
+(0.3 s for the same clip, 15 Nov 2026). The first start downloads the model (about 650 MB).
+TETHER_VOICE_ENGINE=whisper keeps Whisper; Whisper is also used when Parakeet cannot load.
+TETHER_VOICE_MODEL (nemo-parakeet-tdt-0.6b-v2: English; -v3 adds 24 European languages).
+Parakeet has no word-hint prompt: the one-word hints in TETHER_WHISPER_PROMPT fix the spelling afterwards.
+
 Long recordings: the page tags each recording with X-Recording. While the user speaks, each live request may start a
 background pass of the accurate model over the finished sentences. On stop, the final pass converts only the rest,
 so the wait after stop stays short for any length (a 33 s clip took 9.8 s with one whole pass).
@@ -35,14 +43,52 @@ LANGUAGE = os.environ.get('MOBILE_TMUX_WHISPER_LANGUAGE', 'en') or None
 PROMPT = os.environ.get('TETHER_WHISPER_PROMPT') or os.environ.get('MOBILE_TMUX_WHISPER_PROMPT', 'tmux, Tailscale, Claude, Codex, Tether, Friday, approve, deny, preview, split the pane, git push, version, release, npm, repo, PWA, API, JSON.')
 THREADS = int(os.environ.get('MOBILE_TMUX_WHISPER_THREADS', '8'))
 BEAM = int(os.environ.get('MOBILE_TMUX_WHISPER_BEAM', '1'))
-MODEL = WhisperModel(os.environ.get('MOBILE_TMUX_WHISPER_MODEL', 'small'), device='cpu', compute_type='int8', cpu_threads=THREADS)
-LIVE_MODEL = WhisperModel(os.environ.get('MOBILE_TMUX_WHISPER_LIVE_MODEL', 'base.en'), device='cpu', compute_type='int8', cpu_threads=THREADS)
+
+
+def load_parakeet():
+    """(model, model with VAD) or None: then the Whisper models do the work."""
+    if os.environ.get('TETHER_VOICE_ENGINE', 'parakeet') != 'parakeet':
+        return None
+    try:
+        import onnx_asr
+        import onnxruntime
+        options = onnxruntime.SessionOptions()
+        options.intra_op_num_threads = THREADS
+        model = onnx_asr.load_model(os.environ.get('TETHER_VOICE_MODEL', 'nemo-parakeet-tdt-0.6b-v2'), quantization='int8', sess_options=options)
+        # 0.5 s of quiet ends a segment; a segment never runs over 20 s (the model's best length).
+        return model, model.with_vad(onnx_asr.load_vad('silero'), min_silence_duration_ms=500, max_speech_duration_s=20)
+    except Exception as exc:  # not installed, or the model download failed: keep voice working with Whisper
+        print('Parakeet not used (%s: %s); using Whisper' % (type(exc).__name__, exc), file=sys.stderr, flush=True)
+        return None
+
+
+PARAKEET = load_parakeet()
+PARAKEET_LOCK = threading.Lock()  # one conversion at a time: two would share the same cores
+if PARAKEET is None:
+    MODEL = WhisperModel(os.environ.get('MOBILE_TMUX_WHISPER_MODEL', 'small'), device='cpu', compute_type='int8', cpu_threads=THREADS)
+    LIVE_MODEL = WhisperModel(os.environ.get('MOBILE_TMUX_WHISPER_LIVE_MODEL', 'base.en'), device='cpu', compute_type='int8', cpu_threads=THREADS)
+else:
+    MODEL = LIVE_MODEL = None
+
+
+def hints(prompt):
+    """Spelling fixes for Parakeet from the one-word hints: 'Tmux' -> 'tmux', 'tail scale' -> 'Tailscale', 'codex' -> 'Codex'.
+    A space may split a hint only into two parts of 3 letters or more, so 'JS on' never becomes 'JSON'."""
+    def forms(word):
+        return [re.escape(word)] + [re.escape(word[:at]) + r'\s' + re.escape(word[at:]) for at in range(3, len(word) - 2)]
+    words = (part.strip(' .') for part in prompt.split(','))
+    return [(re.compile(r'(?<![\w-])(?:' + '|'.join(forms(word)) + r')(?![\w-])', re.IGNORECASE), word)
+            for word in words if word and ' ' not in word]
+
+
+HINTS = hints(PROMPT)
 FINAL_LOCK = threading.Lock()
 PHRASE_LOCK = threading.Lock()
 LIVE_LOCK = threading.Lock()
 RATE = 16000
 COMMIT_AFTER = 4.0  # seconds of audio not yet converted by the accurate model before a background pass starts
 KEEP_TAIL = 2.5  # never commit a word that ends in the last seconds: the user may be mid-word
+QUIET_PEAK = 0.01  # a final pass with no VAD speech is retried without VAD when the audio peaks at this level or above (-40 dBFS)
 PAUSE = 0.15  # seconds of quiet between two words that make a good place to cut
 RECORDING_ID = re.compile(r'[A-Za-z0-9-]{8,64}')
 # Guards for the accurate model. One temperature: the default retries each 30 s window at up to six temperatures,
@@ -174,11 +220,92 @@ def commit(item, samples):
         item.lock.release()
 
 
+def spell(text):
+    """text with the hint spellings. A lower-case hint keeps a capital at the start of a sentence ('Repo is clean')."""
+    def fix(match, hint):
+        start = not text[:match.start()].strip() or text[:match.start()].rstrip()[-1] in '.!?'
+        return hint[0].upper() + hint[1:] if start and hint.islower() and match.group()[0].isupper() else hint
+    for pattern, hint in HINTS:
+        text = pattern.sub(lambda match: fix(match, hint), text)
+    return text
+
+
+def parakeet_segments(samples, wait=True):
+    """[(end in seconds, text)] of the speech in samples; quiet parts are skipped.
+    wait=False: None when another conversion runs, so previews never queue in front of a final pass."""
+    if not PARAKEET_LOCK.acquire(blocking=wait):
+        return None
+    try:
+        return [(segment.end, segment.text.strip()) for segment in PARAKEET[1].recognize(samples) if segment.text.strip()]
+    finally:
+        PARAKEET_LOCK.release()
+
+
+def plain_text(samples):
+    """The Parakeet text of samples without VAD, in pieces of 20 s or less (the model's memory grows with the clip)."""
+    step = 20 * RATE
+    with PARAKEET_LOCK:
+        return spell(join(*(PARAKEET[0].recognize(samples[at:at + step]).strip() for at in range(0, len(samples), step))))
+
+
+def level(samples):
+    """(peak, RMS) of samples, for the log: a silent mic shows about 0."""
+    import numpy as np  # here, not at the top: the CI server tests run without numpy and stub faster-whisper
+    if not len(samples):
+        return 0.0, 0.0
+    return float(np.abs(samples).max()), float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+
+
+def parakeet(samples, key=None, live=False, phrase=False):
+    """The Parakeet text of samples. key: like the Whisper path, a live request keeps the text of the speech that ended
+    KEEP_TAIL seconds or more before the end of the clip (VAD cuts at a 0.5 s pause, so that speech cannot change);
+    later requests convert only what comes after it. item.lock covers the read, the conversion and the update of
+    item.done, so a final pass waits for a running preview of the same recording and then reuses its text.
+    A preview that finds the recording or the model busy returns the text so far at once."""
+    if phrase:  # the browser already cut the phrase
+        with PARAKEET_LOCK:
+            return spell(PARAKEET[0].recognize(samples).strip())
+    item = recording(key, create=live) if key else None
+    if not item:
+        found = parakeet_segments(samples, wait=not live)
+        return spell(join(*(words for _, words in found or ())))
+    if not item.lock.acquire(blocking=not live):
+        return spell(item.done[1])
+    try:
+        start, text = item.done
+        found = parakeet_segments(samples[int(start * RATE):], wait=not live)
+        if found is None:
+            return spell(text)
+        if live:
+            settled = [(end, words) for end, words in found if end <= len(samples) / RATE - start - KEEP_TAIL]
+            if settled:
+                item.done = (start + settled[-1][0], join(text, *(words for _, words in settled)))
+        else:
+            with RECORDINGS_LOCK:
+                RECORDINGS.pop(key, None)
+        return spell(join(text, *(words for _, words in found)))
+    finally:
+        item.lock.release()
+
+
 def transcribe(audio, live=False, key=None, phrase=False):
     """live=True: quick rough text while the user speaks (fast model, greedy). Otherwise the accurate final text.
     Live passes use one temperature and a token cap: without them, mic noise can send the model into retry loops (34 s seen).
     key: the recording's X-Recording id. With it, the accurate text of finished sentences is reused (see the docstring at the top).
     phrase=True converts the whole clip, at most 30 seconds, without recording reuse or the composer queue."""
+    if PARAKEET:
+        samples = decode_audio(io.BytesIO(audio), sampling_rate=RATE)
+        length = len(samples) / RATE
+        if phrase and length > 30:
+            raise PhraseTooLong('Live phrases must be 30 seconds or shorter.')
+        text = parakeet(samples, key, live, phrase)
+        if not text and not live and not phrase:
+            # VAD found no speech. Quiet or far speech can still be there: the first Mac rescue (2026-11-15) lost 13.9 s here.
+            peak, rms = level(samples)
+            if peak >= QUIET_PEAK:
+                text = plain_text(samples)
+            print('no VAD speech: peak=%.3f rms=%.4f retry words=%d' % (peak, rms, len(text.split())), file=sys.stderr, flush=True)
+        return text, length
     if phrase:
         samples = decode_audio(io.BytesIO(audio), sampling_rate=RATE)
         length = len(samples) / RATE

@@ -17,6 +17,8 @@ import { Choice, Notifications, SessionSettings, SystemSettings } from './Settin
 import { matchesSetting, SETTINGS_GROUPS } from './settingsIndex'
 import type { SettingIndex, SettingsGroup } from './settingsIndex'
 import { keyLabel } from './keys'
+import { ShortcutRows } from './Shortcuts'
+import { SHORTCUT_GROUPS } from './shortcutList'
 import { DigestSettings } from './Attention'
 import { LayoutPicker, StylePicker } from './LookSettings'
 import './Settings.css'
@@ -48,6 +50,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('sort', 'workspace', 'Session order', 'sidebar sort smart manual recent', <Field scope="All devices"><Choice legend="Session order" name="sort" value={prefs.sort} options={[["smart", "Smart"], ["recent", "Recent"], ["name", "Name"], ["manual", "Manual"]]} onChange={sort => update(() => ({ sort }))} /><p className="setting-note">{prefs.sort === 'smart' ? 'Needs you, then Done, Working, and most recent.' : prefs.sort === 'recent' ? 'Needs you, then the latest agent activity.' : prefs.sort === 'name' ? 'Needs you, then A to Z.' : 'Use Reorder in the sidebar to arrange sessions.'}</p></Field>),
     item('paths', 'workspace', 'Folder paths', 'sidebar location directory', <Toggle title="Folder paths" note="Show the folder under each session name." checked={prefs.showPaths} onChange={showPaths => update(() => ({ showPaths }))} />),
     item('terms', 'workspace', 'tmux words', 'pane split tab terminology ctrl-b', <Toggle title="tmux words" note="Use pane, split and Ctrl-b in place of Tether’s terms." checked={prefs.tmuxWords} onChange={tmuxWords => update(() => ({ tmuxWords }))} />),
+    item('header-swipe', 'workspace', 'Swipe on the tab bar scrolls it', 'trackpad two finger swipe gesture header tab bar stacks scroll back forward history mac', <Toggle title="Swipe on the tab bar scrolls it" note="On a trackpad, swipe with two fingers over a chat’s tabs or stacks, or just above them, to scroll that row. The swipe does not go Back or Forward anywhere in the chat’s header. Off: it goes Back or Forward, as on the rest of the page." scope="This device" checked={prefs.headerSwipe} onChange={headerSwipe => update(() => ({ headerSwipe }))} />),
     item('preview', 'workspace', 'Live reply preview', 'claude response stream messages', <Toggle title="Live reply preview" note="Show Claude’s reply as it arrives." checked={prefs.liveReplyPreview} onChange={liveReplyPreview => update(() => ({ liveReplyPreview }))} />),
     item('attention', 'workspace', 'Attention mode', 'waiting on you needs you ask oldest handled snooze remind tomorrow digest daily summary', <>
       <Toggle title="Attention mode" note="Keep a tab in “Waiting on you” until you answer it, mark it handled or snooze it." checked={prefs.attention} onChange={attention => update(() => ({ attention }))} />
@@ -69,6 +72,9 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('learning', 'agents', 'Learning from feedback', 'learn learning lessons feedback self-learning reward punishment correct mistake memory remember improve', <Field scope="This server"><LearningSettings api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),
+    // The same list as the ⌘/ sheet. A search here finds a key by its action, like "split" or "backlog".
+    ...SHORTCUT_GROUPS.map(keys => item(`keys-${keys.name.toLowerCase()}`, 'shortcuts', `${keys.name} keys`, `keyboard shortcut hotkey key ${keys.items.map(([label, key]) => `${label} ${key} ${keyLabel(key)}`).join(' ')}`,
+      <section className="preferences-nested"><h3>{keys.name}</h3><ShortcutRows group={keys} /></section>)),
     item('system', 'system', 'Updates and resources', 'version release reload refresh cpu memory host processes btop monitor', <Field scope="This server"><SystemSettings api={api} onReload={onReload} /></Field>),
   ]
   const searching = !!query.trim()

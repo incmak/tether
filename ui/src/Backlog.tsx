@@ -2,7 +2,7 @@ import { VoiceField } from './VoiceField'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import { ArrowDownUp, Check, ChevronRight, CircleCheck, ClipboardList, FileText, GripVertical, Hash, Inbox, Layers, ListChecks, Maximize2, Minimize2, Pencil, Plus, Search, Send, Timer, Trash2, UserRound, X } from 'lucide-react'
+import { ArrowDownUp, Check, ChevronLeft, ChevronRight, CircleCheck, ClipboardList, FileText, GripVertical, Hash, Inbox, Layers, ListChecks, Maximize2, Minimize2, Pencil, Plus, Search, Send, Timer, Trash2, UserRound, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { addItem, blockOf, moveItem, openGroups, parseBacklog, keptLength, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
@@ -14,7 +14,7 @@ import { BACKLOG_PATH, highestRef, markSeen, useBacklogNews } from './backlogNew
 import { agentTabs, itemPrompt, sendToTab, startTab } from './backlogSend'
 import { Bone } from './Skeleton'
 import { SelectMenu } from './SelectMenu'
-import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, highlight, isFiltered, matchesQuery, matchesStatus, matchesWho, projectCounts, viewGroups } from './backlogView'
+import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, highlight, isFiltered, matchesQuery, matchesStatus, matchesWho, projectCounts, projectGroups, viewGroups } from './backlogView'
 import type { SortKey, StatusFilter, View, Who } from './backlogView'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Backlog.css'
@@ -110,7 +110,10 @@ interface RowActions {
   onSend?: (item: Item) => void
 }
 
-function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged, reorder, query }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean; reorder: boolean; query: string }) {
+/** How the detail pane names an item across saves: its ID, which stays when the line changes. */
+const itemKey = (item: Item) => item.ref ?? item.id
+
+function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged, reorder, query, onOpen, selected }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean; reorder: boolean; query: string; onOpen?: (item: Item) => void; selected?: boolean }) {
   const [wording, setWording] = useState(item.text)
   // Sub-steps stay in view. Notes (the why, the files, selected chat text) fold under the title until opened.
   const [showNotes, setShowNotes] = useState(false)
@@ -127,7 +130,9 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
   const matchedNote = !!query.trim() && notes.some(detail => matchesQuery({ ...item, text: '', ref: undefined, source: undefined, status: undefined, details: [detail] }, query))
   const notesOpen = showNotes || matchedNote
   const visible = notesOpen ? item.details : item.details.filter(detail => detail.done !== undefined)
-  return <li data-backlog-row={item.done ? undefined : item.id} className={['backlog-row', item.done && 'done', !reorder && !item.done && 'fixed', drop && `drop-${drop}`, dragged && 'dragged'].filter(Boolean).join(' ')}
+  const title = highlight(item.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)
+  const reword = () => { if (!locked && !item.done) { setWording(item.text); setEditing(item.id) } }
+  return <li data-backlog-row={item.done ? undefined : item.id} data-backlog-key={itemKey(item)} className={['backlog-row', item.done && 'done', !reorder && !item.done && 'fixed', drop && `drop-${drop}`, dragged && 'dragged', selected && 'selected'].filter(Boolean).join(' ')}
     style={dragged ? { opacity: 1, zIndex: 1, background: 'var(--bg)', boxShadow: '0 3px 10px rgb(0 0 0 / .16)' } : undefined}>
     {!item.done && reorder && <button type="button" className="backlog-grip" aria-label={`Move ${item.text}. Use the up and down arrow keys.`} title="Drag to reorder" disabled={locked}
       onPointerDown={event => actions.onDragStart(event, item)} onKeyDown={event => actions.onDragKey(event, item)}
@@ -138,7 +143,10 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
         ? <VoiceField label="backlog title" value={wording} setValue={value => { setWording(value); typedRef.current = value }} onLeave={() => finish(true)} field={{ 'aria-label': `Reword ${item.text}`, className: 'backlog-input backlog-reword', autoFocus: true,
             onFocus: event => { ended.current = false; event.target.select() },
             onKeyDown: event => { if (event.key === 'Enter') { event.preventDefault(); finish(true) } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false) } } }} />
-        : <span className="backlog-text-line" onDoubleClick={() => { if (!locked && !item.done) { setWording(item.text); setEditing(item.id) } }}>{highlight(item.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)}</span>}
+        : onOpen
+          // The full page: the title opens the detail pane. Arrow keys move between titles (Backlog's onKeyDown).
+          ? <button type="button" className="backlog-text-line backlog-open" aria-current={selected || undefined} aria-controls={selected ? 'backlog-detail' : undefined} title="Open details" onClick={() => onOpen(item)} onDoubleClick={reword}>{title}</button>
+          : <span className="backlog-text-line" onDoubleClick={reword}>{title}</span>}
       {(item.ref || item.source) && <span className="backlog-meta">
         {item.ref && <span className="backlog-ref" title="The ID agents use for this item">{item.ref}</span>}
         {item.source && <SourceTag source={item.source} links={links} />}
@@ -162,6 +170,92 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
 
 function NoteRow({ note }: { note: Note }) {
   return <li className="backlog-free">{note.text}</li>
+}
+
+/** One item in full on the backlog page: its title, state, project, sub-steps, every note, and its actions.
+ * item null: the item was deleted or changed elsewhere. */
+function ItemDetail({ item, project, actions, links, locked, sending, feedback, typed: typedRef, onAdd, onClose, overlay, headingRef }: {
+  item: Item | null; project: string; actions: RowActions; links: Links; locked: boolean; sending?: ReactNode
+  /** Save errors and Undo. On a narrow screen the pane covers the list, so they show here. */
+  feedback?: ReactNode
+  typed: RefObject<string>; onAdd: (text: string) => void; onClose: () => void; overlay: boolean; headingRef: RefObject<HTMLHeadingElement | null>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [wording, setWording] = useState('')
+  const [copied, setCopied] = useState(false)
+  // The item's line when Reword started. If an agent saves a new line meanwhile, Tether asks before it writes over it.
+  const [base, setBase] = useState({ raw: '', text: '' })
+  const [clash, setClash] = useState(false)
+  const stop = () => { typedRef.current = ''; setEditing(false); setClash(false) }
+  const close = <button type="button" className={overlay ? 'secondary backlog-detail-back' : 'icon-button'} aria-label={overlay ? 'Back to the list' : 'Close details'} title={overlay ? undefined : 'Close details (Esc)'} onClick={onClose}>
+    {overlay ? <><ChevronLeft size={16} aria-hidden="true" />Back</> : <X size={16} />}</button>
+  // A Reword in progress keeps its words when the item goes, so the person can add them back or let them go.
+  const kept = editing && wording.trim() && wording.trim() !== base.text ? wording.trim() : ''
+  if (!item) return <aside id="backlog-detail" className={`backlog-detail${overlay ? ' overlay' : ''}`} aria-label="Item details">
+    <div className="backlog-detail-bar">{close}</div>
+    <div className="backlog-empty" role="status"><ClipboardList size={24} aria-hidden="true" /><p><strong>This item is gone</strong></p><p>It was deleted, or an agent changed it.</p></div>
+    {kept && <div className="backlog-detail-kept" role="group" aria-labelledby="backlog-detail-kept">
+      <p id="backlog-detail-kept"><strong>Your new wording was not saved:</strong></p>
+      <p className="backlog-detail-note">{kept}</p>
+      <div className="backlog-detail-actions">
+        <button type="button" className="secondary" disabled={locked} onClick={() => { onAdd(kept); stop() }}><Plus size={14} aria-hidden="true" />Add as a new item</button>
+        <button type="button" className="secondary" onClick={() => { void copyText(kept).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500) }, () => {}) }}>{copied ? 'Copied' : 'Copy'}</button>
+        <button type="button" className="secondary danger-text" onClick={stop}>Discard</button>
+      </div>
+    </div>}
+    {feedback}
+  </aside>
+  const steps = item.details.filter(detail => detail.done !== undefined)
+  const notes = item.details.filter(detail => detail.done === undefined)
+  const finished = steps.filter(step => step.done).length
+  const finish = (keep: boolean, force = false) => {
+    const changed = keep && !!wording.trim() && wording.trim() !== item.text
+    if (changed && item.raw !== base.raw && !force) { setClash(true); return }
+    stop()
+    if (changed) actions.onReword(item, wording)
+  }
+  const reword = () => { setWording(item.text); setBase({ raw: item.raw, text: item.text }); setClash(false); setEditing(true) }
+  const copyRef = () => { if (item.ref) void copyText(item.ref).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1500) }, () => {}) }
+  return <aside id="backlog-detail" className={`backlog-detail${overlay ? ' overlay' : ''}${item.done ? ' done' : ''}`} aria-labelledby="backlog-detail-title">
+    <div className="backlog-detail-bar">
+      {overlay && close}
+      {item.ref && <button type="button" className="backlog-tag" title="Copy the ID agents use for this item" aria-label={`Copy ID ${item.ref}`} onClick={copyRef}>{copied ? 'Copied' : item.ref}</button>}
+      <span className="backlog-detail-project">{project ? <Hash size={13} aria-hidden="true" /> : <Inbox size={13} aria-hidden="true" />}{projectLabel(project)}</span>
+      {!overlay && close}
+    </div>
+    {editing
+      ? <VoiceField label="backlog title" value={wording} setValue={value => { setWording(value); typedRef.current = value }} onLeave={() => finish(true)} multiline field={{ 'aria-label': `Reword ${item.text}`, className: 'backlog-input backlog-detail-reword', autoFocus: true, rows: 3,
+          onFocus: event => event.target.select(),
+          onKeyDown: event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); finish(true) } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false) } } }} />
+      : <h3 id="backlog-detail-title" ref={headingRef} tabIndex={-1} className="backlog-detail-title">{item.text}</h3>}
+    {editing && clash && <div className="confirm-box" role="alertdialog" aria-labelledby="backlog-detail-clash">
+      <p id="backlog-detail-clash"><strong>An agent changed this item while you typed.</strong> The title is now “{item.text}”.</p>
+      <div className="sheet-buttons">
+        <button type="button" className="secondary" disabled={locked} onMouseDown={event => event.preventDefault()} onClick={() => finish(true, true)}>Save my wording</button>
+        <button type="button" className="secondary" onMouseDown={event => event.preventDefault()} onClick={stop}>Keep theirs</button>
+      </div>
+    </div>}
+    <label className="backlog-detail-done"><input type="checkbox" className="backlog-box" checked={item.done} disabled={locked} onChange={event => actions.onDone(item.raw, item.line, event.target.checked)} />Done</label>
+    {item.status && (item.status.kind === 'done' ? item.done : !item.done) && <StatusLine status={item.status} links={links} />}
+    <div className="backlog-detail-field"><span>Added by</span>{item.source ? <SourceTag source={item.source} links={links} /> : <span>You</span>}</div>
+    {steps.length > 0 && <section className="backlog-detail-part" aria-labelledby="backlog-detail-steps">
+      <h4 id="backlog-detail-steps">Steps <span className="backlog-count">{finished} of {steps.length}</span></h4>
+      <ul className="backlog-details">{steps.map(step => <li key={step.line}><label className={`backlog-sub${step.done ? ' done' : ''}`}>
+        <input type="checkbox" checked={step.done} disabled={locked} onChange={event => actions.onDone(step.raw, step.line, event.target.checked)} /><span>{step.text}</span></label></li>)}</ul>
+    </section>}
+    {notes.length > 0 && <section className="backlog-detail-part" aria-labelledby="backlog-detail-notes">
+      <h4 id="backlog-detail-notes">Notes</h4>
+      {notes.map(note => <p key={note.line} className="backlog-detail-note">{note.text}</p>)}
+    </section>}
+    {!steps.length && !notes.length && <p className="backlog-detail-none">No notes yet. Agents add the why and the files under the item.</p>}
+    {!editing && <div className="backlog-detail-actions">
+      {!item.done && actions.onSend && <button type="button" className="secondary" disabled={locked || !item.ref} onClick={() => actions.onSend!(item)}><Send size={14} aria-hidden="true" />Send to an agent</button>}
+      {!item.done && <button type="button" className="secondary" disabled={locked} onClick={reword}><Pencil size={14} aria-hidden="true" />Reword</button>}
+      <button type="button" className="secondary danger-text" disabled={locked} onClick={() => actions.onDelete(item)}><Trash2 size={14} aria-hidden="true" />Delete</button>
+    </div>}
+    {sending}
+    {feedback}
+  </aside>
 }
 
 /** The checklist before the first load. The status line below the list says it is loading; these shapes are hidden from
@@ -205,6 +299,17 @@ function readView(query: string): View {
 }
 const typingIn = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
 const projectLabel = (name: string) => name || 'Inbox'
+const DETAIL_BESIDE = '(min-width: 1200px)'
+function useMedia(query: string) {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const list = window.matchMedia(query), changed = () => setMatches(list.matches)
+    changed()
+    list.addEventListener('change', changed)
+    return () => list.removeEventListener('change', changed)
+  }, [query])
+  return matches
+}
 // A project in a menu: every project, the inbox (no heading), or one heading.
 const ALL = '*all', INBOX = '*inbox'
 const projectValue = (project: string | null) => project === null ? ALL : project === '' ? INBOX : `p:${project}`
@@ -236,6 +341,10 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   const [drag, setDrag] = useState<{ item: Item; target: string | null; after: boolean } | null>(null)
   const [sendFor, setSendFor] = useState<string | null>(null)  // the row whose Send panel is open
   const [sent, setSent] = useState<{ label: string; pane: Pane | null } | null>(null)
+  // The page's detail pane shows this item (itemKey). Beside the list on a wide screen; over it, with Back, on a narrow one.
+  const [selected, setSelected] = useState<string | null>(null)
+  const beside = useMedia(DETAIL_BESIDE)
+  const detailHeading = useRef<HTMLHeadingElement>(null)
   const textBox = useRef<HTMLTextAreaElement>(null)
   const caret = useRef<number | null>(null)
   const typedRow = useRef('')
@@ -545,12 +654,48 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     },
   }
   const links: Links = { panes, onOpenPane }
+  const inText = draft !== null
+  // The detail pane: undefined when closed, null when its item is gone.
+  const detailOpen = page && selected !== null && !inText && !!saved
+  const detailItem = detailOpen ? allItems.find(row => itemKey(row) === selected) ?? null : undefined
+  const overlay = detailOpen && !beside
+  const sendPanel = (row: Item) => <SendPanel item={row} api={api} links={links} command={saved?.command} onClose={() => setSendFor(null)}
+    onSent={(who, pane, name) => { setSendFor(null); change(startItem(row.raw, row.line, who)); setSent({ label: `Sent ${row.ref} to ${name}`, pane }) }} />
+  const rowButton = (key: string) => list.current?.querySelector<HTMLButtonElement>(`[data-backlog-key="${CSS.escape(key)}"] .backlog-open`)
+  const openDetail = (target: Item) => { setSendFor(null); setSelected(itemKey(target)) }
+  const closeDetail = () => {
+    const key = selected
+    setSendFor(null); setSelected(null)
+    if (key) requestAnimationFrame(() => rowButton(key)?.focus())
+  }
+  // A narrow screen covers the list with the pane, so the cursor moves into it. A wide one keeps the cursor in the list.
+  useEffect(() => { if (selected !== null && !beside) detailHeading.current?.focus() }, [selected, beside])
+  // On the page: Esc closes the pane, and ↑ ↓ (or J K) move between titles. The grip and the menus keep their own arrows.
+  const pageKeys = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
+    const target = event.target as HTMLElement
+    if (event.key === 'Escape' && detailOpen && !target.closest('.backlog-send, [role="alertdialog"]')) {
+      event.preventDefault(); event.stopPropagation(); closeDetail(); return
+    }
+    const step = ({ ArrowDown: 1, ArrowUp: -1, j: 1, k: -1 } as Record<string, number>)[event.key]
+    if (!step || event.shiftKey || typingIn(target) || target.closest('.backlog-grip, .backlog-send, .backlog-nav, .backlog-tools')) return
+    if (!target.closest('.backlog-open') && !detailOpen) return
+    const titles = [...(list.current?.querySelectorAll<HTMLButtonElement>('.backlog-open') ?? [])]
+    if (!titles.length) return
+    const from = titles.indexOf(target as HTMLButtonElement) >= 0 ? titles.indexOf(target as HTMLButtonElement) : titles.findIndex(title => title.getAttribute('aria-current') === 'true')
+    const next = titles[from < 0 ? 0 : Math.max(0, Math.min(titles.length - 1, from + step))]
+    event.preventDefault()
+    next.scrollIntoView({ block: 'nearest' })
+    if (!overlay) next.focus()
+    const key = next.closest<HTMLElement>('[data-backlog-key]')?.dataset.backlogKey
+    if (detailOpen && key && key !== selected) { setSendFor(null); setSelected(key) }
+  }
   const showRow = (row: Item | Note) => row.kind === 'note'
     ? <NoteRow key={row.id} note={row} />
     : <ItemRow key={row.id} item={row} actions={actions} links={links} locked={locked}
-        sending={sendFor === row.id && !row.done ? <SendPanel item={row} api={api} links={links} command={saved?.command} onClose={() => setSendFor(null)}
-          onSent={(who, pane, name) => { setSendFor(null); change(startItem(row.raw, row.line, who)); setSent({ label: `Sent ${row.ref} to ${name}`, pane }) }} /> : undefined} editing={editingRow === row.id} setEditing={setEditingRow} typed={typedRow} dragged={drag?.item.id === row.id}
-        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} reorder={reorder} query={view.query} />
+        sending={sendFor === row.id && !row.done && !(detailOpen && itemKey(row) === selected) ? sendPanel(row) : undefined} editing={editingRow === row.id} setEditing={setEditingRow} typed={typedRow} dragged={drag?.item.id === row.id}
+        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} reorder={reorder} query={view.query}
+        onOpen={page ? openDetail : undefined} selected={detailOpen && itemKey(row) === selected} />
   const clearDone = () => {
     const blocks = done.map(row => blockOf(shown, row.raw, row.line)).filter(block => block !== null).sort((a, b) => a.line - b.line)
     const remove: Change = text => done.reduce<string | null>((value, row) => { if (value === null) return null; return removeItem(row.raw, row.line)(value) ?? value }, text)
@@ -569,7 +714,6 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     if (draft !== null && saved && dirty) void saveDraft(saved, draft)
     else void work()
   }
-  const inText = draft !== null
 
   const status = !saved ? (error ? '' : 'Loading backlog…')
     : tooLong ? `Keep it under ${saved.limit.toLocaleString()} characters.`
@@ -597,7 +741,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
         onChange={value => setView({ sort: value as SortKey })} options={(Object.keys(SORT_LABELS) as SortKey[]).map(value => ({ value, label: SORT_LABELS[value], detail: value === 'manual' ? 'Drag to reorder' : undefined }))} />
     </div>
   </div>
-  const nav = page && <nav className="backlog-nav" aria-label="Backlog views">
+  const nav = page && <nav className="backlog-nav" aria-label="Backlog views" inert={overlay}>
     <h3 className="backlog-nav-head">Views</h3>
     <ul>{statuses.map(value => { const Icon = STATUS_ICONS[value]; return <li key={value}>
       <button type="button" aria-pressed={view.status === value} onClick={() => setView({ status: value })}><Icon size={15} aria-hidden="true" /><span>{STATUS_LABELS[value]}</span><span className="backlog-nav-count">{saved ? statusCount(value) : ''}</span></button>
@@ -610,9 +754,25 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     </>}
   </nav>
 
-  return <div className={page ? 'backlog page' : 'backlog'}>
+  // Save errors, retries and Undo. On a narrow screen the detail pane covers the list, so it shows them instead.
+  const feedback = <>
+    {sent && !undo && !inText && <div className="backlog-undo" role="status"><span>{sent.label}</span>{sent.pane && onOpenPane && <button type="button" className="link-button" onClick={() => onOpenPane(sent.pane!)}>Open</button>}<button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setSent(null)}><X size={14} /></button></div>}
+    {undo && !inText && <div className="backlog-undo" role="status"><span>{undo.label}</span><button type="button" className="link-button" onClick={() => { const back = undo.change; setUndo(null); change(back) }}>Undo</button><button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setUndo(null)}><X size={14} /></button></div>}
+    {conflict ? <div className="confirm-box" role="alertdialog" aria-labelledby="backlog-conflict">
+      <p id="backlog-conflict"><strong>The backlog changed while you were editing.</strong> An agent or another tab saved a newer version.</p>
+      <div className="sheet-buttons">
+        <button type="button" className="secondary" disabled={saving} onClick={() => { remember(conflict); setDraft(conflict.text); setConflict(null) }}>Use the newer version</button>
+        <button type="button" className="secondary danger-text" disabled={saving} onClick={() => { if (draft !== null) void saveDraft(conflict, draft) }}>Keep mine</button>
+      </div>
+    </div>
+    : failed && unsaved ? <p className="error" role="alert"><strong>Not saved.</strong> {failed} Tether will keep trying. <button type="button" className="link-button" onClick={retry}>Try now</button></p>
+    : error ? <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>
+    : <p className={`backlog-status${tooLong ? ' error' : ''}${saved ? '' : ' loading'}`} role="status">{status}{!plain && saved && !inText && !overlay && <> · <button type="button" className="link-button" onClick={clearFilters}>Clear filters</button></>}</p>}
+  </>
+
+  return <div className={['backlog', page && 'page', detailOpen && 'with-detail'].filter(Boolean).join(' ')} onKeyDown={page ? pageKeys : undefined}>
     {nav}
-    <div className="backlog-main">
+    <div className="backlog-main" inert={overlay}>
     <div className="backlog-top">
       {inText
         ? <p className="backlog-mode">Editing as text. Items are Markdown lines like <code>- [ ] Item</code>.</p>
@@ -649,19 +809,12 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
             {showDone && <ul>{doneList.map(showRow)}</ul>}
           </div>}
         </div>}
-    {sent && !undo && !inText && <div className="backlog-undo" role="status"><span>{sent.label}</span>{sent.pane && onOpenPane && <button type="button" className="link-button" onClick={() => onOpenPane(sent.pane!)}>Open</button>}<button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setSent(null)}><X size={14} /></button></div>}
-    {undo && !inText && <div className="backlog-undo" role="status"><span>{undo.label}</span><button type="button" className="link-button" onClick={() => { const back = undo.change; setUndo(null); change(back) }}>Undo</button><button type="button" className="icon-button" aria-label="Dismiss" onClick={() => setUndo(null)}><X size={14} /></button></div>}
-    {conflict ? <div className="confirm-box" role="alertdialog" aria-labelledby="backlog-conflict">
-      <p id="backlog-conflict"><strong>The backlog changed while you were editing.</strong> An agent or another tab saved a newer version.</p>
-      <div className="sheet-buttons">
-        <button type="button" className="secondary" disabled={saving} onClick={() => { remember(conflict); setDraft(conflict.text); setConflict(null) }}>Use the newer version</button>
-        <button type="button" className="secondary danger-text" disabled={saving} onClick={() => { if (draft !== null) void saveDraft(conflict, draft) }}>Keep mine</button>
-      </div>
+    {!overlay && feedback}
     </div>
-    : failed && unsaved ? <p className="error" role="alert"><strong>Not saved.</strong> {failed} Tether will keep trying. <button type="button" className="link-button" onClick={retry}>Try now</button></p>
-    : error ? <p className="error" role="alert">{error} <button type="button" className="link-button" onClick={() => setError('')}>Dismiss</button></p>
-    : <p className={`backlog-status${tooLong ? ' error' : ''}${saved ? '' : ' loading'}`} role="status">{status}{!plain && saved && !inText && <> · <button type="button" className="link-button" onClick={clearFilters}>Clear filters</button></>}</p>}
-    </div>
+    {detailItem !== undefined && <ItemDetail key={selected} item={detailItem} project={detailItem ? projectGroups(rows).find(group => group.items.some(row => row.id === detailItem.id))?.name ?? '' : ''}
+      actions={actions} links={links} locked={locked} typed={typedRow} onClose={closeDetail} overlay={overlay} headingRef={detailHeading}
+      onAdd={text => change(addItem(text))} feedback={overlay ? feedback : undefined}
+      sending={detailItem && sendFor === detailItem.id && !detailItem.done ? sendPanel(detailItem) : undefined} />}
   </div>
 }
 

@@ -589,7 +589,7 @@ def login_progress(entry, screen, now=None):
     return {key: state[key] for key in ('phase', 'message')} if state['phase'] != 'waiting' else None
 
 
-def attention(entry, screen, working, now=None, login_screen=None, styled_screen=None):
+def attention(entry, screen, working, now=None, login_screen=None, styled_screen=None, dialog=None):
     """Catch-all for any screen that waits on the user but is not a recognized approval.
 
     Returns the visible screen once the same situation has lasted ATTENTION_DELAY seconds, so redraws and
@@ -611,8 +611,10 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     elif permissions is not None:
         tab_row = max(index for index, line in enumerate(lines) if permissions_dialog.TAB_ROW.match(line))
         reason, tail = 'permissions', lines[tab_row:]
+    elif tabs is not None and dialog is not None:
+        reason, tail = 'dialog', dialog['text'].splitlines()
     elif tabs is not None:
-        # Claude's Settings dialog (/usage, /status ...) only shows facts. Show it from its tab row, without the chat above it.
+        # Claude's Settings dialog (/usage, /status ...) that claude_dialog could not read: show its text from the tab row.
         reason, tail = 'panel', lines[tabs:]
     elif (len(numbered) >= 2 and cursor_in_menu(tail, marker)
           and not (entry['agent'] == 'claude' and claude_input_box(lines, cursor_row))):
@@ -620,6 +622,9 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     elif ((entry['agent'] == 'claude' and (picker := cursor_picker(screen)))
           or (entry['agent'] == 'codex' and (picker := choice_state.cursor_picker(styled_screen or screen, 'codex')))):
         reason, tail = 'picker', picker['text'].splitlines()
+    elif dialog is not None:
+        # A slash-command dialog (/mcp, /resume, /config ...), read as data: see claude_dialog.
+        reason, tail = 'dialog', dialog['text'].splitlines()
     elif INPUT_HINT.search(joined_lines(lines[-8:])):
         reason = 'prompt'
     elif marker and not working and lines and not any(line.startswith(marker) for line in lines[-15:]):
@@ -633,12 +638,15 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
         return None
     # The cursor moves while the user answers; it must not restart the delay.
     text = '\n'.join(tail).strip('\n')
-    fingerprint = hashlib.sha256(('permissions' if reason == 'permissions' else
+    fingerprint = hashlib.sha256(('permissions' if reason == 'permissions' else 'dialog\0' + dialog['title'] if reason == 'dialog' else
                                   reason + re.sub(r'[>❯›]|\s+', '', text)).encode()).hexdigest()
-    if not seen or seen['reason'] != reason or (not seen['shown'] and seen['fingerprint'] != fingerprint):
-        _attention_seen[key] = {'fingerprint': fingerprint, 'first': now, 'last': now, 'reason': reason, 'shown': False, 'id': fingerprint}
-        return None
-    if not seen['shown'] and now - seen['first'] < ATTENTION_DELAY:
+    # Another dialog is another card; a panel or menu that redraws keeps its record.
+    if (not seen or seen['reason'] != reason or seen['fingerprint'] != fingerprint and (not seen['shown'] or reason == 'dialog')):
+        seen = _attention_seen[key] = {'fingerprint': fingerprint, 'first': now, 'last': now, 'reason': reason, 'shown': False, 'id': fingerprint}
+        if reason != 'dialog':
+            return None
+    # A dialog shows at once: only an open dialog has its rule row and its indented rows, so a redraw cannot look like one.
+    if reason != 'dialog' and not seen['shown'] and now - seen['first'] < ATTENTION_DELAY:
         return None
     # Once shown, a panel that redraws (a /usage panel fills in, a clock ticks) stays up and keeps its id.
     # A menu takes the new id, because a new question needs a fresh card.
@@ -650,6 +658,9 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
         found.update(picker)
     elif reason == 'panel':
         found['requiresResponse'] = False
+    elif reason == 'dialog':
+        found['requiresResponse'] = False
+        found['dialog'] = dialog
     elif reason == 'permissions':
         found['requiresResponse'] = False
         found['permissions'] = permissions
@@ -806,7 +817,11 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
         info = prompt_actions.ledger.observe(entry, styled_screen, prompt_actions.metadata(entry, run))
     else:
         prompt_actions.ledger.forget(entry['id'])
-    needed = info or attention(entry, screen, working, login_screen=login_screen, styled_screen=styled_screen)
+    dialog = None
+    if entry['agent'] == 'claude' and not info:
+        import claude_dialog
+        dialog = claude_dialog.read(entry, styled_screen, run)
+    needed = info or attention(entry, screen, working, login_screen=login_screen, styled_screen=styled_screen, dialog=dialog)
     if needed and needed.get('requiresResponse') is False:  # navigation does not ask for an answer
         return {'state': 'Working' if working else 'Idle', 'approval': None, 'attention': needed}
     if needed:

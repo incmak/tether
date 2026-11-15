@@ -337,11 +337,11 @@ class AutoResumeTests(unittest.TestCase):
                                      '@chat_name_at': '123', '@project': 'project-1', '@project_rev': 'rev',
                                      '@worktree': 'tree', '@group': 'g1a2b3c4d',
                                      '@groups': GROUPS, '@chat_name_by': 'user'})
-        self.tmux.panes['%3']['@chat_name_by'] = 'user'  # a name the person cleared: no name, but the mark stays
+        self.tmux.panes['%3']['@chat_name_by'] = 'cleared'  # a name the person cleared: no name, but the mark stays
         self.tick()
         saved_options = self.saved()['tabs'][second['thread']]['options']
         self.assertEqual(saved_options['@chat_name_by'], 'user')
-        self.assertEqual(self.saved()['tabs'][first['thread']]['options'], {'@chat_name_by': 'user'})
+        self.assertEqual(self.saved()['tabs'][first['thread']]['options'], {'@chat_name_by': 'cleared'})
         self.restart()
         commands = [call[-1] for call in self.sends()[::2]]
         self.assertEqual(commands, ['claude --resume ' + first['thread'],
@@ -359,7 +359,7 @@ class AutoResumeTests(unittest.TestCase):
         self.assertIn([paths.TMUX, 'set-option', '-t', tab['session_id'], '@project', 'project-1'], self.tmux.calls)
         self.assertEqual(saved_options['@group'], 'g1a2b3c4d')
         cleared = self.saved()['tabs'][first['thread']]
-        self.assertIn([paths.TMUX, 'set-option', '-p', '-t', cleared['pane'], '@chat_name_by', 'user'], self.tmux.calls)
+        self.assertIn([paths.TMUX, 'set-option', '-p', '-t', cleared['pane'], '@chat_name_by', 'cleared'], self.tmux.calls)
         self.assertEqual(self.tmux.panes[tab['pane']]['@group'], 'g1a2b3c4d')
         self.assertIn([paths.TMUX, 'set-option', '-t', tab['session_id'], '@groups', GROUPS], self.tmux.calls)
         self.assertEqual(tab['profile'], 'foundry')

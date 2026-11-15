@@ -3,14 +3,20 @@
 Selkies streams the real Chromium window to the panel as H.264 (sharp text, 30 fps on this box). Tether keeps its
 own tab bar and address bar and drives Chromium over the DevTools pipe, which the container serves on a Unix socket
 (selkies/cdp_pipe.py). The Selkies web client reaches the panel only through Tether's sign-in: the container
-publishes no port, and Tether relays /browser/live/ to a second Unix socket (selkies/sock_relay.py).
+publishes no port, and Tether relays /browser/live/ to Selkies' own Unix socket (web.sock).
 
 Security (B79):
 - Chromium runs with its sandbox on. The seccomp file is Docker's default profile plus clone/unshare/setns, which the
   namespace sandbox needs; the container keeps Docker's default capabilities (no SYS_ADMIN).
 - HARDEN_DESKTOP turns off sudo, terminals, xdg-open, file transfer and Selkies commands in the container.
-- The container's nginx listens on the Docker bridge. A random password per start (basic auth) keeps other local
-  users and containers out; only Tether's relay sends it.
+- Selkies serves its web client and its data WebSocket on web.sock only (B89). The image's defaults leave its
+  login off, allow any Origin, and listen on TCP 8082 behind nginx, so any process or page that reached the
+  container's loopback could watch the screen and type. Here Selkies opens no TCP port, so other containers, local
+  users and pages in the container's Chromium cannot reach it (web pages cannot open Unix sockets). Selkies also
+  checks a random password per start (basic auth; only Tether sends it) and refuses a WebSocket from another
+  Origin. nginx gets a stub config (selkies/nginx-default.conf) that listens on a Unix socket in /run and answers
+  404, so nothing in the container listens on the Docker bridge. That file must contain no '#': the image's
+  init-nginx deletes every '#' in it when PASSWORD is set.
 - The container sends the live view's page, and a process in it can replace the relay. So Tether serves the live
   view on its own port (LIVE_PORT), never on its main origin: a hostile page there cannot read Tether's pages or call
   its APIs (they check Origin). Tether strips cookies and identity headers before it forwards a request, drops
@@ -100,8 +106,13 @@ class Container:
                 '-e', 'SELKIES_AUDIO_ENABLED=false', '-e', 'SELKIES_MICROPHONE_ENABLED=false',
                 '-e', 'SELKIES_WEBCAM_ENABLED=false', '-e', 'NO_GAMEPAD=true', '-e', 'SELKIES_SECOND_SCREEN=false',
                 '-e', 'SELKIES_ENABLE_BINARY_CLIPBOARD=false',
+                # B89: Selkies on the socket only, with its login on and its Origin rule back to same-origin. The
+                # image sets SELKIES_ENABLE_BASIC_AUTH=false and SELKIES_ALLOWED_ORIGINS=*; an empty value means
+                # the Selkies default (same-origin only). It serves the dashboard that init-nginx prepares.
+                '-e', 'SELKIES_UNIX_SOCKET=/sock/web.sock', '-e', 'SELKIES_ENABLE_BASIC_AUTH=true',
+                '-e', 'SELKIES_ALLOWED_ORIGINS=', '-e', 'SELKIES_WEB_ROOT=/usr/share/selkies/web',
+                '-v', '%s:/defaults/default.conf:ro' % (self.files / 'nginx-default.conf'),
                 '-v', '%s:/tether:ro' % self.files,
-                '-v', '%s:/custom-services.d:ro' % (self.files / 'services'),
                 '-v', '%s:/usr/bin/wrapped-chromium:ro' % (self.files / 'wrapped-chromium'),
                 '-v', '%s:/sock' % self.sock_dir]
         if self.persistent:

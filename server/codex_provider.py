@@ -8,6 +8,8 @@ The switch also sets the top-level `model_provider` line in ~/.codex/config.toml
 Tether panes, Claude Code lanes and scripts. Codex 0.166 refuses a default `profile` key, so this one line is the only lever.
 Tether changes no other line, keeps a one-time backup (config.toml.bak-tether), and keeps the file mode.
 """
+import contextlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -27,6 +29,23 @@ CHOICES = ('plan', 'foundry')
 NOT_SET_UP = 'Foundry is not set up on the server yet.'
 PROFILE_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 _lock = threading.Lock()
+LOCK_FILE = '.config.toml.tether-lock'
+_config_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def config_lock(directory):
+    """The one lock for every Tether write to config.toml in `directory` (a path or an open directory fd):
+    this provider switch and codex_trust.write_trust. A thread lock in this process, an flock across processes."""
+    with _config_lock:
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+        fd = os.open(LOCK_FILE, flags, 0o600, dir_fd=directory) if isinstance(directory, int) \
+            else os.open(Path(directory) / LOCK_FILE, flags, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
 
 def chosen():
@@ -95,25 +114,29 @@ def set_default(provider, home=None):
     config = home / 'config.toml'
     if not name or not config.exists():
         raise ValueError('Could not set the default Codex provider: ~/.codex/config.toml or the Foundry profile is missing.')
-    text = config.read_text()
-    table = re.search(r'^\s*\[', text, re.M)
-    head, tail = (text[:table.start()], text[table.start():]) if table else (text, '')
-    line = f'model_provider = "{name}"'
-    head = TOP_PROVIDER.sub(line, head, count=1) if TOP_PROVIDER.search(head) else f'{line}\n{head}'
-    updated = head + tail
-    if updated == text:
-        return
-    try:
-        tomllib.loads(updated)
-    except ValueError as failure:
-        raise ValueError('Could not set the default Codex provider: config.toml would not parse.') from failure
-    backup = home / 'config.toml.bak-tether'
-    if not backup.exists():
-        shutil.copy2(config, backup)
-    temporary = home / 'config.toml.tether-tmp'
-    temporary.write_text(updated)
-    os.chmod(temporary, config.stat().st_mode & 0o777)
-    os.replace(temporary, config)
+    with config_lock(home):
+        text = config.read_text()
+        table = re.search(r'^\s*\[', text, re.M)
+        head, tail = (text[:table.start()], text[table.start():]) if table else (text, '')
+        line = f'model_provider = "{name}"'
+        head = TOP_PROVIDER.sub(line, head, count=1) if TOP_PROVIDER.search(head) else f'{line}\n{head}'
+        updated = head + tail
+        if updated == text:
+            return
+        try:
+            tomllib.loads(updated)
+        except ValueError as failure:
+            raise ValueError('Could not set the default Codex provider: config.toml would not parse.') from failure
+        backup = home / 'config.toml.bak-tether'
+        if not backup.exists():
+            shutil.copy2(config, backup)
+        temporary = home / 'config.toml.tether-tmp'
+        temporary.write_text(updated)
+        os.chmod(temporary, config.stat().st_mode & 0o777)
+        if config.read_text() != text:  # Codex has no lock: refuse when it wrote in the meantime
+            temporary.unlink()
+            raise ValueError('Codex config.toml changed while Tether wrote it. Try again.')
+        os.replace(temporary, config)
 
 
 def status(home=None):

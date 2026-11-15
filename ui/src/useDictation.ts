@@ -65,7 +65,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     return () => { disposed.current = true; cleanupRecording.current?.() }
   }, [])
   async function toggle() {
-    if (rescuing.current) return  // the backup is closing; the converting state follows at once
+    // The backup is closing, or the server converts the last dictation: a new one would race its text.
+    if (rescuing.current || converting.current) return
     if (stopSpeech.current) { stopSpeech.current(); return }
     if (recorder.current) { if (recorder.current.state !== 'inactive') recorder.current.stop(); return }
     stopSpeaking()
@@ -81,6 +82,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
   }
   function startSpeech(Recognition: SpeechConstructor) {
     const android = /Android/i.test(navigator.userAgent)
+    const lang = navigator.language || 'en-US'
     const base = textNow.current.trimEnd()
     let finish: (text: string) => void = () => undefined
     const final = new Promise<string>(resolve => { finish = resolve })
@@ -148,10 +150,46 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
         void rescue(kept, notice)
         return
       }
+      // Words came: show them now, then let the server convert the same audio. Parakeet takes the project word hints
+      // (tmux, Tether, Codex); browser speech cannot, so it writes "t-marks" for tmux. English only: Parakeet is English.
+      if (spoken && kept && /^en\b/i.test(lang)) {
+        keepBackup = true
+        cleanup(); setText(next); setListening(false)
+        if (notice !== undefined) setError(notice)
+        void refine(kept, spoken)
+        return
+      }
       cleanup(); setText(next); finish(next); setListening(false)
       if (notice !== undefined) setError(notice)
       onFinished?.()
       if (handsFree && spoken && next !== base) onHandsFreeDone?.()
+    }
+    const refine = async (found: Backup, spoken: string) => {
+      const browser = join(base, spoken)
+      // cancel runs on unmount: before the audio is ready it closes the backup, after it stops the server request.
+      let cancelled = false, recorded: { audio: Blob; heard: boolean } | null = null
+      const cancel = () => {
+        cancelled = true; rescuing.current = false; cleanupRecording.current = null
+        if (recorded) converting.current?.abort(); else closeBackup(found)
+        finish(browser)
+      }
+      rescuing.current = true; cleanupRecording.current = cancel
+      const seconds = (Date.now() - found.started) / 1000
+      recorded = await finishBackup(found)
+      if (cancelled) return
+      rescuing.current = false  // toggle() waits while converting.current is set
+      const begun = Date.now()
+      // No level gate: browser speech heard words, so the audio has them even when the meter stayed under its threshold.
+      const server = recorded.audio.size ? await serverText(recorded.audio, refineLimit(seconds)) : null
+      if (cancelled) return
+      if (cleanupRecording.current === cancel) cleanupRecording.current = null
+      const used = server?.text ? 'server' : server?.late ? 'late' : 'browser'
+      const next = server?.text ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
+      setText(next); finish(next)
+      reportVoice({ kind: 'dictation', event: 'refine', trail: trail.join(' '), ms: Date.now() - begun,
+        detail: `used=${used} browser=${spoken.split(/\s+/).length} server=${server?.text ? server.text.split(/\s+/).length : 0} audio=${seconds.toFixed(1)}s` })
+      onFinished?.()
+      if (handsFree && next !== base) onHandsFreeDone?.()
     }
     const rescue = async (found: Backup, notice: string | undefined) => {
       let cancelled = false
@@ -201,7 +239,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     }
     const attach = () => {
       recognition.continuous = !android; recognition.interimResults = true
-      recognition.lang = navigator.language || 'en-US'; recognition.maxAlternatives = 1
+      recognition.lang = lang; recognition.maxAlternatives = 1
       recognition.onaudiostart = () => trace('audio')
       recognition.onsoundstart = () => trace('sound')
       recognition.onspeechstart = () => trace('speech')
@@ -347,6 +385,21 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       return { text: textNow.current, ok: false }
     } finally { window.clearTimeout(limit); converting.current = null; setTranscribing(false); onFinished?.() }
   }
+  // The server text of audio, or '' when it is empty, fails or takes longer than ms (late: true). The box keeps the
+  // browser text then. The mic button cancels it, like any conversion.
+  async function serverText(audio: Blob, ms: number): Promise<{ text: string; late: boolean }> {
+    setTranscribing(true)
+    const cancel = new AbortController()
+    converting.current = cancel
+    let late = false
+    const limit = window.setTimeout(() => { late = true; cancel.abort() }, ms)
+    try {
+      const response = await fetch('/mobile/api/transcribe', { method: 'POST', body: audio, credentials: 'same-origin', signal: cancel.signal, headers: { 'X-Codex-Mobile': '1', 'X-Recording': recordingId(), 'Content-Type': audio.type } })
+      if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return { text: '', late }
+      const data = await response.json() as { text?: string }
+      return { text: (data.text ?? '').trim(), late }
+    } catch { return { text: '', late } } finally { window.clearTimeout(limit); converting.current = null; setTranscribing(false) }
+  }
   const canRecord = !!speechConstructor() || (typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia)
   return {
     listening, transcribing, seconds, error, setError, canRecord,
@@ -365,6 +418,12 @@ function speechConstructor() {
 
 function recorderType() {
   return ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find(kind => MediaRecorder.isTypeSupported(kind))
+}
+
+// How long the box waits for the server text before it keeps the browser text. Parakeet converts 3 s of speech in
+// about 1.5 s on a busy server (2026-11-15); longer speech takes longer. A send waits for this too, so it stays short.
+export function refineLimit(seconds: number) {
+  return Math.min(8000, 3000 + seconds * 150)
 }
 
 function recordingId() {

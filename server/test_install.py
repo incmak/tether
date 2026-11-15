@@ -660,6 +660,9 @@ class InstallTests(unittest.TestCase):
         self.assertIn('whisper-venv/bin/python', server)
         self.assertIn('transcribe_worker.py', plan['units']['tether-voice.service'])
         self.assertTrue(any('faster-whisper' in cmd and 'pywebpush' in cmd for cmd in plan['commands']))
+        self.assertTrue(any('onnx-asr[cpu,hub]' in cmd for cmd in plan['commands']))
+        self.assertIn('CPUWeight=1000', plan['units']['tether-voice.service'])
+        self.assertNotIn('CPUWeight', server)
 
     def test_images_installs_pillow_in_the_server_venv(self):
         plan = self.plan('--images')

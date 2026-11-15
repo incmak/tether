@@ -74,6 +74,7 @@ import reply_preview
 import bang_run
 import uploads
 import media_files
+import previews
 import repo_panel
 import files
 import office_addon
@@ -88,6 +89,7 @@ import host_stats
 import tmux_merge
 import tmux_names
 import auto_resume
+import auto_stacks
 import window_size
 import projects_api
 import work_api
@@ -97,6 +99,7 @@ import groups
 import helper_close
 import groups_api
 import codex_level
+import codex_trust
 import autonomy
 import approval
 import custom_layouts
@@ -490,7 +493,7 @@ def apply_brief_name(entry, name):
         if result.returncode:
             return False
         current, placeholder, by = (result.stdout.rstrip('\n').split('\t') + ['', ''])[:3]
-        if by == 'user' or (current and current != placeholder):  # named or cleared by the person
+        if by in ('user', 'cleared') or (current and current != placeholder):  # named or cleared by the person
             return False
         result = subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
                                  'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)), ';',
@@ -1726,6 +1729,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith('/chat/'):
             self.serve_chat_ui(path)
             return
+        if path.startswith(previews.PREFIX):  # the link's token is the key: a sandboxed page sends no cookie
+            previews.serve(self)
+            return
         if path.startswith('/terminal/live/'):
             if not self.deny():
                 self.proxy_terminal()
@@ -2130,8 +2136,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
+        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2159,6 +2165,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if codex_level.handles(self.path):
             codex_level.post(self)
+            return
+        if codex_trust.handles(self.path):
+            codex_trust.post(self, choose=choose, agent_folder=agent_folder, chat_folder=chat_folder,
+                             session_folder=prefs_sync.session_folder)
             return
         if autonomy.handles(self.path):
             autonomy.post(self)
@@ -2231,6 +2241,13 @@ class Handler(BaseHTTPRequestHandler):
                 agent_tabs.serve(self, body, sessions=sessions, folder=agent_folder, snapshot=snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
                                  status=shared_status, send=review_send, timeline=timeline)
+                return
+            if self.path == '/mobile/api/preview':
+                try:
+                    self.respond(200, previews.PREVIEWS.issue(body.get('path') if isinstance(body.get('path'), str) else '',
+                                                              tab_folder(choose(body.get('session')))))
+                except ValueError as exc:
+                    self.respond(404, {'error': str(exc)})
                 return
             if self.path == '/mobile/api/file-check':
                 names = body.get('paths')
@@ -2373,10 +2390,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Use up to 40 characters for the pane name.')
                 name = name.strip()
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
-                command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
-                           if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at'])
-                # A name the user gave, or cleared, is never replaced by the AI name (apply_brief_name).
-                command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto', ';', 'set-option', '-p', '-t', pane, '@chat_name_by', 'user']
+                # @chat_name_by: 'user' marks the user's own name: Tether never renames that tab, and it names the stack
+                # (auto_stacks). 'cleared' marks a name the user cleared: no stack name, but the AI name (tab_brief) stays off.
+                command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)),
+                            ';', 'set-option', '-p', '-t', pane, auto_stacks.NAME_BY, 'user']
+                           if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at',
+                                         ';', 'set-option', '-p', '-t', pane, auto_stacks.NAME_BY, 'cleared'])
+                command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto']  # the placeholder ends
                 with SEND_LOCK:
                     result = subprocess.run([paths.TMUX, *command], capture_output=True, text=True, timeout=5)
                     if result.returncode:
@@ -2721,6 +2741,20 @@ class Handler(BaseHTTPRequestHandler):
                                            check=True, capture_output=True, timeout=5)
                 self.respond(200, {'accepted': True})
                 return
+            if self.path == '/mobile/api/dialog':
+                # One action of a Claude dialog card. claude_dialog reads the screen again and sends only keys the dialog offers.
+                if config['agent'] != 'claude':
+                    raise ValueError('Dialogs are for Claude sessions.')
+                import claude_dialog
+                try:
+                    with SEND_LOCK:
+                        verify(config)
+                        claude_dialog.act(config, body)
+                except claude_dialog.Changed as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
+                self.respond(200, {'accepted': True})
+                return
             if self.path == '/mobile/api/menu':
                 choice, label, answer = body.get('choice'), body.get('label'), body.get('answer')
                 if (not isinstance(choice, int) or isinstance(choice, bool) or not (label is None or isinstance(label, str))
@@ -2979,6 +3013,7 @@ if __name__ == '__main__':
         'display_dir': lambda entry: home_path(tab_folder(entry)),
         'on_change': forget_sessions,
     }, daemon=True).start()
+    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()

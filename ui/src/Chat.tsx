@@ -12,7 +12,7 @@ import { ArrowDown, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, C
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
 import { ApiError, canFork, creditsLabel, errorText, goalStatusLabel } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, Footer, Pane, PromptAction } from './api'
+import type { Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
 import { usePolling } from './hooks'
 import { useBackStep } from './backNav'
 import type { Anchor } from './hooks'
@@ -38,6 +38,7 @@ import type { OfficeFile } from './OfficeViewer'
 import type { ToolSummary } from './api'
 import { StatusStack } from './StatusStack'
 import { PaneTabs, movePill } from './PaneTabs'
+import { HEADER, PARENTS, SKIP, STRIPS, boxOf, createStripWheel, scrollsItself } from './stripScroll'
 import { WorktreeMark } from './Worktree'
 import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
@@ -57,11 +58,16 @@ import { WORKSPACE_QUERY } from './workspace'
 import { useHost } from './host'
 import { ReviewLinks } from './ReviewLinks'
 import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
+import { PreviewDrawer } from './PreviewDrawer'
+import { PreviewOpener, artifactsOf } from './preview'
+import type { PreviewTarget } from './preview'
 import { codexRunItems, useCodexRuns } from './CodexRuns'
+import { CodexTrustCard } from './CodexTrust'
+import { useCodexTrust } from './codexTrustState'
 import { HOLD_MS } from './gesture'
 
 
-interface ChatProps { liveReplyPreview: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
+interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
 /** Desktop workspace controls for a Chat shown in a slot next to other slots. */
 export interface SlotControls { index: number; zoomed: boolean; onZoom: () => void; onClose?: () => void; onPick?: () => void; onDragStart?: (event: React.DragEvent) => void; onSwapTo?: (to: number) => void }
 export interface SidePinControls { pinned: boolean; index: number; total: number; note: string; onToggle(): void; onNote(text: string): void; onStep(dir: 1 | -1): void }
@@ -218,7 +224,7 @@ function useSteadyPreview(text: string | undefined) {
   return text && preview.ready ? text : undefined
 }
 
-export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd }: ChatProps) {
+export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd }: ChatProps) {
   const agentBrowser = useAgentBrowser(api)
   const words = useWords()
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
@@ -441,6 +447,37 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     moveChat(Math.sign(dx) * width, time)
     leaving.current = setTimeout(() => { leaving.current = null; onOpenPane(target) }, time)
   }
+  // Desktop: a two-finger swipe over the stack row or the tab strip, or BAND px above them, scrolls that strip; over the
+  // rest of the header it does nothing (stripScroll.ts). The listeners sit on the header parts only: a non-passive wheel
+  // listener on the chat would make Chromium wait for the main thread before each chat scroll starts, also while a
+  // reply streams. So the band below the tab strip, which lies over the chat, is left out.
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!headerSwipe || !panel) return
+    const desk = matchMedia(WORKSPACE_QUERY)
+    const decide = createStripWheel()
+    const wheel = (event: WheelEvent) => {
+      const target = event.target as Element | null
+      if (!desk.matches || target?.closest(SKIP)) return
+      const strips = [...panel.querySelectorAll<HTMLElement>(STRIPS)].filter(strip => strip.offsetHeight > 0)
+      const plan = decide(event, dx => ({ strips: strips.map(boxOf), native: scrollsItself(target, panel, dx) }))
+      if (plan.do === 'pass' || !event.cancelable) return
+      event.preventDefault()
+      if (plan.do === 'scroll') strips[plan.strip]?.scrollBy({ left: plan.dx, behavior: 'instant' })
+    }
+    let zone: Element[] = []
+    const attach = () => {
+      for (const part of zone) part.removeEventListener('wheel', wheel as EventListener)
+      zone = [...panel.querySelectorAll(HEADER)]
+      for (const part of zone) part.addEventListener('wheel', wheel as EventListener, { passive: false })
+      for (const parent of panel.querySelectorAll(PARENTS)) observer.observe(parent, { childList: true })
+    }
+    const observer = new MutationObserver(attach)  // the stack row and the strip come and go with the tabs
+    observer.observe(panel, { childList: true })
+    attach()
+    panel.dataset.stripScroll = ''
+    return () => { observer.disconnect(); for (const part of zone) part.removeEventListener('wheel', wheel as EventListener); delete panel.dataset.stripScroll }
+  }, [headerSwipe])
   const swipeCancel = () => {
     if (swipe.current?.mode === 'drag') moveChat(0, reduceMotion() ? 0 : 220)
     swipe.current = null; pull.current = null; setPulled(0)
@@ -623,13 +660,17 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   useEffect(() => {
     if (!data) return
     // Claude writes no chat record for some slash commands (/usage opens a panel). Once the pane is not working, it ran them.
-    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && data.state !== 'Working' && Date.now() - item.at > 3000
+    // Some run at once while Claude works and then show as a card: /btw (a side question), /mcp, /config, /permissions.
+    // /btw never waits in Claude's queue, so its bubble also leaves once its saved answer is in the chat, or after 10 s.
+    const opened = ['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')
+    const asked = (item: Pending) => /^\/btw\s/.test(item.text.trim()) && (Date.now() - item.at > 10000 || data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === squash(item.text.trim().slice(4))))
+    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && Date.now() - item.at > 3000 && (data.state !== 'Working' || opened || asked(item))
     // /clear (and a new chat) starts a new transcript: the count taken in the old one does not apply there.
     const seen = (item: Pending) => item.thread !== undefined && item.thread !== (data.thread ?? null) ? 0 : item.seen
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Reconcile persisted queued sends with the received transcript before scheduling the slash-command recheck.
     setPending(list => { const left = list.filter(item => matches(data.messages, item.key, imagesOnly(item.text)) <= seen(item) && Date.now() - item.at < 1800000 && !ran(item)); return left.length === list.length ? list : left })
     // An idle pane sends no new data, so check a slash command again once its 3 s have passed.
-    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + 3100 - Date.now())
+    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + (/^\/btw\s/.test(item.text.trim()) && Date.now() - item.at > 3100 ? 10100 : 3100) - Date.now())
     if (!slash.length) return
     const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(100, Math.min(...slash)))
     return () => window.clearTimeout(timer)
@@ -808,11 +849,13 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const [opened, setOpened] = useState<Media | null>(null)
   const [textFile, setTextFile] = useState<TextFile | null>(null)
   const [officeFile, setOfficeFile] = useState<OfficeFile | null>(null)
+  const [previewPage, setPreviewPage] = useState<PreviewTarget | null>(null)
   const tabOpener = useMemo(() => ({ panes: allPanes, current: pane, open: onOpenPane }), [allPanes, pane, onOpenPane])
   const openMedia = useCallback(async (path: string, kind: Kind, line?: number) => {
     const url = `/mobile/api/file?session=${encodeURIComponent(activePane.id)}&path=${encodeURIComponent(path)}`
     const name = path.split('/').pop() || path
     if (kind === 'text') { setTextFile({ path, url, line }); return }
+    if (kind === 'html') { setPreviewPage({ path, title: name }); return }
     try {
       const check = await fetch(url, { headers: { Range: 'bytes=0-0' } })
       if (!check.ok) { const body = await check.json().catch(() => null) as { error?: string } | null; setOpened({ name, url, error: body?.error ?? 'Tether cannot open this file.' }); return }
@@ -822,7 +865,13 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     else if (kind === 'file') saveFile(url, name)
     else if (kind === 'pdf') window.open(url, '_blank', 'noopener')
     else setOpened({ name: path, url, kind })
-  }, [activePane.id, host, setTextFile, setOfficeFile, setOpened])
+  }, [activePane.id, host, setTextFile, setOfficeFile, setOpened, setPreviewPage])
+  // Pages agents made: a Claude artifact opens its local copy in the drawer.
+  const artifacts = useMemo(() => artifactsOf(messages), [messages])
+  const previewActions = useMemo(() => ({
+    open: setPreviewPage,
+    artifactFor: (url: string) => artifacts.get(url),
+  }), [artifacts, setPreviewPage])
   // Desktop: "Show in Files" opens the explorer at the file's folder with the file selected. A relative path is in the pane's folder.
   const showInFiles = (path: string | null, close: () => void) => {
     if (!path || typeof matchMedia !== 'function' || !matchMedia(WORKSPACE_QUERY).matches) return undefined
@@ -884,6 +933,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   }
   const background = (footer.agents ?? []).filter(agent => !agent.main)
   const codexRuns = useCodexRuns(api, activePane.id, activePane.agent !== 'shell')
+  const codexTrust = useCodexTrust(api, activePane.agent === 'codex' ? { mode: 'running', session: activePane.id } : null, activePane.thread ?? '')
   // A card key that Claude did not take leaves its error under the message box. Clear it when the card changes or closes.
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
@@ -899,6 +949,14 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   }
   // A key from a read-only panel's footer: the server resolves the action id, checks the screen again, then sends one key.
   // A refusal (the panel changed) returns its sentence to show beside the panel; the next poll shows the new panel.
+  // One action of a Claude dialog card. The server reads the dialog again and sends only keys that the dialog offers.
+  async function dialogAction(attention: Attention, action: DialogAction) {
+    if (acting) return null
+    setActing(true)
+    try { await api('dialog', { session: pane.id, thread: data?.thread ?? null, title: attention.dialog?.title, mode: attention.dialog?.mode, ...action }); return null }
+    catch (failure) { return errorText(failure) }
+    finally { await refresh(); setActing(false) }
+  }
   async function promptAction(attention: Attention, action: PromptAction) {
     if (acting) return null
     setActing(true)
@@ -981,7 +1039,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
   const [hiddenNotices, setHiddenNotices] = useState<string[]>([])
   const visibleNotices = (footer.notices ?? []).filter(note => !hiddenNotices.includes(note))
   const hideNotice = (note: string) => setHiddenNotices(current => [...current.filter(item => (footer.notices ?? []).includes(item)), note])
-  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
+  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
     <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
       {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
@@ -1041,15 +1099,16 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     {state === 'Stopped' && <div className="working-line" role="status"><span className="state-dot" aria-hidden="true" /><span><strong>Stopped by a restart</strong><small>Send a message to continue.</small></span></div>}
     {state === 'Working' && <div className="working-line" role="status"><WorkGlyph /><span><span className="working-head"><strong className="work-verb">{footer.spinner?.verb ?? 'Working…'}<span className="work-glint" aria-hidden="true"><span>{footer.spinner?.verb ?? 'Working…'}</span></span></strong>{footer.spinner?.detail ? <small>{footer.spinner.detail}</small> : workingSince && <Elapsed since={workingSince.at} />}</span>{footer.running && <span className="running-tool"><Terminal size={13} /><span><span className="running-title">{footer.running.title}{footer.running.elapsed && <small> · {footer.running.elapsed}</small>}</span>{footer.running.command && footer.running.command !== footer.running.title && <code>{footer.running.command}</code>}</span></span>}{footer.denied && <button type="button" className="running-tool denied-tool" disabled={!writable || acting} title="Open /permissions, tab Recently blocked" onClick={() => void openPermissions('Recently blocked')}><ShieldAlert size={13} /><span>{footer.denied.text}{footer.denied.reason && <small>{footer.denied.reason}</small>}</span><span className="denied-review">Review</span></button>}</span></div>}
     <StatusStack priorityKey={data?.approval ? `approval:${(data.approval as Approval).id}` : data?.attention ? `attention:${data.attention.id}` : data?.plan ? `plan:${data.plan.id}` : footer.heads_up ? 'heads' : browserAsk ? `browser-ask:${browserAsk.id}` : ''} chips={(footer.goal || !!footer.tasks?.length || (footer.suggestion && !draft.trim() && state !== 'Working')) ? <>{(footer.goal || !!footer.tasks?.length) ? <div className="live-chips">{footer.goal && <button type="button" className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('goal')}><Target size={14} />{footer.goal_status ? `Goal · ${goalStatusLabel(footer.goal_status)}` : `Goal active${footer.goal !== 'active' ? ` · ${footer.goal}` : ''}`}<ChevronRight size={13} /></button>}{footer.tasks?.map(task => <button type="button" key={task} className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('tasks')}><Layers size={14} /><span className="live-chip-text">{taskLabel(task, footer.task_details)}</span><ChevronRight size={13} /></button>)}</div> : null}{(footer.suggestion && !draft.trim() && state !== 'Working' ? <button type="button" className="prompt-suggestion" title="Use this suggested prompt" onClick={() => setDraft(footer.suggestion ?? '')}><CornerDownRight size={15} /><span>{footer.suggestion}</span></button> : null)}</> : null} items={[
-      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
+      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
       { id: 'queue', label: `${queued.length} queued${queued.some(item => item.failed) ? ' · Not sent' : ''}`, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
-      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
+      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
       ...codexRunItems(codexRuns),
+      { id: 'codex-trust', label: codexTrust.status?.state === 'untrusted' ? 'Codex read-only' : 'Folder trusted', active: codexTrust.status?.state === 'untrusted' || codexTrust.status?.state === 'restart' || codexTrust.justTrusted, content: <CodexTrustCard trust={codexTrust} running /> },
       ...agentBrowserItems(api, agentBrowser, activePane.id),
       { id: 'update', label: 'Update ready', active: !!footer.update, content: <>{footer.update && <div className="cli-update" role="status"><RefreshCw size={16} /><span><strong>Claude Code update ready</strong><small>{footer.update.replace(/^[^\w/]+\s*/, '')}</small></span><button type="button" className="secondary" disabled={!writable || state === 'Working'} onClick={() => void send('/restart')}>Restart</button></div>}</> },
     ]} />
@@ -1104,5 +1163,6 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />
     <TextViewer file={textFile} close={() => setTextFile(null)} onShow={showInFiles(textFile?.path ?? null, () => setTextFile(null))} />
     <OfficeViewer file={officeFile} close={() => setOfficeFile(null)} onShow={showInFiles(officeFile?.path ?? null, () => setOfficeFile(null))} />
-  </section></FilePane.Provider></TabOpener.Provider></MediaOpener.Provider></AssistantRuntimeProvider>
+    <PreviewDrawer api={api} session={activePane.id} target={previewPage} close={() => setPreviewPage(null)} onSource={(path, url) => setTextFile({ path, url, readOnly: true })} />
+  </section></PreviewOpener.Provider></FilePane.Provider></TabOpener.Provider></MediaOpener.Provider></AssistantRuntimeProvider>
 }

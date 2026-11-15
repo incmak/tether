@@ -14,21 +14,3 @@ export function toggleVoice() {
   button?.click()
   return !!button
 }
-
-/**
- * Fuzzy match for the command menu. Each word of the query must be in the text, as a whole string or letter by letter.
- * A higher score is a better match; null is no match.
- */
-export function fuzzyScore(text: string, query: string): number | null {
-  const haystack = text.toLowerCase()
-  let total = 0
-  for (const word of query.toLowerCase().split(/\s+/).filter(Boolean)) {
-    const at = haystack.indexOf(word)
-    if (at >= 0) { total += at === 0 || /[\s·:._/-]/.test(haystack[at - 1]) ? 3 : 2; continue }
-    let next = 0
-    for (const char of haystack) if (char === word[next]) next++
-    if (next < word.length) return null
-    total += 1
-  }
-  return total
-}

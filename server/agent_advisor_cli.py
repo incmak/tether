@@ -6,9 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import time
 
 import advisor
+import advisor_log
 import codex_level
 import paths
 
@@ -40,8 +40,8 @@ def arguments(argv):
     ask = actions.add_parser('ask')
     ask.add_argument('--critical', action='store_true')
     ask.add_argument('--timeout', type=int, default=600)
-    ask.add_argument('--stack', metavar='NAME', help="your goal in 1 to 3 words: a new advisor tab joins that stack "
-                     "(made if missing) with this tab; without it, it joins this tab's stack or one named after this tab")
+    ask.add_argument('--stack', metavar='NAME', help="your goal in 1 to 3 words. A new advisor tab joins the stack of this main session by itself; "
+                     "NAME only names that stack the first time")
     ask.add_argument('question')
     args = parser.parse_args(argv)
     if not 60 <= args.timeout <= 600:
@@ -185,18 +185,9 @@ def ask(settings, args, key, replies):
 
 
 def log(pid, question, result, settings):
-    path = paths.TETHER / 'projects' / pid / 'advisor-log.md'
-    try:
-        lines = path.read_text(encoding='utf-8').splitlines()
-    except FileNotFoundError:
-        lines = []
-    question = ' '.join(question.split())[:200]
-    answer = ' '.join(result.get('answer', '').split())[:300]
     main = settings['main']
     model = advisor.resolve(main['agent'], main['model']) if main['agent'] != 'none' else 'latest'
-    lines.append(f'- {time.strftime("%Y-%m-%d %H:%M")} [{result["status"]}] Q: {question} -> A: {answer} '
-                 f'({main["agent"]} {model or "default"})')
-    advisor._write(path, '\n'.join(lines[-200:]) + '\n')
+    advisor_log.append(paths.TETHER / 'projects' / pid, advisor_log.make(question, result, main['agent'], model or 'default'))
 
 
 def main(argv=None):

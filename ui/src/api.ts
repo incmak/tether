@@ -104,7 +104,9 @@ export interface Needs { kind: 'approval' | 'plan' | 'question'; text: string }
 // since and snoozed_until are Unix seconds. next is the reply's "Next:" line or the prompt's question.
 export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean }
 // images: how many images the tool result holds (Claude's Read of a screenshot). GET tool-image serves them.
-export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string }
+// artifact: a page Claude published with its Artifact tool. url: the claude.ai link; path: the local HTML file it came from.
+export interface ToolArtifact { url: string; path: string; title: string }
+export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
 export interface ChatMessage {
   id: string
@@ -177,7 +179,19 @@ export interface ChoiceState {
 }
 // Claude's /permissions dialog as server/permissions_dialog.py reads it.
 export interface PermissionsDialog { tabs: string[]; tab: string | null; lines: string[]; selected: number | null; hint: string; empty: boolean }
-export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side'; permissions?: PermissionsDialog;
+/** A Claude slash-command dialog read from the screen (server/claude_dialog.py). `hints` are the keys its footer offers. */
+export interface DialogItem { text: string; value: string; mark: string; detail: string; selected: boolean }
+export type DialogBlock = { type: 'text'; lines: string[]; dim: boolean; mono: boolean } | { type: 'heading'; text: string }
+  | { type: 'facts'; rows: { label: string; value: string }[] } | { type: 'meter'; percent: number; text: string }
+  | { type: 'tabs'; tabs: string[]; tab: string } | { type: 'scale'; options: string[]; value: string; ends: string[] }
+  | { type: 'search'; placeholder: string; value: string; focused: boolean }
+  | { type: 'heatmap'; months: [number, string][]; rows: { label: string; cells: string }[] } | { type: 'options'; options: string[]; value: string }
+  | { type: 'shortcuts'; items: { keys: string; effect: string }[] } | { type: 'entries'; items: { title: string; lines: string[] }[] }
+  | { type: 'list'; items: (DialogItem | { heading: string })[]; more_above: number; more_below: number }
+export interface DialogHint { keys: { key: string; label: string }[]; effect: string; text: string; go?: boolean }
+export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; mode: string; text: string }
+export type DialogAction = { action: 'key'; key: string } | { action: 'row'; row: number; label: string } | { action: 'tab'; tab: string } | { action: 'scale'; value: string } | { action: 'filter'; text: string } | { action: 'subtab'; tab: string } | { action: 'option'; value: string }
+export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side' | 'dialog'; permissions?: PermissionsDialog; dialog?: ClaudeDialog;
   /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
   pending?: boolean; markdown?: boolean; fork?: boolean;
   promptId?: string; revision?: string; requiresResponse?: boolean; body?: string; hints?: string[]; actions?: PromptAction[]; title?: string; subtitle?: string; items?: PickerItem[]; more_above?: number; more_below?: number; hint?: string; question?: string; options?: Choice[]; choice?: ChoiceState; ask?: { id: string; questions: AskQuestion[] }; askBridge?: AskBridge; ask_current?: AskCurrent; login?: { url: string; code: boolean; user_code?: string; message?: string } }

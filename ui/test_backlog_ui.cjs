@@ -6,7 +6,7 @@ const path = require('node:path')
 const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-14/backlog-search/shots')
+const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/backlog-detail/shots')
 const backlog = [
   '- [ ] Write the release notes #B3',
   '',
@@ -20,6 +20,8 @@ const backlog = [
   '',
   '## brisk',
   '- [ ] Zebra item #B9',
+  '  - [x] find a zebra',
+  '  - [ ] draw the stripes',
   '- [ ] alpha item #B10',
   '',
 ].join('\n')
@@ -211,6 +213,157 @@ async function main() {
     check('390px search fits', !(await overflow()) && (await menu.boundingBox()).width <= 390)
     await page.screenshot({ path: path.join(SHOTS, 'search-390.png') })
     check('no saves from filtering', !posts.length, JSON.stringify(posts))
+    await page.keyboard.press('Escape')
+    await menu.waitFor({ state: 'detached' })
+
+    // B76: an item's details beside the list (1200px and wider) or over it. Esc or Back closes them and gives the cursor back to the row.
+    for (const [width, height] of [[1280, 860], [390, 844], [320, 640]]) {
+      const at = `${width}px`, beside = width >= 1200
+      await page.setViewportSize({ width, height })
+      await page.evaluate(() => localStorage.removeItem('tether.backlogView'))
+      await page.goto(`${origin}/chat/?go=backlog`, { waitUntil: 'load' })
+      const sheet = page.locator('dialog.backlog-page')
+      await sheet.locator('.backlog-row').first().waitFor()
+      // A CSS locator: under the narrow overlay the list is hidden, and role queries skip hidden rows.
+      const zebra = sheet.locator('button.backlog-open', { hasText: /^Zebra item$/ })
+      await zebra.click()
+      const pane = sheet.locator('#backlog-detail')
+      await pane.waitFor()
+      check(`${at} the title opens the details`, (await pane.locator('#backlog-detail-title').innerText()) === 'Zebra item' && (await zebra.getAttribute('aria-current')) === 'true')
+      check(`${at} details ${beside ? 'beside' : 'over'} the list`, beside
+        ? (await pane.boundingBox()).x >= (await sheet.locator('.backlog-main').boundingBox()).x + 300 && !(await pane.evaluate(node => node.classList.contains('overlay')))
+        : await pane.evaluate(node => node.classList.contains('overlay')) && await sheet.locator('.backlog-main').evaluate(node => node.inert) && await sheet.locator('.backlog-nav').evaluate(node => node.inert))
+      check(`${at} narrow: the cursor goes to the title`, beside || await pane.locator('#backlog-detail-title').evaluate(node => node === document.activeElement))
+      check(`${at} steps show progress`, /\d of 2/.test(await pane.locator('#backlog-detail-steps').innerText()))
+      check(`${at} project and ID`, (await pane.locator('.backlog-detail-bar').innerText()).includes('brisk') && await pane.getByRole('button', { name: 'Copy ID B9' }).isVisible())
+      check(`${at} no page overflow (details)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `detail-${width}.png`) })
+      if (beside) {
+        await page.keyboard.press('j')
+        check(`${at} J shows the next item`, (await pane.locator('#backlog-detail-title').innerText()) === 'alpha item')
+        await page.keyboard.press('k')
+        await page.keyboard.press('ArrowUp')
+        check(`${at} K and ↑ go back`, (await pane.locator('#backlog-detail-title').innerText()) === 'Add backlog search'
+          && await sheet.getByRole('button', { name: 'Add backlog search', exact: true }).evaluate(node => node === document.activeElement))
+        await page.keyboard.press('ArrowDown')
+        const saves = posts.length
+        await pane.getByRole('checkbox', { name: 'draw the stripes' }).check()
+        await pane.getByText('2 of 2').waitFor()
+        check(`${at} a step saves from the details`, posts.length === saves + 1 && posts.at(-1).text.includes('  - [x] draw the stripes'))
+        // An agent renames the item during a Reword: Tether asks before it writes over the new title.
+        const agentSaves = text => { saved = { ...saved, text, version: `agent${Date.now()}` } }
+        await pane.getByRole('button', { name: 'Reword' }).click()
+        await pane.getByRole('textbox', { name: 'Reword Zebra item' }).fill('Zebra mine')
+        agentSaves(saved.text.replace('Zebra item #B9', 'Zebra theirs #B9'))
+        await page.waitForTimeout(3600)
+        await page.keyboard.press('Enter')
+        const clash = pane.getByRole('alertdialog')
+        check(`${at} a Reword over an agent's rename asks first`, await clash.isVisible() && (await clash.innerText()).includes('Zebra theirs') && !posts.some(post => post.text.includes('Zebra mine')))
+        await clash.getByRole('button', { name: 'Keep theirs' }).click()
+        check(`${at} Keep theirs keeps the agent's title`, (await pane.locator('#backlog-detail-title').innerText()) === 'Zebra theirs')
+        // The item goes during a Reword: the words stay, with a way to add them back.
+        await pane.getByRole('button', { name: 'Reword' }).click()
+        await pane.getByRole('textbox', { name: 'Reword Zebra theirs' }).fill('Zebra kept')
+        agentSaves(saved.text.replace(/- \[ \] Zebra theirs #B9\n(  - .*\n)*/, ''))
+        await pane.getByText('This item is gone').waitFor({ timeout: 6000 })
+        check(`${at} a gone item keeps the new wording`, (await pane.innerText()).includes('Zebra kept'))
+        await pane.getByRole('button', { name: 'Add as a new item' }).click()
+        await page.waitForFunction(() => document.querySelector('#backlog-detail .backlog-detail-kept') === null)
+        await page.waitForTimeout(1200)
+        check(`${at} Add as a new item saves the words`, posts.at(-1).text.includes('- [ ] Zebra kept'))
+        agentSaves(backlog)
+        await pane.locator('#backlog-detail-title', { hasText: /^Zebra item$/ }).waitFor({ timeout: 6000 })
+        await zebra.focus()
+        // ⌘/ over the page, then Esc: the cursor goes back to the row, so the next Esc closes only the details.
+        await page.keyboard.press('Control+Slash')
+        await page.locator('dialog.shortcuts-sheet').waitFor()
+        await page.keyboard.press('Escape')
+        await page.locator('dialog.shortcuts-sheet').waitFor({ state: 'detached' })
+        await page.waitForTimeout(100)
+        check(`${at} closing the shortcuts gives the cursor back to the row`, await zebra.evaluate(node => node === document.activeElement))
+        await page.keyboard.press('Escape')
+      } else if (width === 390) {
+        // The details cover the list here, so Undo and save errors show in the pane.
+        await pane.getByRole('button', { name: 'Delete' }).click()
+        await pane.getByText('This item is gone').waitFor()
+        const undo = pane.getByRole('button', { name: 'Undo' })
+        check(`${at} Undo shows over the list`, await undo.isVisible())
+        await page.screenshot({ path: path.join(SHOTS, `detail-undo-${width}.png`) })
+        await undo.click()
+        await pane.locator('#backlog-detail-title', { hasText: /^Zebra item$/ }).waitFor()
+        check(`${at} Undo brings the item back`, true)
+        await pane.getByRole('button', { name: 'Back to the list' }).click()
+      }
+      else await page.keyboard.press('Escape')
+      await pane.waitFor({ state: 'detached' })
+      check(`${at} closing gives the cursor back to the row`, await zebra.evaluate(node => node === document.activeElement))
+      check(`${at} the page stays open`, await sheet.isVisible())
+      await page.keyboard.press('Escape')
+      await sheet.waitFor({ state: 'detached' })
+    }
+
+    // ⌘/ (Ctrl+/ off a Mac) and ? open the keyboard shortcuts on any screen. ⌘/ also works over a sheet.
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
+    await page.waitForTimeout(400)
+    const keys = page.locator('dialog.shortcuts-sheet')
+    await page.keyboard.press('Control+Slash')
+    await keys.waitFor()
+    check('⌘/ opens the shortcuts on Home', await keys.getByRole('heading', { name: 'Keyboard shortcuts' }).isVisible())
+    await keys.getByRole('searchbox', { name: 'Find a shortcut' }).fill('split')
+    check('the filter finds a key by its action', JSON.stringify(await keys.locator('dt').allInnerTexts()) === JSON.stringify(['Split right']))
+    await keys.getByRole('searchbox', { name: 'Find a shortcut' }).fill('zzz')
+    check('no match says so', await keys.getByText('No shortcut matches “zzz”.').isVisible())
+    await page.keyboard.press('Escape')
+    check('Esc clears the filter first', (await keys.getByRole('searchbox').inputValue()) === '' && await keys.isVisible())
+    await page.screenshot({ path: path.join(SHOTS, 'shortcuts-1280.png') })
+    await page.keyboard.press('Control+Slash')
+    await keys.waitFor({ state: 'detached' })
+    check('⌘/ again closes them', true)
+    await page.keyboard.press('?')
+    await keys.waitFor()
+    check('? opens them when no text box has focus', true)
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await keys.waitFor({ state: 'detached' })
+    await page.keyboard.press('Alt+Shift+KeyB')
+    await page.locator('dialog.backlog-page .backlog-row').first().waitFor()
+    await page.keyboard.press('Control+Slash')
+    await keys.waitFor()
+    check('⌘/ works over the backlog page', true)
+    await page.keyboard.press('Escape')
+    await keys.waitFor({ state: 'detached' })
+    check('Esc closes only the shortcuts', await page.locator('dialog.backlog-page').isVisible())
+    await page.keyboard.press('Escape')
+    await page.locator('dialog.backlog-page').waitFor({ state: 'detached' })
+
+    for (const [width, height] of [[390, 844], [320, 640]]) {
+      await page.setViewportSize({ width, height })
+      await page.keyboard.press('Control+Slash')
+      await keys.waitFor()
+      check(`${width}px shortcuts fit`, !(await overflow()) && (await keys.boundingBox()).width <= width)
+      await page.screenshot({ path: path.join(SHOTS, `shortcuts-${width}.png`) })
+      await page.keyboard.press('Control+Slash')
+      await keys.waitFor({ state: 'detached' })
+    }
+
+    // Settings › Keyboard shortcuts lists the same keys, and its search finds one.
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.getByRole('button', { name: 'Settings', exact: true }).first().click()
+    const settings = page.locator('dialog.preferences')
+    await settings.waitFor()
+    await settings.getByRole('button', { name: /Keyboard shortcuts/ }).click()
+    check('Settings has a Keyboard shortcuts section', await settings.getByRole('heading', { name: 'Backlog', exact: true }).isVisible() && await settings.getByText('Split right').isVisible())
+    await page.screenshot({ path: path.join(SHOTS, 'settings-shortcuts-1280.png') })
+    await settings.getByRole('searchbox', { name: 'Search settings' }).fill('grid of four')
+    await settings.getByRole('searchbox', { name: 'Search settings' }).focus()
+    await page.keyboard.press('Control+Slash')
+    await keys.waitFor()
+    await page.keyboard.press('Escape')
+    await keys.waitFor({ state: 'detached' })
+    await page.waitForTimeout(100)
+    check('closing the shortcuts over Settings gives the cursor back', await settings.getByRole('searchbox', { name: 'Search settings' }).evaluate(node => node === document.activeElement))
+    check('a Settings search finds a key', await settings.locator('dt', { hasText: 'Grid of four' }).isVisible() && (await settings.locator('.shortcuts-rows').count()) === 1)
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})

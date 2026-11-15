@@ -2,9 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import { CircleCheck, ClipboardList, CornerDownLeft, Search, SquareTerminal, Zap } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { useModal } from './hooks'
-import { fuzzyScore, keyLabel } from './keys'
-import { agentNames, paneTitle, shownIndex, status } from './Sidebar'
+import { keyLabel } from './keys'
+import { agentNames, paneTitle, searchIndex, shownIndex, status } from './Sidebar'
 import type { Session } from './Sidebar'
+import type { Prefs } from './prefs'
+import type { GroupInfo } from './api'
+import { field, matchSessions, scoreWords, searchWords } from './search'
 import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog } from './backlogItems'
 import { projectGroups, queryScore } from './backlogView'
@@ -25,6 +28,9 @@ interface Props {
   onPane: (pane: Pane) => void
   onSession: (session: Session) => void
   onClose: () => void
+  /** The custom groups and each session's stacks: the menu finds the same tabs as the sidebar search. */
+  groups?: Pick<Prefs, 'groups' | 'groupOf'>
+  stacks?: Record<string, GroupInfo[]>
   /** Search the backlog too. `open` shows the backlog page with this search. */
   backlog?: { api: Api; open: (query: string) => void }
 }
@@ -50,7 +56,7 @@ function useBacklogText(api: Api | undefined) {
 const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Backlog: 'Backlog' }
 
 /** ⌘K or ⌥Space: go to a pane or session, run a command, or find a backlog item. Each command row shows its key, so the menu teaches the keys. */
-export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, backlog }: Props) {
+export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, groups, stacks, backlog }: Props) {
   // Opening the menu keeps the Forward steps, so its Forward command can use them.
   const modal = useModal(true, onClose, undefined, { keepForward: true })
   const [query, setQuery] = useState('')
@@ -58,6 +64,8 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
   const { text: backlogText, failed: backlogFailed } = useBacklogText(backlog?.api)
   // Each item with its project, so a search for a project name finds its items.
   const backlogItems = useMemo(() => backlogText === null ? [] : projectGroups(parseBacklog(backlogText)).flatMap(group => group.items.map(item => ({ item, project: group.name }))), [backlogText])
+  // The same index and scores as the sidebar search, built once while the menu is open.
+  const index = useMemo(() => searchIndex(sessions, [], groups ?? { groups: [], groupOf: {} }, stacks)[0], [sessions, groups, stacks])
   const rows = useMemo(() => {
     const panes: Row[] = sessions.flatMap(session => {
       const one = session.panes.length === 1
@@ -71,14 +79,16 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     const commandRows: Row[] = commands.map(command => ({ id: `command:${command.label}`, group: 'Commands', ...command }))
     const words = query.trim()
     if (!words) return [...commandRows, ...panes]
-    // A pane also matches on its folder and agent, the same fields the sidebar search reads. A match in the name ranks first.
-    const scoreOf = (row: Row, extra: string) => { const named = fuzzyScore(row.label, words); return named !== null ? named * 2 : fuzzyScore(`${row.label} ${extra}`, words) }
-    const ranked = (list: Row[], extra: (row: Row) => string) => list
-      .map(row => ({ row, score: scoreOf(row, extra(row)) }))
+    // Panes rank by the sidebar's scores: a session row by its own fields, a pane row by its tab and session.
+    const wordList = searchWords(words)
+    const found = matchSessions(index, wordList)
+    const tabScores = new Map([...found.values()].flatMap(match => [...match.tabScores]))
+    const paneScore = (row: Row) => row.id.startsWith('session:') ? found.get(row.id.slice('session:'.length))?.own ?? null : tabScores.get(row.id) ?? null
+    const ranked = (list: Row[], score: (row: Row) => number | null) => list
+      .map(row => ({ row, score: score(row) }))
       .filter((item): item is { row: Row; score: number } => item.score !== null)
       .sort((a, b) => b.score - a.score)
       .map(item => item.row)
-    const paneText = (row: Row) => { const pane = sessions.flatMap(session => session.panes).find(item => item.id === row.id); return pane ? `${pane.dir} ${agentNames[pane.agent]}` : '' }
     // Backlog items match on every word, like the backlog's own search. Open items rank above done ones.
     const hits: BacklogHit[] = !backlog ? [] : backlogItems.flatMap(({ item, project }) => {
       const score = item.ref ? queryScore(item, words, project) : null
@@ -86,8 +96,8 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     }).sort((a, b) => b.score - a.score)
     const backlogRows: Row[] = hits.slice(0, BACKLOG_ROWS).map(hit => ({ id: `backlog:${hit.ref}`, group: 'Backlog', label: hit.text, hint: [hit.ref, hit.project || 'Inbox', hit.done && 'Done'].filter(Boolean).join(' · '), done: hit.done, run: () => backlog!.open(hit.ref) }))
     if (backlog && backlogText !== null) backlogRows.push({ id: 'backlog:search', group: 'Backlog', label: hits.length > BACKLOG_ROWS ? `See all ${hits.length} in the backlog` : `Search the backlog for “${words}”`, run: () => backlog.open(words) })
-    return [...ranked(panes, paneText), ...ranked(commandRows, () => ''), ...backlogRows]
-  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText])
+    return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...backlogRows]
+  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index])
   const at = Math.min(active, Math.max(0, rows.length - 1))
   const pick = (row: Row | undefined) => { if (!row) return; onClose(); row.run() }
   const move = (to: number) => {

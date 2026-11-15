@@ -317,13 +317,14 @@ def _layers(folders, home):
             yield layer / 'config.toml'
 
 
-def codex_writable(args, cwd=None):
+def codex_writable(args, cwd=None, assume=None):
     """True only when Codex will surely start with a writable workspace. Codex 0.166 exits with code 1 when it gets
     --add-dir and the start folder is not writable (tui/src/additional_dirs.rs). The order follows Codex:
     sandbox flags, then -c sandbox_mode, then config.toml, then the folder trust (core/src/config/permissions.rs:
     a [projects] entry with any trust_level gives the workspace profile; no entry gives read-only).
     Anything this does not model (profiles, permission profiles, system or managed config, project config layers)
-    gives False: Codex then starts without --add-dir, as before."""
+    gives False: Codex then starts without --add-dir, as before.
+    assume: a [projects] key to treat as trusted, to ask "would trusting this key make Codex writable?" (codex_trust.py)."""
     if '--' in args:
         args = args[:args.index('--')]  # after --, everything is the prompt
     if any(arg.partition('=')[0] in UNKNOWN_FLAGS for arg in args):
@@ -366,6 +367,10 @@ def codex_writable(args, cwd=None):
     if config is None or any(key in config for key in ('profile', 'default_permissions', 'permissions',
                                                        'project_root_markers')):
         return False
+    if assume is not None:
+        known = config.get('projects') if isinstance(config.get('projects'), dict) else {}
+        entry = known.get(assume) if isinstance(known.get(assume), dict) else {}
+        config = {**config, 'projects': {**known, assume: {**entry, 'trust_level': 'trusted'}}}
     folder = (_option(args, '-C', '--cd') or [None])[-1]
     start = cwd or os.getcwd()
     if folder:

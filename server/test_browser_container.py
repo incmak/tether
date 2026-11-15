@@ -61,6 +61,35 @@ class ContainerTests(unittest.TestCase):
         self.assertNotIn('FRAME_ANCESTORS', joined)  # Tether sets frame-ancestors on the live origin itself
         self.assertIn('@sha256:', browser_container.IMAGE)  # pinned, not :latest
 
+    def test_selkies_listens_only_on_its_socket_with_login_and_origin_checks(self):
+        # B89: the image turns Selkies' login off, allows any Origin and puts it on TCP 8082 behind nginx.
+        self.container.start()
+        args = self.runner.ran('run')[0]
+        env = {arg.split('=', 1)[0]: arg.split('=', 1)[1] for prev, arg in zip(args, args[1:]) if prev == '-e'}
+        self.assertEqual(env['SELKIES_UNIX_SOCKET'], '/sock/web.sock')
+        self.assertEqual(self.container.web_sock.name, 'web.sock')
+        self.assertEqual(env['SELKIES_ENABLE_BASIC_AUTH'], 'true')
+        self.assertEqual(env['SELKIES_ALLOWED_ORIGINS'], '')  # empty: Selkies' default, same-origin only
+        self.assertEqual(env['CUSTOM_USER'], 'tether')  # web_auth() logs in as this user
+        self.assertEqual(env['PASSWORD'], self.container.password)
+        self.assertNotIn('SELKIES_PUBLIC', env)
+        self.assertNotIn('SELKIES_ADDR', env)
+        self.assertNotIn('CUSTOM_WS_PORT', env)
+        self.assertIn('SELKIES_WEB_ROOT', env)
+        mounts = [arg for prev, arg in zip(args, args[1:]) if prev == '-v']
+        self.assertIn('%s:/defaults/default.conf:ro' % (browser_container.FILES / 'nginx-default.conf'), mounts)
+        self.assertFalse(any('/custom-services.d' in mount for mount in mounts))  # no TCP relay to nginx any more
+
+    def test_nginx_stub_listens_on_no_tcp_port(self):
+        text = (browser_container.FILES / 'nginx-default.conf').read_text()
+        self.assertNotIn('#', text)  # the image's init-nginx deletes every '#' when PASSWORD is set
+        listens = [line.split(None, 1)[1].rstrip(';').strip() for line in text.splitlines()
+                   if line.strip().startswith('listen ')]
+        self.assertTrue(listens)
+        self.assertTrue(all(value.startswith('unix:') for value in listens), listens)
+        self.assertNotIn('proxy_pass', text)
+        self.assertFalse((browser_container.FILES / 'sock_relay.py').exists())
+
     def test_each_start_gets_a_new_password_and_the_web_auth_matches_it(self):
         self.assertIsNone(self.container.web_auth())
         self.container.start()

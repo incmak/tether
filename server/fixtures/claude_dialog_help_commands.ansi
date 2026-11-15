@@ -1,0 +1,45 @@
+
+[38;5;246m[48;5;237m❯[39m [38;5;231m/plugin[39m
+[38;5;153m[49m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◐ medium · /effort[38;5;153m ▔
+[39m   [1m[38;5;110mHelp[0m  General   Commands  [1m[38;5;16m[48;5;110m Custom commands [0m
+
+
+   Browse custom commands
+
+   [38;5;246m❯[39m /animate
+     [38;5;246mBuild an animation from scratch, making the decisions in the order that determines whethe…[39m
+     /animate-expo
+     [38;5;246mBuild animations in React Native and Expo, making the decisions in the order that determi…[39m
+     /animation-performance
+     [38;5;246mKeep web animations inside the frame budget — animate composite-only properties, keep mot…[39m
+     /animation-vocabulary
+     [38;5;246mReverse-lookup glossary that turns a vague description of a web animation or motion effec…[39m
+     /anthropic-skills:built-in-browser
+     [38;5;246mRead this skill before the first step that uses the built-in browser, the browser pane in…[39m
+     /anthropic-skills:chrome-browser
+     [38;5;246mRead this skill before the first step that uses Claude in Chrome, the browser extension w…[39m
+     /anthropic-skills:computer-use
+     [38;5;246mRead this skill before the first step of any request to do something in an app on the per…[39m
+     /anthropic-skills:deep-research
+     [38;5;246mUse this skill when the user's prompt requires (1) researching a topic across multiple so…[39m
+     /anthropic-skills:docs
+     [38;5;246mdocs (editable docs people share and comment on; the default for any document, named as a…[39m
+     /anthropic-skills:docx
+     [38;5;246mUse this skill whenever the user wants to create, read, edit, or manipulate Word document…[39m
+     /anthropic-skills:google-workspace
+     [38;5;246mRead this before the first Google Drive, Docs, Sheets or Slides connector call whenever t…[39m
+     /anthropic-skills:import-memory
+     [38;5;246mImport a memory export from another AI assistant into Claude's memory — conversationally,…[39m
+     /anthropic-skills:morning
+     [38;5;246mRender the user's morning brief as a styled HTML artifact, or set it up as a recurring we…[39m
+     /anthropic-skills:pdf
+     [38;5;246mUse this skill whenever the user wants to do anything with PDF files. This includes readi…[39m
+     /anthropic-skills:pptx
+     [38;5;246mUse this skill any time a .pptx or .potx file is involved in any way — as input, output, …[39m
+
+     [38;5;246m↓ 87 more[39m
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   [38;5;246mSomething else? Use /feedback to report bugs or request features.[39m

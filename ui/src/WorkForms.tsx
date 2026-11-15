@@ -25,7 +25,7 @@ function feedNote(board: WorkBoard, form: WorkProject, saved?: WorkProject) {
   const graph = board.graph
   if (form.feed !== 'github' && !graph?.connected) return `${graph?.why || 'Microsoft 365 is not connected.'} Until then, Tether does not read this feed.`
   if (form.feed === 'teams' && !graph?.teams) return 'The Microsoft 365 sign-in has no Teams permission. Run tether graph connect --feeds mail,teams.'
-  if (form.feed === 'email' && !graph?.mail) return 'The Microsoft 365 sign-in has no mail permission. Run tether graph connect --feeds mail,teams.'
+  if (form.feed === 'email' && !graph?.mail) return 'The Microsoft 365 sign-in has no mail permission. Run tether graph connect --feeds mail.'
   const state = saved && saved.feed === form.feed && saved.feedTarget === form.feedTarget && saved.feedBy === form.feedBy ? board.feeds?.[saved.name] : undefined
   const start = 'Tether reads it every 2 minutes and adds new threads to Triage. It starts with messages that come after you save.'
   if (!state || state.status === 'waiting' || !state.at) return start

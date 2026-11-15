@@ -440,8 +440,8 @@ class Endpoints(unittest.TestCase):
     def test_a_name_the_user_cleared_is_not_replaced(self):
         self.assertEqual(self.request('/mobile/api/pane-name', {'pane': '%12', 'name': ''})[0], 200)
         command, = [argv for argv in self.calls if '@chat_name_by' in argv]
-        self.assertEqual(command[command.index('@chat_name_by') + 1], 'user')
-        self.tmux['@chat_name_by'] = 'user'
+        self.assertEqual(command[command.index('@chat_name_by') + 1], 'cleared')
+        self.tmux['@chat_name_by'] = 'cleared'
         self.calls.clear()
         self.assertEqual(self.request(tab_brief.PATH, {'pane': '%12', 'thread': THREAD, 'action': 'write'})[0], 200)
         self.assertEqual(self.names(), [])

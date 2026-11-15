@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import advisor
+import advisor_log
 import agent_advisor_cli as cli
 import autonomy
 import codex_level
@@ -214,7 +215,7 @@ class Rules(Base):
                 self.assertEqual(positions, sorted(positions))
                 self.assertIn('Claude, Fable 5.2 (latest), high effort', text)
                 self.assertIn('second advisor (Codex, Newest Model (latest), high effort)', text)
-                self.assertIn(f'python3 {cli.__file__} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words)', text)
+                self.assertIn(f'python3 {cli.__file__} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words; the advisor joins this session\'s stack by itself; GOAL only names the stack the first time)', text)
 
     def test_none_adds_no_advisor_and_keeps_evidence_product_and_user_rules(self):
         advisor.write(OFF)
@@ -519,6 +520,48 @@ class Cli(Base):
         self.assertEqual(len(lines), 200)
         self.assertEqual(lines[0], '- old 6')
         self.assertIn('Q: ' + 'q' * 200 + ' -> A: ' + 'a' * 300 + ' (claude fable)', lines[-1])
+
+    def test_log_keeps_the_full_ask_in_jsonl_without_raw_replies(self):
+        self.enterContext(patch.object(advisor, 'second_opinion', return_value={'agent': 'codex', 'model': 'gpt', 'effort': 'high'}))
+        self.wait_reply = REPLY.replace('Use the tested option.', 'a' * 400 + '\nmore')
+        self.invoke(['ask', '--critical', 'q' * 250 + '\nnext'])
+        folder = paths.TETHER / 'projects' / PID
+        entries = [json.loads(text) for text in (folder / 'advisor-log.jsonl').read_text().splitlines()]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual((entry['status'], entry['question'], entry['answer']), ('decided', 'q' * 250 + '\nnext', 'a' * 400 + '\nmore'))
+        self.assertEqual((entry['agent'], entry['model'], entry['evidence']), ('claude', 'fable', 'server/example.py\n\nserver/example.py'))
+        self.assertEqual([(item['role'], item['agent'], item['model']) for item in entry['advisors']],
+                         [('main', 'claude', 'fable'), ('second', 'codex', 'gpt')])
+        self.assertNotIn('raw', entry['advisors'][0])
+        self.assertNotIn(REPLY.splitlines()[1], json.dumps(entry))  # the raw reply stays out
+        self.assertEqual((folder / 'advisor-log.jsonl').stat().st_mode & 0o777, 0o600)
+        # The Markdown line is the same one the reader matches, so the entry is not listed twice.
+        self.assertEqual((folder / 'advisor-log.md').read_text(), advisor_log.line(entry) + '\n')
+        self.assertEqual([item['id'] for item in advisor_log.listing(folder)], [entry['id']])
+
+    def test_jsonl_caps_entries_skips_damaged_lines_and_keeps_long_text(self):
+        folder = paths.TETHER / 'projects' / PID
+        old = [json.dumps(advisor_log.make(f'old {index}', {'status': 'decided', 'answer': 'yes'}, 'claude', 'fable', now=index))
+               for index in range(205)]
+        self.write(folder / 'advisor-log.jsonl', '\n'.join(old[:100] + ['not json', '{"id": "bad"}'] + old[100:]) + '\n')
+        self.wait_reply = REPLY.replace('Use the tested option.', 'b' * 9000)
+        self.invoke()
+        entries = [json.loads(text) for text in (folder / 'advisor-log.jsonl').read_text().splitlines()]
+        self.assertEqual(len(entries), 200)
+        self.assertEqual(entries[0]['question'], 'old 6')
+        self.assertEqual((entries[-1]['answer'], entries[-1]['cut']), ('b' * 9000, []))
+
+    def test_error_entry_keeps_the_error_text(self):
+        self.wait_reply = 123  # not a string: the CLI refuses the reply
+        code, result = self.invoke()
+        self.assertEqual((code, result['status']), (1, 'error'))
+        folder = paths.TETHER / 'projects' / PID
+        entry = json.loads((folder / 'advisor-log.jsonl').read_text())
+        self.assertEqual((entry['status'], entry['error']), ('error', 'The tab command returned an invalid reply.'))
+        self.assertEqual(advisor_log.find(folder, entry['id']), entry)
+        self.assertIsNone(advisor_log.find(folder, '../' + entry['id']))
+
 
     def test_raw_reply_retains_last_four_thousand_characters(self):
         self.wait_reply = 'Context ' * 1000 + '\n' + REPLY

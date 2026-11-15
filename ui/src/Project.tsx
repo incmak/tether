@@ -9,6 +9,8 @@ import { useModal } from './hooks'
 import { ProjectCodexLevel } from './CodexLevel'
 import { ProjectAutonomy } from './Autonomy'
 import type { Session } from './Sidebar'
+import { AdvisorDecision, AdvisorLog, useAdvisorLog } from './AdvisorLog'
+import type { AdvisorRow } from './AdvisorLog'
 
 // The session's project (server: projects.py). Agents that start in the session get its text: Claude through a
 // SessionStart hook, Codex through developer_instructions. An empty project gives them only the short Notes part.
@@ -69,9 +71,13 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
   const [note, setNote] = useState<{ name: string; text: string; saved: string } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [preview, setPreview] = useState(false)
+  const [decision, setDecision] = useState<AdvisorRow | null>(null)
+  const [decisionFocus, setDecisionFocus] = useState<string>()  // the row that opened the last entry, focused on Back
 
   const show = (next: ProjectState, keepText = false) => { setProject(next); if (!keepText) setText(next.instructions.replace(/\n$/, '')) }
   const groupId = group?.id
+  // The advisor log belongs to the session's project; a stack sheet has none of its own.
+  const advisorLog = useAdvisorLog(api, groupId ? undefined : project?.id)
   const load = useCallback(() =>
     api<ProjectState>(groupId ? `groups/context?session=${encodeURIComponent(session.id)}&group=${encodeURIComponent(groupId)}` : `projects/project?session=${encodeURIComponent(session.id)}`)
       .then(next => show(next)).catch(failure => { setError(errorText(failure)) }),
@@ -113,7 +119,7 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
 
   return <dialog {...modal} className="sheet settings-sheet project-sheet" aria-labelledby="project-title">
     <div className="sheet-heading">
-      <h2 id="project-title">{note ? note.name : group ? 'Stack context' : 'Project'}</h2>
+      <h2 id="project-title">{note ? note.name : decision ? 'Advisor decision' : group ? 'Stack context' : 'Project'}</h2>
       <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>
     </div>
     <p className="sheet-sub">{group ? `${session.name} › ${group.name}` : session.name}{project && ` · ${project.chars.toLocaleString()} / ${project.budget.toLocaleString()} characters`}</p>
@@ -134,6 +140,8 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
             <button type="button" className="primary" disabled={pending || noteVoiceBusy || note.text === note.saved} onClick={async () => { if (await post('note', { name: note.name, text: note.text })) setNote({ ...note, saved: note.text }) }}>{pending ? 'Saving…' : 'Save note'}</button>
           </div>}
     </section>
+
+    : project && decision ? <AdvisorDecision api={api} project={project.id} row={decision} onBack={() => { setDecisionFocus(decision.id); setDecision(null) }} />
 
     : project && <>
       {staleCount > 0 && <p className="project-stale" role="status">{staleCount === 1 ? '1 agent' : `${staleCount} agents`} in this {group ? 'stack' : 'session'} started with an older version. Restart them to apply the change. In Claude, <code>/clear</code> also applies it.</p>}
@@ -171,6 +179,8 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
         </li>)}</ul> : <p className="hint">No notes yet. Agents save project facts here, and you review them.</p>}
         {fresh > 0 && <div className="sheet-buttons project-row-end"><button type="button" className="secondary" disabled={pending} onClick={() => void post('seen', {})}>Mark all as read</button></div>}
       </section>
+
+      {!group && <AdvisorLog log={advisorLog} disabled={pending} focus={decisionFocus} onOpen={row => { setDecisionFocus(undefined); setDecision(row) }} />}
 
       <ProjectAutonomy api={api} project={project.id} />
 

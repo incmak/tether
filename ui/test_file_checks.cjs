@@ -187,6 +187,8 @@ function checkRendering() {
     exports: components,
     require: name => {
       if (name === '@assistant-ui/react-markdown') return { useIsMarkdownCodeBlock: () => block }
+      if (name === './tabLinks') return { tabTarget: () => null }
+      if (name === './preview') return { PreviewOpener: React.createContext(null), artifactUrl: () => null }
       if (name === './fileChecks') return { fileChecks: {
         stateOf: (pane, path) => { checks.push([pane, path]); return state },
         subscribe: () => { throw Error('Server rendering must not subscribe') },

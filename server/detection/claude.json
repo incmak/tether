@@ -56,7 +56,7 @@
       "comment": "Find the first rule, prompt, or response after the Claude banner."
     },
     "SIDE_RULE": {
-      "regex": "^▔{20,}\\s*$",
+      "regex": "^(?:▔{20,}.*|.*\\s▔)\\s*$",
       "flags": [],
       "comment": "Find the top edge of the /btw side question overlay."
     },
@@ -79,6 +79,36 @@
       "regex": "\\bf to fork\\b",
       "flags": [],
       "comment": "A finished /btw answer offers the fork key."
+    },
+    "DIALOG_RULE": {
+      "regex": "^(?:▔{3,}.*|.*\\s▔)\\s*$",
+      "flags": [],
+      "comment": "Find the top edge of a Claude slash-command dialog; a notice or the effort level can share the row."
+    },
+    "DIALOG_MORE": {
+      "regex": "^\\s*([↑↓])\\s+(\\d+)\\s+more\\s*$",
+      "flags": [],
+      "comment": "Read the direction and count of hidden dialog list rows."
+    },
+    "DIALOG_HINT": {
+      "regex": "(\\S+(?: ?\\+ ?\\S+)?(?:/\\S+)*)\\s+(?:to|for)\\s+(\\S.*)",
+      "flags": [],
+      "comment": "Read the keys and the effect of one dialog footer hint."
+    },
+    "DIALOG_FACT": {
+      "regex": "^(\\S[^:]{0,40}:)\\s+(\\S.*)$",
+      "flags": [],
+      "comment": "Read a label and its value from a dialog fact row."
+    },
+    "DIALOG_PERCENT": {
+      "regex": "(\\d{1,3})% used",
+      "flags": [],
+      "comment": "Read the percentage of a usage bar."
+    },
+    "DIALOG_MOVE": {
+      "regex": "([↑↓])\\s+(\\w+)",
+      "flags": [],
+      "comment": "Read a footer hint that names where an arrow key moves the focus."
     }
   }
 }
