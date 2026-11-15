@@ -54,10 +54,11 @@ function parseStatus(raw: string, line: number): Status | null {
 }
 
 /** Give each item line without an ID the next free one, in file order. The server does the same (backlog.py with_ids),
- * so a change shows the IDs it will be saved with, and a later change still finds its line. */
-export function withIds(text: string): string {
+ * so a change shows the IDs it will be saved with, and a later change still finds its line. first: the server's next_id,
+ * which counts IDs of items that left the list (moved to DONE.md or deleted). */
+export function withIds(text: string, first = 1): string {
   const lines = text.split('\n')
-  let next = 1
+  let next = first
   for (const line of lines) { const id = TOP.test(line) ? ID.exec(line) : null; if (id) next = Math.max(next, Number(id[1]) + 1) }
   return lines.map(line => TOP.test(line) && !ID.test(line) ? `${line.trimEnd()} #B${next++}` : line).join('\n')
 }

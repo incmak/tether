@@ -22,7 +22,7 @@ import './Backlog.css'
 // The app's one backlog (server: backlog.py). People use the checklist or the text; agents use a command. Every save
 // carries the version the person last saw. A checklist change applies itself again to a newer file, so only rewriting
 // the text ever asks which version to keep.
-interface Saved { text: string; version: string; limit: number; command?: string }
+interface Saved { text: string; version: string; limit: number; next_id?: number; command?: string }
 const POLL_MS = 3000, SAVE_MS = 800, UNDO_MS = 8000, RETRIES = 5
 const PATH = BACKLOG_PATH
 /** A refused save says why. Anything else means the server could not be reached. */
@@ -319,7 +319,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   const change = useCallback((made: Change, offer?: Undo) => {
     if (!current.current) return false
     // The server numbers new items. Numbering here too shows the saved lines, so a later change finds them.
-    const next: Change = text => { const value = made(text); return value === null ? null : withIds(value) }
+    const next: Change = text => { const value = made(text); return value === null ? null : withIds(value, current.current?.next_id) }
     const text = queue.current.reduce((value, queued) => queued(value) ?? value, current.current.text)
     const value = next(text)
     if (value === null) { setError('That item was changed elsewhere. Check the list and try again.'); return false }

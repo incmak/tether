@@ -4,6 +4,7 @@ paths.TETHER/backlog/
   BACKLOG.md   the list. Items at the top are the person's inbox; "## name" starts a project's items.
   .lock        held for every change, by the server and by the agent command (they are separate processes)
   versions/    the last copies, so a bad overwrite can be undone by hand
+  last-id      the highest ID ever saved, so no ID is given twice
   DONE.md      finished items moved out of BACKLOG.md when it grows near its limit, in file order, under their section
 
 Codex's sandbox gets write access to this folder only, so it holds nothing else. Agents change the list through
@@ -48,8 +49,22 @@ def _path():
     return path
 
 
+def _ids(text):
+    return [int(found[1]) for line in text.split('\n') if ITEM.fullmatch(line) and (found := ID.search(line))]
+
+
+def _last_id():
+    """The highest ID ever saved. Items can leave the list (moved to DONE.md, or deleted), so the list alone cannot
+    say which IDs were given."""
+    try:
+        return int(_read(folder() / 'last-id', 32).strip() or 0)
+    except ValueError:
+        return 0
+
+
 def _state(text):
-    return {'text': text, 'version': hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest(), 'limit': LIMIT}
+    return {'text': text, 'version': hashlib.sha256(text.encode('utf-8', 'surrogatepass')).hexdigest(), 'limit': LIMIT,
+            'next_id': max(_ids(text) + [_last_id()]) + 1}
 
 
 def read():
@@ -90,15 +105,25 @@ def _keep(text):
         pass
 
 
+def _item_end(lines, at):
+    """The end of an item and all its detail lines. Like the UI (backlogItems.ts parseBacklog), an indented line after
+    a blank line still belongs to the item; trailing blank lines do not."""
+    end = at + 1
+    for index in range(at + 1, len(lines)):
+        if lines[index].strip():
+            if not lines[index][0].isspace():
+                break
+            end = index + 1
+    return end
+
+
 def _archive(text):
     """Move finished items in file order, with their detail lines, to DONE.md until the text is at ARCHIVE_TO or less.
-    The finished item with the highest ID stays, so new IDs (here and in the UI, backlogItems.ts) never repeat an
-    archived one. DONE.md is written first: a failed write keeps the items in the list, never loses them."""
+    last-id keeps the moved IDs from being given again. DONE.md is written first: a failed write keeps the items in the
+    list, never loses them."""
     if len(text) <= ARCHIVE_AT:
         return text
     lines = text.split('\n')
-    ids = [int(found[1]) for line in lines if ITEM.fullmatch(line) and (found := ID.search(line))]
-    keep = max(ids, default=None)
     size, moved, section, drop = len(text), [], 'Inbox', set()
     for at, line in enumerate(lines):
         heading = HEADING.fullmatch(line)
@@ -106,11 +131,14 @@ def _archive(text):
             section = heading[1]
             continue
         found = ITEM.fullmatch(line)
-        if not found or found[1] == ' ' or ((number := ID.search(line)) and int(number[1]) == keep):
+        if not found or found[1] == ' ':
             continue
-        end = _block_end(lines, at)
+        end = _item_end(lines, at)
         moved.append((section, lines[at:end]))
-        drop.update(range(at, end))
+        gap = end
+        while (at == 0 or not lines[at - 1].strip()) and gap < len(lines) and not lines[gap].strip():
+            gap += 1  # no blank line is left where a blank-separated item was
+        drop.update(range(at, gap))
         size -= sum(len(part) + 1 for part in lines[at:end])
         if size <= ARCHIVE_TO:
             break
@@ -134,6 +162,9 @@ def _archive(text):
 
 
 def _replace(current, text):
+    highest = max(_ids(current) + _ids(text) + [0])
+    if highest > _last_id():
+        _write(folder() / 'last-id', f'{highest}\n')
     text = _archive(text)
     if len(text) > LIMIT:
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
@@ -146,8 +177,7 @@ def _replace(current, text):
 def with_ids(text):
     """Give each item without an ID the next free one, in file order. Text that already has IDs stays the same."""
     lines = text.split('\n')
-    taken = [int(found[1]) for line in lines if ITEM.fullmatch(line) and (found := ID.search(line))]
-    next_id = max(taken, default=0) + 1
+    next_id = max(_ids(text) + [_last_id()]) + 1
     for at, line in enumerate(lines):
         if ITEM.fullmatch(line) and not ID.search(line):
             lines[at] = f'{line.rstrip()} #B{next_id}'

@@ -85,15 +85,35 @@ class BacklogTests(unittest.TestCase):
         kept, done = self.text(), (backlog.folder() / 'DONE.md').read_text()
         self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
         self.assertIn('- [ ] Inbox open #B60', kept)
-        self.assertIn('- [x] Newest done #B62', kept)  # the highest finished ID stays
+        self.assertIn('- [x] Newest done #B62', done)
         self.assertIn('- [x] Open web item #B61\n  - Done: shipped', kept)
         self.assertNotIn('Old 1 #B1', kept)
         self.assertTrue(done.startswith('# Finished backlog items'))
-        self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Old 1 #B1\n  - Done: word')
+        self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Newest done #B62\n  - Done: ok\n- \[x\] Old 1 #B1\n  - Done: word')
         for number in range(1, 51):  # every item is in exactly one of the two files
             self.assertEqual((f'Old {number} #B{number}' in kept) + (f'Old {number} #B{number}' in done), 1, number)
+        self.assertEqual(backlog.read()['next_id'], 63)
         backlog.add('Next item', project='web')
         self.assertIn('- [ ] Next item #B63', self.text())  # no archived ID is given again
+
+    def test_an_id_is_never_given_twice_after_its_item_leaves_the_list(self):
+        backlog.save('- [ ] One\n- [ ] Two\n', backlog.read()['version'])
+        state = backlog.read()
+        self.assertEqual(state['next_id'], 3)
+        backlog.save('- [ ] One #B1\n', state['version'])  # the person deletes the newest item
+        self.assertEqual(backlog.read()['next_id'], 3)
+        backlog.add('Three')
+        self.assertIn('- [ ] Three #B3', self.text())
+        self.assertEqual(backlog.with_ids('- [ ] Typed in the file'), '- [ ] Typed in the file #B4')
+
+    def test_details_after_a_blank_line_move_with_their_item(self):
+        text = ('- [x] Old #B1\n  - first\n\n  - second\n\n- [ ] Open #B2\n  - ' + 'x' * backlog.ARCHIVE_AT + '\n')
+        with mock.patch.object(backlog, 'ARCHIVE_TO', backlog.LIMIT):
+            backlog.save(text, backlog.read()['version'])
+        kept, done = self.text(), (backlog.folder() / 'DONE.md').read_text()
+        self.assertTrue(kept.startswith('- [ ] Open #B2\n'), kept[:40])
+        self.assertNotIn('second', kept)
+        self.assertIn('- [x] Old #B1\n  - first\n\n  - second\n', done)
 
     def test_a_list_with_no_finished_items_stays_and_a_short_list_is_not_moved(self):
         version = backlog.read()['version']
@@ -171,7 +191,7 @@ class BacklogTests(unittest.TestCase):
         (backlog.folder() / 'BACKLOG.md').write_text('- [ ] An agent wrote over it\n')
         backlog.save('- [ ] Two\n', backlog.read()['version'])
         copies = [path.read_text() for path in sorted((backlog.folder() / 'versions').glob('*.md'))]
-        self.assertEqual(copies, ['- [ ] One #B1\n', '- [ ] An agent wrote over it\n', '- [ ] Two #B1\n'])
+        self.assertEqual(copies, ['- [ ] One #B1\n', '- [ ] An agent wrote over it\n', '- [ ] Two #B2\n'])  # B1 was given once
         self.assertTrue(state)
         with mock.patch.object(backlog, 'VERSIONS', 3):
             for at in range(5):
@@ -179,7 +199,7 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(len(list((backlog.folder() / 'versions').glob('*.md'))), 3)
 
     def test_a_failed_copy_does_not_stop_a_save(self):
-        with mock.patch.object(backlog, '_write', side_effect=[None]), mock.patch.object(Path, 'glob', side_effect=OSError('full')):
+        with mock.patch.object(backlog, '_write', side_effect=[None, None]), mock.patch.object(Path, 'glob', side_effect=OSError('full')):
             backlog.save('- [ ] One\n', backlog.read()['version'])
 
     def test_nothing_is_lost_with_many_processes_writing(self):

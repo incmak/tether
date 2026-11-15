@@ -65,6 +65,8 @@ const numbered = '- [ ] One #B7\n- [ ] Two #B8\n  - [ ] sub step\n\n## p\n* [x] 
 assert.equal(b.withIds(unnumbered), numbered)
 assert.equal(b.withIds(numbered), numbered, 'IDs stay')
 assert.equal(b.withIds('- [ ] A  \n'), '- [ ] A #B1\n')
+assert.equal(b.withIds('- [ ] Old #B2\n- [ ] New\n', 9), '- [ ] Old #B2\n- [ ] New #B9\n', 'the server next_id counts IDs that left the list')
+assert.equal(b.withIds('- [ ] Old #B12\n- [ ] New\n', 9), '- [ ] Old #B12\n- [ ] New #B13\n')
 const tracked = '- [ ] Fix (codex · pane %12 · chat 019a) #B12\n  - Doing: claude · tmux $3 · pane %40 · chat abcd\n  - why\n- [x] Old #B7\n  - Done: fixed in 1234abc (claude · chat ef)\n'
 const [open, old] = plain(b.parseBacklog(tracked))
 assert.equal(open.text, 'Fix')
