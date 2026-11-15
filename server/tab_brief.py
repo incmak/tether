@@ -449,7 +449,9 @@ class Briefer:
         if manual and not self._claim(thread):  # the automatic worker claims its own thread in _run
             raise ValueError('A brief for this chat is already being written.')
         try:
-            self.store.update(thread, state='running', error='', agent=agent)  # saved first: a crash never retries
+            # saved first: a crash never retries. 'edits' counts the person's saves, so one made while the model
+            # runs is never overwritten, even by "Write with AI".
+            started = self.store.update(thread, state='running', error='', agent=agent).get('edits', 0)
             try:
                 made = self.generate(entry, pairs[:TURNS])
             except RuntimeError as error:
@@ -463,7 +465,7 @@ class Briefer:
                 print(f'tab brief name failed: {error!r}', flush=True)
 
             def description(record):  # checked under the store lock: a description the person saves meanwhile wins
-                if manual or record.get('description_by') != 'user':
+                if record.get('edits', 0) == started and (manual or record.get('description_by') != 'user'):
                     return {'description': made['description'], 'description_by': 'ai'}
                 return {}
             return self.store.update(thread, merge=description, name=made['name'], state='done', error='',
@@ -479,7 +481,8 @@ class Briefer:
         text = _plain(description)
         if len(text) > DESCRIPTION_LIMIT:
             raise ValueError(f'Keep the description under {DESCRIPTION_LIMIT} characters.')
-        return self.store.update(thread, description=text, description_by='user')
+        return self.store.update(thread, merge=lambda record: {'edits': record.get('edits', 0) + 1},
+                                 description=text, description_by='user')
 
 
 BRIEFER = Briefer()

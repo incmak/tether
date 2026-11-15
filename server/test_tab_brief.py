@@ -224,6 +224,12 @@ class StoreAndBriefer(unittest.TestCase):
         self.briefer.generate = generate
         record = self.briefer.handle(entry(), lambda e: chat('Add a search box to files now', 'ok'), self.apply, lambda: True)
         self.assertEqual((record['state'], record['description'], record['description_by']), ('done', 'Typed meanwhile', 'user'))
+        # "Write with AI" replaces an older description of the person's, but not one saved while it runs.
+        record = self.briefer.write(entry(), chat('Add a search box to files now', 'ok'), self.apply, lambda: True, manual=True)
+        self.assertEqual((record['description'], record['description_by']), ('Typed meanwhile', 'user'))
+        self.briefer.generate = lambda entry_, pairs: {'name': 'Files search', 'description': 'From the model.'}
+        record = self.briefer.write(entry(), chat('Add a search box to files now', 'ok'), self.apply, lambda: True, manual=True)
+        self.assertEqual((record['description'], record['description_by']), ('From the model.', 'ai'))
 
     def test_runs_once_and_keeps_no_chat_text(self):
         messages = chat('Add a search box to the files screen please', 'Done.')
