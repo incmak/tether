@@ -5,14 +5,16 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import auth
 import dev_previews
-from dev_previews import DevPreviews, Refused
+from dev_previews import DevPreviews, Guard, Refused
 
 UID = 1000
 PROC_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -124,7 +126,8 @@ class LeaseTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         self.listening = fake_listeners()
-        self.previews = DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        # A dev port prefers ports[dev_port % len(ports)]: 5173 gets 7700 and 3000 gets 7701.
+        self.previews = DevPreviews(ports=[7701, 7700], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
 
     def token(self, link):
         return link.split('token=')[1].split('&')[0]
@@ -224,6 +227,30 @@ class LeaseTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, code)
         self.assertEqual(self.previews.leases, {})
 
+    def test_a_dev_port_keeps_its_pool_port(self):
+        # Review finding 2: a pool port that moves between dev servers hands one app the other's storage.
+        ports = list(range(7700, 7710))
+        first = DevPreviews(ports=ports, listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        self.assertEqual(first.open(3000)['port'], 7700)  # 3000 % 10
+        self.assertEqual(first.open(5173)['port'], 7703)
+        self.assertEqual(first.open(5174)['port'], 7704)
+        self.now[0] += dev_previews.IDLE + 1  # every lease ends; the same dev port comes back to the same origin
+        self.assertEqual(first.open(5173)['port'], 7703)
+        restarted = DevPreviews(ports=ports, listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        self.assertEqual(restarted.open(5173)['port'], 7703)
+        self.assertEqual(restarted.open(8000)['port'], 7700)
+        self.assertEqual(restarted.open(3000)['port'], 7701)  # its own port is taken: the next free one
+
+    def test_alive_ends_with_the_lease(self):
+        self.previews.open(5173)
+        lease = self.previews.leases[7700]
+        self.assertTrue(self.previews.alive(lease))
+        self.previews.leases[7700] = dev_previews.Lease(7700, 3000, self.now[0])
+        self.assertFalse(self.previews.alive(lease))
+        self.assertTrue(self.previews.alive(self.previews.leases[7700]))
+        self.now[0] += dev_previews.IDLE + 1
+        self.assertFalse(self.previews.alive(self.previews.leases[7700]))
+
     def test_state_lists_leases_with_hints(self):
         self.previews.open(5173)
         self.previews.leases[7700].hint = 'next'
@@ -276,6 +303,95 @@ class HeaderTests(unittest.TestCase):
         self.assertEqual(dev_previews.frame_ancestors('box.example:7700', 7683),
                          "'self' https://box.example http://box.example:7683 https://box.example:7683")
         self.assertEqual(dev_previews.frame_ancestors('bad host;x', 7683), "'self'")
+
+    def test_who_may_send_a_request(self):
+        # Review finding 1: ports share a site, so the cookie comes with requests from other pool ports too.
+        public = 'https://box.example:7700'
+        allowed = dev_previews.allowed_source
+        nav = {'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe'}
+        for method, upgrading, headers in (('GET', False, {}), ('HEAD', False, {}), ('GET', False, nav),
+                                           ('GET', False, dict(nav, **{'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document'})),
+                                           ('GET', False, {'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate'}),
+                                           ('GET', False, {'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'no-cors'}),
+                                           ('POST', False, {'Origin': public}), ('GET', True, {'Origin': public}),
+                                           ('POST', False, {'Sec-Fetch-Site': 'same-origin'}),
+                                           ('GET', False, {'Origin': public, 'Sec-Fetch-Site': 'same-origin'})):
+            self.assertTrue(allowed(method, upgrading, headers, public), (method, upgrading, headers))
+        for method, upgrading, headers in (('POST', False, {}), ('DELETE', False, {}), ('OPTIONS', False, {}), ('GET', True, {}),
+                                           ('POST', False, {'Origin': 'https://box.example:7701'}),
+                                           ('POST', False, {'Origin': 'http://box.example:7700'}),
+                                           ('POST', False, {'Origin': 'https://box.example'}),
+                                           ('POST', False, {'Origin': 'null'}), ('POST', False, {'Origin': ''}),
+                                           ('GET', False, {'Origin': 'https://box.example:7701'}),
+                                           ('GET', True, {'Origin': 'https://box.example:7701'}),
+                                           ('POST', False, nav), ('GET', True, nav),
+                                           ('GET', False, dict(nav, **{'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'script'})),
+                                           ('GET', False, {'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'cors'}),
+                                           ('GET', False, {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image'}),
+                                           ('GET', False, dict(nav, **{'Sec-Fetch-Dest': 'object'}))):
+            self.assertFalse(allowed(method, upgrading, headers, public), (method, upgrading, headers))
+
+    def test_request_framing_has_one_meaning(self):
+        import http.client as client
+        import io
+
+        def framing(lines, version='HTTP/1.1'):
+            return dev_previews.request_framing(client.parse_headers(io.BytesIO(('\r\n'.join(lines) + '\r\n\r\n').encode('latin-1'))), version)
+        self.assertEqual(framing(['Host: x']), ('none', 0))
+        self.assertEqual(framing(['Content-Length: 12']), ('length', 12))
+        self.assertEqual(framing(['Content-Length: 12', 'content-length:  12 ']), ('length', 12))
+        self.assertEqual(framing(['Transfer-Encoding: Chunked']), ('chunked', None))
+        for lines in (['Content-Length: 12', 'Content-Length: 13'], ['Content-Length: 12', 'Transfer-Encoding: chunked'],
+                      ['Transfer-Encoding: gzip, chunked'], ['Transfer-Encoding: chunked', 'Transfer-Encoding: chunked'],
+                      ['Transfer-Encoding: identity'], ['Content-Length: 1x'], ['Content-Length: +1'], ['Content-Length: 1, 1'],
+                      ['Content-Length: -1'], ['Content-Length:'], ['A: b', ' folded'], ['A: b\x01c'],
+                      ['Bad Name: x'], ['no colon here', 'A: b']):
+            with self.assertRaises(ValueError, msg=lines):
+                framing(lines)
+        with self.assertRaises(ValueError):
+            framing(['Transfer-Encoding: chunked'], 'HTTP/1.0')
+
+    def test_raw_request_heads_are_checked_line_by_line(self):
+        ok = dev_previews.raw_head_ok
+        self.assertTrue(ok([b'GET /a?b=c HTTP/1.1\r\n', b'Host: x\r\n', b'X-Text: caf\xc3\xa9\tx\r\n', b'\r\n']))
+        self.assertTrue(ok([b'GET / HTTP/1.0\r\n', b'\r\n']))
+        for lines in ([b'GET / HTTP/1.1\r\n', b'A: b\rX: y\r\n', b'\r\n'],     # the parser would make two headers of it
+                      [b'GET / HTTP/1.1\r\n', b'A: b\n', b'\r\n'],               # a bare LF ends a line for some servers
+                      [b'GET / HTTP/1.1\r\n', b'A: b\r\n', b' folded\r\n', b'\r\n'],
+                      [b'GET / HTTP/1.1\r\n', b'A : b\r\n', b'\r\n'], [b'GET / HTTP/1.1\r\n', b'A: b\x00\r\n', b'\r\n'],
+                      [b'GET / HTTP/1.1\r\n', b'no colon\r\n', b'\r\n'], [b'GET  / HTTP/1.1\r\n', b'\r\n'],
+                      [b'GET /a\rb HTTP/1.1\r\n', b'\r\n'], [b'GET / HTTP/1.1\r\n', b'A: b\r\n'], [b'GET / HTTP/1.1\r\n'], [],
+                      [b'GET / HTTP/1.1\r\n'] + [b'A: b\r\n'] * 300 + [b'\r\n']):
+            self.assertFalse(ok(lines), lines[:3])
+
+    def test_response_framing_has_one_meaning(self):
+        def framing(lines, code=200, method='GET', upgrading=False):
+            return dev_previews.response_framing(b'\r\n'.join([b'HTTP/1.1 %d X' % code] + lines), code, method, upgrading)
+        self.assertEqual(framing([b'Content-Length: 5']), ('length', 5))
+        self.assertEqual(framing([b'Content-Length: 5', b'content-length: 5']), ('length', 5))
+        self.assertEqual(framing([b'Transfer-Encoding: chunked']), ('chunked', None))
+        self.assertEqual(framing([b'A: b']), ('close', None))
+        self.assertEqual(framing([b'Content-Length: 5'], method='HEAD'), ('none', 5))
+        self.assertEqual(framing([], code=304), ('none', None))
+        self.assertEqual(framing([b'Upgrade: websocket'], code=101, upgrading=True), ('upgrade', None))
+        self.assertIsNone(framing([b'Upgrade: websocket'], code=101))  # a switch that nobody asked for
+        for lines in ([b'Content-Length: 5', b'Content-Length: 6'], [b'Content-Length: 5', b'Transfer-Encoding: chunked'],
+                      [b'Transfer-Encoding: gzip'], [b'Transfer-Encoding: chunked', b'Transfer-Encoding: chunked'],
+                      [b'Content-Length: 5x'], [b'Content-Length: -5'], [b'Content-Length:']):
+            self.assertIsNone(framing(lines), lines)
+        self.assertIsNone(framing([b'Content-Length: 5', b'Transfer-Encoding: chunked'], method='HEAD'))
+        self.assertIsNone(dev_previews.response_code(b'HTTP/1.1 200 OK\r\nA: b\x01c'))
+        self.assertIsNone(dev_previews.response_code(b'HTTP/1.1 200 OK\r\nA: b\x7f'))
+
+    def test_the_marker_is_signed_per_port_and_dev_server(self):
+        with unittest.mock.patch.object(dev_previews, 'marker_key', lambda: b'key'):
+            first = dev_previews.marker(7700, 5173)
+            self.assertTrue(first.startswith('5173.'))
+            self.assertEqual(first, dev_previews.marker(7700, 5173))
+            self.assertNotEqual(first.split('.')[1], dev_previews.marker(7701, 5173).split('.')[1])
+            self.assertNotEqual(first.split('.')[1], dev_previews.marker(7700, 5174).split('.')[1])
+        with unittest.mock.patch.object(dev_previews, 'marker_key', lambda: b'other'):
+            self.assertNotEqual(first, dev_previews.marker(7700, 5173))
 
     def test_serve_commands(self):
         self.assertEqual(dev_previews.serve_commands([7700]), ['tailscale serve --bg --https=7700 http://127.0.0.1:7700'])
@@ -352,6 +468,39 @@ class Upstream(BaseHTTPRequestHandler):
             self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nheld')
             Upstream.release.wait(10)
             self.close_connection = True
+        elif self.path == '/flood':
+            # A long answer for a client that stops reading: the write blocks once the buffers are full.
+            self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2000000000\r\n\r\n')
+            try:
+                for _ in range(4000):
+                    self.connection.sendall(b'x' * 65536)
+            except OSError:
+                pass
+            self.close_connection = True
+        elif self.path == '/slow-head':
+            try:
+                self.connection.sendall(b'HTTP/1.1 200 OK\r\n')
+                for index in range(40):
+                    time.sleep(0.1)
+                    self.connection.sendall(b'X-Drip-%d: 1\r\n' % index)
+                self.connection.sendall(b'Content-Length: 2\r\n\r\nok')
+            except OSError:
+                pass
+            self.close_connection = True
+        elif self.path.startswith('/raw/'):
+            answers = {
+                'two-lengths': b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 5\r\n\r\nhello',
+                'length-and-chunked': b'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n',
+                'odd-coding': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nhello',
+                'bad-length': b'HTTP/1.1 200 OK\r\nContent-Length: 2x\r\n\r\nhi',
+                'control': b'HTTP/1.1 200 OK\r\nX-A: b\x01c\r\nContent-Length: 2\r\n\r\nhi',
+                'same-length-twice': b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\ncontent-length: 2\r\n\r\nhi',
+                'chunk-ext': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Trailer\r\n\r\n5;ext=1\r\nfirst\r\n6\r\nsecond\r\n0\r\nX-Trailer: hidden\r\n\r\n',
+                'bad-chunk': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\nzz\r\nsecond\r\n0\r\n\r\n',
+                'unasked-switch': b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nraw bytes',
+            }
+            self.connection.sendall(answers[self.path[len('/raw/'):]])
+            self.close_connection = True
         elif self.path == '/_next/static/chunk.js':
             self.reply(403, b'Unauthorized')
         else:
@@ -369,11 +518,16 @@ class ProxyTests(unittest.TestCase):
         Upstream.release = threading.Event()
         self.upstream = ThreadingHTTPServer(('127.0.0.1', 0), Upstream)
         self.upstream.daemon_threads = True
+        self.upstream.handle_error = lambda *_args: None  # a cut connection is part of several tests
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.dev_port = self.upstream.server_port
         self.previews = DevPreviews()
         self.logged = []
-        self.servers = dev_previews.start('127.0.0.1', 7683, previews=self.previews, ports=[0], log=self.logged.append)
+        key = unittest.mock.patch.object(dev_previews, 'marker_key', lambda: b'test-marker-key')  # not the real access token
+        key.start()
+        self.addCleanup(key.stop)
+        self.guard = self.make_guard()
+        self.servers = dev_previews.start('127.0.0.1', 7683, previews=self.previews, ports=[0], log=self.logged.append, guard=self.guard)
         self.port = self.servers[0].server_port
         self.host = 'box.example:%d' % self.port
         self.cookie = None
@@ -384,10 +538,16 @@ class ProxyTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def request(self, method, path, headers=None, body=None, cookie=True):
+    def make_guard(self):
+        return Guard(lease_check=0.2)
+
+    def request(self, method, path, headers=None, body=None, cookie=True, origin=True):
         headers = dict({'Host': self.host}, **(headers or {}))
         if cookie and self.cookie and 'Cookie' not in headers:
             headers['Cookie'] = self.cookie
+        if origin and method not in ('GET', 'HEAD') and 'Origin' not in headers:
+            # A browser sends Origin with every write. tailscale serve adds X-Forwarded-Proto: https.
+            headers['Origin'] = ('https://' if headers.get('X-Forwarded-Proto') == 'https' else 'http://') + self.host
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
@@ -399,8 +559,32 @@ class ProxyTests(unittest.TestCase):
         link = self.previews.open(self.dev_port, path)
         response, _ = self.request('GET', link['frame'], {'X-Forwarded-Proto': 'https'} if secure else None, cookie=False)
         self.assertEqual(response.status, 302)
-        self.cookie = response.getheader('Set-Cookie').split(';')[0]
+        cookies = response.msg.get_all('Set-Cookie')
+        self.cookie = cookies[0].split(';')[0]
+        self.marker = cookies[1].split(';')[0] if len(cookies) > 1 else None
         return link, response
+
+    def raw(self, request, wait=10):
+        """Send bytes as they are and return everything the proxy answers until it closes."""
+        client = socket.create_connection(('127.0.0.1', self.port), timeout=wait)
+        self.addCleanup(client.close)
+        client.sendall(request)
+        answer = b''
+        try:
+            while True:
+                data = client.recv(65536)
+                if not data:
+                    break
+                answer += data
+        except OSError:
+            pass
+        return answer
+
+    def head(self, method='GET', path='/', version='HTTP/1.1', origin=True):
+        lines = ['%s %s %s' % (method, path, version), 'Host: ' + self.host, 'Cookie: ' + self.cookie]
+        if origin:
+            lines.append('Origin: http://' + self.host)
+        return '\r\n'.join(lines).encode() + b'\r\n'
 
     def last(self):
         entry = Upstream.seen[-1]
@@ -418,7 +602,7 @@ class ProxyTests(unittest.TestCase):
                                       ('GET', '/', {'Cookie': 'tether_preview_%d=guess' % self.port}),
                                       ('GET', '/', {'Tailscale-User-Login': 'owner@example.com'}),
                                       ('GET', '/ws', {'Connection': 'Upgrade', 'Upgrade': 'websocket'})):
-            response, data = self.request(method, path, headers, cookie=False)
+            response, data = self.request(method, path, dict(headers or {}, Origin='http://' + self.host), cookie=False)
             self.assertEqual(response.status, 401, (method, path))
             self.assertIn(b'This preview has ended', data)
             self.assertIn(b'tetherPreview:"expired"', data)
@@ -432,7 +616,7 @@ class ProxyTests(unittest.TestCase):
     def test_the_token_becomes_a_cookie_and_a_clean_url(self):
         link, response = self.sign_in('/app?tab=1#top', secure=True)
         self.assertEqual(response.getheader('Location'), '/app?tab=1#top')
-        cookie = response.getheader('Set-Cookie')
+        cookie = response.msg.get_all('Set-Cookie')[0]
         self.assertTrue(cookie.startswith('tether_preview_%d=' % self.port))
         for part in ('; HttpOnly', '; SameSite=Strict', '; Secure', '; Path=/'):
             self.assertIn(part, cookie)
@@ -440,7 +624,7 @@ class ProxyTests(unittest.TestCase):
         # The used link: 401 without the cookie, and the page again with it (Reload, a second tap).
         self.assertEqual(self.request('GET', link['frame'], cookie=False)[0].status, 401)
         self.assertEqual(self.request('GET', link['frame'])[0].status, 302)
-        self.assertNotIn('Secure', self.request('GET', link['browser'], cookie=False)[0].getheader('Set-Cookie'))
+        self.assertNotIn('Secure', self.request('GET', link['browser'], cookie=False)[0].msg.get_all('Set-Cookie')[0])
         response, data = self.request('GET', '/app?tab=1')
         self.assertEqual((response.status, json.loads(data)), (200, {'path': '/app?tab=1'}))
         self.assertEqual([entry['path'] for entry in Upstream.seen], ['/app?tab=1'])  # the token link never reaches the dev server
@@ -480,10 +664,208 @@ class ProxyTests(unittest.TestCase):
         self.request('GET', '/')
         self.assertNotIn('cookie', self.last()[1])
 
-    def test_another_sites_origin_is_not_translated(self):
+    def test_requests_from_another_origin_never_reach_the_dev_server(self):
+        # Review finding 1. A page on another pool port is the same site: the browser sends this port's cookie with
+        # its requests. The cookie is valid here; the request is still refused.
         self.sign_in()
-        self.request('POST', '/api', {'Origin': 'https://evil.example'}, body=b'x')
-        self.assertEqual(self.last()[1]['origin'], 'https://evil.example')
+        other = 'http://box.example:%d' % (self.port + 1)
+        script = {'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'script'}
+        upgrade = {'Connection': 'Upgrade', 'Upgrade': 'websocket'}
+        for method, path, headers in (('POST', '/api/delete-all', {'Origin': other}), ('PUT', '/api', {'Origin': other}),
+                                      ('DELETE', '/api', {'Origin': 'https://evil.example'}), ('POST', '/api', {'Origin': 'null'}),
+                                      ('POST', '/api', {'Origin': 'https://' + self.host}),  # another scheme is another origin
+                                      ('GET', '/api/private', {'Origin': other, 'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'cors'}),
+                                      ('GET', '/src/secret.js', script), ('GET', '/ws', dict(upgrade, Origin=other)),
+                                      ('POST', '/form', {'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'})):
+            response, data = self.request(method, path, headers, body=b'x' if method in ('POST', 'PUT') else None, origin=False)
+            self.assertEqual(response.status, 403, (method, path, headers))
+            self.assertIn(b'Tether refused this request', data)
+        for method, headers in (('POST', {}), ('GET', upgrade)):  # a write or a WebSocket that names no origin at all
+            self.assertEqual(self.request(method, '/ws', headers, origin=False)[0].status, 403)
+        self.assertEqual(Upstream.seen, [])
+
+    def test_the_page_itself_and_navigations_reach_the_dev_server(self):
+        self.sign_in()
+        own = 'http://' + self.host
+        for method, headers in (('GET', {}), ('GET', {'Sec-Fetch-Site': 'same-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe'}),
+                                ('GET', {'Sec-Fetch-Site': 'none', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'}),
+                                ('GET', {'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors'}),
+                                ('POST', {'Origin': own}), ('DELETE', {'Origin': own, 'Sec-Fetch-Site': 'same-origin'}),
+                                ('POST', {'Sec-Fetch-Site': 'same-origin'})):
+            self.assertEqual(self.request(method, '/ok', headers, origin=False)[0].status, 200, (method, headers))
+        self.assertEqual(len(Upstream.seen), 7)
+
+    def test_the_first_sign_in_clears_the_origin_and_later_ones_do_not(self):
+        # Review finding 2: this browser may hold storage of another dev server on this origin.
+        link, response = self.sign_in(secure=True)
+        self.assertEqual(response.getheader('Clear-Site-Data'), '"cache", "storage", "executionContexts"')
+        self.assertNotIn('cookies', response.getheader('Clear-Site-Data'))  # cookies span ports: Tether's session too
+        mark = response.msg.get_all('Set-Cookie')[1]
+        self.assertTrue(mark.startswith('tether_preview_%d_app=%d.' % (self.port, self.dev_port)))
+        for part in ('; HttpOnly', '; SameSite=Strict', '; Secure', '; Path=/'):
+            self.assertIn(part, mark)
+        both = '%s; %s' % (self.cookie, self.marker)
+        again = self.previews.open(self.dev_port)
+        response, _ = self.request('GET', again['frame'], {'Cookie': both})
+        self.assertEqual(response.status, 302)
+        self.assertIsNone(response.getheader('Clear-Site-Data'))
+        self.assertEqual(len(response.msg.get_all('Set-Cookie')), 1)
+        # A marker for another dev server, a marker with no signature and a marker for another pool port do not count.
+        name = 'tether_preview_%d_app' % self.port
+        for forged in (dev_previews.marker(self.port, self.dev_port + 1), '%d.' % self.dev_port, str(self.dev_port),
+                       dev_previews.marker(self.port + 1, self.dev_port)):
+            response, _ = self.request('GET', self.previews.open(self.dev_port)['frame'], {'Cookie': '%s; %s=%s' % (self.cookie, name, forged)})
+            self.assertEqual(response.getheader('Clear-Site-Data'), '"cache", "storage", "executionContexts"', forged)
+        self.assertEqual(self.request('GET', '/', {'Cookie': both})[0].status, 200)  # the marker is no key ...
+        self.assertNotIn('cookie', self.last()[1])                                   # ... and stays with Tether
+
+    def test_a_pool_port_that_moves_to_another_dev_server_ends_the_old_one(self):
+        # Review finding 2: the old cookie, the old WebSocket and the old storage must not carry over.
+        self.sign_in()
+        old_cookie, old_marker = self.cookie, self.marker
+        client = socket.create_connection(('127.0.0.1', self.port), timeout=10)
+        self.addCleanup(client.close)
+        client.sendall(self.head(path='/ws') + b'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+        self.assertTrue(client.recv(4096).startswith(b'HTTP/1.1 101 '))
+        client.sendall(b'one')
+        self.assertEqual(client.recv(4096), b'echo:one')
+        second = ThreadingHTTPServer(('127.0.0.1', 0), Upstream)
+        second.daemon_threads = True
+        second.handle_error = lambda *_args: None
+        threading.Thread(target=second.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (second.shutdown(), second.server_close()))
+        self.previews.leases[self.port].used -= dev_previews.REUSE_AFTER + 1  # idle long enough for a full pool to take it
+        link = self.previews.open(second.server_port)
+        self.assertEqual(link['port'], self.port)
+        self.assertEqual(client.recv(4096), b'')  # the old page's live connection ended
+        self.assertEqual(self.request('GET', '/', {'Cookie': old_cookie})[0].status, 401)
+        self.assertEqual(self.request('POST', '/api', {'Cookie': old_cookie})[0].status, 401)
+        response, _ = self.request('GET', link['frame'], {'Cookie': '%s; %s' % (old_cookie, old_marker)})
+        self.assertEqual((response.status, response.getheader('Clear-Site-Data')), (302, '"cache", "storage", "executionContexts"'))
+        self.assertTrue(response.msg.get_all('Set-Cookie')[1].startswith('tether_preview_%d_app=%d.' % (self.port, second.server_port)))
+
+    def test_a_connection_that_another_user_owns_gets_no_bytes(self):
+        # Review finding 3: the listener check is cached; the port may belong to someone else when the proxy connects.
+        self.sign_in()
+        self.assertEqual(self.request('GET', '/')[0].status, 200)  # the listener table now says "ours", for 2 s
+        Upstream.seen = []
+        for owner in (os.getuid() + 1, 0, None):
+            self.previews.peer_uid = lambda sock, owner=owner: owner
+            response, data = self.request('POST', '/api/secret', body=b'token=1')
+            self.assertEqual(response.status, 502, owner)
+            self.assertIn(b'now belongs to another program or user', data)
+        self.assertEqual(Upstream.seen, [])
+        self.assertIsNotNone(self.previews.leases[self.port].gone)
+
+        def broken(sock):
+            raise OSError('no socket table')
+        self.previews.peer_uid = broken
+        self.assertEqual(self.request('GET', '/')[0].status, 502)
+        self.previews.peer_uid = dev_previews.connection_uid
+        self.assertEqual(self.request('GET', '/')[0].status, 200)
+
+    def test_the_socket_table_names_the_owner_of_this_connection(self):
+        for family, address in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1'), (socket.AF_INET6, '::')):
+            with socket.socket(family) as listener:
+                try:
+                    listener.bind((address, 0))
+                except OSError:
+                    continue  # no IPv6 here
+                listener.listen(2)
+                port = listener.getsockname()[1]
+                targets = ['127.0.0.1', '::1'] if address == '::' else [address]
+                for target in targets:
+                    try:
+                        client = socket.create_connection((target, port), timeout=5)
+                    except OSError:
+                        continue  # an IPv6-only wildcard listener
+                    with client:
+                        self.assertEqual(dev_previews.connection_uid(client), os.getuid(), (address, target))  # before accept
+                        accepted, _ = listener.accept()
+                        with accepted:
+                            self.assertEqual(dev_previews.connection_uid(client), os.getuid(), (address, target))
+                            with tempfile.TemporaryDirectory() as empty:
+                                self.assertIsNone(dev_previews.connection_uid(client, tries=1, root=empty))
+        # The proxy's own check without a socket table (macOS): the listeners are read again, not taken from the cache.
+        self.previews.peer_uid = None
+        with socket.socket() as probe:
+            self.assertTrue(self.previews.verify(probe, self.dev_port, '127.0.0.1'))
+            self.assertFalse(self.previews.verify(probe, self.dev_port, '::1'))
+            self.upstream.shutdown()
+            self.upstream.server_close()
+            self.assertFalse(self.previews.verify(probe, self.dev_port, '127.0.0.1'))
+
+    def test_ambiguous_requests_are_refused(self):
+        # Review finding 5 (RFC 9112, 6.3): the proxy and the dev server must read the same message.
+        self.sign_in()
+        post = self.head('POST', '/api')
+        for name, request in (
+                ('two lengths', post + b'Content-Length: 5\r\nContent-Length: 11\r\n\r\nhelloGET /x'),
+                ('length and chunked', post + b'Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n'),
+                ('chunked and length', post + b'Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n0\r\n\r\n'),
+                ('two codings', post + b'Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n'),
+                ('chunked twice', post + b'Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n'),
+                ('not a number', post + b'Content-Length: 5x\r\n\r\nhello'),
+                ('signed number', post + b'Content-Length: +5\r\n\r\nhello'),
+                ('folded header', post + b'X-A: b\r\n Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello'),
+                ('control character', post + b'X-A: b\x01c\r\nContent-Length: 5\r\n\r\nhello'),
+                ('bare CR', post + b'X-A: b\rX-B: c\r\nContent-Length: 5\r\n\r\nhello'),
+                ('bare LF', post + b'X-A: b\nContent-Length: 5\r\n\r\nhello'),
+                ('space before the colon', post + b'Content-Length : 5\r\n\r\nhello'),
+                ('chunked in HTTP/1.0', self.head('POST', '/api', 'HTTP/1.0') + b'Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n'),
+                ('WebSocket with a body', self.head('GET', '/ws') + b'Connection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 5\r\n\r\nhello')):
+            answer = self.raw(request)
+            self.assertTrue(answer.startswith(b'HTTP/1.1 400 '), (name, answer[:60]))
+        for name, body in (('bad chunk size', b'5x\r\nhello\r\n0\r\n\r\n'), ('no chunk end', b'5\r\nhelloXX0\r\n\r\n'),
+                           ('negative size', b'-5\r\nhello\r\n0\r\n\r\n'), ('bad trailer', b'5\r\nhello\r\n0\r\nno colon\r\n\r\n')):
+            self.assertNotIn(b' 200 ', self.raw(post + b'Transfer-Encoding: chunked\r\n\r\n' + body)[:20], name)
+        self.assertEqual(Upstream.seen, [])  # no complete request reached the dev server
+
+    def test_request_framing_is_written_again(self):
+        self.sign_in()
+        post = self.head('POST', '/api')
+        answer = self.raw(post + b'Transfer-Encoding: chunked\r\nTrailer: X-Trailer\r\n\r\n5;ext=1\r\nhello\r\n6 ;x\r\n world\r\n0\r\nX-Trailer: hidden\r\n\r\n')
+        self.assertTrue(answer.startswith(b'HTTP/1.1 200 '), answer[:60])
+        entry, headers = self.last()
+        self.assertEqual(entry['body'], b'hello world')
+        self.assertEqual(headers['transfer-encoding'], 'chunked')
+        names = [name for name, _ in entry['headers']]
+        for gone in ('content-length', 'trailer', 'x-trailer'):
+            self.assertNotIn(gone, names)
+        answer = self.raw(post + b'Content-Length: 5\r\ncontent-length: 5\r\n\r\nhello')  # the same length twice is one length
+        self.assertTrue(answer.startswith(b'HTTP/1.1 200 '), answer[:60])
+        entry, _ = self.last()
+        self.assertEqual(entry['body'], b'hello')
+        self.assertEqual([value for name, value in entry['headers'] if name == 'content-length'], ['5'])
+
+    def test_ambiguous_answers_are_refused(self):
+        self.sign_in()
+        for name in ('two-lengths', 'length-and-chunked', 'odd-coding', 'bad-length', 'control', 'unasked-switch'):
+            response, data = self.request('GET', '/raw/' + name)
+            self.assertEqual(response.status, 502, name)
+            self.assertNotIn(b'hello', data)
+            self.assertNotIn(b'raw bytes', data)
+
+    def test_answer_framing_is_written_again(self):
+        self.sign_in()
+        answer = self.raw(self.head(path='/raw/chunk-ext') + b'\r\n')
+        head, _, body = answer.partition(b'\r\n\r\n')
+        self.assertTrue(head.startswith(b'HTTP/1.1 200 '))
+        self.assertIn(b'transfer-encoding: chunked', head.lower())
+        self.assertNotIn(b'trailer', head.lower())
+        self.assertEqual(body, b'5\r\nfirst\r\n6\r\nsecond\r\n0\r\n\r\n')  # no extension, no trailer
+        response, data = self.request('GET', '/raw/chunk-ext')
+        self.assertEqual((response.status, data), (200, b'firstsecond'))
+        # An HTTP/1.0 client cannot read chunks: the body comes plain and ends with the connection.
+        answer = self.raw(self.head(path='/raw/chunk-ext', version='HTTP/1.0') + b'\r\n')
+        head, _, body = answer.partition(b'\r\n\r\n')
+        self.assertNotIn(b'transfer-encoding', head.lower())
+        self.assertEqual(body, b'firstsecond')
+        response, data = self.request('GET', '/raw/same-length-twice')
+        self.assertEqual((response.status, data, response.msg.get_all('Content-Length')), (200, b'hi', ['2']))
+        # A broken chunk ends the answer without the final chunk: the client knows it is incomplete.
+        answer = self.raw(self.head(path='/raw/bad-chunk') + b'\r\n')
+        self.assertTrue(answer.endswith(b'5\r\nfirst\r\n'), answer[-40:])
 
     def test_location_names_the_public_origin(self):
         self.sign_in()
@@ -512,7 +894,7 @@ class ProxyTests(unittest.TestCase):
             yield b'part one, '
             yield b'part two'
         connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
-        connection.request('PUT', '/upload', body=chunks(), headers={'Host': self.host, 'Cookie': self.cookie}, encode_chunked=True)
+        connection.request('PUT', '/upload', body=chunks(), headers={'Host': self.host, 'Cookie': self.cookie, 'Origin': 'http://' + self.host}, encode_chunked=True)
         self.assertEqual(connection.getresponse().status, 200)
         connection.close()
         self.assertEqual(self.last()[0]['body'], b'part one, part two')
@@ -588,6 +970,112 @@ class ProxyTests(unittest.TestCase):
         with self.assertRaises(Refused) as caught:
             self.previews.open(self.port)
         self.assertEqual(caught.exception.code, 'denied')
+
+
+class LimitTests(ProxyTests):
+    """Review finding 4: stalled clients and dev servers do not hold workers. Small limits make the tests fast."""
+
+    def make_guard(self):
+        return Guard(connections=3, sockets=1, accept=0.3, head=0.6, write=0.5, upstream_head=0.8, lease_check=0.2)
+
+    def free_slots(self, want, wait=6):
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and self.guard.connections._value != want:
+            time.sleep(0.05)
+        return self.guard.connections._value
+
+    def test_a_dripping_request_head_has_one_deadline(self):
+        client = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        self.addCleanup(client.close)
+        client.sendall(b'GET / HTTP/1.1\r\nHost: x\r\n')
+        started, closed = time.monotonic(), False
+        try:
+            while time.monotonic() - started < 4:
+                time.sleep(0.2)  # each read gets bytes in time; the head as a whole does not
+                client.sendall(b'X-Drip: 1\r\n')
+                client.settimeout(0.01)
+                try:
+                    if client.recv(1) == b'':
+                        closed = True
+                        break
+                except socket.timeout:
+                    pass
+        except OSError:
+            closed = True
+        self.assertTrue(closed, 'the dripping connection stayed open')
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.free_slots(3), 3)
+
+    def test_connections_have_a_limit(self):
+        self.guard.head = 30  # the idle connections below stay
+        idle = [socket.create_connection(('127.0.0.1', self.port), timeout=5) for _ in range(3)]
+        for sock in idle:
+            self.addCleanup(sock.close)
+        self.assertEqual(self.free_slots(0), 0)
+        started = time.monotonic()
+        self.assertEqual(self.raw(b'GET / HTTP/1.1\r\nHost: x\r\n\r\n', wait=5), b'')  # closed, no worker
+        self.assertLess(time.monotonic() - started, 3)
+        idle[0].close()
+        self.assertTrue(self.raw(b'GET / HTTP/1.1\r\nHost: x\r\n\r\n').startswith(b'HTTP/1.1 401 '))
+        for sock in idle:
+            sock.close()
+        self.assertEqual(self.free_slots(3), 3)
+
+    def test_websockets_have_a_limit(self):
+        self.sign_in()
+        upgrade = self.head(path='/ws') + b'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n'
+        first = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        self.addCleanup(first.close)
+        first.sendall(upgrade)
+        self.assertTrue(first.recv(4096).startswith(b'HTTP/1.1 101 '))
+        self.assertTrue(self.raw(upgrade).startswith(b'HTTP/1.1 503 '))
+        self.assertEqual(self.request('GET', '/')[0].status, 200)  # plain requests still pass
+        first.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and self.guard.sockets._value != 1:
+            time.sleep(0.05)
+        second = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        self.addCleanup(second.close)
+        second.sendall(upgrade)
+        self.assertTrue(second.recv(4096).startswith(b'HTTP/1.1 101 '))
+
+    def test_a_client_that_stops_reading_loses_its_worker(self):
+        self.sign_in()
+        client = socket.socket()
+        self.addCleanup(client.close)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(5)
+        client.connect(('127.0.0.1', self.port))
+        client.sendall(self.head(path='/flood') + b'\r\n')
+        self.assertTrue(client.recv(12).startswith(b'HTTP/1.1 200'))
+        self.assertEqual(self.free_slots(2, wait=1), 2)  # the worker is busy now
+        self.assertEqual(self.free_slots(3), 3)          # ... and gives up when the client takes no more bytes
+
+    def test_a_websocket_peer_that_stops_reading_loses_its_worker(self):
+        self.sign_in()
+        client = socket.socket()
+        self.addCleanup(client.close)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(5)
+        client.connect(('127.0.0.1', self.port))
+        client.sendall(self.head(path='/ws') + b'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+        self.assertTrue(client.recv(4096).startswith(b'HTTP/1.1 101 '))
+        try:
+            for _ in range(2000):  # the echo comes back; nobody reads it
+                client.sendall(b'x' * 65536)
+        except OSError:
+            pass
+        self.assertEqual(self.free_slots(3), 3)
+        self.assertEqual(self.guard.sockets._value, 1)
+
+    def test_a_dripping_answer_head_has_one_deadline(self):
+        self.sign_in()
+        started = time.monotonic()
+        response, data = self.request('GET', '/slow-head')
+        self.assertEqual(response.status, 502)
+        self.assertIn(b'took too long', data)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(self.free_slots(3), 3)
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
