@@ -185,6 +185,33 @@ class ContainerTests(unittest.TestCase):
             self.assertIsNone(browser_container.default('test'))
 
 
+    def test_import_starts_no_process_and_the_server_start_picks_the_container(self):
+        # The UI fixture servers import server.py under an audit hook that forbids subprocesses (test_cold_load.cjs).
+        import os, subprocess, sys
+        with tempfile.TemporaryDirectory() as folder:
+            docker = Path(folder) / 'docker'
+            docker.write_text('#!/bin/sh\nexit 0\n')
+            docker.chmod(0o755)
+            code = ("import sys\n"
+                    "def guard(event, args):\n"
+                    "    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'): raise RuntimeError('spawned')\n"
+                    "sys.addaudithook(guard)\n"
+                    "import browser\n"
+                    "print(browser.BROWSER.container)\n")
+            env = dict(os.environ, PATH=folder + os.pathsep + os.environ.get('PATH', ''), MOBILE_TMUX_BROWSER_SELKIES='1')
+            result = subprocess.run([sys.executable, '-c', code], cwd=Path(browser.__file__).parent, env=env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'None'), result.stderr[-2000:])
+        container = browser_container.Container('t', root=Path(self.tmp.name) / 'u', runner=Runner())
+        chrome = browser.Browser()
+        chrome.use_container(container)
+        self.assertIs(chrome.container, container)
+        self.assertEqual((chrome.chrome_finder(), chrome.launcher), ('container', container.launch))
+        chrome.pid = 1
+        with self.assertRaises(browser.BrowserError):
+            chrome.use_container(container)  # never swap the launcher of a running browser
+        chrome.pid = None
+
 class WindowChrome(FakeChrome):
     def answer(self, message):
         if message['method'] == 'Browser.getWindowForTarget':
