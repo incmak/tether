@@ -7,7 +7,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/overlay-regression/shots')
 const floating = '.status-stack, .attach-menu, .mode-menu, .notice-stack, .jump-button, .composer, .live-chips, .prompt-suggestion, .agent-bubble, .agent-pop'
-const states = ['heads-open', 'heads-tasks', 'approval', 'queue', 'attach-sheet', 'mode-menu', 'jump', 'toast']
+const states = ['heads-open', 'heads-tasks', 'approval', 'queue', 'attach-sheet', 'mode-menu', 'jump', 'toast', 'quiet']
 const sizes = [[390, 844], [820, 1180], [1280, 900]]
 const detail = Array.from({ length: 18 }, (_, i) => `- Check ${i + 1}: Review the overlay text and each available option before the next step. Keep this card readable while its long details scroll beneath the pinned chip row.`)
 const messages = Array.from({ length: 60 }, (_, i) => ({
@@ -31,7 +31,7 @@ function fixtures(state) {
       writable: true, session: pane.id, earlier: 0, limit: 100, state: pane.state, approval },
     footer: { observed: true, model: 'Claude', mode: 'default',
       suggestion: 'Review the next step',
-      heads_up: { text: 'Heads up · Overlay review', state: 'explained', detail,
+      heads_up: state === 'quiet' ? null : { text: 'Heads up · Overlay review', state: 'explained', detail,
         options: [{ key: '1', label: 'Understood' }, { key: '0', label: 'Dismiss' }] },
       ...(state === 'heads-tasks' ? { goal: 'Review overlays', tasks: ['1 shell', '1 monitor'] } : {}),
       notices: state === 'toast' ? ['Fixture notice: Review the overlay result.'] : [],
@@ -39,6 +39,7 @@ function fixtures(state) {
     prefs: { prefs: {}, version: 1 },
     'projects/marks': {},
     'projects/backlog': { text: '' },
+    'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
     'side-shells': { shells: [] },
     update: { current: '0.0.0', latest: '0.0.0', available: false },
     host: { name: 'Test server', office: false },
@@ -199,13 +200,21 @@ function inspectBubbles() {
       }
     }
   }
-  return { bubbles: bubbles.length, errors }
+  // A tab claims its 32px column only while it overlaps the chat foot. Otherwise the composer sits evenly.
+  const gutters = bubbles.filter(bubble => bubble.hasAttribute('data-gutter')).length
+  const area = document.querySelector('.chat-panel:not(.shell-page) .composer-area')
+  if (area && visible(area) && bubbles.length && !gutters) {
+    const s = getComputedStyle(area)
+    if (Math.abs(parseFloat(s.paddingLeft) - parseFloat(s.paddingRight)) > 0.5) errors.push(`no tab overlaps the chat foot, but the composer padding is ${s.paddingLeft} left, ${s.paddingRight} right`)
+  }
+  return { bubbles: bubbles.length, gutters, errors }
 }
 
 async function main() {
   let browser, page, server, passed = 0, failed = 0, cases = 0
   const endpoints = new Set(), unexpected = new Set(), pageErrors = []
   const triggered = new Set(), bubbleCases = new Set()
+  const gutterCases = { on: 0, off: 0 }
   const check = (name, errors) => {
     if (errors.length) { failed++; console.log(`FAIL ${name}: ${errors.join('; ')}`) }
     else { passed++; console.log(`ok ${name}`) }
@@ -286,7 +295,7 @@ async function main() {
         await page.setViewportSize({ width, height })
         await page.goto(`${origin}/chat/?session=%251&state=${state}&look=${look}`, { waitUntil: 'load' })
         await page.waitForSelector('.composer textarea:enabled')
-        await page.waitForSelector('.heads-up-detail', { state: 'attached' })
+        if (state !== 'quiet') await page.waitForSelector('.heads-up-detail', { state: 'attached' })
         await page.waitForFunction(glass => (document.querySelector('.app-shell')?.dataset.surface === 'glass') === glass, look === 'glass')
         await page.waitForFunction(() => document.querySelector('.chat-scroll')?.scrollHeight > innerHeight)
         if (state === 'queue') {
@@ -321,14 +330,31 @@ async function main() {
         check(`${name} A text (${result.textLines} lines)`, result.textLines ? result.textErrors : ['No visible floating text'])
         check(`${name} B controls (${result.controls})`, result.controls ? result.controlErrors : ['No visible floating controls'])
         check(`${name} C page overflow`, result.overflow ? ['documentElement.scrollWidth exceeds innerWidth'] : [])
-        const { bubbles: n, errors } = await page.evaluate(inspectBubbles)
+        const { bubbles: n, gutters, errors } = await page.evaluate(inspectBubbles)
+        gutterCases[gutters ? 'on' : 'off']++
         check(`${name} D bubbles (${n})`, n ? errors : ['No visible bubbles'])
+        if (state === 'quiet' && n && !gutters) {
+          // A size change that no DOM mutation inside the shell shows (here a stylesheet in <head>) still moves the column.
+          const gutterAfter = async css => {
+            await page.evaluate(text => {
+              let tag = document.getElementById('gutter-probe')
+              if (!tag) { tag = document.createElement('style'); tag.id = 'gutter-probe'; document.head.append(tag) }
+              tag.textContent = text
+            }, css)
+            await page.waitForTimeout(150)
+            return page.evaluate(() => document.querySelectorAll('.agent-bubble[data-gutter]').length)
+          }
+          const grown = await gutterAfter('.chat-panel .composer-area { padding-top: 70vh !important }')
+          const shrunk = await gutterAfter('')
+          check(`${name} E tab column follows foot height (grown ${grown}, shrunk ${shrunk})`, grown && !shrunk ? [] : ['Tab column did not follow a size-only change of the foot'])
+        }
         if (pageErrors.length > errorStart) check(`${name} runtime`, pageErrors.slice(errorStart))
       } catch (error) {
         await page.screenshot({ path: path.join(SHOTS, `${name}.png`) }).catch(() => {})
         check(`${name} setup`, [error.message.split('\n')[0]])
       }
     }
+    check(`tab column both ways (on ${gutterCases.on}, off ${gutterCases.off})`, gutterCases.on && gutterCases.off ? [] : ['Every case had the same tab column state; add a case for the other one'])
     check('fixture coverage', [...unexpected].map(endpoint => `Unmocked request: ${endpoint}`))
     console.log(`Fixture endpoints: ${[...endpoints].sort().join(', ')}`)
     const missing = states.filter(state => !triggered.has(state))

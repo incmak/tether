@@ -1,0 +1,14 @@
+/* Zoom badge: placed by ZoomBadge.tsx in visual viewport pixels. The margin keeps it clear of the
+   screen corner, the safe area and the phone tab bar (56px). */
+.zoom-badge {
+  position: fixed; inset: 0 auto auto 0; margin: 0; overflow: visible;
+  transform-origin: 0 0;
+  display: inline-flex; align-items: center; gap: 6px; min-height: 44px; min-width: 44px; padding: 0 14px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--text);
+  font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14);
+  --zoom-badge-dx: calc(-12px - env(safe-area-inset-right)); --zoom-badge-dy: calc(-68px - env(safe-area-inset-bottom));
+}
+.zoom-badge:not(:popover-open) { display: none; }
+.zoom-badge small { font-size: 12px; font-weight: 500; color: var(--muted); }
+.zoom-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

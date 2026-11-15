@@ -1220,16 +1220,16 @@ button.live-chip:active { background: var(--line); }
   .text-viewer-head { padding-top: 12px; }
 }
 /* Bars above the composer line up with the message column and the composer on wide screens. */
-/* A docked agent or pin tab (26px) owns a 32px column at its screen edge. The cards and the composer stop before it,
+/* A docked agent or pin tab (26px) that overlaps the chat foot (dockedBubble.ts sets data-gutter) owns a 32px column at its screen edge. The cards and the composer stop before it,
    so a tab never covers a card's scrollbar, text, or controls. */
-.app-shell:has(> .agent-bubble.left) { --tab-gutter-left: 32px; }
-.app-shell:has(> .agent-bubble.right) { --tab-gutter-right: 32px; }
+.app-shell:has(> .agent-bubble.left[data-gutter]) { --tab-gutter-left: 32px; }
+.app-shell:has(> .agent-bubble.right[data-gutter]) { --tab-gutter-right: 32px; }
 .notice-stack, .heads-up, .choice-dock, .working-line, .status-stack { max-width: 780px; margin-left: max(12px, (100% - 780px) / 2, var(--tab-gutter-left, 0px)); margin-right: max(12px, (100% - 780px) / 2, var(--tab-gutter-right, 0px)); }
 /* The notice tray tucks under the message box, 14px in from its sides. */
 .notice-stack { max-width: 752px; margin-left: max(26px, (100% - 752px) / 2, var(--tab-gutter-left, 0px) + 14px); margin-right: max(26px, (100% - 752px) / 2, var(--tab-gutter-right, 0px) + 14px); }
 /* The composer area is centred at 808px with 14px padding; its padding takes up the rest of the tab column. */
-.app-shell:has(> .agent-bubble.left) .chat-panel:not(.shell-page) .composer-area { padding-left: max(14px, env(safe-area-inset-left), var(--tab-gutter-left) - max(0px, (100% - 808px) / 2)); }
-.app-shell:has(> .agent-bubble.right) .chat-panel:not(.shell-page) .composer-area { padding-right: max(14px, env(safe-area-inset-right), var(--tab-gutter-right) - max(0px, (100% - 808px) / 2)); }
+.app-shell:has(> .agent-bubble.left[data-gutter]) .chat-panel:not(.shell-page) .composer-area { padding-left: max(14px, env(safe-area-inset-left), var(--tab-gutter-left) - max(0px, (100% - 808px) / 2)); }
+.app-shell:has(> .agent-bubble.right[data-gutter]) .chat-panel:not(.shell-page) .composer-area { padding-right: max(14px, env(safe-area-inset-right), var(--tab-gutter-right) - max(0px, (100% - 808px) / 2)); }
 .search-key { display: none; }
 @media (hover: hover) and (pointer: fine) { .sidebar-search:not(:focus-within) .search-key { display: inline-flex; } }
 .sidebar-search input:not(:placeholder-shown) + .search-key { display: none; }

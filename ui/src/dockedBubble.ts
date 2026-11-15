@@ -213,5 +213,42 @@ export function useDockedBubble(storageKey: string, fallback: Place, onEscape?: 
     }
   }, [storageKey])
 
+  // A docked tab claims its edge column (App.css, data-gutter) only while it overlaps the cards and composer
+  // at the foot of the chat. Elsewhere they keep their normal, even side margins. While the tab is open or
+  // dragged the last answer stays, so the composer does not jump.
+  const tabTop = point.y + (SIZE - TAB_H) / 2
+  useEffect(() => {
+    const el = button.current, shell = el?.parentElement
+    if (!el || !shell || !docked) return
+    let frame = 0
+    // Text changes can make a card taller without a mutation the observer below sees; the sizes catch that.
+    const sizes = new ResizeObserver(() => queue()), sized = new Set<HTMLElement>()
+    const check = () => {
+      frame = 0
+      let top = Infinity, bottom = -Infinity
+      const parts = new Set(shell.querySelectorAll<HTMLElement>(FOOT))
+      for (const part of sized) if (!parts.has(part)) { sizes.unobserve(part); sized.delete(part) }
+      for (const part of parts) {
+        if (!sized.has(part)) { sizes.observe(part, { box: 'border-box' }); sized.add(part) }
+        if (!part.getClientRects().length) continue
+        const box = part.getBoundingClientRect()
+        top = Math.min(top, box.top); bottom = Math.max(bottom, box.bottom)
+      }
+      // Hysteresis: the column changes the composer width, which can change its height.
+      const reach = el.hasAttribute('data-gutter') ? GUTTER_KEEP : GUTTER_GAP
+      el.toggleAttribute('data-gutter', tabTop + TAB_H > top - reach && tabTop < bottom + reach)
+    }
+    const queue = () => { if (!frame) frame = requestAnimationFrame(check) }
+    check()
+    const watch = new MutationObserver(queue)
+    watch.observe(shell, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'style', 'open'] })
+    window.addEventListener('resize', queue)
+    return () => { cancelAnimationFrame(frame); watch.disconnect(); sizes.disconnect(); window.removeEventListener('resize', queue) }
+  }, [docked, tabTop])
+
   return { point, place, docked, dragging, open, closing, button, pop, shape, popStyle, close, down, move, up, click }
 }
+
+const FOOT = '.chat-panel:not(.shell-page) :is(.notice-stack, .heads-up, .choice-dock, .working-line, .status-stack, .composer-area)'
+const GUTTER_GAP = 8
+const GUTTER_KEEP = 24
