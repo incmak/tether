@@ -1,15 +1,16 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { ListTodo, Plus, Send, Settings2, SquareKanban, X } from 'lucide-react'
+import { ListTodo, Plus, Search, Send, Settings2, SquareKanban, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { RetryButton } from './Retry'
 import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
+import { searchWords } from './search'
 import { age } from './needs'
-import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, feedLabel, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
-import type { JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
+import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, feedLabel, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage, workScore } from './work'
+import type { BacklogCard, JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
 import { BacklogBoardCard, BacklogDrawer } from './WorkBacklog'
@@ -77,6 +78,8 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   // A form over the sheet: add a project, a project's settings, or a new item. added: the last result line.
   const [form, setForm] = useState<{ kind: 'project'; name?: string } | { kind: 'item' } | null>(null)
   const [added, setAdded] = useState<{ text: string; ok: boolean } | null>(null)
+  const [query, setQuery] = useState('')
+  const searchBox = useRef<HTMLInputElement>(null)
   // A reply closes only the form that sent it: Mak can cancel and open another form while a save runs.
   const sent = form
   const close = (mine: typeof form) => setForm(current => current === mine ? null : current)
@@ -86,10 +89,21 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   const project = projects.some(entry => entry.name === chosen) || (chosen === BACKLOG && hasBacklog) ? chosen : 'all'
   // Settings: the chosen project, or the only one.
   const settingsFor = project === BACKLOG ? '' : project !== 'all' ? project : projects.length === 1 ? projects[0].name : ''
-  const cards = project === 'all' || project === BACKLOG ? allCards : []
+  // The search filters both views and ranks each column by score; the column's own order breaks ties.
+  const words = searchWords(query)
+  const scores = new Map<string, number>()
+  const found = <T extends WorkItem | BacklogCard>(list: T[]) => !words.length ? list : list.filter(entry => {
+    const score = workScore(entry, words)
+    if (score !== null) scores.set(entry.id, score)
+    return score !== null
+  })
+  const ranked = <T extends WorkItem | BacklogCard>(byOrder: (a: T, b: T) => number) => (a: T, b: T) =>
+    (scores.get(b.id) ?? 0) - (scores.get(a.id) ?? 0) || byOrder(a, b)
+  const cards = found(project === 'all' || project === BACKLOG ? allCards : [])
   const hasWork = projects.length > 0 || hasBacklog
   const editing = form?.kind === 'project' && form.name ? projects.find(entry => entry.name === form.name) : undefined
-  const items = (board?.items ?? []).filter(item => onBoard(item, now) && (project === 'all' || item.project === project))
+  const items = found((board?.items ?? []).filter(item => onBoard(item, now) && (project === 'all' || item.project === project)))
+  const matches = items.filter(item => showHold || item.stage !== 'hold').length + cards.length
   const shown = board && { ...board, items }
   const asking = decisions(shown).length
   const holds = items.filter(item => item.stage === 'hold').length
@@ -110,6 +124,20 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
     const opener = card?.matches('button') ? card : card?.querySelector<HTMLElement>('button[aria-haspopup="dialog"]')
     ;(opener ?? sheet.querySelector<HTMLElement>('.work-views [aria-pressed="true"]'))?.focus()
   }, [drawerId, modal.ref])
+  // "/" goes to the search, unless a drawer or form over the board has the keys, or a field has them.
+  useEffect(() => {
+    const sheet = modal.ref.current
+    if (!sheet) return
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement
+      if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey || target.closest('dialog') !== sheet) return
+      if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || !searchBox.current) return
+      event.preventDefault()
+      searchBox.current.focus(); searchBox.current.select()
+    }
+    sheet.addEventListener('keydown', onKey)
+    return () => sheet.removeEventListener('keydown', onKey)
+  }, [modal.ref])
   const open = (pane: Pane) => { onClose(); onOpen(pane) }
   const columns = showHold ? [...COLUMNS, HOLD] : COLUMNS
   return <dialog {...modal} className="sheet work-sheet" aria-labelledby="work-title">
@@ -137,6 +165,13 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
         </>}
         <button type="button" className="work-add-project" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}><Plus size={14} aria-hidden="true" />Add project</button>
       </div>
+      {hasWork && <label className="work-search"><Search size={15} aria-hidden="true" />
+        <input ref={searchBox} type="search" value={query} placeholder="Search" aria-label="Search the work board" aria-keyshortcuts="/" autoComplete="off" spellCheck={false}
+          onChange={event => setQuery(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery('') } }} />
+        {!query && <kbd aria-hidden="true">/</kbd>}
+      </label>}
+      <div role="status" className="visually-hidden">{words.length ? `${matches} ${matches === 1 ? 'match' : 'matches'}` : ''}</div>
       <div className="work-tools">
         {settingsFor && <button type="button" className="ghost sm" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project', name: settingsFor })}>
           <Settings2 size={14} aria-hidden="true" />Settings<span className="visually-hidden"> of {settingsFor}</span></button>}
@@ -156,17 +191,17 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
       </div>}
       {board && view === 'needs' && hasWork && <>
         <DecisionsGroup board={shown} error={error} panes={panes} answers={answers} onRefresh={onRefresh} onOpen={open} compact scope="sheet" onDetails={item => setOpenId(item.id)} />
-        {!asking && <p className="work-empty">Nothing waits on you. An item shows here when its agent asks you something.</p>}
+        {!asking && (words.length ? <NoMatch query={query} onClear={() => setQuery('')} /> : <p className="work-empty">Nothing waits on you. An item shows here when its agent asks you something.</p>)}
       </>}
       {board && view === 'board' && hasWork && <>
         <div role="status">{answers.results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
         {error && <p className="work-error" role="alert"><span>Could not refresh work items. The board can be out of date. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
         {feedTrouble(board, projects.filter(entry => project === 'all' || entry.name === project)).map(text => <p key={text} className="work-error work-feed-error">{text}</p>)}
         {projects.length > 0 && !board.items.length && !hasBacklog && <p className="work-empty">No work items yet. Use New item, or an agent adds one with <code>tether item new</code>.</p>}
-        <div className="work-columns">
+        {words.length > 0 && !matches ? <NoMatch query={query} onClear={() => setQuery('')} hold={items.length} onHold={() => setShowHold(true)} /> : <div className="work-columns">
           {columns.map(column => {
-            const list = items.filter(item => item.stage === column.stage).sort(order(column.stage))
-            const backlog = cards.filter(card => card.stage === column.stage).sort(backlogOrder)
+            const list = items.filter(item => item.stage === column.stage).sort(ranked(order(column.stage)))
+            const backlog = cards.filter(card => card.stage === column.stage).sort(ranked(backlogOrder))
             const all = expanded.includes(column.stage) || backlog.length <= BACKLOG_CAP + 1
             const shownCards = all ? backlog : backlog.slice(0, BACKLOG_CAP)
             const more = backlog.length - shownCards.length
@@ -183,7 +218,7 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
                 Show fewer<span className="visually-hidden"> backlog items in {STAGE_LABEL[column.stage]}</span></button>}
             </section>
           })}
-        </div>
+        </div>}
       </>}
     </div>
     {openedCard && <BacklogDrawer key={openedCard.id} api={api} card={openedCard} error={error} onRefresh={onRefresh} onClose={() => setOpenId(null)}
@@ -201,6 +236,17 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
         void onRefresh()
       }} />}
   </dialog>
+}
+
+/** A search that finds nothing on screen. hold: matches that only Show on hold reveals. */
+function NoMatch({ query, onClear, hold = 0, onHold }: { query: string; onClear: () => void; hold?: number; onHold?: () => void }) {
+  return <div className="work-empty work-no-match">
+    <p>{hold ? `${hold} on hold ${hold === 1 ? 'matches' : 'match'}` : 'Nothing matches'} “{query.trim()}”.</p>
+    <span className="work-no-match-actions">
+      {hold > 0 && onHold && <button type="button" className="secondary sm" onClick={onHold}>Show on hold</button>}
+      <button type="button" className="ghost sm" onClick={onClear}>Clear search</button>
+    </span>
+  </div>
 }
 
 function BoardBones() {

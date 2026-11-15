@@ -1,6 +1,8 @@
 import { useCallback } from 'react'
 import type { Api } from './api'
 import { usePolling } from './hooks'
+import { exactField, field, scoreWords } from './search'
+import type { Field } from './search'
 
 // The work board's data (server: work_items.py, work_api.py). Items move by stage; an agent's question moves an item
 // to Needs you, and Mak's answer goes back to the asking tab.
@@ -129,3 +131,36 @@ export const BACKLOG_CAP = 5
 /** Ready and Building in file order (the person's own order); Done newest first. */
 export const backlogOrder = (a: BacklogCard, b: BacklogCard) =>
   a.stage === 'done' && b.stage === 'done' ? (b.doneAt ?? 0) - (a.doneAt ?? 0) : a.rank - b.rank
+
+// The board's search: the same matcher as the sidebar, ⌘K and the backlog (search.ts).
+// Title and ID count double. Project, stage, links, tabs and source match fuzzy too.
+// The question, history and backlog notes match whole words only, so long text adds no noise.
+const searchFields = new WeakMap<WorkItem | BacklogCard, Field[]>()
+function fieldsOf(entry: WorkItem | BacklogCard) {
+  let fields = searchFields.get(entry)
+  if (fields) return fields
+  fields = 'area' in entry
+    ? [field(2, entry.title, entry.id), field(1, 'backlog', entry.area, STAGE_LABEL[entry.stage], entry.source),
+      exactField(1, ...entry.details, entry.doing, entry.done)]
+    : [field(2, entry.title, entry.id, ...(entry.jira?.tickets ?? [])),
+      field(1, entry.project, STAGE_LABEL[entry.stage], ...entry.refs, ...entry.tabs.flatMap(tab => [tab.name, tab.stack, tab.session]), entry.source),
+      exactField(1, entry.ask?.q, ...(entry.ask?.options ?? []), ...entry.history.map(line => line.text))]
+  searchFields.set(entry, fields)
+  return fields
+}
+
+// An ID alone (T-21, B12, B-12, SHOP-77) finds that item and the items that link to it, not T-210 or B120.
+const ID = /^(?:[a-z]{1,5}-\d+|b\d+)$/
+const sameId = (a: string, b: string) => { const norm = (id: string) => id.toLowerCase().replace(/^b-(?=\d)/, 'b'); return norm(a) === norm(b) }
+
+/** The search score of an item or backlog card for these query words (searchWords). 0: no query. null: no match. */
+export function workScore(entry: WorkItem | BacklogCard, words: string[]): number | null {
+  if (!words.length) return 0
+  if (words.length === 1 && ID.test(words[0])) {
+    const word = words[0]
+    if (sameId(entry.id, word)) return 10
+    // A link to it: a ref, or a Jira ticket like SHOP-77.
+    return 'refs' in entry && [...entry.refs, ...(entry.jira?.tickets ?? [])].some(ref => sameId(ref, word)) ? 5 : null
+  }
+  return scoreWords(fieldsOf(entry), words)
+}

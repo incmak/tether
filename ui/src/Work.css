@@ -185,6 +185,19 @@
 /* Work page tools: Add project after the project chips; Settings, on hold and New item at the end of the row. */
 .work-projects .work-add-project { color: var(--muted); }
 .work-projects .work-add-project svg { width: 14px; height: 14px; }
+/* The board's search: the same box as the backlog's. */
+.work-search { display: flex; flex: 0 1 240px; align-items: center; gap: 6px; min-width: 0; height: 34px; padding: 0 8px 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); cursor: text; }
+.work-search:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.work-sheet .work-search input { flex: 1; width: auto; min-width: 0; height: 100%; min-height: 0; margin: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; box-shadow: none; }
+.work-search input::-webkit-search-cancel-button { cursor: pointer; }
+.work-search kbd { flex: none; display: none; min-width: 18px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font: 11px/16px ui-monospace, SFMono-Regular, Menlo, monospace; text-align: center; }
+@media (hover: hover) and (pointer: fine) { .work-search:not(:focus-within) kbd { display: inline-block; } }
+@media (max-width: 560px) { .work-search { flex-basis: 100%; } .work-sheet .work-search input { font-size: 16px; } }
+@media (pointer: coarse) { .work-search { height: 44px; } .work-sheet .work-search input { font-size: 16px; } }
+.work-no-match { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.work-no-match p { margin: 0; overflow-wrap: anywhere; }
+.work-no-match-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (pointer: coarse) { .work-sheet .work-no-match button { min-height: 44px; } }
 .work-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
 .work-tools .work-hold { margin-left: 0; }
 .work-added:not(:has(p)) { display: none; }
