@@ -206,7 +206,7 @@ function App() {
   const previousSelection = useRef<SelectionSnapshot>({ sessions: [] })
   const orderedSessions = useMemo(() => sortByPrefs(sessions, prefs.order), [sessions, prefs.order])
   const pane = selectPane(orderedSessions, prefs.selected, previousSelection.current, data?.default_thread, prefs.lastPane)
-  useActivityPing(api, prefs.wakatime)
+  useActivityPing(api, prefs.activity)
   useLayoutEffect(() => {
     if (!data) return
     const previous = previousSelection.current

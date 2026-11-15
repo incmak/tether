@@ -1,5 +1,5 @@
 // Activity time (Settings › About & system) and the activity ping against an existing build. Every API request stays
-// in this page's fixtures; no terminal is touched and nothing reaches WakaTime.
+// in this page's fixtures; no terminal is touched and nothing is published.
 // Run: cd ui && npm run test:ui (or node test_activity_ui.cjs against an existing build).
 const http = require('node:http')
 const fs = require('node:fs/promises')
@@ -25,7 +25,10 @@ const fixture = {
 }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
 let prefs = {}, version = 1
-let activity = { enabled: false, agents: false, cli: true, key: true, config: '~/.wakatime.cfg', today: '', last: null }
+const publishOff = { folder: '', file: 'tether-activity.json', busy: false, pending: false, published: null, last: null }
+const sampleDays = Array.from({ length: 14 }, (_, i) => ({ day: `2026-11-${String(2 + i).padStart(2, '0')}`, you: i * 1500, agents: i * 3000 }))
+const sampleProjects = [{ name: 'a-project-with-a-very-long-name-that-must-not-overflow-the-settings-sheet', you: 7200, agents: 36000 }, { name: 'tether', you: 3600, agents: 0 }]
+let activity = { enabled: false, agents: false, zone: 'Asia/Kolkata', since: null, store: '~/.tether/activity', days: [], projects: [], publish: publishOff }
 
 async function main() {
   let browser, page, server, failed = 0
@@ -51,7 +54,8 @@ async function main() {
     page = await context.newPage()
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => pageErrors.push(error.stack))
-    page.on('console', message => { if (message.type() === 'error') pageErrors.push(message.text()) })
+    // The refused publish folder answers 400 on purpose; the browser logs that response.
+    page.on('console', message => { if (message.type() === 'error' && !message.text().includes('status of 400')) pageErrors.push(message.text()) })
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
     await page.routeWebSocket('**/*', socket => socket.close())
     await page.route('**/*', async route => {
@@ -63,10 +67,15 @@ async function main() {
           const body = request.postDataJSON(); posts.push({ endpoint, body })
           if (endpoint === 'prefs') {
             prefs = { ...prefs, ...body.changes }; version++
-            activity = { ...activity, enabled: prefs.wakatime === true, agents: prefs.wakatimeAgents === true }
+            activity = { ...activity, enabled: prefs.activity === true, agents: prefs.activityAgents === true }
             return route.fulfill({ json: { prefs, version } })
           }
           if (endpoint === 'activity') return route.fulfill({ json: { sent: true, reason: '' } })
+          if (endpoint === 'activity/publish') {
+            if (body.folder === '~/not-git') return route.fulfill({ status: 400, json: { error: 'The folder must be the top folder of a git checkout.' } })
+            if ('folder' in body) activity = { ...activity, publish: { ...activity.publish, folder: body.folder } }
+            return route.fulfill({ json: { ...activity, started: body.now === true } })
+          }
           return route.fulfill({ json: { ok: true } })
         }
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
@@ -94,7 +103,7 @@ async function main() {
     for (const [width, height] of sizes) {
       const at = `${width}px`
       prefs = { selected: '%1' }; version++
-      activity = { ...activity, enabled: false, agents: false, today: '', last: null }
+      activity = { ...activity, enabled: false, agents: false, since: null, days: [], projects: [], publish: publishOff }
       posts.length = 0
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
@@ -108,35 +117,52 @@ async function main() {
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
       await page.getByRole('button', { name: 'Settings' }).first().click()
       const search = page.getByPlaceholder(/Search settings/)
-      if (await search.count()) await search.fill('wakatime')
-      const send = page.getByRole('switch', { name: /Send activity time to WakaTime/ })
+      if (await search.count()) await search.fill('activity')
+      const keep = page.getByRole('switch', { name: /Keep activity time/ })
       const agents = page.getByRole('switch', { name: /Count agent work/ })
-      await send.waitFor()
-      check(`${at} send switch off`, !(await send.isChecked()))
-      check(`${at} agent switch disabled until send is on`, await agents.isDisabled())
-      await page.getByText('Ready: wakatime-cli and the API key in ~/.wakatime.cfg.').waitFor()
+      await keep.waitFor()
+      check(`${at} keep switch off`, !(await keep.isChecked()))
+      check(`${at} agent switch disabled until keep is on`, await agents.isDisabled())
+      await page.getByText('Off. Nothing is counted.').waitFor()
       check(`${at} no page overflow (off)`, !(await overflow()))
-      await send.click()
+      await keep.click()
       await page.waitForFunction(() => document.querySelector('[role="switch"]:checked') !== null)
       check(`${at} agent switch enabled`, !(await agents.isDisabled()))
-      await page.screenshot({ path: path.join(SHOTS, `settings-on-${width}.png`), fullPage: false })
       await page.waitForTimeout(500)
-      check(`${at} pref saved`, posts.some(post => post.endpoint === 'prefs' && post.body.changes.wakatime === true), JSON.stringify(posts.map(post => post.endpoint)))
+      check(`${at} pref saved`, posts.some(post => post.endpoint === 'prefs' && post.body.changes.activity === true), JSON.stringify(posts.map(post => post.endpoint)))
       // Clicks inside Settings name no tab, so they send no ping.
-      await send.focus()
+      await keep.focus()
       await page.keyboard.press('Tab')
       check(`${at} settings input sends no ping`, pings().length === 0, JSON.stringify(pings()))
 
-      // A send error shows as an alert; a missing key wins over it.
-      activity = { ...activity, last: { at: 1, ok: false, error: 'WakaTime rejected the API key. Check api_key in ~/.wakatime.cfg.' } }
-      await page.getByRole('alert').filter({ hasText: 'WakaTime rejected the API key' }).waitFor({ timeout: 20000 })
-      check(`${at} send error shown`, true)
-      activity = { ...activity, key: false }
-      await page.getByRole('alert').filter({ hasText: 'has no API key' }).waitFor({ timeout: 20000 })
-      check(`${at} missing key shown`, true)
-      check(`${at} no page overflow (error)`, !(await overflow()))
-      await page.screenshot({ path: path.join(SHOTS, `settings-error-${width}.png`) })
-      activity = { ...activity, key: true, last: null }
+      // Data: today's total, a 14-day table and top projects, with long names that must not overflow.
+      await agents.click()
+      activity = { ...activity, since: 1, days: sampleDays, projects: sampleProjects }
+      await page.getByText('Today: 5 h 25 m').waitFor({ timeout: 20000 })
+      check(`${at} today shown with agents`, await page.getByText('agents 10 h 50 m').isVisible())
+      check(`${at} 14 day rows`, await page.locator('.activity-table').first().locator('tbody tr').count() === 14)
+      check(`${at} day table has headers`, await page.getByRole('columnheader', { name: 'Agents' }).first().isVisible())
+      check(`${at} top projects`, await page.getByRole('rowheader', { name: 'tether' }).isVisible())
+      check(`${at} no page overflow (data)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `settings-data-${width}.png`), fullPage: false })
+
+      // Publish folder: a refusal shows as an alert; a saved folder offers Publish now; a failed publish shows.
+      const field = page.getByLabel('Publish folder')
+      await field.fill('~/not-git')
+      await page.getByRole('button', { name: 'Save folder' }).click()
+      await page.getByRole('alert').filter({ hasText: 'top folder of a git checkout' }).waitFor()
+      check(`${at} bad folder refused`, true)
+      await field.fill('~/stats-activity')
+      await page.getByRole('button', { name: 'Save folder' }).click()
+      await page.getByText('Saved. Tether publishes every 6 hours').waitFor()
+      const now = page.getByRole('button', { name: 'Publish now' })
+      await now.click()
+      check(`${at} publish now posted`, posts.some(post => post.endpoint === 'activity/publish' && post.body.now === true))
+      activity = { ...activity, publish: { ...activity.publish, last: { at: 1, ok: false, error: 'git push failed: fatal: Authentication failed' } } }
+      await page.getByRole('alert').filter({ hasText: 'Authentication failed' }).waitFor({ timeout: 20000 })
+      check(`${at} publish error shown`, true)
+      check(`${at} no page overflow (publish)`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `settings-publish-${width}.png`) })
 
       // Back in the chat: input in the chat panel pings for that tab, once a minute at most.
       await page.keyboard.press('Escape')
@@ -146,7 +172,7 @@ async function main() {
       await page.waitForTimeout(300)
       await chat.click({ position: { x: 20, y: 140 } })
       await page.waitForTimeout(300)
-      check(`${at} chat input pings its tab once`, pings().length === 1 && pings()[0].body.pane === '%1', JSON.stringify(pings()))
+      check(`${at} chat input pings its tab once`, pings().length === 1 && pings()[0].body.pane === '%1' && typeof pings()[0].body.zone === 'string', JSON.stringify(pings()))
       // A click on another tab's button counts for that tab, not for the tab that was open before the click.
       const other = page.locator('[role="tab"][data-pane="%2"]').first()
       if (await other.isVisible()) {

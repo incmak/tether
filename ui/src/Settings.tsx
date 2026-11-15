@@ -76,7 +76,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     // The same list as the ⌘/ sheet. A search here finds a key by its action, like "split" or "backlog".
     ...SHORTCUT_GROUPS.map(keys => item(`keys-${keys.name.toLowerCase()}`, 'shortcuts', `${keys.name} keys`, `keyboard shortcut hotkey key ${keys.items.map(([label, key]) => `${label} ${key} ${keyLabel(key)}`).join(' ')}`,
       <section className="preferences-nested"><h3>{keys.name}</h3><ShortcutRows group={keys} /></section>)),
-    item('activity-time', 'system', 'Activity time', 'wakatime metrics analytics coding time focus hours tracking stats dashboard heartbeat', <ActivitySettings api={api} prefs={prefs} update={update} />),
+    item('activity-time', 'system', 'Activity time', 'metrics analytics coding time focus hours tracking stats dashboard agents publish export wakatime', <ActivitySettings api={api} prefs={prefs} update={update} />),
     item('system', 'system', 'Updates and resources', 'version release reload refresh cpu memory host processes btop monitor', <Field scope="This server"><SystemSettings api={api} onReload={onReload} /></Field>),
   ]
   const searching = !!query.trim()
