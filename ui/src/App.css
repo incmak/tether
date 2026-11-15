@@ -821,7 +821,7 @@ button.live-chip:active { background: var(--line); }
 .choice-options small { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .choice-number { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius); background: var(--hover); color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .picker-card { margin: 0 16px 10px; }
-.picker-subtitle { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.picker-subtitle { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: pre-line; overflow-wrap: anywhere; }
 .picker-list { max-height: 34vh; overflow: auto; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--radius); }
 .picker-list li { padding: 9px 12px; border-bottom: 1px solid var(--line); color: var(--text); font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; }
 .picker-list li:last-child { border-bottom: 0; }

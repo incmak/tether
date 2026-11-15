@@ -38,6 +38,34 @@ class CursorPickerTests(unittest.TestCase):
         self.assertNotIn('Worked for 9s', found['text'])
         self.assertNotIn('Earlier chat', found['text'])
 
+    def test_a_panel_with_paragraphs_takes_its_title_from_the_top_and_keeps_every_paragraph(self):
+        # Claude Code 2.1.325, real screens. The paragraph above the list is the security note, not the question.
+        subtitle = ("This project's CLAUDE.md or .claude/rules imports files outside the current working directory. "
+                    'Never allow this for third-party repositories.\n'
+                    'External imports: /workspace/apps/tools/AGENTS.md\n'
+                    'Important: Only use Claude Code with files you trust. Accessing untrusted files may pose security '
+                    'risks https://code.claude.com/docs/en/security')
+        for width in (140, 60):
+            with self.subTest(width=width):
+                terminal._attention_seen.clear()
+                screen = (FIXTURES / f'claude_2.1.325_external_imports_{width}x40.txt').read_text()
+                found = self.attention(screen)
+                self.assertEqual(found['reason'], 'picker')
+                self.assertEqual(found['title'], 'Allow external CLAUDE.md file imports?')
+                self.assertEqual(found['subtitle'], subtitle)
+                self.assertEqual(found['items'], [
+                    {'text': 'No, disable external imports', 'selected': True},
+                    {'text': 'Yes, allow external imports', 'selected': False},
+                ])
+                self.assertTrue(found['text'].startswith('Allow external CLAUDE.md file imports?\n'))
+
+    def test_without_a_rule_only_the_paragraph_above_the_list_is_the_header(self):
+        screen = ('● Earlier reply\n\nEarlier paragraph\n\nPick one\nWhich file\n\n'
+                  '❯ First\n  Second\n\nEnter to select · Esc to cancel\n')
+        found = self.attention(screen)
+        self.assertEqual((found['title'], found['subtitle']), ('Pick one', 'Which file'))
+        self.assertNotIn('Earlier', found['text'])
+
     def test_picker_without_a_rule_keeps_chat_out_and_reads_rows_below_cursor(self):
         screen = ('Earlier chat\nWorked for 9s\n\nSelect session\nChoose a conversation\n\n'
                   '  First session\n› Second session\n  Third session\n↓ 7 more\n\n'

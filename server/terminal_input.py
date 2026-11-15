@@ -309,6 +309,7 @@ PICKER_HINT = detection_rules.pattern('common', 'PICKER_HINT')
 
 
 PICKER_HINT_START = detection_rules.pattern('common', 'PICKER_HINT_START')
+PANEL_ROWS = 30  # how far above its list a picker panel's own rule may be
 
 
 def cursor_picker(screen):
@@ -358,9 +359,26 @@ def cursor_picker(screen):
     bottom = top + 1
     while top >= 0 and lines[top].strip() and not RULE_LINE.match(lines[top]):
         top -= 1
-    header = [line.strip() for line in lines[top + 1:bottom]]
+    # A panel under its own rule can hold several paragraphs: the question first, a security note last ("Allow external
+    # CLAUDE.md file imports?", Claude Code 2.1.325). Take them all when only blank and plain lines lie between.
+    drawn = lambda line: line.strip() and RULE_LINE.match(line)  # RULE_LINE also matches a blank line
+    rule = top
+    while rule >= max(0, first - PANEL_ROWS) and not drawn(lines[rule]):
+        if CHAT_LINE.match(lines[rule]) or re.match(r'^\s*[❯›]', lines[rule]):
+            break
+        rule -= 1
+    if rule >= max(0, first - PANEL_ROWS) and drawn(lines[rule]):
+        top = rule
+    paragraphs = [[]]
+    for line in lines[top + 1:bottom]:
+        if line.strip():
+            paragraphs[-1].append(line.strip())
+        elif paragraphs[-1]:
+            paragraphs.append([])
+    header = [line for paragraph in paragraphs for line in paragraph]
     if not header or any(CHAT_LINE.match(line) or re.match(r'^[❯›]', line) for line in header):
         return None
+    subtitle = '\n'.join(filter(None, [' '.join(paragraphs[0][1:])] + [' '.join(part) for part in paragraphs[1:] if part]))
     items, counts = [], {'↑': 0, '↓': 0}
     for line in lines[first:index]:
         if not line.strip() or RULE_LINE.match(line):
@@ -374,7 +392,7 @@ def cursor_picker(screen):
             items.append({'text': match[1].strip() if match else line.strip(), 'selected': bool(match)})
     if not items or sum(item['selected'] for item in items) != 1:
         return None
-    return {'title': header[0], 'subtitle': ' '.join(header[1:]), 'items': items,
+    return {'title': header[0], 'subtitle': subtitle, 'items': items,
             'more_above': counts['↑'], 'more_below': counts['↓'], 'hint': hint_text,
             'text': '\n'.join(lines[top + 1:end]).strip()}
 
