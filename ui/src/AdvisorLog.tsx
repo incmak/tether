@@ -86,13 +86,30 @@ export function AdvisorLog({ log, disabled, focus, onOpen }: { log: ReturnType<t
   </section>
 }
 
-// The server keeps every text in full up to a hard cap far above what the advisor CLI can produce (advisor_log.FULL).
+// Storage policy: the server keeps each text up to advisor_log.FULL characters, cuts longer text and names it in cut.
 const CUT_NAMES: Record<string, string> = { question: 'the question', answer: 'the answer', evidence: 'the evidence', error: 'the error', advisors: 'the advisor answers' }
 function cutNote(entry: AdvisorEntry) {
-  const names = (entry.cut ?? []).map(field => CUT_NAMES[field] ?? field)
+  const names = entry.cut.map(field => CUT_NAMES[field])
   if (!names.length) return ''
   const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-  return `Tether kept the first ${entry.limit.toLocaleString('en-US')} characters of ${list}.`
+  return Number.isFinite(entry.limit) && entry.limit > 0
+    ? `Tether kept the first ${entry.limit.toLocaleString('en-US')} characters of ${list}.` : `Tether cut ${list}.`
+}
+
+const text = (value: unknown) => typeof value === 'string' ? value : ''
+/** The entry in the shape the detail reads. A null, missing or wrong-type field (an older or damaged answer) becomes
+ *  empty or falls back to the list row, so it never crashes the sheet. */
+function normal(found: Partial<Record<keyof AdvisorEntry, unknown>> | null, row: AdvisorRow): AdvisorEntry {
+  const raw = found && typeof found === 'object' ? found : {}
+  const advisors = Array.isArray(raw.advisors) ? raw.advisors : []
+  return { ...row, id: row.id, time: typeof raw.time === 'number' ? raw.time : row.time,
+    status: typeof raw.status === 'string' && raw.status in STATUS ? raw.status as AdvisorStatus : row.status,
+    question: text(raw.question) || row.question, answer: text(raw.answer), agent: text(raw.agent) || row.agent, model: text(raw.model) || row.model,
+    confidence: text(raw.confidence), evidence: text(raw.evidence), error: text(raw.error),
+    advisors: advisors.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+      .map(item => ({ role: text(item.role), agent: text(item.agent), model: text(item.model), answer: text(item.answer), confidence: text(item.confidence) })),
+    cut: Array.isArray(raw.cut) ? raw.cut.filter((name): name is string => typeof name === 'string' && name in CUT_NAMES) : [],
+    limit: typeof raw.limit === 'number' ? raw.limit : NaN }
 }
 
 function Text({ label, children }: { label: string; children: string }) {
@@ -107,14 +124,14 @@ export function AdvisorDecision({ api, project, row, onBack }: { api: Api; proje
   useEffect(() => {
     if (!row.full) return
     const controller = new AbortController()
-    api<AdvisorEntry>(`projects/advisor-entry?project=${encodeURIComponent(project)}&id=${encodeURIComponent(row.id)}`, undefined, controller.signal)
-      .then(found => { setEntry(found); setError('') }, failure => { if (!controller.signal.aborted) setError(errorText(failure)) })
+    api<Partial<Record<keyof AdvisorEntry, unknown>> | null>(`projects/advisor-entry?project=${encodeURIComponent(project)}&id=${encodeURIComponent(row.id)}`, undefined, controller.signal)
+      .then(found => { setEntry(normal(found, row)); setError('') }, failure => { if (!controller.signal.aborted) setError(errorText(failure)) })
     return () => controller.abort()
-  }, [api, project, row.id, row.full, attempt])
+  }, [api, project, row, attempt])
   const back = useRef<HTMLButtonElement>(null)
   useEffect(() => { back.current?.focus() }, [])
   const shown = entry ?? row
-  const replies = entry?.advisors.length ? entry.advisors : null
+  const replies = entry && entry.advisors.length ? entry.advisors : null
   const who = (agent: string, model: string) => [agent, model].filter(Boolean).join(' ')
   return <section className="settings-group advisor-detail" aria-labelledby="advisor-detail-title">
     <button type="button" ref={back} className="link-button project-back" onClick={onBack}><ArrowLeft size={16} aria-hidden="true" />All decisions</button>
@@ -128,7 +145,7 @@ export function AdvisorDecision({ api, project, row, onBack }: { api: Api; proje
       <Text label="Question">{shown.question}</Text>
       {entry?.error && <section className="advisor-part"><h4>Error</h4><p className="advisor-text error">{entry.error}</p></section>}
       {replies && replies.length > 1
-        ? replies.map(reply => <Text key={reply.role} label={`${reply.role === 'main' ? 'Advisor' : 'Second advisor'} (${who(reply.agent, reply.model)})${reply.confidence ? ` · ${reply.confidence} confidence` : ''}`}>{reply.answer || 'No answer.'}</Text>)
+        ? replies.map((reply, index) => <Text key={`${index}-${reply.role}`} label={`${reply.role === 'main' ? 'Advisor' : 'Second advisor'} (${who(reply.agent, reply.model)})${reply.confidence ? ` · ${reply.confidence} confidence` : ''}`}>{reply.answer || 'No answer.'}</Text>)
         : <Text label={shown.status === 'off' ? 'Answer' : `Answer (${who(shown.agent, shown.model)})`}>{shown.answer || (shown.status === 'off' ? 'The advisor was off. The agent decided or asked you itself.' : 'No answer.')}</Text>}
       {entry?.evidence && <Text label="Evidence">{entry.evidence}</Text>}
     </>}

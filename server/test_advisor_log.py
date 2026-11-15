@@ -85,8 +85,31 @@ class AdvisorLogTests(unittest.TestCase):
         advisor_log.append(self.folder, later)
         self.assertEqual([entry['id'] for entry in self.jsonl()], [good['id'], later['id']])
 
-    def test_full_text_is_kept_up_to_what_the_cli_can_produce(self):
-        # The longest fields the CLI makes: one reply per advisor (helper_tabs.MAX_REPLY), evidence from two replies.
+    def test_wrong_types_in_detail_fields_are_normalized_or_skipped(self):
+        good = self.entry()
+        odd = dict(good, id='aaaaaaaaaaaa', advisors=None, cut=None, evidence=None, error=5, confidence=['high'])
+        mixed = dict(good, id='bbbbbbbbbbbb', advisors=['x', None, {'role': 'main', 'agent': 1, 'model': None, 'answer': ['a'],
+                                                                   'confidence': 'high'}], cut=['answer', 3, 'nonsense'])
+        text = dict(good, id='cccccccccccc', advisors='main', cut='answer')
+        missing = {key: good[key] for key in ('id', 'time', 'status', 'question', 'answer', 'agent', 'model')}
+        missing['id'] = 'dddddddddddd'
+        broken = [dict(good, id='eeeeeeeeeeee', question=None), dict(good, id='ffffffffffff', agent=7), ['not', 'a', 'dict']]
+        (self.folder / 'advisor-log.jsonl').write_text(
+            '\n'.join(json.dumps(item) for item in [odd, mixed, text, missing, *broken]) + '\n')
+        blank = {'confidence': '', 'evidence': '', 'error': '', 'advisors': [], 'cut': []}
+        self.assertEqual(advisor_log.find(self.folder, 'aaaaaaaaaaaa'), dict(odd, **blank))
+        self.assertEqual(advisor_log.find(self.folder, 'bbbbbbbbbbbb'), dict(
+            mixed, advisors=[{'role': 'main', 'agent': '', 'model': '', 'answer': '', 'confidence': 'high'}], cut=['answer']))
+        self.assertEqual(advisor_log.find(self.folder, 'cccccccccccc'), dict(text, advisors=[], cut=[]))
+        self.assertEqual(advisor_log.find(self.folder, 'dddddddddddd'), dict(missing, **blank))
+        for skipped in ('eeeeeeeeeeee', 'ffffffffffff'):
+            self.assertIsNone(advisor_log.find(self.folder, skipped))
+        self.assertEqual(sorted(row['id'] for row in advisor_log.listing(self.folder)),
+                         ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc', 'dddddddddddd'])
+
+    def test_text_up_to_the_storage_cap_is_kept_whole(self):
+        # FULL is a storage policy, not a limit of the CLI ('ask -' reads stdin of any size). It is above one tab reply
+        # (helper_tabs.MAX_REPLY) and evidence from two replies, so those stay whole; see the next test for longer text.
         self.assertGreaterEqual(advisor_log.FULL, 2 * helper_tabs.MAX_REPLY + 2)
         reply = 'a' * helper_tabs.MAX_REPLY
         entry = self.entry('q' * 131072, reply, evidence='e' * helper_tabs.MAX_REPLY + '\n\n' + 'f' * helper_tabs.MAX_REPLY,
@@ -101,10 +124,10 @@ class AdvisorLogTests(unittest.TestCase):
         self.assertEqual((len(row['question']), len(row['answer'])), (advisor_log.PREVIEW_QUESTION, advisor_log.PREVIEW_ANSWER))
 
     def test_text_over_the_cap_is_cut_and_marked(self):
-        entry = self.entry(answer='b' * (advisor_log.FULL + 10))
-        self.assertEqual(len(entry['answer']), advisor_log.FULL)
+        entry = self.entry('q' * (advisor_log.FULL + 1), answer='b' * (advisor_log.FULL + 10))
+        self.assertEqual((len(entry['question']), len(entry['answer'])), (advisor_log.FULL, advisor_log.FULL))
         self.assertTrue(entry['answer'].endswith('…'))
-        self.assertEqual(entry['cut'], ['answer'])
+        self.assertEqual(entry['cut'], ['question', 'answer'])
 
 
 if __name__ == '__main__':

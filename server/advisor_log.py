@@ -18,12 +18,15 @@ import advisor
 
 KEEP = 200
 LINE_QUESTION, LINE_ANSWER = 200, 300  # the cuts in the Markdown line
-# The most characters Tether keeps of one text field. It is above the longest field the CLI can make, so a real ask
-# is never cut: an answer is one tab reply (helper_tabs.MAX_REPLY, 100,000), the evidence joins two replies, and the
-# question is one argument (Linux MAX_ARG_STRLEN, 131,072 bytes). It only bounds a damaged or hostile input.
+# Storage policy: the most characters Tether keeps of one text field. It is above one tab reply (helper_tabs.MAX_REPLY,
+# 100,000) and evidence from two replies, so those stay whole. A longer field (for example a question from 'ask -',
+# which reads stdin of any size) is cut here, named in the entry's cut list, and the sheet says so.
 FULL = 250_000
 PREVIEW_QUESTION, PREVIEW_ANSWER = 300, 400  # the list shows one and two lines; the rest loads on open
 STATUSES = ('decided', 'ask_user', 'timeout', 'error', 'off')
+CUT_FIELDS = ('question', 'answer', 'evidence', 'error', 'advisors')
+TEXT_FIELDS = ('confidence', 'evidence', 'error')  # optional: a wrong type reads as ''
+ADVISOR_FIELDS = ('role', 'agent', 'model', 'answer', 'confidence')
 ID = re.compile(r'[0-9a-f]{12}')
 LAST_TIME = 253402300799  # 9999-12-31 23:59:59 UTC: time.localtime and strftime work up to here
 LINE = re.compile(r'- (\d{4}-\d\d-\d\d \d\d:\d\d) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
@@ -79,14 +82,31 @@ def _valid(entry):
             and all(isinstance(entry.get(key), str) for key in ('question', 'answer', 'agent', 'model')))
 
 
+def _text(value):
+    return value if isinstance(value, str) else ''
+
+
+def _normal(entry):
+    """The entry with every detail field in the shape the sheet reads, or None when a required field is bad.
+    Optional fields of a wrong type become empty, so a damaged line never reaches the sheet as null or a number."""
+    if not _valid(entry):
+        return None
+    advisors = entry.get('advisors')
+    cut = entry.get('cut')
+    return dict(entry, **{key: _text(entry.get(key)) for key in TEXT_FIELDS},
+                advisors=[{key: _text(item.get(key)) for key in ADVISOR_FIELDS}
+                          for item in (advisors if isinstance(advisors, list) else []) if isinstance(item, dict)],
+                cut=[name for name in (cut if isinstance(cut, list) else []) if name in CUT_FIELDS])
+
+
 def _entries(folder):
     found = []
     for text in _lines(folder / 'advisor-log.jsonl'):
         try:
-            entry = json.loads(text)
+            entry = _normal(json.loads(text))
         except (ValueError, RecursionError, OverflowError):
             continue  # a damaged line (bad JSON, or nested too deep to read): skip it, keep the rest
-        if _valid(entry):
+        if entry:
             found.append(entry)
     return found
 

@@ -25,7 +25,8 @@ const entries = {
   aaaaaaaaaaa1: { ...rows[0], cut: ['answer', 'advisors'], limit: 250000, confidence: 'medium', evidence: 'docs/brand.md has no rule for empty states.', error: '', advisors: [{ role: 'main', agent: 'claude', model: 'fable', answer: 'This is a taste choice. Ask the user.', confidence: 'medium' }] },
   aaaaaaaaaaa2: { ...rows[1], cut: [], limit: 250000, question: longQuestion, answer: longAnswer, confidence: 'high', evidence: 'server/export.py\nui/src/Export.tsx', error: '',
     advisors: [{ role: 'main', agent: 'claude', model: 'fable', answer: longAnswer, confidence: 'high' }, { role: 'second', agent: 'codex', model: 'gpt', answer: 'Agree: stream it.', confidence: 'high' }] },
-  aaaaaaaaaaa5: { ...rows[4], cut: [], limit: 250000, confidence: '', evidence: '', error: '', advisors: [] },
+  // Null and missing detail fields (an older or damaged server answer): the detail must still open.
+  aaaaaaaaaaa5: { ...rows[4], cut: null, confidence: null, evidence: null, error: null, advisors: null },
 }
 const project = { id: PID, name: 'web', revision: 1, budget: 4000, budget_min: 1000, budget_max: 10000, instructions: '', pins: [], notes: [], preview: '', chars: 120, folder: '/srv/projects/' + PID, session_name: 'web' }
 const levels = [0, 1, 2, 3, 4].map(level => ({ level, name: `Level ${level}`, summary: 'Rules for this level.' }))
@@ -250,7 +251,8 @@ async function main() {
 
       // Advisor off: no fake model in the answer label.
       await section.locator('.advisor-row').nth(4).click()
-      await detail.getByText('The advisor was off.').waitFor()
+      await page.getByText(/The advisor was off\.|Tether stopped/).first().waitFor()
+      check(`${at} null fields: the detail opens`, !(await page.getByText('Tether stopped').count()) && await detail.getByText('The advisor was off.').isVisible())
       check(`${at} advisor off: plain Answer label`, (await detail.locator('.advisor-part h4').allInnerTexts()).join(',') === 'Question,Answer')
       await detail.getByRole('button', { name: 'All decisions' }).click()
       await page.keyboard.press('Escape')
