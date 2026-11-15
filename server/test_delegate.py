@@ -273,10 +273,16 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual(options[options.index('@chat_icon') + 1], 'lightbulb')
                 self.assertEqual(options[options.index('@chat_icon_by') + 1], 'tether')
                 self.assertEqual(options[options.index('@tether_role') + 1], role)
+        self.assertNotIn('@chat_name_auto', options)
         run = Mock()
         with patch.object(delegate, 'new_window_after', return_value='%13'):
             delegate.start(entry(), body(), '/project', run=run)
         self.assertNotIn('@chat_icon', run.call_args_list[0].args[0])
+        self.assertIn('@chat_name_auto', run.call_args_list[0].args[0])
+        run = Mock()
+        with patch.object(delegate, 'new_window_after', return_value='%13'):
+            delegate.start(entry(), body(name='Chosen'), '/project', run=run)
+        self.assertNotIn('@chat_name_auto', run.call_args_list[0].args[0])
 
     def test_helper_role_is_validated(self):
         source = entry(writable=True)
@@ -387,7 +393,8 @@ class LaunchTests(unittest.TestCase):
         calls = [call.args[0] for call in run.call_args_list]
         self.assertEqual(calls[2][1:], ['new-window', '-a', '-t', '@3', '-c', '/project', '-P', '-F', '#{pane_id}'])
         self.assertEqual(calls[3][1:], ['set-option', '-p', '-t', '%13', '@chat_name', name, ';',
-                                     'set-option', '-p', '-t', '%13', '@chat_name_at', '123000'])
+                                     'set-option', '-p', '-t', '%13', '@chat_name_at', '123000', ';',
+                                     'set-option', '-p', '-t', '%13', '@chat_name_auto', name])
         path, = (self.root / 'delegate').glob('*.md')
         self.assertEqual(calls[4][1:], ['send-keys', '-t', '%13', '-l', f'claude "$(cat {shlex.quote(str(path))})"'])
         self.assertEqual(calls[5][1:], ['send-keys', '-t', '%13', 'Enter'])
@@ -416,7 +423,8 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(calls[2][1:], ['new-window', '-a', '-t', '@3', '-c', str(self.root), '-P', '-F', '#{pane_id}'])
         self.assertEqual(calls[3][1:], ['set-option', '-p', '-t', '%13', '@chat_name', 'Fix the bug', ';',
                                      'set-option', '-p', '-t', '%13', '@chat_name_at', '123000', ';',
-                                     'set-option', '-p', '-t', '%13', '@worktree', 'feature/foo'])
+                                     'set-option', '-p', '-t', '%13', '@worktree', 'feature/foo', ';',
+                                     'set-option', '-p', '-t', '%13', '@chat_name_auto', 'Fix the bug'])
         self.assertEqual(len(calls), 6)
 
     def test_invalid_profile_does_not_open_window_or_write_prompt(self):

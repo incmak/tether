@@ -500,3 +500,44 @@ def project_name(start=None):
                 found = None
             return _clean(Path(found[1]).name if found else place.name)
     return _clean(here.name)
+
+
+PANE_REF = re.compile(r'\bpane (%[0-9]+)\b')
+CHAT_REF = re.compile(r'\bchat ([0-9A-Za-z-]{4,})\b')
+
+
+def _names(text, pane, chat):
+    """True when a record of who did it ("claude · tmux $3 · pane %12 · chat 019a…") names this tab. A record with a
+    chat id must name this chat; a pane id alone counts only when the record has no chat id (tmux reuses pane ids)."""
+    chats = CHAT_REF.findall(text)
+    if chats:
+        return bool(chat) and chat in chats
+    return bool(pane) and pane in PANE_REF.findall(text)
+
+
+def linked(pane, chat, limit=6):
+    """The backlog items that one tab works on, finished, or added: [{id, title, state}], state 'doing', 'added'
+    or 'done', in that order. It only reads: items without an ID yet are left out."""
+    try:
+        lines = _lines(read()['text'])
+    except (ProjectError, OSError):
+        return []
+    found = []
+    for at, line in enumerate(lines):
+        item = ITEM.fullmatch(line)
+        number = item and ID.search(line)
+        if not number:
+            continue
+        details = lines[at + 1:_block_end(lines, at)]
+        done = item[1] != ' '
+        source = SOURCE.search(ID.sub('', line))
+        doing = not done and any(re.match(r'\s+- Doing:', row) and _names(row, pane, chat) for row in details)
+        finished = done and any(re.match(r'\s+- Done:', row) and _names(row, pane, chat) for row in details)
+        added = bool(source) and _names(source[0], pane, chat)
+        state = 'doing' if doing else 'done' if finished else 'added' if added else ''
+        if state:
+            found.append({'id': f'B{number[1]}', 'title': _bare(item[2]).strip()[:140], 'state': state,
+                          'open': not done})
+    order = {'doing': 0, 'added': 1, 'done': 2}
+    found.sort(key=lambda row: (order[row['state']], not row['open']))
+    return found[:limit]

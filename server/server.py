@@ -51,6 +51,8 @@ import prompt_actions
 import push
 import shortcuts
 import prefs_sync
+import tab_brief
+import backlog
 import codex_provider
 import delegate
 import worktrees
@@ -240,6 +242,11 @@ def monitor_notices():
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
         try:
+            tab_brief.BRIEFER.observe(entries, shared_status, lambda entry: timeline(entry['id'])['finished'],
+                                      brief_messages, apply_brief_name, brief_enabled)
+        except Exception as exc:  # tab briefs must never stop the monitor
+            print(f'tab brief observe failed: {exc!r}', file=sys.stderr)
+        try:
             WORK_WATCHER.observe()
         except Exception as exc:  # the work board must never stop the monitor
             print(f'work watcher failed: {exc!r}', file=sys.stderr)
@@ -382,7 +389,7 @@ def sessions():
 # Writes that add, remove or rename tmux panes or sessions. After one succeeds, the next list must come from tmux,
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
 TMUX_WRITES = {'/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
-               '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/side-shell',
+               '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
                '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled'} | groups_api.WRITES
 
 
@@ -452,7 +459,47 @@ def session_row(entry):
     status = shared_status(entry)
     return dict({key: entry.get(key) for key in ('id', 'tmux_session', 'label', 'agent', 'thread', 'writable', 'pane_name', 'tmux_pane_name', 'pane_icon', 'agent_name', 'codex_profile', 'worktree', 'group', 'role')},
                 dir=home_path(tab_folder(entry)), **status, **timeline(entry['id']), needs=needs.summary(status),
-                ask=attention.STORE.ask(entry['id'], entry.get('thread')))
+                ask=attention.STORE.ask(entry['id'], entry.get('thread')),
+                brief=tab_brief.public(tab_brief.STORE.get(entry.get('thread'))) if entry.get('thread') else None)
+
+
+def brief_messages(entry):
+    """The chat for a tab brief, from the transcript only (no screen capture): user prompts and text replies."""
+    if entry.get('agent') == 'claude':
+        return claude_snapshot(entry, display_text)['messages']
+    path = Path(entry.get('transcript') or '')
+    return history.read(path, codex_state, codex_consume)['messages'] if path.is_file() else []
+
+
+def brief_enabled():
+    """Settings › Main AI model = Local only keeps every chat on the server."""
+    return prefs_sync.load()['prefs'].get('mainModel') != 'none'
+
+
+def apply_brief_name(entry, name):
+    """Name a tab with its AI name only when nobody named it: no agent name, and no Tether name other than the
+    placeholder Tether gave it from the first prompt (@chat_name_auto). Checks the conversation again first."""
+    pane = entry['id']
+    with SEND_LOCK:
+        forget_sessions()
+        live = next((item for item in sessions() if item['id'] == pane), None)
+        if not live or live.get('thread') != entry.get('thread') or live.get('agent_name'):
+            return False
+        result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{@chat_name}\t#{@chat_name_auto}'],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            return False
+        current, _, placeholder = result.stdout.rstrip('\n').partition('\t')
+        if current and current != placeholder:
+            return False
+        result = subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
+                                 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)), ';',
+                                 'set-option', '-p', '-t', pane, '@chat_name_auto', name], capture_output=True, timeout=5)
+        if result.returncode:
+            return False
+        name_in_tmux(pane, name)
+        forget_sessions()
+        return True
 
 
 def session_rows(entries):
@@ -2002,6 +2049,15 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(304, b'', cache='no-cache', headers=headers)
                 else:
                     self.respond(200, body, cache='no-cache', headers=headers)
+            elif path == tab_brief.PATH:
+                query = parse_qs(urlsplit(self.path).query)
+                pane, thread = query.get('pane', [''])[0], query.get('thread', [''])[0]
+                if not re.fullmatch(r'%[0-9]+', pane):
+                    self.respond(400, {'error': 'Select a pane.'})
+                else:
+                    record = tab_brief.STORE.get(thread) if thread else None
+                    self.respond(200, {'brief': tab_brief.public(record), 'enabled': brief_enabled(),
+                                       'backlog': backlog.linked(pane, thread or None)}, cache='no-store')
             elif path == '/mobile/api/side-shells':
                 self.respond(200, {'shells': side_shells.list_shells()})
             elif path == '/mobile/api/tmux-sessions':
@@ -2075,7 +2131,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2319,6 +2375,7 @@ class Handler(BaseHTTPRequestHandler):
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
                 command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
                            if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at'])
+                command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto']  # a name the user gave is never replaced
                 with SEND_LOCK:
                     result = subprocess.run([paths.TMUX, *command], capture_output=True, text=True, timeout=5)
                     if result.returncode:
@@ -2326,6 +2383,27 @@ class Handler(BaseHTTPRequestHandler):
                     name_in_tmux(pane, name)
                     note = name_together(pane, name, from_session=False)
                 self.respond(200, {'pane': pane, 'name': name, **({'note': note} if note else {})})
+                return
+            if self.path == tab_brief.PATH:
+                # action 'write': ask the model now ("Write with AI"); 'save': the person's own description ('' clears).
+                pane, thread, action = body.get('pane'), body.get('thread'), body.get('action')
+                if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
+                    raise ValueError('Select a pane.')
+                entry = next((item for item in sessions() if item['id'] == pane), None)
+                if entry is None:
+                    raise ValueError('That tab has closed.')
+                if not thread or thread != entry.get('thread') or entry.get('pending_conversation'):
+                    raise ValueError('The conversation changed. Reload and try again.')
+                if entry.get('agent') not in ('claude', 'codex'):
+                    raise ValueError('Tab briefs work for Claude and Codex tabs.')
+                if action == 'save':
+                    record = tab_brief.BRIEFER.save(thread, body.get('description'))
+                elif action == 'write':
+                    record = tab_brief.BRIEFER.write(entry, brief_messages(entry), apply_brief_name, brief_enabled, manual=True)
+                else:
+                    raise ValueError('Choose write or save.')
+                forget_sessions()
+                self.respond(200, {'brief': tab_brief.public(record)})
                 return
             if self.path == '/mobile/api/pane-icon/draw':
                 # Claude draws a new icon (pane_icons.draw, a small model, about 10 s) and the pane wears it.
@@ -2517,7 +2595,8 @@ class Handler(BaseHTTPRequestHandler):
                             name = chat['title'][:60]
                             pane = new_window_after(body['after'], subprocess.run, cwd=cwd)
                             subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
-                                            'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))],
+                                            'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)), ';',
+                                            'set-option', '-p', '-t', pane, '@chat_name_auto', name],  # the chat's first prompt
                                            check=True, capture_output=True, timeout=5)
                             subprocess.run([paths.TMUX, 'send-keys', '-t', pane, '-l', command],
                                            check=True, capture_output=True, timeout=5)
@@ -2676,7 +2755,7 @@ class Handler(BaseHTTPRequestHandler):
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in ('/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in ('/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)

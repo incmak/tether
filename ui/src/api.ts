@@ -94,7 +94,12 @@ export interface Pane {
   ask?: Ask | null  // Attention mode: the ask that waits on you until you answer it (server/attention.py)
   reviewers?: string[]
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
+  brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
+/** state: running while the model writes; off when no model may be used; skipped when the chat was too long when first seen. at: Unix seconds. */
+export interface TabBrief { name?: string; description?: string; description_by?: 'ai' | 'user'; state?: 'running' | 'done' | 'failed' | 'off' | 'skipped'; error?: string; at?: number }
+/** A backlog item that names this tab or chat (server/backlog.py linked). */
+export interface TabBriefLink { id: string; title: string; state: 'doing' | 'added' | 'done'; open: boolean }
 export interface Needs { kind: 'approval' | 'plan' | 'question'; text: string }
 // since and snoozed_until are Unix seconds. next is the reply's "Next:" line or the prompt's question.
 export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean }

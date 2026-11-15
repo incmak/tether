@@ -265,6 +265,12 @@ function App() {
     window.addEventListener('tether:open-files', open)
     return () => window.removeEventListener('tether:open-files', open)
   }, [])
+  // Session details → a linked backlog item: the backlog page, searched for its ID.
+  useEffect(() => {
+    const open = (event: Event) => { const query = (event as CustomEvent<{ query?: string }>).detail?.query; setBacklog({ mode: 'page', query }) }
+    window.addEventListener('tether:open-backlog', open)
+    return () => window.removeEventListener('tether:open-backlog', open)
+  }, [])
   const live = useMemo(() => new Set(sessions.flatMap(session => session.panes.map(item => item.id))), [sessions])
   const owner = pane ? sessions.find(item => item.id === pane.tmux_session) : undefined
   const [marks, loadMarks] = useProjectMarks(api, panes.length > 0)

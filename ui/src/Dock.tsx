@@ -7,7 +7,6 @@ import { TextMessagePartProvider } from '@assistant-ui/react'
 import { errorText, goalStatusLabel } from './api'
 import type { Api, Approval, AskBridge, Attention, ChatData, Choice, Footer, FooterTask, LiveState, Pane, PromptAction } from './api'
 import { useModal, usePolling } from './hooks'
-import { agentNames } from './Sidebar'
 import { Linked, PanelText, PanelPre, CopyButton, Markdown } from './Messages'
 import { Elapsed } from './Notices'
 import { LoginLink } from './LoginLink'
@@ -196,17 +195,6 @@ export const taskLabel = (task: string, details?: FooterTask[]) => {
   return named.length > 1 ? `${named[0].description} +${named.length - 1}` : String(named[0].description)
 }
 
-export function SessionInfo({ pane, footer, mode, onClose }: { pane: Pane; footer: Footer; mode: string; onClose: () => void }) {
-  const modal = useModal(true, onClose)
-  const parts = (footer.status ?? '').split('|').map(part => part.trim()).filter(Boolean)
-  const rows: [string, string][] = [['Pane', `${pane.label}`], ['Folder', pane.dir], ...(pane.worktree ? [['Worktree branch', pane.worktree] as [string, string]] : []), ['Agent', agentNames[pane.agent]], ['State', pane.state],
-    ...(pane.agent === 'claude' ? [['Mode', mode], ['Effort', footer.effort ?? 'Not shown'], ['Status line', parts.join(' · ') || 'Not shown'], ['Goal', footer.goal ? `Active${footer.goal !== 'active' ? ` · ${footer.goal}` : ''}` : 'None'], ['Background tasks', footer.tasks?.map(task => taskLabel(task)).join(', ') || 'None'], ['IDE context', footer.ide || 'None']] as [string, string][] : []),
-    ...((footer.agents ?? []).filter(agent => !agent.main).map(agent => ['Background agent', [agent.name, agent.task, agent.detail].filter(Boolean).join(' · ')]) as [string, string][])]
-  return <dialog {...modal} className="sheet" aria-labelledby="info-title">
-    <div className="sheet-heading"><h2 id="info-title">Session details</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
-    <dl className="info-list">{rows.map(([name, value], index) => <div key={index}><dt>{name}</dt><dd>{value}</dd></div>)}</dl>
-  </dialog>
-}
 const since = (time?: number | null) => {
   if (!time) return ''
   const minutes = Math.max(0, Math.round((Date.now() / 1000 - time) / 60))

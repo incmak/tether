@@ -25,7 +25,7 @@ CLOSE_AFTER = 3
 VERIFY_SECS = 60
 MAX_PASS = 20
 GAP = 1.5
-OPTIONS = ('@chat_name', '@chat_name_at', '@chat_icon', '@chat_icon_by',
+OPTIONS = ('@chat_name', '@chat_name_at', '@chat_name_auto', '@chat_icon', '@chat_icon_by',
            '@project_rev', '@worktree', '@group', '@tether_role', '@group_by')
 SESSION_OPTIONS = ('@project', '@groups')  # @groups: the session's groups (groups.py), so restored @group labels resolve
 _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')

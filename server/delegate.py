@@ -244,6 +244,9 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
         options += [';', 'set-option', '-p', '-t', pane, '@tether_role', 'reviewer']
     if worktree is not None:
         options += [';', 'set-option', '-p', '-t', pane, '@worktree', worktree]
+    if 'name' not in body and not role and review != 'new':
+        # A placeholder from the first prompt: the tab's AI name (tab_brief.py) may replace it once.
+        options += [';', 'set-option', '-p', '-t', pane, '@chat_name_auto', name]
     run(options,
         check=True, capture_output=True, timeout=5)
     if owner is not None:

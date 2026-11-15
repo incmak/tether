@@ -1,0 +1,60 @@
+/* Session details: the Settings look (sans-serif, eyebrow, grouped sections), a bottom sheet on phones and a side drawer on desktop. */
+.sheet.session-details { display: none; padding: 0; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; background: var(--surface); color: var(--text); }
+.sheet.session-details[open] { display: flex; flex-direction: column; }
+.session-details :is(h2, h3) { font-family: system-ui, -apple-system, sans-serif; }
+.sd-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 20px 20px 14px; flex: none; border-bottom: 1px solid var(--line); }
+.sd-header > .icon-button { flex: none; width: 44px; height: 44px; margin: -6px -10px 0 0; }
+.sd-heading { min-width: 0; flex: 1; }
+.sd-eyebrow { display: block; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+.sd-title-line { display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 3px; }
+.session-details .sd-title-line h2 { margin: 0; min-width: 0; font: 600 22px/1.25 system-ui, -apple-system, sans-serif; letter-spacing: -.5px; overflow-wrap: anywhere; }
+.sd-small-button { flex: none; width: 44px; height: 44px; color: var(--muted); }
+.sd-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.sd-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
+.sd-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding: 4px 20px max(20px, env(safe-area-inset-bottom)); }
+.sd-section { padding: 16px 0 6px; }
+.sd-section + .sd-section { border-top: 1px solid var(--line); }
+.session-details .sd-section h3 { margin: 0 0 6px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.sd-rows { margin: 0; padding: 0; list-style: none; }
+.sd-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 0; color: var(--text); text-align: left; }
+.sd-rows > li + li { border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent); }
+.sd-action { margin: 0; border: 0; border-radius: 8px; background: transparent; font: inherit; cursor: pointer; }
+.sd-action:hover { background: var(--hover); }
+.sd-action:focus-visible, .sd-copy:focus-visible, .sd-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: hover) { .sd-action { margin-inline: -8px; padding-inline: 8px; width: calc(100% + 16px); } }
+.sd-row-icon { display: flex; flex: none; color: var(--muted); }
+.sd-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.sd-row-text > small { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.sd-row-value { font-size: 14px; font-weight: 550; line-height: 1.45; overflow-wrap: anywhere; }
+.sd-chevron { flex: none; color: var(--muted); }
+.sd-action .sd-row-value { color: var(--text); }
+.sd-mono { font: 500 13px/1.45 var(--shell-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+.sd-muted { color: var(--muted); font-weight: 400; }
+.sd-warn { color: var(--error); }
+.sd-copy { display: flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; margin-right: -10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
+.sd-copy:hover { background: var(--hover); color: var(--text); }
+.sd-brief { padding: 4px 0 8px; }
+.sd-description { margin: 0; font-size: 15px; line-height: 1.55; overflow-wrap: anywhere; }
+.sd-placeholder { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.sd-meta { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.sd-brief-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.sd-brief-actions button, .sd-edit-buttons button { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 8px 12px; font-size: 13px; }
+.sd-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.sd-error { margin: 12px 0 0; color: var(--error); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.sd-link { min-height: 44px; padding: 0 4px; border: 0; background: transparent; color: var(--accent); font: inherit; text-decoration: underline; }
+.sd-edit { display: grid; gap: 8px; margin-top: 6px; }
+.sd-edit > label { font-size: 13px; font-weight: 600; }
+.sd-edit :is(input, textarea) { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, sans-serif; }
+.sd-edit textarea { resize: vertical; }
+.sd-edit :is(input, textarea):focus-visible { outline: 0; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.sd-count { justify-self: end; color: var(--muted); font-size: 11px; }
+.sd-edit-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.sd-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Desktop: a drawer on the right, full height, like the Settings workspace. */
+@media (min-width: 760px) {
+  .sheet.session-details { inset: 0 0 0 auto; width: 420px; max-width: calc(100vw - 48px); height: 100dvh; max-height: none; margin: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; }
+  .sd-header { padding: 24px 28px 16px; }
+  .sd-body { padding: 4px 28px 28px; }
+}
+@media (prefers-reduced-motion: reduce) { .sd-placeholder .spin { animation: none; } }

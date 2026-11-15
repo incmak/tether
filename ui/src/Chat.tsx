@@ -49,7 +49,8 @@ import { Composer } from './Composer'
 import { Bone, Skeleton, Spinner } from './Skeleton'
 import { expandPlaceholders } from './pasteText'
 import { autoBlock } from './noticeText'
-import { ChoiceDock, HeadsUp, taskLabel, SessionInfo, LiveSheet, SearchSheet } from './Dock'
+import { ChoiceDock, HeadsUp, taskLabel, LiveSheet, SearchSheet } from './Dock'
+import { SessionDetails } from './SessionDetails'
 import { AskBar } from './ChoiceExtras'
 import { LiveTerminal } from './Terminal'
 import { WORKSPACE_QUERY } from './workspace'
@@ -1080,7 +1081,12 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
         return { ...base, action, variant: (/\b(error|failed|denied|limit)\b/i.test(note) ? 'warning' : 'default') as NoticeVariant, icon: /\b(error|failed|denied|limit)\b/i.test(note) ? <ShieldAlert size={15} /> : <Info size={15} />, title: <Linked text={note} /> }
       }),
     ]} />
-    {info && <SessionInfo pane={activePane} footer={footer} mode={MODES[currentMode]} onClose={() => setInfo(false)} />}
+    {info && <SessionDetails api={api} pane={activePane} session={session} stack={groupName} footer={footer} mode={MODES[currentMode]} model={model ?? ''} context={context} state={state} thread={data?.thread ?? activePane.thread} onClose={() => setInfo(false)}
+      onFiles={folder => { setInfo(false); window.dispatchEvent(new CustomEvent('tether:open-files', { detail: { path: folder } })) }}
+      onModel={writable && state !== 'Working' ? () => { setInfo(false); setModelSheet(true) } : undefined}
+      onUsage={activePane.agent === 'claude' ? () => { setInfo(false); setPlanSheet(true) } : activePane.agent === 'codex' ? () => { setInfo(false); setUsageSheet(true) } : undefined}
+      onLive={show => { setInfo(false); setLiveSheet(show) }} onTools={activePane.agent !== 'shell' ? () => { setInfo(false); setTools(true) } : undefined}
+      onBacklog={query => { setInfo(false); window.dispatchEvent(new CustomEvent('tether:open-backlog', { detail: { query } })) }} onRenamed={onUpdate} />}
     {usageSheet && <Usage footer={footer} onClose={() => setUsageSheet(false)} />}
     {agentMap && <AgentMap api={api} session={activePane.id} list={subAgents.data} onClose={() => setAgentMap(false)} />}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
