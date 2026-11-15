@@ -89,6 +89,7 @@ import { WorkSheet } from './WorkBoard'
 import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
 import { useActivityPing } from './activityPing'
+import { useQuickCreate } from './QuickToast'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
 
@@ -718,6 +719,8 @@ function App() {
     setDrawer(false)
     leaveHome()
   }
+  // The search menu's "Add to the backlog" and "Start a new tab" rows, and their toast.
+  const quick = useQuickCreate({ api, agent: prefs.mainModel, sessions, onOpen: openPane })
   const archiveTab = (target: Pane) => {
     const owner = sessions.find(session => session.panes.some(item => item.id === target.id))
     if (!owner) return
@@ -980,7 +983,8 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} create={quick.create} />}
+    {quick.toast}
     {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}

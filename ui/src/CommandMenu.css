@@ -1,0 +1,8 @@
+/* The search menu's place picker for "Start a new tab for … in…". */
+.command-place { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 20px; border-bottom: 1px solid var(--line); }
+.command-place-label { flex: 1 1 12em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.command-place-field { flex: 1 1 14em; width: auto; max-width: 100%; font-size: 14px; }
+.command-none { margin-bottom: 4px; }
+@media (max-width: 599.98px) {
+  .command-place { padding: 10px 14px; }
+}

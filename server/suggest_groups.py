@@ -154,24 +154,27 @@ def codex_fast_model():
         return None
 
 
-def agent_output(agent, executable, entries):
-    with tempfile.TemporaryDirectory(prefix='tether-groups-') as folder:
+def run_agent(agent, executable, prompt, content, timeout, started=None):
+    """One tool-free, settings-free agent CLI call in a fresh temporary folder. started(process) lets a caller kill a
+    call that a newer one replaces. A timeout kills the whole process group."""
+    with tempfile.TemporaryDirectory(prefix='tether-ask-') as folder:
         outfile = Path(folder) / 'groups.txt'
-        content = model_input(entries)
         if agent == 'claude':
             command = [executable, '-p', '--model', 'haiku', '--tools', '', '--setting-sources', '',
-                       '--strict-mcp-config', '--no-session-persistence', '--system-prompt', PROMPT]
+                       '--strict-mcp-config', '--no-session-persistence', '--system-prompt', prompt]
         else:
             model = codex_fast_model()
             command = [executable, 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
                        *(['-m', model] if model else []),
-                       '-c', 'model_reasoning_effort=low', '-o', str(outfile), '--', PROMPT + '\n\n' + content]
+                       '-c', 'model_reasoning_effort=low', '-o', str(outfile), '--', prompt + '\n\n' + content]
         process = subprocess.Popen(command, cwd=folder,
                                    stdin=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        if started:
+            started(process)
         try:
-            output, _ = process.communicate(input=content if agent == 'claude' else None, timeout=AGENT_TIMEOUT)
+            output, _ = process.communicate(input=content if agent == 'claude' else None, timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
@@ -180,8 +183,12 @@ def agent_output(agent, executable, entries):
             process.wait()
             raise
         if process.returncode:
-            raise ValueError('Agent failed to suggest groups.')
+            raise ValueError('The agent did not answer.')
         return output if agent == 'claude' else outfile.read_text(encoding='utf-8')
+
+
+def agent_output(agent, executable, entries):
+    return run_agent(agent, executable, PROMPT, model_input(entries), AGENT_TIMEOUT)
 
 
 def suggest(body):

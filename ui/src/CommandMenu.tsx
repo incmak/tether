@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { CircleCheck, ClipboardList, CornerDownLeft, Search, SquareTerminal, Zap } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CircleCheck, ClipboardList, CornerDownLeft, ListPlus, MapPin, Search, SquarePlus, SquareTerminal, Zap } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { useModal } from './hooks'
 import { keyLabel } from './keys'
@@ -11,12 +11,24 @@ import { field, matchSessions, scoreWords, searchWords } from './search'
 import { BACKLOG_PATH } from './backlogNews'
 import { parseBacklog } from './backlogItems'
 import { projectGroups, queryScore } from './backlogView'
+import { SelectMenu } from './SelectMenu'
+import type { MenuOption } from './SelectMenu'
+import { DEFAULT_SESSION, DEFAULT_STACK, placeName, placeValue, places } from './quickTab'
+import type { Choice, Place } from './quickTab'
+import './CommandMenu.css'
 
 /** One command of the menu. Leave a command out when its action does not apply now. */
 export interface Command { label: string; key?: string; run: () => void }
 
-type Group = 'Panes' | 'Commands' | 'Backlog'
-interface Row { id: string; group: Group; label: string; hint?: string; key?: string; dot?: string; done?: boolean; run: () => void }
+type Group = 'Panes' | 'Commands' | 'Backlog' | 'Create'
+/** keep: the row changes the menu and does not close it. */
+interface Row { id: string; group: Group; label: string; hint?: string; key?: string; dot?: string; done?: boolean; keep?: boolean; run: () => void }
+
+/** The last rows of a search: keep the query as a backlog item, or start an agent tab with it. */
+export interface Create {
+  onBacklog: (query: string) => void
+  onTab: (query: string, choice: Choice) => void
+}
 
 interface Props {
   sessions: Session[]
@@ -33,6 +45,7 @@ interface Props {
   stacks?: Record<string, GroupInfo[]>
   /** Search the backlog too. `open` shows the backlog page with this search. */
   backlog?: { api: Api; open: (query: string) => void }
+  create?: Create
 }
 
 interface BacklogHit { ref: string; text: string; project: string; done: boolean; score: number }
@@ -53,14 +66,32 @@ function useBacklogText(api: Api | undefined) {
   return { text, failed }
 }
 
-const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Backlog: 'Backlog' }
+const TYPE: Record<Group, string> = { Panes: 'Pane', Commands: 'Command', Backlog: 'Backlog', Create: 'New' }
+const defaultName = `${DEFAULT_SESSION} · ${DEFAULT_STACK}`
+
+/** The picker's rows: Tether's choice, the default, then each session with its stacks. */
+function placeOptions(sessions: Session[]): { options: MenuOption[]; byValue: Map<string, Place> } {
+  const byValue = new Map<string, Place>()
+  const options: MenuOption[] = [
+    { value: 'auto', label: 'Let Tether choose', detail: 'Picks the session and stack for the task', group: 'Tether' },
+    { value: 'default', label: defaultName, detail: sessions.some(session => session.name === DEFAULT_SESSION) ? 'The default place' : 'The default place. Tether makes the General session.', group: 'Tether' },
+  ]
+  for (const place of places(sessions)) {
+    const value = placeValue(place)
+    byValue.set(value, place)
+    options.push({ value, label: place.groupName || 'Tabs in no stack', detail: place.groupName ? undefined : place.sessionName, group: place.sessionName, search: placeName(place) })
+  }
+  return { options, byValue }
+}
 
 /** ⌘K or ⌥Space: go to a pane or session, run a command, or find a backlog item. Each command row shows its key, so the menu teaches the keys. */
-export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, groups, stacks, backlog }: Props) {
+export function CommandMenu({ sessions, seen, selected, slots, commands, onPane, onSession, onClose, groups, stacks, backlog, create }: Props) {
   // Opening the menu keeps the Forward steps, so its Forward command can use them.
   const modal = useModal(true, onClose, undefined, { keepForward: true })
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
+  const [picking, setPicking] = useState(false)
+  const input = useRef<HTMLInputElement>(null)
   const { text: backlogText, failed: backlogFailed } = useBacklogText(backlog?.api)
   // Each item with its project, so a search for a project name finds its items.
   const backlogItems = useMemo(() => backlogText === null ? [] : projectGroups(parseBacklog(backlogText)).flatMap(group => group.items.map(item => ({ item, project: group.name }))), [backlogText])
@@ -96,10 +127,23 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     }).sort((a, b) => b.score - a.score)
     const backlogRows: Row[] = hits.slice(0, BACKLOG_ROWS).map(hit => ({ id: `backlog:${hit.ref}`, group: 'Backlog', label: hit.text, hint: [hit.ref, hit.project || 'Inbox', hit.done && 'Done'].filter(Boolean).join(' · '), done: hit.done, run: () => backlog!.open(hit.ref) }))
     if (backlog && backlogText !== null) backlogRows.push({ id: 'backlog:search', group: 'Backlog', label: hits.length > BACKLOG_ROWS ? `See all ${hits.length} in the backlog` : `Search the backlog for “${words}”`, run: () => backlog.open(words) })
-    return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...backlogRows]
-  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index])
+    const createRows: Row[] = !create ? [] : [
+      { id: 'create:backlog', group: 'Create', label: `Add “${words}” to the backlog`, run: () => create.onBacklog(words) },
+      { id: 'create:tab', group: 'Create', label: `Start a new tab for “${words}”`, hint: 'Tether picks the place', run: () => create.onTab(words, { kind: 'auto' }) },
+      { id: 'create:place', group: 'Create', label: `Start a new tab for “${words}” in…`, hint: 'Choose the session and stack', keep: true, run: () => setPicking(true) },
+    ]
+    return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...backlogRows, ...createRows]
+  }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index, create])
   const at = Math.min(active, Math.max(0, rows.length - 1))
-  const pick = (row: Row | undefined) => { if (!row) return; onClose(); row.run() }
+  const words = query.trim()
+  const pick = (row: Row | undefined) => { if (!row) return; if (!row.keep) onClose(); row.run() }
+  const { options: placeRows, byValue } = useMemo(() => placeOptions(sessions), [sessions])
+  const choose = (value: string) => {
+    const place = byValue.get(value)
+    const choice: Choice = value === 'default' ? { kind: 'default' } : place ? { kind: 'place', place } : { kind: 'auto' }
+    onClose()
+    create?.onTab(words, choice)
+  }
   const move = (to: number) => {
     const next = (to + rows.length) % rows.length
     setActive(next)
@@ -107,12 +151,14 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
   }
   const icon = (row: Row) => row.group === 'Panes' ? (row.dot ? <span className={`state-dot ${row.dot}`} /> : <SquareTerminal size={16} />)
     : row.group === 'Backlog' ? (row.id === 'backlog:search' ? <Search size={16} /> : row.done ? <CircleCheck size={16} /> : <ClipboardList size={16} />)
+    : row.group === 'Create' ? (row.id === 'create:backlog' ? <ListPlus size={16} /> : row.id === 'create:place' ? <MapPin size={16} /> : <SquarePlus size={16} />)
     : <Zap size={16} />
-  const searching = !!query.trim()
+  const searching = !!words
+  const matched = rows.some(row => row.group !== 'Create' && row.id !== 'backlog:search')
   const placeholder = backlog ? 'Search panes, commands and the backlog' : 'Go to a pane or run a command'
   return <dialog {...modal} className="sheet command-menu" aria-label="Search">
     <label className="command-search"><Search size={20} aria-hidden="true" />
-      <input autoFocus role="combobox" aria-expanded="true" aria-controls="command-list" aria-autocomplete="list" aria-activedescendant={rows.length ? `command-${at}` : undefined}
+      <input ref={input} autoFocus role="combobox" aria-expanded="true" aria-controls="command-list" aria-autocomplete="list" aria-activedescendant={rows.length ? `command-${at}` : undefined}
         aria-label={placeholder} placeholder={placeholder} value={query} autoComplete="off" spellCheck={false}
         onChange={event => { setQuery(event.target.value); setActive(0) }}
         onKeyDown={event => {
@@ -121,9 +167,18 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
           else if (event.key === 'Home' && event.ctrlKey) { event.preventDefault(); move(0) }
           else if (event.key === 'End' && event.ctrlKey) { event.preventDefault(); move(rows.length - 1) }
           else if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); pick(rows[at]) }
+          // → at the end of the text, or Tab, on a "Start a new tab" row opens the place picker.
+          else if (create && rows[at]?.id.startsWith('create:') && rows[at].id !== 'create:backlog' && !event.shiftKey && (event.key === 'Tab' || (event.key === 'ArrowRight' && event.currentTarget.selectionStart === event.currentTarget.value.length))) { event.preventDefault(); setPicking(true) }
         }} />
     </label>
+    {picking && create && words && <div className="command-place">
+      <span className="command-place-label" id="command-place-label">Start “{words}” in</span>
+      <SelectMenu openOnMount value="auto" options={placeRows} onChange={choose} label="Place for the new tab" className="sm-field command-place-field" minWidth={300}
+        searchLabel="Search sessions and stacks" emptyText="No session or stack matches." triggerLabel="Choose a place" icon={<MapPin size={13} aria-hidden="true" />}
+        onClosed={() => { setPicking(false); requestAnimationFrame(() => input.current?.focus()) }} />
+    </div>}
     <div id="command-list" role="listbox" tabIndex={-1} aria-label="Results" className="command-list">
+      {searching && !matched && rows.length > 0 && <p className="command-empty command-none">Nothing matches “{words}”.</p>}
       {rows.map((row, index) => <div key={row.id} role="presentation">
         {(index === 0 || rows[index - 1].group !== row.group) && <div className="command-group" role="presentation">{row.group}</div>}
         <div id={`command-${index}`} role="option" aria-selected={index === at} className={`command-row${index === at ? ' active' : ''}${row.done ? ' done' : ''}`}
@@ -139,7 +194,8 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     </div>
     <div className="command-foot" aria-hidden="true">
       <span><kbd>↑</kbd><kbd>↓</kbd> Move</span>
-      <span><kbd><CornerDownLeft size={11} /></kbd> Open</span>
+      <span><kbd><CornerDownLeft size={11} /></kbd> {rows[at]?.group === 'Create' ? 'Run' : 'Open'}</span>
+      {rows[at]?.id.startsWith('create:') && rows[at].id !== 'create:backlog' && <span><kbd>→</kbd> Choose place</span>}
       <span><kbd>Esc</kbd> Close</span>
     </div>
   </dialog>
