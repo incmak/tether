@@ -7,6 +7,7 @@ import './ExplorerPhone.css'
 
 // The phone's bottom tab bar: Home | Chats | Files | Terminals | More. The desktop shows the left rail instead.
 // Chats and Terminals are the chat panel and its terminal view; Files is the phone explorer.
+// No tab is ever disabled: with no chat open, Terminals shows an empty state with the way to a chat (Home.tsx NoTerminal).
 // The bar holds five items at most (Material 3 navigation bar: three to five destinations). Share, Browser and the
 // assistant open from the More menu, two taps away.
 // Actions such as Undo live in the toast, the chat header's ⋯ menu and the command menu.
@@ -22,7 +23,7 @@ const MORE_MENU = 'phone-more-menu'
 /** browser: opens the shared browser full screen. busy = an agent has tabs open, asking = an agent needs the person there. */
 export interface PhoneBrowser { onOpen: () => void; busy: boolean; asking: boolean }
 
-export function PhoneTabs({ screen, waiting = 0, onScreen, setScreen, terminals, onLive, browser }: { screen: Screen; waiting?: number; onScreen: (screen: Screen) => void; setScreen: (screen: Screen) => void; terminals: boolean; onLive?: (event?: { currentTarget: Element | null }) => void; browser?: PhoneBrowser }) {
+export function PhoneTabs({ screen, waiting = 0, onScreen, setScreen, onLive, browser }: { screen: Screen; waiting?: number; onScreen: (screen: Screen) => void; setScreen: (screen: Screen) => void; onLive?: (event?: { currentTarget: Element | null }) => void; browser?: PhoneBrowser }) {
   const [more, setMore] = useState(false)
   const moreButton = useRef<HTMLButtonElement>(null)
   const menu = useRef<HTMLDivElement>(null)
@@ -59,7 +60,7 @@ export function PhoneTabs({ screen, waiting = 0, onScreen, setScreen, terminals,
 
   return <nav className="phone-tabbar" aria-label="Tether">
     {TABS.map(({ id, label, icon: Icon }) => <button key={id} type="button" aria-current={screen === id ? 'page' : undefined}
-      disabled={id === 'terminals' && !terminals} aria-label={id === 'home' && waiting ? `${label}, ${waiting} need you` : undefined} onClick={() => { setMore(false); onScreen(id) }}><span className="phone-tab-icon"><Icon size={22} aria-hidden="true" />{id === 'home' && waiting > 0 && <span className="phone-tab-dot asking" aria-hidden="true" />}</span><span>{label}</span></button>)}
+      aria-label={id === 'home' && waiting ? `${label}, ${waiting} need you` : undefined} onClick={() => { setMore(false); onScreen(id) }}><span className="phone-tab-icon"><Icon size={22} aria-hidden="true" />{id === 'home' && waiting > 0 && <span className="phone-tab-dot asking" aria-hidden="true" />}</span><span>{label}</span></button>)}
     {/* More is current while one of its pages shows. Its dot and name carry the browser's state, as the Browser tab did. */}
     <button ref={moreButton} type="button" className="phone-tab-more" data-ui="More" aria-haspopup="menu" aria-expanded={more} aria-controls={more ? MORE_MENU : undefined}
       aria-current={screen === 'share' ? 'page' : undefined} aria-label={browserState ? `More, Browser: ${browserState}` : undefined} onClick={() => setMore(open => !open)}>

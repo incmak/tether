@@ -45,7 +45,7 @@ import { ActionDeck, useUrgentDeck } from './ActionDeck'
 import { LessonsReview } from './LessonsReview'
 import { reviewReason, useLessonsReview } from './lessonsReview'
 import { useNow, visibleAsk, waitingAsks } from './attention'
-import { Home } from './Home'
+import { Home, NoTerminal } from './Home'
 import { hasAgents, homeGroups } from './homeGroups'
 import { DRAG_SLOT, WORKSPACE_QUERY, addPanel, addSlot, deskFor, deskKeyFor, hasPanel, newPanelId, panelCols, placePane, removePanel, withDesk, withPanels, resolveSlots, splitSlot, storeSlots, swapSlots } from './workspace'
 import { PanelColumn, PanelTools } from './PanelColumn'
@@ -239,7 +239,9 @@ function App() {
   // A device with no chosen pane starts on Home, unless a link names a pane or a place.
   const [screen, setScreen] = useState<Screen>(() => prefs.selected || new URL(location.href).searchParams.has('session') || new URL(location.href).searchParams.get('go') === 'attention' ? 'chats' : 'home')
   // Home takes over when you pick it, and when there is no pane to show. Nothing is on screen behind it, so no pane counts as open.
-  const home = screen === 'home' || (!pane && screen !== 'files' && screen !== 'share')
+  // Phone: Terminals with no pane is its own screen, with an empty state. The tab is always enabled (Apple HIG, tab bars).
+  const noTerminal = !wide && !pane && screen === 'terminals'
+  const home = screen === 'home' || (!pane && screen !== 'files' && screen !== 'share' && !noTerminal)
   const openId = home ? undefined : pane?.id
   const followSlot = useRef(false)
   const leaveHome = useCallback(() => { followSlot.current = true; setScreen(current => current === 'home' ? 'chats' : current) }, [])
@@ -266,6 +268,13 @@ function App() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Read the committed slot DOM before paint so the rail matches its terminal view.
     setScreen(current => current === 'chats' || current === 'terminals' ? shown : current)
   }, [home, pane?.id])
+  // Phone: a chat chosen from the empty Terminals screen opens in its terminal view.
+  const hadPane = useRef(!!pane)
+  useEffect(() => {
+    const arrived = !hadPane.current && !!pane
+    hadPane.current = !!pane
+    if (arrived && !wide && screen === 'terminals') choosePhoneScreen('terminals', setScreen)
+  }, [pane, wide, screen])
   const screenKeys = useRef<{ files: boolean; home: boolean; choose: (next: Screen) => void; toggleSidebar: () => void } | null>(null)
   // Once the first sessions list is in, fetch the Files and Share chunks in idle time (B26). Once per page load.
   const loaded = !!data
@@ -928,7 +937,7 @@ function App() {
     'data-tint': tint ? '' : undefined, 'data-fill': fill !== undefined ? '' : undefined,
   }
   if (unauthorized) return <main className="signin"><Terminal size={32} strokeWidth={1.4} /><h1>Sign in</h1><p>Sign in to access your terminal sessions.</p><a className="primary" href="/mobile/login?next=/chat/">Sign in</a></main>
-  return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', home && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
+  return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', (home || noTerminal) && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
     {pane ? (view ? <Workspace layout={desk} slots={slotPanes} focus={view.focus} zoomed={zoomed && multi} onCount={setCount} onFocus={focusSlot} onLayout={setDesk}
       renderSlot={(target, index, shown) => chatFor(target, shown > 1 || zoomed ? { index, zoomed, onZoom: toggleZoom, onClose: zoomed ? undefined : () => closeSlot(index), onPick: () => setPicking(index), onSwapTo: to => swap(index, to), onDragStart: event => { event.dataTransfer.setData(DRAG_SLOT, String(index)); event.dataTransfer.effectAllowed = 'move' } } : undefined)}
       onDropPane={dropPane} onDropSession={dropSession} onDropChat={dropChat} onSwap={swap}
@@ -945,6 +954,7 @@ function App() {
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
     {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
+    {noTerminal && <NoTerminal loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onMenu={() => setDrawer(true)} />}
     {files && <Suspense fallback={<PanelLoading label="Files" />}><Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} /></Suspense>}
     {share && <Suspense fallback={<PanelLoading label="Share" cover={!wide} />}><Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
       const before = prefs.drafts[pane.id]?.text ?? ''
@@ -961,7 +971,7 @@ function App() {
       } : undefined} /></Suspense>}
     {!home && prefs.agentBubble && sessions.some(item => item.panes.some(p => p.agent !== 'shell')) && <AgentBubble sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} onPage={() => setAgentsPage('list')} onHide={() => { update(() => ({ agentBubble: false })); setNotice('Agents bubble hidden. Turn it on in Settings › Chat.') }} />}
     {livePins.length > 0 && <SidePins api={api} pins={prefs.sidePins} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onPin={pinPane} onUnpin={unpinPane} onNote={notePin} onMove={movePin} onUpdate={() => void refresh()} />}
-    {!wide && <PhoneTabs screen={home ? 'home' : screen} waiting={waitingCount} onScreen={next => choosePhoneScreen(next, setScreen)} setScreen={setScreen} terminals={!!pane} onLive={openLive}
+    {!wide && <PhoneTabs screen={home ? 'home' : screen} waiting={waitingCount} onScreen={next => choosePhoneScreen(next, setScreen)} setScreen={setScreen} onLive={openLive}
       browser={pane ? {
         // An open ask goes straight to the agent's page. Otherwise the browser opens on the last tab.
         onOpen: () => { const ask = asks.find(item => item.tab); if (ask?.tab && ask.pane) watchTab(ask.tab, ask.pane); else setBrowserSheet(true) },

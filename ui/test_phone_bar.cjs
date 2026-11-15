@@ -1,5 +1,5 @@
 // The phone bottom bar (PhoneTabs.tsx): Home, Chats, Files, Terminals and More. The More menu holds Share, Browser and
-// the assistant. Checks the five items, the menu (opens, each page opens, current state, the browser dot), keyboard and
+// the assistant. No tab is ever disabled: with no chat open, Terminals shows an empty state. Checks the five items, the menu (opens, each page opens, current state, the browser dot), keyboard and
 // screen reader use, 44 px targets, 320 and 390 px, light and dark, and reduced motion.
 // Every API request stays in this page's fixtures; no terminal is touched.
 const http = require('node:http')
@@ -27,7 +27,7 @@ const fixture = {
 }
 
 async function main() {
-  let browser, page, server, failed = 0
+  let browser, page, server, failed = 0, failSessions = false
   const pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -53,6 +53,7 @@ async function main() {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
+        if (endpoint === 'sessions' && failSessions) return route.fulfill({ status: 500, json: { error: 'Server is down.' } })
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs: {}, version: 1 } })
         if (endpoint.startsWith('share/list')) return route.fulfill({ json: { files: [], next: null, usage: { used: 0, quota: 1e9, count: 0 } } })
         if (endpoint === 'share/uploads') return route.fulfill({ json: { uploads: [] } })
@@ -210,16 +211,56 @@ async function main() {
     await page.screenshot({ path: path.join(SHOTS, 'more-asking-320-light.png') })
     await page.keyboard.press('Escape')
 
-    // No chat open: Terminals is disabled and the menu has no Browser row.
+    // No chat open: Terminals stays enabled and shows an empty state. The menu has no Browser row.
     fixture['browser/agents'] = BROWSER_IDLE
-    fixture.sessions = { sessions: [], default_thread: null }
+    const sessions = fixture.sessions
+    const blank = page.locator('.home-blank')
+    for (const [width, scheme] of [[390, 'light'], [390, 'dark'], [320, 'light'], [320, 'dark']]) {
+      const at = `no chat, ${width}px ${scheme}`
+      fixture.sessions = { sessions: [], default_thread: null }
+      await page.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' })
+      await open(width, 740, '')
+      check(`${at}: Terminals is enabled`, await tab('Terminals').isEnabled() && await bar.locator(':scope > button:disabled').count() === 0)
+      await tap(tab('Terminals'))
+      await blank.getByRole('heading', { name: 'No chat is open' }).waitFor({ state: 'visible' })
+      check(`${at}: Terminals is the current item`, await tab('Terminals').getAttribute('aria-current') === 'page' && await bar.locator(':scope > button[aria-current="page"]').count() === 1)
+      check(`${at}: one line says why it is empty`, (await blank.locator('p').allTextContents()).join('|') === 'Terminals shows the terminal of the open chat.', (await blank.locator('p').allTextContents()).join('|'))
+      const choose = blank.getByRole('button', { name: 'Choose a chat' })
+      const box = await choose.boundingBox(), barTop = (await bar.boundingBox()).y
+      check(`${at}: the Choose a chat button is at least 44 high, on screen and above the bar`, box && box.height >= 44 && box.x >= 0 && box.x + box.width <= width && box.y + box.height <= barTop, JSON.stringify(box))
+      check(`${at}: no horizontal page scroll`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)))
+      await page.screenshot({ path: path.join(SHOTS, `terminals-empty-${width}-${scheme}.png`) })
+      await tap(choose)
+      await page.locator('dialog.drawer[open]').waitFor({ state: 'visible' })
+      check(`${at}: Choose a chat opens the sessions list`, await page.locator('dialog.drawer[open]').getAttribute('aria-label') === 'Sessions')
+      await page.keyboard.press('Escape')
+      await page.locator('dialog.drawer[open]').waitFor({ state: 'detached' })
+      check(`${at}: the empty state stays after the list closes`, await blank.getByRole('heading', { name: 'No chat is open' }).count() === 1)
+      if (width === 390 && scheme === 'light') {
+        await tap(more)
+        await menu.waitFor({ state: 'visible' })
+        const few = await menu.getByRole('menuitem').allTextContents()
+        check('no chat: the menu has Share and the assistant, no Browser', few.length === 2 && few[0] === 'Share' && !few.includes('Browser'), JSON.stringify(few))
+        await page.screenshot({ path: path.join(SHOTS, 'more-no-chat-390-light.png') })
+        await page.keyboard.press('Escape')
+        await tap(tab('Home'))
+        check('no chat: Home opens from the empty Terminals screen', await tab('Home').getAttribute('aria-current') === 'page' && await blank.getByRole('heading', { name: 'No chat is open' }).count() === 0)
+      }
+    }
+
+    // The session list did not load: the Terminals screen says so and offers Retry. Retry then shows the chat's terminal.
+    failSessions = true
+    await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' })
     await open(390, 740, '')
-    check('no chat: Terminals is disabled', await tab('Terminals').isDisabled())
-    await tap(more)
-    await menu.waitFor({ state: 'visible' })
-    const few = await menu.getByRole('menuitem').allTextContents()
-    check('no chat: the menu has Share and the assistant, no Browser', few.length === 2 && few[0] === 'Share' && !few.includes('Browser'), JSON.stringify(few))
-    await page.screenshot({ path: path.join(SHOTS, 'more-no-chat-390-light.png') })
+    await tap(tab('Terminals'))
+    await blank.getByRole('heading', { name: 'Could not load sessions' }).waitFor({ state: 'visible', timeout: 30000 })
+    check('error: Terminals shows the load error with Retry', await blank.getByRole('button', { name: /retry|try again/i }).count() === 1, await blank.textContent())
+    await page.screenshot({ path: path.join(SHOTS, 'terminals-error-390-light.png') })
+    failSessions = false
+    fixture.sessions = sessions
+    await tap(blank.getByRole('button', { name: /retry|try again/i }))
+    await page.locator('.chat-panel .terminal-toggle[aria-pressed="true"]').waitFor({ state: 'visible', timeout: 20000 })
+    check('a chat that arrives on the empty Terminals screen opens in its terminal view', await tab('Terminals').getAttribute('aria-current') === 'page' && await blank.count() === 0)
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})

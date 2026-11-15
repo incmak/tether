@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { RetryButton } from './Retry'
 import { groupOf, placeName } from './groups'
 import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { Check, ClipboardList, Hand, Menu, Plus, Terminal } from 'lucide-react'
+import { Check, ClipboardList, Hand, Menu, MessageCircle, Plus, Terminal } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { AnswerActions } from './answers'
 import { useAnswers } from './useAnswers'
@@ -19,7 +19,7 @@ import { age } from './needs'
 import type { Session } from './Sidebar'
 import { AgentIcon, agentNames, chatTitle, sessionName, shownIndex } from './Sidebar'
 import { BacklogNews } from './Backlog'
-import { Bone } from './Skeleton'
+import { Bone, Loading } from './Skeleton'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Home.css'
 
@@ -141,8 +141,18 @@ function AsksGroup({ items, sessions, sort, onOpen }: { items: Waiting[]; sessio
 function Blank({ title, text, children, onMenu }: { title: string; text: string; children?: ReactNode; onMenu: () => void }) {
   return <section className="home home-blank">
     <button type="button" className="icon-button mobile-menu" aria-label="Open sessions" onClick={onMenu}><Menu /></button>
-    <div><Terminal size={32} strokeWidth={1.4} /><h1>{title}</h1><p>{text}</p>{children}</div>
+    <div><Terminal size={32} strokeWidth={1.4} /><h1>{title}</h1>{text && <p>{text}</p>}{children}</div>
   </section>
+}
+
+/** Phone, Terminals with no chat open: one line that says why it is empty, and the way to a chat. */
+export function NoTerminal({ loaded, loading, error, onRetry, onMenu }: { loaded: boolean; loading: boolean; error: string; onRetry: () => unknown; onMenu: () => void }) {
+  if (!loaded && !loading) return <Blank title="Could not load sessions" text={error || 'The session list did not load.'} onMenu={onMenu}><span className="home-blank-action"><RetryButton onRetry={onRetry} className="secondary" /></span></Blank>
+  if (!loaded) return <Blank title="Terminals" text="" onMenu={onMenu}><Loading label="Finding your sessions…" className="home-blank-action" /></Blank>
+  return <Blank title="No chat is open" text="Terminals shows the terminal of the open chat." onMenu={onMenu}>
+    <button type="button" className="primary home-blank-action" onClick={onMenu}><MessageCircle size={18} aria-hidden="true" />Choose a chat</button>
+    {error && <p className="home-stale" role="alert"><span>Could not refresh the session list. {error}</span><RetryButton onRetry={onRetry} className="ghost sm" /></p>}
+  </Blank>
 }
 
 export function Home({ api, groups: all, asks = [], sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {

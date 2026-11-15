@@ -7,7 +7,6 @@
 .phone-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; display: flex; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: var(--sidebar); border-top: 1px solid var(--line); }
 .phone-tabbar > button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; color: var(--muted); font-size: 11px; font-weight: 500; }
 .phone-tabbar > button[aria-current=page] { color: var(--accent); font-weight: 600; }
-.phone-tabbar > button:disabled { opacity: .4; }
 .phone-tabbar > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: var(--radius); }
 /* More menu (PhoneTabs.tsx): Share, Browser and the assistant, above the More tab. While it is open the bar is above
    the floating bubbles, and a tap outside the menu only closes it. */

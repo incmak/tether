@@ -119,6 +119,9 @@
 .home-blank h1 { font-family: ui-serif, Georgia, serif; font-size: clamp(27px, 4vw, 36px); font-weight: 400; letter-spacing: -.8px; line-height: 1.2; }
 .home-blank p { color: var(--muted); font-size: 15px; line-height: 1.6; margin-top: 14px; }
 .home-blank-action { margin-top: 25px; }
+/* The page's one action: a 44 px target with any pointer. */
+.home-blank button.home-blank-action { min-height: 44px; padding-inline: 16px; }
+.home-blank .home-stale { margin: 25px 0 0; }
 
 @container home (max-width: 460px) {
   .home-new span { display: none; }
