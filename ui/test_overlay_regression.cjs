@@ -335,17 +335,18 @@ async function main() {
         check(`${name} D bubbles (${n})`, n ? errors : ['No visible bubbles'])
         if (state === 'quiet' && n && !gutters) {
           // A size change that no DOM mutation inside the shell shows (here a stylesheet in <head>) still moves the column.
-          const gutterAfter = async css => {
+          // The column moves after a ResizeObserver callback and a render; a busy runner needs more than a fixed pause.
+          const gutterAfter = async (css, want) => {
             await page.evaluate(text => {
               let tag = document.getElementById('gutter-probe')
               if (!tag) { tag = document.createElement('style'); tag.id = 'gutter-probe'; document.head.append(tag) }
               tag.textContent = text
             }, css)
-            await page.waitForTimeout(150)
+            await page.waitForFunction(on => (document.querySelectorAll('.agent-bubble[data-gutter]').length > 0) === on, want, { timeout: 2000 }).catch(() => {})
             return page.evaluate(() => document.querySelectorAll('.agent-bubble[data-gutter]').length)
           }
-          const grown = await gutterAfter('.chat-panel .composer-area { padding-top: 70vh !important }')
-          const shrunk = await gutterAfter('')
+          const grown = await gutterAfter('.chat-panel .composer-area { padding-top: 70vh !important }', true)
+          const shrunk = await gutterAfter('', false)
           check(`${name} E tab column follows foot height (grown ${grown}, shrunk ${shrunk})`, grown && !shrunk ? [] : ['Tab column did not follow a size-only change of the foot'])
         }
         if (pageErrors.length > errorStart) check(`${name} runtime`, pageErrors.slice(errorStart))
