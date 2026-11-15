@@ -26,7 +26,7 @@ VERIFY_SECS = 60
 MAX_PASS = 20
 GAP = 1.5
 OPTIONS = ('@chat_name', '@chat_name_at', '@chat_icon', '@chat_icon_by',
-           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by')
+           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by', '@chat_name_by')
 SESSION_OPTIONS = ('@project', '@groups')  # @groups: the session's groups (groups.py), so restored @group labels resolve
 _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in
@@ -536,6 +536,12 @@ def overlay(entry, status):
     if status.get('state') in ('Approval', 'Input needed'):
         return status
     return dict(status, state='Stopped')
+
+
+def restoring():
+    """True while saved tabs wait to resume or are resuming. Their stacks must not look empty then (auto_stacks.watch)."""
+    with _lock:
+        return any(tab['state'] in ('pending', 'resuming') for tab in _read()['tabs'].values())
 
 
 def notice():

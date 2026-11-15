@@ -234,10 +234,13 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.run.call_args.args[0], [paths.TMUX, 'rename-session', '-t', '%12', 'build logs'])
         self.assertEqual(command[7:13], [';', 'set-option', '-p', '-t', '%12', '@chat_name_at'])
         self.assertTrue(command[13].isdigit())
+        # The user named it: Tether never renames this tab, and the name names its stack (auto_stacks).
+        self.assertEqual(command[14:], [';', 'set-option', '-p', '-t', '%12', '@chat_name_by', 'user'])
         self.run.reset_mock()
         self.assertEqual(self.request('/mobile/api/pane-name', {'pane': '%12', 'name': ''})[0], 200)
         self.assertEqual(self.run.call_args_list[0].args[0], [paths.TMUX, 'set-option', '-p', '-t', '%12', '-u', '@chat_name', ';',
-                                                        'set-option', '-p', '-t', '%12', '-u', '@chat_name_at'])
+                                                        'set-option', '-p', '-t', '%12', '-u', '@chat_name_at', ';',
+                                                        'set-option', '-p', '-t', '%12', '-u', '@chat_name_by'])
         self.run.reset_mock()
         for body in ({'pane': '$1', 'name': 'x'}, {'pane': '%12', 'name': 'x' * 41}, {'pane': '%12', 'name': 'a\nb'}, {'pane': '%12'}):
             self.assertEqual(self.request('/mobile/api/pane-name', body)[0], 400)

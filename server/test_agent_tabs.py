@@ -41,9 +41,9 @@ class AgentTabsTests(unittest.TestCase):
         self.stack_calls = []
 
         @contextlib.contextmanager
-        def start_group(body, caller, run, **kwargs):  # the real rules run against tmux in test_groups.py
+        def start_group(body, caller, run, entries=(), **kwargs):  # the real rules run against tmux in test_groups.py
             self.stack_calls.append((body, caller['id'], kwargs))
-            yield 'gabcdef12'
+            yield 'gabcdef12', caller['id'], 'Task'
         self.enterContext(patch.object(agent_tabs, '_start_group', start_group))
 
     def request(self, payload, headers=None, peer='127.0.0.1', denied=False, path=agent_tabs.PATH):
@@ -201,9 +201,11 @@ class AgentTabsTests(unittest.TestCase):
         self.run.assert_not_called()
 
     def test_start_fills_thread_defaults_agent_and_holds_send_lock(self):
-        def start(entry, body, folder, run, recent, cwd, owner, group):
+        def start(entry, body, folder, run, recent, cwd, owner, group, name):
             self.assertTrue(server.SEND_LOCK.locked())
             self.assertEqual(group, 'gabcdef12')  # from the auto stack rules
+            self.assertEqual(name, 'Task')  # the tab name from the auto stack rules
+            self.assertEqual((owner['owner_pane'], owner['root_pane']), (entry['id'], entry['id']))
             self.assertEqual(self.stack_calls[-1][2], {'folder': str(self.root)})
             self.assertIs(entry, self.entries[0])
             self.assertEqual((body['thread'], body['agent']), (THREAD, 'codex'))
@@ -270,7 +272,8 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(kwargs['cwd'], made['path'])
             self.assertEqual(kwargs['worktree'], made['branch'])
             self.assertEqual(kwargs['owner']['owner_pane'], self.entries[0]['id'])
-            self.assertEqual(kwargs['group'], 'gabcdef12')
+            self.assertEqual(kwargs['owner']['root_pane'], self.entries[0]['id'])
+            self.assertEqual((kwargs['group'], kwargs['name']), ('gabcdef12', 'Task'))
             self.assertEqual(self.stack_calls[-1][2], {'folder': str(self.root), 'branch': made['branch']})
             return '%15', 'task'
         with patch.object(agent_tabs.worktrees, 'from_body', side_effect=make), \

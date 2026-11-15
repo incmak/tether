@@ -1,7 +1,11 @@
 """Groups: named sets of tabs (tmux panes) inside one tmux session, each with its own agent context.
 
 The session option @groups holds the list, in order, empty groups included:
-  [{"id": "g1a2b3c4d", "name": "Home dashboard", "project": "<12-hex projects.py id or empty>"}]
+  [{"id": "g1a2b3c4d", "name": "Home dashboard", "project": "<12-hex projects.py id or empty>", "auto": true}]
+"auto" is true for a stack Tether made (auto_stacks.py). Tether removes such a stack when its last tab closes or moves
+out. "by": "user" marks a stack the user made or renamed (groups_api.py): a rename clears "auto" and sets it. Tether
+never renames or removes a user stack. A stack with neither key was made before makers were recorded (2026-11-15);
+Tether leaves it alone too.
 The pane option @group holds a group id. A pane with no @group, or with an id that is not in @groups, is in Unstacked.
 The pane option @group_by is "user" after the user moved the tab by hand (groups_api.py). Auto stacks never move such a tab.
 A group's context is a projects.py bundle, made on first use. Removing a group archives the bundle; nothing is deleted.
@@ -97,8 +101,13 @@ def _valid(item):
     except GroupError:
         return None
     project = item.get('project')
-    return {'id': item['id'], 'name': name,
-            'project': project if isinstance(project, str) and projects.ID.fullmatch(project) else ''}
+    group = {'id': item['id'], 'name': name,
+             'project': project if isinstance(project, str) and projects.ID.fullmatch(project) else ''}
+    if item.get('auto') is True:
+        group['auto'] = True  # Tether made it
+    elif item.get('by') == 'user':
+        group['by'] = 'user'  # the user made or renamed it. Neither: made before makers were recorded (2026-11-15)
+    return group
 
 
 def parse(text):
@@ -136,10 +145,15 @@ def session_name(session_id, run=subprocess.run):
     return _session(session_id, run)[0]
 
 
+def _maker(group):
+    return {'auto': True} if group.get('auto') else {'by': 'user'} if group.get('by') == 'user' else {}
+
+
 def write(session_id, groups, run=subprocess.run):
     """Save the list. An empty list unsets @groups, so the session looks as it did before groups."""
     if groups:
-        value = json.dumps([{'id': g['id'], 'name': g['name'], 'project': g.get('project') or ''} for g in groups])
+        value = json.dumps([dict({'id': g['id'], 'name': g['name'], 'project': g.get('project') or ''}, **_maker(g))
+                            for g in groups])
         _check(_tmux(run, 'set-option', '-t', session_id, '@groups', value))
     else:
         _check(_tmux(run, 'set-option', '-u', '-t', session_id, '@groups'))
@@ -216,8 +230,9 @@ def _pane_in(session_id, pane, run):
         raise GroupError(404, 'That tab is in another session. Refresh the list and try again.')
 
 
-def create(session_id, name, run=subprocess.run, pane=None, by_user=False):
-    """Add a group at the end of the list. With pane, move that tab into it. by_user: the user asked (groups_api.py)."""
+def create(session_id, name, run=subprocess.run, pane=None, by_user=False, auto=False):
+    """Add a group at the end of the list. With pane, move that tab into it. by_user: the user asked (groups_api.py).
+    auto: Tether made it for helper tabs (removed when it empties)."""
     name = clean_name(name)
     with LOCK():
         groups = read(session_id, run)
@@ -226,19 +241,29 @@ def create(session_id, name, run=subprocess.run, pane=None, by_user=False):
             _pane_in(session_id, pane, run)
         # The bundle id is made here, so an agent launcher only reads @groups (context()).
         group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6)}
+        if auto:
+            group['auto'] = True
+        elif by_user:
+            group['by'] = 'user'
         write(session_id, groups + [group], run)
         if pane is not None:
             _label(pane, group['id'], run, by_user)
     return group
 
 
-def rename(session_id, group_id, name, run=subprocess.run):
+def rename(session_id, group_id, name, run=subprocess.run, by_user=True):
+    """by_user (the Stacks sheet): the stack becomes the user's, so Tether never renames or removes it after that."""
     name = clean_name(name)
     with LOCK():
         groups = read(session_id, run)
         group = _find(groups, group_id)
+        if not by_user and not group.get('auto'):
+            raise GroupError(409, 'The user named that stack. Tether keeps its name.')
         _free_name(groups, name, keep=group_id)
         group['name'] = name
+        if by_user:
+            group.pop('auto', None)
+            group['by'] = 'user'
         write(session_id, groups, run)
     if group['project']:
         projects.set_name(group['project'], name)  # the name an archive shows
@@ -246,13 +271,18 @@ def rename(session_id, group_id, name, run=subprocess.run):
 
 
 def move(session_id, pane, group_id, run=subprocess.run, by_user=False):
-    """Put a tab in a group of its session. None or '' puts it in Unstacked."""
+    """Put a tab in a group of its session. None or '' puts it in Unstacked. A Tether-made group that the tab leaves
+    empty goes away."""
     with LOCK():
         groups = read(session_id, run)
         if group_id:
             _find(groups, group_id)
-        _pane_in(session_id, pane, run)
+        found, old = _pane(pane, run)
+        if found != session_id:
+            raise GroupError(404, 'That tab is in another session. Refresh the list and try again.')
         _label(pane, group_id or '', run, by_user)
+        if old and old != (group_id or ''):
+            drop_if_empty(session_id, old, run)
 
 
 def _labelled(session_id, group_id, run):
@@ -277,6 +307,32 @@ def ungroup(session_id, group_id, run=subprocess.run, by_user=False):
     _archive(group)
 
 
+def drop_if_empty(session_id, group_id, run=subprocess.run):
+    """Remove a Tether-made group that has no tabs. True when it went. A user group, or one with tabs, stays."""
+    with LOCK():
+        groups = read(session_id, run)
+        group = next((g for g in groups if g['id'] == group_id), None)
+        if group is None or not group.get('auto') or _labelled(session_id, group_id, run):
+            return False
+        write(session_id, [g for g in groups if g['id'] != group_id], run)
+    _archive(group)
+    return True
+
+
+def drop_empty_auto(run=subprocess.run):
+    """Remove every Tether-made group with no tabs, in all sessions (a tab closed). Returns [(session id, name)]."""
+    dropped = []
+    with LOCK():
+        for session_id, found in all_groups(run).items():
+            for group in found:
+                try:
+                    if group.get('auto') and drop_if_empty(session_id, group['id'], run):
+                        dropped.append((session_id, group['name']))
+                except GroupError:
+                    break  # the session ended
+    return dropped
+
+
 def remove(session_id, group_id, run=subprocess.run):
     """Drop an empty group. Its context bundle goes to the archive."""
     with LOCK():
@@ -288,14 +344,14 @@ def remove(session_id, group_id, run=subprocess.run):
     _archive(group)
 
 
-def find_or_create(session_id, name, run=subprocess.run):
-    """For agent_tab_cli.py --group NAME: the group with that name (any case), made when missing. Unstacked gives None."""
+def find_or_create(session_id, name, run=subprocess.run, auto=True):
+    """The group with that name (any case), made (auto: as a Tether stack) when missing. Unstacked gives None."""
     name = clean_name(name)
     if name.lower() in RESERVED:
         return None
     with LOCK():
         found = next((g for g in read(session_id, run) if g['name'].lower() == name.lower()), None)
-        return found or create(session_id, name, run)
+        return found or create(session_id, name, run, auto=auto)
 
 
 def free_name(groups, name):
@@ -310,9 +366,9 @@ def free_name(groups, name):
 
 
 def create_unique(session_id, name, run=subprocess.run):
-    """Auto stacks: a new group under a free form of name ("Name 2" when "Name" is taken)."""
+    """Auto stacks: a new Tether-made group under a free form of name ("Name 2" when "Name" is taken)."""
     with LOCK():
-        return create(session_id, free_name(read(session_id, run), name), run)
+        return create(session_id, free_name(read(session_id, run), name), run, auto=True)
 
 
 def auto_move(session_id, pane, group_id, run=subprocess.run):
@@ -371,7 +427,7 @@ def merged(target, source):
         remap[group['id']] = group_id
         names.add(name.lower())
         ids.add(group_id)
-        out.append({'id': group_id, 'name': name, 'project': group['project']})
+        out.append(dict({'id': group_id, 'name': name, 'project': group['project']}, **_maker(group)))
     return out, remap
 
 

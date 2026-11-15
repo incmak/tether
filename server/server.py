@@ -87,6 +87,7 @@ import host_stats
 import tmux_merge
 import tmux_names
 import auto_resume
+import auto_stacks
 import window_size
 import projects_api
 import work_api
@@ -2333,8 +2334,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Use up to 40 characters for the pane name.')
                 name = name.strip()
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
-                command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
-                           if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at'])
+                # @chat_name_by marks the user's own name: Tether never renames that tab, and it names the stack (auto_stacks).
+                command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)),
+                            ';', 'set-option', '-p', '-t', pane, auto_stacks.NAME_BY, 'user']
+                           if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at',
+                                         ';', 'set-option', '-p', '-t', pane, '-u', auto_stacks.NAME_BY])
                 with SEND_LOCK:
                     result = subprocess.run([paths.TMUX, *command], capture_output=True, text=True, timeout=5)
                     if result.returncode:
@@ -2925,6 +2929,7 @@ if __name__ == '__main__':
         'display_dir': lambda entry: home_path(tab_folder(entry)),
         'on_change': forget_sessions,
     }, daemon=True).start()
+    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()

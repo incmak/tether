@@ -215,8 +215,9 @@ def launch_command(entry, agent, path, name, *, context=False, profile=None, mod
     return command + f' "$(cat {shlex.quote(str(path))})"'
 
 
-def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=None, worktree=None, owner=None, group=None):
-    """recent: returns source messages when context or a new reviewer needs them.
+def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=None, worktree=None, owner=None, group=None,
+          name=None):
+    """recent: returns source messages when context or a new reviewer needs them. name: the tab name (auto_stacks.py).
     group: None = the source tab's group; "" = Unstacked; a group id = that group (set before the launch command)."""
     # Call after validate, under the server's send lock. Only the new pane receives input.
     agent = body['agent']
@@ -229,7 +230,7 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
     profile = codex_provider.launch_profile() if agent == 'codex' else None
     _check_profile(profile)
     role = ROLES.get(body.get('role'))
-    name = (body['name'].strip() if 'name' in body else
+    name = (name if name else body['name'].strip() if 'name' in body else
             f'{role[0]}: {source_title(entry)}'[:40] if role else
             ('Review: ' + source_title(entry))[:60] if review == 'new' else task_name(body['message']))
     pane = new_window_after(entry['id'], run, cwd=folder, group=group)
