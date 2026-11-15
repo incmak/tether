@@ -57,7 +57,8 @@ function closeLetters(text: string, word: string) {
 // Optimal string alignment distance over three rows kept between calls: no allocation per token.
 let rows = [new Int32Array(0), new Int32Array(0), new Int32Array(0)]
 function oneTypo(word: string, token: string) {
-  if (token.length < word.length - 1 || (token[0] !== word[0] && token[1] !== word[0])) return false
+  // One edit leaves one of the first two letters in place, maybe shifted by one: a cheap test before the full check.
+  if (token.length < word.length - 1 || (token[0] !== word[0] && token[1] !== word[1] && token[0] !== word[1] && token[1] !== word[0])) return false
   const n = Math.min(token.length, word.length + 1)
   if (rows[0].length <= n) rows = rows.map(() => new Int32Array(n + 8))
   let [prev, before, row] = rows
@@ -83,7 +84,11 @@ function oneTypo(word: string, token: string) {
 export function wordScore(f: Field, word: string): number | null {
   const at = f.text.indexOf(word)
   if (at === 0) return 5
-  if (at > 0) return BOUNDARY.test(f.text[at - 1]) ? 4 : 3
+  if (at > 0) {
+    // A later match at a word start beats the first match inside a word: "voice" in "revoice voice".
+    for (let next = at; next > 0; next = f.text.indexOf(word, next + 1)) if (BOUNDARY.test(f.text[next - 1])) return 4
+    return 3
+  }
   if (word.length < 2) return null
   const missing = bitCount(letterBits(word) & ~f.letters)
   if (missing > 1 || (missing === 1 && word.length < 4)) return null

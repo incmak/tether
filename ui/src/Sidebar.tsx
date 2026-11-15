@@ -102,13 +102,13 @@ export const sessionName = (pane: Pane) => pane.label.includes(':') ? pane.label
 
 /**
  * The search index of the sidebar and the ⌘K menu, so both find the same tabs.
- * A session matches on its name, folder and custom group; a tab on its title, tmux name, agent, stack and worktree.
+ * A session matches on its name, folder and custom group; a tab on its title, shown number, tmux name, agent, stack and worktree.
  * An archived tab is its own entry, with its session's fields and its own. Build it once per data change.
  */
 export function searchIndex(sessions: Session[], archivedTabs: Pane[], prefs: Pick<Prefs, 'groups' | 'groupOf'>, stacks?: Record<string, GroupInfo[]>): [SearchEntry[], SearchEntry[]] {
   const groupNames = new Map(prefs.groups.map(group => [group.id, group.name]))
   const stacksOf = new Map(Object.entries(stacks ?? {}).map(([id, list]) => [id, new Map(list.map(stack => [stack.id, stack.name]))]))
-  const tabFields = (pane: Pane) => [field(2, paneTitle(pane), pane.tmux_pane_name), field(1, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)]
+  const tabFields = (pane: Pane) => [field(2, paneTitle(pane), shownIndex(pane), pane.tmux_pane_name), field(1, pane.agent_name, agentNames[pane.agent], stacksOf.get(pane.tmux_session)?.get(pane.group ?? ''), pane.worktree)]
   const sessionFields = (id: string, name: string, dir: string) => [field(2, name), field(1, dir, groupNames.get(prefs.groupOf[id] ?? ''))]
   const live = sessions.map(session => ({ id: session.id, fields: sessionFields(session.id, session.name, session.dir), tabs: session.panes.map(pane => ({ id: pane.id, fields: tabFields(pane) })) }))
   const hidden = archivedTabs.map(pane => ({ id: pane.id, fields: sessionFields(pane.tmux_session, sessionName(pane), pane.dir), tabs: [{ id: pane.id, fields: tabFields(pane) }] }))
