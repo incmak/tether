@@ -155,7 +155,10 @@ Answers from Teams: when the urgent ping goes to the BriskBot 1:1 chat (Settings
 Type the answer in the box and select **Send to the tab**, or quote-reply the card.
 Tether reads the answer back with `chat-replies.py` (next to `post-update.py`) and types it into the tab that asked, as `[Answer from Teams] …`.
 It sends the answer only when that tab still shows the same conversation, and not while the tab waits on an approval or a picker or has an unsent draft.
-BriskBot then shows the result in the chat. A card takes answers for one day; after that, answer in Tether.
+The card then changes in place: the box goes, and the card shows your answer and a status line (Sent, then Delivered to the tab, or Not sent with the reason). Tether reports the delivery with `chat-reply-status.py` (next to `post-update.py`).
+A separate chat message comes only when the answer was not delivered, or when the card could not show the result.
+A delivered answer clears the tab's "waiting on you" state in Tether, like an answer typed there; the chat shows it with a small "Answered from Teams" line.
+A card takes answers for one day; after that, answer in Tether.
 The reply keys are kept in the owner-only `~/.cache/mobile-tmux/teams-replies.json`.
 
 Attachments use random names in the owner-only `~/.cache/mobile-tmux/uploads/` folder and expire after a week.

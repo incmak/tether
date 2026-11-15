@@ -2,7 +2,7 @@ import { terminalText } from './terminalText'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
@@ -151,6 +151,9 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   if (role === 'user' && text.startsWith('This session is being continued from a previous conversation')) {
     return <details className="tool-row compact-row" data-msg-id={id}><summary><Layers size={15} />Conversation compacted<ChevronRight size={15} /></summary><pre>{text}</pre></details>
   }
+  // Your answer to an urgent ping, given in Teams. Tether typed it into the tab with this prefix (server/teams_replies.py).
+  const teams = role === 'user' && !kind ? /^\[Answer from Teams\] ([\s\S]+)$/.exec(text) : null
+  if (teams) return <div className="user-message via-teams" data-msg-id={id}><span className="via-label"><MessageSquareReply size={13} aria-hidden="true" />Answered from Teams</span>{teams[1]}</div>
   const sent = role === 'user' && !kind ? sentContent(text, session, images, imageKey) : null
   if (sent?.shots.length) return <MessagePrimitive.Root className="user-message" data-msg-id={id}><SentContent {...sent} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root className={role === 'user' ? 'user-message' : 'assistant-message'} data-msg-id={id}>

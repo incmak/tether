@@ -1176,8 +1176,12 @@ def review_send(config, message, state=None):
 
 
 def teams_answer(text, item):
-    """Deliver one Teams answer (B126) to its tab through the broadcast guards; returns the result row."""
-    return broadcast.deliver(text, [item], entries=sessions, status=live_status, send=send_text)['results'][0]
+    """Deliver one Teams answer (B126) to its tab through the broadcast guards; returns the result row.
+    A delivered answer is your answer to that tab, like one typed in Tether: its ask clears."""
+    result = broadcast.deliver(text, [item], entries=sessions, status=live_status, send=send_text)['results'][0]
+    if result.get('result') in ('sent', 'sent_busy'):
+        attention.STORE.clear(item['pane'], item.get('thread'))
+    return result
 
 
 def broadcast_message(body):

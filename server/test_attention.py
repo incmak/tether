@@ -451,6 +451,26 @@ class AnswerEndpointTest(unittest.TestCase):
         self.assertEqual(self.post('broadcast', message='Default'), 200)
         self.assertEqual(self.clear.call_args_list, [mock.call('%1'), mock.call('%2')])
 
+    def test_teams_answer_clears_the_ask_only_when_delivered(self):
+        """A Teams answer (B126) is your answer to the tab: the ask goes, as for an answer typed in Tether."""
+        with tempfile.TemporaryDirectory() as folder:
+            store = attention.Attention(Path(folder) / 'attention.json', Clock(), on_urgent=mock.Mock())
+            item = {'pane': '%1', 'thread': 't1'}
+            with mock.patch.object(self.server.attention, 'STORE', store), mock.patch.object(self.server.broadcast, 'deliver') as deliver:
+                for result, left in (('skipped', 1), ('failed', 1), ('sent', 0), ('sent_busy', 0)):
+                    with self.subTest(result=result):
+                        store.note_reply('%1', 't1', f'Pick a plan for {result}.\nNeeds you: yes')
+                        self.assertEqual(len(store.waiting()), 1)
+                        deliver.return_value = {'results': [{'pane': '%1', 'name': 'work', 'result': result}]}
+                        self.assertEqual(self.server.teams_answer('[Answer from Teams] B', item)['result'], result)
+                        self.assertEqual(len(store.waiting()), left)
+                # An answer for an earlier conversation of the pane leaves the new conversation's ask alone.
+                store.note_reply('%1', 't2', 'Another one.\nNeeds you: yes')
+                store.asks['%1']['thread'] = 't2'
+                deliver.return_value = {'results': [{'pane': '%1', 'name': 'work', 'result': 'sent'}]}
+                self.server.teams_answer('[Answer from Teams] B', item)
+                self.assertEqual(len(store.waiting()), 1)
+
     def test_stale_conversation_does_not_send_or_clear(self):
         self.config['thread'] = 'new'
         self.assertEqual(self.post('message', message='Default'), 409)

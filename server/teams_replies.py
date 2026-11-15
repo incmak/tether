@@ -6,6 +6,10 @@ for one day. While a key is open, a watcher reads the answers with chat-replies.
 post token: only this machine reads its own answers), sends each one to the tab and thread
 the key belongs to, through the same guarded path as a broadcast, and tells Teams the result.
 
+The result goes on the answered card itself (chat-reply-status.py): BriskBot changes that card in place, so a
+delivered answer adds no message to the chat. A separate plain message goes out only when the answer was not
+delivered, or when the card could not show the result (an older BriskBot or tools folder).
+
 State: paths.CACHE/teams-replies.json (mode 0600): the read cursor and the open keys.
 """
 import json
@@ -78,6 +82,15 @@ def reader(config):
     return [command[0], str(path)] if path.is_file() else None
 
 
+def status_tool(config):
+    """chat-reply-status.py next to the configured post-update.py, or None with older tools."""
+    argv = reader(config)
+    if argv is None:
+        return None
+    path = Path(argv[1]).with_name('chat-reply-status.py')
+    return [argv[0], str(path)] if path.is_file() else None
+
+
 def open_key(pane, thread, *, clock=time.time):
     """A new reply key for one ping to `pane` in conversation `thread`. The watcher starts reading at once.
     A ping without a known conversation gets no key: the answer could reach a later conversation in that pane."""
@@ -129,6 +142,27 @@ def _outcome(result):
     if result.get('result') == 'sent_busy':
         return f'The tab {name} has your answer. It was working, so it reads it next.'
     return f'Not sent to {name}: {result.get("reason") or "the tab did not take it."} Answer in Tether.'
+
+
+DELIVERED = {'sent': 'delivered', 'sent_busy': 'queued'}
+
+
+def _report(config, sequence, result, runner):
+    """Put one delivery row on the answered card. True when the card shows it."""
+    argv = status_tool(config)
+    if argv is None:
+        return False
+    state = DELIVERED.get(result.get('result'), 'failed')
+    # --name=value: a tab name or a reason that starts with "-" must not read as an option.
+    argv += ['--sequence', str(sequence), '--state', state, '--tab=' + str(result.get('name') or result.get('pane') or '')[:120]]
+    if state == 'failed':
+        argv.append('--reason=' + str(result.get('reason') or 'the tab did not take it.')[:300])
+    try:
+        out = runner(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f'Teams replies: status failed: {exc}', file=sys.stderr)
+        return False
+    return out.returncode == 0
 
 
 def _confirm(config, pane, text, runner):
@@ -190,7 +224,10 @@ def poll_once(config, deliver, *, clock=time.time, runner=subprocess.run):
             except Exception as exc:  # report it in Teams and go on with the next answer
                 print(f'Teams replies: delivery failed: {exc}', file=sys.stderr)
                 result = {'pane': pane, 'result': 'failed', 'reason': 'Tether could not send it.'}
-            _confirm(config, pane, _outcome(result), runner)
+            shown = _report(config, reply['sequence'], result, runner)
+            # A delivered answer that its card shows needs no message. A failure needs you, so it always gets one.
+            if not shown or result.get('result') not in DELIVERED:
+                _confirm(config, pane, _outcome(result), runner)
         last = max(page['last'], after)
         keys = _advance(last, clock)
         if last == after:

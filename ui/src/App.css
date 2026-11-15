@@ -400,6 +400,9 @@ kbd { font-size: 12px; color: var(--muted); }
 .messages { max-width: 780px; margin: 0 auto; padding: 28px 20px 14px; overflow-wrap: anywhere; }
 .messages a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .user-message { width: fit-content; max-width: 90%; margin: 16px 0 28px auto; padding: 12px 18px; border-radius: 18px 18px 5px 18px; background: var(--bubble); white-space: pre-wrap; line-height: 1.55; font-size: calc(var(--chat-text) - 1px); }
+/* An answer given in Teams: the same bubble, with a quiet line that says where it came from. Mixed from --text: --muted on --bubble is under 4.5:1 in the light theme. */
+.via-label { display: flex; align-items: center; gap: 5px; margin-bottom: 4px; color: color-mix(in srgb, var(--text) 78%, transparent); font-size: 12px; line-height: 1.4; white-space: normal; }
+.via-label svg { flex: none; }
 .assistant-message { font-family: ui-serif, Georgia, serif; line-height: 1.6; font-size: var(--chat-text); margin: 24px 0 32px; }
 .assistant-message p { margin: 0 0 16px; }
 .assistant-message p:last-child { margin-bottom: 0; }

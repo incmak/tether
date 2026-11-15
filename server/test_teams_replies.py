@@ -83,6 +83,50 @@ class TeamsRepliesTest(unittest.TestCase):
         self.poll()
         self.assertEqual(len(self.delivered), 2)
 
+    def with_status_tool(self, code=0):
+        """The tools folder has chat-reply-status.py; it exits with `code`."""
+        Path(self.post).with_name('chat-reply-status.py').write_text('')
+        plain = self.runner
+
+        def runner(argv, **kwargs):
+            if Path(argv[1]).name == 'chat-reply-status.py':
+                self.calls.append(argv)
+                return SimpleNamespace(returncode=code, stdout='', stderr='')
+            return plain(argv, **kwargs)
+        self.runner = runner
+
+    def statuses(self):
+        return [argv[2:] for argv in self.calls if Path(argv[1]).name == 'chat-reply-status.py']
+
+    def test_delivered_answer_goes_on_the_card_with_no_message(self):
+        self.with_status_tool()
+        key = teams_replies.open_key('%7', 'thread-a', clock=lambda: self.now)
+        self.pages[0] = {'replies': [{'sequence': 3, 'key': key, 'text': 'yes', 'createTime': ''},
+                                     {'sequence': 4, 'key': key, 'text': 'and push', 'createTime': ''}], 'last': 4}
+        results = iter([{'pane': '%7', 'name': 'B126 work', 'result': 'sent'}, {'pane': '%7', 'name': '-odd name', 'result': 'sent_busy'}])
+        teams_replies.poll_once(self.config, lambda text, item: next(results), clock=lambda: self.now, runner=self.runner)
+        self.assertEqual(self.statuses(), [['--sequence', '3', '--state', 'delivered', '--tab=B126 work'],
+                                           ['--sequence', '4', '--state', 'queued', '--tab=-odd name']])
+        self.assertEqual(self.confirms(), [])
+
+    def test_failed_delivery_goes_on_the_card_and_in_a_message(self):
+        self.with_status_tool()
+        key = teams_replies.open_key('%7', 'thread-a', clock=lambda: self.now)
+        self.pages[0] = {'replies': [{'sequence': 3, 'key': key, 'text': 'yes', 'createTime': ''}], 'last': 3}
+        skipped = {'pane': '%7', 'name': 'B126 work', 'result': 'skipped', 'reason': 'The tab shows a prompt.'}
+        teams_replies.poll_once(self.config, lambda text, item: skipped, clock=lambda: self.now, runner=self.runner)
+        self.assertEqual(self.statuses(), [['--sequence', '3', '--state', 'failed', '--tab=B126 work', '--reason=The tab shows a prompt.']])
+        self.assertEqual(len(self.confirms()), 1)
+        self.assertIn('Not sent to B126 work: The tab shows a prompt. Answer in Tether.', self.confirms()[0])
+
+    def test_a_card_that_cannot_show_the_result_gets_a_message(self):
+        self.with_status_tool(code=3)  # an old card, or Teams refused the update
+        key = teams_replies.open_key('%7', 'thread-a', clock=lambda: self.now)
+        self.pages[0] = {'replies': [{'sequence': 3, 'key': key, 'text': 'yes', 'createTime': ''}], 'last': 3}
+        self.poll()
+        self.assertEqual(len(self.statuses()), 1)
+        self.assertIn('The tab B126 work has your answer.', self.confirms()[0])
+
     def test_no_key_without_a_known_conversation(self):
         self.assertIsNone(teams_replies.open_key('%7', None, clock=lambda: self.now))
         self.assertIsNone(teams_replies.open_key('%7', '', clock=lambda: self.now))
