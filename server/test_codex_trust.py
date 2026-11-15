@@ -108,6 +108,24 @@ class Edit(Base):
         codex_trust.write_trust('/workspace/app')
         self.assertTrue(self.config.read_text().endswith("[projects.'/workspace/app']\ntrust_level = \"trusted\" # important\n"))
 
+    def test_inline_comment_kept_for_every_one_line_string_form(self):
+        for value in ('"\\u0075ntrusted"', '"un\\"trusted\\\\"', "'untrusted'", '"""untrusted"""', '"""un"trusted"""',
+                      "'''untrusted'''", '""'):
+            with self.subTest(value=value):
+                head = KEEP + '[projects."/workspace/app"]\n'
+                self.write(head + f'trust_level = {value} # keep this reason\nnote = 1\n')
+                codex_trust.write_trust('/workspace/app')
+                self.assertEqual(self.config.read_text(), head + 'trust_level = "trusted" # keep this reason\nnote = 1\n')
+
+    def test_value_over_several_lines_is_refused_unchanged(self):
+        for value in ('"""\nuntrusted""" # why', "'''un\ntrusted''' # why", '"""un\\\n  trusted""" # why'):
+            with self.subTest(value=value):
+                text = KEEP + f'[projects."/workspace/app"]\ntrust_level = {value}\n'
+                self.write(text)
+                with self.assertRaisesRegex(codex_trust.TrustError, 'cannot change this form'):
+                    codex_trust.write_trust('/workspace/app')
+                self.assertEqual(self.config.read_text(), text)
+
     def test_symlinked_config_is_refused(self):
         real = self.root / 'elsewhere.toml'
         real.write_text(KEEP)

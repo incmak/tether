@@ -175,6 +175,16 @@ def _header(line):
     return keys if parsed == {} and keys else None
 
 
+# One trust_level line with a one-line TOML string (basic with escapes, literal, or either multi-line form on one line),
+# then only blanks and an optional comment. Anything else is refused, so the comment after the value is never lost.
+_VALUE = re.compile(r'(\s*trust_level\s*=\s*)('
+                    r'"""(?:[^"\\\n]|\\[^\n]|"(?!""))*"""'
+                    r"|'''(?:[^'\n]|'(?!''))*'''"
+                    r'|"(?:[^"\\\n]|\\[^\n])*"'
+                    r"|'[^'\n]*')"
+                    r'([ \t]*(?:#[^\n]*)?\r?\n?)$')
+
+
 def edit(text, key):
     """config.toml text with trust_level = "trusted" for [projects.<key>], every other byte kept.
     Raises TrustError when the result would differ in any other value (dotted or inline forms, odd layouts)."""
@@ -197,12 +207,10 @@ def edit(text, key):
         if found is None:
             lines.insert(start + 1, TRUSTED + newline)
         else:
-            value = re.match(r'(\s*trust_level\s*=\s*)("[^"\\\n]*"|' + r"'[^'\n]*')(.*)$", lines[found], re.S)
-            if value:  # change only the value: an inline comment stays
-                lines[found] = value.group(1) + '"trusted"' + value.group(3)
-            else:  # another value form: the check below refuses a wrong result
-                ending = newline if lines[found].endswith('\n') else ''
-                lines[found] = re.match(r'\s*', lines[found]).group() + TRUSTED + ending
+            value = _VALUE.match(lines[found])
+            if not value:  # a value over several lines, or not a string: Tether cannot keep its comment exactly
+                raise TrustError(409, CANNOT_EDIT)
+            lines[found] = value.group(1) + '"trusted"' + value.group(3)  # only the value changes: a comment stays
         result = ''.join(lines)
     expected = copy.deepcopy(before)
     projects = expected.setdefault('projects', {})
