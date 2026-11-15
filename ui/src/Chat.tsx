@@ -38,7 +38,7 @@ import type { OfficeFile } from './OfficeViewer'
 import type { ToolSummary } from './api'
 import { StatusStack } from './StatusStack'
 import { PaneTabs, movePill } from './PaneTabs'
-import { HEADER, SKIP, STRIPS, boxOf, createStripWheel, scrollsItself } from './stripScroll'
+import { HEADER, PARENTS, SKIP, STRIPS, boxOf, createStripWheel, scrollsItself } from './stripScroll'
 import { WorktreeMark } from './Worktree'
 import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
@@ -444,9 +444,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     moveChat(Math.sign(dx) * width, time)
     leaving.current = setTimeout(() => { leaving.current = null; onOpenPane(target) }, time)
   }
-  // Desktop: a two-finger swipe over the stack row or the tab strip, or BAND px above or below them, scrolls that strip;
-  // over the rest of the header it does nothing (stripScroll.ts). The listener sits on the panel: the band below the
-  // tab strip lies over the chat. Chromium waits for it on the first wheel event of a scroll only.
+  // Desktop: a two-finger swipe over the stack row or the tab strip, or BAND px above them, scrolls that strip; over the
+  // rest of the header it does nothing (stripScroll.ts). The listeners sit on the header parts only: a non-passive wheel
+  // listener on the chat would make Chromium wait for the main thread before each chat scroll starts, also while a
+  // reply streams. So the band below the tab strip, which lies over the chat, is left out.
   useEffect(() => {
     const panel = panelRef.current
     if (!headerSwipe || !panel) return
@@ -456,14 +457,23 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const target = event.target as Element | null
       if (!desk.matches || target?.closest(SKIP)) return
       const strips = [...panel.querySelectorAll<HTMLElement>(STRIPS)].filter(strip => strip.offsetHeight > 0)
-      const plan = decide(event, dx => ({ strips: strips.map(boxOf), native: scrollsItself(target, panel, dx), header: !!target?.closest(HEADER) }))
-      if (plan.do === 'pass') return
-      if (event.cancelable) event.preventDefault()
+      const plan = decide(event, dx => ({ strips: strips.map(boxOf), native: scrollsItself(target, panel, dx) }))
+      if (plan.do === 'pass' || !event.cancelable) return
+      event.preventDefault()
       if (plan.do === 'scroll') strips[plan.strip]?.scrollBy({ left: plan.dx, behavior: 'instant' })
     }
-    panel.addEventListener('wheel', wheel, { passive: false })
+    let zone: Element[] = []
+    const attach = () => {
+      for (const part of zone) part.removeEventListener('wheel', wheel as EventListener)
+      zone = [...panel.querySelectorAll(HEADER)]
+      for (const part of zone) part.addEventListener('wheel', wheel as EventListener, { passive: false })
+      for (const parent of panel.querySelectorAll(PARENTS)) observer.observe(parent, { childList: true })
+    }
+    const observer = new MutationObserver(attach)  // the stack row and the strip come and go with the tabs
+    observer.observe(panel, { childList: true })
+    attach()
     panel.dataset.stripScroll = ''
-    return () => { panel.removeEventListener('wheel', wheel); delete panel.dataset.stripScroll }
+    return () => { observer.disconnect(); for (const part of zone) part.removeEventListener('wheel', wheel as EventListener); delete panel.dataset.stripScroll }
   }, [headerSwipe])
   const swipeCancel = () => {
     if (swipe.current?.mode === 'drag') moveChat(0, reduceMotion() ? 0 : 220)

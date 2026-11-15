@@ -1,5 +1,6 @@
 // Strip scroll: a two-finger trackpad swipe over a chat's stack row or tab strip, or BAND px above or below them,
 // scrolls that strip; elsewhere in the header it does nothing; it never switches tabs (stripScroll.ts). Real TS, no DOM.
+// Only the header listens (Chat.tsx): every scene here is under the pointer in the header.
 const assert = require('node:assert/strict')
 const { readFileSync } = require('node:fs')
 const { runInNewContext } = require('node:vm')
@@ -13,7 +14,7 @@ assert.equal(BAND, 10)
 // The header at 1280 px: title row 0-83, stack row 84-120, tab strip 121-165, chat below. Both strips overflow.
 const strip = (top, bottom, extra) => ({ top, bottom, left: 0, right: 1000, scrollLeft: 100, scrollWidth: 2000, clientWidth: 1000, ...extra })
 const stacks = strip(84, 120), tabs = strip(121, 165)
-const scene = (over = {}) => () => ({ strips: [stacks, tabs], native: false, header: false, ...over })
+const scene = (over = {}) => () => ({ strips: [stacks, tabs], native: false, ...over })
 const event = (dx, at, y, over = {}) => ({ deltaX: dx, deltaY: 0, deltaMode: 0, ctrlKey: false, timeStamp: at, clientX: 500, clientY: y, ...over })
 // One gesture: the fingers, then momentum, 16 ms apart.
 const deltas = [2, 6, 14, 26, 38, 44, 40, 30, 26, 18, 12, 8, 5, 3, 2, 1]
@@ -46,7 +47,8 @@ assert.equal(room(strip(0, 1, { scrollWidth: 1000 }), 5), false)
   assert.ok(plans.every(plan => plan.do === 'pass'), JSON.stringify(plans))
 }
 
-// 4. In the band below the tab strip (over the chat): every event scrolls the tab strip by its own delta, 1:1.
+// 4. In the band below the tab strip: every event scrolls the tab strip by its own delta, 1:1. (In the app the chat
+// lies there and has no listener; the logic still picks the strip for any header part that reaches below it.)
 {
   const plans = feed(createStripWheel(), 1, 172, scene())
   assert.ok(plans.every(plan => plan.do === 'scroll' && plan.strip === 1), JSON.stringify(plans))
@@ -54,22 +56,29 @@ assert.equal(room(strip(0, 1, { scrollWidth: 1000 }), 5), false)
 }
 // ... and 8 px above the stack row (over the title row) scrolls the stack row, to the left too.
 {
-  const plans = feed(createStripWheel(), -1, 76, scene({ header: true }))
+  const plans = feed(createStripWheel(), -1, 76, scene())
   assert.ok(plans.every(plan => plan.do === 'scroll' && plan.strip === 0 && plan.dx <= 0), JSON.stringify(plans))
 }
 
-// 5. At the strip's end, or over a strip that does not overflow: cancel the whole gesture (no Back), scroll nothing.
+// 5. At the strip's end, or over a strip that does not overflow: the whole gesture is cancelled (no Back) and scrolled
+// by hand, which moves nothing there.
 for (const over of [{ scrollLeft: 1000 }, { scrollWidth: 1000 }]) {
   const end = strip(121, 165, over)
-  const plans = feed(createStripWheel(), 1, 140, () => ({ strips: [stacks, end], native: false, header: true }))
-  assert.ok(plans.every(plan => plan.do === 'block'), JSON.stringify(plans))
+  const plans = feed(createStripWheel(), 1, 140, () => ({ strips: [stacks, end], native: false }))
+  assert.ok(plans.every(plan => plan.do === 'scroll' && plan.strip === 1), JSON.stringify(plans))
+}
+// Review: at the start, the fingers go right (nothing to scroll), then turn left in the same gesture: that scrolls.
+for (const deltaMode of [0, 1]) {
+  const wheel = createStripWheel(), start = () => ({ strips: [stacks, strip(121, 165, { scrollLeft: 0 })], native: false })
+  assert.equal(wheel(event(-20, 0, 140, { deltaMode }), start).do, 'scroll')
+  const back = wheel(event(20, 16, 140, { deltaMode }), start)
+  assert.equal(back.do, 'scroll'); assert.ok(back.dx > 0)
 }
 
-// 6. The title row outside the zone: no Back/Forward. The chat outside the zone: B81 Back/Forward (pass).
-assert.ok(feed(createStripWheel(), 1, 40, scene({ header: true })).every(plan => plan.do === 'block'))
-assert.ok(feed(createStripWheel(), 1, 400, scene()).every(plan => plan.do === 'pass'))
+// 6. The title row outside the zone: no Back/Forward.
+assert.ok(feed(createStripWheel(), 1, 40, scene()).every(plan => plan.do === 'block'))
 // A horizontal scroller in the title row keeps its own scroll.
-assert.ok(feed(createStripWheel(), 1, 40, scene({ header: true, native: true })).every(plan => plan.do === 'pass'))
+assert.ok(feed(createStripWheel(), 1, 40, scene({ native: true })).every(plan => plan.do === 'pass'))
 
 // 7. A vertical wheel (a mouse too) and a pinch pass through, also over a strip.
 {
@@ -85,7 +94,17 @@ assert.ok(feed(createStripWheel(), 1, 40, scene({ header: true, native: true }))
   assert.equal(wheel(event(20, 0, 172), scene()).do, 'scroll')
   const tilted = wheel(event(1, 16, 172, { deltaY: 4 }), scene())
   assert.equal(tilted.do, 'scroll'); assert.equal(tilted.dx, 1)
-  assert.equal(wheel(event(20, 16 + QUIET_MS + 1, 400), scene()).do, 'pass', 'a new gesture over the chat')
+  assert.equal(wheel(event(20, 16 + QUIET_MS + 1, 140), scene({ native: true })).do, 'pass', 'a new gesture: native over the strip')
+}
+
+// Review: a gesture that starts vertical passes, all of it, also when it turns sideways: its later events cannot be
+// cancelled, so a scroll by hand would scroll twice.
+{
+  const wheel = createStripWheel()
+  assert.equal(wheel(event(0, 0, 172, { deltaY: 10 }), scene()).do, 'pass')
+  assert.equal(wheel(event(30, 16, 172), scene()).do, 'pass')
+  assert.equal(wheel(event(30, 32, 40), scene()).do, 'pass')
+  assert.equal(wheel(event(30, 32 + QUIET_MS + 1, 172), scene()).do, 'scroll', 'after a pause: a new gesture')
 }
 
 // 9. Line and page deltas (a mouse): scaled to px.

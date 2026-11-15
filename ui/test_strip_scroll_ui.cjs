@@ -1,5 +1,6 @@
-// Strip scroll (stripScroll.ts): real wheel events (CDP) over a chat's stack row or tab strip, or 10 px above or below
-// them, scroll that strip and never switch tabs. The title row cancels the swipe (no Back/Forward); the chat keeps B81.
+// Strip scroll (stripScroll.ts): real wheel events (CDP) over a chat's stack row or tab strip, or 10 px above them, scroll
+// that strip and never switch tabs. The title row cancels the swipe (no Back/Forward). The chat, also just below the tab
+// strip, has no listener and keeps B81.
 // With the setting off and on the phone, nothing changes. Every API request stays in this page's fixtures; no terminal
 // is touched.
 const http = require('node:http')
@@ -130,15 +131,28 @@ async function main() {
     wheels = await swipe(1, { x, y: row.y + row.height / 2 })
     check('stack row: a swipe left scrolls it, no stack or tab switch', await scrolled(ROW) > 100 && await current() === stack && await selected() === '%2', `${await scrolled(ROW)} ${await current()}`)
     await page.screenshot({ path: path.join(SHOTS, 'strip-scroll-stacks-1280.png') })
-    // 3. The 10 px band: 8 px below the tab strip (over the chat) scrolls the tab strip; 8 px above the stack row scrolls the stack row.
+    // 3. The 10 px band above the stack row (over the title row) scrolls the stack row. Below the tab strip lies the chat:
+    // it has no listener (its scroll never waits), so a swipe there passes (B81).
     await setScroll(TABS, 0); await setScroll(ROW, 0)
-    wheels = await swipe(1, { x, y: tabs.y + tabs.height + 8 })
-    left = await scrolled(TABS)
-    check('band below the tab strip: scrolls the tab strip 1:1, cancelled (no Back)', Math.abs(left - total) <= 1 && all(wheels) && await selected() === '%2', `${left} ${JSON.stringify(wheels)}`)
     wheels = await swipe(1, { x, y: row.y - 8 })
-    check('band above the stack row: scrolls the stack row, cancelled', Math.abs(await scrolled(ROW) - total) <= 1 && all(wheels) && await scrolled(TABS) === left, `${await scrolled(ROW)} ${JSON.stringify(wheels)}`)
-    wheels = await swipe(1, { x, y: tabs.y + tabs.height + 14 })
-    check('14 px below the tab strip: outside the band, the chat keeps B81 (not cancelled)', none(wheels) && await scrolled(TABS) === left, JSON.stringify(wheels))
+    check('band above the stack row: scrolls the stack row 1:1, cancelled (no Back)', Math.abs(await scrolled(ROW) - total) <= 1 && all(wheels) && await scrolled(TABS) === 0 && await selected() === '%2', `${await scrolled(ROW)} ${JSON.stringify(wheels)}`)
+    wheels = await swipe(1, { x, y: tabs.y + tabs.height + 4 })
+    check('just below the tab strip: the chat, not cancelled (B81), no strip scroll', none(wheels) && await scrolled(TABS) === 0, JSON.stringify(wheels))
+    check('the chat has no wheel listener of the header swipe', await page.evaluate(() => {
+      const scroll = document.querySelector('.chat-scroll'), event = new WheelEvent('wheel', { deltaX: 40, bubbles: true, cancelable: true })
+      scroll.dispatchEvent(event)
+      return !event.defaultPrevented
+    }))
+    // Without stacks the band above the tab strip lies over the title row.
+    sessions = few
+    await open(1280)
+    await page.evaluate(s => { const e = document.querySelector(s); for (let i = 0; i < 12; i++) e.append(e.querySelector('[role="tab"]').cloneNode(true)) }, TABS)
+    tabs = await box(TABS)
+    wheels = await swipe(1, { x, y: tabs.y - 6 })
+    check('no stacks, band above the tab strip: scrolls the tab strip, cancelled', await scrolled(TABS) > 100 && all(wheels), `${await scrolled(TABS)} ${JSON.stringify(wheels)}`)
+    sessions = many
+    await open(1280)
+    tabs = await box(TABS); row = await box(ROW)
     // 4. At the strip's end: the swipe stops there, cancelled.
     await setScroll(TABS, 'end')
     const end = await scrolled(TABS)
