@@ -52,10 +52,6 @@
 .pick-modes button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .sheet.popover.task-pop.opening { width: 460px; }
 .task-pop .task-open { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px 14px 6px; }
-.sheet.session-pick { padding-bottom: 12px; }
-.sheet.session-pick .cp-list { margin: 0 -14px; }
-.sheet.session-pick .sheet-heading { margin-bottom: 14px; }
-.sheet.session-pick .pick-modes { justify-self: start; width: fit-content; margin-bottom: 14px; }
 
 /* Past chats in the sidebar. */
 .past-filters { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0 4px 8px 10px; }

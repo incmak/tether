@@ -473,6 +473,48 @@ def find_or_create(session_id, name, run=subprocess.run, auto=True):
         return found or create(session_id, name, run, auto=auto)
 
 
+def arrange(session_id, plan, run=subprocess.run):
+    """Apply suggested stacks: plan is [{"name": ..., "panes": [pane ids]}]. A stack with that name (any case) is reused,
+    else made. Each listed tab moves there as if the user moved it. Unlisted tabs and other stacks stay as they are.
+    Returns the stacks that got tabs, in plan order."""
+    if not isinstance(plan, list) or not 1 <= len(plan) <= 20:
+        raise GroupError(400, 'Send 1 to 20 stacks.')
+    wanted, seen = [], set()
+    for item in plan:
+        if not isinstance(item, dict) or not isinstance(item.get('panes'), list) or not 1 <= len(item['panes']) <= 200:
+            raise GroupError(400, 'Each stack needs a name and its tabs.')
+        name = clean_name(item.get('name'))
+        if name.lower() in RESERVED:
+            raise GroupError(400, 'Unstacked and Main are kept for the tabs in no stack. Choose another name.')
+        panes = []
+        for pane in item['panes']:
+            if not isinstance(pane, str) or not PANE.fullmatch(pane):
+                raise GroupError(400, 'Choose a tab.')
+            if pane not in seen:
+                seen.add(pane)
+                panes.append(pane)
+        wanted.append((name, panes))
+    with LOCK():
+        groups = read(session_id, run)
+        live = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{pane_id}')
+        _check(live, GONE_SESSION)
+        here = set(live.stdout.split())
+        made = []
+        for name, panes in wanted:
+            panes = [pane for pane in panes if pane in here]  # a tab that closed meanwhile is skipped
+            if not panes:
+                continue
+            group = next((g for g in groups if g['name'].lower() == name.lower()), None)
+            if group is None:
+                group = {'id': _new_id({g['id'] for g in groups}), 'name': name, 'project': secrets.token_hex(6)}
+                groups.append(group)
+                write(session_id, groups, run)
+            for pane in panes:
+                _label(pane, group['id'], run, by_user=True)
+            made.append(group)
+    return made
+
+
 def free_name(groups, name):
     """name, or "name 2", "name 3"... : the first one that no group has (any case) and that is not reserved."""
     name, base, number = clean_name(name), clean_name(name), 2
@@ -503,6 +545,17 @@ def auto_move(session_id, pane, group_id, run=subprocess.run):
             return False
         move(session_id, pane, group_id, run)
     return True
+
+
+def pane_session(pane, run=subprocess.run):
+    """The session id of a live pane, or GroupError(404)."""
+    return _pane(pane, run)[0]
+
+
+def check_group(session_id, group_id, run=subprocess.run):
+    """GroupError unless group_id ('' = Unstacked) is a stack of the session."""
+    if group_id:
+        _find(read(session_id, run), group_id)
 
 
 def group_of_pane(pane, run=subprocess.run):

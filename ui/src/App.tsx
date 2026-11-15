@@ -33,7 +33,6 @@ import { NewTask } from './NewTask'
 import { isTabArchived, tabNeighbor, withTabArchived, withoutTab } from './tabArchive'
 import { selectPane } from './paneSelection'
 import type { SelectionSnapshot } from './paneSelection'
-import { NewSession } from './NewSession'
 import { resumeChat } from './ChatPicker'
 import type { ChatAgent } from './api'
 import { Chat } from './Chat'
@@ -120,7 +119,9 @@ function App() {
     if (pending) void pending.promise.then(item => applyPhoto(item, update)).catch(() => { /* A resumed job can expire or disappear after a server restart. */ })
   }, [api, update])
   const [drawer, setDrawer] = useState(false)
-  const [newSession, setNewSession] = useState(false)
+  // New session: false = closed; at = the popover anchor on a desk, none = a sheet.
+  const [newSession, setNewSession] = useState<false | { at?: Anchor }>(false)
+  const [newStack, setNewStack] = useState<{ pane: Pane; at?: Anchor } | null>(null)
   const [actions, setActions] = useState<string | null>(null)
   const [actionsDelete, setActionsDelete] = useState(false)
   const [paneActions, setPaneActions] = useState<string | null>(null)
@@ -524,7 +525,7 @@ function App() {
     history.replaceState(history.state, '', url)
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Consume the external navigation request after session data arrives and update history once.
     setGo(null)
-    if (go === 'new') setNewSession(true)
+    if (go === 'new') setNewSession({})
     else if (go === 'usage') setPlanSheet(true)
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
@@ -642,7 +643,7 @@ function App() {
         const mod = event.ctrlKey || event.metaKey
         const act = (run: () => void) => { event.preventDefault(); run() }
         if (mod && !event.altKey && !event.shiftKey && event.code === 'KeyB') return act(rail.toggleSidebar)
-        if (event.altKey && !mod && !event.shiftKey && event.code === 'KeyN') return act(() => setNewSession(true))
+        if (event.altKey && !mod && !event.shiftKey && event.code === 'KeyN') return act(() => setNewSession({}))
       }
       if (slots && !document.querySelector('dialog[open]')) {
         // Browsers keep Cmd+1-9, Cmd+W and Cmd+N, so slot keys use Alt. Read event.code: Alt+letter types a symbol on a Mac.
@@ -825,7 +826,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: () => { setDrawer(false); setNewSession(true) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -838,7 +839,7 @@ function App() {
       ...extraPanels(desk, pane).map(({ kind, key, open }) => ({ label: open ? `Hide the ${PANELS[kind].title.toLowerCase()} panel` : kind === 'chat' ? 'Side chat: fork this chat beside it' : `Show ${PANELS[kind].title.toLowerCase()}`, key, run: () => kind === 'chat' ? void sideChat() : togglePanelKind(setPanels, kind) }))] : []),
     ...(pane && placesOf(sessions.find(item => item.id === pane.tmux_session)?.panes ?? [], sessions.find(item => item.id === pane.tmux_session)?.groups).filter(place => place.panes.length).length > 1 ? [{ label: 'Next stack', key: '⌥⇧]', run: () => stepGroup(1) }, { label: 'Previous stack', key: '⌥⇧[', run: () => stepGroup(-1) }] : []),
     ...(livePins.length > 1 ? [{ label: 'Next pinned chat', key: '⌥]', run: () => stepPin(1) }, { label: 'Previous pinned chat', key: '⌥[', run: () => stepPin(-1) }] : []),
-    { label: 'New session', key: '⌥N', run: () => setNewSession(true) },
+    { label: 'New session', key: '⌥N', run: () => setNewSession({}) },
     { label: desk.sidebar ? 'Hide the sidebar' : 'Show the sidebar', key: '⌘B', run: () => setDesk({ sidebar: !desk.sidebar }) },
     // After the menu closes: its own entry goes first, then the step.
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
@@ -864,6 +865,7 @@ function App() {
       seen: prefs.seen, selected: openId, hidden: archivedTabs.filter(item => item.tmux_session === owner.id),
       onStart: (group, from) => void split('right', from, group),
       onContext: group => setProject({ session: owner.id, group: group.id }),
+      onNewStack: (from, at) => setNewStack({ pane: from, at: view ? at : undefined }),
     } : undefined
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}
@@ -919,7 +921,7 @@ function App() {
     {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
-    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession(true)} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
+    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
     {files && <Suspense fallback={<PanelLoading label="Files" />}><Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} /></Suspense>}
     {share && <Suspense fallback={<PanelLoading label="Share" cover={!wide} />}><Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
       const before = prefs.drafts[pane.id]?.text ?? ''
@@ -958,19 +960,28 @@ function App() {
     {backlogAdd && <BacklogAddSheet key={backlogAdd.text} api={api} text={backlogAdd.text} pane={backlogAdd.pane} onClose={() => setBacklogAdd(null)} onAdded={setNotice} />}
     {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === 'layout-maker' ? 'layout-maker' : undefined} />}
     {!settings && <TrialBar onRevert={revertLook} />}
-    {tabTask && <NewTask api={api} pane={tabTask.pane} at={tabTask.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} onClose={() => setTabTask(null)}
+    {tabTask && <NewTask api={api} pane={tabTask.pane} at={tabTask.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel} onClose={() => setTabTask(null)}
       onEmpty={() => { const target = tabTask.pane; setTabTask(null); void split('right', target) }}
       onCreated={(_id, made) => { setTabTask(null); void refresh(); if (made) setNotice(worktreeNotice(made)) }}
       onOpen={item => { setTabTask(null); void refresh(); openPane(item) }} onMoved={item => { setTabTask(null); void refresh(); openPane(item) }} />}
-    {newSession && <NewSession api={api} onClose={() => setNewSession(false)} onCreated={(created, made) => { openPane(created); setNewSession(false); void refresh(); if (made) setNotice(worktreeNotice(made)) }} />}
-    {actionSession && pane && <SessionActions key={`${actionSession.id}-${actionsDelete}`} tabCount={panes.filter(item => item.tmux_session === actionSession.id).length} startDelete={actionsDelete} at={actionsDelete ? undefined : menuAt} place={placeFor(actionSession.panes[0].id, actionSession)} api={api} session={actionSession} pane={actionSession.panes.find(item => item.id === pane.id)?.id ?? actionSession.panes[0].id} pinned={prefs.pinned.includes(actionSession.id)} archived={isArchived(actionSession, prefs.archived)} canMoveUp={ordered.indexOf(actionSession.id) > 0} canMoveDown={ordered.indexOf(actionSession.id) < ordered.length - 1} targets={moveTargets} marks={marks} onMarks={loadMarks}
+    {newSession && <NewTask kind="session" api={api} at={newSession.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel} taken={sessions.map(item => item.name)}
+      onClose={() => setNewSession(false)} onCreated={() => setNewSession(false)} onOpen={item => { setNewSession(false); void refresh(); openPane(item) }}
+      onSession={(created, made, warning) => { setNewSession(false); void refresh(); openPane(created); if (warning || made) setNotice([warning, made && worktreeNotice(made)].filter(Boolean).join(' ')) }} />}
+    {newStack && (() => {
+      const owner = sessions.find(item => item.id === newStack.pane.tmux_session)
+      return owner && <NewTask kind="stack" api={api} pane={newStack.pane} session={owner} at={newStack.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel}
+        onClose={() => setNewStack(null)} onStack={() => { setNewStack(null); void refresh() }}
+        onCreated={(id, made) => { setNewStack(null); update(current => ({ selected: id, lastPane: { ...current.lastPane, [owner.id]: id } })); void refresh(); if (made) setNotice(worktreeNotice(made)) }}
+        onOpen={item => { setNewStack(null); void refresh(); openPane(item) }} />
+    })()}
+    {actionSession && pane && <SessionActions mainModel={prefs.mainModel} key={`${actionSession.id}-${actionsDelete}`} tabCount={panes.filter(item => item.tmux_session === actionSession.id).length} startDelete={actionsDelete} at={actionsDelete ? undefined : menuAt} place={placeFor(actionSession.panes[0].id, actionSession)} api={api} session={actionSession} pane={actionSession.panes.find(item => item.id === pane.id)?.id ?? actionSession.panes[0].id} pinned={prefs.pinned.includes(actionSession.id)} archived={isArchived(actionSession, prefs.archived)} canMoveUp={ordered.indexOf(actionSession.id) > 0} canMoveDown={ordered.indexOf(actionSession.id) < ordered.length - 1} targets={moveTargets} marks={marks} onMarks={loadMarks}
       onPin={() => update(current => ({ pinned: current.pinned.includes(actionSession.id) ? current.pinned.filter(id => id !== actionSession.id) : [...current.pinned, actionSession.id] }))}
       onArchive={() => update(toggleArchive(actionSession))}
       color={prefs.colors?.[actionSession.id]} onColor={color => update(current => ({ colors: withColor(current.colors, actionSession.id, color) }))}
       groups={prefs.groups} group={prefs.groupOf?.[actionSession.id]}
       onGroup={(group, created) => update(current => ({ groups: created ? [...current.groups, created] : current.groups, groupOf: withGroup(current.groupOf, actionSession.id, group?.id), ...current.groupBy === 'custom' || !group ? {} : { groupBy: 'custom' as const } }))}
       onMove={step => move(actionSession.id, step)} onProject={() => { setActions(null); setProject({ session: actionSession.id }) }} onClose={() => setActions(null)} onDone={(newPane, direction) => { setActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} />}
-    {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions api={api} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
+    {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions api={api} mainModel={prefs.mainModel} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}

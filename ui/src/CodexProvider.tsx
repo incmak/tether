@@ -45,10 +45,9 @@ export function CodexProviderSwitch({ api }: { api: Api }) {
 }
 
 // " · Foundry" after "Codex" on a start button while new Codex panes use Azure Foundry. Nothing for the plan.
-// `below`: a small second line under the name, for the narrow agent choices in New session.
-export function FoundryTag({ api, below = false }: { api: Api; below?: boolean }) {
+export function FoundryTag({ api }: { api: Api }) {
   const [data] = useCodexProvider(api)
-  return data?.provider === 'foundry' ? <span className={below ? 'provider-tag below' : 'provider-tag'}>{below ? 'Foundry' : ' · Foundry'}</span> : null
+  return data?.provider === 'foundry' ? <span className="provider-tag"> · Foundry</span> : null
 }
 
 const money = (usd: number, currency = 'USD') => new Intl.NumberFormat(undefined, { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(usd)

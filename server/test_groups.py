@@ -268,6 +268,30 @@ class TmuxTests(Bundles):
         self.assertEqual(groups.rename(self.a, docs['id'], 'docs', run)['name'], 'docs')  # its own name, new case
         groups.create(self.b, 'Docs', run)  # another session may use the name
 
+    def test_arrange_reuses_names_makes_stacks_and_skips_closed_tabs(self):
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run)
+        made = groups.arrange(self.a, [{'name': 'docs', 'panes': [self.a1, '%999']}, {'name': 'Release', 'panes': [self.a2, self.a1]},
+                                       {'name': 'Gone', 'panes': ['%998']}], run)
+        self.assertEqual([g['name'] for g in made], ['Docs', 'Release'])
+        self.assertEqual(made[0]['id'], docs['id'])
+        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Docs', 'Release'])
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (docs['id'], made[1]['id']))
+        self.assertTrue(groups.placed_by_user(self.a1, run), 'auto stacks must leave arranged tabs alone')
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [{'name': 'Main', 'panes': [self.a1]}], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [{'name': 'X', 'panes': ['a1']}], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange('$999', [{'name': 'X', 'panes': [self.a1]}], run)), 404)
+
+    def test_pane_session_and_check_group(self):
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run)
+        self.assertEqual(groups.pane_session(self.a2, run), self.a)
+        groups.check_group(self.a, docs['id'], run)
+        groups.check_group(self.a, '', run)
+        self.assertEqual(self.status(lambda: groups.check_group(self.b, docs['id'], run)), 404)
+        self.assertEqual(self.status(lambda: groups.pane_session('%999', run)), 404)
+
     def test_stale_ids_give_404(self):
         run = self.run_tmux
         docs = groups.create(self.a, 'Docs', run)

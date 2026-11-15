@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Check, FolderPlus, ListTree, X } from 'lucide-react'
+import { Check, FolderPlus, Sparkles, X } from 'lucide-react'
+import { Spinner } from './Skeleton'
 import type { Api } from './api'
 import { errorText } from './api'
 import type { Anchor } from './hooks'
@@ -111,7 +112,7 @@ export function OrganizeMenu({ api, sessions, prefs, update, at, onClose }: { ap
       <Choice legend="Sort" name="sort" value={prefs.sort} options={[['smart', 'Smart'], ['recent', 'Recent'], ['name', 'Name'], ['manual', 'Manual']]} onChange={sort => update(() => ({ sort }))} />
       <p className="hint organize-hint">{prefs.sort === 'smart' ? 'Done first, then working, then the latest activity.' : prefs.sort === 'recent' ? 'The latest agent activity first.' : prefs.sort === 'name' ? 'A to Z.' : 'Your own order. Use Reorder in a group.'} Sessions that need you always show at the top.</p>
       <section className="suggest-box" aria-live="polite">
-        {!suggestion && <button type="button" className="secondary suggest-button" disabled={asking} onClick={() => void suggest()}><ListTree size={16} />{asking ? 'Suggesting groups… about 15 seconds' : 'Suggest groups'}</button>}
+        {!suggestion && <button type="button" className="secondary suggest-button" disabled={asking} onClick={() => void suggest()}>{asking ? <Spinner size={16} /> : <Sparkles size={16} />}{asking ? 'Suggesting groups… about 15 seconds' : 'Suggest groups'}</button>}
         {suggestion && <>
           <p className="suggest-note">{suggestion.source === 'claude' ? 'Suggested by Claude.' : suggestion.source === 'codex' ? 'Suggested by Codex.' : suggestion.source === 'llm' ? 'Suggested by the local model.' : 'The model gave no useful groups. These groups follow the folders.'} Apply replaces your groups.</p>
           <ul className="suggest-list">{suggestion.groups.map(group => <li key={group.name}><strong>{group.name}</strong><span>{group.sessions.map(id => names.get(id) ?? id).join(', ')}</span></li>)}</ul>

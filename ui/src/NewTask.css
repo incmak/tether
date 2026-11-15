@@ -1,13 +1,20 @@
 /* The + popover on the tab strip (NewTask.tsx). It grows out of the +. No shimmer: Mak asked for none.
    Reduced motion keeps it still. */
 
-.sheet.popover.task-pop { width: 360px; padding: 0; overflow: hidden; border-radius: 16px; background: var(--surface); transform-origin: top right;
+.sheet.popover.task-pop { width: 360px; padding: 0; overflow: hidden auto; border-radius: 16px; background: var(--surface); transform-origin: top right;
   box-shadow: 0 1px 0 #ffffff0d inset, 0 2px 6px #00000014, 0 22px 56px #00000033;
   animation: task-grow .32s cubic-bezier(.23, 1, .32, 1); }
 @keyframes task-grow { from { opacity: 0; transform: translateY(-6px) scale(.94); } }
 
 .task-pop form { position: relative; display: grid; gap: 12px; padding: 14px; }
 .task-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.task-head-end { display: flex; align-items: center; gap: 2px; margin-left: auto; }
+/* Stack and session hold a name and a folder too: a little wider on a desk. */
+.sheet.popover.task-pop.task-wide { width: 392px; }
+/* No anchor (phones, Home): the same box as a bottom sheet with a close button. */
+.sheet.task-pop.task-sheet { padding: 0 0 env(safe-area-inset-bottom); overflow-y: auto; background: var(--surface); }
+.sheet.task-pop.task-sheet form, .sheet.task-pop.task-sheet .task-open { padding: 16px; }
+.sheet.task-pop form > p, .sheet.task-pop form > p.error { margin: 0; }
 .sheet.popover.task-pop h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.005em; }
 .task-empty { min-height: 28px; padding: 0 8px; border-radius: 7px; font-size: 12.5px; color: var(--muted); }
 .task-empty:hover:not(:disabled) { background: var(--hover); color: var(--text); }
@@ -80,10 +87,65 @@
 .pane-tabs button.task-new { animation: task-land 1.4s ease-out; }
 @keyframes task-land { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); } 100% { box-shadow: 0 0 0 10px transparent; } }
 
-@media (max-width: 480px) { .sheet.popover.task-pop { width: calc(100vw - 16px); } }
+@media (max-width: 480px) { .sheet.popover.task-pop, .sheet.popover.task-pop.task-wide { width: calc(100vw - 16px); } }
+
+/* Name with suggestions (CreateFields.tsx NameField). */
+.create-name { display: grid; gap: 6px; }
+.create-name > label, .create-folder-label { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.create-name-box { display: flex; align-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); transition: border-color .15s, box-shadow .15s; }
+.create-name-box:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.create-name-box input { flex: 1; min-width: 0; min-height: 40px; padding: 0 12px; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 14.5px; }
+.create-name-box input[aria-invalid="true"] { color: var(--text); }
+.create-name-box:has(input[aria-invalid="true"]) { border-color: var(--error); }
+.create-suggest { display: grid; place-items: center; flex: none; width: 36px; height: 36px; margin-right: 2px; border-radius: 8px; color: var(--accent); transition: background .15s; }
+.create-suggest:hover:not(:disabled) { background: var(--hover); }
+.create-suggest:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.create-names { display: flex; flex-wrap: wrap; gap: 6px; }
+.create-names button { min-height: 28px; max-width: 100%; padding: 0 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; font-size: 12.5px; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; transition: background .15s, color .15s, border-color .15s; }
+.create-names button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.create-names button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--text); }
+.create-hint { margin: 0; font-size: 12px; line-height: 1.35; color: var(--muted); }
+.create-name-box:has(input[aria-invalid="true"]) ~ .create-hint:not(.error) { color: var(--error); }
+
+/* Folder: one row; it opens the browser in place, so the box keeps one level (no modal on a modal). */
+.create-folder { display: grid; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden; }
+.create-folder-row { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px 0 12px; text-align: left; color: var(--muted); }
+.create-folder-row:hover:not(:disabled) { background: var(--hover); }
+.create-folder-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 10px; }
+.create-folder-path { flex: 1; min-width: 0; overflow: hidden; color: var(--text); font-size: 13.5px; text-overflow: ellipsis; white-space: nowrap; }
+.create-folder-row small { flex: none; padding: 1px 6px; border-radius: 6px; background: var(--hover); font-size: 11.5px; }
+.create-folder-chevron { flex: none; transition: transform .2s cubic-bezier(.23, 1, .32, 1); }
+.create-folder-row[aria-expanded="true"] .create-folder-chevron { transform: rotate(180deg); }
+.create-browser { display: grid; gap: 8px; padding: 8px; border-top: 1px solid var(--line); }
+.create-browser-filter { width: 100%; min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13.5px; }
+.create-browser-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.create-recent { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.create-recent button { flex: none; min-height: 28px; max-width: 160px; padding: 0 10px; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.create-recent button:hover { background: var(--hover); }
+.create-crumbs { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.create-crumbs .icon-button { flex: none; width: 32px; height: 32px; }
+.create-crumbs nav { display: flex; align-items: center; min-width: 0; overflow-x: auto; scrollbar-width: none; font-size: 12.5px; white-space: nowrap; }
+.create-crumbs nav button { min-height: 28px; padding: 0 4px; border-radius: 6px; color: var(--muted); }
+.create-crumbs nav button:hover { background: var(--hover); color: var(--text); }
+.create-crumbs [aria-current] { padding: 0 4px; font-weight: 600; }
+.create-sep { color: var(--muted); opacity: .6; }
+.create-folders { display: grid; max-height: 188px; margin: 0; padding: 0; overflow-y: auto; list-style: none; overscroll-behavior: contain; }
+.create-folders button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 0 8px; border-radius: 7px; text-align: left; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.create-folders button svg { flex: none; color: var(--muted); }
+.create-folders button:hover, .create-folders button:focus-visible { background: var(--hover); }
+.create-folders button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.create-folders .error { padding: 6px 8px; font-size: 12.5px; }
+.create-note { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 0 8px; color: var(--muted); font-size: 12.5px; }
+.create-mkdir { display: flex; gap: 6px; }
+.create-mkdir input { flex: 1; min-width: 0; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; font-size: 13.5px; }
+.create-mkdir button { min-height: 34px; }
+.create-browser-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.create-browser-foot .ghost { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 8px; border-radius: 7px; color: var(--muted); font-size: 12.5px; }
+.create-browser-foot .ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.create-browser-foot .primary { display: flex; align-items: center; gap: 6px; min-height: 32px; max-width: 70%; margin-left: auto; padding: 0 12px; overflow: hidden; border-radius: 8px; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
   .sheet.popover.task-pop, .pane-tabs button.task-new, .task-spin { animation: none !important; }
-  .pane-tabs .tab-add svg, .task-switch input::after { transition: none; }
+  .pane-tabs .tab-add svg, .task-switch input::after, .create-folder-chevron { transition: none; }
 }
 
 /* A tab with a reviewer shows a small eye. The eye in the chat header lists and stops the links. */

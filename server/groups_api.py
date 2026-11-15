@@ -9,7 +9,7 @@ import projects
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
-WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove')}  # server.py TMUX_WRITES
+WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange')}  # server.py TMUX_WRITES
 
 
 def handles(path):
@@ -73,13 +73,15 @@ def post(handler, run=subprocess.run):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise ValueError('Invalid request.')
-        if name not in ('create', 'rename', 'move', 'ungroup', 'remove'):
+        if name not in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange'):
             raise groups.GroupError(404, 'Not found')
         session_id = _session(body.get('session'))
         if name == 'create':
             pane = body.get('pane')
             return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
                                            by_user=True)}
+        if name == 'arrange':
+            return {'groups': groups.arrange(session_id, body.get('stacks'), run)}
         if name == 'move':
             group_id = body.get('group')
             groups.move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run,

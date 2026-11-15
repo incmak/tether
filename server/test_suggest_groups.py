@@ -331,6 +331,19 @@ class SuggestGroupsTests(unittest.TestCase):
                          {'groups': [{'name': 'shared', 'sessions': ['$1', '$2']},
                                      {'name': 'Other', 'sessions': ['$3', '$4', '$5']}], 'source': 'folder'})
 
+    def test_tabs_kind_uses_stack_prompt_pane_ids_and_renames_reserved(self):
+        tabs = [session('%3', name='Login'), session('%8', name='Auth'), session('%12', '/other', name='Docs')]
+        self.reply('Main: 3 8\nDocs: 12')
+        value = suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs})
+        self.assertEqual(value['source'], 'llm')
+        self.assertEqual(value['groups'][0], {'name': 'Main tabs', 'sessions': ['%3', '%8']})
+        payload = json.loads(self.urlopen.call_args.args[0].data)
+        self.assertEqual(payload['messages'][0]['content'], suggest_groups.TABS_PROMPT)
+        for body in ({'kind': 'tabs', 'tabs': [session('$3')]}, {'kind': 'tabs', 'sessions': tabs},
+                     {'kind': 'other', 'sessions': []}):
+            with self.assertRaises(ValueError):
+                suggest_groups.suggest(body)
+
     def test_empty_sessions_do_not_call_model(self):
         self.assertEqual(suggest_groups.suggest({'sessions': []}), {'groups': [], 'source': 'folder'})
         self.urlopen.assert_not_called()
