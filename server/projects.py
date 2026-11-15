@@ -477,6 +477,19 @@ def marks(run=subprocess.run, home=None):
     return out
 
 
+def unarchive(pid):
+    """Move the newest archived bundle of pid back (an undo of the step that archived it). False when there is none
+    or a live bundle has that id."""
+    folder = bundle(pid)
+    if folder.exists():
+        return False
+    found = sorted((root() / '.archive').glob(f'{pid}-*'))
+    if not found:
+        return False
+    shutil.move(str(found[-1]), str(folder))
+    return True
+
+
 def archive(pid):
     """Move a bundle to projects/.archive/ (merge keeps the other one). It can be moved back."""
     folder = bundle(pid)

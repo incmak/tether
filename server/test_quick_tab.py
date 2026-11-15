@@ -239,6 +239,20 @@ class StarterTest(unittest.TestCase):
         self.assertEqual(self.starter.start(body, ENTRIES, GROUPS, folder_of), first)
         self.mocks[0].assert_not_called()
 
+    def test_a_failed_undo_record_keeps_the_answer_for_a_retry(self):
+        broken = SimpleNamespace(record_tab_start=mock.Mock(side_effect=subprocess.TimeoutExpired(['tmux'], 5)))
+        body = {'request': 'req-00013', 'message': 'x', 'session': '$1', 'group': ''}
+        with mock.patch.object(quick_tab, '_undo', return_value=broken):
+            try:
+                first = self.starter.start(body, ENTRIES, GROUPS, folder_of)
+            except subprocess.TimeoutExpired:
+                first = None
+            self.mocks[0].reset_mock()
+            again = self.starter.start(body, ENTRIES, GROUPS, folder_of)
+        self.mocks[0].assert_not_called()
+        self.assertEqual(again['pane'], '%50')
+        self.assertIn(first, (None, again))
+
     def test_an_unclear_launch_failure_blocks_a_second_launch(self):
         for error in (subprocess.TimeoutExpired(['tmux'], 5), RuntimeError('Could not split the pane.')):
             with self.subTest(error=type(error).__name__):

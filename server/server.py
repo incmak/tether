@@ -101,6 +101,9 @@ import work_jira
 import groups
 import helper_close
 import groups_api
+import undo
+import undo_api
+import undo_store
 import codex_level
 import activity_time
 import ui_usage
@@ -415,7 +418,19 @@ def sessions():
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
 TMUX_WRITES = {quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
                '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
-               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled'} | groups_api.WRITES
+               '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES
+
+
+def _web_draft(pane):
+    draft = (prefs_sync.load()['prefs'].get('drafts') or {}).get(pane)
+    return draft.get('text', '') if isinstance(draft, dict) and isinstance(draft.get('text'), str) else ''
+
+
+def undo_env():
+    """What undo.py reads: the live tabs, their state and unsent text, for its checks and its warnings."""
+    return undo.Env(run=subprocess.run, entries=sessions, status=shared_status,
+                    draft=lambda entry: prompt_draft(entry, subprocess.run), web_draft=_web_draft,
+                    name_window=name_in_tmux)
 
 
 def forget_sessions():
@@ -1339,6 +1354,12 @@ class Handler(BaseHTTPRequestHandler):
                 and not getattr(self, 'keep_sessions', False)):
             forget_sessions()
         headers = dict(headers or {})
+        if self.command in ('POST', 'DELETE'):
+            try:
+                undo_api.note_start(self.path.split('?', 1)[0], status, body)
+                headers.update(undo_api.headers(status))  # the page offers Undo for the step this request made
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass  # undo must never break the answer
         if content_type in GZIP_TYPES and 'Content-Encoding' not in headers and status not in (204, 304):
             headers.setdefault('Vary', 'Accept-Encoding, Sec-Fetch-Site')
             request = getattr(self, 'headers', None) or {}
@@ -1803,6 +1824,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'shortcuts': shortcuts.load()})
             elif path == '/mobile/api/prefs':
                 self.respond(200, prefs_sync.load())
+            elif path == undo_api.PATH:
+                undo_api.get(self, undo_env())
             elif path == '/mobile/api/auto-resume':
                 self.respond(200, auto_resume.notice())
             elif path == '/mobile/api/codex-provider':
@@ -2184,7 +2207,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not undo_api.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2209,6 +2232,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if groups_api.handles(self.path):
             groups_api.post(self, sessions=sessions)
+            return
+        if undo_api.handles(self.path):
+            undo_api.post(self, undo_env(), SEND_LOCK)
             return
         if codex_level.handles(self.path):
             codex_level.post(self)
@@ -2366,7 +2392,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/prefs':
                 try:
-                    self.respond(200, prefs_sync.save(body.get('changes')))
+                    with prefs_sync.LOCK:  # the read before, the save and the record are one step for an undo (undo.run)
+                        before = prefs_sync.load()['prefs']
+                        saved = prefs_sync.save(body.get('changes'))
+                        for key in ('order', 'paneOrder'):  # a drag that reorders sessions or tabs
+                            if isinstance(body.get('changes'), dict) and key in body['changes']:
+                                undo.record_order(key, before.get(key), saved['prefs'].get(key))
+                    self.respond(200, saved)
                 except ValueError as exc:
                     self.respond(400, {'error': str(exc)})
                 return
@@ -2405,18 +2437,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not valid_name(name):
                     self.respond(400, {'error': NAME_HELP})
                     return
+                # One hold of SEND_LOCK from the read of the old names to the record: an undo (undo_api, which holds it
+                # too) cannot run between them.
                 with SEND_LOCK:
+                    was = undo.session_of(pane)
+                    pane_was = undo.name_state(pane)
                     result = subprocess.run([paths.TMUX, 'rename-session', '-t', pane, name], capture_output=True, text=True, timeout=5)
+                    if not result.returncode:
+                        note = name_together(pane, name, from_session=True)
+                        if was:
+                            undo.record_session_name(was[0], was[1], name)
+                        undo.record_pane_name(pane, pane_was, (undo.name_state(pane) or {}).get('@chat_name', ''))
                 if result.returncode:
                     self.respond(409, {'error': 'That name is already used.' if 'duplicate' in result.stderr else 'Could not rename the session.'})
                     return
-                with SEND_LOCK:
-                    note = name_together(pane, name, from_session=True)
                 self.respond(200, {'session': pane, 'name': name, **({'note': note} if note else {})})
                 return
             if self.path == '/mobile/api/merge':  # sidebar drag and drop: merge sessions, move or break out a pane
                 with SEND_LOCK:
+                    noted = undo.record_merge(body.get('kind'), body.get('source'), body.get('target'))
                     moved = tmux_merge.merge(body.get('kind'), body.get('source'), body.get('target'), keep=body.get('keep'))
+                    noted(moved)
                 self.respond(200, moved)
                 return
             if self.path in ('/mobile/api/session', '/mobile/api/tmux-sessions'):
@@ -2478,11 +2519,17 @@ class Handler(BaseHTTPRequestHandler):
                                          ';', 'set-option', '-p', '-t', pane, auto_stacks.NAME_BY, 'cleared'])
                 command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto']  # the placeholder ends
                 with SEND_LOCK:
+                    name_was = undo.name_state(pane)
+                    session_was = undo.session_of(pane)
                     result = subprocess.run([paths.TMUX, *command], capture_output=True, text=True, timeout=5)
                     if result.returncode:
                         raise RuntimeError('Could not rename the pane. It may have closed.')
                     name_in_tmux(pane, name)
                     note = name_together(pane, name, from_session=False)
+                    undo.record_pane_name(pane, name_was, name)
+                    session_now = undo.session_of(pane)
+                    if session_was and session_now and session_now[1] != session_was[1]:
+                        undo.record_session_name(session_was[0], session_was[1], session_now[1])
                 self.respond(200, {'pane': pane, 'name': name, **({'note': note} if note else {})})
                 return
             if self.path == tab_brief.PATH:
@@ -2992,10 +3039,12 @@ class Handler(BaseHTTPRequestHandler):
                     if pane not in active_panes:
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
+                    closed = undo.capture_safe(pane, entries=sessions)
                     auto_resume.forget_pane(pane, run=subprocess.run)
                     with groups.closing(pane):  # its auto stack goes when empty or root-only
                         subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
                                        capture_output=True, timeout=5)
+                    undo.record_tab_close(closed)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -3008,9 +3057,11 @@ class Handler(BaseHTTPRequestHandler):
                 if identifier not in active:
                     self.respond(404, {'error': 'That tmux session has already ended.'})
                     return
+                saved = undo.capture_session_safe(identifier, entries=sessions)
                 auto_resume.forget_session(identifier, run=subprocess.run)
                 subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
                                capture_output=True, timeout=5)
+                undo.record_session_close(saved)
             self.respond(200, {'closed': identifier})
         except (ValueError, UnicodeError):
             self.respond(400, {'error': 'Invalid request.'})
@@ -3029,8 +3080,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         import share_api
-        if not share_api.dispatch(self):
-            self._post_without_share()
+        with undo_store.acting('user'), undo_store.step():  # the tab, session and stack steps this request makes
+            if not share_api.dispatch(self):
+                self._post_without_share()
+
+    _delete_plain = do_DELETE
+
+    def do_DELETE(self):
+        with undo_store.acting('user'), undo_store.step():
+            self._delete_plain()
 
     def do_HEAD(self):
         import share_api
@@ -3103,6 +3161,7 @@ def start_office_origin(host):
 
 
 if __name__ == '__main__':
+    undo_store.enable()
     import share_api
     share_api.get_store()  # Reconcile private storage before accepting requests.
     import atexit

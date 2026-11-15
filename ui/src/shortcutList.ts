@@ -51,6 +51,8 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     ['Restore the default layout', '⌥⇧L'],
   ] },
   { name: 'Act', items: [
+    ['Undo the last tab, session or stack step', '⌘Z'],
+    ['Redo it', '⌘⇧Z'],
     ['Send', '↵'],
     ['New line', '⇧↵'],
     ['Voice input on or off', '⌥V'],

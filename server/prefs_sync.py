@@ -29,7 +29,8 @@ MAX_DRAFT_TEXT = 20000
 MAX_REPO_FOLDERS = 200
 MAX_PINNED_FILES = 200
 CLEARED_KEEP = 2 * 86400
-_lock = threading.Lock()
+_lock = threading.RLock()
+LOCK = _lock  # undo.py holds it over an undo's check and change, so a save cannot slip in between
 
 
 def load():

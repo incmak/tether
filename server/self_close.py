@@ -65,7 +65,13 @@ def watch(entry, run, status, *, sessions, lock, fresh, sleep=time.sleep, now=ti
                 if fresh(current).get('state') not in helper_close.QUIET:
                     quiet_since = None
                     continue
-                helper_close.close_pane(pane, run)
+                import undo  # here: undo.py imports helper_close, which this module imports
+                import undo_store
+                name = current.get('pane_name') or current.get('agent_name') or current.get('label') or ''
+                with undo_store.acting('agent', name):  # the tab asked to close itself: Cmd+Z brings it back
+                    closed = undo.capture_safe(pane, run, [current])
+                    helper_close.close_pane(pane, run)
+                    undo.record_tab_close(closed, run)
                 return 'closed'
             finally:
                 lock.release()

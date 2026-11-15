@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import groups
 import projects
 from terminal_input import UUID
+import undo
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
@@ -89,7 +90,7 @@ def post(handler, run=subprocess.run, sessions=lambda: []):
         session_id = _session(body.get('session'))
         if name == 'create':
             pane = body.get('pane')
-            return {'group': groups.create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
+            return {'group': undo.group_create(session_id, body.get('name'), run, pane=None if pane is None else _pane(pane),
                                            by_user=True)}
         if name == 'arrange':
             return {'groups': groups.arrange(session_id, body.get('stacks', []), run, body.get('unstack', []),
@@ -98,15 +99,15 @@ def post(handler, run=subprocess.run, sessions=lambda: []):
             return {'groups': groups.reorder(session_id, body.get('groups'), run)}
         if name == 'move':
             group_id = body.get('group')
-            groups.move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run,
-                        by_user=True)
+            undo.group_move(session_id, _pane(body.get('pane')), None if group_id in (None, '') else _group(group_id), run,
+                            by_user=True)
             return {'ok': True}
         group_id = _group(body.get('group'))
         if name == 'rename':
-            return {'group': groups.rename(session_id, group_id, body.get('name'), run)}
+            return {'group': undo.group_rename(session_id, group_id, body.get('name'), run)}
         if name == 'ungroup':
-            groups.ungroup(session_id, group_id, run, by_user=True)
+            undo.group_ungroup(session_id, group_id, run, by_user=True)
         else:
-            groups.remove(session_id, group_id, run)
+            undo.group_remove(session_id, group_id, run)
         return {'ok': True}
     _answer(handler, work)

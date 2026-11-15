@@ -247,7 +247,19 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     return {}
   })
   if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
+  if (init.method !== 'GET') announceUndo(response)
   return data as T
+}
+
+/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx). */
+export interface UndoStep { id: string; label: string }
+export const UNDO_EVENT = 'tether-undo-step'
+function announceUndo(response: Response) {
+  const id = response.headers.get('X-Tether-Undo')
+  if (!id || typeof window === 'undefined') return
+  let label = ''
+  try { label = decodeURIComponent(response.headers.get('X-Tether-Undo-Label') ?? '') } catch { /* a bad label: use the plain one */ }
+  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step' } }))
 }
 /** A GET that the server can answer with 304 Not Modified. It sends the ETag of the last answer and returns the last
  *  data again when nothing changed, so a poll of an unchanged list moves no body bytes. `last` holds the state per caller. */

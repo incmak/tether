@@ -15,6 +15,8 @@ import helper_tabs
 import paths
 import review_links
 import self_close
+import undo
+import undo_store
 import worktrees
 from terminal_input import UUID, live_status
 
@@ -81,7 +83,9 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
+    closed = undo.capture_safe(pane, run, entries)
     helper_close.close_pane(pane, run)
+    undo.record_tab_close(closed, run)
     return {'closed': pane}
 
 
@@ -135,7 +139,19 @@ def _pick_group(body, caller, run, entries, session_id, current):
     return current['id'], root, named or current['name']
 
 
-def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
+def serve(handler, body, **kwargs):
+    """The agent's own steps (start, close) go in the undo history under its tab name; a failed start records
+    nothing (undo_store.step)."""
+    caller = next((entry for entry in kwargs['sessions']() if entry['id'] == body.get('session')), None) \
+        if body.get('action') in ('start', 'close') else None
+    if caller is None:
+        return _serve(handler, body, **kwargs)
+    name = caller.get('pane_name') or caller.get('agent_name') or caller.get('label') or ''
+    with undo_store.acting('agent', name), undo_store.step():
+        return _serve(handler, body, **kwargs)
+
+
+def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
     credential = handler.headers.get('X-Tether-Hook', '')
     if (not auth.is_loopback(handler.client_address[0]) or not credential
             or not hmac.compare_digest(credential.encode(), auth.session_value().encode())):
@@ -182,6 +198,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                                             cwd=made['path'], worktree=made['branch'],
                                             owner=_owner(caller, root, fresh), group=group,
                                             name=title)
+        undo.record_tab_start(pane, run)
         handler.respond(201, {'pane': pane, 'name': name, 'worktree': made})
         return
     with lock:
@@ -204,6 +221,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                                             run=run, recent=lambda: snapshot(caller).get('messages') or [],
                                             cwd=body.get('cwd'), owner=_owner(caller, root, entries),
                                             group=group, name=title)
+            undo.record_tab_start(pane, run)
             result = 201, {'pane': pane, 'name': name}
         elif action == 'link':
             if caller['id'] not in (body.get('worker'), body.get('reviewer')):

@@ -8,7 +8,7 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, ArchiveRestore, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
+import { Archive, ArchiveRestore, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
@@ -259,6 +259,8 @@ interface Props {
   onRestoreTab: (pane: Pane) => void
   onPastChat: (chat: PastChat) => void
   onSettings: () => void
+  /** Opens the undo history (Undo.tsx). */
+  onUndoHistory?: () => void
   onBacklog: () => void
   /** The work board: its button, and each linked tab's item id and stage. Absent until the board loads. */
   work?: WorkLinks
@@ -288,7 +290,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks }: Props) {
+export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -554,7 +556,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
       <RunningNow sessions={sessions} selected={selected} onOpen={onOpen} />
       <UpdateBanner />
       <Usage api={api} />
-      <div className="footer-row"><HostMenu host={host} hosts={prefs.hosts ?? []} onChange={hosts => update(() => ({ hosts }))} /><ReloadButton onReload={onReload} /><button className="icon-button" aria-label="Settings" title="Settings" onClick={onSettings}><Settings size={18} /></button></div>
+      <div className="footer-row"><HostMenu host={host} hosts={prefs.hosts ?? []} onChange={hosts => update(() => ({ hosts }))} /><ReloadButton onReload={onReload} />{onUndoHistory && <button type="button" className="icon-button" aria-label="Undo history" title="Undo history" onClick={onUndoHistory}><History size={18} /></button>}<button className="icon-button" aria-label="Settings" title="Settings" onClick={onSettings}><Settings size={18} /></button></div>
     </footer>
   </div>
 }

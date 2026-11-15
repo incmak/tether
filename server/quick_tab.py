@@ -200,6 +200,11 @@ class Router:
         return {'place': public(found[index]), 'source': 'ai'}
 
 
+def _undo():
+    import undo  # here: undo.py loads many modules, and this one loads at server start
+    return undo
+
+
 class Starter:
     """start and move. Call both under the server's send lock: they create tmux windows and send keys."""
 
@@ -240,7 +245,9 @@ class Starter:
         else:
             fresh = terminal_input.create_session(DEFAULT_SESSION, str(prefs_sync.session_folder()), run=self.run)
             sid = self._session_of(fresh)
-        group = groups.find_or_create(sid, DEFAULT_STACK, self.run)
+        # In a session that was open, the stack is part of the start step, so undo removes it too. In a new session,
+        # undo closes the tab and so the session with its stack: a stack step there would refuse.
+        group = (groups.find_or_create if fresh else _undo().group_find_or_create)(sid, DEFAULT_STACK, self.run)
         if not group:
             raise ValueError('Could not make the Triage stack.')
         return (sid, group['id'], DEFAULT_SESSION, group['name']), fresh
@@ -291,7 +298,8 @@ class Starter:
         self.started[pane] = now
         answer = {'pane': pane, 'name': name, 'agent': agent,
                   'place': {'session': sid, 'group': gid, 'sessionName': sname, 'groupName': gname}}
-        self.answers[request] = answer
+        self.answers[request] = answer  # first: a retry gets this answer, whatever happens after
+        _undo().record_tab_start(pane, self.run)  # here, not in the route: a repeat answer must not record it twice
         return answer
 
     def move(self, body, entries, all_groups):
@@ -302,7 +310,9 @@ class Starter:
         if at is None or self.clock() - at >= MOVE_WINDOW:
             raise ValueError('Move works only on a tab the search menu started in the last 10 minutes.')
         sid, gid, sname, gname = self._place(body, entries, all_groups)
+        undo = _undo()
         if self._session_of(pane) != sid:
-            tmux_merge.move_pane(pane, sid, self.run)
-        groups.move(sid, pane, gid, self.run, by_user=True)
+            noted = undo.record_merge('pane', pane, sid, self.run)
+            noted(tmux_merge.move_pane(pane, sid, self.run))
+        undo.group_move(sid, pane, gid, self.run, by_user=True)
         return {'pane': pane, 'place': {'session': sid, 'group': gid, 'sessionName': sname, 'groupName': gname}}

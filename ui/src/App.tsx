@@ -57,6 +57,7 @@ import type { DesktopLayout, SidePin, WaitOrder } from './prefs'
 import { CommandMenu } from './CommandMenu'
 import type { Command } from './CommandMenu'
 import { Shortcuts } from './Shortcuts'
+import { UndoCenter } from './Undo'
 import { StatusBar } from './StatusBar'
 import { IS_MAC, toggleTerminal, toggleVoice } from './keys'
 import { copyPaneName, nameKindOf } from './CopyNames'
@@ -154,6 +155,7 @@ function App() {
   const [browserSheet, setBrowserSheet] = useState(false)
   // The ⌘K command menu, or the ⌘/ shortcuts sheet (any screen).
   const [menu, setMenu] = useState<'commands' | 'shortcuts' | null>(null)
+  const [undoHistory, setUndoHistory] = useState(false)
   // Home-screen shortcuts open /chat/?go=attention|new|usage (manifest.webmanifest).
   const [go, setGo] = useState(() => new URL(location.href).searchParams.get('go'))
   // The Agents page (Active and Unread tabs). Tether's summary notification opens it with /chat/?go=agents.
@@ -837,7 +839,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneActions(item.id) }, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -856,6 +858,7 @@ function App() {
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
     ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
     { label: 'Keyboard shortcuts', key: '⌘/', run: () => setMenu('shortcuts') },
+    { label: 'Undo history', run: () => setUndoHistory(true) },
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
     { label: 'Plan usage', run: () => setPlanSheet(true) },
@@ -1000,6 +1003,7 @@ function App() {
     {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} create={quick.create} />}
     {quick.toast}
     {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
+    <UndoCenter api={api} onChanged={() => void refresh()} history={undoHistory} onHistory={setUndoHistory} />
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}

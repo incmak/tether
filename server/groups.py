@@ -52,7 +52,8 @@ def _locked():
             except OSError:
                 if handle:
                     handle.close()
-                handle = None
+                # Without the file lock another process could write @groups between a read and a write: refuse.
+                raise GroupError(503, LOCK_FAILED) from None
         _depth += 1
         try:
             yield
@@ -64,6 +65,7 @@ def _locked():
 
 LOCK = _locked
 GONE_TAB = 'That tab has ended.'
+LOCK_FAILED = 'Tether could not lock the stacks. Try again.'
 GONE_GROUP = 'That stack no longer exists.'
 GONE_SESSION = 'That session has ended.'
 

@@ -116,6 +116,14 @@ def _tab(thread):
         return _read()['tabs'].get(thread)
 
 
+def saved_tab(pane):
+    """The snapshot of an open Claude or Codex tab by its pane id, or None. undo.py reads it before a close."""
+    if not isinstance(pane, str) or not pane:
+        return None
+    with _lock:
+        return next((dict(tab) for tab in _read()['tabs'].values() if tab['pane'] == pane), None)
+
+
 def _update(thread, **fields):
     def change(saved):
         tab = saved['tabs'].get(thread)
@@ -333,6 +341,11 @@ def _options(tab, pane, session_id, *, run):
     if tab['name']:
         _tmux(run, 'rename-window', '-t', pane, tab['name'], check=True)
         _tmux(run, 'set-option', '-w', '-t', pane, 'automatic-rename', 'off', check=True)
+
+
+def apply_options(tab, pane, session_id, *, run=subprocess.run):
+    """Give a reopened pane the names, stack and project of a saved tab (undo.py)."""
+    _options(tab, pane, session_id, run=run)
 
 
 def launch(*, entries, run=subprocess.run, now=time.time, sleep=time.sleep):

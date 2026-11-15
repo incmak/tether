@@ -1987,3 +1987,25 @@ button.live-chip:active { background: var(--line); }
 .lazy-panel { flex: 1; min-width: 0; min-height: 0; display: flex; align-items: flex-start; justify-content: center; padding: 24px 16px; background: var(--surface); color: var(--muted); }
 .lazy-panel.cover { position: absolute; inset: 0; z-index: 5; padding-top: calc(24px + env(safe-area-inset-top)); }
 .lazy-float { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60; margin: 0; padding: 8px 14px; border-radius: 999px; background: var(--surface); color: var(--text); box-shadow: 0 4px 16px rgb(0 0 0 / .18); }
+
+/* Undo (Undo.tsx): the toast with Undo or Redo, the confirm dialog and the History sheet. */
+.undo-toast-region { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%); z-index: 21; width: max-content; max-width: calc(100% - 32px); pointer-events: none; }
+.undo-toast { display: flex; align-items: center; gap: 4px; margin: 0; padding: 6px 6px 6px 16px; pointer-events: auto; box-shadow: 0 6px 24px rgb(0 0 0 / 0.14); }
+.undo-toast-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; padding-right: 8px; }
+.undo-toast button { flex: none; min-width: 44px; min-height: 44px; }
+.undo-toast-action { padding: 0 12px; border: 0; border-radius: var(--radius); background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.undo-toast-action:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.undo-toast-more { display: inline-grid; place-items: center; border: 0; border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
+.undo-toast-more:hover { color: inherit; }
+.undo-toast :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.undo-effects { margin: 0 0 18px; padding-left: 20px; line-height: 1.5; overflow-wrap: anywhere; }
+.undo-effects li + li { margin-top: 6px; }
+.undo-confirm h2 { overflow-wrap: anywhere; }
+.undo-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; max-height: min(60dvh, 520px); }
+.undo-list li { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.undo-list li.undone .undo-row-label { color: var(--muted); text-decoration: line-through; }
+.undo-row-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.undo-row-label { overflow-wrap: anywhere; }
+.undo-row-text small { color: var(--muted); font-size: 12px; }
+.undo-row-text .undo-why { color: var(--error); }
+.undo-list button { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }

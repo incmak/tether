@@ -136,6 +136,7 @@ export function savePending(pending: Shared): void {
 
 interface Stored { prefs: Shared; version: number }
 const PULL_MS = 20000
+export const PREFS_PULL_EVENT = 'tether-prefs-pull'
 
 function store(prefs: Prefs) {
   try { localStorage.setItem(KEY, JSON.stringify(prefs)) } catch { /* private mode: keep it for this visit only */ }
@@ -239,7 +240,10 @@ export function usePrefs() {
     const every = window.setInterval(visible, PULL_MS)
     document.addEventListener('visibilitychange', visible)
     window.addEventListener('focus', visible)
-    return () => { window.clearInterval(every); window.clearTimeout(timer.current); document.removeEventListener('visibilitychange', visible); window.removeEventListener('focus', visible) }
+    // An undo of a reorder changed the server copy: read it now (Undo.tsx).
+    const pullNow = () => void pull()
+    window.addEventListener(PREFS_PULL_EVENT, pullNow)
+    return () => { window.clearInterval(every); window.clearTimeout(timer.current); document.removeEventListener('visibilitychange', visible); window.removeEventListener('focus', visible); window.removeEventListener(PREFS_PULL_EVENT, pullNow) }
   }, [pull])
 
   const update = useCallback((change: (current: Prefs) => Partial<Prefs>) => {

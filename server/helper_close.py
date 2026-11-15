@@ -148,7 +148,10 @@ class Closer:
                 return False
             if status(entry).get('state') not in QUIET or watching(pane):
                 return False
+            import undo  # here: undo.py imports this module
+            closed = undo.capture_safe(pane, run, [entry])
             close_pane(pane, run)
+            undo.record_tab_close(closed, run)  # Tether closed it: Cmd+Z brings it back
             return True
         finally:
             if lock is not None:

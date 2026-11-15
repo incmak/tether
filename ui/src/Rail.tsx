@@ -1,7 +1,8 @@
-import { ArrowLeft, ArrowRight, AudioLines, Folder, Home, Images, MessageCircle, SquareTerminal } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Redo2, Undo2, AudioLines, Folder, Home, Images, MessageCircle, SquareTerminal } from 'lucide-react'
 import { ASSISTANT } from './assistant'
 import { keyLabel } from './keys'
 import { BACK_KEY, FORWARD_KEY } from './navKeys'
+import { requestUndo, useUndoNext } from './undoState'
 
 export type RailNav = { back: boolean; forward: boolean; onBack: () => void; onForward: () => void }
 
@@ -25,9 +26,19 @@ export function Rail({ screen, waiting = 0, onScreen, onLive, nav }: { screen: S
       {/* aria-disabled, not disabled: the buttons keep focus and their tooltip when there is nothing to go to. */}
       <button type="button" className="app-rail-step" aria-label="Back" aria-disabled={!nav.back} title={`Back  ${keyLabel(BACK_KEY)}`} onClick={() => { if (nav.back) nav.onBack() }}><ArrowLeft size={18} aria-hidden="true" /></button>
       <button type="button" className="app-rail-step" aria-label="Forward" aria-disabled={!nav.forward} title={`Forward  ${keyLabel(FORWARD_KEY)}`} onClick={() => { if (nav.forward) nav.onForward() }}><ArrowRight size={18} aria-hidden="true" /></button>
+      <UndoSteps />
     </div>}
     {SCREENS.map(({ id, label, key, icon: Icon }) => <button key={id} type="button" className="app-rail-button" aria-label={id === 'home' && waiting ? `${label}, ${waiting} need you` : label} title={`${label}  ${keyLabel(key)}`}
       aria-current={screen === id ? 'page' : undefined} onClick={() => onScreen(id)}><Icon size={20} aria-hidden="true" />{id === 'home' && waiting > 0 && <span className="inbox-badge" aria-hidden="true">{waiting > 99 ? '99+' : waiting}</span>}</button>)}
     {onLive && <button type="button" className="app-rail-button app-rail-live" aria-label={`${ASSISTANT} Live mode`} title={`${ASSISTANT} Live mode: talk hands-free`} onClick={onLive}><AudioLines size={20} aria-hidden="true" /></button>}
   </nav>
+}
+
+/** Undo and Redo under Back and Forward: the newest Tether step (Undo.tsx), for a mouse or a touch screen. */
+function UndoSteps() {
+  const next = useUndoNext()
+  return <>
+    <button type="button" className="app-rail-step" aria-label={next.undo ? `Undo: ${next.undo}` : 'Undo'} aria-disabled={!next.undo} title={next.undo ? `Undo: ${next.undo}  ${keyLabel('⌘Z')}` : 'Nothing to undo'} onClick={() => { if (next.undo) requestUndo('undo') }}><Undo2 size={18} aria-hidden="true" /></button>
+    <button type="button" className="app-rail-step" aria-label={next.redo ? `Redo: ${next.redo}` : 'Redo'} aria-disabled={!next.redo} title={next.redo ? `Redo: ${next.redo}  ${keyLabel('⌘⇧Z')}` : 'Nothing to redo'} onClick={() => { if (next.redo) requestUndo('redo') }}><Redo2 size={18} aria-hidden="true" /></button>
+  </>
 }
