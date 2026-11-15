@@ -53,6 +53,7 @@ const fixture = {
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
+  'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
 }
 
 const setupFresh = () => ({

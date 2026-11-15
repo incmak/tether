@@ -24,6 +24,7 @@ const fixtures = {
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, 'codex-runs': { pane: '%1', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
+  'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
 }
 const python = `
 import json, sys
@@ -115,7 +116,7 @@ async function run(browser, port, viewport, entry) {
       if (new URL(response.url()).pathname.startsWith('/chat/assets/')) tasks.push((async () => {
         if (!response.ok()) throw new Error(`Asset HTTP ${response.status()}: ${response.url()}`)
         const headers = await response.allHeaders()
-        if (new URL(response.url()).pathname === entry) gzip = headers['content-encoding'] === 'gzip'
+        if (new URL(response.url()).pathname === entry) gzip = ['br', 'gzip'].includes(headers['content-encoding'])
         await response.finished()
         bytes += headers['content-length'] !== undefined ? Number(headers['content-length']) : (await response.request().sizes()).responseBodySize
       })().then(() => null, error => error.message))
@@ -182,8 +183,9 @@ async function main() {
         catch (error) { failed = true; console.log(`FAIL ${name} run=${i + 1}: ${error.message.split('\n')[0]}`); results.push({ ready: Infinity, fcp: Infinity, composer: Infinity, bytes: 0, gzip: false }) }
       }
       const value = key => median(results.map(result => result[key]))
-      // Tailscale Serve passes assets through raw, so the server's own gzip is what keeps 4G loads fast.
-      check(results.every(result => result.gzip), `${name} entry JS sent with gzip`)
+      // Tailscale Serve passes assets through raw, so the server's own compression (prebuilt Brotli since B26, else gzip)
+      // is what keeps 4G loads fast.
+      check(results.every(result => result.gzip), `${name} entry JS sent compressed (br or gzip)`)
       check(value('ready') <= budget, `${name} median=${Math.round(value('ready'))} runs=[${results.map(result => Math.round(result.ready)).join(',')}] fcp=${Math.round(value('fcp'))} composer=${Math.round(value('composer'))} assetsKB=${(value('bytes') / 1024).toFixed(1)} gzip=${results.every(result => result.gzip) ? 'yes' : 'no'}`)
     }
   } catch (error) { check(false, `runner: ${error.message}`) }
