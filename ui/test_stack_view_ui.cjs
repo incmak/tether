@@ -132,6 +132,15 @@ async function main() {
     check('a direct open of the last tab of a long stack shows that tab in the tab strip', await inView(TABS, '[role="tab"][aria-selected="true"]') === true, String(await inView(TABS, '[role="tab"][aria-selected="true"]')))
     check('and its stack in the stack row', await inView(ROW, '.group-tab[aria-current="true"]') === true)
 
+    // 3b. A narrower window keeps the open stack and tab in view (1500 -> 1000 px, and 1280 -> 1000 px).
+    for (const [wide, id] of [[1500, '%28'], [1280, '%12']]) {
+      await open(id, wide)
+      await page.setViewportSize({ width: 1000, height: 800 })
+      await page.waitForTimeout(250)
+      check(`${wide} -> 1000 px keeps the open stack in view (${id})`, await inView(ROW, '.group-tab[aria-current="true"]') === true, String(await inView(ROW, '.group-tab[aria-current="true"]')))
+      if (id === '%12') check(`${wide} -> 1000 px keeps the open tab in view`, await inView(TABS, '[role="tab"][aria-selected="true"]') === true, String(await inView(TABS, '[role="tab"][aria-selected="true"]')))
+    }
+
     // 4. Each stack keeps its own tab strip place: a scroll in Ship does not move another stack's strip.
     await page.locator(TABS).evaluate(element => { element.scrollLeft = 0 })
     await page.locator(`${ROW} .group-tab`, { hasText: 'Release work' }).click()

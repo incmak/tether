@@ -132,8 +132,11 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
     }
     // The open tab is always in view (a switch from the keyboard, the sidebar or another stack can land off screen).
     // The strip moves only as far as needed, so a click on a visible tab keeps it still.
-    const active = box.querySelector<HTMLElement>('[aria-selected="true"]')
-    if (active) box.scrollLeft = revealLeft(box.scrollLeft, box.clientWidth, box.scrollWidth, active.offsetLeft, active.offsetWidth)
+    const reveal = () => {
+      const active = box.querySelector<HTMLElement>('[aria-selected="true"]')
+      if (active) box.scrollLeft = revealLeft(box.scrollLeft, box.clientWidth, box.scrollWidth, active.offsetLeft, active.offsetWidth)
+    }
+    reveal()
     const capture = () => {
       const tabs = new Map([...box.querySelectorAll<HTMLElement>('[data-pane]')].map(tab => [tab.dataset.pane!, positionOf(tab)]))
       const add = box.querySelector<HTMLElement>('.tab-add')
@@ -164,7 +167,10 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
     capture()
     if (closing && !tabIds.includes(before.active)) box.querySelector<HTMLElement>('[aria-selected="true"]')?.focus({ preventScroll: true })
     scrollByStrip.set(key, box.scrollLeft)
-    const observer = new ResizeObserver(place)
+    // A narrower strip must not push the open tab out of view. Only the strip's own width counts, so a tab
+    // that changes size never pulls back a strip the user scrolled.
+    let width = box.clientWidth
+    const observer = new ResizeObserver(() => { if (box.clientWidth !== width && swipeScroll.get(box) === undefined) { width = box.clientWidth; reveal() } place() })
     observer.observe(box)  // A layout change can move the tabs (Zed centres them) without resizing any of them.
     for (const tab of box.querySelectorAll('[role="tab"]')) observer.observe(tab)
     box.addEventListener('scroll', save, { passive: true })

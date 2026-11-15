@@ -51,15 +51,21 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
     const box = row.current
     if (!box) return
     box.scrollLeft = rowScroll.get(session.id) ?? 0
-    const active = box.querySelector<HTMLElement>('[aria-current="true"]')
-    if (active) {
+    const reveal = () => {
+      const active = box.querySelector<HTMLElement>('[aria-current="true"]')
+      if (!active) return
       const start = active.getBoundingClientRect().left - box.getBoundingClientRect().left + box.scrollLeft
       box.scrollLeft = revealLeft(box.scrollLeft, box.clientWidth, box.scrollWidth, start, active.offsetWidth, 24)
     }
+    reveal()
     rowScroll.set(session.id, box.scrollLeft)
     const save = () => rowScroll.set(session.id, box.scrollLeft)
     box.addEventListener('scroll', save, { passive: true })
-    return () => box.removeEventListener('scroll', save)
+    // A narrower window or panel must not push the open stack out of view.
+    let width = box.clientWidth
+    const observer = new ResizeObserver(() => { if (box.clientWidth !== width) { width = box.clientWidth; reveal() } })
+    observer.observe(box)
+    return () => { box.removeEventListener('scroll', save); observer.disconnect() }
   }, [session.id, current, shown])
   if (!shown) return <>{children}{creating && <NewGroup api={api} session={session} onClose={() => setCreating(false)} onDone={() => { setCreating(false); onUpdate() }} />}</>
 
