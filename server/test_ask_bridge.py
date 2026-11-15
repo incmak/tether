@@ -620,6 +620,13 @@ class HttpRoundtripTests(unittest.TestCase):
                     patch.object(store, 'poll', wraps=store.poll) as poll:
                 worker.start()
                 try:
+                    if not watched:
+                        # Python startup and imports slow down under full-suite load. Time them here and
+                        # bound only the hook's own work, so the check fails on a wait, not on CPU load.
+                        load = f'import sys; sys.path.insert(0, {str(Path(bridge.__file__).parent)!r}); import ask_bridge'
+                        startup = time.monotonic()
+                        subprocess.run([sys.executable, '-c', load], env=env, check=True, capture_output=True, timeout=3)
+                        startup = time.monotonic() - startup
                     started = time.monotonic()
                     process = subprocess.Popen([sys.executable, str(Path(bridge.__file__))], stdin=subprocess.PIPE,
                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
@@ -629,7 +636,7 @@ class HttpRoundtripTests(unittest.TestCase):
                     if not watched:
                         stdout, stderr = process.communicate(timeout=3)
                         elapsed = time.monotonic() - started
-                        self.assertLess(elapsed, .3)
+                        self.assertLess(elapsed - startup, .3)
                         self.assertEqual((process.returncode, stdout, stderr), (0, '', ''))
                         self.assertEqual(register.call_count, 1)
                         poll.assert_not_called()
