@@ -89,6 +89,7 @@ import { WorkSheet } from './WorkBoard'
 import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
 import { useActivityPing } from './activityPing'
+import { useUsageLog } from './uiUsage'
 import { useQuickCreate } from './QuickToast'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
@@ -206,6 +207,7 @@ function App() {
   const orderedSessions = useMemo(() => sortByPrefs(sessions, prefs.order), [sessions, prefs.order])
   const pane = selectPane(orderedSessions, prefs.selected, previousSelection.current, data?.default_thread, prefs.lastPane)
   useActivityPing(api, prefs.wakatime)
+  useUsageLog(prefs.uiUsage)
   useLayoutEffect(() => {
     if (!data) return
     const previous = previousSelection.current

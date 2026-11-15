@@ -168,3 +168,17 @@
 .lesson-edit { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; padding-right: 6px; }
 .lesson-edit textarea { width: 100%; font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); resize: vertical; }
 .lesson-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Settings › UI usage (UiUsage.tsx) */
+.ui-usage-list { margin: 12px 0 4px; }
+.ui-usage-list h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text); }
+.ui-usage-list ol { margin: 0; padding: 0; list-style: none; }
+.ui-usage-list li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); min-width: 0; }
+.ui-usage-list li > span:first-child { min-width: 0; }
+.ui-usage-list strong { display: block; font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.ui-usage-list small { display: block; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.ui-usage-deep { color: var(--error); font-weight: 400; font-size: 11px; }
+.ui-usage-num { flex-shrink: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+.ui-usage-empty { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+.ui-usage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 8px; font-size: 13px; }
+.ui-usage-actions .danger-text { color: var(--error); }
