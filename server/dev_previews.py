@@ -34,6 +34,10 @@ Security:
   person releases one from the drawer (POST /mobile/api/dev-preview/release) after they close its tabs. As a
   second line, the first sign-in of a browser on a pool port that last showed it another dev server clears that
   origin's storage and cache (Clear-Site-Data), and the connections of a released lease end.
+- No service worker can exist on a preview origin. A worker outlives its pages and its dev server: registered by
+  one app, it would intercept the sign-in link of the next app on a released port, before Clear-Site-Data runs.
+  A browser sends "Service-Worker: script" with every fetch of a worker script (install and update); the proxy
+  refuses those requests and removes Service-Worker-Allowed from answers.
 - After the proxy connects, it reads the owner of that very connection from the socket table and sends nothing when
   it is not Tether's user, or when the owner cannot be read: another user cannot take a port that a dev server
   left. The socket table is Linux's /proc/net/tcp; on another system Tether does not forward dev servers.
@@ -278,6 +282,7 @@ class Lease:
         self.gone = None      # when the dev server was first seen not listening
         self.tickets = {}     # one-time token -> the time it ends
         self.hint = None      # 'next': Next.js refused a dev request
+        self.worker = False   # the page tried to register a service worker, which previews refuse
 
 
 class DevPreviews:
@@ -505,7 +510,7 @@ class DevPreviews:
         """What the page shows next to a preview: [{'port', 'dev_port', 'hint'}]."""
         with self.lock:
             self._sweep(self.clock())
-            return [{'port': lease.pool_port, 'dev_port': lease.dev_port, 'hint': lease.hint}
+            return [{'port': lease.pool_port, 'dev_port': lease.dev_port, 'hint': lease.hint, 'worker': lease.worker}
                     for lease in self.leases.values()]
 
 
@@ -892,6 +897,14 @@ class PoolHandler(BaseHTTPRequestHandler):
         if not re.fullmatch(r'/[\x21-\x7e]*', self.path) or not raw_head_ok(self.rfile.lines):
             self.answer(400, page('Bad request', 'Tether cannot forward this request: its path or its headers are malformed.'))
             return
+        if self.headers.get('Service-Worker') is not None:
+            # A fetch of a service worker script, for any path (the sign-in link too) and before a token is spent.
+            lease = previews.authorize(port, self.headers.get_all('Cookie'))
+            if lease is not None:
+                lease.worker = True
+            self.answer(403, page('Service workers are off in previews', 'A service worker would stay on this address '
+                                  'after its dev server is gone. The page works without it.'))
+            return
         if self.path.split('?', 1)[0] == OPEN_PATH:
             self.sign_in()
             return
@@ -987,7 +1000,8 @@ class PoolHandler(BaseHTTPRequestHandler):
         for line in lines[1:]:
             name, _, value = line.partition(':')
             low, value = name.lower(), value.strip()
-            if low in ('clear-site-data', 'x-frame-options', 'set-cookie2', 'content-length', 'transfer-encoding', 'trailer') \
+            if low in ('clear-site-data', 'x-frame-options', 'set-cookie2', 'content-length', 'transfer-encoding', 'trailer',
+                       'service-worker-allowed') \
                     or (not upgraded and low in ('connection', 'keep-alive')):
                 continue  # Clear-Site-Data "cookies" clears every port of the host, Tether's session too
             if low == 'set-cookie':

@@ -23,7 +23,7 @@ type Link = { key: string; url?: string; outside?: string; pool?: number; at?: n
 type DevServerRow = { port: number; name: string; folder: string }
 /** A dev port that holds a preview port. running: it listens now. */
 type InUseRow = { devPort: number; running: boolean }
-type DevState = { servers: DevServerRow[]; previews: { port: number; hint: string | null }[]; assigned: { port: number; dev_port: number }[]; free: number }
+type DevState = { servers: DevServerRow[]; previews: { port: number; hint: string | null; worker?: boolean }[]; assigned: { port: number; dev_port: number }[]; free: number }
 
 /** A page an agent made, in a drawer: a Claude artifact's local copy, an HTML file, or a dev server on the agent's
  * machine. Phone: a sheet that leaves the top of the chat in view, with a full-screen switch. Wider screens: a
@@ -41,7 +41,7 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
   const [loaded, setLoaded] = useState('')
   const [full, setFull] = useState(false)
   const [narrow, setNarrow] = useState(false)
-  const [hint, setHint] = useState<{ key: string; kind: string } | null>(null)
+  const [hint, setHint] = useState<{ key: string; next: boolean; worker: boolean } | null>(null)
   const frameRef = useRef<HTMLIFrameElement>(null)
   useEffect(() => {
     if (!target) return
@@ -82,12 +82,13 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
   const shown = !!frame && loaded === frame
   useEffect(() => {
     if (!pool || !shown) return
-    // Next.js may refuse dev requests from an origin it does not know. The proxy sees that; ask once the page has run.
+    // Next.js may refuse dev requests from an origin it does not know, and the proxy refuses service workers
+    // (server/dev_previews.py). The proxy sees both; ask once the page has run.
     const abort = new AbortController()
     const timer = window.setTimeout(() => {
       api<DevState>('dev-preview', undefined, abort.signal).then(state => {
-        const kind = state.previews.find(row => row.port === pool)?.hint
-        if (kind) setHint({ key, kind })
+        const row = state.previews.find(item => item.port === pool)
+        if (row?.hint === 'next' || row?.worker) setHint({ key, next: row.hint === 'next', worker: !!row.worker })
       }, () => { /* the hint is optional */ })
     }, HINT_DELAY_MS)
     return () => { window.clearTimeout(timer); abort.abort() }
@@ -117,7 +118,8 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
       </div>
       <button type="button" className="icon-button preview-close" aria-label="Close" onClick={close}><X size={20} /></button>
     </div>
-    {hint?.key === key && hint.kind === 'next' && !current?.error && <p className="preview-hint" role="status">Next.js refused a dev request. Add <code>allowedDevOrigins: ['{location.hostname}']</code> to next.config.js, then restart the dev server.</p>}
+    {hint?.key === key && hint.next && !current?.error && <p className="preview-hint" role="status">Next.js refused a dev request. Add <code>allowedDevOrigins: ['{location.hostname}']</code> to next.config.js, then restart the dev server.</p>}
+    {hint?.key === key && hint.worker && !current?.error && <p className="preview-hint" role="status">Service workers are off in previews. The page runs without its worker.</p>}
     <div className={narrow ? 'preview-body narrow' : 'preview-body'}>
       {current?.error ? <div className="preview-error" role="alert">
         <p>{current.error}</p>

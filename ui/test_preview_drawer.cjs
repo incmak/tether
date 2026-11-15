@@ -109,7 +109,7 @@ async function main() {
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           if (endpoint === 'dev-preview') {
             const full = posts.at(-1)?.body.port === 5200 && !released  // the pool is full only for the new app
-            return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next' }],
+            return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
               assigned: [{ port: 7700, dev_port: 5174 }, { port: 7701, dev_port: 3000 }], free: full ? 0 : 8 } })
           }
           return route.fulfill({ json: fixture[endpoint] || {} })
@@ -256,8 +256,12 @@ async function main() {
         // 7. A URL in code opens too. Next.js refused a request: the drawer shows the setting on one short note.
         await page.getByRole('button', { name: 'Preview localhost:3000' }).click()
         await frameShows()
-        const hint = drawer.locator('.preview-hint')
+        const hint = drawer.locator('.preview-hint').first()
         await hint.waitFor({ timeout: 6000 }).catch(() => errors.push('no Next.js hint'))
+        const workerNote = drawer.locator('.preview-hint').nth(1)
+        if (!(await workerNote.innerText().catch(() => '')).includes('Service workers are off in previews')) errors.push('no service worker note')
+        const noteBox = await workerNote.boundingBox().catch(() => null)
+        if (noteBox && Math.round(noteBox.width) > width) errors.push('the service worker note is wider than the view')
         if (!(await hint.innerText().catch(() => '')).includes(`allowedDevOrigins: ['${host}']`)) errors.push('the hint does not name the setting')
         const hintBox = await hint.boundingBox().catch(() => null)
         if (hintBox && Math.round(hintBox.width) > width) errors.push('the hint is wider than the view')

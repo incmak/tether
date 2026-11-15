@@ -304,7 +304,7 @@ class LeaseTests(unittest.TestCase):
     def test_state_lists_leases_with_hints(self):
         self.previews.open(5173)
         self.previews.leases[7700].hint = 'next'
-        self.assertEqual(self.previews.state(), [{'port': 7700, 'dev_port': 5173, 'hint': 'next'}])
+        self.assertEqual(self.previews.state(), [{'port': 7700, 'dev_port': 5173, 'hint': 'next', 'worker': False}])
 
 
 class HeaderTests(unittest.TestCase):
@@ -547,6 +547,7 @@ class Upstream(BaseHTTPRequestHandler):
                 'same-length-twice': b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\ncontent-length: 2\r\n\r\nhi',
                 'chunk-ext': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTrailer: X-Trailer\r\n\r\n5;ext=1\r\nfirst\r\n6\r\nsecond\r\n0\r\nX-Trailer: hidden\r\n\r\n',
                 'bad-chunk': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\nzz\r\nsecond\r\n0\r\n\r\n',
+                'worker-allowed': b'HTTP/1.1 200 OK\r\nService-Worker-Allowed: /\r\nContent-Type: text/javascript\r\nContent-Length: 2\r\n\r\nhi',
                 'unasked-switch': b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\nraw bytes',
             }
             self.connection.sendall(answers[self.path[len('/raw/'):]])
@@ -846,6 +847,32 @@ class ProxyTests(unittest.TestCase):
                             self.assertEqual(dev_previews.connection_uid(client), os.getuid(), (address, target))
                             with tempfile.TemporaryDirectory() as empty:
                                 self.assertIsNone(dev_previews.connection_uid(client, tries=1, root=empty))
+
+    def test_no_service_worker_can_be_installed(self):
+        # Round 3: app A's worker survived the release of its port and intercepted app B's sign-in link.
+        link = self.previews.open(self.dev_port)
+        token_link = link['frame']
+        worker = {'Service-Worker': 'script', 'Sec-Fetch-Dest': 'serviceworker', 'Sec-Fetch-Site': 'same-origin'}
+        response, data = self.request('GET', token_link, worker, cookie=False)  # the sign-in link as a worker script
+        self.assertEqual(response.status, 403)
+        self.assertIn(b'Service workers are off in previews', data)
+        self.assertIsNone(response.getheader('Set-Cookie'))
+        response, _ = self.request('GET', token_link, cookie=False)  # the token was not spent by the refused fetch
+        self.assertEqual(response.status, 302)
+        self.cookie = response.msg.get_all('Set-Cookie')[0].split(';')[0]
+        self.assertFalse(self.previews.state()[0]['worker'])
+        for path, headers in (('/sw.js', worker), ('/sw.js', {'Service-Worker': 'script'}), ('/', {'service-worker': 'anything'}),
+                              ('/src/sw.ts?worker_file&type=module', worker)):
+            response, data = self.request('GET', path, headers)
+            self.assertEqual(response.status, 403, (path, headers))
+            self.assertIn(b'Service workers are off in previews', data)
+        self.assertEqual(self.request('GET', '/sw.js', worker, cookie=False)[0].status, 403)
+        self.assertEqual(Upstream.seen, [])
+        self.assertTrue(self.previews.state()[0]['worker'])  # the drawer can say why the worker is missing
+        # The same file as a plain script is fine; a header that widens a worker's scope never passes.
+        response, data = self.request('GET', '/raw/worker-allowed')
+        self.assertEqual((response.status, data), (200, b'hi'))
+        self.assertIsNone(response.getheader('Service-Worker-Allowed'))
 
     def test_a_request_head_has_a_size_limit(self):
         # Review of 8a40fd3, item 3: 120 KB and 240 KB heads reached the sign-in check.
@@ -1221,7 +1248,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(self.upstream.server_port, [row['port'] for row in data['servers']])
         self.assertNotIn(self.main.server_port, [row['port'] for row in data['servers']])
-        self.assertEqual(data['previews'], [{'port': 7700, 'dev_port': self.upstream.server_port, 'hint': None}])
+        self.assertEqual(data['previews'], [{'port': 7700, 'dev_port': self.upstream.server_port, 'hint': None, 'worker': False}])
         self.assertEqual((data['assigned'], data['free']), ([{'port': 7700, 'dev_port': self.upstream.server_port}], 0))
 
     def test_only_the_person_releases_a_port(self):
