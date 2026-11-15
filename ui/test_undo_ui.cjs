@@ -254,7 +254,7 @@ async function main() {
         const label = button.querySelector(':scope > span:last-child'), box = button.getBoundingClientRect()
         return { text: button.textContent.trim(), name: button.getAttribute('aria-label') || '', left: box.left, right: box.right, clipped: !label || label.scrollWidth > label.clientWidth + 1 || label.getBoundingClientRect().left < box.left - 1 || label.getBoundingClientRect().right > box.right + 1 }
       }))
-      check(`${width}px: the bottom bar has no Undo`, bar.length >= 5 && !bar.some(item => /undo|redo/i.test(item.text + item.name)) && await page.locator('.phone-tabbar .phone-tab-undo').count() === 0, JSON.stringify(bar))
+      check(`${width}px: the bottom bar has five items and no Undo`, bar.length === 5 && !bar.some(item => /undo|redo/i.test(item.text + item.name)) && await page.locator('.phone-tabbar .phone-tab-undo').count() === 0, JSON.stringify(bar))
       check(`${width}px: the bar fits and no label is clipped`, bar.every(item => !item.clipped && item.left >= 0 && item.right <= width + 0.5), JSON.stringify(bar))
       check(`${width}px: no horizontal page scroll`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)))
       await page.screenshot({ path: path.join(SHOTS, `phone-bar-${width}-${scheme}.png`) })

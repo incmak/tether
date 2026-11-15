@@ -89,7 +89,7 @@
   --surface: var(--g-fill-strong); --bubble: color-mix(in srgb, var(--text) 6%, transparent); --sidebar: color-mix(in srgb, var(--text) 3%, transparent);
 }
 /* Floating menus and popovers sit over other content: a stronger fill and their own blur keep them readable. */
-.app-shell[data-surface="glass"] :is(.agent-pop, .attach-menu, .keys-menu, .browser-menu, .sm-panel, .live-popover, .suggest, .selection-backlog, .jump-button, .update-banner, .resume-notice, .fx-uploads, .look-trial) {
+.app-shell[data-surface="glass"] :is(.agent-pop, .attach-menu, .keys-menu, .phone-more-menu, .browser-menu, .sm-panel, .live-popover, .suggest, .selection-backlog, .jump-button, .update-banner, .resume-notice, .fx-uploads, .look-trial) {
   background: var(--g-pop); border-color: var(--g-edge); -webkit-backdrop-filter: blur(20px) saturate(170%); backdrop-filter: blur(20px) saturate(170%);
 }
 /* Sticky strips (the status grip and rail) used --bg to cover what scrolls under them. With no card open nothing

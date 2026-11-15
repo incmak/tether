@@ -34,7 +34,7 @@
 /* "Needs you" list row for a browser ask (Inbox.tsx). */
 .inbox-row.browser { border-color: color-mix(in srgb, var(--attention) 55%, var(--line)); }
 
-/* Phone tab bar: the Browser tab and its dot (PhoneTabs.tsx). */
+/* Phone tab bar: the dot on Home, on More and on the Browser row of the More menu (PhoneTabs.tsx). */
 .phone-tab-icon { position: relative; display: inline-flex; }
 .phone-tab-dot { position: absolute; top: -2px; right: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 2px var(--sidebar); }
 .phone-tab-dot.asking { background: var(--attention); }
