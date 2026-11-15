@@ -1,6 +1,6 @@
 """Work items: pieces of work that move by stage, across projects (the work board, B59).
 
-paths.work()/projects.json      the work projects: name, item prefix, folder, sessions, feed, Jira key, QA status.
+paths.work()/projects.json      the work projects: name, item prefix, folder, sessions, feeds, Jira key, QA status.
                               Only the server and Mak's own commands write it; Codex's sandbox cannot.
 paths.items()/<PREFIX>/items.jsonl  a project's items, as append-only events, one JSON object per line. The folder is
                               named by the prefix, which never changes. Codex tabs get write access to paths.items().
@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 import time
 
@@ -27,8 +28,12 @@ STAGES = ('triage', 'needs', 'ready', 'building', 'review', 'done', 'hold')
 STAGE_LABELS = {'triage': 'Triage', 'needs': 'Needs you', 'ready': 'Ready', 'building': 'Building',
                 'review': 'Review', 'done': 'Done', 'hold': 'On hold'}
 ROLES = ('triage', 'fix', 'review', 'other')
-FEEDS = ('manual', 'teams', 'github', 'email')
+FEEDS = ('teams', 'github', 'email')  # kinds of feed; a project with no feeds gets its items by hand
 FEED_BY = ('tether', 'agent')  # who reads the feed: Tether (work_feeds), or the project's own agent
+FEED_ID = re.compile(r'[a-z0-9]{1,16}')
+FEEDS_MAX = 8
+LEGACY_FEED = 'f1'  # the id of the one feed a project record from before B106 had (feed, feedTarget, feedBy, feedSince)
+GITHUB_REPO = re.compile(r'(?:https://github\.com/)?([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?')
 FEED_KEY = re.compile(r'(github|teams|email):[!-~]{1,280}')
 RESERVED = ('B',)  # backlog items (#B12) fold in later
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{0,31}')
@@ -74,6 +79,11 @@ def _lock_in(place):
 
 def locked():
     return _lock_in(folder())
+
+
+def saving():
+    """The lock that save_project holds: a feed holds it to check its entry and write an item in one step."""
+    return _lock_in(paths.work())
 
 
 # ---- text checks ----
@@ -131,6 +141,76 @@ def _options(values):
 
 # ---- projects ----
 
+def _legacy_feeds(data):
+    """The feed list of a record, or of a form, from before B106: one feed in feed, feedTarget, feedBy, feedSince."""
+    kind = data.get('feed') or 'manual'
+    if kind == 'manual':
+        return []
+    entry = {'id': LEGACY_FEED, 'kind': kind, 'target': data.get('feedTarget') or '', 'by': data.get('feedBy') or 'tether'}
+    if isinstance(data.get('feedSince'), (int, float)):
+        entry['since'] = data['feedSince']
+    return [entry]
+
+
+def _feed_place(kind, target):
+    """What a feed reads, to find a feed that is there twice. Email with no folder reads the Inbox."""
+    target = target.casefold()
+    return kind, (target or 'inbox') if kind == 'email' else target
+
+
+def _clean_feeds(data, existing):
+    """The project's feeds: [{id, kind, target, by}]. A row with an id keeps that id; a new row gets one. since is set
+    by save_project. A form from before B106 (feed, feedTarget, feedBy) is read as one feed."""
+    old = (existing or {}).get('feeds') or []
+    if 'feeds' not in data:
+        rows = _legacy_feeds(data)
+        if len(old) > 1:
+            raise invalid('This project has several feeds now. Reload the page and try again.')
+        if rows and old:  # the old form changes the one feed there is: keep its id
+            rows[0]['id'] = old[0]['id']
+    else:
+        rows = data.get('feeds')
+    if not isinstance(rows, list):
+        raise invalid('Invalid feeds.')
+    if len(rows) > FEEDS_MAX:
+        raise invalid(f'A project reads at most {FEEDS_MAX} feeds.')
+    out, places = [], set()
+    for number, row in enumerate(rows, 1):
+        if not isinstance(row, dict):
+            raise invalid('Invalid feed.')
+        kind = row.get('kind')
+        if kind not in FEEDS:
+            raise invalid(f'Choose the source of feed {number}.')
+        by = row.get('by') or 'tether'
+        if by not in FEED_BY:
+            raise invalid(f'Choose who reads feed {number}.')
+        target = _line(row.get('target'), FIELD_LIMIT, f'target of feed {number}', required=False)
+        if kind != 'email' and not target:  # email: no folder reads the Inbox
+            raise invalid(f'Name where feed {number} reads from.')
+        if by == 'tether':  # the project's own agent reads its feed its own way: Tether does not check the target
+            if kind == 'github' and not GITHUB_REPO.fullmatch(target):
+                raise invalid(f'Feed {number}: a GitHub target is owner/repo, like octo-org/app.')
+            if kind == 'teams' and not all(part.strip() for part in target.partition('/')[::2]):
+                raise invalid(f'Feed {number}: a Teams target is Team/Channel, like Brisk/QA.')
+        place = _feed_place(kind, target)
+        if place in places:
+            raise invalid(f'Feed {number} reads the same place as an earlier feed.')
+        places.add(place)
+        fid = row.get('id')
+        if fid is not None and (not isinstance(fid, str) or not FEED_ID.fullmatch(fid)):
+            raise invalid('Invalid feed id.')
+        out.append({'id': fid, 'kind': kind, 'target': target, 'by': by})
+    taken = {row['id'] for row in out if row['id']}
+    if len(taken) != sum(1 for row in out if row['id']):
+        raise invalid('Two feeds have the same id. Reload the page and try again.')
+    for row in out:
+        if not row['id']:
+            row['id'] = LEGACY_FEED if LEGACY_FEED not in taken else next(
+                fid for fid in iter(lambda: secrets.token_hex(3), None) if fid not in taken)
+            taken.add(row['id'])
+    return out
+
+
 def _clean_project(data, existing=None):
     """A project record from the form or the command. Name and prefix cannot change after the project exists:
     item ids and folders use them."""
@@ -142,30 +222,34 @@ def _clean_project(data, existing=None):
         raise invalid('A project name has lower-case letters, digits and dashes, up to 32.')
     if not isinstance(prefix, str) or not PREFIX.fullmatch(prefix):
         raise invalid('An item prefix is 1 to 3 capital letters.')
-    feed = data.get('feed') or 'manual'
-    if feed not in FEEDS:
-        raise invalid('Choose a feed.')
-    feed_by = data.get('feedBy') or 'tether'
-    if feed_by not in FEED_BY:
-        raise invalid('Choose who reads the feed.')
     jira = _line(data.get('jira'), 20, 'Jira key', required=False)
     if jira and not re.fullmatch(r'[A-Z][A-Z0-9]{0,19}', jira):
         raise invalid('A Jira key is capital letters and digits, like BS.')
-    record = {
+    return {
         'name': name, 'prefix': prefix,
         'folder': _line(data.get('folder'), 1024, 'folder'),
         'triage': _line(data.get('triage'), 64, 'triage session', required=False) or f'{name}-triage',
         'work': _line(data.get('work'), 64, 'work session', required=False) or name,
-        'feed': feed,
-        'feedTarget': _line(data.get('feedTarget'), FIELD_LIMIT, 'feed target', required=False) if feed != 'manual' else '',
-        'feedBy': feed_by,
+        'feeds': _clean_feeds(data, existing),
         'jira': jira,
         'qaStatus': _line(data.get('qaStatus'), 64, 'QA status', required=False) or 'QA Testing',
         'jiraUser': _line(data.get('jiraUser'), 128, 'Jira user', required=False),
     }
-    if feed not in ('manual', 'email') and not record['feedTarget']:  # email: no folder reads the Inbox
-        raise invalid('Name where the feed reads from.')
-    return record
+
+
+def _stored_feeds(record):
+    """The feeds of a stored record: the list, or the one feed of a record from before B106. Broken rows are left out."""
+    rows = record.get('feeds') if isinstance(record.get('feeds'), list) else _legacy_feeds(record)
+    out = []
+    for row in rows:
+        if (isinstance(row, dict) and row.get('kind') in FEEDS and isinstance(row.get('id'), str)
+                and FEED_ID.fullmatch(row['id']) and all(row['id'] != r['id'] for r in out)):
+            entry = {'id': row['id'], 'kind': row['kind'], 'target': str(row.get('target') or ''),
+                     'by': row.get('by') if row.get('by') in FEED_BY else 'tether'}
+            if isinstance(row.get('since'), (int, float)):
+                entry['since'] = row['since']
+            out.append(entry)
+    return out
 
 
 def registry():
@@ -180,7 +264,9 @@ def registry():
     for name, record in sorted(found.items()):
         if isinstance(record, dict) and NAME.fullmatch(name) and PREFIX.fullmatch(str(record.get('prefix', ''))):
             if all(p['prefix'] != record['prefix'] for p in projects):  # a hand edit that repeats a prefix: first wins
-                projects.append({'feedBy': 'tether', **record, 'name': name})
+                legacy = ('feed', 'feedTarget', 'feedBy', 'feedSince')
+                projects.append({**{k: v for k, v in record.items() if k not in legacy}, 'name': name,
+                                 'feeds': _stored_feeds(record)})
     revision = data.get('revision') if isinstance(data.get('revision'), int) else 0
     return {'revision': revision, 'projects': projects}
 
@@ -196,7 +282,7 @@ def save_project(data, revision, create):
     """Add a project (create) or change one. revision: the registry revision the writer last saw."""
     if not isinstance(revision, int):
         raise invalid('Reload the board and try again.')
-    with _lock_in(paths.work()):
+    with saving():
         current = registry()
         if current['revision'] != revision:
             raise ProjectError(409, 'The projects changed in another tab. Reload and try again.')
@@ -214,11 +300,16 @@ def save_project(data, revision, create):
             if not existing:
                 raise ProjectError(404, 'That project is gone. Reload and try again.')
             record = _clean_project(data, existing)
-        old = by_name.get(record['name']) or {}
-        if record['feed'] != 'manual':  # a feed reads from the time it was saved (work_feeds.poll), never older mail
-            same = all(old.get(k) == record[k] for k in ('feed', 'feedTarget', 'feedBy'))
-            since = old.get('feedSince')
-            record['feedSince'] = since if same and isinstance(since, (int, float)) else time.time()
+        old = {row['id']: row for row in (by_name.get(record['name']) or {}).get('feeds') or []}
+        now = time.time()
+        for row in record['feeds']:  # a feed reads from the time it was saved (work_feeds.poll), never older mail
+            was = old.get(row['id']) or {}
+            same = all(was.get(k) == row[k] for k in ('kind', 'target', 'by'))
+            since = was.get('since')
+            if same and isinstance(since, (int, float)):
+                row['since'] = since
+            elif not (same and was):  # an unchanged feed saved before it had a since keeps its state's start (poll)
+                row['since'] = now
         by_name[record['name']] = record
         stored = {name: {k: v for k, v in p.items() if k != 'name'} for name, p in sorted(by_name.items())}
         _write(_registry_path(), json.dumps({'revision': revision + 1, 'projects': stored}, indent=2) + '\n')

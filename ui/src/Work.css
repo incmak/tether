@@ -205,10 +205,29 @@
 .sheet .work-fieldset { display: flex; flex-direction: column; gap: 12px; min-width: 0; margin: 4px 0 0; padding: 14px 0 0; border: 0; border-top: 1px solid var(--line); }
 .work-fieldset legend { float: left; width: 100%; padding: 0; }
 .work-fieldset legend span { font-weight: 400; color: var(--muted); }
+/* Feeds: one bordered row per feed. Source and target sit in one line when the sheet is wide enough; the agent box and Remove sit below. */
+.work-feeds { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; container-type: inline-size; }
+.work-feeds .work-feed fieldset { display: flex; flex-direction: column; gap: 10px; min-width: 0; margin: 0; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.work-fieldset .work-feed legend { float: none; width: auto; padding: 0 4px; margin: 0; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.work-feed-fields { display: grid; grid-template-columns: minmax(0, 11rem) minmax(0, 1fr); align-items: start; gap: 10px; }
+.work-feed-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.work-feed-foot .work-check { flex: 1 1 14rem; }
+.work-feed-remove { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); }
+.work-feed-remove svg { width: 15px; height: 15px; }
+.work-feed-note { overflow-wrap: anywhere; }
+.work-feed-note.failed { color: var(--error); }
+.work-feeds-empty { margin: 0; padding: 12px; border: 1px dashed var(--line); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.45; color: var(--muted); }
+.work-feeds-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.work-feeds-add button { display: inline-flex; align-items: center; gap: 6px; }
+.work-feeds-add svg { width: 15px; height: 15px; }
+@container (max-width: 460px) {
+  .work-feed-fields { grid-template-columns: minmax(0, 1fr); }
+}
 .work-form-error { margin: 0; font-size: 13px; line-height: 1.45; color: var(--error); }
 .work-form-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
 @media (pointer: coarse) {
   .work-field input, .work-field select { height: 44px; }
+  .work-feed-remove, .work-feeds-add button { min-height: 44px; }
   .work-form-actions button, .work-sheet .work-tools button, .work-sheet .work-projects .work-add-project { min-height: 44px; }
   .work-form-sheet .sheet-heading .icon-button { width: 44px; height: 44px; }
 }

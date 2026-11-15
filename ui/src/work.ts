@@ -8,7 +8,15 @@ import { usePolling } from './hooks'
 export type Stage = 'triage' | 'needs' | 'ready' | 'building' | 'review' | 'done' | 'hold'
 export const STAGE_LABEL: Record<Stage, string> = { triage: 'Triage', needs: 'Needs you', ready: 'Ready', building: 'Building', review: 'Review', done: 'Done', hold: 'On hold' }
 
-export interface WorkProject { name: string; prefix: string; folder: string; triage: string; work: string; feed: string; feedTarget: string; feedBy: 'tether' | 'agent'; jira: string; qaStatus: string; jiraUser: string }
+export type FeedKind = 'teams' | 'github' | 'email'
+/** One feed of a project. id: kept across saves (its state file and cursor go with it); a new feed has none until
+ * saved. by agent: the project's own agent reads it and Tether does not. since: when Tether starts reading it. */
+export interface WorkFeed { id?: string; kind: FeedKind; target: string; by: 'tether' | 'agent'; since?: number }
+export const FEED_KIND_LABEL: Record<FeedKind, string> = { teams: 'Teams', github: 'GitHub', email: 'Email' }
+/** A feed in a sentence: "GitHub o/r", "Email Inbox". */
+export const feedLabel = (kind: FeedKind, target: string) => `${FEED_KIND_LABEL[kind] ?? kind} ${target || (kind === 'email' ? 'Inbox' : '')}`.trim()
+/** A project with no feeds gets its items by hand. */
+export interface WorkProject { name: string; prefix: string; folder: string; triage: string; work: string; feeds: WorkFeed[]; jira: string; qaStatus: string; jiraUser: string }
 export interface WorkTab { pane: string; role: 'triage' | 'fix' | 'review' | 'other'; chat: string; name: string; session: string; stack: string }
 export interface WorkAsk { id: string; q: string; options: string[]; pane: string; chat: string; at: number }
 export interface WorkHistory { at: number; by: string; text: string; ref?: string }
@@ -28,10 +36,10 @@ export interface JiraLink { connected: boolean; site?: string; account?: string;
 /** The Microsoft 365 connection for Teams and email feeds (`tether graph connect`). Never holds a token. mail, teams:
  * the granted permissions allow that feed. why: what to do when not connected. */
 export interface GraphLink { connected: boolean; account?: string; mail?: boolean; teams?: boolean; why?: string }
-/** One project's feed as Tether reads it. by agent: the project's own agent reads it and Tether does not. waiting: not
- * read yet. off: the feed cannot run until Mak acts (error says what to do). errors: failed reads in a row. */
-export interface FeedState { by: 'tether' | 'agent'; status: 'ok' | 'off' | 'error' | 'waiting'; at: number | null; error: string; errors: number; items: number }
-export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink; graph?: GraphLink; feeds?: Record<string, FeedState>; backlog?: BacklogCards }
+/** One feed as Tether reads it, by the feed's id. by agent: the project's own agent reads it and Tether does not.
+ * waiting: not read yet. off: the feed cannot run until Mak acts (error says what to do). errors: failed reads in a row. */
+export interface FeedState { id: string; kind: FeedKind; target: string; by: 'tether' | 'agent'; status: 'ok' | 'off' | 'error' | 'waiting'; at: number | null; error: string; errors: number; items: number }
+export interface WorkBoard { revision: number; projects: WorkProject[]; items: WorkItem[]; stages: Stage[]; jira?: JiraLink; graph?: GraphLink; feeds?: Record<string, FeedState[]>; backlog?: BacklogCards }
 /** A BACKLOG.md item on the board (server: work_backlog.py). The file stays the record. area: its section, or Inbox.
  * rank: its place in the file. doing, done: the text of its Doing and Done lines. doneAt: from a dated Done line;
  * ticked items without one stay off the board. version: of the item's own lines. */

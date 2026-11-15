@@ -92,15 +92,15 @@ class Poll(Home):
 
     def test_a_save_that_keeps_the_feed_keeps_its_start(self):
         self.save(dict(PROJECT, feed='github', feedTarget='o/r', triage='other-triage'), at=NOW + 500)
-        self.assertEqual(work_items.project('shop')['feedSince'], NOW)
+        self.assertEqual(work_items.project('shop')['feeds'][0]['since'], NOW)
         self.save(dict(PROJECT, feed='github', feedTarget='o/r', feedBy='agent'), at=NOW + 600)
-        self.assertEqual(work_items.project('shop')['feedSince'], NOW + 600)
+        self.assertEqual(work_items.project('shop')['feeds'][0]['since'], NOW + 600)
         self.save(dict(PROJECT, feed='manual'), at=NOW + 700)
-        self.assertNotIn('feedSince', work_items.project('shop'))
+        self.assertEqual(work_items.project('shop')['feeds'], [])
 
     def test_a_project_saved_before_feed_since_starts_at_its_first_poll(self):
         record = dict(work_items.project('shop'))
-        record.pop('feedSince')
+        record['feeds'] = [{k: v for k, v in record['feeds'][0].items() if k != 'since'}]
         self.found = [msg('github:o/r#1', 1, NOW - 600)]
         state = work_feeds.poll(record, None, now=NOW, sources=self.sources)
         self.assertEqual((state['cursor'], self.items()), (NOW, []))
@@ -241,22 +241,23 @@ class Poll(Home):
 
 class Due(Home):
     def test_manual_and_agent_feeds_are_not_read(self):
-        self.assertTrue(work_feeds.due(self.record))
-        self.assertFalse(work_feeds.due(dict(self.record, feed='manual')))
-        self.assertFalse(work_feeds.due(dict(self.record, feedBy='agent')))
+        entry = self.record['feeds'][0]
+        self.assertTrue(work_feeds.due(entry))
+        self.assertFalse(work_feeds.due(dict(entry, kind='manual')))
+        self.assertFalse(work_feeds.due(dict(entry, by='agent')))
 
     def test_feed_by_is_checked_and_defaults_to_tether(self):
-        self.assertEqual(self.record['feedBy'], 'tether')
+        self.assertEqual(self.record['feeds'][0]['by'], 'tether')
         with self.assertRaises(Exception):
-            work_items.save_project(dict(PROJECT, feedBy='robot'), work_items.registry()['revision'], create=False)
+            work_items.save_project(dict(PROJECT, feed='github', feedTarget='o/r', feedBy='robot'), work_items.registry()['revision'], create=False)
         work_items.save_project(dict(PROJECT, feed='teams', feedTarget='Brisk/QA', feedBy='agent'),
                                 work_items.registry()['revision'], create=False)
-        self.assertEqual(work_feeds.statuses()['shop']['by'], 'agent')
+        self.assertEqual(work_feeds.statuses()['shop'][0]['by'], 'agent')
 
     def test_email_feed_needs_no_folder_but_others_need_a_target(self):
         revision = work_items.registry()['revision']
         saved = work_items.save_project(dict(PROJECT, feed='email', feedTarget=''), revision, create=False)
-        self.assertEqual(next(p for p in saved['projects'] if p['name'] == 'shop')['feedTarget'], '')
+        self.assertEqual(next(p for p in saved['projects'] if p['name'] == 'shop')['feeds'][0]['target'], '')
         with self.assertRaises(Exception):
             work_items.save_project(dict(PROJECT, feed='teams', feedTarget=''), saved['revision'], create=False)
 
@@ -265,7 +266,7 @@ class Due(Home):
         poller = work_feeds.Poller(clock=lambda: clock[0], start=False)
         self.assertEqual((poller.observe(), poller.observe()), (1, 0))
         with mock.patch.object(work_feeds, 'SOURCES', self.sources):
-            poller.run('shop', 'T')
+            poller.run('shop', 'T', 'f1')
         self.assertEqual(poller.observe(), 0)
         clock[0] += work_feeds.EVERY
         self.assertEqual(poller.observe(), 1)
@@ -279,8 +280,190 @@ class Due(Home):
             raise work_feeds.FeedError('down')
         with mock.patch.object(work_feeds, 'SOURCES', {'github': broken}):
             poller.observe()
-            poller.run('shop', 'T')
-        self.assertEqual(poller.next['T'], 100.0 + work_feeds.EVERY * 2)
+            poller.run('shop', 'T', 'f1')
+        self.assertEqual(poller.next['T/f1'], 100.0 + work_feeds.EVERY * 2)
+
+
+class SeveralFeeds(Home):
+    """B106: one project reads email, Teams and GitHub at once, and two targets of one kind."""
+
+    def feeds(self, *rows, at=NOW):
+        self.save(dict(PROJECT, feeds=[dict(row) for row in rows]), at=at)
+        return work_items.project('shop')['feeds']
+
+    def poll_all(self, now, sources):
+        return {entry['id']: work_feeds.poll(work_items.project('shop'), None, now=now, sources=sources, entry=entry)
+                for entry in work_items.project('shop')['feeds']}
+
+    def test_an_old_record_reads_as_one_feed_and_keeps_its_state_file(self):
+        registry = paths.work() / 'projects.json'
+        old = {'prefix': 'T', 'folder': '/code/shop', 'triage': 'shop-triage', 'work': 'shop', 'feed': 'github',
+               'feedTarget': 'o/r', 'feedBy': 'tether', 'jira': '', 'qaStatus': 'QA Testing', 'jiraUser': '',
+               'feedSince': NOW}
+        registry.write_text(json.dumps({'revision': 7, 'projects': {'shop': old}}))
+        work_feeds.save('T', None, {'feed': 'github', 'target': 'o/r', 'since': NOW, 'cursor': NOW + 40,
+                                    'seen': ['m1'], 'status': 'ok', 'at': NOW + 50, 'error': '', 'errors': 0,
+                                    'items': 3, 'more': False})
+        record = work_items.project('shop')
+        self.assertEqual(record['feeds'], [{'id': 'f1', 'kind': 'github', 'target': 'o/r', 'by': 'tether', 'since': NOW}])
+        self.assertNotIn('feed', record)
+        self.assertEqual(work_feeds.statuses()['shop'][0]['items'], 3)  # read before its first poll
+        state = work_feeds.poll(record, None, now=NOW + 120, sources=self.sources)
+        self.assertEqual((state['cursor'], state['seen'], state['items']), (NOW + 40, ['m1'], 3))
+        self.assertFalse((paths.work() / 'feeds' / 'T.json').exists())
+        self.assertTrue((paths.work() / 'feeds' / 'T-f1.json').exists())
+        self.save(dict(PROJECT, feeds=record['feeds'] + [{'kind': 'email', 'target': ''}]), at=NOW + 200)
+        stored = json.loads(registry.read_text())['projects']['shop']
+        self.assertEqual([(f['id'], f['since']) for f in stored['feeds']][0], ('f1', NOW))  # its cursor start stays
+        self.assertFalse({'feed', 'feedTarget', 'feedBy', 'feedSince'} & set(stored))
+
+    def test_new_or_changed_feeds_start_at_save_time_and_others_keep_theirs(self):
+        github, email = self.feeds({'kind': 'github', 'target': 'o/r'}, {'kind': 'email', 'target': ''}, at=NOW + 10)
+        self.assertNotEqual(github['id'], email['id'])
+        changed = self.feeds(github, dict(email, target='Bugs'), {'kind': 'teams', 'target': 'Brisk/QA'}, at=NOW + 90)
+        self.assertEqual([f['since'] for f in changed], [NOW, NOW + 90, NOW + 90])
+        self.assertEqual([f['id'] for f in changed[:2]], [github['id'], email['id']])
+
+    def test_two_feeds_poll_with_separate_cursors(self):
+        self.feeds({'kind': 'github', 'target': 'o/r'}, {'kind': 'github', 'target': 'o/web'},
+                   {'kind': 'email', 'target': ''})
+        found = {'o/r': [msg('github:o/r#1', 1, NOW + 10)], 'o/web': [msg('github:o/web#1', 2, NOW + 70)],
+                 '': [dict(msg('email:conv-1', 3, NOW + 40), place='Email Inbox')]}
+        sources = {'github': lambda target, since, state: found[target], 'email': lambda target, since, state: found[target]}
+        states = self.poll_all(NOW + 120, sources)
+        self.assertEqual(sorted(s['cursor'] for s in states.values()), [NOW + 10, NOW + 40, NOW + 70])
+        self.assertEqual(sorted(i['feed'] for i in self.items()), ['email:conv-1', 'github:o/r#1', 'github:o/web#1'])
+        files = sorted(f.name for f in (paths.work() / 'feeds').glob('T-*.json'))
+        self.assertEqual(len(files), 3)
+        self.assertEqual(len(self.poll_all(NOW + 240, sources)), 3)
+        self.assertEqual(len(self.items()), 3)  # read again: no second item
+
+    def test_one_failing_feed_does_not_stop_the_others(self):
+        self.feeds({'kind': 'github', 'target': 'o/r'}, {'kind': 'teams', 'target': 'Brisk/QA'},
+                   {'kind': 'email', 'target': ''})
+
+        def crash(target, since, state):
+            raise RuntimeError('a bug in one source')
+
+        def off(target, since, state):
+            raise work_feeds.FeedError(work_feeds.TEAMS_CONSENT, off=True)
+        mail = [dict(msg('email:conv-1', 3, NOW + 40), place='Email Inbox')]
+        sources = {'github': crash, 'teams': off, 'email': lambda target, since, state: mail}
+        clock = [100.0]
+        poller = work_feeds.Poller(clock=lambda: clock[0], start=False)
+        with mock.patch.object(work_feeds, 'SOURCES', sources):
+            self.assertEqual(poller.observe(), 3)
+            while poller.jobs:
+                poller.run(*poller.jobs.pop(0))
+        self.assertEqual([i['feed'] for i in self.items()], ['email:conv-1'])
+        shown = {s['kind']: s for s in work_feeds.statuses()['shop']}
+        self.assertEqual((shown['email']['status'], shown['email']['items']), ('ok', 1))
+        self.assertEqual(shown['teams']['status'], 'off')
+        self.assertIn('admin consent', shown['teams']['error'])
+        self.assertEqual(len(poller.next), 3)  # each feed waits for its own next poll
+
+    def test_agent_feeds_stay_with_the_agent(self):
+        self.feeds({'kind': 'teams', 'target': 'QA, Bro 2 Bro', 'by': 'agent'}, {'kind': 'github', 'target': 'o/r'})
+        poller = work_feeds.Poller(clock=lambda: 0.0, start=False)
+        self.assertEqual(poller.observe(), 1)
+        self.assertEqual(poller.jobs[0][2], work_items.project('shop')['feeds'][1]['id'])
+
+    def test_feed_rows_are_checked(self):
+        bad = [
+            ([{'kind': 'github', 'target': 'o/r'}, {'kind': 'github', 'target': 'O/R'}], 'same place'),
+            ([{'kind': 'email', 'target': ''}, {'kind': 'email', 'target': 'inbox'}], 'same place'),
+            ([{'kind': 'github', 'target': 'not a repo'}], 'owner/repo'),
+            ([{'kind': 'teams', 'target': 'Brisk'}], 'Team/Channel'),
+            ([{'kind': 'teams', 'target': ''}], 'Name where feed 1'),
+            ([{'kind': 'fax', 'target': 'x'}], 'source of feed 1'),
+            ([{'kind': 'email', 'target': f'F{n}'} for n in range(work_items.FEEDS_MAX + 1)], 'at most'),
+            ([{'id': '../x', 'kind': 'email', 'target': ''}], 'feed id'),
+        ]
+        for rows, error in bad:
+            with self.subTest(error=error), self.assertRaises(work_items.ProjectError) as caught:
+                self.feeds(*rows)
+            self.assertIn(error, str(caught.exception))
+
+    def test_an_old_form_cannot_drop_feeds_it_does_not_show(self):
+        self.feeds({'kind': 'github', 'target': 'o/r'}, {'kind': 'email', 'target': ''})
+        with self.assertRaises(work_items.ProjectError) as caught:
+            self.save(dict(PROJECT, feed='github', feedTarget='o/r'))
+        self.assertIn('Reload the page', str(caught.exception))
+        self.assertEqual(len(work_items.project('shop')['feeds']), 2)
+
+    def test_an_unchanged_feed_with_no_since_keeps_its_cursor_on_save(self):
+        # Review of B106: an old record without feedSince, and a list row without since, must not restart on a save.
+        registry = paths.work() / 'projects.json'
+        cases = {
+            'old record': {'feed': 'github', 'feedTarget': 'o/r', 'feedBy': 'tether'},
+            'list row': {'feeds': [{'id': 'f1', 'kind': 'github', 'target': 'o/r', 'by': 'tether'}]},
+        }
+        for case, fields in cases.items():
+            with self.subTest(case):
+                old = {'prefix': 'T', 'folder': '/code/shop', 'triage': 'shop-triage', 'work': 'shop', 'jira': '',
+                       'qaStatus': 'QA Testing', 'jiraUser': '', **fields}
+                registry.write_text(json.dumps({'revision': 7, 'projects': {'shop': old}}))
+                work_items._CACHE.clear()
+                for stale in (paths.work() / 'feeds').glob('T*.json'):
+                    stale.unlink()
+                work_feeds.save('T', None, {'feed': 'github', 'target': 'o/r', 'since': NOW, 'cursor': NOW + 40,
+                                            'seen': ['m1'], 'status': 'ok', 'at': NOW + 50, 'error': '', 'errors': 0,
+                                            'items': 3, 'more': False})
+                record = work_items.project('shop')
+                self.save(dict(PROJECT, feeds=record['feeds']), at=NOW + 200)
+                state = work_feeds.poll(work_items.project('shop'), None, now=NOW + 300, sources=self.sources)
+                self.assertEqual((state['since'], state['cursor'], state['seen'], state['items']), (NOW, NOW + 40, ['m1'], 3))
+                # A change still starts again at its save time.
+                self.save(dict(PROJECT, feeds=[dict(record['feeds'][0], target='o/web')]), at=NOW + 400)
+                self.assertEqual(work_items.project('shop')['feeds'][0]['since'], NOW + 400)
+
+    def test_a_save_during_a_read_stops_the_read(self):
+        # Review of B106: a feed changed, removed, or given to the agent while its source reads adds nothing.
+        github = self.feeds({'kind': 'github', 'target': 'o/r'})[0]
+        changes = {
+            'target changed': [dict(github, target='o/web')],
+            'feed removed': [],
+            'agent reads it': [dict(github, by='agent')],
+        }
+        for case, rows in changes.items():
+            with self.subTest(case):
+                self.feeds({'kind': 'github', 'target': 'o/r', 'id': github['id']})
+
+                def read(target, since, state, rows=rows):
+                    self.feeds(*rows, at=NOW + 50)  # the save lands while the read is out
+                    return [msg('github:o/r#1', 1, NOW + 10)]
+                poller = work_feeds.Poller(clock=lambda: 0.0, start=False)
+                with mock.patch.object(work_feeds, 'SOURCES', {'github': read}):
+                    poller.run('shop', 'T', github['id'])
+                self.assertEqual(self.items(), [])
+        # A save that lands after the read, just before the item write, also adds nothing (second review).
+        for case, rows in changes.items():
+            with self.subTest(f'{case} before the write'):
+                self.feeds({'kind': 'github', 'target': 'o/r', 'id': github['id']})
+                saving, landed = work_items.saving, []
+
+                def late(rows=rows):
+                    if not landed:
+                        landed.append(1)
+                        self.feeds(*rows, at=NOW + 50)
+                    return saving()
+                with mock.patch.object(work_feeds, 'SOURCES', {'github': lambda target, since, state: [msg('github:o/r#1', 1, NOW + 10)]}), \
+                        mock.patch.object(work_items, 'saving', late):
+                    work_feeds.Poller(clock=lambda: 0.0, start=False).run('shop', 'T', github['id'])
+                self.assertEqual((landed, self.items()), ([1], []))
+        # While a feed writes, a save waits for it.
+        done = threading.Event()
+        with work_items.saving():
+            saver = threading.Thread(target=lambda: (self.feeds({'kind': 'github', 'target': 'o/r', 'id': github['id']}), done.set()))
+            saver.start()
+            self.assertFalse(done.wait(0.3))
+        saver.join(5)
+        self.assertTrue(done.is_set())
+        # The same read with no save in between adds the item.
+        self.feeds({'kind': 'github', 'target': 'o/r', 'id': github['id']})
+        with mock.patch.object(work_feeds, 'SOURCES', {'github': lambda target, since, state: [msg('github:o/r#1', 1, NOW + 10)]}):
+            work_feeds.Poller(clock=lambda: 0.0, start=False).run('shop', 'T', github['id'])
+        self.assertEqual([i['feed'] for i in self.items()], ['github:o/r#1'])
 
 
 class Completed:
@@ -420,9 +603,9 @@ class GitHub(Home):
     def test_a_reply_read_again_adds_no_second_note(self):
         self.found = [msg('github:o/r#1', 1, NOW + 5), msg('github:o/r#1', 2, NOW + 6, root=False, link='https://x.example/c2')]
         self.poll(now=NOW + 60)
-        state = work_feeds.load(self.record['prefix'])
+        state = work_feeds.load(self.record['prefix'], 'f1')
         state['seen'] = []  # as if the ids were dropped from seen
-        work_feeds.save(self.record['prefix'], state)
+        work_feeds.save(self.record['prefix'], 'f1', state)
         self.poll(now=NOW + 70)
         notes = [e for e in work_items._events(self.record['prefix']) if e.get('type') == 'note']
         self.assertEqual(len(notes), 1)
@@ -592,9 +775,9 @@ class Teams(Home):
         for n in range(3):  # the same storm on each poll: one item
             work_feeds.poll(work_items.project('shop'), None, now=NOW + 120 + n, sources=self.sources)
         self.assertEqual(len(gaps()), 1)
-        state = work_feeds.load(self.record['prefix'])
+        state = work_feeds.load(self.record['prefix'], 'f1')
         state['gapRange'] = {'from': NOW - 1000, 'to': NOW - 900}  # an earlier storm, long over
-        work_feeds.save(self.record['prefix'], state)
+        work_feeds.save(self.record['prefix'], 'f1', state)
         work_feeds.poll(work_items.project('shop'), None, now=NOW + 200, sources=self.sources)
         self.assertEqual(len(gaps()), 2)
 
@@ -618,7 +801,7 @@ class Teams(Home):
         graph_client.save(dict(GRAPH, granted=['User.Read', 'Mail.ReadBasic']))
         with self.assertRaises(work_feeds.FeedError) as caught:
             work_feeds.teams('Brisk/QA', NOW, {})
-        self.assertIn('no access to Teams channels', str(caught.exception))
+        self.assertIn('admin consent for ChannelMessage.Read.All', str(caught.exception))
 
 
 class Email(Home):
@@ -965,7 +1148,7 @@ class Api(Home):
         self.poll()
         status, payload = self.call('board')
         self.assertEqual(status, 200)
-        self.assertEqual(payload['feeds']['shop']['status'], 'ok')
+        self.assertEqual(payload['feeds']['shop'][0]['status'], 'ok')
         self.assertTrue(payload['graph']['connected'])
         self.assertNotIn('refresh-secret', json.dumps(payload))
 

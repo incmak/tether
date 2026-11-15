@@ -1,37 +1,72 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
-import { X } from 'lucide-react'
+import { Plus, Trash2, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api } from './api'
 import { useModal } from './hooks'
 import { saveProject, newItem } from './work'
-import type { FixResult, WorkBoard, WorkItem, WorkProject } from './work'
+import type { FeedKind, FeedState, FixResult, WorkBoard, WorkFeed, WorkItem, WorkProject } from './work'
 
 // Project settings (Add project, Settings) and New item: small sheets over the work page. The server checks every
 // field (work_items._clean_project); these forms show its message and keep what Mak typed.
 
-const FEEDS: { value: WorkProject['feed']; label: string; target: string; hint: string; placeholder: string; optional?: boolean }[] = [
-  { value: 'manual', label: 'None: add items by hand', target: '', hint: '', placeholder: '' },
-  { value: 'teams', label: 'Teams channel', target: 'Team/Channel', hint: 'One channel, like Brisk/QA.', placeholder: 'Team/Channel' },
+const FEEDS: { value: FeedKind; label: string; target: string; hint: string; placeholder: string; optional?: boolean }[] = [
   { value: 'github', label: 'GitHub issues', target: 'Repository (owner/name)', hint: '', placeholder: 'owner/name' },
   { value: 'email', label: 'Email (Microsoft 365)', target: 'Mail folder (optional)', hint: 'Empty reads the Inbox.', placeholder: 'Inbox', optional: true },
+  { value: 'teams', label: 'Teams channel', target: 'Team/Channel', hint: 'One channel, like Brisk/QA.', placeholder: 'Team/Channel' },
 ]
-const BLANK: WorkProject = { name: '', prefix: '', folder: '', triage: '', work: '', feed: 'manual', feedTarget: '', feedBy: 'tether', jira: '', qaStatus: '', jiraUser: '' }
+const FEEDS_MAX = 8  // work_items.FEEDS_MAX
+const BLANK: WorkProject = { name: '', prefix: '', folder: '', triage: '', work: '', feeds: [], jira: '', qaStatus: '', jiraUser: '' }
+/** A feed row in the form. key: the saved id, or a local one for a row not saved yet (the server gives it an id). */
+interface FeedRow extends WorkFeed { key: string }
+let rowCount = 0
+const newKey = () => `new-${++rowCount}`
+const toRows = (feeds: WorkFeed[]): FeedRow[] => feeds.map(feed => ({ ...feed, key: feed.id ?? newKey() }))
 
-/** What the feed does now: read by the project's agent, the last read, or what blocks it. */
-function feedNote(board: WorkBoard, form: WorkProject, saved?: WorkProject) {
-  if (form.feed === 'manual') return 'Add items with New item.'
-  if (form.feedBy === 'agent') return "Tether does not read this feed. The project's agent adds its items."
+/** What one feed does now: read by the project's agent, the last read, or what blocks it. failed: show it as an error. */
+function feedNote(board: WorkBoard, project: string | undefined, row: FeedRow, saved?: WorkFeed): { text: string; failed?: boolean } {
+  if (row.by === 'agent') return { text: "Tether does not read this feed. The project's agent adds its items." }
   const graph = board.graph
-  if (form.feed !== 'github' && !graph?.connected) return `${graph?.why || 'Microsoft 365 is not connected.'} Until then, Tether does not read this feed.`
-  if (form.feed === 'teams' && !graph?.teams) return 'The Microsoft 365 sign-in has no Teams permission. Run tether graph connect --feeds mail,teams.'
-  if (form.feed === 'email' && !graph?.mail) return 'The Microsoft 365 sign-in has no mail permission. Run tether graph connect --feeds mail.'
-  const state = saved && saved.feed === form.feed && saved.feedTarget === form.feedTarget && saved.feedBy === form.feedBy ? board.feeds?.[saved.name] : undefined
-  const start = 'Tether reads it every 2 minutes and adds new threads to Triage. It starts with messages that come after you save.'
-  if (!state || state.status === 'waiting' || !state.at) return start
+  if (row.kind !== 'github' && !graph?.connected) return { text: `${graph?.why || 'Microsoft 365 is not connected.'} Until then, Tether does not read this feed.`, failed: true }
+  if (row.kind === 'teams' && !graph?.teams) return { text: 'Off: Teams channels need admin consent for ChannelMessage.Read.All. Ask your Microsoft 365 admin to grant it, then run tether graph connect --feeds mail,teams.', failed: true }
+  if (row.kind === 'email' && !graph?.mail) return { text: 'Off: the Microsoft 365 sign-in has no mail permission. Run tether graph connect --feeds mail.', failed: true }
+  const same = saved && saved.kind === row.kind && saved.target === row.target.trim() && saved.by === row.by
+  const state: FeedState | undefined = same && project ? board.feeds?.[project]?.find(entry => entry.id === saved.id) : undefined
+  const start = saved && !same ? 'Changed: Tether starts again with messages that come after you save.'
+    : 'Tether reads it every 2 minutes and adds new threads to Triage. It starts with messages that come after you save.'
+  if (!state || state.status === 'waiting' || !state.at) return { text: saved && same ? 'Saved. Waiting for the first read.' : start }
   const at = new Date(state.at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (state.status === 'ok') return `Last read at ${at}. ${state.items} ${state.items === 1 ? 'item' : 'items'} added so far.`
-  return `${state.status === 'off' ? 'Stopped' : 'The last read failed'} at ${at}: ${state.error}`
+  if (state.status === 'ok') return { text: `Last read at ${at}. ${state.items} ${state.items === 1 ? 'item' : 'items'} added so far.` }
+  return { text: `${state.status === 'off' ? 'Off since' : 'The last read failed at'} ${at}: ${state.error}`, failed: true }
+}
+
+/** One feed: where it reads, who reads it, and its last read. */
+function FeedFields({ id, number, row, note, onChange, onRemove, selectRef }: {
+  id: string; number: number; row: FeedRow; note: { text: string; failed?: boolean }
+  onChange: (change: Partial<WorkFeed>) => void; onRemove: () => void; selectRef: (node: HTMLSelectElement | null) => void
+}) {
+  const feed = FEEDS.find(entry => entry.value === row.kind) ?? FEEDS[0]
+  const hint = [feed.hint, `${id}-note`].filter(Boolean)
+  return <li className="work-feed">
+    <fieldset>
+      <legend>Feed {number}</legend>
+      <div className="work-feed-fields">
+        <Field id={`${id}-kind`} label="Source">
+          <select id={`${id}-kind`} ref={selectRef} value={row.kind} onChange={event => onChange({ kind: event.target.value as FeedKind })}>
+            {FEEDS.map(entry => <option key={entry.value} value={entry.value}>{entry.label}</option>)}
+          </select>
+        </Field>
+        <Field id={`${id}-target`} label={feed.target} hint={feed.hint || undefined}>
+          <input id={`${id}-target`} value={row.target} onChange={event => onChange({ target: event.target.value })} required={!feed.optional} maxLength={300} autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder={feed.placeholder} aria-describedby={hint.length > 1 ? `${id}-target-hint ${id}-note` : `${id}-note`} />
+        </Field>
+      </div>
+      <div className="work-feed-foot">
+        <label className="work-check"><input type="checkbox" checked={row.by === 'agent'} onChange={event => onChange({ by: event.target.checked ? 'agent' : 'tether' })} />The project's own agent adds items from this feed</label>
+        <button type="button" className="secondary work-feed-remove" onClick={onRemove} aria-label={`Remove feed ${number}`}><Trash2 aria-hidden="true" /><span>Remove</span></button>
+      </div>
+      <p id={`${id}-note`} className={note.failed ? 'work-hint work-feed-note failed' : 'work-hint work-feed-note'}>{note.text}</p>
+    </fieldset>
+  </li>
 }
 
 function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactNode }) {
@@ -65,18 +100,37 @@ export function ProjectForm({ api, board, project, onClose, onSaved }: {
   const id = useId()
   const editing = !!project
   const [form, setForm] = useState<WorkProject>(() => ({ ...BLANK, ...project }))
+  const [rows, setRows] = useState<FeedRow[]>(() => toRows(project?.feeds ?? []))
+  // After Add feed, its source gets focus; after Remove, Add feed does (the removed row's button is gone).
+  const focusRow = useRef<string | null>(null)
+  const selects = useRef(new Map<string, HTMLSelectElement>())
+  const addButton = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (focusRow.current === null) return
+    const target = focusRow.current ? selects.current.get(focusRow.current) : addButton.current
+    focusRow.current = null
+    target?.focus()
+  }, [rows])
+  const changeRow = (key: string, change: Partial<WorkFeed>) => setRows(current => current.map(row => row.key === key ? { ...row, ...change } : row))
+  const addRow = () => {
+    const used = new Set(rows.map(row => row.kind))
+    const row: FeedRow = { key: newKey(), kind: FEEDS.find(entry => !used.has(entry.value))?.value ?? 'github', target: '', by: 'tether' }
+    focusRow.current = row.key
+    setRows(current => [...current, row])
+  }
+  const removeRow = (key: string) => { focusRow.current = ''; setRows(current => current.filter(row => row.key !== key)) }
   // The registry revision this form started from. After a 409 it follows the board, so a second Save replaces.
   const [base, setBase] = useState<number | null>(board.revision)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const set = (key: keyof WorkProject) => (event: { target: { value: string } }) => setForm(current => ({ ...current, [key]: event.target.value }))
-  const feed = FEEDS.find(entry => entry.value === form.feed) ?? FEEDS[0]
   const name = form.name.trim()
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setBusy(true); setError('')
     try {
-      const saved = { ...form, prefix: form.prefix.trim().toUpperCase(), jira: form.jira.trim().toUpperCase(), name }
+      const feeds = rows.map(row => ({ ...(row.id ? { id: row.id } : {}), kind: row.kind, target: row.target.trim(), by: row.by }))
+      const saved = { ...form, feeds, prefix: form.prefix.trim().toUpperCase(), jira: form.jira.trim().toUpperCase(), name }
       await saveProject(api, saved, base ?? board.revision, !editing)
       onSaved(name)
     } catch (failure) {
@@ -107,15 +161,18 @@ export function ProjectForm({ api, board, project, onClose, onSaved }: {
         </Field>
       </div>
       <fieldset className="work-fieldset">
-        <legend>Feed</legend>
-        <Field id={`${id}-feed`} label="Source">
-          <select id={`${id}-feed`} value={form.feed} onChange={set('feed')}>{FEEDS.map(entry => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
-        </Field>
-        {feed.value !== 'manual' && <Field id={`${id}-target`} label={feed.target} hint={feed.hint || undefined}>
-          <input id={`${id}-target`} value={form.feedTarget} onChange={set('feedTarget')} required={!feed.optional} maxLength={300} autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder={feed.placeholder} aria-describedby={feed.hint ? `${id}-target-hint` : undefined} />
-        </Field>}
-        {feed.value !== 'manual' && <label className="work-check"><input type="checkbox" checked={form.feedBy === 'agent'} onChange={event => { const agent = event.target.checked; setForm(current => ({ ...current, feedBy: agent ? 'agent' : 'tether' })) }} />The project's own agent adds items from this feed</label>}
-        <p className="work-hint">{feedNote(board, form, project)}</p>
+        <legend>Feeds</legend>
+        <p className="work-hint">Each feed adds new threads to Triage: GitHub issues, email and Teams messages. A project can read several at once.</p>
+        {rows.length > 0
+          ? <ol className="work-feeds">{rows.map((row, index) => <FeedFields key={row.key} id={`${id}-feed-${row.key}`} number={index + 1} row={row}
+              note={feedNote(board, project?.name, row, project?.feeds.find(feed => feed.id === row.id))}
+              onChange={change => changeRow(row.key, change)} onRemove={() => removeRow(row.key)}
+              selectRef={node => { if (node) selects.current.set(row.key, node); else selects.current.delete(row.key) }} />)}</ol>
+          : <p className="work-feeds-empty">No feeds. Add items by hand with New item, or add a feed.</p>}
+        <div className="work-feeds-add">
+          <button type="button" ref={addButton} className="secondary" onClick={addRow} disabled={rows.length >= FEEDS_MAX} aria-describedby={rows.length >= FEEDS_MAX ? `${id}-feeds-max` : undefined}><Plus aria-hidden="true" />Add feed</button>
+          {rows.length >= FEEDS_MAX && <p id={`${id}-feeds-max`} className="work-hint">A project reads at most {FEEDS_MAX} feeds.</p>}
+        </div>
       </fieldset>
       <fieldset className="work-fieldset">
         <legend>Jira <span>(optional)</span></legend>
