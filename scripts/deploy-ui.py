@@ -5,7 +5,9 @@ B92: each build carries .build-commit (written by ui/vite.config.ts). The instal
 target. A build whose commit does not contain the live commit would remove deployed work, so it is refused.
 """
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,8 @@ import tempfile
 
 STAMP = '.build-commit'
 RECORD = '.live-commit'
+PENDING = '.live-commit.pending'
+LOCK = '.deploy-lock'
 REPO = Path(__file__).resolve().parent.parent
 
 
@@ -25,7 +29,22 @@ class Refused(ValueError):
 
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True)
+    try:
+        return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True)
+    except OSError as error:
+        raise Refused(f'git did not start: {error}') from None
+
+
+@contextmanager
+def locked(target: Path):
+    """One deploy per target: two parallel deploys would both pass the check against the same live commit."""
+    target.mkdir(parents=True, exist_ok=True)
+    with open(target / LOCK, 'w') as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(f'Another UI deploy to {target} is running. Wait for it, then run again.') from None
+        yield
 
 
 def read_json(path: Path, label: str):
@@ -48,6 +67,10 @@ def check(build: Path, target: Path, repo: Path) -> list[str]:
     """Return warnings, or raise Refused when the build would remove live work."""
     stamp = read_json(build / STAMP, 'The build stamp')
     live = read_json(target / RECORD, 'The live record')
+    unfinished = read_json(target / PENDING, 'The unfinished deploy record')
+    if unfinished is not None:
+        raise Refused(f'A deploy of {unfinished["commit"]} did not finish, so the live commit is unknown. Check which '
+                      'assets/index-*.js the live index.html loads, then run --record-live COMMIT for its commit.')
     if stamp is None:
         raise Refused(f'The build has no {STAMP}, so its commit is unknown. Rebuild with the current '
                       'ui/vite.config.ts in a git checkout.')
@@ -77,15 +100,22 @@ def check(build: Path, target: Path, repo: Path) -> list[str]:
     return warnings
 
 
-def write_record(target: Path, record: dict):
-    staged = target / f'{RECORD}.tmp'
+def write_record(target: Path, record: dict, name: str = RECORD):
+    staged = target / f'{name}.tmp'
     staged.write_text(json.dumps(record, indent=2) + '\n')
-    os.replace(staged, target / RECORD)
+    os.replace(staged, target / name)
 
 
 def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dry_run: bool = False,
            warn=lambda text: print(f'Warning: {text}', file=sys.stderr)) -> int:
     build, target = build.resolve(), target.resolve()
+    if dry_run and not target.is_dir():
+        return install(build, target, repo, force, dry_run, warn)
+    with locked(target):
+        return install(build, target, repo, force, dry_run, warn)
+
+
+def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, warn) -> int:
     entry = build / 'index.html'
     if build == target or not entry.is_file():
         raise ValueError('Use a separate build folder with index.html.')
@@ -106,6 +136,30 @@ def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dr
     except Refused:
         stamp = None
     target.mkdir(parents=True, exist_ok=True)
+    # Until the record is written, the live commit is unknown. If this run stops after the entry page is published,
+    # the pending file makes the next deploy refuse instead of comparing against a stale record.
+    if stamp is None:
+        # A forced install of an unknown commit leaves nothing to compare with. The next stamped deploy records again.
+        (target / RECORD).unlink(missing_ok=True)
+        (target / PENDING).unlink(missing_ok=True)
+        warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
+    else:
+        write_record(target, stamp, PENDING)
+    try:
+        count = copy_build(build, target, entry)
+        if stamp is not None:
+            write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'),
+                                  'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+    except BaseException:
+        live_entry = target / 'index.html'
+        if not (live_entry.is_file() and live_entry.read_bytes() == entry.read_bytes()):
+            (target / PENDING).unlink(missing_ok=True)  # the old entry page is still live, so the old record holds
+        raise
+    (target / PENDING).unlink(missing_ok=True)
+    return count
+
+
+def copy_build(build: Path, target: Path, entry: Path) -> int:
     # Stage on the destination filesystem so each replacement is atomic.
     with tempfile.TemporaryDirectory(prefix='.ui-deploy-', dir=target.parent) as folder:
         stage = Path(folder)
@@ -122,13 +176,6 @@ def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dr
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(stage / relative, destination)
     (target / '.live-ui').touch(exist_ok=True)
-    if stamp is None:
-        # A forced install of an unknown commit leaves nothing to compare with. The next stamped deploy records again.
-        (target / RECORD).unlink(missing_ok=True)
-        warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
-    else:
-        write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'),
-                              'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
     return len(files)
 
 
@@ -141,9 +188,11 @@ def record_live(commit: str, target: Path, repo: Path = REPO) -> str:
     if not (target / 'index.html').is_file():
         raise ValueError(f'{target} has no index.html.')
     full = found.stdout.strip()
-    entry = re.search(r'src=["\']/chat/(assets/index-[^"\']+\.js)', (target / 'index.html').read_text())
-    write_record(target, {'commit': full, 'dirty': False, 'changes': [], 'entry': entry[1] if entry else None,
-                          'deployed': None, 'recorded': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+    with locked(target):
+        entry = re.search(r'src=["\']/chat/(assets/index-[^"\']+\.js)', (target / 'index.html').read_text())
+        write_record(target, {'commit': full, 'dirty': False, 'changes': [], 'entry': entry[1] if entry else None,
+                              'deployed': None, 'recorded': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+        (target / PENDING).unlink(missing_ok=True)
     return full
 
 

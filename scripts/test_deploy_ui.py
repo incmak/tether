@@ -179,6 +179,57 @@ class DeployGuardTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             deploy_ui.record_live('f' * 40, self.target, repo=self.repo)
 
+    def test_parallel_deploy_to_the_same_target_is_refused(self):
+        self.stamp(self.live)
+        with deploy_ui.locked(self.target.resolve()):
+            with self.assertRaisesRegex(ValueError, 'Another UI deploy'):
+                self.deploy(force=True)
+        self.assert_untouched()
+        self.assertEqual(self.deploy(), 2)
+
+    def test_record_write_failure_after_publish_blocks_the_next_deploy(self):
+        self.set_live(self.base)
+        self.stamp(self.live)
+        write = deploy_ui.write_record
+        def fail_final(target, record, name=deploy_ui.RECORD):
+            if name == deploy_ui.RECORD:
+                raise OSError('disk full')
+            write(target, record, name)
+        with patch.object(deploy_ui, 'write_record', side_effect=fail_final):
+            with self.assertRaises(OSError):
+                self.deploy()
+        self.assertEqual((self.target / 'assets/new.js').read_text(), 'new')
+        self.stamp(self.base)  # a rollback would now pass against the stale record
+        with self.assertRaisesRegex(deploy_ui.Refused, 'did not finish'):
+            self.deploy()
+        deploy_ui.record_live(self.live, self.target, repo=self.repo)
+        self.assertFalse((self.target / '.live-commit.pending').exists())
+        with self.assertRaisesRegex(deploy_ui.Refused, 'drops live commits'):
+            self.deploy()
+
+    def test_failure_before_publish_keeps_the_old_record_valid(self):
+        self.set_live(self.base)
+        self.stamp(self.live)
+        replace = deploy_ui.os.replace
+        def fail_asset(source, target):
+            if Path(target).name == 'new.js':
+                raise OSError('disk error')
+            replace(source, target)
+        with patch.object(deploy_ui.os, 'replace', side_effect=fail_asset):
+            with self.assertRaises(OSError):
+                self.deploy()
+        self.assertEqual((self.target / 'index.html').read_text(), 'old entry')
+        self.assertFalse((self.target / '.live-commit.pending').exists())
+        self.assertEqual(self.deploy(), 2)
+
+    def test_force_overrides_git_that_does_not_start(self):
+        self.set_live(self.base)
+        self.stamp(self.live)
+        with patch.object(deploy_ui.subprocess, 'run', side_effect=FileNotFoundError('git')):
+            with self.assertRaisesRegex(deploy_ui.Refused, 'git did not start'):
+                self.deploy()
+            self.assertEqual(self.deploy(force=True), 2)
+
 
 if __name__ == '__main__':
     unittest.main()
