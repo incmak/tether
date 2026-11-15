@@ -120,7 +120,8 @@ async function main() {
       await drawer.getByRole('button', { name: 'Save', exact: true }).click()
       await drawer.getByText('My own words.').waitFor()
       check('save posts the text', JSON.stringify(state.posts.at(-1)) === JSON.stringify({ endpoint: 'tab-brief', body: { pane: '%1', thread: 'thread-1', action: 'save', description: 'My own words.' } }))
-      check('a saved text says who wrote it', await drawer.getByText('Written by you').isVisible())
+      // The author line follows the saved brief; it can render a moment after the text.
+      check('a saved text says who wrote it', await drawer.getByText('Written by you').waitFor({ timeout: 5000 }).then(() => true, () => false))
       await drawer.getByRole('button', { name: 'Clear' }).click()
       await drawer.getByText('No description yet.').waitFor()
       check('clear posts an empty text', state.posts.at(-1).body.description === '')
@@ -153,7 +154,8 @@ async function main() {
       await close(); await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' }); await open()
       // Copy the pane id: no crash, the button answers.
       await drawer.getByRole('button', { name: 'Copy pane' }).click()
-      check('copy answers', await drawer.locator('.sd-copy[aria-label="Copied"], .sd-copy[aria-label="Could not copy"]').count() === 1)
+      // copyText() is async; the label changes when it settles and resets after 1.5 s.
+      check('copy answers', await drawer.locator('.sd-copy[aria-label="Copied"], .sd-copy[aria-label="Could not copy"]').waitFor({ timeout: 1000 }).then(() => true, () => false))
       // Keyboard: Tab moves through the drawer and the focus shows.
       await page.keyboard.press('Tab')
       check('keyboard focus stays in the drawer', await drawer.evaluate(node => node.contains(document.activeElement)))
