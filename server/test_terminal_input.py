@@ -61,8 +61,15 @@ class HeadsUpAttentionTests(unittest.TestCase):
     def test_card_text_does_not_open_a_panel(self):
         self.assertIsNone(self.attention(self.screen))
 
-    def test_press_enter_outside_a_card_still_opens_a_panel(self):
-        screen = self.screen.replace('✦ Heads up · ', 'Note · ')
+    def test_reply_text_above_the_input_box_does_not_open_a_panel(self):
+        for words in ('press Enter', 'press any key', 'Esc to cancel', '(y/n)'):
+            with self.subTest(words=words):
+                terminal._attention_seen.clear()
+                screen = self.screen.replace('✦ Heads up · ', 'Note · ').replace('before you press Enter', f'then {words}')
+                self.assertIsNone(self.attention(screen))
+
+    def test_press_enter_without_an_input_box_still_opens_a_panel(self):
+        screen = '\n'.join(self.screen.splitlines()[:-6] + ['', '  Press Enter to continue…'])
         self.assertEqual((self.attention(screen) or {}).get('reason'), 'prompt')
 
 
