@@ -19,6 +19,7 @@
   --hover: #e4e1d8;
   --accent: #c96442;
   --accent-text: #fffaf5;
+  --accent-fill: #b55a3b;  /* filled controls: --accent-text on it is 4.5:1. From tones.ts; test_contrast.cjs checks it. */
   --attention: #8c6b22;
   --done: #2f8a68;
   --pin: #3f6f8f;

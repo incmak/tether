@@ -20,7 +20,7 @@
   --control-lg: 36px;
   --control-text: 13px;
   --field-text: 13.5px;
-  --accent-hover: color-mix(in srgb, var(--accent) 86%, #000);
+  --accent-hover: color-mix(in srgb, var(--accent-fill) 86%, #000);
   --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
   --field: color-mix(in srgb, var(--hover) 70%, var(--surface));
   --danger: #b3261e;
@@ -38,7 +38,7 @@
   font-size: var(--control-text); font-weight: 500; line-height: 1.2; white-space: nowrap; text-decoration: none;
   transition: background-color .12s, border-color .12s, color .12s;
 }
-.primary { background: var(--accent); color: var(--accent-text); }
+.primary { background: var(--accent-fill); color: var(--accent-text); }
 :is(button, a).primary:not(:disabled):hover { background: var(--accent-hover); }
 .secondary { border-color: var(--line); background: var(--surface); color: var(--text); }
 :is(button, a).secondary:not(:disabled):hover { background: var(--hover); }
@@ -132,7 +132,7 @@
 }
 .badge.accent { background: var(--accent-soft); color: var(--accent); }
 .badge.danger { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
-.badge.solid { background: var(--accent); color: var(--accent-text); }
+.badge.solid { background: var(--accent-fill); color: var(--accent-text); }
 
 /* Keyboard key */
 kbd, .search-key {

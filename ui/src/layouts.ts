@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Api } from './api'
 import manifest from '../../server/ui_manifest.json'
+import { accentFill, contrast, luminance } from './tones'
 
 // Layouts are data: { id, name, grid, panels, style, theme }. The desktop shell draws the same panels in a different
 // grid; the phone keeps its own UI and takes only the theme and the style. Classic is today's UI and adds nothing.
@@ -82,13 +83,6 @@ function whole(value: unknown, low: number, high: number, where: string) {
 function plain(value: unknown, high: number, where: string) {
   if (typeof value !== 'string' || !value.trim() || value.length > high || [...value].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw new Bad(`${where} must be plain text of 1 to ${high} characters.`)
   return value.trim()
-}
-
-const channel = (hex: string, at: number) => { const value = parseInt(hex.slice(at, at + 2), 16) / 255; return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4 }
-const luminance = (hex: string) => 0.2126 * channel(hex, 1) + 0.7152 * channel(hex, 3) + 0.0722 * channel(hex, 5)
-export function contrast(one: string, two: string) {
-  const [a, b] = [luminance(one), luminance(two)].sort((x, y) => y - x)
-  return (a + 0.05) / (b + 0.05)
 }
 
 function theme(value: unknown): LayoutTheme | null {
@@ -230,6 +224,7 @@ export function applyLayoutTheme(value: LayoutTheme | null) {
     '--line': value.line, '--hover': value.hover ?? value.line, '--accent': value.accent, '--accent-text': accentText, '--attention': value.attention,
     '--error': value.error ?? (mode === 'dark' ? '#f09888' : '#a43b31'), '--done': value.done, '--pin': value.pin,
   }
+  tokens['--accent-fill'] = accentFill(value.accent, accentText)
   // Every value passed the hex check, so the text holds no CSS other than these tokens.
   style.textContent = `:root:root:root{color-scheme:${mode};color:${value.text};background:${value.bg};${Object.entries(tokens).filter(([, colour]) => colour).map(([name, colour]) => `${name}:${colour};`).join('')}}`
   document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach(meta => { meta.content = value.bg })

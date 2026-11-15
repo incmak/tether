@@ -70,7 +70,7 @@
 .dlg-scale [role="radiogroup"] { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .dlg-scale button { min-width: 0; min-height: var(--control-lg); padding: 0; border: 0; border-right: 1px solid var(--line); background: none; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .dlg-scale button:last-child { border-right: 0; }
-.dlg-scale button[aria-checked="true"] { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.dlg-scale button[aria-checked="true"] { background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
 .dlg-scale button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .dlg-scale-ends { display: flex; justify-content: space-between; margin: 4px 2px 0; color: var(--muted); font-size: 12px; }
 .dlg-search { display: flex; gap: 6px; margin: 0 16px; }
@@ -101,7 +101,7 @@
 .dlg-mark.bad { color: var(--error); }
 .dlg-help { margin-top: -2px; }
 .dlg-actions { margin: 2px 16px 0; }
-.dlg-actions button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.dlg-actions button.primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
 .dlg-actions button.primary kbd { border-color: color-mix(in srgb, var(--accent-text) 40%, transparent); color: var(--accent-text); }
 .dlg-error { margin: 0 16px; }
 .dlg-card button[aria-disabled="true"] { opacity: .6; cursor: default; }

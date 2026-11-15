@@ -41,7 +41,7 @@
 .sh-check { position: absolute; top: 2px; left: 2px; display: grid; place-items: center; width: 40px; height: 40px; min-height: 0; padding: 0; opacity: 0; transition: opacity .12s; }
 .sh-check:not(:disabled):hover { background: none; }
 .sh-check span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 2px solid #fff; background: rgb(0 0 0 / .25); color: transparent; box-shadow: 0 1px 3px rgb(0 0 0 / .3); }
-.sh-check[aria-pressed="true"] span { border-color: var(--accent); background: var(--accent); color: #fff; }
+.sh-check[aria-pressed="true"] span { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--accent-text); }
 .share.wide .sh-grid li:hover .sh-check, .sh-check:focus-visible, .share.selecting .sh-check { opacity: 1; }
 .share.narrow:not(.selecting) .sh-check { pointer-events: none; }
 

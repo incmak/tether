@@ -60,7 +60,7 @@ a.fx-tb:hover { background: var(--hover); }
 .fx-tb-quiet { border-color: transparent; background: none; color: var(--muted); }
 .fx-tb-time { color: var(--attention); font-variant-numeric: tabular-nums; }
 .fx-tb-wide { width: 100%; }
-.fx-tb-primary { border-color: var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 600; }
+.fx-tb-primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
 .fx-tb-primary:not(:disabled):hover { background: var(--accent-hover); }
 .fx-tb-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .fx-toolbar .fx-tb-primary { max-width: 260px; }

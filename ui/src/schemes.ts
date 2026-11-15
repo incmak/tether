@@ -1,5 +1,6 @@
 // App color schemes. Each has a light and a dark set of the tokens in index.css; the Theme setting picks which set shows.
 // "claude" is the built-in palette in index.css, so it adds no style.
+import { accentFill } from './tones'
 
 type Tokens = { bg: string; sidebar: string; surface: string; bubble: string; text: string; muted: string; line: string; hover: string; accent: string; accentText: string; attention?: string; error?: string }
 export interface Scheme { id: string; name: string; light: Tokens; dark: Tokens }
@@ -25,10 +26,13 @@ export const SCHEMES: Scheme[] = [
 export const DEFAULT_SCHEME = 'claude'
 export const schemeById = (id: string | undefined) => SCHEMES.find(scheme => scheme.id === id) ?? SCHEMES[0]
 
+/** The fill of filled controls: see tones.ts. index.css holds the same value for "claude". */
+export const tones = (tokens: Tokens) => `--accent-fill:${accentFill(tokens.accent, tokens.accentText)};`
+
 const LIGHT_EXTRA = { attention: '#8c6b22', error: '#a43b31' }, DARK_EXTRA = { attention: '#d9b761', error: '#f09888' }
 const block = (tokens: Tokens, extra: { attention: string; error: string }) => {
   const all = { ...extra, ...tokens }
-  return `color:${all.text};background:${all.bg};--bg:${all.bg};--sidebar:${all.sidebar};--surface:${all.surface};--bubble:${all.bubble};--text:${all.text};--muted:${all.muted};--line:${all.line};--hover:${all.hover};--accent:${all.accent};--accent-text:${all.accentText};--attention:${all.attention};--error:${all.error};`
+  return `color:${all.text};background:${all.bg};--bg:${all.bg};--sidebar:${all.sidebar};--surface:${all.surface};--bubble:${all.bubble};--text:${all.text};--muted:${all.muted};--line:${all.line};--hover:${all.hover};--accent:${all.accent};--accent-text:${all.accentText};${tones(all)}--attention:${all.attention};--error:${all.error};`
 }
 
 /** Apply a scheme: one style tag after the app CSS, with the same selectors as index.css. Also sets the browser bar color. */

@@ -52,7 +52,7 @@
 .side-pin-reply-field:focus-within { border-color: var(--pin); }
 .side-pin-reply-field textarea { flex: 1; min-width: 0; border: 0; background: none; color: var(--text); font-size: 13px; line-height: 20px; resize: none; padding: 6px 0; max-height: 92px; }
 .side-pin-reply-field textarea:focus-visible { outline: none; }
-.side-pin-send { width: var(--control); height: var(--control); min-height: var(--control); border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--accent-text); flex: none; }
+.side-pin-send { width: var(--control); height: var(--control); min-height: var(--control); border-radius: 50%; display: grid; place-items: center; background: var(--accent-fill); color: var(--accent-text); flex: none; }
 .side-pin-quick-foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .side-pin-quick-foot button { flex: none; min-height: var(--control-sm); padding: 4px 2px; background: none; border: 0; color: var(--pin); font-size: 12px; font-weight: 500; }
 .side-pin-quick .side-pin-reply-error { margin-top: 8px; color: var(--error); }

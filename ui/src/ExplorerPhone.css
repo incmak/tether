@@ -71,7 +71,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-empty { margin: 0; padding: 40px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
 .xp-empty-actions { display: flex; gap: 10px; justify-content: center; margin-top: 14px; }
 .xp-empty-actions .secondary { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
-.xp-fab { position: absolute; right: max(18px, env(safe-area-inset-right)); bottom: 18px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 50%; background: var(--accent); color: var(--accent-text); box-shadow: 0 2px 8px #0003; }
+.xp-fab { position: absolute; right: max(18px, env(safe-area-inset-right)); bottom: 18px; z-index: 2; display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 50%; background: var(--accent-fill); color: var(--accent-text); box-shadow: 0 2px 8px #0003; }
 .xp-fab:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 
 /* Select mode: the action bar covers the tab bar. */
@@ -137,7 +137,7 @@ p.xp-preview-foot { font-size: 13px; }
 /* The global button rule gives 44px and a hover fill. Chips are 32px (44px tap area above), and touch screens keep
    no sticky hover fill after a tap. */
 .xp-chip { min-height: var(--control-sm); }
-.xp .xp-fab:not(:disabled):hover { background-color: var(--accent); }
+.xp .xp-fab:not(:disabled):hover { background-color: var(--accent-fill); }
 @media (hover: none) {
   :is(.xp, .xp-picker) button:not(.primary, .xp-fab):hover, .phone-tabbar button:hover, .xp-actionbar button:hover { background-color: transparent; }
 }

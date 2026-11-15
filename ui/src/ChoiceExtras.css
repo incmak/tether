@@ -12,7 +12,7 @@
 .choice-item-text small { color: var(--muted); font-size: 12.5px; font-weight: 400; }
 .choice-box { flex: none; display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border: 1.5px solid var(--muted); border-radius: var(--radius-sm); color: var(--accent-text); }
 .choice-box.single { border-radius: 50%; }
-.choice-box.on { border-color: var(--accent); background: var(--accent); }
+.choice-box.on { border-color: var(--accent-fill); background: var(--accent-fill); }
 .choice-options .choice-box { margin-top: 4px; }
 
 .ask-form { display: flex; flex-direction: column; gap: 14px; max-height: 60vh; overflow: auto; overscroll-behavior: contain; margin: 0 16px 10px; }
@@ -35,7 +35,7 @@
 .ask-form-time { margin: 0; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .ask-form-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .ask-form-actions button { min-height: var(--control-lg); padding: 0 16px; border: 1px solid var(--line); border-radius: var(--radius); background: none; color: var(--text); font-size: 14px; }
-.ask-form-actions button.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-text); font-weight: 500; }
+.ask-form-actions button.primary { border-color: var(--accent-fill); background: var(--accent-fill); color: var(--accent-text); font-weight: 500; }
 .ask-form-actions button:disabled { opacity: .5; }
 .ask-form-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .picker-card .choice-meta { margin: 0 0 8px; }
