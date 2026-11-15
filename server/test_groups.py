@@ -120,7 +120,9 @@ class RenderTests(Bundles):
     GPID = 'b1b2b3b4b5b6'
 
     def test_group_part_comes_after_the_session_part_and_names_its_notes_folder(self):
-        projects.set_instructions(PID, 'Use pnpm.', 0)
+        # The rendered text holds CLI paths of this checkout; the largest budget keeps a long worktree path from cutting the notes.
+        projects.set_budget(PID, projects.BUDGET_MAX, 0)
+        projects.set_instructions(PID, 'Use pnpm.', 1)
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         projects.set_instructions(self.GPID, 'Only touch the dashboard.', 0)
         projects.write_note(self.GPID, 'chart.md', '# Chart\nUse the bar chart.')
