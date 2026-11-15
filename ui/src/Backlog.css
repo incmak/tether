@@ -134,7 +134,7 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 .backlog-filters { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .sm-trigger.backlog-filter { width: auto; max-width: 180px; min-height: 34px; padding: 0 8px 0 10px; border-radius: var(--radius); font-size: 13px; }
 .sm-trigger.backlog-filter > svg:first-child { color: var(--muted); }
-.backlog mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; }
+.backlog mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text); }
 .backlog-row.fixed { grid-template-columns: 18px minmax(0, 1fr) auto; }
 .backlog-status .link-button { font-size: 12px; }
 .backlog-empty .secondary { margin-top: 6px; }

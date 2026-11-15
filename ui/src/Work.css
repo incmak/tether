@@ -24,7 +24,7 @@
 .work-card-body { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px 8px; }
 .work-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .work-id { flex: none; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
-.work-sheet mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: inherit; }
+.work-sheet mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text); }
 .work-title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .work-q { margin: 2px 0 0; padding: 8px 10px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 9%, var(--surface)); font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .work-card .inbox-actions { padding: 0 12px 10px; }

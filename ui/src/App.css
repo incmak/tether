@@ -874,7 +874,7 @@ button.live-chip:active { background: var(--line); }
 .search-results button { display: grid; gap: 3px; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line); padding: 11px 2px; color: var(--text); font: inherit; font-size: 14px; line-height: 1.45; }
 .search-results button:disabled { opacity: .55; }
 .search-results small { color: var(--muted); font-size: 12px; }
-.search-results mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: inherit; border-radius: var(--radius-xs); padding: 0 1px; }
+.search-results mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); border-radius: var(--radius-xs); padding: 0 1px; }
 .search-hit { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--radius-lg); transition: outline-color .6s; }
 @media (prefers-reduced-motion: reduce) { .search-hit { transition: none; } }
 
@@ -1370,7 +1370,7 @@ button.live-chip:active { background: var(--line); }
 .command-row.active .command-icon { color: var(--text); }
 .command-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .command-row.done .command-label { color: var(--muted); text-decoration: line-through; }
-.command-label mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; }
+.command-label mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 28%, transparent); color: var(--text); }
 .command-hint { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); }
 .command-type { flex: none; min-width: 4.6em; color: var(--muted); font-size: 12px; text-align: end; }
 .command-empty, .command-note { margin: 16px 10px; color: var(--muted); font-size: 14px; }

@@ -23,10 +23,11 @@ const card = (n, stage, extra = {}) => ({
   rank: n, stage, source: 'claude · chat a', doing: stage === 'building' ? 'Mak' : null, done: stage === 'done' ? 'in 1234abc' : null,
   doneAt: stage === 'done' ? NOW - 3600 : null, details: ['why it matters'], version: 1000 + n, ...extra,
 })
-const board = (error, bare) => ({
+const item = (id, title, stage) => ({ id, project: 'shop', title, stage, qa: false, ask: null, askFrom: null, refs: [], tabs: [], history: [], source: '', created: NOW, updated: NOW, doneAt: null, jira: null, version: 3 })
+const board = (error, bare, hold) => ({
   revision: 1, stages: [], jira: { connected: false }, feeds: {},
   projects: bare ? [] : [{ name: 'shop', prefix: 'T', folder: '', triage: '', work: '', feeds: [], jira: '', qaStatus: '', jiraUser: '' }],
-  items: bare ? [] : [{ id: 'T-001', project: 'shop', title: 'Login fails', stage: 'ready', qa: false, ask: null, askFrom: null, refs: [], tabs: [], history: [], source: '', created: NOW, updated: NOW, doneAt: null, jira: null, version: 3 }],
+  items: bare ? [] : [item('T-001', 'Login fails', 'ready'), ...(hold ? [item('T-002', 'Login times out', 'hold')] : [])],
   backlog: error ? { items: [], error } : { items: [...Array.from({ length: 12 }, (_, i) => card(i + 1, 'ready')), card(20, 'building'), card(21, 'done'), card(22, 'done', { doneAt: NOW - 8 * 86400 })], error: '' },
 })
 const types = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.webmanifest': 'application/manifest+json' }
@@ -48,7 +49,7 @@ async function open(browser, viewport, options = {}) {
       }
       gets.push(name)
       if (name === 'work/board') {
-        const json = board(options.error, options.bare)
+        const json = board(options.error, options.bare, options.hold)
         // vanish: after the first move, B1 leaves the backlog (moved to DONE.md, or deleted)
         if (options.vanish && posts.length) json.backlog.items = json.backlog.items.filter(entry => entry.id !== 'B1')
         return route.fulfill({ json })
@@ -166,6 +167,19 @@ async function main() {
       await page.keyboard.press('Escape')
       await drawer.waitFor({ state: 'detached' })
       assert.equal(await page.locator('[data-item="T-001"]').evaluate(el => el === document.activeElement), true, 'focus goes to the card')
+      assert.deepEqual(errors, [])
+      await context.close()
+    })
+    await check('⌘K board search shows every counted item, on hold too', async () => {
+      const { context, page, errors } = await open(browser, { width: 1280, height: 900 }, { home: true, hold: true })
+      await page.waitForResponse(response => response.url().endsWith('/work/board'))
+      await page.keyboard.press('Control+k')
+      const menu = page.locator('dialog.command-menu')
+      await menu.getByRole('combobox').fill('login')
+      await menu.getByRole('option', { name: /Login times out/ }).waitFor()
+      await menu.getByRole('option', { name: 'Search the work board for “login”' }).click()
+      await page.locator('[data-item="T-002"]').waitFor()
+      assert.deepEqual(await page.locator('[data-item]').evaluateAll(els => els.map(el => el.dataset.item).sort()), ['T-001', 'T-002'], 'both matches show')
       assert.deepEqual(errors, [])
       await context.close()
     })

@@ -74,7 +74,8 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   const now = useNow()
   const [view, setView] = useState<WorkView>(() => start ?? (decisions(board).length ? 'needs' : 'board'))
   const [chosen, setProject] = useState('all')
-  const [showHold, setShowHold] = useState(() => !!find?.item && board?.items.find(item => item.id === find.item)?.stage === 'hold')
+  // A search from ⌘K shows every item it counted, the ones on hold too.
+  const [showHold, setShowHold] = useState(() => !!find && !!board?.items.some(item => item.stage === 'hold' && (item.id === find.item || (!find.item && workScore(item, searchWords(find.query)) !== null))))
   const [openId, setOpenId] = useState<string | null>(null)
   // Columns that show every backlog card, not only the first BACKLOG_CAP.
   const [expanded, setExpanded] = useState<Stage[]>([])
