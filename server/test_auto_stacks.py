@@ -81,6 +81,16 @@ class TabNameTests(unittest.TestCase):  # rule 5
         self.assertIn('Header Swipe', run.call_args_list[0].args[0])
 
 
+class RootTests(unittest.TestCase):  # rule 1, any depth
+    def test_a_long_chain_reaches_the_main_session(self):
+        records = {f'%{n}': {'owner_pane': f'%{n - 1}', 'sent_at': 1.0} for n in range(2, 20)}
+        with mock.patch.object(auto_stacks.helper_tabs, 'load', lambda pane, run: (True, records.get(pane))):
+            self.assertEqual(auto_stacks.root_of('%19', lambda pane: None, None), '%1')
+        records['%1'] = {'owner_pane': '%19', 'sent_at': 1.0}  # a loop stops
+        with mock.patch.object(auto_stacks.helper_tabs, 'load', lambda pane, run: (True, records.get(pane))):
+            self.assertEqual(auto_stacks.root_of('%19', lambda pane: None, None), '%1')
+
+
 class WatchTests(unittest.TestCase):  # rule 6, the timer
     def test_sweeps_unless_auto_resume_restores(self):
         calls, slept = [], []

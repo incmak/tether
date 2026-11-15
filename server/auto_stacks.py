@@ -35,7 +35,6 @@ FALLBACK_GOAL = 'Work'
 FALLBACK_TASK = 'Task'
 NAME_BY = '@chat_name_by'  # "user" after the user named the tab in Tether (server.py pane-name)
 ROLE_WORDS = {'advisor': 'advisor', 'second-advisor': 'advisor 2'}
-ROOT_DEPTH = 16
 SWEEP_EVERY = 30
 
 
@@ -152,7 +151,7 @@ def root_of(pane, thread_of, run=subprocess.run):
     gives the root, but only if that record has root_thread and the root does not hold another conversation.
     Returns a pane id. It may be a closed tab when the root has closed."""
     current, seen, stored = pane, {pane}, None
-    for _ in range(ROOT_DEPTH):
+    while True:  # any depth: each step visits a new pane, and a loop stops at a pane seen before
         exists, record = helper_tabs.load(current, run)
         if not exists:
             return stored or current  # a closed tab in the chain
@@ -168,7 +167,6 @@ def root_of(pane, thread_of, run=subprocess.run):
             stored = root
         seen.add(owner)
         current = owner
-    return current
 
 
 def named_by_user(pane, run=subprocess.run):

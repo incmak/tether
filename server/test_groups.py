@@ -646,10 +646,12 @@ class TmuxTests(Bundles):
                                                 'thread': '11111111-1111-4111-8111-111111111111'}])
         result = cleanup.plan(snap, {keep['id'], drop['id']})
         self.assertTrue(result['moves'])
-        changed = {self.a1: '22222222-2222-4222-8222-222222222222'}.get  # the root now holds another chat
-        self.assertTrue(cleanup.apply(result, run, changed))
-        self.assertEqual([self.label(p) for p in (self.a1, self.a2, third)], ['', keep['id'], drop['id']])
-        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Helpers', 'Other'], 'no rename, no drop')
+        for now in ({self.a1: '22222222-2222-4222-8222-222222222222'}.get, lambda pane: None):  # another chat; a shell
+            self.assertTrue(cleanup.apply(result, run, now))
+            self.assertEqual([self.label(p) for p in (self.a1, self.a2, third)], ['', keep['id'], drop['id']])
+            found = groups.read(self.a, run)
+            self.assertEqual([g['name'] for g in found], ['Helpers', 'Other'], 'no rename, no drop')
+            self.assertFalse([g for g in found if 'root' in g], 'no root marker for a family left in place')
 
     def test_cleanup_apply_copies_no_notes_from_a_stack_the_user_took(self):  # review round 2, finding 3
         run = self.run_tmux

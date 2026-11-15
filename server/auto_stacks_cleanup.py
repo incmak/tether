@@ -227,8 +227,7 @@ def _live_roots(result, thread_of, run):
                 continue
         except groups.GroupError:
             continue  # closed
-        now = thread_of(root)
-        if not (thread and now and now != thread):
+        if not thread or thread_of(root) == thread:  # a pane that shows no conversation now (a shell) is no match
             live.add(root)
     return live
 
@@ -247,7 +246,7 @@ def apply(result, run=subprocess.run, thread_of=lambda pane: None):
         for group in current:
             if group['id'] in result['mark_auto'] and group.get('by') != 'user':
                 group['auto'] = True
-            if group.get('auto') and result.get('roots', {}).get(group['id']):
+            if group.get('auto') and result.get('roots', {}).get(group['id']) in live:
                 group['root'] = result['roots'][group['id']]
         groups.write(session_id, current, run)
         ours = {g['id'] for g in groups.read(session_id, run) if g.get('auto')}
@@ -262,6 +261,9 @@ def apply(result, run=subprocess.run, thread_of=lambda pane: None):
         for note in result['notes']:
             target = by_id.get(ids.get(note['to'], note['to']))
             source = by_id.get(note['from'])
+            family = result.get('roots', {}).get(note['to'])
+            if family is not None and family not in live:
+                continue  # its family stays where it is
             if source and target and source['project'] and source['id'] in ours and target['id'] in ours:
                 pid = target['project'] or groups.context(session_id, target['id'], run)
                 slug = ''.join(c if c.isalnum() else '-' for c in source['name'].lower()).strip('-') or 'stack'
