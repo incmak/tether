@@ -99,7 +99,9 @@ export interface Needs { kind: 'approval' | 'plan' | 'question'; text: string }
 // since and snoozed_until are Unix seconds. next is the reply's "Next:" line or the prompt's question.
 export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean }
 // images: how many images the tool result holds (Claude's Read of a screenshot). GET tool-image serves them.
-export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string }
+// artifact: a page Claude published with its Artifact tool. url: the claude.ai link; path: the local HTML file it came from.
+export interface ToolArtifact { url: string; path: string; title: string }
+export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
 export interface ChatMessage {
   id: string

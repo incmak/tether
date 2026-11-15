@@ -17,7 +17,7 @@ export function FilesPanel({ api, pane, folder, active }: PanelProps) {
   const [failed, setFailed] = useState<Record<string, string>>({})
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const [focus, setFocus] = useState('')
-  const [open, viewers] = useFileOpener(pane)
+  const [open, viewers] = useFileOpener(pane, api)
   const tree = useRef<HTMLUListElement>(null)
   const wanted = useRef(expanded)
   useEffect(() => { wanted.current = expanded }, [expanded])

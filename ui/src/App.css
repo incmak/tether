@@ -906,6 +906,16 @@ button.live-chip:active { background: var(--line); }
 .sent-image-gone { display: flex; flex-direction: column; justify-content: center; gap: 4px; width: 132px; height: 96px; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--muted); font-size: 12px; }
 .sent-image-gone span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-images button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius); }
+.tool-artifacts { display: grid; gap: 6px; list-style: none; margin: 4px 0 0; padding: 0; max-width: 560px; }
+.tool-artifacts li { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.tool-artifacts .artifact-main { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; min-height: 48px; padding: 6px 4px 6px 12px; color: inherit; text-align: left; background: none; border: 0; border-radius: var(--radius); }
+.tool-artifacts .artifact-main > svg { flex: none; color: var(--accent); }
+.tool-artifacts .artifact-main > span { display: grid; min-width: 0; }
+.tool-artifacts bdi { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.tool-artifacts small { color: var(--muted); font-size: 12px; }
+.tool-artifacts .icon-button { flex: none; margin-right: 2px; }
+.tool-artifacts .artifact-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (hover: hover) { .tool-artifacts button.artifact-main:hover { background: var(--hover); } }
 .tool-toggle { display: flex; align-items: center; gap: 8px; min-height: var(--control-lg); max-width: 100%; padding: 6px 5px; border-radius: var(--radius-sm); color: inherit; text-align: left; font-size: inherit; }
 .tool-toggle > svg { flex-shrink: 0; }
 .tool-toggle > span { min-width: 0; }

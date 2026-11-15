@@ -1,10 +1,11 @@
 import { RetryButton } from './Retry'
 import { Loading } from './Skeleton'
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import { Bot, ChevronRight, CircleAlert, Code2, Eye, Globe, ListTodo, LoaderCircle, Search, SquarePen, Terminal, Wrench } from 'lucide-react'
+import { useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { AppWindow, Bot, ChevronRight, CircleAlert, Code2, ExternalLink, Eye, Globe, ListTodo, LoaderCircle, Search, SquarePen, Terminal, Wrench } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, ToolSummary, ToolDetail } from './api'
 import { ImageViewer } from './ImageViewer'
+import { PreviewOpener } from './preview'
 import { Elapsed, formatElapsed } from './Notices'
 import { groupSeconds, liveTail, slowestStep, toolHeadline, toolKind, toolSeconds } from './toolSummary'
 
@@ -86,6 +87,19 @@ function ToolImages({ tools, session }: { tools: ToolSummary[]; session: string 
   </>
 }
 
+// Pages Claude published as artifacts in this group. They stay in view when the group folds: they are what the work made.
+function ToolArtifacts({ tools }: { tools: ToolSummary[] }) {
+  const preview = useContext(PreviewOpener)
+  const pages = [...new Map(tools.flatMap(tool => tool.artifact ? [[tool.artifact.url, tool.artifact] as const] : [])).values()]
+  if (!pages.length) return null
+  return <ul className="tool-artifacts" aria-label="Artifacts">{pages.map(page => <li key={page.url}>
+    {preview ? <button type="button" className="artifact-main" onClick={() => preview.open({ path: page.path, title: page.title, remote: page.url })}>
+      <AppWindow size={18} aria-hidden="true" /><span><bdi>{page.title}</bdi><small>Claude artifact · Preview</small></span>
+    </button> : <span className="artifact-main"><AppWindow size={18} aria-hidden="true" /><span><bdi>{page.title}</bdi><small>Claude artifact</small></span></span>}
+    <a className="icon-button" href={page.url} target="_blank" rel="noreferrer" aria-label={`Open ${page.title} on claude.ai`} title="Open on claude.ai"><ExternalLink size={16} /></a>
+  </li>)}</ul>
+}
+
 const LIVE_STEPS = 4
 
 // A folded group says what the agent did and how long it took. The newest group of a running turn stays open with its
@@ -116,5 +130,6 @@ export function ToolGroup({ id, text, count, tools, api, session, live = false, 
       {steps.length > 0 && <ul className="tool-list">{steps.map((tool, index) => <ToolRow key={`${tool.id}:${index + offset}`} tool={tool} api={api} session={session} live={live} onOpen={() => setChoice(true)} />)}</ul>}
     </> : <pre tabIndex={0}>{text}</pre>}</div>}
     {tools && <ToolImages tools={tools} session={session} />}
+    {tools && <ToolArtifacts tools={tools} />}
   </div>
 }
