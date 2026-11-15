@@ -44,7 +44,8 @@ async function main() {
       document.getElementById('sub-open').addEventListener('click', () => document.getElementById('sub').showPopover())
       document.getElementById('bash').addEventListener('click', () => document.getElementById('sub').hidePopover())
       window.gen = ''
-      window.stop = window.usage.startUsageLog(events => window.sent.push(...events), () => true, () => window.gen)
+      window.asks = 0
+      window.stop = window.usage.startUsageLog(events => { if (events.length) window.sent.push(...events); else window.asks++ }, () => true, () => window.gen)
     })
     const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
     const events = () => page.evaluate(() => window.sent)
@@ -52,6 +53,9 @@ async function main() {
     await page.waitForTimeout(2600)
     await flush()
     check('nothing is logged before the generation is known', (await events()).length === 0, JSON.stringify(await events()))
+    // The first answers never came (offline): the log keeps asking, with backoff.
+    const asks = await page.evaluate(() => window.asks)
+    check('the log asks again for the generation', asks >= 2 && asks <= 3, String(asks))
     await page.evaluate(() => { window.gen = '1' })
     await page.waitForTimeout(1600)
     await flush()

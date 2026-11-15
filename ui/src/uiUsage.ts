@@ -114,7 +114,8 @@ export function openLayers() {
 }
 
 /** gen: the log generation the page knows now, '' before the first answer. Nothing is logged without one, so an event
- * never carries a generation newer than the log it happened in. */
+ * never carries a generation newer than the log it happened in. Until it is known, the log sends an empty batch to ask
+ * for it, again after 1 s, 2 s, 4 s ... up to a minute, until an answer comes. */
 export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => boolean, gen: () => string): () => void {
   const queue: UsageEvent[] = []
   let visit = ''
@@ -130,6 +131,8 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   let idle: number | undefined
   let hiddenAt = 0
   let stopped = false
+  let askAt = 0
+  let askWait = 1000
 
   const newVisit = () => {
     visit = Math.random().toString(36).slice(2, 12)
@@ -176,7 +179,12 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   const scan = () => {
     scanTimer = idle = undefined
     if (stopped || document.visibilityState !== 'visible') return
-    if (!gen()) { later(1000); return }  // wait for the generation, or the seen controls would be marked but not sent
+    if (!gen()) {  // wait for the generation, or the seen controls would be marked but not sent
+      if (Date.now() >= askAt) { send([]); askAt = Date.now() + askWait; askWait = Math.min(askWait * 2, 60_000) }
+      later(1000)
+      return
+    }
+    askWait = 1000
     sync()
     rowTexts = new WeakMap()
     const top = stack[stack.length - 1]
@@ -235,7 +243,7 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
 
   newVisit()
   lastInput = Date.now()
-  later(2000)
+  later(gen() ? 2000 : 0)
   const timer = setInterval(flush, SEND_EVERY)
   document.addEventListener('click', onClick, { capture: true, passive: true })
   document.addEventListener('keydown', onKey, { capture: true, passive: true })
@@ -280,7 +288,6 @@ export function useUsageLog(on: boolean) {
   useEffect(() => {
     if (!on) return
     const media = window.matchMedia(WORKSPACE_QUERY)
-    if (!generation) post([])  // ask for the generation; the log starts once it is known
     return startUsageLog(post, () => media.matches, () => generation)
   }, [on])
 }
