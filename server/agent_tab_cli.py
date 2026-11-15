@@ -54,7 +54,9 @@ def arguments(argv):
     send.add_argument('--pane', required=True)
     send.add_argument('text')
     close = actions.add_parser('close')
-    close.add_argument('--pane', required=True)
+    which = close.add_mutually_exclusive_group(required=True)
+    which.add_argument('--pane')
+    which.add_argument('--self', action='store_true', help='close this tab after its reply ends; only when the user asks')
     wait = actions.add_parser('wait')
     wait.add_argument('--pane', required=True)
     wait.add_argument('--timeout', type=int, default=600)
@@ -80,7 +82,7 @@ def arguments(argv):
             parser.error('a message is required')
         body.update(pane=args.pane, message=message)
     elif args.action == 'close':
-        body['pane'] = args.pane
+        body.update({'self': True} if args.self else {'pane': args.pane})
     elif args.action == 'wait':
         if not 1 <= args.timeout <= 600:
             parser.error('timeout must be 1 to 600 seconds')

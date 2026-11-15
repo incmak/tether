@@ -1,4 +1,4 @@
-// One search for the sidebar and the ⌘K / ⌥Space menu: the same words find the same tabs in both.
+// One search for the sidebar, the ⌘K / ⌥Space menu and the backlog: the same words find the same things everywhere.
 // Every word of the query must match a field, in any order. A word matches, best first:
 //   at the start of the text (5), at the start of a word (4), inside a word (3),
 //   as initials ("vml" → Voice mode latency) (3), as close letters from a word start ("bklg" → backlog) (2),
@@ -6,7 +6,8 @@
 // A field has a weight: a name counts double, so a title match ranks above a folder match.
 // Build the fields once per data change (field()); each keystroke only scores them.
 
-export interface Field { text: string; tokens: string[]; initials: string; weight: number; letters: number }
+/** fuzzy false: whole substrings only, for long free text (backlog details) where loose letters would match noise. */
+export interface Field { text: string; tokens: string[]; initials: string; weight: number; letters: number; fuzzy: boolean }
 export interface SearchTab { id: string; fields: Field[] }
 /** A session and its tabs. A word can match the session and the next word a tab: "tether voice". */
 export interface SearchEntry { id: string; fields: Field[]; tabs: SearchTab[] }
@@ -38,7 +39,13 @@ export const searchWords = (query: string) => query.toLowerCase().split(/\s+/).f
 export function field(weight: number, ...parts: (string | null | undefined)[]): Field {
   const text = parts.filter(Boolean).join(' ').toLowerCase()
   const tokens = text.split(SPLIT).filter(Boolean)
-  return { text, tokens, initials: tokens.map(token => token[0]).join(''), weight, letters: letterBits(text) }
+  return { text, tokens, initials: tokens.map(token => token[0]).join(''), weight, letters: letterBits(text), fuzzy: true }
+}
+
+/** A field for long free text: it matches whole substrings only, never initials, close letters or typos. */
+export function exactField(weight: number, ...parts: (string | null | undefined)[]): Field {
+  const text = parts.filter(Boolean).join(' \n ').toLowerCase()
+  return { text, tokens: [], initials: '', weight, letters: 0, fuzzy: false }
 }
 
 // The letters of the word in order, starting at a word start, within a short span: no letters scattered over a long path.
@@ -89,7 +96,7 @@ export function wordScore(f: Field, word: string): number | null {
     for (let next = at; next > 0; next = f.text.indexOf(word, next + 1)) if (BOUNDARY.test(f.text[next - 1])) return 4
     return 3
   }
-  if (word.length < 2) return null
+  if (!f.fuzzy || word.length < 2) return null
   const missing = bitCount(letterBits(word) & ~f.letters)
   if (missing > 1 || (missing === 1 && word.length < 4)) return null
   if (f.initials.startsWith(word) || (word.length >= 3 && f.initials.includes(word))) return 3

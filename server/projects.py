@@ -396,7 +396,8 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  '`wait --pane %N [--timeout SECONDS]` (max 600) prints its new reply as JSON. '
                  'Exit: 0 finished, 3 timeout (still working), 4 gone, 5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost). '
                  'When a tab you started or review is done, save a note in notes/ (what it did, outcome, findings), '
-                 'then run `close --pane %N`. Busy tabs stay open.\n')
+                 'then run `close --pane %N`. Busy tabs stay open. '
+                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply).\n')
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
     parts.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '

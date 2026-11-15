@@ -226,6 +226,12 @@ label.broadcast-row:hover { background: var(--hover); }
 .archived-tab-open { display: flex; flex: 1; min-width: 0; align-items: center; gap: 10px; min-height: var(--control); padding: 0 10px; border-radius: var(--radius); font-size: 13px; color: var(--muted); text-align: left; }
 .archived-tab-open:hover { background: var(--hover); }
 .archived-tab-restore { flex: none; color: var(--muted); }
+/* A session with stacks: each stack heading, then its tabs one step in (as in the chat header's stack row). */
+.pane-children .pane-stack-head { gap: 8px; min-height: 28px; margin-top: 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.pane-children .pane-stack-head.current { color: var(--text); }
+.pane-children .pane-stack-head .group-count { margin-left: auto; font-weight: 400; font-variant-numeric: tabular-nums; }
+.pane-stack-tabs { list-style: none; margin: 0; padding: 0; }
+.pane-stack-tabs button { padding-left: 38px; }
 .pane-child-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .state-slot { display: flex; align-items: center; justify-content: center; width: 8px; height: 8px; flex: none; }
 .session-list .state-dot { width: 8px; height: 8px; border-width: 1.5px; }

@@ -3024,6 +3024,9 @@ if __name__ == '__main__':
     import pane_view
     import detection_rules
     detection_rules.save_last_good()
+    container = browser_container.default('test')
+    if container is not None:
+        browser.BROWSER.use_container(container)
     atexit.register(browser.stop_all)
     pane_view.zoom_repair_all()
     paths.SCOPE_TMUX = bool(os.environ.get('INVOCATION_ID'))

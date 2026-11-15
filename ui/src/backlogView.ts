@@ -1,6 +1,8 @@
 // What the backlog shows: search, status, project, who added it, and the order. The file order stays the saved order;
 // a sort only changes what is shown, so drag-to-reorder works only in the file order with nothing filtered out.
 import type { Item, Note, Row } from './backlogItems'
+import { exactField, field, scoreWords, searchWords, wordScore } from './search'
+import type { Field } from './search'
 
 export type StatusFilter = 'open' | 'doing' | 'done' | 'all'
 export type SortKey = 'manual' | 'newest' | 'oldest' | 'az'
@@ -14,26 +16,44 @@ export const SORT_LABELS: Record<SortKey, string> = { manual: 'Manual order', ne
 export const WHO_LABELS: Record<Who, string> = { any: 'Anyone', me: 'Me', claude: 'Claude', codex: 'Codex' }
 
 const number = (item: Item) => Number(item.ref?.slice(1) ?? 0)
-const words = (query: string) => query.toLowerCase().split(/\s+/).filter(Boolean)
 
-/** All the text a search reads: title, ID, details, status and who added it. */
-export const searchText = (item: Item, project = '') => [item.text, item.ref, project, item.source?.agent, item.status?.text, item.status?.kind === 'doing' ? 'doing in progress' : '', ...item.details.map(detail => detail.text)]
-  .filter(Boolean).join(' \n ').toLowerCase()
+// The search fields of an item, made once per item and project: each keystroke only scores them.
+// Title and ID count double. Project, who added it and status match fuzzy too. Details match whole words only.
+const fieldCache = new WeakMap<Item, { project: string; fields: Field[] }>()
+function itemFields(item: Item, project: string) {
+  const cached = fieldCache.get(item)
+  if (cached && cached.project === project) return cached.fields
+  const fields = [
+    field(2, item.text, item.ref),
+    field(1, project, item.source?.agent, item.status?.text, item.status?.kind === 'doing' ? 'doing in progress' : ''),
+    exactField(1, ...item.details.map(detail => detail.text)),
+  ]
+  fieldCache.set(item, { project, fields })
+  return fields
+}
+const isRef = (word: string) => /^b\d+$/.test(word)
 
-/** Every word of the query is in the item. An ID like "b12" matches that item only. */
-export function matchesQuery(item: Item, query: string, project = '') {
-  const parts = words(query)
-  if (!parts.length) return true
-  if (parts.length === 1 && /^b\d+$/.test(parts[0])) return item.ref?.toLowerCase() === parts[0]
-  const text = searchText(item, project)
-  return parts.every(part => text.includes(part))
+/**
+ * The search score of an item: the same matcher as the sidebar and ⌘K (search.ts). null: no match.
+ * Every word must match. An ID alone like "b12" matches that item only.
+ */
+export const queryScore = (item: Item, query: string, project = '') => wordsScore(item, searchWords(query), project)
+
+function wordsScore(item: Item, words: string[], project: string) {
+  if (!words.length) return 0
+  if (words.length === 1 && isRef(words[0])) return item.ref?.toLowerCase() === words[0] ? 10 : null
+  return scoreWords(itemFields(item, project), words)
 }
 
-/** A search score: a match in the title counts more than one in the details. null: no match. */
-export function queryScore(item: Item, query: string, project = '') {
-  if (!matchesQuery(item, query, project)) return null
-  const title = item.text.toLowerCase()
-  return words(query).reduce((score, part) => score + (title.startsWith(part) ? 4 : title.includes(part) ? 3 : 1), 0)
+export const matchesQuery = (item: Item, query: string, project = '') => queryScore(item, query, project) !== null
+
+/** True when a detail is why the item matches: a word that the title, ID, project and status do not match. Show the details then. */
+export function detailMatched(item: Item, query: string, project = '') {
+  // An ID alone matches the ID only. In a longer query an ID is a plain word and can match a note ("Blocked by B1234").
+  const words = searchWords(query)
+  if (!words.length || (words.length === 1 && isRef(words[0])) || !matchesQuery(item, query, project)) return false
+  const [title, meta, details] = itemFields(item, project)
+  return words.some(word => wordScore(title, word) === null && wordScore(meta, word) === null && wordScore(details, word) !== null)
 }
 
 export function matchesStatus(item: Item, status: StatusFilter) {
@@ -85,11 +105,21 @@ const compare: Record<Exclude<SortKey, 'manual'>, (a: Item, b: Item) => number> 
 /** The groups the list shows: filtered, then sorted inside each group. A group with nothing left is hidden. */
 export function viewGroups(rows: Row[], view: View, statusOverride?: StatusFilter): Group[] {
   const status = statusOverride ?? view.status
+  const words = searchWords(view.query)
   return projectGroups(rows)
     .filter(group => view.project === null || group.name === view.project)
     .map(group => {
-      const items = group.items.filter(item => matchesStatus(item, status) && matchesWho(item, view.who) && matchesQuery(item, view.query, group.name))
-      return { ...group, items: view.sort === 'manual' ? items : [...items].sort(compare[view.sort]) }
+      const scores = new Map<Item, number>()
+      for (const item of group.items) {
+        if (!matchesStatus(item, status) || !matchesWho(item, view.who)) continue
+        const score = wordsScore(item, words, group.name)
+        if (score !== null) scores.set(item, score)
+      }
+      const items = [...scores.keys()]
+      // A search in the saved order shows the best match first; a chosen sort keeps its order.
+      if (view.sort !== 'manual') items.sort(compare[view.sort])
+      else if (view.query.trim()) items.sort((a, b) => scores.get(b)! - scores.get(a)!)
+      return { ...group, items }
     })
     .filter(group => group.items.length)
 }
@@ -102,7 +132,7 @@ export const isFiltered = (view: View) => !!view.query.trim() || view.status !==
 
 /** The parts of a title that match the query, for highlighting. Returns [text, matched] pieces. */
 export function highlight(text: string, query: string): [string, boolean][] {
-  const parts = words(query).filter(part => !/^b\d+$/.test(part)).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const parts = searchWords(query).filter(part => !isRef(part)).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   if (!parts.length) return [[text, false]]
   // A split on a capturing pattern puts the matches at the odd places.
   return text.split(new RegExp(`(${parts.join('|')})`, 'i')).map((piece, at) => [piece, at % 2 === 1] as [string, boolean]).filter(([piece]) => piece)

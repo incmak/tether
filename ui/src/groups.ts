@@ -32,6 +32,21 @@ export function groupPanes(panes: Pane[], groups: GroupInfo[] | undefined, pane:
   return panes.filter(item => groupOf(item, groups) === id)
 }
 
+/**
+ * The scroll place of a sideways strip that shows one item fully, with `gap` px to spare. It moves the strip as little
+ * as it can: an item already in view keeps the strip still. An item wider than the strip shows from its start.
+ */
+export function revealLeft(scroll: number, view: number, total: number, start: number, width: number, gap = 12): number {
+  const most = Math.max(0, total - view)
+  let next = scroll
+  if (start + width + gap > next + view) next = start + width + gap - view
+  if (start - gap < next) next = start - gap
+  return Math.max(0, Math.min(most, next))
+}
+
+/** The scroll key of a strip that shows one stack of a session. */
+export function stripKey(session: string, group: string) { return `${session}/${group}` }
+
 /** The most urgent state of a set of tabs: needs you, then done, then working. */
 export function topState(panes: Pane[], seen: Record<string, number>, selected?: string): GroupState {
   if (panes.some(pane => needsYou(pane.state))) return 'needs'

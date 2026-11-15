@@ -14,7 +14,7 @@ import { BACKLOG_PATH, highestRef, markSeen, useBacklogNews } from './backlogNew
 import { agentTabs, itemPrompt, sendToTab, startTab } from './backlogSend'
 import { Bone } from './Skeleton'
 import { SelectMenu } from './SelectMenu'
-import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, highlight, isFiltered, matchesQuery, matchesStatus, matchesWho, projectCounts, projectGroups, viewGroups } from './backlogView'
+import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, detailMatched, highlight, isFiltered, matchesStatus, matchesWho, projectCounts, projectGroups, viewGroups } from './backlogView'
 import type { SortKey, StatusFilter, View, Who } from './backlogView'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Backlog.css'
@@ -113,7 +113,7 @@ interface RowActions {
 /** How the detail pane names an item across saves: its ID, which stays when the line changes. */
 const itemKey = (item: Item) => item.ref ?? item.id
 
-function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged, reorder, query, onOpen, selected }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean; reorder: boolean; query: string; onOpen?: (item: Item) => void; selected?: boolean }) {
+function ItemRow({ item, actions, links, sending, locked, editing, setEditing, typed: typedRef, drop, dragged, reorder, query, project, onOpen, selected }: { item: Item; actions: RowActions; links: Links; sending?: ReactNode; locked: boolean; editing: boolean; setEditing: (id: string | null) => void; typed: RefObject<string>; drop?: 'before' | 'after'; dragged: boolean; reorder: boolean; query: string; project: string; onOpen?: (item: Item) => void; selected?: boolean }) {
   const [wording, setWording] = useState(item.text)
   // Sub-steps stay in view. Notes (the why, the files, selected chat text) fold under the title until opened.
   const [showNotes, setShowNotes] = useState(false)
@@ -127,7 +127,7 @@ function ItemRow({ item, actions, links, sending, locked, editing, setEditing, t
     if (keep && wording.trim() && wording.trim() !== item.text) actions.onReword(item, wording)
   }
   // A search shows the details that matched, so the reason for a match is in view.
-  const matchedNote = !!query.trim() && notes.some(detail => matchesQuery({ ...item, text: '', ref: undefined, source: undefined, status: undefined, details: [detail] }, query))
+  const matchedNote = detailMatched(item, query, project)
   const notesOpen = showNotes || matchedNote
   const visible = notesOpen ? item.details : item.details.filter(detail => detail.done !== undefined)
   const title = highlight(item.text, query).map(([piece, hit], at) => hit ? <mark key={at}>{piece}</mark> : piece)
@@ -690,11 +690,13 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     const key = next.closest<HTMLElement>('[data-backlog-key]')?.dataset.backlogKey
     if (detailOpen && key && key !== selected) { setSendFor(null); setSelected(key) }
   }
+  // The project of each item, for the search fields (a project name matches its items).
+  const itemProject = new Map(view.query.trim() ? projectGroups(rows).flatMap(group => group.items.map(item => [item.id, group.name] as const)) : [])
   const showRow = (row: Item | Note) => row.kind === 'note'
     ? <NoteRow key={row.id} note={row} />
     : <ItemRow key={row.id} item={row} actions={actions} links={links} locked={locked}
         sending={sendFor === row.id && !row.done && !(detailOpen && itemKey(row) === selected) ? sendPanel(row) : undefined} editing={editingRow === row.id} setEditing={setEditingRow} typed={typedRow} dragged={drag?.item.id === row.id}
-        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} reorder={reorder} query={view.query}
+        drop={drag?.target === row.id && drag.item.id !== row.id ? (drag.after ? 'after' : 'before') : undefined} reorder={reorder} query={view.query} project={itemProject.get(row.id) ?? ''}
         onOpen={page ? openDetail : undefined} selected={detailOpen && itemKey(row) === selected} />
   const clearDone = () => {
     const blocks = done.map(row => blockOf(shown, row.raw, row.line)).filter(block => block !== null).sort((a, b) => a.line - b.line)

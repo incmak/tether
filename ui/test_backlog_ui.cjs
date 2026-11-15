@@ -86,7 +86,8 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
-    const titles = scope => scope.locator('.backlog-text-line').allInnerTexts()
+    // Loading bones reuse the row classes (Backlog.tsx BacklogBones); only loaded rows carry data-backlog-key.
+    const titles = scope => scope.locator('.backlog-row[data-backlog-key] .backlog-text-line').allInnerTexts()
 
     for (const [width, height] of [[1280, 860], [390, 844], [320, 640]]) {
       const at = `${width}px`
@@ -94,7 +95,7 @@ async function main() {
       if (width !== 1280) await page.evaluate(() => localStorage.removeItem('tether.backlogView'))
       await page.goto(`${origin}/chat/?go=backlog`, { waitUntil: 'load' })
       const sheet = page.locator('dialog.backlog-page')
-      await sheet.locator('.backlog-row').first().waitFor()
+      await sheet.locator('.backlog-row[data-backlog-key]').first().waitFor()
       check(`${at} ?go=backlog opens the page`, await sheet.isVisible())
       check(`${at} page fills the width`, (await sheet.boundingBox()).width >= Math.min(width - 48, 1440) - 1)
       check(`${at} plain list keeps the saved order`, JSON.stringify(await titles(sheet)) === JSON.stringify(['Write the release notes', 'Fix flaky share test', 'Add backlog search', 'Zebra item', 'alpha item']))
@@ -110,6 +111,8 @@ async function main() {
       await search.fill('flaky')
       check(`${at} title match is marked`, (await sheet.locator('mark').first().innerText()) === 'flaky')
       check(`${at} status says what is shown`, (await sheet.locator('.backlog-status').innerText()).startsWith('1 shown · 5 open'))
+      await search.fill('flkay shre')
+      check(`${at} typos find the item (the sidebar's matcher)`, JSON.stringify(await titles(sheet)) === JSON.stringify(['Fix flaky share test']))
       await search.press('Escape')
       check(`${at} Escape clears the search, the page stays`, (await search.inputValue()) === '' && await sheet.isVisible())
       await search.fill('nothing like this')
@@ -143,7 +146,7 @@ async function main() {
     await page.waitForTimeout(400)
     await page.keyboard.press('Alt+KeyB')
     const small = page.locator('dialog.backlog-sheet:not(.backlog-page)')
-    await small.locator('.backlog-row').first().waitFor()
+    await small.locator('.backlog-row[data-backlog-key]').first().waitFor()
     check('⌥B opens the sheet', await small.isVisible())
     check('the sheet keeps A to Z and Codex', JSON.stringify(await titles(small)) === JSON.stringify(['Fix flaky share test']))
     await small.getByRole('button', { name: 'Added by: Codex' }).click()
@@ -187,7 +190,7 @@ async function main() {
     await page.screenshot({ path: path.join(SHOTS, 'search-1280.png') })
     await page.keyboard.press('Enter')
     const found = page.locator('dialog.backlog-page')
-    await found.locator('.backlog-row').first().waitFor()
+    await found.locator('.backlog-row[data-backlog-key]').first().waitFor()
     check('Enter opens the item on the page, in Done too', JSON.stringify(await titles(found)) === JSON.stringify(['Ship gzip']) && (await found.getByRole('searchbox').inputValue()) === 'B5')
     await found.getByRole('textbox', { name: 'New backlog item' }).fill('half typed')
     await found.getByRole('button', { name: 'Show as a sheet' }).click()
@@ -223,7 +226,7 @@ async function main() {
       await page.evaluate(() => localStorage.removeItem('tether.backlogView'))
       await page.goto(`${origin}/chat/?go=backlog`, { waitUntil: 'load' })
       const sheet = page.locator('dialog.backlog-page')
-      await sheet.locator('.backlog-row').first().waitFor()
+      await sheet.locator('.backlog-row[data-backlog-key]').first().waitFor()
       // A CSS locator: under the narrow overlay the list is hidden, and role queries skip hidden rows.
       const zebra = sheet.locator('button.backlog-open', { hasText: /^Zebra item$/ })
       await zebra.click()
@@ -296,7 +299,9 @@ async function main() {
       }
       else await page.keyboard.press('Escape')
       await pane.waitFor({ state: 'detached' })
-      check(`${at} closing gives the cursor back to the row`, await zebra.evaluate(node => node === document.activeElement))
+      // closeDetail() moves the cursor in the next animation frame, after the pane leaves; a slow runner can check first.
+      const refocused = await page.waitForFunction(node => node === document.activeElement, await zebra.elementHandle(), { timeout: 2000 }).then(() => true, () => false)
+      check(`${at} closing gives the cursor back to the row`, refocused)
       check(`${at} the page stays open`, await sheet.isVisible())
       await page.keyboard.press('Escape')
       await sheet.waitFor({ state: 'detached' })
@@ -327,7 +332,7 @@ async function main() {
     await page.keyboard.press('Escape')
     await keys.waitFor({ state: 'detached' })
     await page.keyboard.press('Alt+Shift+KeyB')
-    await page.locator('dialog.backlog-page .backlog-row').first().waitFor()
+    await page.locator('dialog.backlog-page .backlog-row[data-backlog-key]').first().waitFor()
     await page.keyboard.press('Control+Slash')
     await keys.waitFor()
     check('⌘/ works over the backlog page', true)

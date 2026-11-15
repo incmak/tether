@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -86,7 +87,8 @@ class ProjectTests(unittest.TestCase):
         code = str(Path(projects.__file__).resolve().parent.parent)
         real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
         real = real.replace(code, '/srv/user/apps/tether')
-        self.assertLess(len(real), 3300)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14)
+        real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
+        self.assertLess(len(real), 3400)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15)
         self.assertIn('not evidence of absence', text)
         self.assertLess(text.index('## Naming tabs'), text.index('## Claims of absence'))
         self.assertLess(text.index('## Claims of absence'), text.index('## New tabs and reviewers'))
@@ -114,6 +116,7 @@ class ProjectTests(unittest.TestCase):
             'Exit: 0 finished, 3 timeout (still working), 4 gone, 5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost). '
             'When a tab you started or review is done, save a note in notes/ (what it did, outcome, findings), '
             'then run `close --pane %N`. Busy tabs stay open.', text)
+        self.assertIn('Asked to close this tab: run `close --self`', text)
         self.assertFalse(projects.has_context(PID, self.home))
         state = projects.state(PID, self.home)
         self.assertEqual((state['chars'] > 0, state['revision']), (True, 0))

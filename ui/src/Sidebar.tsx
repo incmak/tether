@@ -5,6 +5,7 @@ import { Bone, SkeletonRows, Spinner } from './Skeleton'
 import { RetryButton } from './Retry'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import { needsYou, isDone } from './paneState'
+import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Archive, ArchiveRestore, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
@@ -503,7 +504,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   })
   // Enter opens the first match; Down moves into the list; Escape clears the search.
   const searchKeys = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button, .archived-tab-open)')
+    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button:not(.pane-stack-head), .archived-tab-open)')
     if (event.key === 'Enter' && query.trim() && first) { event.preventDefault(); first.click(); setQuery(''); event.currentTarget.blur() }
     else if (event.key === 'ArrowDown' && first) { event.preventDefault(); first.focus() }
     else if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery('') }
@@ -572,9 +573,22 @@ function projectMark(mark: ProjectMark | undefined) {
   return <BookMarked size={11} className={`project-mark ${stale ? 'stale' : ''}`} aria-label={stale ? 'Project changed. Restart its agents to apply.' : 'Has project context'} />
 }
 
+// The stack state dot, as in the chat header's stack row (Groups.tsx).
+const STACK_DOT = { needs: 'approval', done: 'done', working: 'working', idle: 'idle' } as const
+
 function SessionList({ matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
   const list = useRef<HTMLUListElement>(null)
   const dragging = useRef<string | null>(null)
+  // The open tab stays in view: its row, or its session's row when the session is folded. The list moves only when it must.
+  useEffect(() => {
+    const box = list.current
+    if (!box || !selected) return
+    const owner = items.find(session => session.panes.some(pane => pane.id === selected))
+    if (!owner) return
+    const row = box.querySelector<HTMLElement>('.pane-children [aria-current="page"], .session-main[aria-current="page"]')
+      ?? box.querySelector<HTMLElement>(`li[data-id="${CSS.escape(owner.id)}"] .session-main`)
+    row?.scrollIntoView({ block: 'nearest' })
+  }, [selected])  // eslint-disable-line react-hooks/exhaustive-deps -- only a new open tab scrolls the list; a poll must not move it
   const [preview, setPreview] = useState<string[] | null>(null)
   const order = useRef<string[] | null>(null)
   const ids = preview ?? items.map(session => session.id)
@@ -646,6 +660,8 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
       const toggleOpen = () => update(current => ({ expanded: { ...current.expanded, [session.id]: current.expanded[session.id] === false } }))
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
+      const paneRow = (pane: Pane) => { const paneState = status([pane], prefs.seen, selected), paneTag = tagDot(prefs.colors?.[pane.id]); return <li key={pane.id}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} className={pane.id === selected ? 'selected' : ''} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}</button></li> }
+      const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).filter(place => place.panes.length) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
         <div className={`swipe-row ${swiped === session.id ? 'swiped' : ''}`}
           onPointerDownCapture={() => { suppressClick.current = false }}
@@ -731,7 +747,18 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
           {reorder && <span className="grip" aria-label={`Drag to move ${session.name}`} onPointerDown={event => { dragging.current = session.id; order.current = null; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={drag} onPointerUp={() => { if (order.current) onMove(order.current); dragging.current = null; order.current = null; setPreview(null) }} onPointerCancel={() => { dragging.current = null; order.current = null; setPreview(null) }}><GripVertical size={18} /></span>}
         </div>
         </div>
-        {multi && open && !reorder && <ul className="pane-children">{tabs.map(pane => { const paneState = status([pane], prefs.seen, selected), paneTag = tagDot(prefs.colors?.[pane.id]); return <li key={pane.id}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} className={pane.id === selected ? 'selected' : ''} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}</button></li> })}</ul>}
+        {multi && open && !reorder && <ul className="pane-children">{stacked
+          // A session with stacks shows them like the chat header: each stack, then its tabs. A heading opens the stack.
+          ? stacked.map(place => <li key={place.id || 'unstacked'} className="pane-stack">
+              <button type="button" className={`pane-stack-head${place.panes.some(pane => pane.id === selected) ? ' current' : ''}`}
+                aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}. Open it`}
+                onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
+                <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
+                <span className="pane-child-name">{place.name}</span><span className="group-count" aria-hidden="true">{place.panes.length}</span>
+              </button>
+              <ul className="pane-stack-tabs">{place.panes.map(paneRow)}</ul>
+            </li>)
+          : tabs.map(paneRow)}</ul>}
       </li>
     })}
   </ul>

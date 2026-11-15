@@ -10,6 +10,7 @@ import { anchorOf, clipTitle } from './hooks'
 import type { Anchor } from './hooks'
 import type { Session } from './Sidebar'
 import { HOLD_MS } from './gesture'
+import { groupOf, revealLeft, stripKey } from './groups'
 
 // Put panes in the saved order. Panes not in the list (new splits) keep tmux order at the end.
 export function orderPanes(panes: Pane[], order: string[] | undefined) {
@@ -42,7 +43,7 @@ interface Props {
 }
 // One shared pill marks the active tab. A side swipe on the chat slides it toward the next tab with the finger.
 const SLIDE_CURVE = 'cubic-bezier(.2,.8,.2,1)'
-const scrollBySession = new Map<string, number>()  // the strip remounts with each pane: keep its scroll place
+const scrollByStrip = new Map<string, number>()  // the strip remounts with each pane: keep the scroll place of each session's stack
 const swipeScroll = new WeakMap<HTMLElement, number>()  // strip scroll when the swipe started
 const scrollTween = new WeakMap<HTMLElement, number>()
 interface TabPosition { left: number; top: number; width: number; height: number }
@@ -117,30 +118,32 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
   const ids = session.panes.map(item => item.id)
   const order = ids.join()
   const positions = useRef<TabSnapshot | null>(null)
+  const key = stripKey(session.id, groupOf(pane, session.groups))
   // Before paint: restore the strip scroll and put the pill on the active tab. Tab sizes change with names and state dots.
   useLayoutEffect(() => {
     const box = strip.current
     if (!box) return
-    box.scrollLeft = scrollBySession.get(session.id) ?? 0
+    box.scrollLeft = scrollByStrip.get(key) ?? 0
     const tabIds = order.split(',')
     const before = positions.current ?? [...closedTabPositions.values()].reverse().find(snapshot => snapshot.session === session.id && !tabIds.includes(snapshot.active))
     const closing = before && [...before.tabs.keys()].some(id => id !== '+' && !tabIds.includes(id))
     for (const [id, snapshot] of closedTabPositions) {
       if (snapshot.session === session.id && !tabIds.includes(snapshot.active)) closedTabPositions.delete(id)
     }
-    if (closing) {
-      // Reveal the neighbor only as far as needed. Preserve the strip's place for inactive closes.
+    // The open tab is always in view (a switch from the keyboard, the sidebar or another stack can land off screen).
+    // The strip moves only as far as needed, so a click on a visible tab keeps it still.
+    const reveal = () => {
       const active = box.querySelector<HTMLElement>('[aria-selected="true"]')
-      if (active) box.scrollLeft = Math.max(0, Math.min(box.scrollLeft, active.offsetLeft - 12, Math.max(0, box.scrollWidth - box.clientWidth)))
-      if (active && active.offsetLeft + active.offsetWidth + 12 > box.scrollLeft + box.clientWidth) box.scrollLeft = active.offsetLeft + active.offsetWidth + 12 - box.clientWidth
+      if (active) box.scrollLeft = revealLeft(box.scrollLeft, box.clientWidth, box.scrollWidth, active.offsetLeft, active.offsetWidth)
     }
+    reveal()
     const capture = () => {
       const tabs = new Map([...box.querySelectorAll<HTMLElement>('[data-pane]')].map(tab => [tab.dataset.pane!, positionOf(tab)]))
       const add = box.querySelector<HTMLElement>('.tab-add')
       if (add) tabs.set('+', positionOf(add))
       positions.current = { session: session.id, active: pane.id, scroll: box.scrollLeft, tabs, pill: tabs.get(pane.id) }
     }
-    const save = () => { scrollBySession.set(session.id, box.scrollLeft); capture() }
+    const save = () => { scrollByStrip.set(key, box.scrollLeft); capture() }
     const place = () => { if (swipeScroll.get(box) === undefined) movePill(box, null, 0) }
     place()
     const animations: Animation[] = []
@@ -163,8 +166,11 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
     }
     capture()
     if (closing && !tabIds.includes(before.active)) box.querySelector<HTMLElement>('[aria-selected="true"]')?.focus({ preventScroll: true })
-    scrollBySession.set(session.id, box.scrollLeft)
-    const observer = new ResizeObserver(place)
+    scrollByStrip.set(key, box.scrollLeft)
+    // A narrower strip must not push the open tab out of view. Only the strip's own width counts, so a tab
+    // that changes size never pulls back a strip the user scrolled.
+    let width = box.clientWidth
+    const observer = new ResizeObserver(() => { if (box.clientWidth !== width && swipeScroll.get(box) === undefined) { width = box.clientWidth; reveal() } place() })
     observer.observe(box)  // A layout change can move the tabs (Zed centres them) without resizing any of them.
     for (const tab of box.querySelectorAll('[role="tab"]')) observer.observe(tab)
     box.addEventListener('scroll', save, { passive: true })
@@ -178,7 +184,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       }
       cancelAnimationFrame(scrollTween.get(box) ?? 0)
     }
-  }, [session.id, pane.id, order])
+  }, [session.id, pane.id, order, key])
   const latest = useRef({ ids, onReorder, onPaneActions, onDropGroup })
   latest.current = { ids, onReorder, onPaneActions, onDropGroup }
 

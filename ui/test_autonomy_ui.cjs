@@ -53,6 +53,7 @@ const fixture = {
   catalog: { commands: [], plugins: [], mcp: [], note: '' }, stream: {}, 'codex-runs': { pane: '%1', running: 0, runs: [] },
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
+  'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
 }
 
 const setupFresh = () => ({
@@ -225,7 +226,8 @@ async function main() {
       await page.getByRole('button', { name: 'Add passkey' }).click()
       await page.getByText('Passkey added.', { exact: false }).waitFor()
       check(`${at} passkey enrolled`, keys.length === 1 && keys[0].id === 'cred-1', JSON.stringify(keys))
-      check(`${at} passkey count shows`, await page.getByText('1 passkey approves changes').isVisible())
+      // The count comes from the passkey list, read again after the add.
+      check(`${at} passkey count shows`, await page.getByText('1 passkey approves changes').waitFor({ timeout: 5000 }).then(() => true, () => false))
       check(`${at} hook preview shows the command`, (await page.locator('.setup-review pre').innerText()).includes('autonomy.py hook'))
       check(`${at} no page overflow (setup review)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-setup-review-${width}.png`) })
@@ -263,6 +265,9 @@ async function main() {
       const reviewerPosts = () => posts.filter(post => post.endpoint === 'autonomy' && post.body.reviewers).map(post => post.body.reviewers)
       const settle = async (list, mark) => { for (let tries = 0; tries < 30 && list().length === mark; tries++) await page.waitForTimeout(100); return list().at(-1) }
       const row = name => page.locator('.helper-row', { hasText: name })
+      // A save disables the sheet's fieldsets until it answers; wait before the next pick or focus.
+      const enabled = async locator => { await page.waitForFunction(node => !node.matches(':disabled'), await locator.elementHandle(), { timeout: 5000 }).catch(() => {}); return locator }
+      const pick = async name => (await enabled(sheet.getByRole('radio', { name, exact: true }))).check({ force: true })
       const sheet = page.locator('dialog.helper-sheet')
       if (await search.count()) await search.fill('reviewers')
       await row('Critical tasks').waitFor()
@@ -291,20 +296,20 @@ async function main() {
       check(`${at} no page overflow (advisor sheet)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-advisor-sheet-${width}.png`) })
       let mark = advisorPosts().length
-      await sheet.getByRole('radio', { name: 'Codex', exact: true }).check({ force: true })
+      await pick('Codex')
       let last = await settle(advisorPosts, mark)
       check(`${at} codex advisor uses latest and keeps effort`, last && last.main.agent === 'codex' && last.main.model === 'latest' && last.main.effort === 'high' && last.second.agent === 'codex', JSON.stringify(last))
       await sheet.getByRole('radio', { name: /Latest: GPT-6.1 Sol/ }).waitFor()
       check(`${at} codex efforts include ultra`, await sheet.getByRole('radio', { name: 'Ultra', exact: true }).count() === 1)
       mark = advisorPosts().length
-      await sheet.getByRole('radio', { name: 'Ultra', exact: true }).check({ force: true })
+      await pick('Ultra')
       last = await settle(advisorPosts, mark)
       mark = advisorPosts().length
       await sheet.getByText('GPT-6 Luna', { exact: true }).click()
       last = await settle(advisorPosts, mark)
       check(`${at} effort the model lacks resets to auto`, last && last.main.model === 'gpt-6-luna' && last.main.effort === 'auto', JSON.stringify(last))
       // Keyboard: arrow keys move between agent radios.
-      await sheet.getByRole('radio', { name: 'Codex', exact: true }).focus()
+      await (await enabled(sheet.getByRole('radio', { name: 'Codex', exact: true }))).focus()
       mark = advisorPosts().length
       await page.keyboard.press('ArrowRight')
       last = await settle(advisorPosts, mark)
@@ -312,11 +317,12 @@ async function main() {
       check(`${at} off hides model and effort`, await sheet.getByRole('group', { name: 'Model' }).count() === 0 && await sheet.getByRole('group', { name: 'Effort' }).count() === 0)
       await sheet.getByRole('button', { name: 'Done' }).click()
       await sheet.waitFor({ state: 'hidden' })
-      check(`${at} focus returns to the row`, await advisorRow.evaluate(node => node === document.activeElement))
+      // Closing moves focus in the next animation frame (Helpers.tsx onClose).
+      check(`${at} focus returns to the row`, await page.waitForFunction(node => node === document.activeElement, await advisorRow.elementHandle(), { timeout: 2000 }).then(() => true, () => false))
       check(`${at} off: rows say agents ask you`, (await advisorRow.innerText()).includes('Off. Agents ask you') && await row('Second opinion').isDisabled())
       mark = advisorPosts().length
       await advisorRow.click()
-      await sheet.getByRole('radio', { name: 'Claude', exact: true }).check({ force: true })
+      await pick('Claude')
       last = await settle(advisorPosts, mark)
       check(`${at} advisor back on restores second opinion`, last && last.main.agent === 'claude' && last.second.agent === 'codex' && last.second.model === 'latest', JSON.stringify(last))
       await page.keyboard.press('Escape')
@@ -327,7 +333,7 @@ async function main() {
       await sheet.waitFor()
       check(`${at} reviewer sheet starts on Auto`, await sheet.getByRole('radio', { name: 'Auto', exact: true }).first().isChecked())
       mark = reviewerPosts().length
-      await sheet.getByRole('radio', { name: 'Codex', exact: true }).check({ force: true })
+      await pick('Codex')
       last = await settle(reviewerPosts, mark)
       check(`${at} reviewer codex uses latest, high`, last && last.critical.agent === 'codex' && last.critical.model === 'latest' && last.critical.effort === 'high', JSON.stringify(last))
       check(`${at} reviewer offers latest model`, await sheet.getByRole('radio', { name: /Latest: GPT-6.1 Sol/ }).isChecked())

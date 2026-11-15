@@ -578,6 +578,7 @@ class EndpointTests(unittest.TestCase):
         with patch.object(server, 'sessions', return_value=rows), \
                 patch.object(server, 'session_row', side_effect=lambda row: dict(row)), \
                 patch.object(server, 'settings', return_value={'thread': THREAD}), \
+                patch.object(server.groups, 'all_groups', return_value={}), \
                 patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%12', '%20'], '%12': []}) as reviewed_by, \
                 patch.object(server.review_links, 'paused', return_value={'%13': ['%20']}) as paused:
             listing = get()
