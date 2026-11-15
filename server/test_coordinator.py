@@ -306,6 +306,51 @@ class Feed(unittest.TestCase):
         self.assertNotIn('rm -r build', self.world.sent[0][1])
         self.assertIn('Which branch?', self.world.sent[0][1])
 
+    def approval(self, pane, command):
+        """A Codex or fallback approval: it has no id, so only its content tells two prompts apart."""
+        self.world.states[pane] = {'state': 'Approval', 'approval': {'id': None, 'text': 'Bash command\n' + command}}
+
+    def test_a_prompt_without_an_id_that_changed_is_not_reported_as_the_old_one(self):
+        self.approval('%2', 'OLD command')
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE)     # OLD is queued
+        self.world.tick(coordinator.JOIN - 3)
+        self.approval('%2', 'NEW command')
+        self.world.tick(3)                      # the flush time, before NEW settles
+        self.assertEqual(self.world.sent, [])
+        self.wait_for_send()
+        self.assertEqual(len(self.world.sent), 1)
+        self.assertNotIn('OLD command', self.world.sent[0][1])
+        self.assertIn('NEW command', self.world.sent[0][1])
+
+    def test_a_second_prompt_without_an_id_is_reported_and_the_same_one_is_not(self):
+        self.approval('%2', 'OLD command')
+        self.world.tick()
+        self.world.tick(coordinator.SETTLE)
+        self.wait_for_send()
+        self.assertIn('OLD command', self.world.sent[-1][1])
+        for command, count in (('OLD command', 1), ('NEW command', 2)):
+            self.world.states['%2'] = 'Unknown'
+            self.world.tick()
+            self.approval('%2', command)
+            self.world.tick()
+            self.world.tick(coordinator.SETTLE)
+            self.wait_for_send()
+            self.assertEqual(len(self.world.sent), count)
+        self.assertIn('NEW command', self.world.sent[-1][1])
+
+    def test_prompt_identity_uses_the_id_else_the_kind_and_content(self):
+        identity = coordinator.prompt_identity
+        self.assertIsNone(identity({'state': 'Idle'}))
+        self.assertEqual(identity({'state': 'Approval', 'approval': {'id': 'a1', 'text': 'x'}}),
+                         identity({'state': 'Approval', 'approval': {'id': 'a1', 'text': 'y'}}))
+        same = [identity({'state': 'Approval', 'approval': {'id': None, 'text': text}}) for text in ('ls  -a', 'ls -a')]
+        self.assertEqual(same[0], same[1])
+        self.assertNotEqual(identity({'state': 'Approval', 'approval': {'id': None, 'text': 'ls'}}),
+                            identity({'state': 'Approval', 'approval': {'id': None, 'text': 'rm'}}))
+        self.assertNotEqual(identity({'state': 'Approval', 'approval': {'text': 'ls'}}),
+                            identity({'state': 'Input needed', 'attention': {'text': 'ls'}}))
+
     def test_a_tab_of_unknown_state_keeps_its_update(self):
         self.world.run_turn('%2')
         for state in ('Unknown', 'Unavailable'):

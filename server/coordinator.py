@@ -10,7 +10,9 @@ Feed.observe runs in the server monitor. When a tab of the session finishes a tu
 the coordinator one short status message, so the coordinator can tell the user without polling. It sends only while the
 coordinator is idle, joins updates that come close together, and keeps them when the send fails.
 """
+import hashlib
 import hmac
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -243,21 +245,19 @@ class Feed:
         record = self.seen.get(entry['id'])
         if record is None:
             # First sight of this tab: a prompt that is already on screen is in the tabs list, so it is no update.
-            waiting = {'Approval': 'approval', 'Input needed': 'attention'}.get(state)
-            record = self.seen[entry['id']] = {
-                'state': state, 'since': now, 'worked': None,
-                'sent': ('needs', (info.get(waiting) or {}).get('id')) if waiting else None}
-        if state != record['state']:
-            record['state'], record['since'] = state, now
+            prompt = prompt_identity(info)
+            record = self.seen[entry['id']] = {'state': state, 'prompt': prompt, 'since': now, 'worked': None,
+                                               'sent': ('needs', prompt) if prompt else None}
+        prompt = prompt_identity(info)
+        if state != record['state'] or prompt != record['prompt']:
+            record['state'], record['prompt'], record['since'] = state, prompt, now
         if state == 'Working':
             record['worked'] = record['worked'] if record['worked'] is not None else now
             record['sent'] = None
             return None
         kind, token = None, None
-        if state == 'Approval':
-            kind, token = 'needs', (info.get('approval') or {}).get('id')
-        elif state == 'Input needed':
-            kind, token = 'needs', (info.get('attention') or {}).get('id')
+        if prompt:
+            kind, token = 'needs', prompt
         elif state == 'Idle' and record['worked'] is not None and record['since'] - record['worked'] >= MINIMUM_WORK:
             kind = 'done'
         if state == 'Idle' and kind is None and record['worked'] is not None and now - record['since'] >= SETTLE:
@@ -338,8 +338,7 @@ class Feed:
                 held.append(event)  # not sure of this tab now: keep the update and look again on the next tick
                 continue
             if event['kind'] == 'needs':
-                waiting = {'Approval': 'approval', 'Input needed': 'attention'}.get(state)
-                if waiting and (info.get(waiting) or {}).get('id') == event['token']:
+                if prompt_identity(info) == event['token']:
                     live.append(event)
             elif state == 'Idle':
                 live.append(event)
@@ -354,6 +353,21 @@ class Feed:
             return
         if sent:
             queue.update(events=held, sent_at=now, retry_at=None)
+
+
+def prompt_identity(info):
+    """The identity of the prompt a tab waits on, else None. One function for the once-per-prompt check and for the check
+    at delivery. A missing id proves nothing (Codex and fallback approvals have none), so the prompt's own content
+    stands in for it."""
+    waiting = {'Approval': 'approval', 'Input needed': 'attention'}.get((info or {}).get('state'))
+    if waiting is None:
+        return None
+    prompt = info.get(waiting) if isinstance(info.get(waiting), dict) else {}
+    if prompt.get('id') is not None:
+        return (waiting, 'id', str(prompt['id']))
+    content = re.sub(r'\s+', ' ', json.dumps({key: value for key, value in prompt.items() if key != 'id'},
+                                             sort_keys=True, ensure_ascii=False, default=str))
+    return (waiting, 'content', hashlib.sha256(content.encode()).hexdigest())
 
 
 def wanted(event, mode):
