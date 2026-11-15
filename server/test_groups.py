@@ -400,9 +400,12 @@ class TmuxTests(Bundles):
         self.assertEqual(self.names(self.a), ['Billing Fix'])
         self.assertEqual([self.label(p) for p in (self.a1, self.a2, third)], [group, '', group],
                          'the root and the caller move in; a tab that is not part of this start stays')
-        # A stored root_pane wins over the chain, so the root stays known after a tab in between closes.
+        # A stored root_pane keeps the root known after a tab in between closes.
+        one = '11111111-1111-4111-8111-111111111111'
+        self.helper(third, '%999', root_pane=self.a1, root_thread=one)
+        self.assertEqual(agent_tabs.auto_stacks.root_of(third, {self.a1: one}.get, run), self.a1)
         self.helper(third, '%999', root_pane=self.a1)
-        self.assertEqual(agent_tabs.auto_stacks.root_of(third, lambda pane: None, run), self.a1)
+        self.assertEqual(agent_tabs.auto_stacks.root_of(third, {self.a1: one}.get, run), '%999', 'no root_thread: no cache')
 
     def test_a_reused_owner_pane_breaks_the_chain(self):
         self.helper(self.a2, self.a1, owner_thread='11111111-1111-4111-8111-111111111111')
@@ -579,8 +582,19 @@ class TmuxTests(Bundles):
         self.helper(self.a2, self.a1, owner_thread=one, root_pane=self.b1)
         self.assertEqual(auto_stacks.root_of(self.a2, {self.a1: two}.get, run), self.a2, 'the owner link is broken')
         self.helper(self.a2, self.a1, root_pane=self.b1, root_thread=one)
-        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: two}.get, run), self.a1, 'the root holds another chat')
-        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: one}.get, run), self.b1)
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: one}.get, run), self.a1, 'a live chain wins over the cache')
+        self.helper(self.a2, '%999', root_pane=self.b1, root_thread=one)
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: one}.get, run), self.b1, 'the owner closed: the cache')
+        self.assertEqual(auto_stacks.root_of(self.a2, {self.b1: two}.get, run), '%999', 'the root holds another chat')
+        # R -> A -> B -> C, and A changes conversations: B and C both stop below A, though C caches R.
+        third, fourth = (terminal_input.new_window_after(self.a2, run) for _ in range(2))
+        self.helper(self.a2, self.a1, root_pane=self.a1, root_thread=one)  # A, under R = a1 (thread one)
+        self.helper(third, self.a2, owner_thread=two, root_pane=self.a1, root_thread=one)  # B, under A (thread two)
+        self.helper(fourth, third, root_pane=self.a1, root_thread=one)  # C, under B
+        three = '33333333-3333-4333-8333-333333333333'
+        changed = {self.a1: one, self.a2: three}.get  # A now holds another chat
+        self.assertEqual({auto_stacks.root_of(p, changed, run) for p in (third, fourth)}, {third})
+        self.assertEqual(auto_stacks.root_of(fourth, {self.a1: one, self.a2: two}.get, run), self.a1)
         self.assertEqual(agent_tabs._owner({'id': self.a2, 'thread': one}, self.a1, [{'id': self.a1, 'thread': two}])
                          ['root_thread'], two)
 
@@ -618,6 +632,46 @@ class TmuxTests(Bundles):
         self.assertEqual([(g['name'], g.get('auto'), g.get('root')) for g in found], [('Helpers', True, self.a1)],
                          'the old name is the --stack name, which comes before the tab name (rule 4)')
         self.assertEqual({self.label(p) for p in (self.a1, self.a2, third)}, {keep['id']})
+
+    def test_cleanup_apply_leaves_a_family_whose_root_closed(self):  # review round 2, finding 2
+        run = self.run_tmux
+        third = terminal_input.new_window_after(self.a2, run)
+        keep, drop = {'id': 'gaaaaaaaa', 'name': 'Helpers', 'project': ''}, {'id': 'gbbbbbbbb', 'name': 'Other', 'project': ''}
+        groups.write(self.a, [keep, drop], run)
+        self.tmux('set-option', '-p', '-t', self.a2, '@group', keep['id'])
+        self.tmux('set-option', '-p', '-t', third, '@group', drop['id'])
+        self.helper(self.a2, self.a1)
+        self.helper(third, self.a1)
+        cleanup, snap = self.cleanup_snapshot([{'id': self.a1, 'pane_name': 'Billing',
+                                                'thread': '11111111-1111-4111-8111-111111111111'}])
+        result = cleanup.plan(snap, {keep['id'], drop['id']})
+        self.assertTrue(result['moves'])
+        changed = {self.a1: '22222222-2222-4222-8222-222222222222'}.get  # the root now holds another chat
+        self.assertTrue(cleanup.apply(result, run, changed))
+        self.assertEqual([self.label(p) for p in (self.a1, self.a2, third)], ['', keep['id'], drop['id']])
+        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Helpers', 'Other'], 'no rename, no drop')
+
+    def test_cleanup_apply_copies_no_notes_from_a_stack_the_user_took(self):  # review round 2, finding 3
+        run = self.run_tmux
+        third = terminal_input.new_window_after(self.a2, run)
+        keep = {'id': 'gaaaaaaaa', 'name': 'Helpers', 'project': ''}
+        drop = groups.create(self.a, 'Other', run)
+        groups.write(self.a, [keep] + groups.read(self.a, run), run)
+        source = groups.context(self.a, drop['id'], run)
+        (projects.bundle(source) / 'notes').mkdir(parents=True, exist_ok=True)
+        (projects.bundle(source) / 'notes' / 'mine.md').write_text('# Mine')
+        self.tmux('set-option', '-p', '-t', self.a2, '@group', keep['id'])
+        self.tmux('set-option', '-p', '-t', third, '@group', drop['id'])
+        self.helper(self.a2, self.a1)
+        self.helper(third, self.a1)
+        cleanup, snap = self.cleanup_snapshot([{'id': self.a1, 'pane_name': 'Billing'}])
+        result = cleanup.plan(snap, {keep['id'], drop['id']})
+        self.assertEqual(result['notes'], [{'from': drop['id'], 'to': keep['id']}])
+        groups.rename(self.a, drop['id'], 'Mine', run)  # the user, after the plan
+        cleanup.apply(result, run)
+        target = groups.context(self.a, keep['id'], run)
+        self.assertFalse((projects.bundle(target) / 'notes' / 'mine.md').exists())
+        self.assertEqual(self.label(third), drop['id'])
 
     def test_cleanup_renames_in_a_safe_order(self):  # review finding 8
         import auto_stacks_cleanup

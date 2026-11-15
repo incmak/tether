@@ -147,23 +147,25 @@ def helper_tab_name(*, role=None, review=False, name=None, branch=None, stack=No
 
 def root_of(pane, thread_of, run=subprocess.run):
     """The main session of a tab: follow helper records to the tab no other tab started. A record whose owner now holds
-    another conversation (thread_of(pane) differs from owner_thread) is a broken link: the chain stops there. The stored
-    root_pane is a shortcut only when the owner link holds and the root still holds root_thread (or the root has closed).
+    another conversation (thread_of(pane) differs from owner_thread) is a broken link: the chain stops there, and the
+    tab below it is the root. When a tab in the chain has closed, the stored root_pane of the nearest record below it
+    gives the root, but only if that record has root_thread and the root does not hold another conversation.
     Returns a pane id. It may be a closed tab when the root has closed."""
-    current, seen = pane, {pane}
+    current, seen, stored = pane, {pane}, None
     for _ in range(ROOT_DEPTH):
         exists, record = helper_tabs.load(current, run)
-        if not exists or record is None:
+        if not exists:
+            return stored or current  # a closed tab in the chain
+        if record is None:
             return current
         owner = record['owner_pane']
         known = thread_of(owner)
         if owner in seen or (record.get('owner_thread') and known and known != record['owner_thread']):
             return current  # the owner now holds another conversation: this tab is its own root
-        root = record.get('root_pane')
-        if isinstance(root, str) and groups.PANE.fullmatch(root) and root != current and root not in seen:
-            now = thread_of(root)
-            if not (record.get('root_thread') and now and now != record['root_thread']):
-                return root
+        root, root_thread = record.get('root_pane'), record.get('root_thread')
+        if stored is None and isinstance(root, str) and groups.PANE.fullmatch(root) and root_thread \
+                and thread_of(root) in (None, root_thread):
+            stored = root
         seen.add(owner)
         current = owner
     return current

@@ -103,7 +103,7 @@ def plan(snap, proven=()):
             if place[pane] == target:
                 continue
             if movable(pane):
-                moves.append({'pane': pane, 'from': place[pane], 'to': target})
+                moves.append({'pane': pane, 'from': place[pane], 'to': target, 'root': root})
                 place[pane] = target
             else:
                 kept.append({'pane': pane, 'group': names.get(place[pane], ''),
@@ -138,7 +138,8 @@ def plan(snap, proven=()):
             renames.append({'group': gid, 'old': old, 'new': name})
     mark = [g for g in order if g in auto and not next(x for x in snap['groups'] if x['id'] == g).get('auto')]
     return {'session': snap['session'], 'moves': moves, 'made': made, 'drops': drops, 'notes': notes,
-            'renames': renames, 'mark_auto': mark, 'roots': owners, 'orphans': orphans, 'kept': kept, 'names': names,
+            'renames': renames, 'mark_auto': mark, 'roots': owners,
+            'root_threads': {root: (snap['entries'].get(root) or {}).get('thread') for root in families}, 'orphans': orphans, 'kept': kept, 'names': names,
             'unproven': unproven}
 
 
@@ -217,10 +218,30 @@ def _rename_all(session_id, renames, run):
     return [s for s in skipped if s]
 
 
-def apply(result, run=subprocess.run):
+def _live_roots(result, thread_of, run):
+    """The family roots of the plan that still hold the same conversation in the session."""
+    live = set()
+    for root, thread in result.get('root_threads', {}).items():
+        try:
+            if groups.group_of_pane(root, run)[0] != result['session']:
+                continue
+        except groups.GroupError:
+            continue  # closed
+        now = thread_of(root)
+        if not (thread and now and now != thread):
+            live.add(root)
+    return live
+
+
+def apply(result, run=subprocess.run, thread_of=lambda pane: None):
     """Do the plan. It re-reads the stacks first and acts only on stacks that are still Tether's: a stack the user
-    renamed or made since the plan (by "user") is not marked, moved into, renamed or removed. Returns the skipped steps."""
+    renamed or made since the plan (by "user") is not marked, moved into, renamed, removed or copied from. A family
+    whose root has closed or holds another conversation since the plan is left in place, and a tab whose root changed
+    does not move. thread_of: a pane's conversation now. Returns the skipped steps."""
     session_id, skipped = result['session'], []
+    live = _live_roots(result, thread_of, run)
+    skipped += [f'skipped family of {root}: its root closed or changed since the plan'
+                for root in result.get('root_threads', {}) if root not in live]
     with groups.LOCK():
         current = groups.read(session_id, run)
         for group in current:
@@ -233,18 +254,23 @@ def apply(result, run=subprocess.run):
         skipped += [f"skipped {g}: no longer Tether's" for g in result['mark_auto'] if g not in ours]
         ids = {}
         for made in result['made']:
+            if made['root'] not in live:
+                continue
             ids[made['key']] = groups.create_unique(session_id, 'Work', run, root=made['root'])['id']
             ours.add(ids[made['key']])
         by_id = {g['id']: g for g in groups.read(session_id, run)}
         for note in result['notes']:
             target = by_id.get(ids.get(note['to'], note['to']))
             source = by_id.get(note['from'])
-            if source and target and source['project'] and target['id'] in ours:
+            if source and target and source['project'] and source['id'] in ours and target['id'] in ours:
                 pid = target['project'] or groups.context(session_id, target['id'], run)
                 slug = ''.join(c if c.isalnum() else '-' for c in source['name'].lower()).strip('-') or 'stack'
                 _copy_notes(source['project'], pid, slug)
         for move in result['moves']:
             to = ids.get(move['to'], move['to'])
+            if move.get('root') not in live or auto_stacks.root_of(move['pane'], thread_of, run) != move['root']:
+                skipped.append(f"skipped move {move['pane']}: its root closed or changed since the plan")
+                continue
             try:
                 now = groups.group_of_pane(move['pane'], run)[1]
             except groups.GroupError as exc:
@@ -257,7 +283,12 @@ def apply(result, run=subprocess.run):
             skipped.append(_step(groups.move, session_id, move['pane'], to, run))
         for gid in result['drops']:
             skipped.append(_step(groups.drop_if_empty, session_id, gid, run))
-        renames = [dict(r, group=ids.get(r['group'], r['group'])) for r in result['renames']]
+        roots = result.get('roots', {})
+        kept = [r for r in result['renames'] if (r['group'] not in roots or roots[r['group']] in live)
+                and (not r['group'].startswith('new:') or r['group'] in ids)]
+        skipped += [f"skipped rename {r['old'] or '(new)'} -> {r['new']}: its root closed or changed"
+                    for r in result['renames'] if r not in kept]
+        renames = [dict(r, group=ids.get(r['group'], r['group'])) for r in kept]
         skipped += [f"skipped rename {r['old']}: no longer Tether's" for r in renames if r['group'] not in ours]
         skipped += _rename_all(session_id, [r for r in renames if r['group'] in ours], run)
     return [s for s in skipped if s]
@@ -290,7 +321,8 @@ def main(argv=None, run=subprocess.run):
         total_after += after
         print(text + '\n')
         if not args.dry_run:
-            for line in apply(result, run):
+            threads = {entry['id']: entry.get('thread') for entry in server.sessions()}
+            for line in apply(result, run, threads.get):
                 print('- ' + line)
     print(f"Total stacks: {total_before} -> {total_after}{' (dry run: nothing changed)' if args.dry_run else ''}")
     return 0

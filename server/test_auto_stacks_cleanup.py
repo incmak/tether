@@ -22,7 +22,8 @@ class PlanTests(unittest.TestCase):
                  {'%1': '%1', '%2': '%1', '%3': '%1'},
                  {'%1': {'id': '%1', 'pane_name': 'Vscode-claude_codex', 'cwd': '/x/proj'}})
         out = cleanup.plan(s, {A, B})
-        self.assertEqual(out['moves'], [{'pane': '%1', 'from': '', 'to': A}, {'pane': '%3', 'from': B, 'to': A}])
+        self.assertEqual(out['moves'], [{'pane': '%1', 'from': '', 'to': A, 'root': '%1'},
+                                        {'pane': '%3', 'from': B, 'to': A, 'root': '%1'}])
         self.assertEqual((out['drops'], out['notes']), ([B], [{'from': B, 'to': A}]))
         self.assertEqual(out['renames'], [{'group': A, 'old': 'B45 advisor log', 'new': 'Advisor Log'}])
         self.assertEqual(out['mark_auto'], [A, B], 'proven stacks are marked, the dropped one too (drop_if_empty)')
@@ -64,7 +65,7 @@ class PlanTests(unittest.TestCase):
                  {'%3': {'id': '%3', 'agent_name': 'Billing'}})
         out = cleanup.plan(s, {A})
         self.assertEqual([m['key'] for m in out['made']], ['new:%3'])
-        self.assertIn({'pane': '%4', 'from': A, 'to': 'new:%3'}, out['moves'])
+        self.assertIn({'pane': '%4', 'from': A, 'to': 'new:%3', 'root': '%3'}, out['moves'])
         self.assertIn({'group': 'new:%3', 'old': None, 'new': 'Billing'}, out['renames'])
 
     def test_a_lone_main_session_keeps_its_stack_with_a_rule_4_name(self):
