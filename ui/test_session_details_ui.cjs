@@ -37,6 +37,8 @@ async function main() {
   let browser, page, failed = 0
   const errors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
+  // The newest tab-brief post: the page also posts other things (ui-usage) at any time.
+  const briefPost = () => state.posts.findLast(post => post.endpoint === 'tab-brief')
   const reset = (extra = {}) => { state = { brief: { ...AI, at: now() - 120 }, enabled: true, links: [{ id: 'B4', title: 'Add search to Files', state: 'doing', open: true }], goal: true, tasks: ['1 shell'], ide: undefined, fail: false, posts: [], gets: [], thread: pane.thread, ...extra } }
   reset()
   try {
@@ -119,12 +121,12 @@ async function main() {
       await field.fill('My own words.')
       await drawer.getByRole('button', { name: 'Save', exact: true }).click()
       await drawer.getByText('My own words.').waitFor()
-      check('save posts the text', JSON.stringify(state.posts.at(-1)) === JSON.stringify({ endpoint: 'tab-brief', body: { pane: '%1', thread: 'thread-1', action: 'save', description: 'My own words.' } }))
+      check('save posts the text', JSON.stringify(briefPost()) === JSON.stringify({ endpoint: 'tab-brief', body: { pane: '%1', thread: 'thread-1', action: 'save', description: 'My own words.' } }))
       // The author line follows the saved brief; it can render a moment after the text.
       check('a saved text says who wrote it', await drawer.getByText('Written by you').waitFor({ timeout: 5000 }).then(() => true, () => false))
       await drawer.getByRole('button', { name: 'Clear' }).click()
       await drawer.getByText('No description yet.').waitFor()
-      check('clear posts an empty text', state.posts.at(-1).body.description === '')
+      check('clear posts an empty text', briefPost()?.body.description === '')
       // Write it again with AI.
       await drawer.getByRole('button', { name: 'Write with AI' }).click()
       await drawer.getByText('Builds search for the Files panel.').waitFor()
