@@ -4,6 +4,7 @@ paths.TETHER/backlog/
   BACKLOG.md   the list. Items at the top are the person's inbox; "## name" starts a project's items.
   .lock        held for every change, by the server and by the agent command (they are separate processes)
   versions/    the last copies, so a bad overwrite can be undone by hand
+  DONE.md      finished items moved out of BACKLOG.md when it grows near its limit, in file order, under their section
 
 Codex's sandbox gets write access to this folder only, so it holds nothing else. Agents change the list through
 agent_backlog_cli.py. A saved version check catches anything that edits the file another way."""
@@ -21,6 +22,9 @@ from projects import ProjectError, _read, _write, invalid
 # A backlog save is at most 1 MiB (projects_api.py BACKLOG_BODY_LIMIT). 200,000 characters fit in any language,
 # 4 bytes each at most in UTF-8, with room for the JSON around them.
 LIMIT = 200000
+# Past ARCHIVE_AT characters, finished items move to DONE.md, in file order, until the list is at ARCHIVE_TO or less.
+# Agents read the whole list, so it stays short; LIMIT is room for a list with many open items.
+ARCHIVE_AT, ARCHIVE_TO = 48000, 36000
 VERSIONS = 50
 # The patterns below run on every line of a text the browser sends. Each runs in linear time: no match can start
 # inside a run of spaces, and nothing lazy meets a trailing \s*. Long runs of spaces took seconds before (15 Nov 2026).
@@ -86,7 +90,51 @@ def _keep(text):
         pass
 
 
+def _archive(text):
+    """Move finished items in file order, with their detail lines, to DONE.md until the text is at ARCHIVE_TO or less.
+    The finished item with the highest ID stays, so new IDs (here and in the UI, backlogItems.ts) never repeat an
+    archived one. DONE.md is written first: a failed write keeps the items in the list, never loses them."""
+    if len(text) <= ARCHIVE_AT:
+        return text
+    lines = text.split('\n')
+    ids = [int(found[1]) for line in lines if ITEM.fullmatch(line) and (found := ID.search(line))]
+    keep = max(ids, default=None)
+    size, moved, section, drop = len(text), [], 'Inbox', set()
+    for at, line in enumerate(lines):
+        heading = HEADING.fullmatch(line)
+        if heading:
+            section = heading[1]
+            continue
+        found = ITEM.fullmatch(line)
+        if not found or found[1] == ' ' or ((number := ID.search(line)) and int(number[1]) == keep):
+            continue
+        end = _block_end(lines, at)
+        moved.append((section, lines[at:end]))
+        drop.update(range(at, end))
+        size -= sum(len(part) + 1 for part in lines[at:end])
+        if size <= ARCHIVE_TO:
+            break
+    if not moved:
+        return text
+    stamp = time.strftime('%Y-%m-%d %H:%M')
+    out, last = [], None
+    for section, block in moved:
+        if section != last:
+            out += ['', f'## {section} (moved {stamp})']
+            last = section
+        out += block
+    path = folder() / 'DONE.md'
+    if path.is_symlink():
+        raise invalid('The backlog archive is a link. Tether does not open it.')
+    head = '' if path.exists() else '# Finished backlog items\n\nMoved here from BACKLOG.md when the list grew near its limit.\n'
+    handle = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(handle, 'a', encoding='utf-8') as archive:
+        archive.write(head + '\n'.join(out) + '\n')
+    return '\n'.join(line for at, line in enumerate(lines) if at not in drop)
+
+
 def _replace(current, text):
+    text = _archive(text)
     if len(text) > LIMIT:
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     _keep(current)  # an agent may have edited the file directly since the last copy

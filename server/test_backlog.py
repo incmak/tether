@@ -74,6 +74,36 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 413)
         self.assertEqual(len(self.text()), backlog.LIMIT + 1)
 
+    def test_a_list_near_its_limit_moves_the_oldest_finished_items_to_done(self):
+        filler = 'word ' * 200
+        blocks = [f'- [x] Old {n} #B{n}\n  - Done: {filler}\n' for n in range(1, 51)]
+        text = '- [ ] Inbox open #B60\n\n## web\n- [x] Newest done #B62\n  - Done: ok\n' + ''.join(blocks) + '- [ ] Open web item #B61\n'
+        with mock.patch.object(backlog, 'ARCHIVE_AT', backlog.LIMIT):  # save as is, then let one change cross the line
+            backlog.save(text, backlog.read()['version'])
+        self.assertGreater(len(self.text()), backlog.ARCHIVE_AT)
+        backlog.mark_done('B61', result='shipped')
+        kept, done = self.text(), (backlog.folder() / 'DONE.md').read_text()
+        self.assertLessEqual(len(kept), backlog.ARCHIVE_TO)
+        self.assertIn('- [ ] Inbox open #B60', kept)
+        self.assertIn('- [x] Newest done #B62', kept)  # the highest finished ID stays
+        self.assertIn('- [x] Open web item #B61\n  - Done: shipped', kept)
+        self.assertNotIn('Old 1 #B1', kept)
+        self.assertTrue(done.startswith('# Finished backlog items'))
+        self.assertRegex(done, r'\n## web \(moved [0-9-]+ [0-9:]+\)\n- \[x\] Old 1 #B1\n  - Done: word')
+        for number in range(1, 51):  # every item is in exactly one of the two files
+            self.assertEqual((f'Old {number} #B{number}' in kept) + (f'Old {number} #B{number}' in done), 1, number)
+        backlog.add('Next item', project='web')
+        self.assertIn('- [ ] Next item #B63', self.text())  # no archived ID is given again
+
+    def test_a_list_with_no_finished_items_stays_and_a_short_list_is_not_moved(self):
+        version = backlog.read()['version']
+        backlog.save('- [x] Done #B1\n- [ ] Open #B2\n', version)
+        self.assertFalse((backlog.folder() / 'DONE.md').exists())
+        big = '- [ ] Open ' + 'x' * (backlog.ARCHIVE_AT + 10) + ' #B1\n'
+        backlog.save(big, backlog.read()['version'])
+        self.assertEqual(self.text(), big)
+        self.assertFalse((backlog.folder() / 'DONE.md').exists())
+
     def test_a_full_list_fits_in_a_request_in_any_language(self):
         for char in ('語', '\U0001F600'):  # 3 and 4 bytes in UTF-8
             body = json.dumps({'text': char * backlog.LIMIT, 'version': 'x' * 64}, ensure_ascii=False).encode()
