@@ -298,20 +298,30 @@ class Store:
         record = self.load().get(thread) if isinstance(thread, str) else None
         return dict(record) if isinstance(record, dict) else None
 
-    def update(self, thread, **fields):
+    def update(self, thread, merge=None, **fields):
+        """Save fields for a thread. merge(record) -> more fields runs under the lock, so it sees the newest record."""
         if not isinstance(thread, str) or not CHAT_ID.fullmatch(thread):
             raise ValueError('This tab has no conversation yet.')
         with self.lock:
             threads = dict(self.load())
             record = dict(threads.get(thread) or {})
+            if merge:
+                fields = {**fields, **merge(record)}
             record.update(fields, at=int(time.time()))
             threads[thread] = record
             file = self._file()
             file.parent.mkdir(parents=True, exist_ok=True)
-            temporary = file.with_name(file.name + '.tmp')
-            temporary.write_text(json.dumps({'threads': threads}, ensure_ascii=False, indent=1), encoding='utf-8')
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, file)
+            handle, temporary = tempfile.mkstemp(prefix=file.name + '.', suffix='.tmp', dir=file.parent)  # mode 0600
+            try:
+                with os.fdopen(handle, 'w', encoding='utf-8') as out:
+                    json.dump({'threads': threads}, out, ensure_ascii=False, indent=1)
+                os.replace(temporary, file)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
             self._cache = (None, {})
             return record
 
@@ -328,6 +338,13 @@ def public(record, now=None):
     if shown.get('state') == 'running' and (now or time.time()) - int(record.get('at') or 0) > STALE:
         shown.update(state='failed', error='It stopped before it finished.')
     return shown
+
+
+BUSY = ('Working', 'Approval', 'Input needed')  # the turn is not over (server.ACTIVE_STATES)
+
+
+def busy(status):
+    return (status or {}).get('state') in BUSY
 
 
 class Briefer:
@@ -351,19 +368,20 @@ class Briefer:
                     or not isinstance(thread, str) or not CHAT_ID.fullmatch(thread)):
                 continue
             finished = finished_of(entry)
-            key = (thread, finished)
-            if not finished or self.seen.get(entry['id']) == key:
-                self.seen[entry['id']] = key
-                continue
+            key, before = (thread, finished), self.seen.get(entry['id'])
             self.seen[entry['id']] = key
+            # A new conversation in the pane (or a pane seen for the first time) waits for a turn that ends after now:
+            # the pane's last finished time may belong to the conversation before.
+            if not finished or before is None or before[0] != thread or before == key:
+                continue
             try:
-                if self.store.get(thread) or status_of(entry).get('busy'):
+                if self.store.get(thread) or busy(status_of(entry)):
                     continue
             except Exception:
                 continue
             with self.lock:
                 if thread not in self.active and all(job[0]['thread'] != thread for job in self.queue):
-                    self.queue.append((entry, messages_of, apply_name, enabled))
+                    self.queue.append((entry, messages_of, apply_name, enabled, status_of))
         live = {entry['id'] for entry in entries}
         for pane in [pane for pane in self.seen if pane not in live]:
             del self.seen[pane]
@@ -380,20 +398,34 @@ class Briefer:
             with self.lock:
                 if not self.queue:
                     return
-                entry, messages_of, apply_name, enabled = self.queue.pop(0)
-                self.active.add(entry['thread'])
+                entry, messages_of, apply_name, enabled, status_of = self.queue.pop(0)
+            if not self._claim(entry['thread']):
+                continue  # "Write with AI" is making this brief now
             try:
-                self.handle(entry, messages_of, apply_name, enabled)
+                self.handle(entry, messages_of, apply_name, enabled, status_of)
             except Exception as error:  # one odd tab must never stop the others
                 print(f'tab brief failed: {error!r}', flush=True)
             finally:
-                with self.lock:
-                    self.active.discard(entry['thread'])
+                self._release(entry['thread'])
 
-    def handle(self, entry, messages_of, apply_name, enabled):
-        """The automatic try: at most once per conversation."""
+    def _claim(self, thread):
+        """The one way to start work on a thread: False when another job holds it."""
+        with self.lock:
+            if thread in self.active:
+                return False
+            self.active.add(thread)
+            return True
+
+    def _release(self, thread):
+        with self.lock:
+            self.active.discard(thread)
+
+    def handle(self, entry, messages_of, apply_name, enabled, status_of=None):
+        """The automatic try: at most once per conversation. The caller holds the thread's claim."""
         thread = entry['thread']
         if self.store.get(thread):
+            return None
+        if status_of and busy(status_of(entry)):  # a new turn started after it was queued: wait for its end
             return None
         messages = messages_of(entry)
         verdict = decide(messages)
@@ -414,11 +446,8 @@ class Briefer:
         pairs, _ = turns(messages)
         if not pairs:
             raise ValueError('Wait for the first reply, then try again.')
-        if manual:  # the automatic worker marks its own thread in _run
-            with self.lock:
-                if thread in self.active:
-                    raise ValueError('A brief for this chat is already being written.')
-                self.active.add(thread)
+        if manual and not self._claim(thread):  # the automatic worker claims its own thread in _run
+            raise ValueError('A brief for this chat is already being written.')
         try:
             self.store.update(thread, state='running', error='', agent=agent)  # saved first: a crash never retries
             try:
@@ -427,20 +456,21 @@ class Briefer:
                 return self.store.update(thread, state='failed', error=str(error), agent=agent)
             if not enabled():  # turned off while the model ran
                 return self.store.update(thread, state='off', error=NOT_SENT['off'], agent=agent)
-            record = self.store.get(thread) or {}
-            fields = {'name': made['name'], 'state': 'done', 'error': '', 'agent': agent}
-            if manual or record.get('description_by') != 'user':
-                fields.update(description=made['description'], description_by='ai')
             named = False
             try:
                 named = bool(apply_name(entry, made['name']))
             except Exception as error:
                 print(f'tab brief name failed: {error!r}', flush=True)
-            return self.store.update(thread, named=named, **fields)
+
+            def description(record):  # checked under the store lock: a description the person saves meanwhile wins
+                if manual or record.get('description_by') != 'user':
+                    return {'description': made['description'], 'description_by': 'ai'}
+                return {}
+            return self.store.update(thread, merge=description, name=made['name'], state='done', error='',
+                                     agent=agent, named=named)
         finally:
             if manual:
-                with self.lock:
-                    self.active.discard(thread)
+                self._release(thread)
 
     def save(self, thread, description):
         """The person's own description; an empty one clears it. Raises ValueError for bad input."""

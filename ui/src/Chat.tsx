@@ -1081,7 +1081,7 @@ export function Chat({ liveReplyPreview, pane, session, api, onMenu, onUpdate, d
         return { ...base, action, variant: (/\b(error|failed|denied|limit)\b/i.test(note) ? 'warning' : 'default') as NoticeVariant, icon: /\b(error|failed|denied|limit)\b/i.test(note) ? <ShieldAlert size={15} /> : <Info size={15} />, title: <Linked text={note} /> }
       }),
     ]} />
-    {info && <SessionDetails api={api} pane={activePane} session={session} stack={groupName} footer={footer} mode={MODES[currentMode]} model={model ?? ''} context={context} state={state} thread={data?.thread ?? activePane.thread} onClose={() => setInfo(false)}
+    {info && <SessionDetails key={`${activePane.id} ${data?.thread ?? activePane.thread ?? ''}`} api={api} pane={activePane} session={session} stack={groupName} footer={footer} mode={MODES[currentMode]} model={model ?? ''} context={context} state={state} thread={data?.thread ?? activePane.thread} onClose={() => setInfo(false)}
       onFiles={folder => { setInfo(false); window.dispatchEvent(new CustomEvent('tether:open-files', { detail: { path: folder } })) }}
       onModel={writable && state !== 'Working' ? () => { setInfo(false); setModelSheet(true) } : undefined}
       onUsage={activePane.agent === 'claude' ? () => { setInfo(false); setPlanSheet(true) } : activePane.agent === 'codex' ? () => { setInfo(false); setUsageSheet(true) } : undefined}

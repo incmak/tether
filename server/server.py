@@ -485,12 +485,12 @@ def apply_brief_name(entry, name):
         live = next((item for item in sessions() if item['id'] == pane), None)
         if not live or live.get('thread') != entry.get('thread') or live.get('agent_name'):
             return False
-        result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{@chat_name}\t#{@chat_name_auto}'],
-                                capture_output=True, text=True, timeout=5)
+        result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane,
+                                 '#{@chat_name}\t#{@chat_name_auto}\t#{@chat_name_by}'], capture_output=True, text=True, timeout=5)
         if result.returncode:
             return False
-        current, _, placeholder = result.stdout.rstrip('\n').partition('\t')
-        if current and current != placeholder:
+        current, placeholder, by = (result.stdout.rstrip('\n').split('\t') + ['', ''])[:3]
+        if by == 'user' or (current and current != placeholder):  # named or cleared by the person
             return False
         result = subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
                                  'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000)), ';',
@@ -2375,7 +2375,8 @@ class Handler(BaseHTTPRequestHandler):
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
                 command = (['set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
                            if name else ['set-option', '-p', '-t', pane, '-u', '@chat_name', ';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_at'])
-                command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto']  # a name the user gave is never replaced
+                # A name the user gave, or cleared, is never replaced by the AI name (apply_brief_name).
+                command += [';', 'set-option', '-p', '-t', pane, '-u', '@chat_name_auto', ';', 'set-option', '-p', '-t', pane, '@chat_name_by', 'user']
                 with SEND_LOCK:
                     result = subprocess.run([paths.TMUX, *command], capture_output=True, text=True, timeout=5)
                     if result.returncode:
@@ -2389,19 +2390,23 @@ class Handler(BaseHTTPRequestHandler):
                 pane, thread, action = body.get('pane'), body.get('thread'), body.get('action')
                 if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
                     raise ValueError('Select a pane.')
-                entry = next((item for item in sessions() if item['id'] == pane), None)
-                if entry is None:
-                    raise ValueError('That tab has closed.')
-                if not thread or thread != entry.get('thread') or entry.get('pending_conversation'):
-                    raise ValueError('The conversation changed. Reload and try again.')
-                if entry.get('agent') not in ('claude', 'codex'):
-                    raise ValueError('Tab briefs work for Claude and Codex tabs.')
-                if action == 'save':
-                    record = tab_brief.BRIEFER.save(thread, body.get('description'))
-                elif action == 'write':
-                    record = tab_brief.BRIEFER.write(entry, brief_messages(entry), apply_brief_name, brief_enabled, manual=True)
-                else:
+                if action not in ('save', 'write'):
                     raise ValueError('Choose write or save.')
+                with SEND_LOCK:  # a fresh look at the pane, not the one-second cache: the chat may have just changed
+                    forget_sessions()
+                    entry = next((item for item in sessions() if item['id'] == pane), None)
+                    if entry is None:
+                        raise ValueError('That tab has closed.')
+                    if not thread or thread != entry.get('thread') or entry.get('pending_conversation'):
+                        raise ValueError('The conversation changed. Reload and try again.')
+                    if entry.get('agent') not in ('claude', 'codex'):
+                        raise ValueError('Tab briefs work for Claude and Codex tabs.')
+                    if action == 'save':
+                        record = tab_brief.BRIEFER.save(thread, body.get('description'))
+                    else:
+                        messages = brief_messages(entry)
+                if action == 'write':  # the model runs outside the lock; apply_brief_name checks the chat again
+                    record = tab_brief.BRIEFER.write(entry, messages, apply_brief_name, brief_enabled, manual=True)
                 forget_sessions()
                 self.respond(200, {'brief': tab_brief.public(record)})
                 return

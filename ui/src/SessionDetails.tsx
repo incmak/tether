@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Blocks, Check, ChevronRight, Copy, Folder, Gauge, Layers, ListTodo, Pencil, RefreshCw, Sparkles, Target, X } from 'lucide-react'
 import { errorText, goalStatusLabel } from './api'
@@ -62,6 +62,12 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
   const [status, setStatus] = useState('')
   const [editing, setEditing] = useState<'' | 'name' | 'description'>('')
   const [draft, setDraft] = useState('')
+  // After an edit closes (saved or cancelled), focus returns to the button that opened it.
+  const lastEdit = useRef<'' | 'name' | 'description'>('')
+  useEffect(() => {
+    if (!editing && lastEdit.current) document.querySelector<HTMLElement>(`.session-details [data-sd-edit="${lastEdit.current}"]`)?.focus()
+    lastEdit.current = editing
+  }, [editing])
   const briefed = pane.agent === 'claude' || pane.agent === 'codex'
   // Shells have no brief. A brief that is being written shows up on the next look, 4 seconds later at most.
   const fetcher = useCallback((signal: AbortSignal) => briefed
@@ -114,7 +120,7 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
     : !enabled ? (brief?.error || 'AI descriptions are off: Settings › Main AI model is Local only.')
     : `Once per chat, Tether sends the first two prompts and replies, shortened, to ${BRIEF_MODEL[pane.agent] ?? 'a small model'} to write the name and description.`
 
-  return <dialog {...modal} className="sheet session-details" aria-labelledby="sd-title" aria-describedby={description ? 'sd-description' : undefined}>
+  return <dialog {...modal} className="sheet session-details" aria-label={`Session details: ${title}`} aria-describedby={description ? 'sd-description' : undefined}>
     <header className="sd-header">
       <div className="sd-heading">
         <span className="sd-eyebrow">Session details</span>
@@ -124,7 +130,7 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
               <input id="sd-name-input" autoFocus value={draft} maxLength={NAME_LIMIT} autoComplete="off" disabled={busy === 'name'} placeholder={chatTitle({ ...pane, pane_name: '' }, session)} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setEditing('') } }} />
               <div className="sd-edit-buttons"><button type="button" className="secondary" disabled={busy === 'name'} onClick={() => setEditing('')}>Cancel</button><button type="submit" disabled={busy === 'name'}>{busy === 'name' ? 'Saving…' : 'Save name'}</button></div>
             </form>
-          : <div className="sd-title-line"><h2 id="sd-title"><bdi>{title}</bdi></h2><button type="button" className="icon-button sd-small-button" aria-label="Rename this tab" title="Rename this tab" onClick={() => edit('name')}><Pencil size={16} /></button></div>}
+          : <div className="sd-title-line"><h2 id="sd-title"><bdi>{title}</bdi></h2><button type="button" className="icon-button sd-small-button" data-sd-edit="name" aria-label="Rename this tab" title="Rename this tab" onClick={() => edit('name')}><Pencil size={16} /></button></div>}
         <p className="sd-sub"><State state={state} />{nameByAi && <span className="sd-tag"><Sparkles size={12} aria-hidden="true" />Named by AI</span>}</p>
       </div>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
@@ -152,7 +158,7 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
                 {brief?.state === 'failed' && !busy && <p className="sd-error" role="alert">Could not write a description: {brief.error || 'unknown error'}</p>}
                 {loadError && <p className="sd-error" role="alert">Could not load the description: {loadError} <button type="button" className="sd-link" onClick={() => void refresh()}>Try again</button></p>}
                 <div className="sd-brief-actions">
-                  <button type="button" className="secondary" disabled={!!busy || running} onClick={() => edit('description')}><Pencil size={15} />{description ? 'Edit' : 'Write it yourself'}</button>
+                  <button type="button" className="secondary" data-sd-edit="description" disabled={!!busy || running} onClick={() => edit('description')}><Pencil size={15} />{description ? 'Edit' : 'Write it yourself'}</button>
                   {description && <button type="button" className="secondary" disabled={!!busy || running} onClick={() => void saveDescription('')}><X size={15} />Clear</button>}
                   {thread && !foundry && enabled && <button type="button" className="secondary" disabled={!canWrite} aria-busy={busy === 'write' || running} onClick={() => void write()}><Sparkles size={15} />{busy === 'write' || running ? 'Writing…' : description ? 'Write again with AI' : 'Write with AI'}</button>}
                 </div>

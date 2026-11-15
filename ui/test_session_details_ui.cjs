@@ -14,8 +14,8 @@ let state
 
 function fixture(endpoint, url) {
   const fixtures = {
-    sessions: { sessions: [{ ...pane, finished: now() - 300, brief: state.brief }], default_thread: pane.thread },
-    chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: pane.thread, agent: 'claude', state: 'Idle', writable: true },
+    sessions: { sessions: [{ ...pane, thread: state.thread, finished: now() - 300, brief: state.brief }], default_thread: state.thread },
+    chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: state.thread, agent: 'claude', state: 'Idle', writable: true },
     footer: { observed: true, model: 'Opus 5.5', effort: 'high', mode: 'default', context: { percent: 42 }, goal: state.goal ? 'active' : undefined, tasks: state.tasks, task_details: [], ide: state.ide },
     prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' }, 'projects/marks': {}, 'side-shells': { shells: [] },
     'projects/backlog': { text: '## tether\n- [ ] Add search to Files (claude · pane %1 · chat thread-1) #B4\n', version: 'v1', limit: 50000 },
@@ -37,7 +37,7 @@ async function main() {
   let browser, page, failed = 0
   const errors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
-  const reset = (extra = {}) => { state = { brief: { ...AI, at: now() - 120 }, enabled: true, links: [{ id: 'B4', title: 'Add search to Files', state: 'doing', open: true }], goal: true, tasks: ['1 shell'], ide: undefined, fail: false, posts: [], gets: [], ...extra } }
+  const reset = (extra = {}) => { state = { brief: { ...AI, at: now() - 120 }, enabled: true, links: [{ id: 'B4', title: 'Add search to Files', state: 'doing', open: true }], goal: true, tasks: ['1 shell'], ide: undefined, fail: false, posts: [], gets: [], thread: pane.thread, ...extra } }
   reset()
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -129,11 +129,28 @@ async function main() {
       await drawer.getByText('Builds search for the Files panel.').waitFor()
       check('write posts the write action', state.posts.some(post => post.endpoint === 'tab-brief' && post.body.action === 'write'), JSON.stringify(state.posts.map(post => post.endpoint)))
       // Rename.
-      await drawer.getByRole('button', { name: 'Rename this tab' }).click()
+      const renameButton = drawer.getByRole('button', { name: 'Rename this tab' })
+      const focusedOnRename = () => renameButton.evaluate(node => node === document.activeElement)
+      await renameButton.click()
+      check('rename mode keeps the dialog name', /^Session details: /.test(await drawer.getAttribute('aria-label') || ''), await drawer.getAttribute('aria-label'))
+      await drawer.getByRole('button', { name: 'Cancel' }).click()
+      await renameButton.waitFor()
+      check('cancel returns the focus to Rename', await focusedOnRename())
+      await renameButton.click()
       await drawer.getByRole('textbox', { name: 'Tab name' }).fill('Search work')
       await drawer.getByRole('button', { name: 'Save name' }).click()
-      await drawer.getByRole('button', { name: 'Rename this tab' }).waitFor()
-      check('rename posts pane-name', JSON.stringify(state.posts.at(-1)) === JSON.stringify({ endpoint: 'pane-name', body: { pane: '%1', name: 'Search work' } }))
+      await renameButton.waitFor()
+      check('rename posts pane-name', state.posts.some(post => JSON.stringify(post) === JSON.stringify({ endpoint: 'pane-name', body: { pane: '%1', name: 'Search work' } })), JSON.stringify(state.posts.slice(-3)))
+      check('save returns the focus to Rename', await focusedOnRename())
+      // A new chat in the same pane: a draft from the old chat must not save to the new one.
+      await drawer.getByRole('button', { name: 'Edit' }).click()
+      await drawer.getByRole('textbox', { name: 'Description' }).fill('Draft for the old chat')
+      state.thread = 'thread-2'
+      await drawer.getByRole('textbox', { name: 'Description' }).waitFor({ state: 'detached', timeout: 20000 })
+      check('a new chat drops the old draft', !state.posts.some(post => post.body.description === 'Draft for the old chat'))
+      await page.waitForFunction(() => !document.querySelector('.session-details textarea'))
+      state.thread = pane.thread
+      await close(); await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' }); await open()
       // Copy the pane id: no crash, the button answers.
       await drawer.getByRole('button', { name: 'Copy pane' }).click()
       check('copy answers', await drawer.locator('.sd-copy[aria-label="Copied"], .sd-copy[aria-label="Could not copy"]').count() === 1)

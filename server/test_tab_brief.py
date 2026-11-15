@@ -196,6 +196,35 @@ class StoreAndBriefer(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.update('../x', state='done')
 
+    def test_the_temporary_file_is_private_from_the_start(self):
+        modes, replace = [], os.replace
+
+        def spy(source, target):
+            modes.append(oct(os.stat(source).st_mode & 0o777))
+            replace(source, target)
+        with mock.patch.object(tab_brief.os, 'replace', spy):
+            self.store.update(THREAD, state='done')
+        self.assertEqual(modes, ['0o600'])
+        self.assertEqual([item.name for item in self.store.path.parent.iterdir()], ['tab-briefs.json'])
+
+    def test_a_queued_automatic_job_skips_a_thread_that_write_with_ai_holds(self):
+        self.assertTrue(self.briefer._claim(THREAD))  # "Write with AI" is running
+        self.briefer.queue.append((entry(), lambda e: chat('Add a search box to files now', 'ok'), self.apply,
+                                   lambda: True, lambda e: {'state': 'Idle'}))
+        self.briefer._run()
+        self.assertEqual(self.made, [])
+        self.assertIn(THREAD, self.briefer.active)  # the manual job still owns it
+        with self.assertRaises(ValueError):
+            self.briefer.write(entry(), chat('Add a search box to files now', 'ok'), self.apply, lambda: True, manual=True)
+
+    def test_a_description_saved_while_the_model_runs_wins(self):
+        def generate(entry_, pairs):
+            self.briefer.save(THREAD, 'Typed meanwhile')
+            return {'name': 'Files search', 'description': 'From the model.'}
+        self.briefer.generate = generate
+        record = self.briefer.handle(entry(), lambda e: chat('Add a search box to files now', 'ok'), self.apply, lambda: True)
+        self.assertEqual((record['state'], record['description'], record['description_by']), ('done', 'Typed meanwhile', 'user'))
+
     def test_runs_once_and_keeps_no_chat_text(self):
         messages = chat('Add a search box to the files screen please', 'Done.')
         record = self.briefer.handle(entry(), lambda e: messages, self.apply, lambda: True)
@@ -266,6 +295,30 @@ class StoreAndBriefer(unittest.TestCase):
         watch()
         self.assertEqual(len(self.briefer.queue), 1)
 
+    def test_observe_ignores_an_old_finish_after_the_conversation_changes(self):
+        current = {'thread': THREAD, 'state': 'Idle'}
+        self.briefer._start = lambda: None
+        watch = lambda: self.briefer.observe([entry(thread=current['thread'])], lambda e: {'state': current['state']},
+                                             lambda e: 100.0, lambda e: [], self.apply, lambda: True)
+        watch()
+        current['thread'] = OTHER  # /clear: a new chat, the pane's last finish is from the old one
+        watch()
+        self.assertEqual(self.briefer.queue, [])
+
+    def test_observe_and_handle_wait_while_the_agent_works(self):
+        finished, state = {'at': None}, {'state': 'Idle'}
+        self.briefer._start = lambda: None
+        watch = lambda: self.briefer.observe([entry()], lambda e: dict(state), lambda e: finished['at'],
+                                             lambda e: [], self.apply, lambda: True)
+        watch()
+        finished['at'], state['state'] = 100.0, 'Working'
+        watch()
+        self.assertEqual(self.briefer.queue, [])
+        messages = chat('Add a search box to files now', 'ok')
+        self.assertIsNone(self.briefer.handle(entry(), lambda e: messages, self.apply, lambda: True,
+                                              lambda e: {'state': 'Working'}))
+        self.assertEqual(self.made, [])
+
     def test_observe_skips_helpers_shells_and_known_threads(self):
         self.store.update(OTHER, state='done')
         entries = [entry(role='advisor'), entry(agent='shell', pane='%6'), entry(thread=OTHER, pane='%7'),
@@ -327,13 +380,14 @@ class Endpoints(unittest.TestCase):
         self.sessions = mock.patch.object(server, 'sessions', return_value=[self.entry]).start()
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(server, 'brief_messages', return_value=chat('Add search to files please now', 'Done.')).start()
-        self.tmux = {'@chat_name': '', '@chat_name_auto': ''}
+        self.tmux = {'@chat_name': '', '@chat_name_auto': '', '@chat_name_by': ''}
         self.calls = []
 
         def run(argv, **kwargs):
             self.calls.append(argv)
-            if argv[1] == 'display-message':
-                return subprocess.CompletedProcess(argv, 0, stdout=f"{self.tmux['@chat_name']}\t{self.tmux['@chat_name_auto']}\n")
+            if argv[1] == 'display-message' and argv[-1].startswith('#{@chat_name}'):
+                fields = argv[-1].split('\t')  # '#{@chat_name}\t#{@chat_name_auto}\t#{@chat_name_by}'
+                return subprocess.CompletedProcess(argv, 0, stdout='\t'.join(self.tmux[key[2:-1]] for key in fields) + '\n')
             return subprocess.CompletedProcess(argv, 0, stdout='1\n')
         mock.patch.object(server.subprocess, 'run', side_effect=run).start()
 
@@ -376,6 +430,25 @@ class Endpoints(unittest.TestCase):
         self.sessions.return_value = [dict(self.entry, agent_name='From /rename')]
         self.assertFalse(self.server.apply_brief_name(self.entry, 'X'))
         self.assertEqual(self.names(), [])
+
+    def test_a_name_the_user_cleared_is_not_replaced(self):
+        self.assertEqual(self.request('/mobile/api/pane-name', {'pane': '%12', 'name': ''})[0], 200)
+        command, = [argv for argv in self.calls if '@chat_name_by' in argv]
+        self.assertEqual(command[command.index('@chat_name_by') + 1], 'user')
+        self.tmux['@chat_name_by'] = 'user'
+        self.calls.clear()
+        self.assertEqual(self.request(tab_brief.PATH, {'pane': '%12', 'thread': THREAD, 'action': 'write'})[0], 200)
+        self.assertEqual(self.names(), [])
+
+    def test_post_checks_a_fresh_conversation_not_the_cache(self):
+        def forget():  # the pane started a new chat a moment ago; only a fresh look sees it
+            self.sessions.return_value = [dict(self.entry, thread=OTHER)]
+        with mock.patch.object(self.server, 'forget_sessions', side_effect=forget):
+            for action in ('write', 'save'):
+                with self.subTest(action=action):
+                    status, _ = self.request(tab_brief.PATH, {'pane': '%12', 'thread': THREAD, 'action': action, 'description': 'x'})
+                    self.assertEqual(status, 400)
+        self.assertIsNone(self.store.get(THREAD))
 
     def test_save_and_clear_the_description(self):
         status, body = self.request(tab_brief.PATH, {'pane': '%12', 'thread': THREAD, 'action': 'save', 'description': 'Mine.'})
