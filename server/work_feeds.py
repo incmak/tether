@@ -1,12 +1,15 @@
 """Work board feeds: a new GitHub issue, Teams thread or email becomes a Triage item (work_items.from_feed).
 
-Each project names one feed (project['feed'], its target in project['feedTarget']). A project whose own agent reads the
-feed (project['feedBy'] == 'agent', like a project's own Teams watcher) is left alone. The Poller reads each feed about
-every two minutes on one worker thread, called from the server's monitor loop.
+A project has a list of feeds (project['feeds']: id, kind, target, by, since), for example an email folder, a Teams
+channel and two GitHub repositories at once. A feed its project's own agent reads (by == 'agent', like a project's own
+Teams watcher) is left alone. The Poller reads each feed about every two minutes on one worker thread, called from the
+server's monitor loop. One feed that fails does not stop the others. Item keys name the source (github:, teams:,
+email:), so two feeds never make the same item.
 
-State per project in paths.work()/feeds/<PREFIX>.json: the feed and target it read, the cursor (a time), the last
-message ids seen, and the last result. A feed reads from the time it was saved (project['feedSince']): Tether never
-imports older messages.
+State per feed in paths.work()/feeds/<PREFIX>-<feed id>.json: the feed and target it read, the cursor (a time), the
+last message ids seen, and the last result. A project from before several feeds kept its one feed's state in
+<PREFIX>.json; its feed takes that file over on its first poll, so the cursor is kept. A feed reads from the time it
+was saved (its since): Tether never imports older messages.
 
 Feed text is data, never instructions. Tether keeps a short title, the sender's name and a link, never a body.
 A triage tab starts on its own only for a trusted sender (GitHub owner, member or collaborator; a Teams user; email
@@ -36,7 +39,7 @@ SEEN = 2500            # message ids kept per feed: more than one read fetches (
 SLACK = 2              # seconds: GitHub times are whole seconds, the cursor is not
 GH_TIMEOUT = 30
 PAGES = 10             # pages per read of one list: a burst larger than this waits for the next poll
-REPO = re.compile(r'(?:https://github\.com/)?([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?')
+REPO = work_items.GITHUB_REPO
 TRUSTED_GITHUB = ('OWNER', 'MEMBER', 'COLLABORATOR')
 NAME_LIMIT = 60
 
@@ -188,17 +191,25 @@ def _client(kind):
     if not config:
         raise FeedError(why, off=True)
     if not graph_client.status().get(kind):
-        what = 'Teams channels' if kind == 'teams' else 'mail'
-        raise FeedError(f'The Microsoft connection has no access to {what}. Run: tether graph connect '
-                        f'--tenant <tenant id> --client <app id> --feeds mail,teams', off=True)
+        if kind == 'teams':
+            raise FeedError(TEAMS_CONSENT, off=True)
+        raise FeedError('The Microsoft connection has no access to mail. Run: tether graph connect '
+                        '--tenant <tenant id> --client <app id> --feeds mail', off=True)
     return graph_client.Client(config)
 
 
-def _graph(work):
+TEAMS_CONSENT = ('Teams channels need admin consent for ChannelMessage.Read.All. Ask your Microsoft 365 admin to '
+                 'grant it, then run: tether graph connect --tenant <tenant id> --client <app id> --feeds mail,teams')
+
+
+def _graph(work, kind=''):
     try:
         return work()
     except graph_client.GraphError as exc:
-        raise FeedError(str(exc), off=exc.status in (401, 403)) from None
+        text = str(exc)
+        if kind == 'teams' and exc.status == 403:
+            text = f'{text} {TEAMS_CONSENT}'
+        raise FeedError(text, off=exc.status in (401, 403)) from None
 
 
 def _id(value):
@@ -277,7 +288,7 @@ def teams(target, since, state, client=None):
         else:  # Graph has no filter for channel messages: threads older than the last page are not read
             state['gap'] = {'from': since, 'to': min(map(_activity, roots))}  # threads in this range were not read
         return roots, place, _tenant_id(client, state)
-    messages, place, tenant = _graph(read)
+    messages, place, tenant = _graph(read, 'teams')
     out = []
 
     def add(message, root_id):
@@ -360,20 +371,47 @@ SOURCES = {'github': github, 'teams': teams, 'email': email}
 
 # State and polling.
 
-def _path(prefix):
-    return paths.work() / 'feeds' / f'{prefix}.json'
+def _path(prefix, fid=None):
+    """A feed's state file. fid None: the one file of a project from before several feeds."""
+    return paths.work() / 'feeds' / (f'{prefix}-{fid}.json' if fid else f'{prefix}.json')
 
 
-def load(prefix):
+def _read(path):
     try:
-        data = json.loads(_path(prefix).read_text())
+        data = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def save(prefix, state):
+def _legacy(prefix, entry):
+    """The project's state file from before several feeds, when it holds this feed (same kind and target)."""
     path = _path(prefix)
+    data = _read(path)
+    return path if data and data.get('feed') == entry['kind'] and data.get('target') == entry['target'] else None
+
+
+def load(prefix, fid, entry=None):
+    """A feed's state. With entry: a feed that has no file yet reads the project's file from before several feeds."""
+    path = _path(prefix, fid)
+    if entry is not None and not path.exists() and _legacy(prefix, entry):
+        return _read(_path(prefix))
+    return _read(path)
+
+
+def _adopt(prefix, entry):
+    """Move the project's state file from before several feeds to this feed, so its cursor is kept. Once only."""
+    path = _path(prefix, entry['id'])
+    old = None if path.exists() else _legacy(prefix, entry)
+    if old:
+        try:
+            os.replace(old, path)
+        except OSError as exc:
+            print(f'work feed {prefix}: old state not moved: {exc!r}')
+
+
+def save(prefix, fid, state):
+    path = _path(prefix, fid)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     temp.write_text(json.dumps(state) + '\n')
@@ -384,13 +422,24 @@ def _find(record, key):
     return next((item for item in work_items.fold(record).values() if item.get('feed') == key), None)
 
 
-def poll(record, sessions=None, run=subprocess.run, lock=None, now=None, sources=None):
-    """Read one project's feed once. Returns the state it saved. sessions: the live tabs (None: no triage tabs)."""
+def entries(record):
+    return [entry for entry in record.get('feeds') or [] if isinstance(entry, dict)]
+
+
+def poll(record, sessions=None, run=subprocess.run, lock=None, now=None, sources=None, entry=None, still=None):
+    """Read one feed of a project once (entry; None: the project's first feed). Returns the state it saved.
+    sessions: the live tabs (None: no triage tabs). still: says whether the feed is still saved as it was; a save
+    that changes or removes it during a read stops the read before its next write, so an old target adds nothing."""
+    still = still or (lambda: True)
     now = time.time() if now is None else now
-    prefix, feed, target = record['prefix'], record.get('feed') or 'manual', record.get('feedTarget') or ''
-    state = load(prefix)
-    since = record.get('feedSince')
-    if not (isinstance(since, (int, float)) and 0 < since <= now):  # a project saved before feedSince existed
+    entry = entry if entry is not None else (entries(record) or [None])[0]
+    if entry is None:
+        return {}
+    prefix, fid, feed, target = record['prefix'], entry['id'], entry['kind'], entry.get('target') or ''
+    _adopt(prefix, entry)
+    state = load(prefix, fid)
+    since = entry.get('since')
+    if not (isinstance(since, (int, float)) and 0 < since <= now):  # a feed saved before it had a since
         kept = state.get('since')
         same = state.get('feed') == feed and state.get('target') == target
         since = kept if same and isinstance(kept, (int, float)) and 0 < kept <= now else now
@@ -398,7 +447,7 @@ def poll(record, sessions=None, run=subprocess.run, lock=None, now=None, sources
             or not isinstance(state.get('cursor'), (int, float))):
         state = {'feed': feed, 'target': target, 'since': since, 'cursor': since, 'seen': [], 'status': 'ok',
                  'at': now, 'error': '', 'errors': 0, 'items': 0, 'more': False}
-        save(prefix, state)  # a feed starts when it was saved: older messages never become items
+        save(prefix, fid, state)  # a feed starts when it was saved: older messages never become items
     source = (sources or SOURCES).get(feed)
     if source is None:
         return state
@@ -413,9 +462,11 @@ def poll(record, sessions=None, run=subprocess.run, lock=None, now=None, sources
         try:
             found = source(target, state['cursor'], state)
         except FeedError as exc:
+            if not still():
+                return state
             state.update(status='off' if exc.off else 'error', at=now, error=str(exc)[:300],
                          errors=state.get('errors', 0) + (0 if exc.off else 1))
-            save(prefix, state)
+            save(prefix, fid, state)
             return state
         found = list(found) + state['later']
         state['later'] = []  # merged into this read
@@ -425,28 +476,32 @@ def poll(record, sessions=None, run=subprocess.run, lock=None, now=None, sources
                    key=lambda m: (m['at'], not m['root']))  # a thread's first message before its replies at one time
     hold = state.get('hold')
     hold = hold if isinstance(hold, (int, float)) else None
+    if not still():
+        return state
     state['queue'] = fresh
-    save(prefix, state)  # the read position moves only with the messages it fetched kept
+    save(prefix, fid, state)  # the read position moves only with the messages it fetched kept
     tabs = made = 0
     for index, message in enumerate(fresh[:LIMIT]):
         if hold is not None and not message['root'] and _find(record, message['key']) is None:
             # a list was cut at the page cap: this reply's thread can start on a page not read yet. It waits, unseen.
             state.update(later=state['later'] + [message], queue=fresh[index + 1:])
-            save(prefix, state)
+            save(prefix, fid, state)
             continue
         try:
-            item, tab = _take(record, message, sessions, run, lock, tabs < TABS)
+            item, tab = _take(record, message, sessions, run, lock, tabs < TABS, still)
             made, tabs = made + item, tabs + tab
+        except Moved:
+            return state
         except (ProjectError, OSError, ValueError) as exc:  # one bad message must not stop the feed
-            print(f'work feed {prefix}: {message["msg"]} skipped: {exc!r}')
+            print(f'work feed {prefix}-{fid}: {message["msg"]} skipped: {exc!r}')
         seen = (seen + [message['msg']])[-SEEN:]
         at = min(message['at'], state['hold']) if isinstance(state.get('hold'), (int, float)) else message['at']
         state.update(cursor=max(state['cursor'], at), seen=seen, queue=fresh[index + 1:])
-        save(prefix, state)  # the item is written before the cursor moves past its message
-    _gap(record, state, state.pop('gap', None))
+        save(prefix, fid, state)  # the item is written before the cursor moves past its message
+    _gap(record, entry, state, state.pop('gap', None))
     state.update(status='ok', at=now, error='', errors=0, items=state.get('items', 0) + made,
                  more=bool(state['queue'] or state.get('later') or state.get('resume')))
-    save(prefix, state)
+    save(prefix, fid, state)
     return state
 
 
@@ -457,7 +512,7 @@ def _queued(message):
             and isinstance(message.get('trusted'), bool) and isinstance(message.get('root'), bool))
 
 
-def _gap(record, state, gap):
+def _gap(record, entry, state, gap):
     """One item per unread range. A range that overlaps the last one is the same gap: no second item."""
     if not isinstance(gap, dict):
         return
@@ -465,9 +520,9 @@ def _gap(record, state, gap):
     if isinstance(last.get('to'), (int, float)) and gap['from'] <= last['to'] + SLACK:
         state['gapRange'] = {'from': last['from'], 'to': max(last['to'], gap['to'])}
         return
-    target = record.get('feedTarget') or ''
+    target = entry.get('target') or ''
     try:  # an item, so Mak sees it and closes it when checked
-        work_items.new(record['name'], f'Feed gap: check {record.get("feed")} {target}'.strip(), 'feed',
+        work_items.new(record['name'], f'Feed gap: check {entry["kind"]} {target}'.strip(), 'feed',
                        source=(f'More than {PAGES * 50} threads changed at once. Some threads with activity from '
                                f'{_stamp(gap["from"])} were not read. Check {target} from then.')[:200])
     except (ProjectError, OSError, ValueError) as exc:
@@ -476,28 +531,36 @@ def _gap(record, state, gap):
     state['gapRange'] = dict(gap)
 
 
-def _take(record, message, sessions, run, lock, tab_ok):
-    """Write one message. Returns (items made, tabs started), each 0 or 1."""
-    ref = message['link'] if len(message['link']) <= work_items.REF_LIMIT else ''
-    if not message['root']:
-        item = _find(record, message['key'])
-        if item is not None:
-            if ref and any(entry.get('ref') == ref for entry in item.get('history') or []):
-                return 0, 0  # a reply read again: one note only
-            work_items.note(item['id'], f'New reply from {message["who"]}. Read it at the link.', 'feed',
-                            who=message['who'], ref=ref)
+class Moved(Exception):
+    """The feed was changed or removed while it was read: the read adds nothing."""
+
+
+def _take(record, message, sessions, run, lock, tab_ok, still=lambda: True):
+    """Write one message. Returns (items made, tabs started), each 0 or 1. The entry check and the item write hold
+    the save lock, so a save cannot land between them (Moved); a triage tab starts after it, so saves never wait."""
+    with work_items.saving():
+        if not still():
+            raise Moved
+        ref = message['link'] if len(message['link']) <= work_items.REF_LIMIT else ''
+        if not message['root']:
+            item = _find(record, message['key'])
+            if item is not None:
+                if ref and any(entry.get('ref') == ref for entry in item.get('history') or []):
+                    return 0, 0  # a reply read again: one note only
+                work_items.note(item['id'], f'New reply from {message["who"]}. Read it at the link.', 'feed',
+                                who=message['who'], ref=ref)
+                return 0, 0
+            if not message['key'].startswith('email:'):
+                return 0, 0  # a reply in a thread from before the feed
+            # a mail in a conversation from before the feed: the conversation becomes an item
+        item, created = work_items.from_feed(record['name'], message['key'], message['title'], message['link'],
+                                             f'{message["place"]}, from {message["who"]}')
+        if not created:  # a later mail in a known conversation; a GitHub or Teams root seen again adds nothing
+            if message['key'].startswith('email:') and not (
+                    ref and any(entry.get('ref') == ref for entry in item.get('history') or [])):
+                work_items.note(item['id'], f'New message from {message["who"]}. Read it at the link.', 'feed',
+                                who=message['who'], ref=ref)
             return 0, 0
-        if not message['key'].startswith('email:'):
-            return 0, 0  # a reply in a thread from before the feed
-        # a mail in a conversation from before the feed: the conversation becomes an item
-    item, created = work_items.from_feed(record['name'], message['key'], message['title'], message['link'],
-                                         f'{message["place"]}, from {message["who"]}')
-    if not created:  # a later mail in a known conversation; a GitHub or Teams root seen again adds nothing
-        if message['key'].startswith('email:') and not (
-                ref and any(entry.get('ref') == ref for entry in item.get('history') or [])):
-            work_items.note(item['id'], f'New message from {message["who"]}. Read it at the link.', 'feed',
-                            who=message['who'], ref=ref)
-        return 0, 0
     if not message['trusted']:
         why = f'{message["who"]} is outside your team. Read the report first, then use Start triage tab.'
     elif not sessions:
@@ -519,26 +582,40 @@ def _take(record, message, sessions, run, lock, tab_ok):
     return 1, 0
 
 
-def due(record):
-    """A feed that Tether reads: not by hand, and not read by the project's own agent."""
-    return (record.get('feed') or 'manual') in SOURCES and record.get('feedBy', 'tether') == 'tether'
+def current(name, prefix, entry):
+    """The feed is still saved as entry, in a project with this prefix, and Tether still reads it."""
+    try:
+        record = work_items.project(name)
+    except ProjectError:
+        return False
+    now = next((e for e in entries(record) if e.get('id') == entry['id']), None)
+    return (record['prefix'] == prefix and now is not None and due(now)
+            and all(now.get(k) == entry.get(k) for k in ('kind', 'target', 'by', 'since')))
+
+
+def due(entry):
+    """A feed that Tether reads: not one the project's own agent reads."""
+    return entry.get('kind') in SOURCES and entry.get('by', 'tether') == 'tether'
 
 
 def statuses():
-    """{project name: feed state} for the board. No cursor detail, no message ids."""
+    """{project name: [feed state, in the project's order]} for the board. No cursor detail, no message ids."""
     out = {}
     for record in work_items.registry()['projects']:
-        if (record.get('feed') or 'manual') == 'manual':
-            continue
-        state = load(record['prefix'])
-        same = state.get('feed') == record.get('feed') and state.get('target') == (record.get('feedTarget') or '')
-        out[record['name']] = {
-            'by': record.get('feedBy', 'tether'),
-            'status': (state.get('status') or 'ok') if same else 'waiting',
-            'at': state.get('at') if same else None,
-            'error': state.get('error', '') if same else '',
-            'errors': state.get('errors', 0) if same else 0,
-            'items': state.get('items', 0) if same else 0}
+        shown = []
+        for entry in entries(record):
+            state = load(record['prefix'], entry['id'], entry)
+            same = state.get('feed') == entry['kind'] and state.get('target') == (entry.get('target') or '')
+            shown.append({
+                'id': entry['id'], 'kind': entry['kind'], 'target': entry.get('target') or '',
+                'by': entry.get('by', 'tether'),
+                'status': (state.get('status') or 'ok') if same else 'waiting',
+                'at': state.get('at') if same else None,
+                'error': state.get('error', '') if same else '',
+                'errors': state.get('errors', 0) if same else 0,
+                'items': state.get('items', 0) if same else 0})
+        if shown:
+            out[record['name']] = shown
     return out
 
 
@@ -547,7 +624,7 @@ class Poller:
 
     def __init__(self, clock=None, start=True):
         self.clock = clock or time.monotonic
-        self.next = {}        # prefix: monotonic time of the next poll
+        self.next = {}        # 'PREFIX/feed id': monotonic time of the next poll
         self.busy = set()
         self.lock = threading.Lock()
         self.jobs = []
@@ -559,18 +636,19 @@ class Poller:
         self.tabs = (sessions, run, lock)
         now, added = self.clock(), 0
         for record in work_items.registry()['projects']:
-            prefix = record['prefix']
-            if not due(record) or now < self.next.get(prefix, 0):
-                continue
-            with self.lock:
-                if prefix in self.busy:
+            for entry in entries(record):
+                key = f'{record["prefix"]}/{entry["id"]}'
+                if not due(entry) or now < self.next.get(key, 0):
                     continue
-                self.busy.add(prefix)
-                self.jobs.append((record['name'], prefix))
-                added += 1
-                if self.start and self.thread is None:
-                    self.thread = threading.Thread(target=self._work, name='work-feeds', daemon=True)
-                    self.thread.start()
+                with self.lock:
+                    if key in self.busy:
+                        continue
+                    self.busy.add(key)
+                    self.jobs.append((record['name'], record['prefix'], entry['id']))
+                    added += 1
+                    if self.start and self.thread is None:
+                        self.thread = threading.Thread(target=self._work, name='work-feeds', daemon=True)
+                        self.thread.start()
         return added
 
     def _work(self):
@@ -579,31 +657,33 @@ class Poller:
                 if not self.jobs:
                     self.thread = None
                     return
-                name, prefix = self.jobs.pop(0)
-            self.run(name, prefix)
+                name, prefix, fid = self.jobs.pop(0)
+            self.run(name, prefix, fid)
 
-    def run(self, name, prefix):
-        """One poll of one project. It reads the project again: a change since observe() counts."""
+    def run(self, name, prefix, fid):
+        """One poll of one feed. It reads the project again: a change since observe() counts."""
+        key = f'{prefix}/{fid}'
         try:
             record = work_items.project(name)
-            if record['prefix'] != prefix or not due(record):
+            entry = next((e for e in entries(record) if e['id'] == fid), None)
+            if record['prefix'] != prefix or entry is None or not due(entry):
                 return None
             sessions, run, lock = self.tabs
-            state = poll(record, sessions, run, lock)
+            state = poll(record, sessions, run, lock, entry=entry, still=lambda: current(name, prefix, entry))
             wait = SOON if state.get('more') else EVERY
             if state.get('status') == 'error':
                 wait = min(BACKOFF, EVERY * 2 ** min(state.get('errors', 1), 4))
             elif state.get('status') == 'off':
                 wait = 600  # a setup step is missing: look again now and then
-            self.next[prefix] = self.clock() + wait
+            self.next[key] = self.clock() + wait
             return state
         except Exception as exc:  # noqa: BLE001 - one bad feed must not stop the others
-            print(f'work feed {name} failed: {exc!r}')
-            self.next[prefix] = self.clock() + EVERY
+            print(f'work feed {name} {fid} failed: {exc!r}')
+            self.next[key] = self.clock() + EVERY
             return None
         finally:
             with self.lock:
-                self.busy.discard(prefix)
+                self.busy.discard(key)
 
 
 POLLER = Poller()

@@ -9,6 +9,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+import urllib.parse
 from unittest import mock
 
 import paths
@@ -75,7 +76,7 @@ class UrgentPingTest(unittest.TestCase):
                            'base_url': 'https://tether.test///'})
         self.assertTrue(self.send('%12', name='Build tab'))
         self.runner.assert_called_once_with(
-            ['ping-tool', 'Tether: Build tab', 'Q=Choose?', 'https://tether.test/mobile/#session=%2512', '%12', '{unknown}'],
+            ['ping-tool', 'Tether: Build tab', 'Q=Choose?', 'https://tether.test/chat/?session=%2512', '%12', '{unknown}'],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
         self.assertTrue(self.workers[0].daemon)
 
@@ -153,16 +154,34 @@ class UrgentPingTest(unittest.TestCase):
                 self.assertTrue(self.send(f'%{index}'))
             self.assertIn('Urgent ping failed:', err.getvalue())
 
+    def test_link_opens_the_tab_inside_the_installed_app_scope(self):
+        # The PWA scope is /chat/ and the chat UI reads ?session=. A link outside the scope opens a browser tab instead.
+        self.write_config({'command': ['ping-tool', '{url}'], 'base_url': 'https://tether.test'})
+        manifest = json.loads((Path(urgent_ping.__file__).parent.parent / 'ui' / 'public' / 'manifest.webmanifest').read_text())
+        for pane in ('%12', '%1&x=#y'):
+            with self.subTest(pane=pane):
+                url = urllib.parse.urlsplit(urgent_ping._argv({'pane': pane})[1])
+                self.assertTrue(url.path.startswith(manifest['scope']), url.path)
+                self.assertEqual(url.fragment, '')
+                self.assertEqual(urllib.parse.parse_qs(url.query), {'session': [pane]})
+
+    def test_test_ping_names_no_real_tab(self):
+        # A real pane id (such as %0) would open someone else's tab from the test card.
+        self.write_config({'command': ['ping-tool', '{title}', '{url}', '{pane}'], 'base_url': 'https://tether.test'})
+        with mock.patch.object(subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'', stderr=b'')) as run:
+            self.assertTrue(urgent_ping.run_test()['ok'])
+        self.assertEqual(run.call_args.args[0], ['ping-tool', 'Tether: Test', 'https://tether.test/chat/', ''])
+
     def test_cli_test_runs_in_foreground_and_prints_exit_code_and_stderr(self):
         self.write_config({'command': [sys.executable, '-c',
-            'import sys; print(sys.argv[1], file=sys.stderr); print(sys.argv[2], file=sys.stderr); sys.exit(3)',
+            'import sys; print(sys.argv[1], file=sys.stderr); print(repr(sys.argv[2]), file=sys.stderr); sys.exit(3)',
             '{question}', '{pane}']})
         result = subprocess.run([sys.executable, str(Path(urgent_ping.__file__)), 'test'],
                                 env=dict(os.environ, MOBILE_TMUX_CONFIG=str(self.config)),
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 3)
         self.assertIn('Exit code: 3', result.stdout)
-        self.assertIn('Stderr tail:\nTest ping from Tether\n%0', result.stdout)
+        self.assertIn('Stderr tail:\nTest ping from Tether\n\x27\x27', result.stdout)
         self.assertEqual(result.stderr, '')
 
 

@@ -8,7 +8,7 @@ import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
+import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, feedLabel, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
 import type { JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
@@ -238,13 +238,13 @@ const JIRA_CARD: Record<string, string> = { moved: 'Jira moved', owners: 'Jira: 
 /** What Done does, or did, to the item's Jira tickets. Only tickets assigned to the connected account move. */
 /** A feed that Tether cannot read: stopped until Mak acts (off), or failed 3 reads in a row. Agent-read feeds are not ours. */
 function feedTrouble(board: WorkBoard, projects: WorkProject[]) {
-  return projects.flatMap(entry => {
-    const state = board.feeds?.[entry.name]
-    if (!state || state.by !== 'tether') return []
-    if (state.status === 'off') return [`The ${entry.name} feed is stopped: ${state.error}`]
-    if (state.status === 'error' && state.errors >= 3) return [`The ${entry.name} feed failed ${state.errors} times in a row: ${state.error}`]
+  return projects.flatMap(entry => (board.feeds?.[entry.name] ?? []).flatMap(state => {
+    if (state.by !== 'tether') return []
+    const name = `${entry.name} ${feedLabel(state.kind, state.target)}`
+    if (state.status === 'off') return [`The ${name} feed is stopped: ${state.error}`]
+    if (state.status === 'error' && state.errors >= 3) return [`The ${name} feed failed ${state.errors} times in a row: ${state.error}`]
     return []
-  })
+  }))
 }
 
 function JiraState({ item, project, link }: { item: WorkItem; project?: WorkProject; link?: JiraLink }) {

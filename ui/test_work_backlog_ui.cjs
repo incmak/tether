@@ -25,7 +25,7 @@ const card = (n, stage, extra = {}) => ({
 })
 const board = (error, bare) => ({
   revision: 1, stages: [], jira: { connected: false }, feeds: {},
-  projects: bare ? [] : [{ name: 'shop', prefix: 'T', folder: '', triage: '', work: '', feed: '', feedTarget: '', feedBy: 'tether', jira: '', qaStatus: '', jiraUser: '' }],
+  projects: bare ? [] : [{ name: 'shop', prefix: 'T', folder: '', triage: '', work: '', feeds: [], jira: '', qaStatus: '', jiraUser: '' }],
   items: bare ? [] : [{ id: 'T-001', project: 'shop', title: 'Login fails', stage: 'ready', qa: false, ask: null, askFrom: null, refs: [], tabs: [], history: [], source: '', created: NOW, updated: NOW, doneAt: null, jira: null, version: 3 }],
   backlog: error ? { items: [], error } : { items: [...Array.from({ length: 12 }, (_, i) => card(i + 1, 'ready')), card(20, 'building'), card(21, 'done'), card(22, 'done', { doneAt: NOW - 8 * 86400 })], error: '' },
 })
