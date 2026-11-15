@@ -22,7 +22,7 @@ function fixtures() {
       tools: [{ id: 't1', name: 'Artifact', title: 'Publish plan.html', is_error: false, status: 'complete', artifact: ARTIFACT }] },
     { id: 'm3', role: 'assistant', time: '2026-11-15T08:00:09Z',
       text: `Done. Read [the plan](${REMOTE}), open \`site/index.html\` or \`site/broken.html\`, or run [the dev server](http://localhost:5173/app?tab=1#top).`
-        + ' The shop runs on `http://127.0.0.1:3000/`, the old one on `localhost:5199`, and [the stale one](http://localhost:5180/) has ended. [No port](http://localhost/) is a plain link.' }]
+        + ' The shop runs on `http://127.0.0.1:3000/`, the old one on `localhost:5199`, and [the stale one](http://localhost:5180/) has ended. A new app is on `localhost:5200`. [No port](http://localhost/) is a plain link.' }]
   return {
     sessions: { sessions: [pane], default_thread: pane.thread },
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
@@ -67,6 +67,7 @@ async function main() {
       const name = `drawer-${width}`, errors = [], posts = [], pageErrors = [], frames = []
       // One width waits past the time in which an ended frame means "the browser did not keep the cookie".
       const endedAfter = width === 390 ? 8300 : 50
+      let released = 0
       const fixture = fixtures()
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
@@ -94,17 +95,23 @@ async function main() {
               ? route.fulfill({ status: 404, json: { error: 'That file is not there.' } })
               : route.fulfill({ json: { url: `/mobile/preview/token123/${body.path.split('/').pop()}`, name: 'x', path: body.path } })
             if (endpoint === 'dev-preview') {
+              if (body.port === 5200 && !released) return route.fulfill({ status: 503, json: { error: 'All 2 preview ports are in use (localhost:5173, localhost:3000). Release one to preview port 5200.', code: 'pool-full' } })
               if (body.port === 5199) return route.fulfill({ status: 404, json: { error: 'Nothing listens on port 5199. Start the dev server, then try again.', code: 'not-listening' } })
               const pool = body.port === 3000 ? 7701 : 7700, turn = posts.filter(post => post.endpoint === 'dev-preview').length - 1
               const token = body.port === 5180 ? `ended-${endedAfter}-${turn}` : `frame${turn}`
               const next = `&next=${encodeURIComponent(body.path)}`
               return route.fulfill({ json: { port: pool, dev_port: body.port, frame: `/__tether_preview__/open?token=${token}${next}`, browser: `/__tether_preview__/open?token=browser${turn}${next}` } })
             }
+            if (endpoint === 'dev-preview/release') { released = body.port; return route.fulfill({ json: { ok: true, assigned: [{ port: 7701, dev_port: 3000 }], free: 1 } }) }
             if (endpoint === 'browser/new') return route.fulfill({ json: { id: 'tab9', url: body.url, title: '' } })
             return route.fulfill({ json: { ok: true, accepted: true } })
           }
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-          if (endpoint === 'dev-preview') return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next' }] } })
+          if (endpoint === 'dev-preview') {
+            const full = posts.at(-1)?.body.port === 5200 && !released  // the pool is full only for the new app
+            return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next' }],
+              assigned: [{ port: 7700, dev_port: 5174 }, { port: 7701, dev_port: 3000 }], free: full ? 0 : 8 } })
+          }
           return route.fulfill({ json: fixture[endpoint] || {} })
         }
         if (url.origin === origin && url.pathname.startsWith('/chat/')) return route.continue()
@@ -292,6 +299,30 @@ async function main() {
         await ended.getByRole('button', { name: 'Open again' }).click()
         await drawer.locator('iframe').waitFor()
         if (devPosts().length !== before + 1) errors.push('Open again did not ask for a new link')
+        await closeDrawer()
+
+        // 10. Every preview port is in use: Tether takes none back by itself. The person releases one, with a warning.
+        await page.getByRole('button', { name: 'Preview localhost:5200' }).click()
+        const fullAlert = drawer.getByRole('alert')
+        await fullAlert.waitFor()
+        if (!(await fullAlert.innerText()).includes('All 2 preview ports are in use')) errors.push('the full pool has no reason')
+        if (!(await fullAlert.innerText()).includes('First close every tab and preview of that dev server')) errors.push('the release list has no warning')
+        if (await fullAlert.getByRole('list', { name: 'Dev servers that run now' }).count()) errors.push('a full pool offers other servers')
+        const releases = fullAlert.getByRole('list', { name: 'Preview ports in use' }).getByRole('button')
+        if (await releases.count() !== 2) errors.push(`${await releases.count()} ports to release, want 2`)
+        if (!(await releases.nth(0).innerText()).includes('running') || !(await releases.nth(1).innerText()).includes('not running')) errors.push('the release rows do not say what runs')
+        for (const row of await releases.all()) {
+          const size = await row.boundingBox()
+          if (size.height < 44 || size.x < 0 || size.x + size.width > width) errors.push(`a release row is ${Math.round(size.width)}x${Math.round(size.height)} px or leaves the view`)
+        }
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-dev-full.png`) })
+        if (posts.some(post => post.endpoint === 'dev-preview/release')) errors.push('a port was released without the person')
+        await releases.nth(1).focus()
+        await page.keyboard.press('Enter')
+        await frameShows()
+        const releasePost = posts.find(post => post.endpoint === 'dev-preview/release')
+        if (releasePost?.body.port !== 3000) errors.push(`release asked for ${JSON.stringify(releasePost?.body)}`)
+        if (await drawer.locator('h2').innerText() !== 'localhost:5200') errors.push('the new app did not open after the release')
         await closeDrawer()
 
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)

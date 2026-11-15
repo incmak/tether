@@ -19,9 +19,11 @@ const DEV_SANDBOX = `${SANDBOX} allow-same-origin`
 const COOKIE_CHECK_MS = 8000
 const HINT_DELAY_MS = 2500
 
-type Link = { key: string; url?: string; outside?: string; pool?: number; at?: number; error?: string; servers?: DevServerRow[] }
+type Link = { key: string; url?: string; outside?: string; pool?: number; at?: number; error?: string; servers?: DevServerRow[]; inUse?: InUseRow[] }
 type DevServerRow = { port: number; name: string; folder: string }
-type DevState = { servers: DevServerRow[]; previews: { port: number; hint: string | null }[] }
+/** A dev port that holds a preview port. running: it listens now. */
+type InUseRow = { devPort: number; running: boolean }
+type DevState = { servers: DevServerRow[]; previews: { port: number; hint: string | null }[]; assigned: { port: number; dev_port: number }[]; free: number }
 
 /** A page an agent made, in a drawer: a Claude artifact's local copy, an HTML file, or a dev server on the agent's
  * machine. Phone: a sheet that leaves the top of the chat in view, with a full-screen switch. Wider screens: a
@@ -44,7 +46,7 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
   useEffect(() => {
     if (!target) return
     const abort = new AbortController()
-    const fail = (failure: unknown, servers?: DevServerRow[]) => { if (!abort.signal.aborted) setLink({ key, error: errorText(failure), servers }) }
+    const fail = (failure: unknown, servers?: DevServerRow[], inUse?: InUseRow[]) => { if (!abort.signal.aborted) setLink({ key, error: errorText(failure), servers, inUse }) }
     if (devPort === undefined) {
       api<{ url: string }>('preview', { session, path: target.path }, abort.signal).then(result => setLink({ key, url: result.url }), fail)
     } else {
@@ -53,7 +55,12 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
       api<{ port: number; frame: string; browser: string }>('dev-preview', { port: devPort, path: devPath }, abort.signal)
         .then(result => setLink({ key, url: `${origin}${result.port}${result.frame}`, outside: `${origin}${result.port}${result.browser}`, pool: result.port, at: Date.now() }),
           // The agent's link may name a port that changed (Vite takes 5174 when 5173 is busy): offer what runs now.
-          failure => api<DevState>('dev-preview', undefined, abort.signal).then(state => fail(failure, state.servers.filter(row => row.port !== devPort)), () => fail(failure)))
+          // Every preview port may be in use: Tether never takes one back by itself, so offer the ports to release.
+          failure => api<DevState>('dev-preview', undefined, abort.signal).then(state => {
+            const full = state.free === 0 && state.assigned.length > 0 && !state.assigned.some(row => row.dev_port === devPort)
+            if (full) fail(failure, undefined, state.assigned.map(row => ({ devPort: row.dev_port, running: state.servers.some(server => server.port === row.dev_port) })))
+            else fail(failure, state.servers.filter(row => row.port !== devPort))
+          }, () => fail(failure)))
     }
     return () => abort.abort()
   }, [api, session, target, key, round, devPort, devPath])
@@ -91,6 +98,11 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
   const reload = () => { setLoaded(''); setRound(value => value + 1) }
   const retry = () => { setLink(null); setRound(value => value + 1) }
   const pick = (port: number) => { if (target) { setLink(null); setLoaded(''); setPicked({ target, port }) } }
+  const [releasing, setReleasing] = useState(0)
+  const release = (port: number) => {
+    setReleasing(port)
+    api('dev-preview/release', { port }).then(retry, failure => setLink(old => old?.key === key ? { ...old, error: errorText(failure) } : old)).finally(() => setReleasing(0))
+  }
   return <dialog {...modal} className={['sheet', 'preview-drawer', full && 'full'].filter(Boolean).join(' ')} aria-labelledby="preview-title">{target && <>
     <div className="preview-grip" aria-hidden="true" />
     <div className="preview-head">
@@ -115,6 +127,16 @@ export function PreviewDrawer({ api, session, target, close, onSource }: { api: 
           {remote && <a className="secondary" href={remote} target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" />Open on claude.ai</a>}
           {dev && current.outside && <a className="secondary" href={current.outside} target="_blank" rel="noreferrer"><ExternalLink size={16} aria-hidden="true" />Open in browser</a>}
         </div>
+        {!!current.inUse?.length && dev && <div className="preview-servers">
+          <h3 id="preview-in-use-title">Preview ports in use</h3>
+          <p className="preview-servers-note">Release one to preview localhost:{dev.port}. First close every tab and preview of that dev server: a page that stays open could reach the next app on its port.</p>
+          <ul aria-labelledby="preview-in-use-title">{current.inUse.map(row => <li key={row.devPort}>
+            <button type="button" className="secondary" disabled={!!releasing} aria-busy={releasing === row.devPort} onClick={() => release(row.devPort)}>
+              <span>Release localhost:{row.devPort}</span>
+              <small>{row.running ? 'running' : 'not running'}</small>
+            </button>
+          </li>)}</ul>
+        </div>}
         {!!current.servers?.length && <div className="preview-servers">
           <h3 id="preview-servers-title">Dev servers that run now</h3>
           <ul aria-labelledby="preview-servers-title">{current.servers.map(row => <li key={row.port}>

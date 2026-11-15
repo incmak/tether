@@ -1804,7 +1804,11 @@ class Handler(BaseHTTPRequestHandler):
                     found = dev_previews.PREVIEWS.servers()
                 except dev_previews.Refused:
                     found = []
-                self.respond(200, {'servers': found, 'previews': dev_previews.PREVIEWS.state()})
+                try:
+                    used = dev_previews.PREVIEWS.assignments()
+                except dev_previews.Refused:
+                    used = {'assigned': [], 'free': 0}
+                self.respond(200, dict(used, servers=found, previews=dev_previews.PREVIEWS.state()))
             elif path == '/mobile/api/host':
                 self.respond(200, {'name': socket.gethostname().split('.')[0], 'resources': host_stats.enabled(), 'terminal': TTYD_PORT > 0, 'office': office_addon.enabled()})
             elif path == '/mobile/api/office/copy':
@@ -2169,7 +2173,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
                          '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
@@ -2289,7 +2293,16 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     self.respond(200, dev_previews.PREVIEWS.open(body.get('port'), body.get('path') if isinstance(body.get('path'), str) else '/'))
                 except dev_previews.Refused as exc:
-                    self.respond(503 if exc.code in ('off', 'pool-full', 'unsupported') else 404, {'error': str(exc), 'code': exc.code})
+                    self.respond(503 if exc.code in ('off', 'pool-full', 'unsupported', 'state') else 404, {'error': str(exc), 'code': exc.code})
+                return
+            if self.path == '/mobile/api/dev-preview/release':
+                # The person frees the preview port of a dev server (the drawer, when every port is in use). Tether
+                # never does this by itself: an open page of that dev server would reach the next one on the port.
+                try:
+                    dev_previews.PREVIEWS.release(body.get('port'))
+                    self.respond(200, dict(dev_previews.PREVIEWS.assignments(), ok=True))
+                except dev_previews.Refused as exc:
+                    self.respond(503 if exc.code == 'state' else 404, {'error': str(exc), 'code': exc.code})
                 return
             if self.path == '/mobile/api/preview':
                 try:

@@ -205,7 +205,11 @@ Tap the link in Tether: the preview opens the dev server through Tether, and hot
 Tether forwards each dev server on one port of a pool (7700 to 7709 by default), so each has its own origin.
 The pool forwards only listeners above port 1024 that Tether's own user owns on localhost.
 It never forwards Tether's own ports, debugger ports, or database ports.
-A preview port needs a link from Tether: without it, the port answers 401. A preview ends after 12 hours without use.
+A preview port needs a link from Tether: without it, the port answers 401. A sign-in to a preview ends after 12 hours without use.
+
+A preview port stays with its dev port until you release it. When every port is in use, the preview shows the ports in use.
+Close the tabs of a dev server before you release its port: a page that stays open could reach the next app on that port.
+Previews need a Linux server: Tether checks who owns each connection in `/proc/net/tcp`.
 
 If you reach Tether through Tailscale Serve, publish the pool ports too:
 

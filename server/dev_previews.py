@@ -27,12 +27,16 @@ Security:
 - Ports of one host are one site, so the browser sends a preview port's cookie with a request from a page on
   another preview port. The proxy therefore checks where a request comes from (allowed_source): only the page's own
   origin may write, open a WebSocket or load a part of the page; another origin may only navigate to it.
-- A dev port keeps its pool port when it can (stable_port), so an origin's storage stays with one dev server, as on
-  plain localhost. When a browser signs in to a pool port that last showed it another dev server, the answer clears
-  that origin's storage and cache (Clear-Site-Data) and the connections of the old lease end. A page of the old dev
-  server that is still open in a browser without "executionContexts" support stays open until it is reloaded.
+- A pool port belongs to one dev port until the person releases it (the list is a file in Tether's config folder,
+  so it holds after a lease ends and after a restart). Tether never moves a pool port to another dev server by
+  itself: a page of the old dev server that is still open in a browser would act with the new server's cookie,
+  and clearing storage does not close that page. A full pool is an error that names the assigned dev ports; the
+  person releases one from the drawer (POST /mobile/api/dev-preview/release) after they close its tabs. As a
+  second line, the first sign-in of a browser on a pool port that last showed it another dev server clears that
+  origin's storage and cache (Clear-Site-Data), and the connections of a released lease end.
 - After the proxy connects, it reads the owner of that very connection from the socket table and sends nothing when
-  it is not Tether's user: another user cannot take a port that a dev server left.
+  it is not Tether's user, or when the owner cannot be read: another user cannot take a port that a dev server
+  left. The socket table is Linux's /proc/net/tcp; on another system Tether does not forward dev servers.
 - The proxy rebuilds the request and response framing (one Content-Length or chunked, never both) and refuses
   malformed heads, so no request can mean one thing to the proxy and another to the dev server (RFC 9112, 6.3).
 - Connections, WebSockets, header time and write time are limited (Guard), so stalled clients cannot hold workers.
@@ -41,12 +45,12 @@ Security:
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import secrets
 import select
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -54,12 +58,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
 import auth
+import paths
 
 DEFAULT_PORTS = '7700-7709'
 MAX_POOL = 32
 IDLE = 12 * 3600          # a lease ends after this long without a request
 GONE = 10 * 60            # ... or this long after its dev server stopped listening (a restart keeps the lease)
-REUSE_AFTER = 5 * 60      # a full pool takes the lease that is idle the longest, when it is idle at least this long
+STATE_FILE = 'dev-preview-ports.json'  # which dev port each pool port belongs to, until the person releases it
 TICKET_LIFE = 120         # the link for the frame; the "Open in browser" link lives as long as the lease
 MAX_TICKETS = 20
 SCAN_TTL = 2.0            # how long one read of the listener table serves the proxy
@@ -70,7 +75,7 @@ DENIED_PORTS = frozenset({22, 2375, 2376, 3306, 5432, 6379, 9200, 9222, 9229, 11
 MARKER_SUFFIX = '_app'    # tether_preview_<pool>_app: which dev server this browser last saw on the pool port
 MARKER_LIFE = 365 * 86400
 CLEAR = '"cache", "storage", "executionContexts"'  # never "cookies": cookies span all ports, Tether's session too
-HEAD_LIMIT = 65536
+HEAD_LIMIT = 65536        # bytes of a request head or an answer head
 HEAD_WAIT = 300           # a dev server may compile for a while before it answers; an absolute limit for its head
 IDLE_STREAM = 900         # a plain answer that sends nothing for this long is cut; WebSockets have no idle limit
 MAX_CONNECTIONS = 256     # open connections on all pool ports together
@@ -89,6 +94,10 @@ FIELD_LINE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[\t\x20-\x7e\x80-\xff]*")
 CHUNK_SIZE = re.compile(rb'([0-9A-Fa-f]{1,8})(?:[ \t]*;[\t\x20-\x7e\x80-\xff]*)?')
 LENGTH = re.compile(r'[0-9]{1,15}')
 HOST_VALUE = re.compile(r'[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?|\[[0-9A-Fa-f:.]{2,45}\](?::[0-9]{1,5})?')
+
+
+UNSUPPORTED = ('Dev server previews need a Linux server: on this system Tether cannot check who owns a dev '
+               "server's connection, so it does not forward it.")
 
 
 class Refused(ValueError):
@@ -151,35 +160,10 @@ def parse_proc_net(text):
     return found
 
 
-def parse_lsof(text, uid):
-    """Listening sockets from `lsof -nP -iTCP -sTCP:LISTEN -a -u UID -Fpcn` (macOS has no /proc)."""
-    found, pid, name = [], None, ''
-    for line in text.splitlines():
-        kind, value = line[:1], line[1:]
-        if kind == 'p':
-            pid, name = value, ''
-        elif kind == 'c':
-            name = value
-        elif kind == 'n':
-            host, _, port = value.rpartition(':')
-            try:
-                address = ipaddress.ip_address('0.0.0.0' if host == '*' else host.strip('[]'))
-                found.append({'address': address, 'port': int(port), 'uid': uid, 'inode': 0, 'pid': pid, 'name': name})
-            except ValueError:
-                continue
-    return found
-
-
 def read_listeners():
-    """Every listening TCP socket this system shows. Linux: all users, from /proc. macOS: this user's, from lsof."""
-    if sys.platform == 'darwin':
-        uid = os.getuid()
-        try:
-            result = subprocess.run(['lsof', '-nP', '-iTCP', '-sTCP:LISTEN', '-a', '-u', str(uid), '-Fpcn'],
-                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            raise Refused('unsupported', 'Tether cannot list the dev servers on this machine (lsof did not run).') from None
-        return parse_lsof(result.stdout, uid)
+    """Every listening TCP socket, of all users, from the kernel's socket table (Linux)."""
+    if not sys.platform.startswith('linux'):
+        raise Refused('unsupported', UNSUPPORTED)
     found = []
     for name in ('/proc/net/tcp', '/proc/net/tcp6'):
         try:
@@ -300,8 +284,10 @@ class DevPreviews:
     """The pool: which dev port each pool port forwards, and who may use it. Thread-safe."""
 
     def __init__(self, ports=(), denied=(), clock=time.time, listeners=read_listeners, uid=None, names=process_names,
-                 peer_uid=connection_uid if sys.platform.startswith('linux') else None):
-        self.peer_uid = peer_uid  # None: no socket table on this system (macOS); verify() reads the listeners again
+                 peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None):
+        self.peer_uid = peer_uid  # None: no socket table on this system. Nothing is forwarded then (verify, open).
+        self.store = store        # the file that keeps the assignments; None keeps them in memory (tests)
+        self.assigned = None      # pool port -> dev port, read from the file at first use
         self.ports = list(ports)
         self.denied = set(DENIED_PORTS) | set(denied) | set(self.ports)
         self.clock = clock
@@ -352,24 +338,77 @@ class DevPreviews:
             raise Refused('denied', 'Port %d belongs to another user or does not listen on localhost.' % port)
         raise Refused('not-listening', 'Nothing listens on port %d. Start the dev server, then try again.' % port)
 
-    def verify(self, sock, port, expected=None):
-        """True when the connected socket `sock` reaches a dev server of Tether's own user. Called after connect and
-        before the first byte: between the listener check and connect, another user may have taken the port."""
+    def verify(self, sock):
+        """'ours' when the connected socket `sock` reaches a dev server of Tether's own user, 'other' when it does
+        not, 'unknown' when the owner of this very connection cannot be read. Called after connect and before the
+        first byte: between the listener check and connect, another user may have taken the port. Only 'ours'
+        is forwarded; a second look at the listeners would not name this connection."""
+        if self.peer_uid is None:
+            return 'unknown'
         try:
-            if self.peer_uid is not None:
-                return self.peer_uid(sock) == self.uid
-            return self.target(port, fresh=True) == expected
-        except (Refused, OSError, ValueError):
-            return False
+            owner = self.peer_uid(sock)
+        except (OSError, ValueError):
+            return 'unknown'
+        return 'unknown' if owner is None else 'ours' if owner == self.uid else 'other'
 
-    def stable_port(self, dev_port, free):
-        """The pool port for a dev port, from the free ones: always the same one when it is free (also after a
-        restart), so the origin and its storage stay with one dev server, as they do on localhost:<port>."""
-        wanted = self.ports[dev_port % len(self.ports)]
-        return wanted if wanted in free else free[0]
+    # assignments -----------------------------------------------------------------------------------------------
+    def _assignments(self):
+        """{pool port: dev port}, read once. Call with the lock held. Refused when the file is there but unreadable:
+        without the list, Tether cannot know which dev server an origin belongs to, so it assigns nothing."""
+        if self.assigned is None:
+            found = {}
+            if self.store is not None:
+                try:
+                    data = json.loads(self.store.read_text())['ports']
+                    found = {int(pool): dev for pool, dev in data.items()}
+                    if not all(type(dev) is int and 1024 < dev <= 65535 and 1024 < pool <= 65535 for pool, dev in found.items()) \
+                            or len(set(found.values())) != len(found):
+                        raise ValueError('ports')
+                except FileNotFoundError:
+                    found = {}
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    raise Refused('state', 'Tether cannot read its list of preview ports (%s in its config folder). '
+                                           'Repair or remove that file.' % self.store.name) from None
+            self.assigned = found
+        return self.assigned
+
+    def _save(self, assigned):
+        """Write the assignments, then use them. Call with the lock held. Nothing changes when the write fails."""
+        if self.store is not None:
+            try:
+                self.store.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                draft = self.store.with_name(self.store.name + '.new')
+                descriptor = os.open(draft, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, 'w') as stream:
+                    json.dump({'ports': {str(pool): dev for pool, dev in sorted(assigned.items())}}, stream)
+                os.replace(draft, self.store)
+            except OSError:
+                raise Refused('state', 'Tether cannot save its list of preview ports. Check the disk and its config folder.') from None
+        self.assigned = assigned
+
+    def assignments(self):
+        """For the page: {'assigned': [{'port', 'dev_port'}], 'free': how many pool ports have no dev port}."""
+        with self.lock:
+            assigned = self._assignments()
+            rows = [{'port': port, 'dev_port': assigned[port]} for port in self.ports if port in assigned]
+            return {'assigned': rows, 'free': len(self.ports) - len(rows)}
+
+    def release(self, dev_port):
+        """The person gives up the pool port of `dev_port`: its lease, cookie and open connections end, and the pool
+        port is free for another dev server. Only a request the person makes does this (server.py)."""
+        if type(dev_port) is not int:
+            raise Refused('bad-port', 'That is not a port number.')
+        with self.lock:
+            assigned = self._assignments()
+            pool = next((port for port, dev in assigned.items() if dev == dev_port), None)
+            if pool is None:
+                raise Refused('not-assigned', 'Port %d has no preview port.' % dev_port)
+            self._save({port: dev for port, dev in assigned.items() if port != pool})
+            self.leases.pop(pool, None)
+        return pool
 
     def alive(self, lease):
-        """False once the lease ended or its pool port went to another dev server: its open connections must end."""
+        """False once the lease ended or the person released its pool port: its open connections must end."""
         with self.lock:
             return self.leases.get(lease.pool_port) is lease and self.clock() - lease.used <= IDLE
 
@@ -382,8 +421,8 @@ class DevPreviews:
                     or connect_address(entry['address']) is None):
                 continue
             found[port] = entry
-        names = self.names([entry['inode'] for entry in found.values()], self.uid) if sys.platform != 'darwin' else {}
-        return [{'port': port, 'name': names.get(entry['inode'], {}).get('name') or entry.get('name', ''),
+        names = self.names([entry['inode'] for entry in found.values()], self.uid)
+        return [{'port': port, 'name': names.get(entry['inode'], {}).get('name', ''),
                  'folder': names.get(entry['inode'], {}).get('folder', '')}
                 for port, entry in sorted(found.items())]
 
@@ -397,22 +436,26 @@ class DevPreviews:
         """Forward `dev_port` and return the links: {'port', 'dev_port', 'frame', 'browser'}. Refused with a reason."""
         if not self.ports:
             raise Refused('off', 'Dev server previews are turned off on this server.')
+        if self.peer_uid is None:
+            raise Refused('unsupported', UNSUPPORTED)
         self.target(dev_port, fresh=True)
         path = safe_path(path)
         now = self.clock()
         with self.lock:
             self._sweep(now)
-            lease = next((item for item in self.leases.values() if item.dev_port == dev_port), None)
-            if lease is None:
-                free = [port for port in self.ports if port not in self.leases]
-                if not free:
-                    free = self._reusable(now)
-                if not free:
-                    raise Refused('pool-full', 'All %d preview ports are in use. Stop a dev server you do not need, '
-                                               'or wait %d minutes.' % (len(self.ports), REUSE_AFTER // 60))
-                # A new Lease has a new secret: the cookie and the connections of the port's old lease end here.
-                port = self.stable_port(dev_port, free)
-                lease = self.leases[port] = Lease(port, dev_port, now)
+            assigned = self._assignments()
+            pool = next((port for port in self.ports if assigned.get(port) == dev_port), None)
+            if pool is None:
+                # The first free pool port. A pool port never moves to another dev port here: only release() frees it.
+                pool = next((port for port in self.ports if port not in assigned), None)
+                if pool is None:
+                    used = ', '.join('localhost:%d' % assigned[port] for port in self.ports)
+                    raise Refused('pool-full', 'All %d preview ports are in use (%s). Release one to preview port %d.'
+                                  % (len(self.ports), used, dev_port))
+                self._save({**assigned, pool: dev_port})
+            lease = self.leases.get(pool)
+            if lease is None or lease.dev_port != dev_port:
+                lease = self.leases[pool] = Lease(pool, dev_port, now)
             lease.used, lease.gone = now, None
             lease.tickets = {key: end for key, end in lease.tickets.items() if end > now}
             while len(lease.tickets) > MAX_TICKETS - 2:
@@ -423,19 +466,6 @@ class DevPreviews:
             after = '&next=' + quote(path, safe='')
             return {'port': lease.pool_port, 'dev_port': dev_port, 'frame': OPEN_PATH + '?token=' + frame + after,
                     'browser': OPEN_PATH + '?token=' + browser + after}
-
-    def _reusable(self, now):
-        """A full pool: first the leases whose dev server is gone, then the one that is idle the longest."""
-        try:
-            listening = {entry['port'] for entry in self.read()}
-        except Refused:
-            listening = None
-        if listening is not None:
-            dead = [port for port, lease in self.leases.items() if lease.dev_port not in listening]
-            if dead:
-                return dead
-        port, lease = min(self.leases.items(), key=lambda item: item[1].used)
-        return [port] if now - lease.used >= REUSE_AFTER else []
 
     def redeem(self, pool_port, token):
         """The lease for a one-time token, which is spent now. None for an unknown, used or old token."""
@@ -710,12 +740,23 @@ class HeadRecorder:
     and joins folded lines; the proxy checks the lines as they came (raw_head_ok), so it never forwards a head that
     it read in a more lenient way than the dev server would."""
 
-    def __init__(self, stream):
+    def __init__(self, stream, limit=HEAD_LIMIT):
         self.stream, self.lines, self.recording = stream, [], True
+        self.left, self.over = limit, False
 
-    def readline(self, *args):
-        line = self.stream.readline(*args)
-        if self.recording and len(self.lines) < 256:
+    def readline(self, size=65537):
+        if not self.recording:
+            return self.stream.readline(size)
+        if self.over:
+            return b'\r\n'
+        # Never read more of the head than the limit allows: the limit holds while the head arrives, before any
+        # parsing and before the sign-in check. Past it, the parser gets an end of head and relay() answers 431.
+        line = self.stream.readline(min(size, self.left + 1))
+        self.left -= len(line)
+        if self.left < 0:
+            self.over = True
+            return b'\r\n'
+        if len(self.lines) < 256:
             self.lines.append(line)
         return line
 
@@ -845,6 +886,9 @@ class PoolHandler(BaseHTTPRequestHandler):
         previews, guard, port = self.server.previews, self.server.guard, self.server.server_port
         guard.unwatch(self.connection)  # the whole head is here
         self.rfile.recording = False
+        if self.rfile.over:
+            self.answer(431, page('Request header too large', 'Tether forwards request headers of up to %d KB.' % (HEAD_LIMIT // 1024)))
+            return
         if not re.fullmatch(r'/[\x21-\x7e]*', self.path) or not raw_head_ok(self.rfile.lines):
             self.answer(400, page('Bad request', 'Tether cannot forward this request: its path or its headers are malformed.'))
             return
@@ -894,10 +938,13 @@ class PoolHandler(BaseHTTPRequestHandler):
                                           'loads again in a moment.' % lease.dev_port, state='down', refresh=3))
                     return
                 # The listener was checked a moment ago (and that answer may be cached). This connection is checked now.
-                if not previews.verify(upstream, lease.dev_port, address):
+                owner = previews.verify(upstream)
+                if owner != 'ours':
                     previews.mark(lease, False)
                     self.answer(502, page('Tether cannot forward this port', 'Port %d now belongs to another program or '
-                                          'user. Start the dev server again.' % lease.dev_port, state='down'))
+                                          'user. Start the dev server again.' % lease.dev_port if owner == 'other' else
+                                          'Tether cannot check who owns the connection to port %d, so it does not '
+                                          'forward it.' % lease.dev_port, state='down'))
                     return
                 previews.mark(lease, True)
                 self.forward(upstream, lease, public, upgrading, framing)
@@ -1098,7 +1145,7 @@ def serve_commands(ports):
     return ['tailscale serve --bg --https=%d http://127.0.0.1:%d' % (port, port) for port in ports]
 
 
-PREVIEWS = DevPreviews()
+PREVIEWS = DevPreviews(store=paths.private_file(STATE_FILE))
 
 
 def start(host, main_port, denied=(), previews=None, ports=None, log=print, guard=None):

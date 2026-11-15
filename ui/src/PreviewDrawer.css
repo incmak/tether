@@ -31,6 +31,8 @@
 .preview-servers ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .preview-servers button { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; width: 100%; min-height: 44px; padding: 8px 14px; text-align: start; font-variant-numeric: tabular-nums; }
 .preview-servers small { color: var(--muted); font-size: 12px; }
+.preview-servers .preview-servers-note { margin: 0 0 12px; color: var(--text); font-size: 13px; line-height: 1.45; text-align: start; }
+.preview-servers button:disabled { opacity: .5; }
 .preview-wide-only { display: none; }
 /* The phone sheet: the body area has the white page; the frame swallows touches, so only the head drags the sheet down. */
 @media (max-width: 599.98px) {

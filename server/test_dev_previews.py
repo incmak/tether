@@ -11,6 +11,7 @@ import time
 import unittest
 import unittest.mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import auth
 import dev_previews
@@ -64,13 +65,6 @@ class PortTests(unittest.TestCase):
         self.assertEqual(found[8001]['address'].ipv4_mapped, ipaddress.ip_address('127.0.0.1'))
         self.assertEqual((found[8080]['uid'], found[5173]['uid'], found[5173]['inode']), (0, UID, 5001))
         self.assertEqual(len(found), 9)
-
-    def test_lsof_lines_become_listeners(self):
-        text = 'p311\ncnode\nf23\nn127.0.0.1:5173\nf24\nn[::1]:5173\np400\ncpython3.12\nf3\nn*:8000\nf4\nnbad\n'
-        found = dev_previews.parse_lsof(text, UID)
-        self.assertEqual([(str(entry['address']), entry['port'], entry['name']) for entry in found],
-                         [('127.0.0.1', 5173, 'node'), ('::1', 5173, 'node'), ('0.0.0.0', 8000, 'python3.12')])
-        self.assertTrue(all(entry['uid'] == UID for entry in found))
 
     def test_own_loopback_and_wildcard_listeners_are_forwarded(self):
         self.assertEqual(self.previews.target(5173), '127.0.0.1')
@@ -126,8 +120,13 @@ class LeaseTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         self.listening = fake_listeners()
-        # A dev port prefers ports[dev_port % len(ports)]: 5173 gets 7700 and 3000 gets 7701.
-        self.previews = DevPreviews(ports=[7701, 7700], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        self.previews = DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.file = Path(self.temp.name) / 'config' / dev_previews.STATE_FILE
+
+    def pool(self, ports=range(7700, 7710), **more):
+        return DevPreviews(ports=list(ports), listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0], store=self.file, **more)
 
     def token(self, link):
         return link.split('token=')[1].split('&')[0]
@@ -196,26 +195,83 @@ class LeaseTests(unittest.TestCase):
         self.now[0] += dev_previews.GONE + 1
         self.assertIsNone(self.previews.authorize(7700, self.cookie(lease)))
 
-    def test_a_full_pool_reuses_dead_then_idle_leases(self):
+    def test_a_full_pool_is_an_error_and_nothing_moves_by_itself(self):
+        # Review of 8a40fd3, item 1: a pool port that moves hands an open page of the old app the new app's cookie.
         self.previews.open(5173)
         self.previews.open(3000)
         with self.assertRaises(Refused) as caught:
             self.previews.open(5174)
         self.assertEqual(caught.exception.code, 'pool-full')
-        self.assertIn('2 preview ports', str(caught.exception))
-        # The server on 3000 stops: its pool port is free for the next dev server at once.
+        self.assertEqual(str(caught.exception), 'All 2 preview ports are in use (localhost:5173, localhost:3000). Release one to preview port 5174.')
+        # Not when a dev server stops, not when its lease ends, not after a long time.
         self.listening = [entry for entry in self.listening if entry['port'] != 3000]
-        self.assertEqual(self.previews.open(5174)['port'], 7701)
-        self.assertEqual(self.previews.leases[7701].dev_port, 5174)
-        # Both servers run; the lease that is idle the longest goes once it is idle long enough.
-        self.now[0] += 60
-        self.previews.authorize(7701, self.cookie(self.previews.leases[7701]))
+        self.now[0] += 30 * 86400
+        self.assertEqual(self.previews.leases and self.previews.state(), [])
+        with self.assertRaises(Refused) as caught:
+            self.previews.open(5174)
+        self.assertEqual(caught.exception.code, 'pool-full')
+        self.assertEqual(self.previews.assignments(), {'assigned': [{'port': 7700, 'dev_port': 5173}, {'port': 7701, 'dev_port': 3000}], 'free': 0})
+        self.assertEqual(self.previews.open(5173)['port'], 7700)  # an assigned dev port still opens
+
+    def test_release_frees_the_port_and_ends_the_lease(self):
+        self.previews.open(5173)
+        self.previews.open(3000)
+        lease = self.previews.leases[7701]
+        self.assertEqual(self.previews.release(3000), 7701)
+        self.assertFalse(self.previews.alive(lease))
+        self.assertIsNone(self.previews.authorize(7701, self.cookie(lease)))
+        self.assertEqual(self.previews.assignments(), {'assigned': [{'port': 7700, 'dev_port': 5173}], 'free': 1})
+        new = self.previews.open(5174)
+        self.assertEqual(new['port'], 7701)
+        self.assertNotEqual(self.previews.leases[7701].secret, lease.secret)
+        for port, code in ((3000, 'not-assigned'), (9999, 'not-assigned'), ('5173', 'bad-port'), (None, 'bad-port')):
+            with self.assertRaises(Refused) as caught:
+                self.previews.release(port)
+            self.assertEqual(caught.exception.code, code)
+
+    def test_assignments_survive_lease_expiry_and_restart(self):
+        first = self.pool()
+        self.assertEqual(first.open(3000)['port'], 7700)  # the first free pool port
+        self.assertEqual(first.open(5173)['port'], 7701)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        self.now[0] += dev_previews.IDLE + 1  # every lease ends
+        # The reviewer's case: 3000 and 8000 collided on 7700 while nine pool ports were free.
+        self.assertEqual(first.open(8000)['port'], 7702)
+        self.assertEqual(first.open(3000)['port'], 7700)
+        restarted = self.pool()
+        self.assertEqual(restarted.assignments()['assigned'], [{'port': 7700, 'dev_port': 3000}, {'port': 7701, 'dev_port': 5173}, {'port': 7702, 'dev_port': 8000}])
+        self.assertEqual(restarted.open(5174)['port'], 7703)
+        self.assertEqual(restarted.open(5173)['port'], 7701)
+        restarted.release(5173)
+        self.assertEqual(self.pool().open(8001)['port'], 7701)  # the release is on disk too
+        # A smaller pool keeps what it knows about its ports and assigns no port twice.
+        small = self.pool(ports=[7700, 7702])
+        self.assertEqual(small.assignments(), {'assigned': [{'port': 7700, 'dev_port': 3000}, {'port': 7702, 'dev_port': 8000}], 'free': 0})
         with self.assertRaises(Refused):
-            self.previews.open(8000)
-        self.now[0] += dev_previews.REUSE_AFTER
-        old_secret = self.previews.leases[7700].secret
-        self.assertEqual(self.previews.open(8000)['port'], 7700)
-        self.assertNotEqual(self.previews.leases[7700].secret, old_secret)  # the old cookie does not open the new server
+            small.open(5173)
+
+    def test_an_unreadable_list_assigns_nothing(self):
+        self.file.parent.mkdir(parents=True)
+        for text in ('not json', '{}', '{"ports": []}', '{"ports": {"7700": "3000"}}', '{"ports": {"x": 3000}}', '{"ports": {"7700": 80}}',
+                     '{"ports": {"7700": 3000, "7701": 3000}}'):
+            self.file.write_text(text)
+            previews = self.pool()
+            for action in (lambda: previews.open(5173), lambda: previews.release(5173), previews.assignments):
+                with self.assertRaises(Refused, msg=text) as caught:
+                    action()
+                self.assertEqual(caught.exception.code, 'state')
+            self.assertIn(dev_previews.STATE_FILE, str(caught.exception))
+            self.assertEqual(self.file.read_text(), text)  # Tether does not overwrite what it could not read
+
+    def test_a_failed_save_assigns_nothing(self):
+        self.file.parent.mkdir(parents=True)
+        self.file.parent.chmod(0o500)
+        self.addCleanup(self.file.parent.chmod, 0o700)
+        previews = self.pool()
+        with self.assertRaises(Refused) as caught:
+            previews.open(5173)
+        self.assertEqual(caught.exception.code, 'state')
+        self.assertEqual((previews.leases, previews.assignments()['assigned']), ({}, []))
 
     def test_refusals(self):
         with self.assertRaises(Refused) as caught:
@@ -226,26 +282,20 @@ class LeaseTests(unittest.TestCase):
                 self.previews.open(port)
             self.assertEqual(caught.exception.code, code)
         self.assertEqual(self.previews.leases, {})
-
-    def test_a_dev_port_keeps_its_pool_port(self):
-        # Review finding 2: a pool port that moves between dev servers hands one app the other's storage.
-        ports = list(range(7700, 7710))
-        first = DevPreviews(ports=ports, listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
-        self.assertEqual(first.open(3000)['port'], 7700)  # 3000 % 10
-        self.assertEqual(first.open(5173)['port'], 7703)
-        self.assertEqual(first.open(5174)['port'], 7704)
-        self.now[0] += dev_previews.IDLE + 1  # every lease ends; the same dev port comes back to the same origin
-        self.assertEqual(first.open(5173)['port'], 7703)
-        restarted = DevPreviews(ports=ports, listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
-        self.assertEqual(restarted.open(5173)['port'], 7703)
-        self.assertEqual(restarted.open(8000)['port'], 7700)
-        self.assertEqual(restarted.open(3000)['port'], 7701)  # its own port is taken: the next free one
+        self.assertEqual(self.previews.assignments()['assigned'], [])  # a refused port takes no pool port
+        # Review of 8a40fd3, item 2: no socket table, no forwarding. The preview does not even start.
+        with self.assertRaises(Refused) as caught:
+            DevPreviews(ports=[7700], listeners=fake_listeners, uid=UID, peer_uid=None).open(5173)
+        self.assertEqual(caught.exception.code, 'unsupported')
+        self.assertIn('need a Linux server', str(caught.exception))
 
     def test_alive_ends_with_the_lease(self):
         self.previews.open(5173)
         lease = self.previews.leases[7700]
         self.assertTrue(self.previews.alive(lease))
-        self.previews.leases[7700] = dev_previews.Lease(7700, 3000, self.now[0])
+        self.previews.release(5173)
+        self.assertFalse(self.previews.alive(lease))
+        self.previews.open(3000)
         self.assertFalse(self.previews.alive(lease))
         self.assertTrue(self.previews.alive(self.previews.leases[7700]))
         self.now[0] += dev_previews.IDLE + 1
@@ -719,8 +769,8 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/', {'Cookie': both})[0].status, 200)  # the marker is no key ...
         self.assertNotIn('cookie', self.last()[1])                                   # ... and stays with Tether
 
-    def test_a_pool_port_that_moves_to_another_dev_server_ends_the_old_one(self):
-        # Review finding 2: the old cookie, the old WebSocket and the old storage must not carry over.
+    def test_a_released_pool_port_ends_the_old_dev_server_there(self):
+        # The person released the port: the old cookie, the old WebSocket and the old storage must not carry over.
         self.sign_in()
         old_cookie, old_marker = self.cookie, self.marker
         client = socket.create_connection(('127.0.0.1', self.port), timeout=10)
@@ -734,10 +784,15 @@ class ProxyTests(unittest.TestCase):
         second.handle_error = lambda *_args: None
         threading.Thread(target=second.serve_forever, daemon=True).start()
         self.addCleanup(lambda: (second.shutdown(), second.server_close()))
-        self.previews.leases[self.port].used -= dev_previews.REUSE_AFTER + 1  # idle long enough for a full pool to take it
+        with self.assertRaises(Refused) as caught:  # the pool has one port: nothing moves by itself
+            self.previews.open(second.server_port)
+        self.assertEqual(caught.exception.code, 'pool-full')
+        client.sendall(b'two')
+        self.assertEqual(client.recv(4096), b'echo:two')
+        self.previews.release(self.dev_port)
+        self.assertEqual(client.recv(4096), b'')  # the old page's live connection ended
         link = self.previews.open(second.server_port)
         self.assertEqual(link['port'], self.port)
-        self.assertEqual(client.recv(4096), b'')  # the old page's live connection ended
         self.assertEqual(self.request('GET', '/', {'Cookie': old_cookie})[0].status, 401)
         self.assertEqual(self.request('POST', '/api', {'Cookie': old_cookie})[0].status, 401)
         response, _ = self.request('GET', link['frame'], {'Cookie': '%s; %s' % (old_cookie, old_marker)})
@@ -749,18 +804,23 @@ class ProxyTests(unittest.TestCase):
         self.sign_in()
         self.assertEqual(self.request('GET', '/')[0].status, 200)  # the listener table now says "ours", for 2 s
         Upstream.seen = []
-        for owner in (os.getuid() + 1, 0, None):
+        for owner in (os.getuid() + 1, 0):
             self.previews.peer_uid = lambda sock, owner=owner: owner
             response, data = self.request('POST', '/api/secret', body=b'token=1')
             self.assertEqual(response.status, 502, owner)
             self.assertIn(b'now belongs to another program or user', data)
-        self.assertEqual(Upstream.seen, [])
         self.assertIsNotNone(self.previews.leases[self.port].gone)
 
+        # Review of 8a40fd3, item 2: when the owner of this very connection cannot be read, nothing is forwarded.
+        # A second look at the listeners does not name the connection, so it is no substitute.
         def broken(sock):
             raise OSError('no socket table')
-        self.previews.peer_uid = broken
-        self.assertEqual(self.request('GET', '/')[0].status, 502)
+        for reader in (lambda sock: None, broken, None):  # not in the table; the table cannot be read; no table (macOS)
+            self.previews.peer_uid = reader
+            response, data = self.request('POST', '/api/secret', body=b'token=1')
+            self.assertEqual(response.status, 502)
+            self.assertIn(b'Tether cannot check who owns the connection to port %d' % self.dev_port, data)
+        self.assertEqual(Upstream.seen, [])
         self.previews.peer_uid = dev_previews.connection_uid
         self.assertEqual(self.request('GET', '/')[0].status, 200)
 
@@ -786,14 +846,24 @@ class ProxyTests(unittest.TestCase):
                             self.assertEqual(dev_previews.connection_uid(client), os.getuid(), (address, target))
                             with tempfile.TemporaryDirectory() as empty:
                                 self.assertIsNone(dev_previews.connection_uid(client, tries=1, root=empty))
-        # The proxy's own check without a socket table (macOS): the listeners are read again, not taken from the cache.
-        self.previews.peer_uid = None
-        with socket.socket() as probe:
-            self.assertTrue(self.previews.verify(probe, self.dev_port, '127.0.0.1'))
-            self.assertFalse(self.previews.verify(probe, self.dev_port, '::1'))
-            self.upstream.shutdown()
-            self.upstream.server_close()
-            self.assertFalse(self.previews.verify(probe, self.dev_port, '127.0.0.1'))
+
+    def test_a_request_head_has_a_size_limit(self):
+        # Review of 8a40fd3, item 3: 120 KB and 240 KB heads reached the sign-in check.
+        self.sign_in()
+        calls = []
+        real = self.previews.authorize
+        self.previews.authorize = lambda *args: calls.append(args) or real(*args)
+        for size in (120, 240, 2000):
+            many = b''.join(b'X-Fill-%d: %s\r\n' % (index, b'a' * 4000) for index in range(size // 4))
+            for head in (self.head(), b'GET / HTTP/1.1\r\nHost: x\r\n'):  # signed in or not
+                answer = self.raw(head + many + b'\r\n')
+                self.assertTrue(answer.startswith(b'HTTP/1.1 431 '), (size, answer[:40]))
+        one = self.raw(self.head() + b'X-Big: ' + b'a' * 70000 + b'\r\n\r\n')  # one long line
+        self.assertTrue(one.startswith(b'HTTP/1.1 431 '), one[:40])
+        self.assertEqual((calls, Upstream.seen), ([], []))
+        fits = b''.join(b'X-Fill-%d: %s\r\n' % (index, b'a' * 4000) for index in range(15))  # 60 KB
+        self.assertTrue(self.raw(self.head() + fits + b'\r\n').startswith(b'HTTP/1.1 200 '))
+        self.assertEqual(len(calls), 1)
 
     def test_ambiguous_requests_are_refused(self):
         # Review finding 5 (RFC 9112, 6.3): the proxy and the dev server must read the same message.
@@ -1110,10 +1180,10 @@ class ApiTests(unittest.TestCase):
             item.shutdown()
             item.server_close()
 
-    def call(self, method, body=None, **changed):
+    def call(self, method, body=None, path='/mobile/api/dev-preview', **changed):
         connection = http.client.HTTPConnection('127.0.0.1', self.main.server_port, timeout=10)
         headers = {name: value for name, value in dict(self.headers, **changed).items() if value is not None}
-        connection.request(method, '/mobile/api/dev-preview', json.dumps(body) if body is not None else None, headers)
+        connection.request(method, path, json.dumps(body) if body is not None else None, headers)
         response = connection.getresponse()
         data = json.loads(response.read() or b'{}')
         connection.close()
@@ -1152,6 +1222,29 @@ class ApiTests(unittest.TestCase):
         self.assertIn(self.upstream.server_port, [row['port'] for row in data['servers']])
         self.assertNotIn(self.main.server_port, [row['port'] for row in data['servers']])
         self.assertEqual(data['previews'], [{'port': 7700, 'dev_port': self.upstream.server_port, 'hint': None}])
+        self.assertEqual((data['assigned'], data['free']), ([{'port': 7700, 'dev_port': self.upstream.server_port}], 0))
+
+    def test_only_the_person_releases_a_port(self):
+        # Review of 8a40fd3, item 1: a full pool is an error; the release is a signed-in, same-origin POST.
+        release, dev = '/mobile/api/dev-preview/release', self.upstream.server_port
+        self.call('POST', {'port': dev})
+        status, data = self.call('POST', {'port': self.main.server_port + 1})
+        self.assertEqual(status, 404)  # nothing listens there: not-listening comes before pool-full
+        other = ThreadingHTTPServer(('127.0.0.1', 0), Upstream)
+        self.addCleanup(other.server_close)
+        status, data = self.call('POST', {'port': other.server_port})
+        self.assertEqual((status, data['code']), (503, 'pool-full'))
+        self.assertIn('localhost:%d' % dev, data['error'])
+        self.assertEqual(self.call('POST', {'port': dev}, path=release, Cookie=None)[0], 401)
+        self.assertEqual(self.call('POST', {'port': dev}, path=release, Origin='http://127.0.0.1:7700')[0], 403)  # a forwarded dev page
+        self.assertEqual(self.call('POST', {'port': dev}, path=release, **{'X-Codex-Mobile': None})[0], 403)
+        self.assertEqual(self.call('GET', path=release)[0], 404)
+        self.assertIn(7700, self.previews.leases)
+        self.assertEqual(self.call('POST', {'port': dev}, path=release), (200, {'ok': True, 'assigned': [], 'free': 1}))
+        self.assertEqual(self.previews.leases, {})
+        status, data = self.call('POST', {'port': dev}, path=release)
+        self.assertEqual((status, data['code']), (404, 'not-assigned'))
+        self.assertEqual(self.call('POST', {'port': other.server_port})[1]['port'], 7700)
 
 
 if __name__ == '__main__':
