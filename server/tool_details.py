@@ -66,7 +66,7 @@ def summary(call):
     return item
 
 
-def mark_result(messages, identifier, result, time=None):
+def mark_result(messages, identifier, result, time=None, details=None):
     for message in reversed(messages):
         tool = message.get('tool')
         if tool and tool['id'] == identifier:
@@ -76,7 +76,23 @@ def mark_result(messages, identifier, result, time=None):
                 tool['ended'] = time
             if count := len(images(result)):
                 tool['images'] = count
+            if tool['name'] == 'Artifact' and not tool['is_error'] and (found := artifact(details)):
+                tool['artifact'] = found
             break
+
+
+ARTIFACT_URL = re.compile(r'^https://claude\.ai/(?:code/)?artifact/[\w-]{6,80}$')
+
+
+def artifact(details):
+    """A page Claude published with its Artifact tool: the claude.ai link and the local HTML file it came from.
+    `details` is the transcript record's toolUseResult. A read, list or quickstart call has no path, so it shows no card."""
+    if not isinstance(details, dict):
+        return None
+    url, path, title = details.get('url'), details.get('path'), details.get('title')
+    if not isinstance(url, str) or not ARTIFACT_URL.match(url) or not isinstance(path, str) or not path.lower().endswith(('.html', '.htm')):
+        return None
+    return {'url': url, 'path': path[:1024], 'title': ' '.join(title.split())[:160] if isinstance(title, str) and title.strip() else path.rsplit('/', 1)[-1]}
 
 
 def failed(result):

@@ -57,6 +57,9 @@ import { WORKSPACE_QUERY } from './workspace'
 import { useHost } from './host'
 import { ReviewLinks } from './ReviewLinks'
 import { agentBrowserItems, useAgentBrowser } from './AgentBrowser'
+import { PreviewDrawer } from './PreviewDrawer'
+import { PreviewOpener, artifactsOf } from './preview'
+import type { PreviewTarget } from './preview'
 import { codexRunItems, useCodexRuns } from './CodexRuns'
 import { HOLD_MS } from './gesture'
 
@@ -842,11 +845,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [opened, setOpened] = useState<Media | null>(null)
   const [textFile, setTextFile] = useState<TextFile | null>(null)
   const [officeFile, setOfficeFile] = useState<OfficeFile | null>(null)
+  const [previewPage, setPreviewPage] = useState<PreviewTarget | null>(null)
   const tabOpener = useMemo(() => ({ panes: allPanes, current: pane, open: onOpenPane }), [allPanes, pane, onOpenPane])
   const openMedia = useCallback(async (path: string, kind: Kind, line?: number) => {
     const url = `/mobile/api/file?session=${encodeURIComponent(activePane.id)}&path=${encodeURIComponent(path)}`
     const name = path.split('/').pop() || path
     if (kind === 'text') { setTextFile({ path, url, line }); return }
+    if (kind === 'html') { setPreviewPage({ path, title: name }); return }
     try {
       const check = await fetch(url, { headers: { Range: 'bytes=0-0' } })
       if (!check.ok) { const body = await check.json().catch(() => null) as { error?: string } | null; setOpened({ name, url, error: body?.error ?? 'Tether cannot open this file.' }); return }
@@ -856,7 +861,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     else if (kind === 'file') saveFile(url, name)
     else if (kind === 'pdf') window.open(url, '_blank', 'noopener')
     else setOpened({ name: path, url, kind })
-  }, [activePane.id, host, setTextFile, setOfficeFile, setOpened])
+  }, [activePane.id, host, setTextFile, setOfficeFile, setOpened, setPreviewPage])
+  // Pages agents made: a Claude artifact opens its local copy in the drawer.
+  const artifacts = useMemo(() => artifactsOf(messages), [messages])
+  const previewActions = useMemo(() => ({
+    open: setPreviewPage,
+    artifactFor: (url: string) => artifacts.get(url),
+  }), [artifacts, setPreviewPage])
   // Desktop: "Show in Files" opens the explorer at the file's folder with the file selected. A relative path is in the pane's folder.
   const showInFiles = (path: string | null, close: () => void) => {
     if (!path || typeof matchMedia !== 'function' || !matchMedia(WORKSPACE_QUERY).matches) return undefined
@@ -1023,7 +1034,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [hiddenNotices, setHiddenNotices] = useState<string[]>([])
   const visibleNotices = (footer.notices ?? []).filter(note => !hiddenNotices.includes(note))
   const hideNotice = (note: string) => setHiddenNotices(current => [...current.filter(item => (footer.notices ?? []).includes(item)), note])
-  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
+  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`}>
     <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
       {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
@@ -1141,5 +1152,6 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />
     <TextViewer file={textFile} close={() => setTextFile(null)} onShow={showInFiles(textFile?.path ?? null, () => setTextFile(null))} />
     <OfficeViewer file={officeFile} close={() => setOfficeFile(null)} onShow={showInFiles(officeFile?.path ?? null, () => setOfficeFile(null))} />
-  </section></FilePane.Provider></TabOpener.Provider></MediaOpener.Provider></AssistantRuntimeProvider>
+    <PreviewDrawer api={api} session={activePane.id} target={previewPage} close={() => setPreviewPage(null)} onSource={(path, url) => setTextFile({ path, url, readOnly: true })} />
+  </section></PreviewOpener.Provider></FilePane.Provider></TabOpener.Provider></MediaOpener.Provider></AssistantRuntimeProvider>
 }

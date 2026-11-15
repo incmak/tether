@@ -165,7 +165,7 @@ async function main() {
     './Skeleton': { CodeBones: 'loading', SkeletonRows: 'loading' }, './skeletonCounts': { rememberCount() {}, rememberedCount: n => n }, 'lucide-react': {}, './panelProps': {},
   }, {}, '\nexport { FileDiffView }')
   await hostCycle('ToolGroup.tsx', 'ToolRow', { tool: { id: 'tool', name: 'Read', title: '', status: 'complete' }, session: 'fixture', onOpen() {} }, {
-    './Skeleton': { Loading: 'loading' }, 'lucide-react': {}, './ImageViewer': {}, './Notices': {}, './toolSummary': { toolSeconds: () => null, toolKind: () => 'read' },
+    './Skeleton': { Loading: 'loading' }, 'lucide-react': {}, './ImageViewer': {}, './preview': { PreviewOpener: {} }, './Notices': {}, './toolSummary': { toolSeconds: () => null, toolKind: () => 'read' },
   }, {}, '\nexport { ToolRow }')
   await hostCycle('TerminalPanel.tsx', 'TerminalPanel', { pane: { id: '%fake' }, item: { id: 'fixture' }, onItem() {} }, { './Terminal': { LiveTerminal: 'terminal' } })
   await hostCycle('Terminal.tsx', 'LiveTerminal', { paneId: '%fake', onChat() {} }, {

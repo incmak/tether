@@ -3,11 +3,12 @@ import { fileChecks } from './fileChecks'
 import { useIsMarkdownCodeBlock } from '@assistant-ui/react-markdown'
 import type { Pane } from './api'
 import { tabTarget } from './tabLinks'
+import { PreviewOpener, artifactUrl } from './preview'
 
 // Paths an agent names in a reply (`shots/row-menu.png`, [clip](out/demo.mp4), src/App.tsx:42) open on the phone through
 // GET /mobile/api/file. the server decides what may open: home folder only, no secrets. Media, text and Office files open in Tether;
 // any other file ('file': an archive or an unsupported document) downloads.
-export type Kind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'office' | 'file'
+export type Kind = 'image' | 'video' | 'audio' | 'pdf' | 'text' | 'office' | 'html' | 'file'
 const KINDS: Record<string, Kind> = {
   png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image',
   mp4: 'video', webm: 'video', mov: 'video', m4v: 'video', mp3: 'audio', m4a: 'audio', wav: 'audio', ogg: 'audio', pdf: 'pdf',
@@ -15,6 +16,9 @@ const KINDS: Record<string, Kind> = {
 // Keep in step with TEXT_SUFFIXES and TEXT_NAMES in media_files.py.
 for (const suffix of ('txt md markdown log json jsonl csv tsv yml yaml toml ini cfg conf py js jsx mjs cjs ts tsx css scss html htm xml svg sh zsh bash '
   + 'sql go rs java kt swift c h cc cpp hpp rb php lua diff patch tf graphql proto vue svelte ipynb lock gitignore dockerignore editorconfig').split(' ')) KINDS[suffix] = 'text'
+// An HTML page opens as a page, in the preview drawer (PreviewDrawer.tsx); the drawer can show its source.
+KINDS.html = 'html'
+KINDS.htm = 'html'
 const TEXT_NAMES = new Set(['Makefile', 'Dockerfile', 'README', 'LICENSE', 'Procfile', 'Gemfile', 'Justfile', 'CODEOWNERS'])
 // A bare document or other file name needs one of these extensions, so "Node.js" or "e.g." is not a file; a path with a folder may have any.
 const DOCUMENTS = new Set(('xlsx xls xlsm ods docx doc odt rtf pptx ppt odp key numbers pages epub zip tar gz tgz bz2 xz 7z rar '
@@ -121,6 +125,15 @@ export function Link({ href = '', children, ...props }: React.ComponentProps<'a'
   if (named !== undefined) return tab ? <FileLink open={tab.open} label={`Open the tab ${named}`}>{children}</FileLink> : <>{children}</>
   if (open) return <FileLink open={open}>{children}</FileLink>
   if (found || media) return <span className="file-chip">{children}</span>
+  return <WebLink {...props} href={href}>{children}</WebLink>
+}
+
+// A claude.ai artifact this chat published opens its local copy in the preview drawer. Other links open in a new browser tab.
+function WebLink({ href = '', children, ...props }: React.ComponentProps<'a'>) {
+  const preview = useContext(PreviewOpener)
+  const remote = artifactUrl(href)
+  const artifact = remote ? preview?.artifactFor(remote) : undefined
+  if (preview && artifact) return <FileLink open={() => preview.open({ path: artifact.path, title: artifact.title, remote: artifact.url })} label={`Preview ${artifact.title}`}>{children}</FileLink>
   return <a {...props} href={href} target="_blank" rel="noreferrer"><InsideLink.Provider value>{children}</InsideLink.Provider></a>
 }
 

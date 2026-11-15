@@ -24,8 +24,8 @@ PRIVATE = {'.ssh', '.gnupg', '.config', '.aws', '.azure', '.claude', '.codex', '
            '.pki', '.mozilla', '.git', '.npm', '.cargo', '.gemini', '.vscode-server'}
 
 
-def resolve(name, folder, home=None):
-    """The real file for `name`, or ValueError with a message for the phone."""
+def resolve(name, folder, home=None, text_limit=TEXT_LIMIT):
+    """The real file for `name`, or ValueError with a message for the phone. text_limit None: no size limit for text."""
     home = Path(home or os.path.expanduser('~')).resolve()
     name = (name or '').strip()
     if not name or '\0' in name or len(name) > 1024:
@@ -46,7 +46,7 @@ def resolve(name, folder, home=None):
     kind = TYPES.get(path.suffix.lower()) or (TEXT if path.suffix.lower() in TEXT_SUFFIXES or path.name in TEXT_NAMES else DOWNLOAD)
     if not path.is_file():
         raise ValueError('That is not a file.')
-    if kind == TEXT and path.stat().st_size > TEXT_LIMIT:
+    if kind == TEXT and text_limit is not None and path.stat().st_size > text_limit:
         raise ValueError('That file is too large to show (2 MB at most).')
     return path, kind
 
