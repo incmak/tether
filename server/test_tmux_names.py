@@ -17,7 +17,10 @@ class TmuxNameHookTests(unittest.TestCase):
         self.socket_dir = tempfile.mkdtemp(prefix='tnh', dir='/tmp')  # short: long socket paths fail
         self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
         self.env['TMUX_TMPDIR'] = self.socket_dir
-        self.tmux('new-session', '-d', '-s', 'work')
+        # A plain /bin/sh, never the user's shell: an interactive zsh reads ~/.zshrc and locks the real
+        # ~/.zsh_history before it runs a typed line, and a held lock delayed that past the waits below (B148).
+        self.env['SHELL'] = '/bin/sh'
+        self.tmux('new-session', '-d', '-s', 'work', 'exec /bin/sh')  # exec: no outer sh -c keeps the foreground
         self.pane = self.tmux('display-message', '-p', '-t', '=work:', '#{pane_id}').stdout.strip()
 
     def tearDown(self):
@@ -74,8 +77,8 @@ class TmuxNameHookTests(unittest.TestCase):
         self.settle()
         self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
         # A new program that writes output (tmux checks the name on pane output): tmux renames again.
-        self.tmux('send-keys', '-t', self.pane, 'exec sh -c "while :; do echo .; sleep 0.2; done"', 'Enter')
-        self.assertTrue(self.wait_for(lambda: self.option('window_name') == 'sh', seconds=6))
+        self.tmux('send-keys', '-t', self.pane, 'exec python3 -uc "import itertools, time; [print(1) or time.sleep(.2) for _ in itertools.count()]"', 'Enter')
+        self.assertTrue(self.wait_for(lambda: self.option('window_name') == 'python3', seconds=6))
         self.settle()
         self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
 
