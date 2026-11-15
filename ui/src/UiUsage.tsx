@@ -33,8 +33,8 @@ export function UiUsageSettings({ api, prefs, update }: { api: Api; prefs: Prefs
   const { data: report, error, refresh } = usePolling(fetchReport, 60000)
   async function clear() {
     try {
-      await api('ui-usage/clear', {})
-      window.dispatchEvent(new Event(USAGE_CLEARED))
+      const { gen } = await api<{ gen: string }>('ui-usage/clear', {})
+      window.dispatchEvent(new CustomEvent(USAGE_CLEARED, { detail: gen }))
       setNotice('The UI usage log is empty now.')
       void refresh()
     } catch (failure) {

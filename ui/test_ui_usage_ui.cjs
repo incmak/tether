@@ -74,6 +74,8 @@ async function main() {
             prefs = { ...prefs, ...body.changes }; version++
             return route.fulfill({ json: { prefs, version } })
           }
+          if (endpoint === 'ui-usage') return route.fulfill({ json: { kept: body.events.length, enabled: true, gen: '1' } })
+          if (endpoint === 'ui-usage/clear') return route.fulfill({ json: { cleared: true, gen: '2' } })
           return route.fulfill({ json: { ok: true } })
         }
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })

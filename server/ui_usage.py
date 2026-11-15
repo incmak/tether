@@ -15,7 +15,8 @@ Event fields (all short strings or small numbers):
   n  clicks to reach: the clicks in the current chain. A click on the page starts a chain; 0 means by keyboard.
   j  visit id: one page load, or a return after a long pause
   w  'phone' or 'wide'
-  (batch) gen: the log generation from the last answer. After a clear the server drops batches with an older one.
+  g  the log generation the page knew when the event happened (every answer has 'gen'). Clear starts a new one, and
+     the server keeps only events with the current one, so nothing from before a clear comes back.
   t  when it happened, in the page's milliseconds. The batch has the page's time when it was sent ('now'), so the
      server finds the real time without trusting the page's clock.
 
@@ -139,7 +140,7 @@ def generation():
     return str(_cleared())
 
 
-def record(events, now=None, sent=None, gen=None):
+def record(events, now=None, sent=None):
     """Append the valid events. Returns how many were kept. Without the UI word list nothing is kept: a label could
     then hold a name."""
     now = time.time() if now is None else now
@@ -147,10 +148,8 @@ def record(events, now=None, sent=None, gen=None):
     if known is None:
         return 0
     with _lock:
-        since = _cleared()
-        if gen is not None and gen != str(since):
-            return 0
-        kept = [event for event in (clean(raw, now, known, sent) for raw in events[:MAX_EVENTS]) if event and event['at'] >= since]
+        current = generation()
+        kept = [event for event in (clean(raw, now, known, sent) for raw in events[:MAX_EVENTS] if isinstance(raw, dict) and raw.get('g') == current) if event]
         target = file()
         if kept:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -228,7 +227,7 @@ def load(since):
 
 
 def clear(now=None):
-    """Remove the log. Events that happened before now and arrive later (a page's queue) are dropped too."""
+    """Remove the log and start a new generation: events that a page captured before now and sends later are dropped."""
     with _lock:
         cleared_file().parent.mkdir(parents=True, exist_ok=True)
         cleared_file().write_text(str(time.time() if now is None else now))
@@ -324,7 +323,7 @@ def post(handler):
     path = handler.path.split('?', 1)[0]
     if path == CLEAR:
         clear()
-        handler.respond(200, {'cleared': True})
+        handler.respond(200, {'cleared': True, 'gen': generation()})
         return
     try:
         size = int(handler.headers.get('Content-Length', '0') or 0)
@@ -341,8 +340,7 @@ def post(handler):
         expire()
         handler.respond(200, {'kept': 0, 'enabled': False, 'gen': generation()})
         return
-    gen = body.get('gen')
-    kept = record(events, sent=body.get('now'), gen=gen if isinstance(gen, str) else None)
+    kept = record(events, sent=body.get('now'))
     handler.respond(200, {'kept': kept, 'enabled': True, 'gen': generation()})
 
 

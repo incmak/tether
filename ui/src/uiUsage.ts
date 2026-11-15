@@ -6,8 +6,8 @@ import { WORKSPACE_QUERY } from './workspace'
 // in and by its accessible name. It never sends typed text, and in lists of items (tabs, sessions, messages, files)
 // it sends no visible text: only the aria-label or title, or "(item)". The server keeps only the words of the UI code
 // from each name, so "Restore <tab name>" is stored as "Restore …".
-export type UsageEvent = { k: 'click' | 'seen' | 'open'; r: string; l: string; c: string; d: number; n: number; j: string; w: 'phone' | 'wide'; t: number }
-/** Settings sends this after it clears the log, so the page drops its queue and starts a new visit. */
+export type UsageEvent = { k: 'click' | 'seen' | 'open'; r: string; l: string; c: string; d: number; n: number; j: string; w: 'phone' | 'wide'; t: number; g: string }
+/** Settings sends this, with the new generation as detail, after it clears the log: the page drops its queue. */
 export const USAGE_CLEARED = 'tether-ui-usage-cleared'
 
 const CONTROL = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="tab"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], [role="treeitem"]'
@@ -113,7 +113,9 @@ export function openLayers() {
   return layers.filter(outer => !layers.some(inner => inner !== outer && outer.contains(inner) && (outer.textContent ?? '').trim() === (inner.textContent ?? '').trim()))
 }
 
-export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => boolean): () => void {
+/** gen: the log generation the page knows now, '' before the first answer. Nothing is logged without one, so an event
+ * never carries a generation newer than the log it happened in. */
+export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => boolean, gen: () => string): () => void {
   const queue: UsageEvent[] = []
   let visit = ''
   let lastInput = 0
@@ -134,8 +136,10 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     seen = new Set()
     chain = 0
   }
-  const add = (event: Omit<UsageEvent, 'j' | 'w' | 't'>) => {
-    queue.push({ ...event, j: visit, w: wide() ? 'wide' : 'phone', t: Date.now() })
+  const add = (event: Omit<UsageEvent, 'j' | 'w' | 't' | 'g'>) => {
+    const g = gen()
+    if (!g) return
+    queue.push({ ...event, j: visit, w: wide() ? 'wide' : 'phone', t: Date.now(), g })
     if (queue.length >= BATCH) flush()
   }
   const flush = () => {
@@ -172,6 +176,7 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   const scan = () => {
     scanTimer = idle = undefined
     if (stopped || document.visibilityState !== 'visible') return
+    if (!gen()) { later(1000); return }  // wait for the generation, or the seen controls would be marked but not sent
     sync()
     rowTexts = new WeakMap()
     const top = stack[stack.length - 1]
@@ -225,6 +230,7 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   }
   const onHide = () => flush()
   const onScroll = () => { if (!scanTimer && idle === undefined) later(1000) }
+  // Events from before the clear carry the old generation, so the server would drop them; do not send them.
   const onCleared = () => { queue.length = 0; newVisit(); later() }
 
   newVisit()
@@ -251,16 +257,18 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   }
 }
 
-// The server's log generation. It changes when the log is cleared, so the server drops a batch that left before that.
+// The server's log generation. It changes when the log is cleared; the server keeps only events with the current one.
 let generation = ''
-if (typeof window !== 'undefined') window.addEventListener(USAGE_CLEARED, () => { generation = '' })
+if (typeof window !== 'undefined') {
+  window.addEventListener(USAGE_CLEARED, event => { const detail = (event as CustomEvent).detail; generation = typeof detail === 'string' ? detail : '' })
+}
 
 function post(events: UsageEvent[]) {
   try {
     void fetch('/mobile/api/ui-usage', {
       method: 'POST', credentials: 'same-origin', keepalive: true,
       headers: { 'Content-Type': 'application/json', 'X-Codex-Mobile': '1' },
-      body: JSON.stringify({ events, now: Date.now(), ...(generation ? { gen: generation } : {}) }),
+      body: JSON.stringify({ events, now: Date.now() }),
     }).then(response => response.ok ? response.json() : null)
       .then((body: { gen?: unknown } | null) => { if (typeof body?.gen === 'string') generation = body.gen })
       .catch(() => { /* usage is best effort */ })
@@ -272,6 +280,7 @@ export function useUsageLog(on: boolean) {
   useEffect(() => {
     if (!on) return
     const media = window.matchMedia(WORKSPACE_QUERY)
-    return startUsageLog(post, () => media.matches)
+    if (!generation) post([])  // ask for the generation; the log starts once it is known
+    return startUsageLog(post, () => media.matches, () => generation)
   }, [on])
 }

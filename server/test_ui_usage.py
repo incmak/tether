@@ -8,8 +8,8 @@ from unittest import mock
 import ui_usage
 
 
-def event(k, label, region='Tether', kind='button', depth=0, steps=1, visit='v1', device='wide'):
-    return {'k': k, 'l': label, 'r': region, 'c': kind, 'd': depth, 'n': steps, 'j': visit, 'w': device}
+def event(k, label, region='Tether', kind='button', depth=0, steps=1, visit='v1', device='wide', gen='0'):
+    return {'k': k, 'l': label, 'r': region, 'c': kind, 'd': depth, 'n': steps, 'j': visit, 'w': device, 'g': gen}
 
 
 class Handler:
@@ -88,9 +88,10 @@ class RecordTest(Base):
     def test_a_batch_from_before_the_clear_is_dropped_even_when_late(self):
         old = ui_usage.generation()
         ui_usage.clear(now=20)
-        # Captured and sent at 19 with the old generation; it arrives at 21.
-        self.assertEqual(ui_usage.record([dict(event('click', 'Home'), t=19_000)], now=21, sent=19_000, gen=old), 0)
-        self.assertEqual(ui_usage.record([dict(event('click', 'Theme'), t=21_000)], now=22, sent=21_000, gen=ui_usage.generation()), 1)
+        # Captured and sent at 19 with the old generation, or with none; it arrives at 21.
+        self.assertEqual(ui_usage.record([dict(event('click', 'Home', gen=old), t=19_000)], now=21, sent=19_000), 0)
+        self.assertEqual(ui_usage.record([dict(event('click', 'Home', gen=None), t=19_000)], now=21, sent=19_000), 0)
+        self.assertEqual(ui_usage.record([dict(event('click', 'Theme', gen=ui_usage.generation()), t=21_000)], now=22, sent=21_000), 1)
         self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Theme'])
 
     def test_an_old_event_after_newer_ones_still_expires(self):
@@ -100,13 +101,12 @@ class RecordTest(Base):
         ui_usage.expire(now=13_700 + cutoff)
         self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Home'])
 
-    def test_clear_drops_events_that_happened_before_it(self):
+    def test_clear_answers_the_new_generation(self):
         ui_usage.record([event('click', 'Settings')], now=10)
-        ui_usage.clear(now=20)
-        # A page sends its queue after the clear: one event from before it, one from after.
-        kept = ui_usage.record([dict(event('click', 'Home'), t=1_000), dict(event('click', 'Theme'), t=9_000)], now=22, sent=10_000)
-        self.assertEqual(kept, 1)
-        self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Theme'])
+        handler = Handler(ui_usage.CLEAR)
+        ui_usage.post(handler)
+        self.assertEqual(handler.body, {'cleared': True, 'gen': ui_usage.generation()})
+        self.assertNotEqual(ui_usage.generation(), '0')
 
 
 class HttpTest(Base):
