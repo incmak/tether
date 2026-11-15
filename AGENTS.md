@@ -44,6 +44,7 @@ Claude Code, Codex and Antigravity redraw their screens between versions. Code t
 - Resolve routine conflicts between sessions. Ask Mak only when the conflict requires a product decision or destructive action.
 - Preserve unrelated work. Build the UI from the selected commit in a clean checkout, then install the output atomically.
 - Install with `python3 scripts/deploy-ui.py BUILD_DIR ui/dist`. It preserves old chunks and publishes the entry page last.
+- The build writes `.build-commit`; the install records it in `ui/dist/.live-commit`. The install refuses a build that does not contain the live commit, or one from uncommitted changes. To fix, rebase or merge `origin/main` and any deployed commits not yet pushed, then rebuild. Check first with `--dry-run`. Use `--force` only to remove deployed work on purpose.
 - Verify the served entry page and deployed behavior after installation.
 - The backend loads the shared working tree on restart. Coordinate pending server edits before a restart.
 - A public release publishes an update to all users. Publish release tags, packages, or update channels only when Mak explicitly requests a release.

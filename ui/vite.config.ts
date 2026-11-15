@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, extname, resolve } from 'node:path'
@@ -15,6 +16,29 @@ const liveGuard: Plugin = {
       throw new Error('This folder is the live Tether UI. Build to another folder (vite build --outDir <dir>), then run scripts/deploy-ui.py <dir> ui/dist.')
     }
   },
+}
+
+// B92: write the commit this build came from to .build-commit. scripts/deploy-ui.py refuses a build whose commit does
+// not contain the live commit, so a build from an older base cannot remove deployed work. Read at the start of the
+// build. Dirty: tracked changes anywhere (ui/src imports server/ui_manifest.json) or new files under ui/.
+type Git = (args: string[]) => string
+export function buildStamp(root: string, git: Git = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })) {
+  try {
+    const commit = git(['rev-parse', 'HEAD']).trim()
+    const lines = [...git(['status', '--porcelain', '--untracked-files=no']).split('\n'),
+      ...git(['status', '--porcelain', '--untracked-files=all', '--', '.']).split('\n').filter(line => line.startsWith('??'))]
+    const changes = [...new Set(lines.filter(Boolean).map(line => line.slice(3)))]
+    return { commit, dirty: changes.length > 0, changes: changes.slice(0, 20) }
+  } catch {
+    return null  // not a git checkout: no stamp, and deploy-ui.py refuses the build unless --force
+  }
+}
+let stamp: ReturnType<typeof buildStamp> = null
+const commitStamp: Plugin = {
+  name: 'commit-stamp',
+  apply: 'build',
+  configResolved(config) { stamp = buildStamp(config.root) },
+  writeBundle(options) { if (options.dir && stamp) writeFileSync(resolve(options.dir, '.build-commit'), JSON.stringify(stamp) + '\n') },
 }
 
 // Copy from the installed versions so dev and production use the same local assets.
@@ -138,7 +162,7 @@ const panelManifest: Plugin = {
 
 export default defineConfig({
   base: '/chat/',
-  plugins: [liveGuard, react(), tailwindcss(), vadAssets, bodyStylesheet, panelManifest, brotliAssets],
+  plugins: [liveGuard, commitStamp, react(), tailwindcss(), vadAssets, bodyStylesheet, panelManifest, brotliAssets],
   build: {
     rollupOptions: { output: { manualChunks: (id, { getModuleInfo }) => vendorChunk(id, getModuleInfo, vendorSeen) } },
   },

@@ -83,7 +83,7 @@ async function prefetch() {
 function brotli() {
   const stub = () => ({ default: () => ({}) })
   const config = load('vite.config.ts', { vite: () => ({ defineConfig: value => value }), '@vitejs/plugin-react': stub, '@tailwindcss/vite': stub,
-    'node:fs': () => require('node:fs'), 'node:module': () => require('node:module'), 'node:path': () => require('node:path'), 'node:zlib': () => require('node:zlib') })
+    'node:child_process': () => require('node:child_process'), 'node:fs': () => require('node:fs'), 'node:module': () => require('node:module'), 'node:path': () => require('node:path'), 'node:zlib': () => require('node:zlib') })
   const folder = mkdtempSync(join(tmpdir(), 'tether-brotli-'))
   try {
     const script = Buffer.from('export const message = "Hello, phone!";\n'.repeat(80))
