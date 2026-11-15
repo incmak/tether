@@ -197,6 +197,24 @@ If you reach Tether through Tailscale Serve, publish the port too:
 tailscale serve --bg --https=7698 http://127.0.0.1:7698
 ```
 
+## Dev server previews
+
+An agent starts a dev server and posts a link such as `http://localhost:5173/`. Your phone cannot open that address.
+Tap the link in Tether: the preview opens the dev server through Tether, and hot reload keeps working.
+
+Tether forwards each dev server on one port of a pool (7700 to 7709 by default), so each has its own origin.
+The pool forwards only listeners above port 1024 that Tether's own user owns on localhost.
+It never forwards Tether's own ports, debugger ports, or database ports.
+A preview port needs a link from Tether: without it, the port answers 401. A preview ends after 12 hours without use.
+
+If you reach Tether through Tailscale Serve, publish the pool ports too:
+
+```sh
+for port in $(seq 7700 7709); do tailscale serve --bg --https=$port http://127.0.0.1:$port; done
+```
+
+Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off` to turn previews off.
+
 ## Usage reports
 
 Claude Code and Antigravity supply usage through status-line hooks.
@@ -246,6 +264,7 @@ For advanced service settings, add `Environment=NAME=value` to a systemd user ov
 | `MOBILE_TMUX_AUTH` | `token` | `token` or `proxy`. |
 | `MOBILE_TMUX_TRUST_FORWARDED` | Off | Set to `1` only behind a local proxy that replaces `X-Forwarded-For`. Rate limits then use the forwarded client address. |
 | `MOBILE_TMUX_TTYD_PORT` | `7682` | Optional interactive terminal port. |
+| `MOBILE_TMUX_DEV_PREVIEW_PORTS` | `7700-7709` | Ports that forward dev servers for previews. `off` turns previews off. |
 | `MOBILE_TMUX_PUSH_SUBJECT` | `mailto:mobile-tmux@localhost` | Contact URL for push services. Set your own contact if you use push. |
 | `MOBILE_TMUX_HOME` | Your home | Root for the agent folders: `.claude`, `.codex`, and `.gemini`. |
 | `MOBILE_TMUX_CACHE` | `~/.cache/mobile-tmux` | Usage reports and other working data. |
