@@ -66,6 +66,7 @@ import type { Screen } from './Rail'
 import { mentionText } from './fileWrites'
 import type { FilesTarget } from './Explorer'
 import { PhoneTabs } from './PhoneTabs'
+import { requestUndo, useUndoNext } from './undoState'
 import { ASSISTANT } from './assistant'
 import { Loading } from './Skeleton'
 import { Explorer, ExplorerPhone, Live, prefetchPanels, Share } from './lazyPanels'
@@ -156,6 +157,7 @@ function App() {
   // The ⌘K command menu, or the ⌘/ shortcuts sheet (any screen).
   const [menu, setMenu] = useState<'commands' | 'shortcuts' | null>(null)
   const [undoHistory, setUndoHistory] = useState(false)
+  const undoNext = useUndoNext()
   // Home-screen shortcuts open /chat/?go=attention|new|usage (manifest.webmanifest).
   const [go, setGo] = useState(() => new URL(location.href).searchParams.get('go'))
   // The Agents page (Active and Unread tabs). Tether's summary notification opens it with /chat/?go=agents.
@@ -858,6 +860,9 @@ function App() {
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
     ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
     { label: 'Keyboard shortcuts', key: '⌘/', run: () => setMenu('shortcuts') },
+    // The newest step, named. The chat header's ⋯ menu (Chat.tsx) has the same two entries for the phone.
+    ...(undoNext.undo ? [{ label: `Undo: ${undoNext.undo}`, key: '⌘Z', run: () => requestUndo('undo') }] : []),
+    ...(undoNext.redo ? [{ label: `Redo: ${undoNext.redo}`, key: '⌘⇧Z', run: () => requestUndo('redo') }] : []),
     { label: 'Undo history', run: () => setUndoHistory(true) },
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },

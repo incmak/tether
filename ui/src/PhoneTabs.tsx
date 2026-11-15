@@ -1,13 +1,13 @@
 import { useEffect } from 'react'
-import { AudioLines, Folder, Globe, Home, Images, MessageCircle, SquareTerminal, Undo2 } from 'lucide-react'
+import { AudioLines, Folder, Globe, Home, Images, MessageCircle, SquareTerminal } from 'lucide-react'
 import { ASSISTANT } from './assistant'
 import type { Screen } from './Rail'
 import { toggleButton } from './phoneScreen'
-import { requestUndo, useUndoNext } from './undoState'
 import './ExplorerPhone.css'
 
 // The phone's bottom tab bar: Home | Chats | Files | Share | Terminals (ExplorerPhone.dc.html). The desktop shows the left rail instead.
 // Chats and Terminals are the chat panel and its terminal view; Files is the phone explorer.
+// The bar holds destinations only. Actions such as Undo live in the toast, the chat header's ⋯ menu and the command menu.
 
 const TABS: { id: Screen; label: string; icon: typeof Folder }[] = [
   { id: 'home', label: 'Home', icon: Home },
@@ -35,7 +35,6 @@ export function PhoneTabs({ screen, waiting = 0, onScreen, setScreen, terminals,
     observer.observe(shell, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-pressed'] })
     return () => observer.disconnect()
   }, [screen, setScreen])
-  const next = useUndoNext()
   return <nav className="phone-tabbar" aria-label="Tether">
     {TABS.map(({ id, label, icon: Icon }) => <button key={id} type="button" aria-current={screen === id ? 'page' : undefined}
       disabled={id === 'terminals' && !terminals} aria-label={id === 'home' && waiting ? `${label}, ${waiting} need you` : undefined} onClick={() => onScreen(id)}><span className="phone-tab-icon"><Icon size={22} aria-hidden="true" />{id === 'home' && waiting > 0 && <span className="phone-tab-dot asking" aria-hidden="true" />}</span><span>{label}</span></button>)}
@@ -45,8 +44,5 @@ export function PhoneTabs({ screen, waiting = 0, onScreen, setScreen, terminals,
       <span>Browser</span>
     </button>}
     {onLive && <button type="button" onClick={onLive}><AudioLines size={22} aria-hidden="true" /><span>{ASSISTANT}</span></button>}
-    {/* Undo the newest tab, session or stack step (Undo.tsx). Its toast offers Redo and the History list. */}
-    <button type="button" className="phone-tab-undo" aria-disabled={!next.undo} aria-label={next.undo ? `Undo: ${next.undo}` : 'Undo, nothing to undo'}
-      onClick={() => { if (next.undo) requestUndo('undo') }}><Undo2 size={22} aria-hidden="true" /><span>Undo</span></button>
   </nav>
 }

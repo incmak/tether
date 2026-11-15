@@ -148,7 +148,7 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
     return () => window.removeEventListener(UNDO_EVENT, onStep)
   }, [run])
 
-  // The Undo and Redo buttons (Rail, PhoneTabs) send their press here.
+  // The Undo and Redo buttons (Rail, the chat header's ⋯ menu) and the command menu send their press here.
   useEffect(() => {
     const onRun = (event: Event) => { const direction = (event as CustomEvent<Direction>).detail; if (direction === 'undo' || direction === 'redo') void run(direction) }
     window.addEventListener(UNDO_RUN_EVENT, onRun)

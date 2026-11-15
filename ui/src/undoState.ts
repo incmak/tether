@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-/** What ⌘Z and ⌘⇧Z would act on now, for the Undo and Redo buttons (Rail, PhoneTabs). Undo.tsx keeps it current and runs
+/** What ⌘Z and ⌘⇧Z would act on now, for the Undo and Redo buttons (Rail, the chat header's ⋯ menu) and the command menu. Undo.tsx keeps it current and runs
  *  the step when a button sends UNDO_RUN_EVENT. */
 export interface UndoNext { undo: string | null; redo: string | null }
 export const UNDO_RUN_EVENT = 'tether-undo-run'

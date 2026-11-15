@@ -1,5 +1,6 @@
 // Undo and redo (Undo.tsx): the toast after a step, ⌘Z / ⌘⇧Z (Ctrl off a Mac) with real key presses, the keys staying
-// with text fields, the confirm dialog for critical steps, refusals, the rail and phone Undo buttons, and History.
+// with text fields, the confirm dialog for critical steps, refusals, the rail Undo buttons, the command menu and phone ⋯ menu entries, and History.
+// The phone bottom bar holds destinations only: it has no Undo.
 // Every API request stays in this page's fixtures; no terminal is touched.
 const http = require('node:http')
 const fs = require('node:fs/promises')
@@ -8,7 +9,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/undo/shots')
+const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/phone-bar/shots')
 const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 const fixture = {
   sessions: { sessions: [pane('%1', 'Deploy fix'), pane('%2', 'Docs pass')], default_thread: 't1' },
@@ -225,27 +226,74 @@ async function main() {
     check('shortcuts sheet lists undo and redo', shortcuts.includes('Undo the last tab, session or stack step') && shortcuts.includes('Redo it'))
     await page.keyboard.press('Escape')
 
-    // Phone, 390 and 320 wide, dark: the tab bar Undo button.
+    // The command menu names the newest step and runs it; then it offers Redo for that step.
+    await open(1280, 900)
+    const STEP = 'Moved tab `Docs pass` to stack `API`'
+    const menuRow = name => page.locator('dialog.command-menu [role="option"]').filter({ hasText: name })
+    const openMenu = async words => { await away(); await page.keyboard.press(`${mod}+k`); await page.locator('dialog.command-menu input').fill(words) }
+    await page.waitForFunction(() => document.querySelector('.app-rail [aria-label^="Undo: "]'))
+    await openMenu('undo')
+    check('command menu offers Undo with the step', await menuRow(`Undo: ${STEP}`).count() === 1 && await menuRow('Undo history').count() === 1, (await page.locator('dialog.command-menu [role="option"]').allTextContents()).join(' | '))
+    check('command menu offers no Redo when nothing is undone', await menuRow('Redo: ').count() === 0)
+    const sentBefore = posts.length
+    await menuRow(`Undo: ${STEP}`).click()
+    await page.waitForFunction(() => document.querySelector('.undo-toast')?.textContent?.includes('Undid'))
+    check('the command menu Undo entry undoes the newest step', posts.length === sentBefore + 1 && posts.at(-1).action === 'undo' && entries[1].state === 'undone', JSON.stringify(posts.at(-1)))
+    check('the command menu closes after Undo', await page.locator('dialog.command-menu').count() === 0)
+    await page.waitForFunction(() => document.querySelector('.app-rail [aria-label^="Redo: "]'))
+    await openMenu('redo')
+    await menuRow(`Redo: ${STEP}`).click()
+    await page.waitForFunction(() => document.querySelector('.undo-toast')?.textContent?.includes('Redid'))
+    check('the command menu Redo entry redoes it', posts.at(-1).action === 'redo' && entries[1].state === 'done')
+
+    // Phone, 390 and 320 wide: the bottom bar holds destinations only. Undo and Redo are in the chat header's ⋯ menu.
     for (const [width, scheme] of [[390, 'dark'], [320, 'light']]) {
       await page.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' })
       await open(width, 740)
-      const undoTab = page.locator('.phone-tabbar .phone-tab-undo')
-      await page.waitForFunction(() => document.querySelector('.phone-tabbar .phone-tab-undo')?.getAttribute('aria-disabled') === 'false')
-      const size = await undoTab.boundingBox()
-      check(`${width}px: tab bar Undo is at least 24 by 24`, size && size.width >= 24 && size.height >= 24, JSON.stringify(size))
+      const bar = await page.evaluate(() => [...document.querySelectorAll('.phone-tabbar button')].map(button => {
+        const label = button.querySelector(':scope > span:last-child'), box = button.getBoundingClientRect()
+        return { text: button.textContent.trim(), name: button.getAttribute('aria-label') || '', left: box.left, right: box.right, clipped: !label || label.scrollWidth > label.clientWidth + 1 || label.getBoundingClientRect().left < box.left - 1 || label.getBoundingClientRect().right > box.right + 1 }
+      }))
+      check(`${width}px: the bottom bar has no Undo`, bar.length >= 5 && !bar.some(item => /undo|redo/i.test(item.text + item.name)) && await page.locator('.phone-tabbar .phone-tab-undo').count() === 0, JSON.stringify(bar))
+      check(`${width}px: the bar fits and no label is clipped`, bar.every(item => !item.clipped && item.left >= 0 && item.right <= width + 0.5), JSON.stringify(bar))
       check(`${width}px: no horizontal page scroll`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)))
+      await page.screenshot({ path: path.join(SHOTS, `phone-bar-${width}-${scheme}.png`) })
+      const more = page.locator('.chat-header .keys-container > button')
+      const step = name => page.locator('.keys-menu .keys-step').filter({ hasText: name })
+      await page.waitForTimeout(400)  // the first read of the next step
+      await more.tap().catch(() => more.click())
+      await step('Undo: ').waitFor({ state: 'visible' })
+      check(`${width}px: the ⋯ menu offers Undo with the step and no Redo`, (await step('Undo: ').textContent()) === `Undo: ${STEP}` && await step('Redo: ').count() === 0, await page.locator('.keys-menu').textContent())
+      const size = await step('Undo: ').boundingBox(), menuBox = await page.locator('.keys-menu').boundingBox()
+      check(`${width}px: the Undo entry is at least 24 by 24 and on screen`, size && size.width >= 24 && size.height >= 24 && size.x >= 0 && size.x + size.width <= width && size.y >= 0 && size.y + size.height <= 740, JSON.stringify(size))
+      check(`${width}px: the ⋯ menu fits the width`, menuBox && menuBox.x >= 0 && menuBox.x + menuBox.width <= width, JSON.stringify(menuBox))
+      const barTop = (await page.locator('.phone-tabbar').boundingBox()).y
+      check(`${width}px: the ⋯ menu ends above the bottom bar`, menuBox && menuBox.y + menuBox.height <= barTop, `${JSON.stringify(menuBox)} bar ${barTop}`)
+      const lastKey = page.locator('.keys-menu button').last()
+      await lastKey.scrollIntoViewIfNeeded()
+      const keyBox = await lastKey.boundingBox()
+      check(`${width}px: the last ⋯ menu row can be reached above the bar`, keyBox && keyBox.y + keyBox.height <= barTop, JSON.stringify(keyBox))
+      await page.locator('.keys-menu').evaluate(menu => { menu.scrollTop = 0 })
+      await page.screenshot({ path: path.join(SHOTS, `phone-menu-${width}-${scheme}.png`) })
       const count = posts.length
-      await undoTab.tap().catch(() => undoTab.click())
+      await step('Undo: ').tap().catch(() => step('Undo: ').click())
       await page.waitForFunction(() => document.querySelector('.undo-toast')?.textContent?.includes('Undid'))
-      check(`${width}px: tapping Undo undoes the newest step`, posts.length === count + 1 && entries[1].state === 'undone')
+      check(`${width}px: the ⋯ menu Undo undoes the newest step and closes the menu`, posts.length === count + 1 && posts.at(-1).action === 'undo' && entries[1].state === 'undone' && await page.locator('.keys-menu').count() === 0)
       const box2 = await toast.boundingBox()
       check(`${width}px: the toast fits the screen`, box2 && box2.x >= 0 && box2.x + box2.width <= width, JSON.stringify(box2))
-      await page.screenshot({ path: path.join(SHOTS, `undo-phone-${width}-${scheme}.png`) })
+      check(`${width}px: the toast offers Redo and History`, await toast.getByRole('button', { name: 'Redo', exact: true }).count() === 1 && await toast.getByRole('button', { name: 'Undo history' }).count() === 1)
+      await page.screenshot({ path: path.join(SHOTS, `phone-toast-${width}-${scheme}.png`) })
       await toast.getByRole('button', { name: 'Undo history' }).click()
       await page.locator('dialog.undo-history .undo-list li').first().waitFor()
       check(`${width}px: History opens from the toast`, await page.locator('dialog.undo-history .undo-list li').count() === 2)
-      await page.screenshot({ path: path.join(SHOTS, `undo-phone-${width}-history.png`) })
+      await page.screenshot({ path: path.join(SHOTS, `phone-history-${width}-${scheme}.png`) })
       await page.locator('dialog.undo-history').getByRole('button', { name: 'Close' }).click()
+      await page.locator('dialog.undo-history').waitFor({ state: 'detached' })
+      await more.tap().catch(() => more.click())
+      await step('Redo: ').waitFor({ state: 'visible' })
+      await step('Redo: ').tap().catch(() => step('Redo: ').click())
+      await page.waitForFunction(() => document.querySelector('.undo-toast')?.textContent?.includes('Redid'))
+      check(`${width}px: the ⋯ menu Redo redoes it`, posts.at(-1).action === 'redo' && entries[1].state === 'done')
     }
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {

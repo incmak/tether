@@ -535,6 +535,11 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
   .chat-header { padding-left: 30px; }
 }
 .keys-menu kbd { margin-left: auto; }
+/* Phone: the menu stays between the chat header and the bottom bar, and scrolls when its rows need more room. */
+.app-shell.phone-tabs .keys-menu { max-height: calc(100dvh - 150px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; }
+/* Undo and Redo name their step: up to two lines, then an ellipsis. */
+.keys-menu .keys-step svg { flex: none; }
+.keys-menu .keys-step span { min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; line-height: 1.3; }
 .past-meta { display: flex; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .past-meta > span:first-child { flex: none; }
 .past-meta .session-folder { min-width: 0; flex: 1; }
