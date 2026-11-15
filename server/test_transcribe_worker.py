@@ -239,6 +239,13 @@ class ParakeetTest(unittest.TestCase):
             self.segments((2.0, 'hi'))
             self.assertEqual(worker.transcribe(b'x'), ('hi', 31.0))
 
+    def test_misheard_words_from_the_voice_test_are_fixed(self):
+        worker.HINTS = worker.hints('tmux, Codex, Tether')
+        self.assertEqual(worker.spell('Open Tther on the server and split the Tmuxpan.'), 'Open Tether on the server and split the tmux pane.')
+        self.assertEqual(worker.spell('Check the voice log in Titha. Ask Portex to review the diff and push it to mean.'),
+                         'Check the voice log in Tether. Ask Codex to review the diff and push it to main.')
+        self.assertEqual(worker.spell('What do you mean? A frying pan. I mean it.'), 'What do you mean? A frying pan. I mean it.')
+
     def test_hints_fix_spelling_and_keep_sentence_capitals(self):
         worker.HINTS = worker.hints('tmux, Codex, Tailscale, repo, API, split the pane.')
         self.assertEqual(worker.spell('Run Tmux on tail scale, then ask codex about the Api.'), 'Run tmux on Tailscale, then ask Codex about the API.')

@@ -82,6 +82,14 @@ def hints(prompt):
 
 
 HINTS = hints(PROMPT)
+# Words Parakeet heard wrong in a test with the owner's voice (2026-11-15). Only non-words, or a word in a clear phrase,
+# so normal speech never changes. spell() applies them before the hints.
+MISHEARD = [(re.compile(pattern, re.IGNORECASE), meant) for pattern, meant in (
+    (r'(?<![\w-])(?:tther|titha|tetha)(?![\w-])', 'Tether'),
+    (r'(?<![\w-])portex(?![\w-])', 'Codex'),
+    (r'(?<![\w-])tmux\s?pane?(?![\w-])', 'tmux pane'),
+    (r'(?<![\w-])((?:push|merge|rebase|pull)(?: it| this| that)? (?:to|into|onto|from)) mean(?![\w-])', r'\1 main'),
+)]
 FINAL_LOCK = threading.Lock()
 PHRASE_LOCK = threading.Lock()
 LIVE_LOCK = threading.Lock()
@@ -225,6 +233,8 @@ def spell(text):
     def fix(match, hint):
         start = not text[:match.start()].strip() or text[:match.start()].rstrip()[-1] in '.!?'
         return hint[0].upper() + hint[1:] if start and hint.islower() and match.group()[0].isupper() else hint
+    for pattern, meant in MISHEARD:
+        text = pattern.sub(meant, text)
     for pattern, hint in HINTS:
         text = pattern.sub(lambda match: fix(match, hint), text)
     return text
