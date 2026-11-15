@@ -212,3 +212,9 @@
   .work-form-actions button, .work-sheet .work-tools button, .work-sheet .work-projects .work-add-project { min-height: 44px; }
   .work-form-sheet .sheet-heading .icon-button { width: 44px; height: 44px; }
 }
+
+/* Backlog items on the board (WorkBacklog.tsx): a dashed edge says the card lives in BACKLOG.md, not the item store. */
+.work-bcard-backlog { border-style: dashed; }
+.work-backlog-icon { flex: none; color: var(--muted); }
+.work-more { align-self: flex-start; margin-top: 6px; }
+.work-backlog-details { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; overflow-wrap: anywhere; }

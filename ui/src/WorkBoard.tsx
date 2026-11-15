@@ -1,6 +1,6 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Plus, Send, Settings2, SquareKanban, X } from 'lucide-react'
+import { ListTodo, Plus, Send, Settings2, SquareKanban, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { RetryButton } from './Retry'
@@ -8,10 +8,11 @@ import { Bone, Skeleton } from './Skeleton'
 import { useNow } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
-import { STAGE_LABEL, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
+import { BACKLOG_CAP, STAGE_LABEL, backlogOnBoard, backlogOrder, decisions, moveItem, moveJira, onBoard, projectHue, setItemQa, startFix, startTriage } from './work'
 import type { JiraLink, Stage, WorkBoard, WorkItem, WorkProject } from './work'
 import { DecisionCard, DecisionsGroup } from './WorkItems'
 import { NewItemForm, ProjectForm } from './WorkForms'
+import { BacklogBoardCard, BacklogDrawer } from './WorkBacklog'
 import type { DecisionAnswers } from './WorkItems'
 import './Work.css'
 
@@ -53,20 +54,26 @@ export function WorkMark({ mark }: { mark?: { id: string; stage: Stage } }) {
 type Props = {
   api: Api; board?: WorkBoard; error: string; panes: Pane[]; answers: DecisionAnswers
   onRefresh: () => unknown; onOpen: (pane: Pane) => void; onClose: () => void; start?: WorkView
+  /** Open the Backlog page on a search, like B12. */
+  onBacklog: (query: string) => void
 }
+// The project filter's value for backlog items. A colon keeps it apart from every project name.
+const BACKLOG = ':backlog'
 
 const prefixOf = (board: WorkBoard | undefined, item: WorkItem) => board?.projects.find(project => project.name === item.project)?.prefix ?? item.id.split('-')[0]
 // Newest activity first; in Needs you, the oldest question first (it has waited longest).
 const order = (stage: Stage) => (a: WorkItem, b: WorkItem) => stage === 'needs' ? (a.ask?.at ?? a.updated) - (b.ask?.at ?? b.updated) : b.updated - a.updated
 const tabPath = (tab: WorkItem['tabs'][number]) => [tab.session, tab.stack, tab.name || tab.pane].filter(Boolean).join(' › ')
 
-export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen, onClose, start }: Props) {
+export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen, onClose, start, onBacklog }: Props) {
   const modal = useModal(true, onClose, undefined, { view: start ? `work:${start}` : 'work' })
   const now = useNow()
   const [view, setView] = useState<WorkView>(() => start ?? (decisions(board).length ? 'needs' : 'board'))
   const [chosen, setProject] = useState('all')
   const [showHold, setShowHold] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
+  // Columns that show every backlog card, not only the first BACKLOG_CAP.
+  const [expanded, setExpanded] = useState<Stage[]>([])
   // A form over the sheet: add a project, a project's settings, or a new item. added: the last result line.
   const [form, setForm] = useState<{ kind: 'project'; name?: string } | { kind: 'item' } | null>(null)
   const [added, setAdded] = useState<{ text: string; ok: boolean } | null>(null)
@@ -74,15 +81,35 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   const sent = form
   const close = (mine: typeof form) => setForm(current => current === mine ? null : current)
   const projects = board?.projects ?? []
-  const project = projects.some(entry => entry.name === chosen) ? chosen : 'all'
+  const allCards = backlogOnBoard(board, now)
+  const hasBacklog = allCards.length > 0
+  const project = projects.some(entry => entry.name === chosen) || (chosen === BACKLOG && hasBacklog) ? chosen : 'all'
   // Settings: the chosen project, or the only one.
-  const settingsFor = project !== 'all' ? project : projects.length === 1 ? projects[0].name : ''
+  const settingsFor = project === BACKLOG ? '' : project !== 'all' ? project : projects.length === 1 ? projects[0].name : ''
+  const cards = project === 'all' || project === BACKLOG ? allCards : []
+  const hasWork = projects.length > 0 || hasBacklog
   const editing = form?.kind === 'project' && form.name ? projects.find(entry => entry.name === form.name) : undefined
   const items = (board?.items ?? []).filter(item => onBoard(item, now) && (project === 'all' || item.project === project))
   const shown = board && { ...board, items }
   const asking = decisions(shown).length
   const holds = items.filter(item => item.stage === 'hold').length
   const opened = board?.items.find(item => item.id === openId)
+  const openedCard = board?.backlog?.items.find(card => card.id === openId)
+  // A closed drawer gives focus back to the card that opened it, or to the view switch when that card left the board.
+  const lastOpen = useRef<string | null>(null)
+  // drawerId: the drawer on screen. A refresh can remove its item (moved to DONE.md, or deleted) with openId still set.
+  const drawerId = opened || openedCard ? openId : null
+  useEffect(() => {
+    if (drawerId) { lastOpen.current = drawerId; return }
+    const id = lastOpen.current, sheet = modal.ref.current
+    lastOpen.current = null
+    if (!id) return
+    setOpenId(current => current === id ? null : current)  // a card that comes back later does not open its drawer again
+    if (!sheet?.open) return
+    const card = sheet.querySelector<HTMLElement>(`[data-item="${CSS.escape(id)}"]`)
+    const opener = card?.matches('button') ? card : card?.querySelector<HTMLElement>('button[aria-haspopup="dialog"]')
+    ;(opener ?? sheet.querySelector<HTMLElement>('.work-views [aria-pressed="true"]'))?.focus()
+  }, [drawerId, modal.ref])
   const open = (pane: Pane) => { onClose(); onOpen(pane) }
   const columns = showHold ? [...COLUMNS, HOLD] : COLUMNS
   return <dialog {...modal} className="sheet work-sheet" aria-labelledby="work-title">
@@ -96,7 +123,7 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
     </div>
     {board && <div className="work-filters">
       <div className="tab-bar work-projects" role="group" aria-label="Project">
-        {projects.length > 1 && <>
+        {projects.length + (hasBacklog ? 1 : 0) > 1 && <>
         <button type="button" aria-pressed={project === 'all'} onClick={() => setProject('all')}>All projects</button>
         {projects.map(entry => {
           const count = (board?.items ?? []).filter(item => item.project === entry.name && item.stage === 'needs').length
@@ -105,6 +132,8 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
             {count > 0 && <span className="work-chip-count"> · {count}<span className="visually-hidden"> need you</span></span>}
           </button>
         })}
+        {hasBacklog && <button type="button" aria-pressed={project === BACKLOG} onClick={() => setProject(BACKLOG)}>
+          <ListTodo size={14} className="work-backlog-icon" aria-hidden="true" />Backlog</button>}
         </>}
         <button type="button" className="work-add-project" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}><Plus size={14} aria-hidden="true" />Add project</button>
       </div>
@@ -119,38 +148,51 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
       {!board && !error && <BoardBones />}
       {!board && error && <p className="work-error" role="alert"><span>Could not load work items. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
       {board && <div role="status" className="work-added">{added && <p className={`work-result${added.ok ? '' : ' failed'}`}>{added.text}</p>}</div>}
-      {board && !projects.length && <div className="work-empty work-start">
+      {board?.backlog?.error && (!hasWork || (view === 'board' && (project === 'all' || project === BACKLOG))) &&
+        <p className="work-error work-feed-error">Could not load the backlog. {board.backlog.error}</p>}
+      {board && !hasWork && <div className="work-empty work-start">
         <p>No projects yet. Add a project: its items, sessions and Jira key live here.</p>
         <button type="button" className="primary" aria-haspopup="dialog" onClick={() => setForm({ kind: 'project' })}>Add project</button>
       </div>}
-      {board && view === 'needs' && projects.length > 0 && <>
+      {board && view === 'needs' && hasWork && <>
         <DecisionsGroup board={shown} error={error} panes={panes} answers={answers} onRefresh={onRefresh} onOpen={open} compact scope="sheet" onDetails={item => setOpenId(item.id)} />
         {!asking && <p className="work-empty">Nothing waits on you. An item shows here when its agent asks you something.</p>}
       </>}
-      {board && view === 'board' && projects.length > 0 && <>
+      {board && view === 'board' && hasWork && <>
         <div role="status">{answers.results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
         {error && <p className="work-error" role="alert"><span>Could not refresh work items. The board can be out of date. {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
         {feedTrouble(board, projects.filter(entry => project === 'all' || entry.name === project)).map(text => <p key={text} className="work-error work-feed-error">{text}</p>)}
-        {projects.length > 0 && !board.items.length && <p className="work-empty">No work items yet. Use New item, or an agent adds one with <code>tether item new</code>.</p>}
+        {projects.length > 0 && !board.items.length && !hasBacklog && <p className="work-empty">No work items yet. Use New item, or an agent adds one with <code>tether item new</code>.</p>}
         <div className="work-columns">
           {columns.map(column => {
             const list = items.filter(item => item.stage === column.stage).sort(order(column.stage))
+            const backlog = cards.filter(card => card.stage === column.stage).sort(backlogOrder)
+            const all = expanded.includes(column.stage) || backlog.length <= BACKLOG_CAP + 1
+            const shownCards = all ? backlog : backlog.slice(0, BACKLOG_CAP)
+            const more = backlog.length - shownCards.length
             return <section key={column.stage} className={`work-col ${column.stage}`} aria-labelledby={`work-col-${column.stage}`}>
-              <h3 id={`work-col-${column.stage}`} className="work-col-head"><span>{STAGE_LABEL[column.stage]}</span><span className="badge">{list.length}</span><span className="work-col-hint">{column.hint}</span></h3>
-              {list.length ? <ul className="work-col-list">{list.map(item => item.stage === 'needs' && item.ask
+              <h3 id={`work-col-${column.stage}`} className="work-col-head"><span>{STAGE_LABEL[column.stage]}</span><span className="badge">{list.length + backlog.length}</span><span className="work-col-hint">{column.hint}</span></h3>
+              {list.length + backlog.length ? <ul className="work-col-list">{list.map(item => item.stage === 'needs' && item.ask
                 ? <DecisionCard key={`${item.id}:${item.ask.id}`} scope="board" item={item} prefix={prefixOf(board, item)} panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={open} onDetails={entry => setOpenId(entry.id)} />
-                : <li key={item.id}><BoardCard item={item} prefix={prefixOf(board, item)} panes={panes} now={now} onDetails={() => setOpenId(item.id)} /></li>)}</ul>
+                : <li key={item.id}><BoardCard item={item} prefix={prefixOf(board, item)} panes={panes} now={now} onDetails={() => setOpenId(item.id)} /></li>)}
+                {shownCards.map(card => <li key={card.id}><BacklogBoardCard card={card} now={now} onDetails={() => setOpenId(card.id)} /></li>)}</ul>
                 : <p className="work-col-empty">Nothing here.</p>}
+              {more > 0 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => [...list, column.stage])}>
+                Show {more} more backlog items<span className="visually-hidden"> in {STAGE_LABEL[column.stage]}</span></button>}
+              {all && backlog.length > BACKLOG_CAP + 1 && <button type="button" className="ghost sm work-more" onClick={() => setExpanded(list => list.filter(stage => stage !== column.stage))}>
+                Show fewer<span className="visually-hidden"> backlog items in {STAGE_LABEL[column.stage]}</span></button>}
             </section>
           })}
         </div>
       </>}
     </div>
+    {openedCard && <BacklogDrawer key={openedCard.id} api={api} card={openedCard} error={error} onRefresh={onRefresh} onClose={() => setOpenId(null)}
+      onBacklog={query => { onClose(); onBacklog(query) }} />}
     {opened && <ItemDrawer key={opened.id} api={api} item={opened} project={projects.find(entry => entry.name === opened.project)} prefix={prefixOf(board, opened)} panes={panes} link={board?.jira}
       answers={answers} error={error} onRefresh={onRefresh} onOpen={open} onClose={() => setOpenId(null)} />}
     {board && form?.kind === 'project' && (!form.name || editing) && <ProjectForm api={api} board={board} project={editing} onClose={() => setForm(null)}
       onSaved={name => { close(sent); setProject(name); setAdded({ ok: true, text: editing ? `${name} settings saved.` : `Project ${name} added.` }); void onRefresh() }} />}
-    {board && form?.kind === 'item' && <NewItemForm api={api} board={board} project={project === 'all' ? undefined : project} onClose={() => setForm(null)}
+    {board && form?.kind === 'item' && <NewItemForm api={api} board={board} project={project === 'all' || project === BACKLOG ? undefined : project} onClose={() => setForm(null)}
       onAdded={(item, tab) => {
         close(sent); setView('board')
         if (project !== 'all') setProject(item.project)

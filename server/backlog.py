@@ -117,9 +117,10 @@ def _item_end(lines, at):
     return end
 
 
-def _finished(text, everything):
+def _finished(text, everything, keep_since=None):
     """The finished top-level items to move, in file order: (moved [(section, block)], lines, the line numbers to drop).
-    everything: all of them; else only until the text is at ARCHIVE_TO or less."""
+    everything: all of them; else only until the text is at ARCHIVE_TO or less. keep_since: items done at or after
+    this time stay, so the work board still shows them (board_items)."""
     lines = text.split('\n')
     size, moved, section, drop = len(text), [], 'Inbox', set()
     for at, line in enumerate(lines):
@@ -131,6 +132,8 @@ def _finished(text, everything):
         if not found or found[1] == ' ':
             continue
         end = _item_end(lines, at)
+        if keep_since is not None and (_done_time(lines[at:end]) or 0) >= keep_since:
+            continue
         moved.append((section, lines[at:end]))
         gap = end
         while (at == 0 or not lines[at - 1].strip()) and gap < len(lines) and not lines[gap].strip():
@@ -154,7 +157,9 @@ def _archive(text, everything=False):
     written first: a failed write keeps the items in the list, never loses them."""
     if not everything and len(text) <= ARCHIVE_AT:
         return text
-    moved, lines, drop = _finished(text, everything)
+    moved, lines, drop = _finished(text, everything, None if everything else time.time() - WEEK)
+    if not everything and len(text) - sum(len(lines[at]) + 1 for at in drop) > LIMIT:
+        moved, lines, drop = _finished(text, everything)  # the list must fit: this week's finished items move too
     if not moved:
         return text
     stamp = time.strftime('%Y-%m-%d %H:%M')
@@ -403,8 +408,8 @@ def _block_end(lines, at):
 
 
 def _drop_status(lines, at):
-    """Remove the item's Doing and Done lines. Other details stay."""
-    end = _block_end(lines, at)
+    """Remove the item's Doing and Done lines, after a blank line too (_item_end). Other details stay."""
+    end = _item_end(lines, at)
     lines[at + 1:end] = [line for line in lines[at + 1:end] if not STATUS.match(line)]
 
 
@@ -426,10 +431,14 @@ def mark_done(query, project='', result='', who=''):
         at = _match(lines, query, project)
         lines[at] = lines[at].replace('[ ]', '[x]', 1)
         _drop_status(lines, at)
-        if result or who:
-            lines.insert(_block_end(lines, at), f'  - Done: {result or "finished"}{f" ({who})" if who else ""}')
+        lines.insert(_item_end(lines, at), _done_line(result, who))
         return lines[at]
     return _change(change)
+
+
+def _done_line(result, who):
+    """The Done line, dated, so the work board can show the item for a week (board_items)."""
+    return f'  - Done: {time.strftime("%Y-%m-%d %H:%M")} · {result or "finished"}{f" ({who})" if who else ""}'
 
 
 def _open_block(lines, start, end):
@@ -500,3 +509,115 @@ def project_name(start=None):
                 found = None
             return _clean(Path(found[1]).name if found else place.name)
     return _clean(here.name)
+
+
+# The work board shows backlog items as cards (work_backlog.py). Only Ready, Building and Done fit an item:
+# open, open with a Doing line, and ticked.
+BOARD_STAGES = ('ready', 'building', 'done')
+DONE_AT = re.compile(r'\s+- Done: ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})(?: · (.*))?$')
+DETAILS = 20  # detail lines a card carries, at most
+WEEK = 7 * 86400
+
+
+def _done_time(block):
+    """When the item was done, from its last Done line (as _card reads it) if _done_line dated it, or None."""
+    found = None
+    for line in block[1:]:
+        if STATUS.match(line) and line.strip().startswith('- Done:'):
+            found = DONE_AT.fullmatch(line)
+    if not found:
+        return None
+    try:
+        return time.mktime(time.strptime(found[1], '%Y-%m-%d %H:%M'))
+    except ValueError:
+        return None
+
+
+def _block_version(block):
+    """A number for one item's lines (48 bits, so a browser keeps it exact). A change to the item changes it."""
+    return int(hashlib.sha256('\n'.join(block).encode('utf-8', 'surrogatepass')).hexdigest()[:12], 16)
+
+
+def _card(lines, at, area, rank, now):
+    """One item as a card, or None: no ID, or done with no dated Done line or more than a week ago."""
+    found = ITEM.fullmatch(lines[at])
+    number = ID.search(lines[at])
+    if not number:
+        return None
+    block = lines[at:_item_end(lines, at)]
+    doing = done = None
+    details = []
+    for line in block[1:]:
+        if not line.strip():
+            continue
+        if STATUS.match(line):
+            kind, _, text = line.strip()[2:].partition(': ')
+            if kind == 'Doing':
+                doing = text.strip()
+            else:
+                dated = DONE_AT.fullmatch(line)
+                done = (dated[2] or '') if dated else text.strip()
+            continue
+        if len(details) < DETAILS:
+            details.append(re.sub(r'^[-*] (\[[ xX]\] )?', '', line.strip())[:300])
+    finished, done_at = found[1] != ' ', _done_time(block)
+    if finished and (done_at is None or now - done_at > WEEK):
+        return None
+    source = SOURCE.search(ID.sub('', found[2]))
+    return {'id': f'B{number[1]}', 'area': area, 'title': _bare(found[2]).strip(), 'rank': rank,
+            'stage': 'done' if finished else 'building' if doing is not None else 'ready',
+            'source': source[0].strip()[1:-1] if source else '', 'doing': doing, 'done': done, 'doneAt': done_at,
+            'details': details, 'version': _block_version(block)}
+
+
+def board_items(now=None):
+    """The backlog's items as work board cards, in file order. Reads only: a read never writes the file."""
+    lines = read()['text'].split('\n')
+    now = time.time() if now is None else now
+    area, cards = 'Inbox', []
+    for at, line in enumerate(lines):
+        heading = HEADING.fullmatch(line)
+        if heading:
+            area = heading[1] or 'Inbox'
+        elif ITEM.fullmatch(line):
+            card = _card(lines, at, area, len(cards), now)
+            if card:
+                cards.append(card)
+    return cards
+
+
+def set_stage(ref, stage, version, who='Mak'):
+    """Move one item from the work board: ready (reopen, or stop Doing), building (a Doing line) or done (ticked, with
+    a dated Done line). version: the card's version; the item must not have changed since. Returns the new card."""
+    found = ID_QUERY.fullmatch(_one_line(ref).replace('-', '')) if isinstance(ref, str) else None
+    if not found:
+        raise invalid('Write a backlog ID like B12.')
+    if stage not in BOARD_STAGES:
+        raise invalid('A backlog item moves only to Ready, Building or Done.')
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise invalid('Reload the board and try again.')
+    number, who = int(found[1]), _one_line(who) or 'Mak'
+    with _locked():
+        current = read()['text']
+        lines = _lines(current)
+        at = _by_id(lines, number, need_open=False)
+        if _block_version(lines[at:_item_end(lines, at)]) != version:
+            raise ProjectError(409, f'B{number} changed since you loaded it. Reload and try again.')
+        doing = any(line.lstrip().startswith('- Doing:') for line in lines[at + 1:_item_end(lines, at)])
+        finished = ITEM.fullmatch(lines[at])[1] != ' '
+        if stage == 'ready':
+            lines[at] = re.sub(r'^([-*] \[)[xX](\] )', r'\1 \2', lines[at])
+            _drop_status(lines, at)
+        elif stage == 'building' and (finished or not doing):
+            lines[at] = re.sub(r'^([-*] \[)[xX](\] )', r'\1 \2', lines[at])
+            _drop_status(lines, at)
+            lines.insert(at + 1, f'  - Doing: {who}')
+        elif stage == 'done' and not finished:
+            lines[at] = lines[at].replace('[ ]', '[x]', 1)
+            _drop_status(lines, at)
+            lines.insert(_item_end(lines, at), _done_line('', who))
+        text = '\n'.join(lines) + '\n'
+        if text != current:
+            _replace(current, with_ids(text, current))
+    card = next((c for c in board_items() if c['id'] == f'B{number}'), None)
+    return card or {'id': f'B{number}', 'stage': stage, 'gone': True}

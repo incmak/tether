@@ -312,6 +312,37 @@ class Api(unittest.TestCase):
         status, payload = handler.sent
         self.assertEqual(status, 200)
         self.assertEqual(payload['items'][0]['stage'], 'needs')
+        self.assertEqual(payload['backlog'], {'items': [], 'error': ''})  # no backlog file yet
+
+    def test_backlog_cards_are_on_the_board_and_move_from_it(self):
+        folder = paths.TETHER / 'backlog'
+        folder.mkdir()
+        (folder / 'BACKLOG.md').write_text('- [ ] Fix login #B7\n')
+        handler = Handler(work_api.PREFIX + 'board')
+        work_api.get(handler)
+        card = handler.sent[1]['backlog']['items'][0]
+        self.assertEqual([i['id'] for i in handler.sent[1]['items']], ['T-001'])  # not counted as work items
+        self.assertEqual((card['id'], card['project'], card['stage']), ('B7', 'Backlog', 'ready'))
+        status, payload = self.post('stage', {'item': 'B7', 'stage': 'done', 'version': card['version']})
+        self.assertEqual((status, payload['item']['stage']), (200, 'done'))
+        self.assertIn('- [x] Fix login #B7\n  - Done: ', (folder / 'BACKLOG.md').read_text())
+        status, payload = self.post('stage', {'item': 'B7', 'stage': 'ready', 'version': card['version']})
+        self.assertEqual(status, 409)
+        status, payload = self.post('stage', {'item': 'B7', 'stage': 'hold', 'version': 1})
+        self.assertEqual(status, 400)
+        status, payload = self.post('qa', {'item': 'B7', 'qa': True, 'version': 1})
+        self.assertEqual(status, 400)
+        self.assertIn('backlog item', payload['error'])
+
+    def test_an_unreadable_backlog_leaves_the_board(self):
+        folder = paths.TETHER / 'backlog'
+        folder.mkdir()
+        (folder / 'BACKLOG.md').write_text('x' * 200001)
+        handler = Handler(work_api.PREFIX + 'board')
+        work_api.get(handler)
+        self.assertEqual(handler.sent[0], 200)
+        self.assertEqual(handler.sent[1]['items'][0]['id'], 'T-001')
+        self.assertIn('over 200,000 characters', handler.sent[1]['backlog']['error'])
 
     def test_answer_goes_to_the_asking_tab(self):
         status, payload = self.answer()

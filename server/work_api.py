@@ -11,6 +11,7 @@ from projects import _read, _write
 
 import jira_client
 import graph_client
+import work_backlog
 import work_feeds
 import work_fix
 import work_items
@@ -44,7 +45,7 @@ def get(handler):
     def work():
         if name == 'board':
             return {**work_items.board(), 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
-                    'graph': graph_client.status()}
+                    'graph': graph_client.status(), 'backlog': work_backlog.cards()}
         raise ProjectError(404, 'Not found')
     _answer(handler, work)
 
@@ -119,6 +120,8 @@ def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
             _, item = work_items.find(body.get('item'))
             item, fix = work_fix.try_start({**item, 'version': version}, sessions(), run, lock, strict=True)
             return {'item': item, 'fix': fix}
+        if name == 'stage' and work_backlog.is_ref(body.get('item')):
+            return {'item': work_backlog.stage(body['item'], body.get('stage'), version)}
         if name == 'stage':
             return {'item': work_items.stage(body.get('item'), body.get('stage'), 'mak', version=version,
                                              text=body.get('text') or '')}
