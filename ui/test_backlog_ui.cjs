@@ -110,6 +110,8 @@ async function main() {
       await search.fill('flaky')
       check(`${at} title match is marked`, (await sheet.locator('mark').first().innerText()) === 'flaky')
       check(`${at} status says what is shown`, (await sheet.locator('.backlog-status').innerText()).startsWith('1 shown · 5 open'))
+      await search.fill('flkay shre')
+      check(`${at} typos find the item (the sidebar's matcher)`, JSON.stringify(await titles(sheet)) === JSON.stringify(['Fix flaky share test']))
       await search.press('Escape')
       check(`${at} Escape clears the search, the page stays`, (await search.inputValue()) === '' && await sheet.isVisible())
       await search.fill('nothing like this')
