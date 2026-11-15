@@ -10,7 +10,6 @@ import { anchorOf, clipTitle } from './hooks'
 import type { Anchor } from './hooks'
 import type { Session } from './Sidebar'
 import { HOLD_MS } from './gesture'
-import { takeTabStep } from './tabSwipe'
 
 // Put panes in the saved order. Panes not in the list (new splits) keep tmux order at the end.
 export function orderPanes(panes: Pane[], order: string[] | undefined) {
@@ -160,22 +159,6 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
           { transform: tabTransform(before.pill, dx), width: `${before.pill.width}px`, height: `${before.pill.height}px` },
           { transform: tabTransform(end), width: `${end.width}px`, height: `${end.height}px` },
         ], timing))
-      }
-    }
-    const step = takeTabStep()
-    const left = step && !closing ? box.querySelector<HTMLElement>(`[data-pane="${CSS.escape(step.from)}"]`) : null
-    const active = left && box.querySelector<HTMLElement>('[aria-selected="true"]')
-    if (left && active) {
-      const pad = 12
-      if (active.offsetLeft - pad < box.scrollLeft) box.scrollLeft = Math.max(0, active.offsetLeft - pad)
-      else if (active.offsetLeft + active.offsetWidth + pad > box.scrollLeft + box.clientWidth) box.scrollLeft = active.offsetLeft + active.offsetWidth + pad - box.clientWidth
-      const pill = box.querySelector<HTMLElement>('.pane-tab-pill')
-      if (pill && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        const from = positionOf(left), to = positionOf(active)
-        animations.push(pill.animate([
-          { transform: tabTransform(from), width: `${from.width}px`, height: `${from.height}px` },
-          { transform: tabTransform(to), width: `${to.width}px`, height: `${to.height}px` },
-        ], { duration: 180, easing: SLIDE_CURVE }))
       }
     }
     capture()

@@ -1884,6 +1884,8 @@ button.live-chip:active { background: var(--line); }
 .group-add { display: grid; place-items: center; flex-shrink: 0; width: 34px; color: var(--muted); }
 .group-add:hover { color: var(--text); }
 .group-strip { display: contents; }
+/* Desktop strip scroll (stripScroll.ts, Settings): a swipe stops at the strip's end, not Back/Forward on the root. */
+@media (min-width: 900px) and (hover: hover) and (pointer: fine) { .chat-panel[data-strip-scroll] :is(.group-row, .pane-tabs) { overscroll-behavior-x: contain; } }
 .group-switch { display: none; }
 .group-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--attention); color: var(--bg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .group-crumb { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

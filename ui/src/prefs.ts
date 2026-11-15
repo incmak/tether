@@ -28,7 +28,7 @@ export interface Prefs {
   handsFree: boolean
   // The floating agents bubble (this device only; its place is kept in its own key).
   agentBubble: boolean
-  /** Desktop: a two-finger trackpad swipe over a chat's header switches tabs, not Back/Forward (this device). */
+  /** Desktop: a two-finger trackpad swipe over a chat's tab strip or stack row scrolls it, not Back/Forward (this device). */
   headerSwipe: boolean
   /** Panel sizes in px per layout key: a panel name for a column width, "top"/"bottom" for an edge row. This device. */
   panelSizes: Record<string, Record<string, number>>

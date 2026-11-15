@@ -38,7 +38,7 @@ import type { OfficeFile } from './OfficeViewer'
 import type { ToolSummary } from './api'
 import { StatusStack } from './StatusStack'
 import { PaneTabs, movePill } from './PaneTabs'
-import { SWIPE_PARENTS, SWIPE_SKIP, SWIPE_ZONE, markTabStep, tabSwipe } from './tabSwipe'
+import { HEADER, SKIP, STRIPS, boxOf, createStripWheel, scrollsItself } from './stripScroll'
 import { WorktreeMark } from './Worktree'
 import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
@@ -64,7 +64,7 @@ import { codexRunItems, useCodexRuns } from './CodexRuns'
 import { HOLD_MS } from './gesture'
 
 
-interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the header switches tabs (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
+interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
 /** Desktop workspace controls for a Chat shown in a slot next to other slots. */
 export interface SlotControls { index: number; zoomed: boolean; onZoom: () => void; onClose?: () => void; onPick?: () => void; onDragStart?: (event: React.DragEvent) => void; onSwapTo?: (to: number) => void }
 export interface SidePinControls { pinned: boolean; index: number; total: number; note: string; onToggle(): void; onNote(text: string): void; onStep(dir: 1 | -1): void }
@@ -444,39 +444,26 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     moveChat(Math.sign(dx) * width, time)
     leaving.current = setTimeout(() => { leaving.current = null; onOpenPane(target) }, time)
   }
-  // Desktop: a two-finger swipe over the header, the stack row or the tab strip steps one tab (tabSwipe.ts). The
-  // listeners sit on those parts only: a non-passive wheel listener on the whole chat would hold up its scrolling.
-  const stepTab = useRef<(step: -1 | 1) => void>(() => {})
-  useLayoutEffect(() => {
-    stepTab.current = step => {
-      const next = panes[paneIndex + step]
-      if (!next || paneIndex < 0) return
-      markTabStep(pane.id)
-      onOpenPane(next)
-      requestAnimationFrame(() => tabSwipe.hold(performance.now()))
-    }
-  })
+  // Desktop: a two-finger swipe over the stack row or the tab strip, or BAND px above or below them, scrolls that strip;
+  // over the rest of the header it does nothing (stripScroll.ts). The listener sits on the panel: the band below the
+  // tab strip lies over the chat. Chromium waits for it on the first wheel event of a scroll only.
   useEffect(() => {
     const panel = panelRef.current
     if (!headerSwipe || !panel) return
     const desk = matchMedia(WORKSPACE_QUERY)
+    const decide = createStripWheel()
     const wheel = (event: WheelEvent) => {
-      if (!desk.matches || (event.target as Element | null)?.closest(SWIPE_SKIP)) return
-      const result = tabSwipe(event)
-      if (result.handled) event.preventDefault()
-      if (result.step) stepTab.current(result.step)
+      const target = event.target as Element | null
+      if (!desk.matches || target?.closest(SKIP)) return
+      const strips = [...panel.querySelectorAll<HTMLElement>(STRIPS)].filter(strip => strip.offsetHeight > 0)
+      const plan = decide(event, dx => ({ strips: strips.map(boxOf), native: scrollsItself(target, panel, dx), header: !!target?.closest(HEADER) }))
+      if (plan.do === 'pass') return
+      if (event.cancelable) event.preventDefault()
+      if (plan.do === 'scroll') strips[plan.strip]?.scrollBy({ left: plan.dx, behavior: 'instant' })
     }
-    let zone: Element[] = []
-    const attach = () => {
-      for (const part of zone) part.removeEventListener('wheel', wheel as EventListener)
-      zone = [...panel.querySelectorAll(SWIPE_ZONE)]
-      for (const part of zone) part.addEventListener('wheel', wheel as EventListener, { passive: false })
-      for (const parent of panel.querySelectorAll(SWIPE_PARENTS)) observer.observe(parent, { childList: true })
-    }
-    const observer = new MutationObserver(attach)  // the stack row and the strip come and go with the tabs
-    observer.observe(panel, { childList: true })
-    attach()
-    return () => { observer.disconnect(); for (const part of zone) part.removeEventListener('wheel', wheel as EventListener) }
+    panel.addEventListener('wheel', wheel, { passive: false })
+    panel.dataset.stripScroll = ''
+    return () => { panel.removeEventListener('wheel', wheel); delete panel.dataset.stripScroll }
   }, [headerSwipe])
   const swipeCancel = () => {
     if (swipe.current?.mode === 'drag') moveChat(0, reduceMotion() ? 0 : 220)

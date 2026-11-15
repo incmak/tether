@@ -40,6 +40,6 @@ export function Shortcuts({ onClose }: { onClose: () => void }) {
       {shown.map(group => <section key={group.name}><h3>{group.name}</h3><ShortcutRows group={group} /></section>)}
     </div>
     {!shown.length && <p className="shortcuts-empty" role="status">No shortcut matches “{filter.trim()}”.</p>}
-    <p className="hint">Mouse buttons 4 and 5 and a two-finger swipe on a Mac trackpad also go Back and Forward. Typing anywhere else moves to the message box. Drag a divider to resize. Double-click it to make the panes equal again. Settings › Keyboard shortcuts has this list too.</p>
+    <p className="hint">Mouse buttons 4 and 5 and a two-finger swipe on a Mac trackpad also go Back and Forward. Over a chat’s header, the swipe scrolls the tabs and stacks instead (Settings › Sessions & chat). Typing anywhere else moves to the message box. Drag a divider to resize. Double-click it to make the panes equal again. Settings › Keyboard shortcuts has this list too.</p>
   </dialog>
 }
