@@ -9,7 +9,7 @@ import { useModal, usePolling } from './hooks'
 import { startTrial } from './lookTrial'
 import { TrialBar } from './TrialBar'
 import type { Anchor } from './hooks'
-import { goBack, goForward, setPlace, setPlaceHandler, setViewOpener, useNavAvailability } from './backNav'
+import { goBack, goForward, setPlace, setPlaceHandler, setSearchOpener, setViewOpener, useNavAvailability } from './backNav'
 import { BACK_KEY, FORWARD_KEY, isNavKey } from './navKeys'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
@@ -311,6 +311,8 @@ function App() {
     })
     return () => setViewOpener(null)
   }, [])
+  // The extension's "Open Tether search" key (#search) opens search like ⌥Space; /chat/?go=search does too.
+  useEffect(() => { setSearchOpener(() => setGo('search')); return () => setSearchOpener(null) }, [])
   // Mouse buttons 4 and 5 go Back and Forward inside Tether. Stop the browser's own step, so it cannot leave the app.
   useEffect(() => {
     const mouse = (event: MouseEvent) => {
@@ -531,6 +533,8 @@ function App() {
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
+    // Like ⌥Space: inside another dialog (Settings), search does not open over it.
+    else if (go === 'search') setMenu(current => document.querySelector('dialog[open]') ? current : 'commands')
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})

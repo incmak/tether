@@ -8,6 +8,7 @@
   "optional_host_permissions": ["https://*/*"],
   "background": {"service_worker": "worker.js", "type": "module"},
   "options_page": "options.html",
+  "commands": {"open-search": {"suggested_key": {"default": "Ctrl+Shift+9"}, "description": "Open Tether search", "global": true}},
   "action": {"default_title": "Tether: connect or stop"},
   "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src https: wss:"}
 }
