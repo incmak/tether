@@ -116,6 +116,7 @@ function taskSetup(env) {
     './ChatPicker': { ChatPicker: () => null }, './Sidebar': { AgentIcon: () => null, agentNames: { claude: 'Claude', codex: 'Codex' } },
     './Worktree': { WorktreeField: () => null }, './Skeleton': { Spinner: () => null },
     './keys': { keyLabel: () => 'Alt+V' }, './useDictation': { useDictation: s.useDictation }, './NewTask.css': {},
+    './CodexTrust': { CodexTrustCard: () => null }, './codexTrustState': { useCodexTrust: () => ({ status: null, busy: false, error: '', trust() {}, justTrusted: false }) },
   }, env.globals)
   const props = {
     api: async (path, body) => {
