@@ -32,6 +32,7 @@ class Base(unittest.TestCase):
         words = Path(folder.name) / 'ui-words.txt'
         words.write_text('settings home archive export theme shell close open file folder terminal in browser restore tabs tether more new tab rail bar search\n')
         self.enterContext(mock.patch.object(ui_usage, 'words_file', lambda: words))
+        self.enterContext(mock.patch.dict(ui_usage._state, checked=float('-inf')))
         self.prefs = {}
         self.enterContext(mock.patch.object(ui_usage.prefs_sync, 'load', side_effect=lambda: {'prefs': self.prefs}))
 
@@ -84,6 +85,21 @@ class RecordTest(Base):
         ui_usage.expire(now=2 * ui_usage.KEEP_DAYS * 86400 + 20)
         self.assertEqual(ui_usage.file().read_text(), '')
 
+    def test_a_batch_from_before_the_clear_is_dropped_even_when_late(self):
+        old = ui_usage.generation()
+        ui_usage.clear(now=20)
+        # Captured and sent at 19 with the old generation; it arrives at 21.
+        self.assertEqual(ui_usage.record([dict(event('click', 'Home'), t=19_000)], now=21, sent=19_000, gen=old), 0)
+        self.assertEqual(ui_usage.record([dict(event('click', 'Theme'), t=21_000)], now=22, sent=21_000, gen=ui_usage.generation()), 1)
+        self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Theme'])
+
+    def test_an_old_event_after_newer_ones_still_expires(self):
+        cutoff = ui_usage.KEEP_DAYS * 86400
+        ui_usage.record([dict(event('click', 'Home'), t=100_000_000)], now=100_000, sent=100_000_000)
+        ui_usage.record([dict(event('click', 'Theme'), t=1)], now=100_000 + 10, sent=86_400_000)  # a day late: at 13610
+        ui_usage.expire(now=13_700 + cutoff)
+        self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Home'])
+
     def test_clear_drops_events_that_happened_before_it(self):
         ui_usage.record([event('click', 'Settings')], now=10)
         ui_usage.clear(now=20)
@@ -98,11 +114,11 @@ class HttpTest(Base):
         body = json.dumps({'events': [event('click', 'Settings')]}).encode()
         handler = Handler(ui_usage.PATH, body)
         ui_usage.post(handler)
-        self.assertEqual((handler.status, handler.body), (200, {'kept': 1, 'enabled': True}))
+        self.assertEqual((handler.status, handler.body), (200, {'kept': 1, 'enabled': True, 'gen': '0'}))
         self.prefs['uiUsage'] = False
         handler = Handler(ui_usage.PATH, body)
         ui_usage.post(handler)
-        self.assertEqual(handler.body, {'kept': 0, 'enabled': False})
+        self.assertEqual(handler.body, {'kept': 0, 'enabled': False, 'gen': '0'})
         self.assertEqual(len(ui_usage.file().read_text().splitlines()), 1)
 
     def test_post_rejects_bad_bodies(self):

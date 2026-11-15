@@ -15,6 +15,7 @@ Event fields (all short strings or small numbers):
   n  clicks to reach: the clicks in the current chain. A click on the page starts a chain; 0 means by keyboard.
   j  visit id: one page load, or a return after a long pause
   w  'phone' or 'wide'
+  (batch) gen: the log generation from the last answer. After a clear the server drops batches with an older one.
   t  when it happened, in the page's milliseconds. The batch has the page's time when it was sent ('now'), so the
      server finds the real time without trusting the page's clock.
 
@@ -54,6 +55,8 @@ WORDS = 'ui-words.txt'
 _TOKEN = re.compile(r'[^\W\d_]+|\d+')
 _lock = threading.Lock()
 _words = {'key': None, 'set': frozenset()}
+CHECK_EVERY = 3600  # a full check for old events at most this often: a late batch can append older events
+_state = {'checked': float('-inf')}
 
 
 def file():
@@ -131,7 +134,12 @@ def clean(raw, now, known, sent=None):
     return event
 
 
-def record(events, now=None, sent=None):
+def generation():
+    """Changes when the log is cleared. A batch that carries an older generation left the page before the clear."""
+    return str(_cleared())
+
+
+def record(events, now=None, sent=None, gen=None):
     """Append the valid events. Returns how many were kept. Without the UI word list nothing is kept: a label could
     then hold a name."""
     now = time.time() if now is None else now
@@ -140,6 +148,8 @@ def record(events, now=None, sent=None):
         return 0
     with _lock:
         since = _cleared()
+        if gen is not None and gen != str(since):
+            return 0
         kept = [event for event in (clean(raw, now, known, sent) for raw in events[:MAX_EVENTS]) if event and event['at'] >= since]
         target = file()
         if kept:
@@ -164,17 +174,22 @@ def expire(now=None):
 
 
 def _expire(now):
-    """Remove events older than KEEP_DAYS, and old events when the file is too big. Call with _lock held. Reads only the
-    first line unless there is work to do."""
+    """Remove events older than KEEP_DAYS, and old events when the file is too big. Call with _lock held. Reads the
+    whole file at most once per CHECK_EVERY, since a late batch can put an old event after newer ones."""
     target = file()
     try:
         size = target.stat().st_size
-        with open(target, encoding='utf-8') as source:
-            first = source.readline()
     except FileNotFoundError:
         return
-    if size > MAX_FILE or _at(first) < now - KEEP_DAYS * 86400:
+    if size > MAX_FILE:
         _trim(target, now)
+        return
+    if now - _state['checked'] < CHECK_EVERY:
+        return
+    _state['checked'] = now
+    with open(target, encoding='utf-8') as source:
+        if any(_at(line) < now - KEEP_DAYS * 86400 for line in source):
+            _trim(target, now)
 
 
 def _trim(target, now):
@@ -324,9 +339,11 @@ def post(handler):
         return
     if not enabled():
         expire()
-        handler.respond(200, {'kept': 0, 'enabled': False})
+        handler.respond(200, {'kept': 0, 'enabled': False, 'gen': generation()})
         return
-    handler.respond(200, {'kept': record(events, sent=body.get('now')), 'enabled': True})
+    gen = body.get('gen')
+    kept = record(events, sent=body.get('now'), gen=gen if isinstance(gen, str) else None)
+    handler.respond(200, {'kept': kept, 'enabled': True, 'gen': generation()})
 
 
 if __name__ == '__main__':

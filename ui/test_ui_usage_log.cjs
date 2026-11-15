@@ -15,7 +15,8 @@ const FIXTURE = `
       <button role="menuitem" id="file">File</button><button role="menuitem" id="sub-open">Shell</button></div></div>
     <div id="sub" popover="manual"><div role="menu" aria-label="Shell menu"><button role="menuitem" id="bash">Bash</button></div></div>
     <ul aria-label="Archived"><li data-ui-item><span>Fix login</span> <button aria-label="Restore Fix login" id="restore">↺</button>
-      <button id="open-row">Fix login</button></li></ul>
+      <button id="open-row">Fix login</button></li>
+      <li data-ui-item><span>A</span> <button aria-label="Restore A" id="restore-a">↺</button> <button aria-label="Add A to a stack" id="add-a">+</button></li></ul>
     <div style="height: 3000px"></div>
     <button id="far">Far</button>
   </main>`
@@ -72,9 +73,11 @@ async function main() {
     check('events carry their time', all.every(event => typeof event.t === 'number'))
     await page.click('#restore')
     await page.click('#open-row')
+    await page.click('#restore-a')
+    await page.click('#add-a')
     await flush()
-    const rows = (await events()).filter(event => event.k === 'click').slice(-2).map(event => event.l)
-    check('row text in a label becomes …', rows.includes('Restore …') && rows.includes('(item)') && !JSON.stringify(await events()).includes('Fix login'), JSON.stringify(rows))
+    const rows = (await events()).filter(event => event.k === 'click').slice(-4).map(event => event.l)
+    check('row text in a label becomes …', JSON.stringify(rows) === JSON.stringify(['Restore …', '(item)', 'Restore …', 'Add … to a stack']) && !JSON.stringify(await events()).includes('Fix login'), JSON.stringify(rows))
     await page.evaluate(() => { document.getElementById('pop').hidePopover(); window.scrollTo(0, 4000) })
     await page.waitForTimeout(2200)
     await flush()

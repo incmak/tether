@@ -14,7 +14,7 @@ const CONTROL = 'button, a[href], summary, select, input[type="checkbox"], input
 // Menus, dialogs and popovers. Each one adds a level of depth.
 const LAYER = 'dialog[open], [role="dialog"], [role="alertdialog"], [role="menu"], [popover]'
 // A row in a list of the person's own things. Its visible text is theirs, so it is never sent.
-const ITEM = '[data-ui-item], [data-id], [data-pane], [data-msg-id], [data-path], [data-item], [data-backlog-row], [data-key], .messages'
+const ITEM = '[data-ui-item], [data-id], [data-pane]:not(.chat-panel), [data-msg-id], [data-path], [data-item], [data-backlog-row], [data-key], .messages'
 const REGION = 'nav[aria-label], aside[aria-label], [role="toolbar"][aria-label], [role="tablist"][aria-label], [role="region"][aria-label], section[aria-label], section[aria-labelledby], header, footer'
 const SEND_EVERY = 15_000
 const BATCH = 100
@@ -51,16 +51,29 @@ function kindOf(element: Element) {
   return element.tagName === 'A' ? 'link' : element.tagName.toLowerCase()
 }
 
-/** Replace each text that the row shows (a tab title, a file name) with "…": "Restore Fix login" -> "Restore …". */
-export function withoutRowText(label: string, item: Element) {
+const MAX_ROW_NODES = 500
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// The texts each row shows, kept until the row changes. Rows are small; MAX_ROW_NODES bounds a long one.
+let rowTexts = new WeakMap<Element, RegExp | null>()
+function shownText(item: Element) {
+  if (rowTexts.has(item)) return rowTexts.get(item)!
   const shown = new Set<string>()
   const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
-  for (let node = walker.nextNode(); node && shown.size < 200; node = walker.nextNode()) {
+  let visited = 0
+  for (let node = walker.nextNode(); node && visited < MAX_ROW_NODES; node = walker.nextNode(), visited++) {
     const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim()
-    if (text.length >= 2 && /\p{L}/u.test(text)) shown.add(text)
+    if (/\p{L}/u.test(text)) shown.add(text)
   }
-  for (const text of [...shown].sort((a, b) => b.length - a.length)) label = label.split(text).join('…')
-  return label.replace(/…(?:[^\p{L}\p{N}]*…)+/gu, '…')
+  // Longest first, whole words only: the row "A" makes "Restore A" -> "Restore …" but leaves "Add" alone.
+  const pattern = shown.size ? new RegExp(`(?<![\\p{L}\\p{N}])(?:${[...shown].sort((a, b) => b.length - a.length).map(escape).join('|')})(?![\\p{L}\\p{N}])`, 'gu') : null
+  rowTexts.set(item, pattern)
+  return pattern
+}
+
+/** Replace each text that the row shows (a tab title, a file name) with "…": "Restore Fix login" -> "Restore …". */
+export function withoutRowText(label: string, item: Element) {
+  const pattern = shownText(item)
+  return (pattern ? label.replace(pattern, '…') : label).replace(/…(?:[^\p{L}\p{N}]*…)+/gu, '…')
 }
 
 /** The control's name. In a list item, only a name the code sets (aria-label or title), never the row's text. */
@@ -160,6 +173,7 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     scanTimer = idle = undefined
     if (stopped || document.visibilityState !== 'visible') return
     sync()
+    rowTexts = new WeakMap()
     const top = stack[stack.length - 1]
     const controls = top ? top.querySelectorAll(CONTROL) : document.querySelectorAll(CONTROL)
     for (const control of controls) {
@@ -192,6 +206,7 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     if (!control) return
     touch()
     sync()
+    rowTexts = new WeakMap()
     const { layer, depth } = layerOf(control)
     // A click on the page starts a chain. A click in a menu or dialog continues from the clicks that opened it, so
     // closing a submenu and opening it again counts the same each time.
@@ -236,13 +251,19 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   }
 }
 
+// The server's log generation. It changes when the log is cleared, so the server drops a batch that left before that.
+let generation = ''
+if (typeof window !== 'undefined') window.addEventListener(USAGE_CLEARED, () => { generation = '' })
+
 function post(events: UsageEvent[]) {
   try {
     void fetch('/mobile/api/ui-usage', {
       method: 'POST', credentials: 'same-origin', keepalive: true,
       headers: { 'Content-Type': 'application/json', 'X-Codex-Mobile': '1' },
-      body: JSON.stringify({ events, now: Date.now() }),
-    }).catch(() => { /* usage is best effort */ })
+      body: JSON.stringify({ events, now: Date.now(), ...(generation ? { gen: generation } : {}) }),
+    }).then(response => response.ok ? response.json() : null)
+      .then((body: { gen?: unknown } | null) => { if (typeof body?.gen === 'string') generation = body.gen })
+      .catch(() => { /* usage is best effort */ })
   } catch { /* usage must never interrupt the app */ }
 }
 
