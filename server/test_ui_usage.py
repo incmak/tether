@@ -29,6 +29,9 @@ class Base(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.enterContext(mock.patch.object(ui_usage.paths, 'CACHE', Path(folder.name)))
+        words = Path(folder.name) / 'ui-words.txt'
+        words.write_text('settings home archive export theme shell close open file folder terminal in browser restore tabs tether more new tab rail bar search\n')
+        self.enterContext(mock.patch.object(ui_usage, 'words_file', lambda: words))
         self.prefs = {}
         self.enterContext(mock.patch.object(ui_usage.prefs_sync, 'load', side_effect=lambda: {'prefs': self.prefs}))
 
@@ -42,10 +45,28 @@ class RecordTest(Base):
         self.assertEqual(stored, [{'at': 100, 'k': 'click', 'r': 'Tether', 'l': 'Settings', 'c': 'button', 'd': 0, 'n': 1, 'j': 'v1', 'w': 'wide'}])
         self.assertEqual(ui_usage.file().stat().st_mode & 0o777, 0o600)
 
+    def test_words_outside_the_ui_become_an_ellipsis(self):
+        ui_usage.record([event('click', 'Restore Secret acquisition', region='Tabs: Ünïcode name'),
+                         event('open', 'notes-2026.md', kind='', depth=1), event('click', 'Close tab 12')], now=1)
+        stored = [json.loads(line) for line in ui_usage.file().read_text().splitlines()]
+        self.assertEqual([(item['r'], item['l']) for item in stored],
+                         [('Tabs: …', 'Restore …'), ('Tether', '…'), ('Tether', 'Close tab #')])
+
+    def test_no_word_list_keeps_nothing(self):
+        with mock.patch.object(ui_usage, 'words_file', lambda: Path('/nonexistent/ui-words.txt')):
+            self.assertEqual(ui_usage.record([event('click', 'Settings')], now=1), 0)
+        self.assertFalse(ui_usage.file().exists())
+
+    def test_time_comes_from_the_page_offset(self):
+        ui_usage.record([dict(event('click', 'Settings'), t=5_000), dict(event('click', 'Home'), t='x')], now=100, sent=9_000)
+        stored = [json.loads(line)['at'] for line in ui_usage.file().read_text().splitlines()]
+        self.assertEqual(stored, [96, 100])
+
     def test_caps_text_and_numbers(self):
-        ui_usage.record([event('click', 'x' * 500, depth=50, steps=-3)], now=1)
+        ui_usage.record([event('click', 'Settings ' * 50, depth=50, steps=-3)], now=1)
         stored = json.loads(ui_usage.file().read_text())
-        self.assertEqual(len(stored['l']), ui_usage.TEXT)
+        self.assertLessEqual(len(stored['l']), ui_usage.TEXT)
+        self.assertTrue(stored['l'].startswith('Settings Settings'))
         self.assertEqual((stored['d'], stored['n']), (9, 0))
 
     def test_trims_old_events_when_the_file_is_too_big(self):
@@ -55,6 +76,21 @@ class RecordTest(Base):
         labels = {json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()}
         self.assertEqual(labels, {'New'})
         self.assertLessEqual(ui_usage.file().stat().st_size, 2000)
+
+    def test_old_events_go_after_90_days_in_a_small_file(self):
+        ui_usage.record([event('click', 'Settings')], now=0)
+        ui_usage.record([event('click', 'Home')], now=ui_usage.KEEP_DAYS * 86400 + 10)
+        self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Home'])
+        ui_usage.expire(now=2 * ui_usage.KEEP_DAYS * 86400 + 20)
+        self.assertEqual(ui_usage.file().read_text(), '')
+
+    def test_clear_drops_events_that_happened_before_it(self):
+        ui_usage.record([event('click', 'Settings')], now=10)
+        ui_usage.clear(now=20)
+        # A page sends its queue after the clear: one event from before it, one from after.
+        kept = ui_usage.record([dict(event('click', 'Home'), t=1_000), dict(event('click', 'Theme'), t=9_000)], now=22, sent=10_000)
+        self.assertEqual(kept, 1)
+        self.assertEqual([json.loads(line)['l'] for line in ui_usage.file().read_text().splitlines()], ['Theme'])
 
 
 class HttpTest(Base):
@@ -131,9 +167,11 @@ class ReportTest(Base):
         labels = sorted((row['label'], row['clicks']) for row in ui_usage.report(now=2000)['top'])
         self.assertEqual(labels, [('Close', 1), ('Close …', 3)])
 
-    def test_two_shared_first_words_stay_apart(self):
-        self.visits(1, lambda index: [event('click', 'Open file'), event('click', 'Open folder')])
-        self.assertEqual(sorted(row['label'] for row in ui_usage.report(now=2000)['top']), ['Open file', 'Open folder'])
+    def test_controls_that_share_a_first_word_stay_apart(self):
+        self.visits(1, lambda index: [event('click', 'Open file'), event('click', 'Open folder'), event('click', 'Open terminal'),
+                                      event('click', 'Open in browser')])
+        self.assertEqual(sorted(row['label'] for row in ui_usage.report(now=2000)['top']),
+                         ['Open file', 'Open folder', 'Open in browser', 'Open terminal'])
 
     def test_filters_by_device_and_days(self):
         self.visits(1, lambda index: [event('click', 'Rail')], device='wide')

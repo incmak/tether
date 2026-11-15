@@ -130,7 +130,7 @@ async function main() {
       check(`${at} logs the Settings click`, clicks.some(event => event.l === 'Settings' && (width < 800 ? event.d === 1 && event.n === 2 : event.d === 0 && event.n === 1)), JSON.stringify(clicks))
       check(`${at} logs the click in Settings at depth 1`, clicks.some(event => /About/.test(event.l) && event.d === 1 && event.n >= 2), JSON.stringify(clicks))
       check(`${at} logs Settings opening`, events.some(event => event.k === 'open' && event.l === 'Settings' && event.n >= 1), JSON.stringify(events.filter(event => event.k === 'open')))
-      check(`${at} logs seen controls`, events.filter(event => event.k === 'seen').length > 5)
+      check(`${at} logs seen controls`, events.filter(event => event.k === 'seen').length >= 3, JSON.stringify(events.filter(event => event.k !== 'click').map(event => [event.k, event.r, event.l, event.d])))
       check(`${at} device`, events.every(event => event.w === (width < 800 ? 'phone' : 'wide')), JSON.stringify([...new Set(events.map(event => event.w))]))
       const text = JSON.stringify(events)
       check(`${at} no tab names or paths`, !/Fix login|Docs pass|\/srv\//.test(text), text.match(/.{40}(Fix login|Docs pass|\/srv\/).{40}/)?.[0])

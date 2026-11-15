@@ -160,9 +160,32 @@ const panelManifest: Plugin = {
   },
 }
 
+// UI usage (server/ui_usage.py): the words of the UI code, one per line, in ui-words.txt. Before the server stores a
+// label such as "Restore <tab name>", it keeps only these words and makes the others "…". The JS files already hold
+// these words, so the list shows nothing new. Comments are left out; camelCase names add their parts too.
+export function uiWords(dir: string) {
+  const words = new Set<string>()
+  for (const name of readdirSync(dir, { recursive: true }) as string[]) {
+    if (!/\.tsx?$/.test(name) || /(^|\/)test[_-]|\.test\./.test(name)) continue
+    const code = readFileSync(resolve(dir, name), 'utf8').replace(/\/\*[\s\S]*?\*\/|(^|[^:'"`\\])\/\/.*$/gm, '$1')  // no comments
+    for (const word of code.match(/\p{L}+/gu) ?? []) {
+      words.add(word.toLowerCase())
+      for (const part of word.match(/\p{Lu}?\p{Ll}+|\p{Lu}+(?!\p{Ll})/gu) ?? []) words.add(part.toLowerCase())
+    }
+  }
+  return [...words].sort().join('\n') + '\n'
+}
+let wordsSource = ''
+const usageWords: Plugin = {
+  name: 'ui-words',
+  apply: 'build',
+  configResolved(config) { wordsSource = resolve(config.root, 'src') },
+  writeBundle(options) { if (options.dir) writeFileSync(resolve(options.dir, 'ui-words.txt'), uiWords(wordsSource)) },
+}
+
 export default defineConfig({
   base: '/chat/',
-  plugins: [liveGuard, commitStamp, react(), tailwindcss(), vadAssets, bodyStylesheet, panelManifest, brotliAssets],
+  plugins: [liveGuard, commitStamp, react(), tailwindcss(), vadAssets, bodyStylesheet, panelManifest, brotliAssets, usageWords],
   build: {
     rollupOptions: { output: { manualChunks: (id, { getModuleInfo }) => vendorChunk(id, getModuleInfo, vendorSeen) } },
   },

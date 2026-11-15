@@ -3,6 +3,7 @@ import type { Api } from './api'
 import { usePolling } from './hooks'
 import type { Prefs } from './prefs'
 import { Choice } from './SettingsControls'
+import { USAGE_CLEARED } from './uiUsage'
 
 // Settings › About & system › UI usage: the report from server/ui_usage.py. The log is uiUsage.ts.
 interface Row { region: string; label: string; kind: string; depth: number; clicks: number; seen: number; rate: number; steps: number | null }
@@ -33,6 +34,7 @@ export function UiUsageSettings({ api, prefs, update }: { api: Api; prefs: Prefs
   async function clear() {
     try {
       await api('ui-usage/clear', {})
+      window.dispatchEvent(new Event(USAGE_CLEARED))
       setNotice('The UI usage log is empty now.')
       void refresh()
     } catch (failure) {
@@ -41,7 +43,7 @@ export function UiUsageSettings({ api, prefs, update }: { api: Api; prefs: Prefs
     setConfirming(false)
   }
   return <section className="settings-group ui-usage" aria-labelledby="settings-ui-usage"><h3 id="settings-ui-usage">UI usage</h3>
-    <label className="switch-row"><span><strong>Log UI usage</strong><small>Tether notes which buttons, menu items and links you use, and which menus and dialogs you open. The log stays on this server for 90 days. It has no typed text, no message text and no tab or file names.</small><span className="preferences-scope">All devices</span></span><input type="checkbox" role="switch" checked={prefs.uiUsage} onChange={event => update(() => ({ uiUsage: event.target.checked }))} /></label>
+    <label className="switch-row"><span><strong>Log UI usage</strong><small>Tether notes which buttons, menu items and links you use, and which menus and dialogs you open. The log stays on this server for 90 days. It never has typed text. Names shown in lists, and words that are not in Tether's own labels, become “…”.</small><span className="preferences-scope">All devices</span></span><input type="checkbox" role="switch" checked={prefs.uiUsage} onChange={event => update(() => ({ uiUsage: event.target.checked }))} /></label>
     <Choice legend="Period" name="ui-usage-days" value={days} options={[['7', '7 days'], ['30', '30 days'], ['90', '90 days']]} onChange={setDays} />
     <Choice legend="Screen" name="ui-usage-device" value={device} options={[['all', 'All'], ['phone', 'Phone'], ['wide', 'Desktop']]} onChange={setDevice} />
     {error && <p className="error" role="alert">{error}</p>}

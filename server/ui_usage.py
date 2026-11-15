@@ -1,8 +1,10 @@
 """UI usage: which controls people click, which views they open, and how many clicks each view takes.
 
 The page (ui/src/uiUsage.ts) sends small batches of events. Each event names a control by its place ("region"), its
-label and its kind, never by the text a person typed, message text or the names of tabs and files in lists. The events
-stay on this server, in one JSON-lines file under the cache folder. The 'uiUsage' preference turns the log off.
+label and its kind. The page never sends typed text or the visible text of rows in lists. Labels can still hold a name
+(aria-label="Restore <tab name>"), so before the server stores a label it keeps only the words that the Tether UI code
+has (ui-words.txt, written by the UI build) and makes every other word "…": "Restore …". The events stay on this
+server, in one JSON-lines file under the cache folder, for 90 days. The 'uiUsage' preference turns the log off.
 
 Event fields (all short strings or small numbers):
   k  'click' (a control was used), 'seen' (a control was on screen in this visit), 'open' (a menu or dialog opened)
@@ -13,6 +15,8 @@ Event fields (all short strings or small numbers):
   n  clicks to reach: the clicks in the current chain. A click on the page starts a chain; 0 means by keyboard.
   j  visit id: one page load, or a return after a long pause
   w  'phone' or 'wide'
+  t  when it happened, in the page's milliseconds. The batch has the page's time when it was sent ('now'), so the
+     server finds the real time without trusting the page's clock.
 
 report() turns the log into the lists in Settings > UI usage: the most used controls, controls on the page that are
 rarely used (move them into a menu), controls in menus that are often used (move them up), controls that were seen
@@ -26,6 +30,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import paths
 import prefs_sync
@@ -44,12 +49,48 @@ RARE = 0.02  # clicked in at most 2% of the visits where it was on screen
 POPULAR = 0.2  # clicked in at least 20% of all visits
 DEEP = 3  # clicks to reach that count as deep
 LIST = 15
+MAX_AGE = 86400  # an event sent later than this after it happened gets the time it arrived
+WORDS = 'ui-words.txt'
+_TOKEN = re.compile(r'[^\W\d_]+|\d+')
 _lock = threading.Lock()
+_words = {'key': None, 'set': frozenset()}
 
 
 def file():
     """Read at call time: tests move the cache folder."""
     return paths.CACHE / 'ui-usage.jsonl'
+
+
+def cleared_file():
+    return paths.CACHE / 'ui-usage.cleared'
+
+
+def words_file():
+    """The words of the Tether UI code, from the deployed build (server.py CHAT_UI_ROOT)."""
+    root = os.environ.get('TMUX_CHAT_DIST') or Path(__file__).resolve().parent.parent / 'ui' / 'dist'
+    return Path(root) / WORDS
+
+
+def words():
+    """The UI words, or None when the build has no word list. Read again when the file changes."""
+    target = words_file()
+    try:
+        stat = target.stat()
+    except OSError:
+        return None
+    key = (str(target), stat.st_mtime_ns, stat.st_size)
+    if _words['key'] != key:
+        _words.update(key=key, set=frozenset(target.read_text(encoding='utf-8').lower().split()))
+    return _words['set']
+
+
+def redact(text, known):
+    """Keep the words in known; other words become '…', numbers become '#'. "Restore My tab 2" -> "Restore … #"."""
+    def word(match):
+        token = match.group()
+        return '#' if token.isdigit() else token if token.lower() in known else '…'
+    text = _TOKEN.sub(word, text)
+    return re.sub(r'…(?:\W*…)+', '…', text)
 
 
 def enabled():
@@ -70,37 +111,75 @@ def _number(value, top):
     return max(0, min(top, value)) if type(value) is int else 0
 
 
-def clean(raw, now):
+def _when(raw, now, sent):
+    """The server time of the event: now minus how long before the send it happened, by the page's own clock."""
+    at = raw.get('t')
+    if type(sent) is not int or type(at) is not int or not 0 <= sent - at <= MAX_AGE * 1000:
+        return now
+    return now - (sent - at) / 1000
+
+
+def clean(raw, now, known, sent=None):
     """One stored event from one sent event, or None when the event is not valid."""
     if not isinstance(raw, dict) or raw.get('k') not in KINDS or raw.get('w') not in DEVICES:
         return None
-    event = {'at': round(now, 3), 'k': raw['k'], 'r': _text(raw.get('r')), 'l': _text(raw.get('l')), 'c': _text(raw.get('c'))[:20],
+    event = {'at': round(_when(raw, now, sent), 3), 'k': raw['k'], 'r': redact(_text(raw.get('r')), known),
+             'l': redact(_text(raw.get('l')), known), 'c': _text(raw.get('c'))[:20],
              'd': _number(raw.get('d'), 9), 'n': _number(raw.get('n'), 99), 'j': _text(raw.get('j'))[:16], 'w': raw['w']}
     if not event['l'] or not event['j']:
         return None
     return event
 
 
-def record(events, now=None):
-    """Append the valid events. Returns how many were kept."""
+def record(events, now=None, sent=None):
+    """Append the valid events. Returns how many were kept. Without the UI word list nothing is kept: a label could
+    then hold a name."""
     now = time.time() if now is None else now
-    kept = [event for event in (clean(raw, now) for raw in events[:MAX_EVENTS]) if event]
-    if not kept:
+    known = words()
+    if known is None:
         return 0
-    target = file()
     with _lock:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, 'a', encoding='utf-8') as out:
-            os.chmod(target, 0o600)
-            out.write(''.join(json.dumps(event, separators=(',', ':')) + '\n' for event in kept))
-        if target.stat().st_size > MAX_FILE:
-            _trim(target, now)
+        since = _cleared()
+        kept = [event for event in (clean(raw, now, known, sent) for raw in events[:MAX_EVENTS]) if event and event['at'] >= since]
+        target = file()
+        if kept:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, 'a', encoding='utf-8') as out:
+                os.chmod(target, 0o600)
+                out.write(''.join(json.dumps(event, separators=(',', ':')) + '\n' for event in kept))
+        _expire(now)
     return len(kept)
+
+
+def _cleared():
+    try:
+        return float(cleared_file().read_text())
+    except (OSError, ValueError):
+        return 0
+
+
+def expire(now=None):
+    with _lock:
+        _expire(time.time() if now is None else now)
+
+
+def _expire(now):
+    """Remove events older than KEEP_DAYS, and old events when the file is too big. Call with _lock held. Reads only the
+    first line unless there is work to do."""
+    target = file()
+    try:
+        size = target.stat().st_size
+        with open(target, encoding='utf-8') as source:
+            first = source.readline()
+    except FileNotFoundError:
+        return
+    if size > MAX_FILE or _at(first) < now - KEEP_DAYS * 86400:
+        _trim(target, now)
 
 
 def _trim(target, now):
     """Keep the last KEEP_DAYS days, and at most half of MAX_FILE, so the file never grows without end."""
-    lines = [line for line in target.read_text(encoding='utf-8').splitlines(True) if _at(line) >= now - KEEP_DAYS * 86400]
+    lines = sorted((line for line in target.read_text(encoding='utf-8').splitlines(True) if _at(line) >= now - KEEP_DAYS * 86400), key=_at)
     while lines and sum(map(len, lines)) > MAX_FILE // 2:
         lines = lines[len(lines) // 4:]
     temp = target.with_suffix('.tmp')
@@ -112,7 +191,7 @@ def _trim(target, now):
 def _at(line):
     try:
         return float(json.loads(line).get('at', 0))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return 0
 
 
@@ -133,32 +212,21 @@ def load(since):
     return events
 
 
-def clear():
+def clear(now=None):
+    """Remove the log. Events that happened before now and arrive later (a page's queue) are dropped too."""
     with _lock:
+        cleared_file().parent.mkdir(parents=True, exist_ok=True)
+        cleared_file().write_text(str(time.time() if now is None else now))
         try:
             file().unlink()
         except FileNotFoundError:
             pass
 
 
-def _merge_templates(events):
-    """Labels such as "Close tab one", "Close tab two" name the same control with a different item. When one region
-    and kind has three or more labels that share their first word, count them as one control: "Close …"."""
-    groups = defaultdict(set)
-    for event in events:
-        if event['k'] != 'open' and ' ' in event['l']:
-            groups[(event['w'], event['r'], event['c'], event['l'].split(' ', 1)[0])].add(event['l'])
-    merged = {key for key, labels in groups.items() if len(labels) >= 3}
-    for event in events:
-        if event['k'] != 'open' and ' ' in event['l'] and (event['w'], event['r'], event['c'], event['l'].split(' ', 1)[0]) in merged:
-            event['l'] = event['l'].split(' ', 1)[0] + ' …'
-    return events
-
-
 def report(days=30, device='', now=None):
     now = time.time() if now is None else now
     events = [event for event in load(now - days * 86400) if not device or event.get('w') == device]
-    events = _merge_templates([event for event in events if isinstance(event.get('l'), str)])
+    events = [event for event in events if isinstance(event.get('l'), str)]
     visits = {event.get('j') for event in events}
     controls = {}
     views = {}
@@ -232,6 +300,7 @@ def get(handler):
     if days not in ('7', '30', '90') or device not in ('', *DEVICES):
         handler.respond(400, {'error': 'Invalid request.'})
         return
+    expire()
     handler.respond(200, report(int(days), device))
 
 
@@ -254,9 +323,10 @@ def post(handler):
         handler.respond(400, {'error': 'Invalid request.'})
         return
     if not enabled():
+        expire()
         handler.respond(200, {'kept': 0, 'enabled': False})
         return
-    handler.respond(200, {'kept': record(events), 'enabled': True})
+    handler.respond(200, {'kept': record(events, sent=body.get('now')), 'enabled': True})
 
 
 if __name__ == '__main__':

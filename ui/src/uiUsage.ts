@@ -4,8 +4,11 @@ import { WORKSPACE_QUERY } from './workspace'
 // UI usage (server/ui_usage.py): which controls people click, which menus and dialogs they open, and how many clicks
 // that took. The log stays on this server. It names a control by the menu, dialog or labelled part of the page it is
 // in and by its accessible name. It never sends typed text, and in lists of items (tabs, sessions, messages, files)
-// it sends no visible text: only a fixed name such as "Copy", or "(item)".
-export type UsageEvent = { k: 'click' | 'seen' | 'open'; r: string; l: string; c: string; d: number; n: number; j: string; w: 'phone' | 'wide' }
+// it sends no visible text: only the aria-label or title, or "(item)". The server keeps only the words of the UI code
+// from each name, so "Restore <tab name>" is stored as "Restore …".
+export type UsageEvent = { k: 'click' | 'seen' | 'open'; r: string; l: string; c: string; d: number; n: number; j: string; w: 'phone' | 'wide'; t: number }
+/** Settings sends this after it clears the log, so the page drops its queue and starts a new visit. */
+export const USAGE_CLEARED = 'tether-ui-usage-cleared'
 
 const CONTROL = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="tab"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], [role="treeitem"]'
 // Menus, dialogs and popovers. Each one adds a level of depth.
@@ -48,10 +51,23 @@ function kindOf(element: Element) {
   return element.tagName === 'A' ? 'link' : element.tagName.toLowerCase()
 }
 
+/** Replace each text that the row shows (a tab title, a file name) with "…": "Restore Fix login" -> "Restore …". */
+export function withoutRowText(label: string, item: Element) {
+  const shown = new Set<string>()
+  const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT)
+  for (let node = walker.nextNode(); node && shown.size < 200; node = walker.nextNode()) {
+    const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim()
+    if (text.length >= 2 && /\p{L}/u.test(text)) shown.add(text)
+  }
+  for (const text of [...shown].sort((a, b) => b.length - a.length)) label = label.split(text).join('…')
+  return label.replace(/…(?:[^\p{L}\p{N}]*…)+/gu, '…')
+}
+
 /** The control's name. In a list item, only a name the code sets (aria-label or title), never the row's text. */
 export function labelOf(element: Element) {
   const fixed = element.getAttribute('data-ui') || element.getAttribute('aria-label') || labelledBy(element) || element.getAttribute('title')
-  if (element.closest(ITEM)) return clean(fixed) || '(item)'
+  const item = element.closest(ITEM)
+  if (item) return clean(withoutRowText(fixed ?? '', item.matches('.messages') ? element.closest('[data-msg-id]') ?? element : item)) || '(item)'
   if (fixed) return clean(fixed)
   if (element instanceof HTMLInputElement || element instanceof HTMLSelectElement) {
     const label = element.labels?.[0]
@@ -64,13 +80,24 @@ export function labelOf(element: Element) {
 const visible = (element: Element) => typeof (element as HTMLElement).checkVisibility === 'function'
   ? (element as HTMLElement).checkVisibility() : element.getClientRects().length > 0
 
-function openLayers() {
-  return [...document.querySelectorAll(LAYER)].filter(layer => (!layer.matches('[popover]') || layer.matches(':popover-open')) && visible(layer))
+/** On screen now: in the viewport, and on top at the middle of its visible part (not under a dialog, not scrolled away
+ * inside a list). A checkbox hidden under its styled label counts when the label is on top. */
+export function onScreen(element: Element) {
+  if (!visible(element)) return false
+  const box = element.getBoundingClientRect()
+  const left = Math.max(box.left, 0), right = Math.min(box.right, window.innerWidth)
+  const top = Math.max(box.top, 0), bottom = Math.min(box.bottom, window.innerHeight)
+  if (right <= left || bottom <= top) return false
+  const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2)
+  if (!hit) return false
+  if (element.contains(hit)) return true
+  return element instanceof HTMLInputElement && [...(element.labels ?? [])].some(label => label.contains(hit))
 }
 
-/** 0 on the page; in a menu or dialog, the number of menus and dialogs open now (a menu opened from a dialog is 2). */
-function depthOf(element: Element, layers: Element[]) {
-  return element.closest(LAYER) ? Math.max(1, layers.length) : 0
+/** The menus and dialogs open now, one per menu: a popover that only wraps a menu counts once, as the menu. */
+export function openLayers() {
+  const layers = [...document.querySelectorAll(LAYER)].filter(layer => (!layer.matches('[popover]') || layer.matches(':popover-open')) && visible(layer))
+  return layers.filter(outer => !layers.some(inner => inner !== outer && outer.contains(inner) && (outer.textContent ?? '').trim() === (inner.textContent ?? '').trim()))
 }
 
 export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => boolean): () => void {
@@ -81,17 +108,21 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   let lastRegion = ''
   let chain = 0
   let seen = new Set<string>()
-  let open = new WeakSet<Element>()
+  // The menus and dialogs open now, in the order they opened, and the clicks it took to open each one.
+  let stack: Element[] = []
+  const reached = new WeakMap<Element, number>()
   let scanTimer: ReturnType<typeof setTimeout> | undefined
+  let idle: number | undefined
   let hiddenAt = 0
+  let stopped = false
 
   const newVisit = () => {
     visit = Math.random().toString(36).slice(2, 12)
     seen = new Set()
     chain = 0
   }
-  const add = (event: Omit<UsageEvent, 'j' | 'w'>) => {
-    queue.push({ ...event, j: visit, w: wide() ? 'wide' : 'phone' })
+  const add = (event: Omit<UsageEvent, 'j' | 'w' | 't'>) => {
+    queue.push({ ...event, j: visit, w: wide() ? 'wide' : 'phone', t: Date.now() })
     if (queue.length >= BATCH) flush()
   }
   const flush = () => {
@@ -106,36 +137,52 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     lastInput = now
   }
 
-  // Menus and dialogs that opened since the last scan, and the controls now on screen that this visit has not seen.
-  const scan = () => {
-    scanTimer = undefined
-    if (document.visibilityState !== 'visible') return
+  // Update the stack of open menus and dialogs. A new one gets an 'open' event with the clicks that reached it.
+  const sync = () => {
     const layers = openLayers()
+    stack = stack.filter(layer => layers.includes(layer))
     const byKeyboard = Date.now() - lastClick > KEYBOARD
     for (const layer of layers) {
-      if (open.has(layer)) continue
-      open.add(layer)
-      add({ k: 'open', r: byKeyboard ? 'Keyboard' : lastRegion, l: layerName(layer), c: '', d: layers.length, n: byKeyboard ? 0 : chain })
+      if (stack.includes(layer)) continue
+      stack.push(layer)
+      reached.set(layer, byKeyboard ? 0 : chain)
+      add({ k: 'open', r: byKeyboard ? 'Keyboard' : lastRegion, l: layerName(layer), c: '', d: stack.length, n: byKeyboard ? 0 : chain })
     }
-    const now = new WeakSet(layers)
-    open = now
-    const top = layers[layers.length - 1]
+  }
+  /** The open menu or dialog the element is in, and its depth: 1 for the first one open, 2 for one opened from it. */
+  const layerOf = (element: Element) => {
+    for (let index = stack.length - 1; index >= 0; index--) if (stack[index].contains(element)) return { layer: stack[index], depth: index + 1 }
+    return element.closest(LAYER) ? { layer: null, depth: Math.max(1, stack.length) } : { layer: null, depth: 0 }
+  }
+
+  // Menus and dialogs that opened since the last scan, and the controls now on screen that this visit has not seen.
+  const scan = () => {
+    scanTimer = idle = undefined
+    if (stopped || document.visibilityState !== 'visible') return
+    sync()
+    const top = stack[stack.length - 1]
     const controls = top ? top.querySelectorAll(CONTROL) : document.querySelectorAll(CONTROL)
     for (const control of controls) {
       if (seen.size >= MAX_SEEN) break
       if (!top && control.closest(LAYER)) continue
-      if (control.matches(':disabled') || !visible(control)) continue
+      if (control.matches(':disabled') || !onScreen(control)) continue
       const region = regionOf(control), label = labelOf(control), kind = kindOf(control)
       const key = `${region}\n${label}\n${kind}`
       if (seen.has(key)) continue
       seen.add(key)
-      add({ k: 'seen', r: region, l: label, c: kind, d: depthOf(control, layers), n: 0 })
+      add({ k: 'seen', r: region, l: label, c: kind, d: layerOf(control).depth, n: 0 })
     }
   }
-  const later = (delay = SCAN_DELAY) => {
+  const cancel = () => {
     clearTimeout(scanTimer)
+    if (idle !== undefined && 'cancelIdleCallback' in window) window.cancelIdleCallback(idle)
+    scanTimer = idle = undefined
+  }
+  const later = (delay = SCAN_DELAY) => {
+    cancel()
     scanTimer = setTimeout(() => {
-      if ('requestIdleCallback' in window) window.requestIdleCallback(scan, { timeout: 1000 })
+      scanTimer = undefined
+      if ('requestIdleCallback' in window) idle = window.requestIdleCallback(scan, { timeout: 1000 })
       else scan()
     }, delay)
   }
@@ -144,9 +191,11 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     const control = event.target instanceof Element ? event.target.closest(CONTROL) : null
     if (!control) return
     touch()
-    const layers = openLayers()
-    const depth = depthOf(control, layers)
-    chain = depth === 0 ? 1 : chain + 1
+    sync()
+    const { layer, depth } = layerOf(control)
+    // A click on the page starts a chain. A click in a menu or dialog continues from the clicks that opened it, so
+    // closing a submenu and opening it again counts the same each time.
+    chain = depth === 0 ? 1 : (layer ? reached.get(layer) ?? chain : chain) + 1
     lastClick = Date.now()
     lastRegion = regionOf(control)
     add({ k: 'click', r: lastRegion, l: labelOf(control), c: kindOf(control), d: depth, n: chain })
@@ -160,6 +209,8 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
     later(2000)
   }
   const onHide = () => flush()
+  const onScroll = () => { if (!scanTimer && idle === undefined) later(1000) }
+  const onCleared = () => { queue.length = 0; newVisit(); later() }
 
   newVisit()
   lastInput = Date.now()
@@ -169,10 +220,15 @@ export function startUsageLog(send: (events: UsageEvent[]) => void, wide: () => 
   document.addEventListener('keydown', onKey, { capture: true, passive: true })
   document.addEventListener('visibilitychange', onVisibility)
   window.addEventListener('pagehide', onHide)
+  document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+  window.addEventListener(USAGE_CLEARED, onCleared)
   return () => {
+    stopped = true
     flush()
     clearInterval(timer)
-    clearTimeout(scanTimer)
+    cancel()
+    document.removeEventListener('scroll', onScroll, { capture: true })
+    window.removeEventListener(USAGE_CLEARED, onCleared)
     document.removeEventListener('click', onClick, { capture: true })
     document.removeEventListener('keydown', onKey, { capture: true })
     document.removeEventListener('visibilitychange', onVisibility)
@@ -185,7 +241,7 @@ function post(events: UsageEvent[]) {
     void fetch('/mobile/api/ui-usage', {
       method: 'POST', credentials: 'same-origin', keepalive: true,
       headers: { 'Content-Type': 'application/json', 'X-Codex-Mobile': '1' },
-      body: JSON.stringify({ events }),
+      body: JSON.stringify({ events, now: Date.now() }),
     }).catch(() => { /* usage is best effort */ })
   } catch { /* usage must never interrupt the app */ }
 }
