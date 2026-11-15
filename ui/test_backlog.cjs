@@ -67,6 +67,8 @@ assert.equal(b.withIds(numbered), numbered, 'IDs stay')
 assert.equal(b.withIds('- [ ] A  \n'), '- [ ] A #B1\n')
 assert.equal(b.withIds('- [ ] Old #B2\n- [ ] New\n', 9), '- [ ] Old #B2\n- [ ] New #B9\n', 'the server next_id counts IDs that left the list')
 assert.equal(b.withIds('- [ ] Old #B12\n- [ ] New\n', 9), '- [ ] Old #B12\n- [ ] New #B13\n')
+assert.equal(b.keptLength('- [x] Done\n  - why\n\n  - more\n- [ ] Open\n'), '- [ ] Open\n'.length, 'finished items and their details can move to DONE.md')
+assert.equal(b.keptLength('- [ ] Open\n  - [x] sub\n'), '- [ ] Open\n  - [x] sub\n'.length, 'a finished detail line stays with its open item')
 const tracked = '- [ ] Fix (codex · pane %12 · chat 019a) #B12\n  - Doing: claude · tmux $3 · pane %40 · chat abcd\n  - why\n- [x] Old #B7\n  - Done: fixed in 1234abc (claude · chat ef)\n'
 const [open, old] = plain(b.parseBacklog(tracked))
 assert.equal(open.text, 'Fix')

@@ -106,6 +106,12 @@ class BacklogTests(unittest.TestCase):
         self.assertIn('- [ ] Three #B3', self.text())
         self.assertEqual(backlog.with_ids('- [ ] Typed in the file'), '- [ ] Typed in the file #B4')
 
+    def test_a_first_save_without_last_id_does_not_give_a_deleted_id_again(self):
+        backlog._write(backlog._path(), '- [ ] One #B1\n- [ ] Two #B2\n')  # a list from before last-id
+        self.assertFalse((backlog.folder() / 'last-id').exists())
+        backlog.save('- [ ] Replacement\n', backlog.read()['version'])
+        self.assertEqual(self.text(), '- [ ] Replacement #B3\n')
+
     def test_details_after_a_blank_line_move_with_their_item(self):
         text = ('- [x] Old #B1\n  - first\n\n  - second\n\n- [ ] Open #B2\n  - ' + 'x' * backlog.ARCHIVE_AT + '\n')
         with mock.patch.object(backlog, 'ARCHIVE_TO', backlog.LIMIT):

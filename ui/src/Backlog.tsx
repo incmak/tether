@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react'
 import { ArrowDownUp, Check, ChevronRight, CircleCheck, ClipboardList, FileText, GripVertical, Hash, Inbox, Layers, ListChecks, Maximize2, Minimize2, Pencil, Plus, Search, Send, Timer, Trash2, UserRound, X } from 'lucide-react'
 import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
-import { addItem, blockOf, moveItem, openGroups, parseBacklog, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
+import { addItem, blockOf, moveItem, openGroups, parseBacklog, keptLength, removeItem, restoreItem, rewordItem, setDone, startItem, withIds } from './backlogItems'
 import type { Change, Item, Note, Source, Status } from './backlogItems'
 import { copyText } from './clipboard'
 import { useModal } from './hooks'
@@ -252,7 +252,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
 
   const shown = saved ? changes.reduce((text, change) => change(text) ?? text, saved.text) : ''
   const dirty = !!saved && draft !== null && draft !== saved.text
-  const tooLong = !!saved && draft !== null && draft.length > saved.limit
+  const tooLong = !!saved && draft !== null && keptLength(draft) > saved.limit
   const unsaved = changes.length > 0 || dirty
 
   const remember = useCallback((next: Saved) => { current.current = next; setSaved(next) }, [])
@@ -323,7 +323,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
     const text = queue.current.reduce((value, queued) => queued(value) ?? value, current.current.text)
     const value = next(text)
     if (value === null) { setError('That item was changed elsewhere. Check the list and try again.'); return false }
-    if (value.length > current.current.limit) { setError(`The backlog is full (${current.current.limit.toLocaleString()} characters). Delete some items first.`); return false }
+    if (keptLength(value) > current.current.limit) { setError(`The backlog is full (${current.current.limit.toLocaleString()} characters). Delete some items first.`); return false }
     setError('')
     queue.current.push(next)
     setChanges([...queue.current])
@@ -382,7 +382,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
   // Closing the sheet keeps what was typed. The version check still protects an agent's edit.
   useEffect(() => () => {
     const last = current.current, value = latest.current.draft
-    if (last && value !== null && value !== last.text && value.length <= last.limit && !latest.current.conflict) void api(PATH, { text: value, version: last.version }).catch(() => {})
+    if (last && value !== null && value !== last.text && keptLength(value) <= last.limit && !latest.current.conflict) void api(PATH, { text: value, version: last.version }).catch(() => {})
   }, [api])
 
   // A page close can stop a save that has not reached the server.

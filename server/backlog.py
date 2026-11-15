@@ -174,10 +174,12 @@ def _replace(current, text):
     return _state(text)
 
 
-def with_ids(text):
-    """Give each item without an ID the next free one, in file order. Text that already has IDs stays the same."""
+def with_ids(text, before=''):
+    """Give each item without an ID the next free one, in file order. Text that already has IDs stays the same.
+    before: the saved text this replaces. Its IDs count too, so an item deleted in the same save never gives its ID
+    again, even before last-id exists."""
     lines = text.split('\n')
-    next_id = max(_ids(text) + [_last_id()]) + 1
+    next_id = max(_ids(text) + _ids(before) + [_last_id()]) + 1
     for at, line in enumerate(lines):
         if ITEM.fullmatch(line) and not ID.search(line):
             lines[at] = f'{line.rstrip()} #B{next_id}'
@@ -211,7 +213,7 @@ def save(text, version):
         current = read()
         if current['version'] != version:
             raise ProjectError(409, 'The backlog changed while you were editing.')
-        return _replace(current['text'], with_ids(text))
+        return _replace(current['text'], with_ids(text, current['text']))
 
 
 def _one_line(text):
@@ -252,7 +254,7 @@ def _change(change):
         current = read()['text']
         lines = _lines(current)
         result = change(lines)
-        _replace(current, with_ids('\n'.join(lines) + '\n'))
+        _replace(current, with_ids('\n'.join(lines) + '\n', current))
     return result
 
 

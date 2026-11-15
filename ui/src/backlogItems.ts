@@ -63,6 +63,25 @@ export function withIds(text: string, first = 1): string {
   return lines.map(line => TOP.test(line) && !ID.test(line) ? `${line.trimEnd()} #B${next++}` : line).join('\n')
 }
 
+/** The length the server can keep at most: the text without its finished items and their detail lines. Past its
+ * archive size the server moves finished items to DONE.md (backlog.py _archive), so only this part must fit the limit. */
+export function keptLength(text: string): number {
+  const lines = text.split('\n')
+  let size = text.length
+  for (let at = 0; at < lines.length; at++) {
+    if (!/^[-*] \[[xX]\] /.test(lines[at])) continue
+    let end = at + 1
+    for (let next = at + 1; next < lines.length; next++) {
+      if (!lines[next].trim()) continue
+      if (!/^\s/.test(lines[next])) break
+      end = next + 1
+    }
+    for (let line = at; line < end; line++) size -= lines[line].length + 1
+    at = end - 1
+  }
+  return size
+}
+
 export function parseBacklog(text: string): Row[] {
   const rows: Row[] = []
   const seen = new Map<string, number>()
