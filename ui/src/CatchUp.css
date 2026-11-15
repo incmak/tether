@@ -1,0 +1,58 @@
+/* The sidebar views: the Catch up / Sessions switch, Catch up itself, and the Sessions tree's counts and quiet rows. */
+.side-modes { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; }
+.side-mode-switch { display: flex; flex: 1; min-width: 0; padding: 2px; border-radius: var(--radius); background: var(--hover); }
+.side-mode-switch button { display: inline-flex; flex: 1; justify-content: center; align-items: center; gap: 6px; min-width: 0; min-height: 28px; padding: 0 8px; border: 0; border-radius: calc(var(--radius) - 2px); background: none; color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.side-mode-switch button:hover { color: var(--text); }
+.side-mode-switch button[aria-pressed='true'] { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 12%, transparent); }
+.side-mode-count, .rollup { flex: none; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); font-size: 11px; font-weight: 600; line-height: 17px; font-variant-numeric: tabular-nums; }
+.side-active { display: inline-grid; flex: none; place-items: center; width: 32px; min-height: 32px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
+.side-active:hover { color: var(--text); }
+.side-active[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text); }
+@media (pointer: coarse) { .side-mode-switch button { min-height: 40px; } .side-active { width: 44px; min-height: 44px; } }
+
+.group-toggle .rollup { margin-left: 4px; }
+.session-main .rollup { margin-left: auto; }
+.pane-children .pane-stack-head .rollup + .group-count { margin-left: 6px; }
+.pane-children .pane-stack-head .rollup { margin-left: auto; }
+.quiet-more { display: block; min-height: 28px; margin: 0 0 2px; padding: 0 10px 0 36px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.pane-children .quiet-more { min-height: 28px; padding-left: 38px; font-size: 12px; }
+.quiet-more:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+@media (pointer: coarse) { .quiet-more, .pane-children .quiet-more { min-height: 40px; } }
+
+.catchup { padding: 0 0 8px; }
+.catchup-part + .catchup-part { margin-top: 12px; }
+.catchup-head { display: flex; align-items: center; gap: 6px; margin: 0; padding: 4px 10px 4px; color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 400; }
+.catchup-head .waiting-sort:first-of-type { margin-left: auto; }
+.catchup-count { font-variant-numeric: tabular-nums; }
+.catchup-mark { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.catchup-mark.need { background: var(--attention); }
+.catchup-mark.done { background: var(--done); }
+.catchup-mark.working { border: 2px solid var(--accent); width: 9px; height: 9px; }
+.catchup-goal { margin-top: 6px; }
+.catchup-goal-head { display: flex; align-items: baseline; gap: 6px; margin: 0; padding: 4px 10px 2px; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.catchup-goal-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.catchup-goal-session { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11.5px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.catchup-goal-count { margin-left: auto; color: var(--muted); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.catchup-rows { list-style: none; margin: 0; padding: 0; }
+.catchup-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 1px 10px; align-items: center; width: 100%; padding: 5px 10px; border: 0; border-radius: var(--radius); background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.catchup-row:hover, .catchup-row[aria-current='page'] { background: var(--hover); }
+.catchup-dot { width: 8px; height: 8px; border-radius: 50%; }
+.catchup-dot.need { background: var(--attention); }
+.catchup-dot.need.opened { background: none; box-shadow: inset 0 0 0 1.5px var(--attention); }
+.catchup-dot.need.urgent { background: var(--error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 25%, transparent); }
+.catchup-dot.done { background: var(--done); }
+.catchup-icon { color: var(--muted); }
+.catchup-name { overflow: hidden; font-size: 13px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.catchup-age { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.catchup-age.late { color: var(--attention); font-weight: 700; }
+.catchup-next { grid-column: 2 / 4; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.catchup-more { min-height: 28px; padding: 0 10px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.catchup-more:hover { color: var(--text); }
+.catchup-empty { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; padding: 10px; color: var(--muted); font-size: 13px; }
+.catchup-empty svg { color: var(--done); }
+.catchup-toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: var(--control); padding: 0 10px; border: 0; border-radius: var(--radius); background: none; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.catchup-toggle:hover { background: var(--hover); color: var(--text); }
+.catchup-toggle .chevron { margin-left: auto; }
+.catchup-toggle[aria-expanded='true'] .chevron { transform: rotate(90deg); }
+.catchup .visually-hidden, .side-modes .visually-hidden, .session-groups .rollup .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (pointer: coarse) { .catchup-row { min-height: 48px; } .catchup-more, .catchup-toggle { min-height: 44px; } }

@@ -8,7 +8,7 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, ArchiveRestore, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
+import { Archive, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
@@ -31,9 +31,10 @@ import { Elapsed } from './Notices'
 import { ShellList } from './ShellList'
 import { OrganizeMenu, tagDot } from './Organize'
 import { useWords } from './words'
-import { WaitingBox } from './Attention'
+import { CatchUp } from './CatchUp'
+import { isQuiet, waitCount } from './catchUp'
 import type { ReviewEntry } from './Attention'
-import { waitingAsks } from './attention'
+import { useNow } from './attention'
 import { HOLD_MS } from './gesture'
 import { field, matchSessions, searchWords } from './search'
 import type { SearchEntry, SessionMatch } from './search'
@@ -230,7 +231,7 @@ function RunningNow({ sessions, selected, onOpen }: { sessions: Session[]; selec
 }
 
 // Fixed sections, plus g:<id> (your groups) and f:<folder> (folder groups).
-type Section = 'needs' | 'pinned' | 'agents' | 'terminals' | 'shells' | 'archived' | 'past' | 'other' | 'all' | `g:${string}` | `f:${string}`
+type Section = 'pinned' | 'agents' | 'terminals' | 'shells' | 'archived' | 'past' | 'other' | 'all' | `g:${string}` | `f:${string}`
 // What a sidebar drag carries: a whole session, or one pane of a session with several panes.
 type Carry = { session: string; pane?: string; chat?: PastChat }
 // The server's answer to a merge: the session that now holds the moved panes, for the rename prompt.
@@ -464,6 +465,14 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
     return () => { drawerScrollTop = scroll; observer.disconnect(); nav.removeEventListener('scroll', save) }
   }, [drawer, search])
   const manual = prefs.sort === 'manual'
+  const now = useNow()
+  // Catch up shows what waits on you; Sessions shows the tree. A search always shows the tree.
+  const catchUp = prefs.sideMode !== 'sessions' && !search
+  const waitingTotal = waitCount(sessions.flatMap(session => session.panes), now, prefs.attention)
+  // Active only: quiet sessions fold into one row per group (not Pinned, and not while you reorder).
+  const [quietOpen, setQuietOpen] = useState<string[]>([])
+  const foldQuiet = (key: Section) => prefs.activeOnly && !search && key !== 'pinned' && key !== 'archived' && reorder !== key
+  const quietSession = (session: Session) => session.panes.every(pane => isQuiet(pane, prefs.seen, selected, now, prefs.attention))
   // The index is built once per data change; each keystroke only scores it.
   const { groups: customGroups, groupOf } = prefs
   const [index, archivedIndex] = useMemo(() => searchIndex(sessions, archivedTabs, { groups: customGroups, groupOf }, stacks), [sessions, archivedTabs, stacks, customGroups, groupOf])
@@ -475,13 +484,11 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   const archived = visible.filter(session => isArchived(session, prefs.archived))
   const hiddenTabs = archivedMatches ? archivedTabs.filter(pane => archivedMatches.has(pane.id)).sort((a, b) => archivedMatches.get(b.id)!.score - archivedMatches.get(a.id)!.score) : archivedTabs
   const live = visible.filter(session => !isArchived(session, prefs.archived))
-  // A session that needs you moves to the top group, out of its usual group, so it shows once.
-  const needs = live.filter(session => status(session.panes, prefs.seen, selected).kind === 'approval')
-  const calm = live.filter(session => !needs.includes(session))
-  const pinned = calm.filter(session => prefs.pinned.includes(session.id))
-  const rest = calm.filter(session => !prefs.pinned.includes(session.id))
+  // Each session stays in its own group. The counts on area, session and stack rows show what waits on you;
+  // Catch up lists it. The smart sort still puts those sessions first in each group.
+  const pinned = live.filter(session => prefs.pinned.includes(session.id))
+  const rest = live.filter(session => !prefs.pinned.includes(session.id))
   const groups: { key: Section; title: string; items: Session[] }[] = [
-    ...(needs.length ? [{ key: 'needs' as const, title: 'Needs you', items: needs }] : []),
     ...(pinned.length ? [{ key: 'pinned' as const, title: 'Pinned', items: pinned }] : []),
     ...bodyGroups(rest, prefs),
     ...(archived.length || hiddenTabs.length ? [{ key: 'archived' as const, title: 'Archived', items: archived }] : []),
@@ -522,33 +529,44 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
       : <kbd className="search-key" aria-hidden="true">{shortcutLabel}</kbd>}</label><button type="button" className="icon-button organize-button" aria-label="Organize sessions" title="Group and sort" aria-haspopup="dialog" onClick={event => setOrganizing({ at: matchMedia('(hover: hover)').matches ? anchorOf(event) : undefined })}><SlidersHorizontal size={17} /></button></div>
     <BacklogButton api={api} onOpen={onBacklog} />
     {work && <WorkButton links={work} />}
+    {!search && <div className="side-modes">
+      <div className="side-mode-switch" role="group" aria-label="Sidebar view">
+        <button type="button" aria-pressed={catchUp} onClick={() => update(() => ({ sideMode: 'catchup' }))}>Catch up{loaded && waitingTotal > 0 && <span className="side-mode-count"><span className="visually-hidden">, </span>{waitingTotal}<span className="visually-hidden"> need you</span></span>}</button>
+        <button type="button" aria-pressed={!catchUp} onClick={() => update(() => ({ sideMode: 'sessions' }))}>Sessions</button>
+      </div>
+      {!catchUp && <button type="button" className="side-active" aria-pressed={prefs.activeOnly} title={prefs.activeOnly ? 'Show quiet sessions and tabs' : 'Fold sessions and tabs with nothing new'} aria-label="Active only" onClick={() => update(current => ({ activeOnly: !current.activeOnly }))}><ListFilter size={16} aria-hidden="true" /></button>}
+    </div>}
     {organizing && <OrganizeMenu api={api} sessions={sessions.filter(session => !isArchived(session, prefs.archived))} prefs={prefs} update={update} at={organizing.at} onClose={() => setOrganizing(null)} />}
     <nav className="session-groups" aria-label="Sessions">
-      {/* eslint-disable-next-line react-hooks/purity -- Sample snooze expiry on each existing render without adding a clock or delaying it. */}
-      {prefs.attention && !search && <WaitingBox variant="list" sort={{ order: prefs.waitingOrder ?? 'oldest', onOrder: waitingOrder => update(() => ({ waitingOrder })) }} items={waitingAsks(sessions.flatMap(item => item.panes), Date.now() / 1000)} sessions={sessions} selected={selected} review={review} onOpen={onOpen} onDeck={onDeck} />}
       {error && <div className="sidebar-error" role="alert"><span>{loaded ? 'Could not refresh sessions.' : 'Could not load sessions.'} {error}</span><RetryButton onRetry={onRetry} /></div>}
       {openingChat && <div className="past-opening" role="status">Opening {openingChat}…</div>}
       {mergeError && <div className="sidebar-error" role="alert">{mergeError}<button onClick={() => setMergeError('')}>Dismiss</button></div>}
-      {groups.map(group => <section key={group.key} className={group.key === 'needs' ? 'group needs-group' : 'group'}>
+      {catchUp ? <CatchUp sessions={sessions} prefs={prefs} update={update} selected={selected} loaded={loaded} error={error} now={now} review={review} onOpen={onOpen} onDeck={onDeck} /> : <>
+      {groups.map(group => { const waits = group.key === 'archived' ? 0 : waitCount(group.items.flatMap(session => session.panes), now, prefs.attention)
+        const quiet = foldQuiet(group.key) ? group.items.filter(quietSession) : [], showQuiet = quietOpen.includes(group.key)
+        const items = showQuiet || !quiet.length ? group.items : group.items.filter(session => !quiet.includes(session))
+        return <section key={group.key} className="group">
         <div className="group-head">
-          <button className="group-toggle" aria-expanded={isOpen(group.key)} onClick={() => toggle(group.key)}>{group.title}{loaded ? <span className="group-count">· {group.items.length + (group.key === 'archived' ? hiddenTabs.length : 0)}</span> : !error && <span className="group-count" aria-hidden="true"><Bone w="1.4em" /></span>}{group.key === 'archived' && !isOpen('archived') && [...group.items.map(session => session.panes), ...hiddenTabs.map(pane => [pane])].some(list => status(list, prefs.seen, selected).kind === 'approval') && <span className="state-dot approval" role="img" aria-label="An archived session needs you" />}<ChevronRight size={14} className="chevron" /></button>
-          {isOpen(group.key) && group.items.length > 1 && !search && manual && group.key !== 'archived' && group.key !== 'needs' && <button className="group-edit" onClick={() => setReorder(reorder === group.key ? null : group.key)}>{reorder === group.key ? 'Done' : 'Reorder'}</button>}
+          <button className="group-toggle" aria-expanded={isOpen(group.key)} onClick={() => toggle(group.key)}>{group.title}{loaded ? <span className="group-count">· {group.items.length + (group.key === 'archived' ? hiddenTabs.length : 0)}</span> : !error && <span className="group-count" aria-hidden="true"><Bone w="1.4em" /></span>}{waits > 0 && <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span>}{group.key === 'archived' && !isOpen('archived') && [...group.items.map(session => session.panes), ...hiddenTabs.map(pane => [pane])].some(list => status(list, prefs.seen, selected).kind === 'approval') && <span className="state-dot approval" role="img" aria-label="An archived session needs you" />}<ChevronRight size={14} className="chevron" /></button>
+          {isOpen(group.key) && group.items.length > 1 && !search && manual && group.key !== 'archived' && <button className="group-edit" onClick={() => setReorder(reorder === group.key ? null : group.key)}>{reorder === group.key ? 'Done' : 'Reorder'}</button>}
         </div>
         {isOpen(group.key) && group.key === 'archived' && !group.items.length ? null : isOpen(group.key) && (group.items.length
-          ? <SessionList workMarks={work?.marks} items={group.items} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} />
+          ? <SessionList workMarks={work?.marks} items={items} now={now} activeOnly={foldQuiet(group.key)} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} />
           : !loaded ? !error && <SkeletonRows count={rememberedCount(`sidebar.${group.key}`, 2, 6)} label="Finding sessions…" className="sidebar-skeleton" meta={false} />
           : <p className="group-empty">{search ? 'No sessions or tabs match.' : group.key === 'terminals' ? 'No plain terminals. Create one with New session.' : 'Nothing here yet.'}</p>)}
+        {isOpen(group.key) && quiet.length > 0 && <button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietOpen(list => showQuiet ? list.filter(key => key !== group.key) : [...list, group.key])}>{showQuiet ? 'Fold' : 'Show'} {quiet.length} quiet {quiet.length === 1 ? 'session' : 'sessions'}</button>}
         {isOpen(group.key) && group.key === 'archived' && hiddenTabs.length > 0 && <ul className="archived-tabs">{hiddenTabs.map(pane => <li key={pane.id} data-ui-item>
           <button type="button" className="archived-tab-open" onMouseEnter={clipTitle} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(status([pane], prefs.seen, selected))}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {sessionName(pane)}</span></button>
           <button type="button" className="icon-button archived-tab-restore" aria-label={`Restore ${paneTitle(pane)}`} title="Restore" onClick={() => onRestoreTab(pane)}><ArchiveRestore size={16} /></button>
         </li>)}</ul>}
-      </section>)}
+      </section> })}
       <ShellList api={api} open={isOpen('shells')} onToggle={() => toggle('shells')} onOpenShell={onOpenShell} onEnded={panes => onShellsEnded?.(panes)} />
       {(carry?.pane || carry?.chat) && <div className={`new-session-drop ${overNew ? 'over' : ''}`} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setOverNew(true) }} onDragLeave={() => setOverNew(false)} onDrop={event => { event.preventDefault(); if (carry.chat) openChat(carry.chat, null); else merge('break', carry.pane!) }}><Plus size={14} aria-hidden="true" />New session</div>}
       <section className="group">
         <div className="group-head"><button className="group-toggle" aria-expanded={isOpen('past')} onClick={() => toggle('past')}>Past chats<ChevronRight size={14} className="chevron" /></button></div>
         {isOpen('past') && <PastChats api={api} search={search} showPaths={prefs.showPaths} onPick={onPastChat} sessions={sessions} drag={!!drag && !reorder} onCarry={startCarry} onHold={holdStart} />}
       </section>
+      </>}
     </nav>
     {ghost && <div ref={ghostRef} className="touch-ghost" aria-hidden="true" style={{ transform: `translate3d(${ghost.x}px, ${ghost.y}px, 0)` }}><span>{ghost.label}</span></div>}
     {confirming && <MergeConfirm {...confirming} marks={marks} onMerge={keep => merge('session', confirming.source.id, confirming.target.id, keep)} onCancel={() => setConfirming(null)} />}
@@ -578,7 +596,7 @@ function projectMark(mark: ProjectMark | undefined) {
 // The stack state dot, as in the chat header's stack row (Groups.tsx).
 const STACK_DOT = { needs: 'approval', done: 'done', working: 'working', idle: 'idle' } as const
 
-function SessionList({ matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
+function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane }: { now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
   const list = useRef<HTMLUListElement>(null)
   const dragging = useRef<string | null>(null)
   // The open tab stays in view: its row, or its session's row when the session is folded. The list moves only when it must.
@@ -644,6 +662,8 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
     onDrop: (event: React.DragEvent) => { event.preventDefault(); setOver(null); onDrop(session) },
   } : {}
   const words = useWords()
+  // Active only: each session's quiet tabs fold into one row until you show them.
+  const [quietShown, setQuietShown] = useState<string[]>([])
   const slotKey = (id: string) => { const at = slots.indexOf(id); return at < 0 ? null : <kbd className="slot-key" aria-label={`In slot ${at + 1}`}>⌥{at + 1}</kbd> }
   return <ul className={`session-list ${reorder ? 'reordering' : ''}`} ref={list}>
     {/* eslint-disable-next-line react-hooks/refs -- Sample the drag marker on reorder renders; state would add visible updates on pointer down and up. */}
@@ -658,12 +678,17 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
       const archived = isArchived(session, prefs.archived)
       // A session with several panes is open by default; its heading folds the pane rows away.
       const filtered = !!only
-      const open = !multi || filtered || prefs.expanded[session.id] !== false
-      const toggleOpen = () => update(current => ({ expanded: { ...current.expanded, [session.id]: current.expanded[session.id] === false } }))
+      // Until you open or fold it, a session opens only when a tab waits on you or is the open tab.
+      const waits = waitCount(session.panes, now, prefs.attention)
+      const open = !multi || filtered || (prefs.expanded[session.id] ?? (waits > 0 || active))
+      const toggleOpen = () => update(current => ({ expanded: { ...current.expanded, [session.id]: !open } }))
+      const quietTabs = activeOnly && multi && !only ? tabs.filter(pane => isQuiet(pane, prefs.seen, selected, now, prefs.attention)) : []
+      const showQuiet = quietShown.includes(session.id)
+      const visibleTab = (pane: Pane) => showQuiet || !quietTabs.includes(pane)
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
       const paneRow = (pane: Pane) => { const paneState = status([pane], prefs.seen, selected), paneTag = tagDot(prefs.colors?.[pane.id]); return <li key={pane.id} data-ui-item><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} className={pane.id === selected ? 'selected' : ''} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}</button></li> }
-      const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).filter(place => place.panes.length) : null
+      const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).map(place => ({ ...place, shown: place.panes.filter(visibleTab) })).filter(place => place.shown.length) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
         <div className={`swipe-row ${swiped === session.id ? 'swiped' : ''}`}
           onPointerDownCapture={() => { suppressClick.current = false }}
@@ -742,7 +767,7 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
             {!multi && avatar(session.name)}
             <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <WorkMark mark={workMarks?.[session.panes[0].id]} />}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
             {!multi && slotKey(session.panes[0].id)}
-            {multi && !open && state.kind !== 'idle' && dot(state)}
+            {multi && (waits > 0 ? <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span> : !open && state.kind !== 'idle' && dot(state))}
           </button>}
           {onAddPane && !reorder && !dropping && renaming?.session !== session.id && <button type="button" className="session-add" aria-label={`${words.newRight} in ${session.name}`} title={words.newRight} aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onAddPane(session, { x: box.left, y: box.bottom + 6 }) }}><Plus size={15} aria-hidden="true" /></button>}
           {dropping && <span className="merge-hint" aria-hidden="true">{carry.pane ? 'Move here' : carry.chat ? 'Open here' : 'Merge here'}</span>}
@@ -751,16 +776,17 @@ function SessionList({ matches, workMarks, items, reorder, selected, prefs, upda
         </div>
         {multi && open && !reorder && <ul className="pane-children">{stacked
           // A session with stacks shows them like the chat header: each stack, then its tabs. A heading opens the stack.
-          ? stacked.map(place => <li key={place.id || 'unstacked'} className="pane-stack">
+          ? stacked.map(place => { const placeWaits = waitCount(place.panes, now, prefs.attention); return <li key={place.id || 'unstacked'} className="pane-stack">
               <button type="button" className={`pane-stack-head${place.panes.some(pane => pane.id === selected) ? ' current' : ''}`}
-                aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}. Open it`}
+                aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${placeWaits ? `, ${placeWaits} need you` : ''}. Open it`}
                 onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
                 <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
-                <span className="pane-child-name">{place.name}</span><span className="group-count" aria-hidden="true">{place.panes.length}</span>
+                <span className="pane-child-name">{place.name}</span>{placeWaits > 0 && <span className="rollup" aria-hidden="true">{placeWaits}</span>}<span className="group-count" aria-hidden="true">{place.panes.length}</span>
               </button>
-              <ul className="pane-stack-tabs">{place.panes.map(paneRow)}</ul>
-            </li>)
-          : tabs.map(paneRow)}</ul>}
+              <ul className="pane-stack-tabs">{place.shown.map(paneRow)}</ul>
+            </li> })
+          : tabs.filter(visibleTab).map(paneRow)}
+          {quietTabs.length > 0 && <li><button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietShown(list => showQuiet ? list.filter(id => id !== session.id) : [...list, session.id])}>{showQuiet ? 'Fold' : 'Show'} {quietTabs.length} quiet {quietTabs.length === 1 ? 'tab' : 'tabs'}</button></li>}</ul>}
       </li>
     })}
   </ul>

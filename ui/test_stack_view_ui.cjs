@@ -79,7 +79,7 @@ async function main() {
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       const off = new URL(location.href).searchParams.has('off')
-      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: true, voiceSound: false, ...off ? { headerSwipe: false } : {} }))
+      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'system', voiceOff: true, voiceSound: false, sideMode: 'sessions', ...off ? { headerSwipe: false } : {} }))
     })
     const TABS = '.chat-panel .pane-tabs', ROW = '.chat-panel .group-row', SIDE = '.sidebar .session-groups'
     const open = async (id, width = 1280, height = 800) => {

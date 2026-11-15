@@ -52,6 +52,8 @@ export interface Prefs {
   groupBy: GroupBy
   attention: boolean  // Attention mode: the "Waiting on you" box, header button and reply chips
   waitingOrder: WaitOrder  // the Waiting on you lists: oldest first (default) or newest first
+  sideMode: 'catchup' | 'sessions'  // the sidebar view on this device: Catch up (what waits on you) or the Sessions tree
+  activeOnly: boolean  // the Sessions tree folds quiet sessions and tabs into one row each
   seen: Record<string, number>
   // Tether's own order of the pane tabs, per session id. tmux pane order does not change.
   paneOrder: Record<string, string[]>
@@ -90,7 +92,7 @@ export interface ArchivedTab { thread: string | null; dir: string }
 export interface SidePin { pane: string; note?: string }
 const KEY = 'tmux-chat.prefs.v1'
 const CLEARED_KEEP = 2 * 86400  // Match CLEARED_KEEP in server/prefs_sync.py (seconds).
-const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto', activity: false, activityAgents: false, uiUsage: true }
+const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', sideMode: 'catchup', activeOnly: false, seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto', activity: false, activityAgents: false, uiUsage: true }
 
 function keptDrafts(drafts: Record<string, Draft>) {
   const now = Date.now() / 1000

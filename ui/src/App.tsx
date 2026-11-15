@@ -681,8 +681,8 @@ function App() {
         if (copyKind && slots.pane) { const target = slots.pane; return act(() => void copyPaneName(target, copyKind).then(setNotice)) }
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && !document.querySelector('dialog[open]')) {
-        // Every row that opens a pane: one-pane sessions and the pane rows under a session with several panes.
-        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button:not(.pane-stack-head)')].filter(row => row.offsetParent)
+        // Every row that opens a pane: one-pane sessions, the pane rows under a session with several panes, and the Catch up rows.
+        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button:not(.pane-stack-head, .quiet-more), .sidebar .session-groups .catchup-row:not(.catchup-review)')].filter(row => row.offsetParent)
         const at = rows.findIndex(row => row.getAttribute('aria-current') === 'page')
         const next = rows[at < 0 ? 0 : at + (event.key === 'ArrowDown' ? 1 : -1)]
         if (next) { event.preventDefault(); next.click(); next.scrollIntoView({ block: 'nearest' }) }
