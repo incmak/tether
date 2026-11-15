@@ -233,6 +233,7 @@ class FakeContainer:
 class BrowserInContainerTests(unittest.TestCase):
     def setUp(self):
         self.fake = WindowChrome()
+        self.addCleanup(self.fake.close)  # runs after stop(): the reader blocked in os.read needs EOF (B149)
         self.container = FakeContainer(self.fake)
         self.browser = browser.Browser(container=self.container)
         self.addCleanup(self.browser.stop)
@@ -281,6 +282,7 @@ class BrowserInContainerTests(unittest.TestCase):
 class LocalBrowserUnchangedTests(unittest.TestCase):
     def test_no_live_key_and_no_fullscreen_without_a_container(self):
         fake = WindowChrome()
+        self.addCleanup(fake.close)
         local = browser.Browser(launcher=fake.launcher, chrome_finder=lambda: '/fake/chrome', profile=Path('/nonexistent/p'))
         self.addCleanup(local.stop)
         self.assertNotIn('live', local.list_tabs())

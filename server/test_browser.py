@@ -21,10 +21,12 @@ class FakeChrome:
         self.commands = []
         self.targets = ['T0']  # the hidden start-up page
         self.lock = threading.Lock()
+        self.handed_out = False  # the launcher gave our Connection ends to a Browser, which closes them
         threading.Thread(target=self.serve, daemon=True).start()
 
     def launcher(self, chrome, profile):
         self.launched = (chrome, profile)
+        self.handed_out = True
         return None, self.from_chrome_r, self.to_chrome_w
 
     def emit(self, message):
@@ -70,10 +72,16 @@ class FakeChrome:
         return [command for command in self.commands if command['method'] == method]
 
     def close(self):
+        """End Chrome's side. The Connection reader gets EOF; a fake no Browser launched also closes the
+        Connection ends itself, so serve() gets EOF. Without this each test leaks a blocked thread (B149)."""
         with self.lock:
             if self.from_chrome_w is not None:
                 os.close(self.from_chrome_w)
                 self.from_chrome_w = None
+            if not self.handed_out:
+                self.handed_out = True
+                os.close(self.from_chrome_r)
+                os.close(self.to_chrome_w)
 
 
 def make():
