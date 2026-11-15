@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -86,7 +87,8 @@ class ProjectTests(unittest.TestCase):
         code = str(Path(projects.__file__).resolve().parent.parent)
         real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
         real = real.replace(code, '/srv/user/apps/tether')
-        self.assertLess(len(real), 3350)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +35 --stack GOAL rule (B86, 7b51e2a)
+        real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
+        self.assertLess(len(real), 3300)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14)
         self.assertIn('not evidence of absence', text)
         self.assertLess(text.index('## Naming tabs'), text.index('## Claims of absence'))
         self.assertLess(text.index('## Claims of absence'), text.index('## New tabs and reviewers'))
