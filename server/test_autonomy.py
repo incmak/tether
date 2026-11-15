@@ -281,10 +281,17 @@ class Hook(Base):
                              stdout='' if args[-1] == '#{@tether_helper}' else PID))
             out = json.loads(autonomy.hook_output({'cwd': '/work'}, {'TMUX': '/fixture', 'TMUX_PANE': '%7'}, tmux, agent='codex'))
         text = out['hookSpecificOutput']['additionalContext']
-        selected = lessons.for_prompt(PID)
-        rows = selected['confirmed'] + selected['trial']
+        tmux.assert_any_call('display-message', '-p', '-t', '%7', '#{@chat_name}')
+        self.assertNotIn('Lessons from past feedback', text, 'no prompt, so no lesson matches')
+        self.assertIn(f'More lessons: {lessons.path(PID)}.', text)
+        with mock.patch.object(codex_level, 'models', return_value=models):
+            out = json.loads(autonomy.hook_output({'cwd': '/work', 'prompt': 'A case appears.'},
+                                                  {'TMUX': '/fixture', 'TMUX_PANE': '%7'}, tmux, agent='codex'))
+        text = out['hookSpecificOutput']['additionalContext']
+        rows = lessons.fit(lessons.for_prompt(PID, 'A case appears.')['rows'])
         self.assertEqual(len(rows), 8)
         self.assertEqual([len(row['text']) for row in rows], [150] * 8)
+        self.assertEqual(text.count('- Avoid ('), 8)
         self.assertIn('Lessons from past feedback', text)
         self.assertLess(len(text), 9000)
         self.assertIn('Autonomy level 5', text)
@@ -647,12 +654,16 @@ class Learning(Base):
             for level in range(6):
                 text = autonomy.rules({'level': level, 'source': 'project'}, PID, agent, prompt='wrong again?')
                 self.assertIn('Learn from feedback.', text)
-                self.assertIn(f'- Avoid ({avoid["id"]}): When checks fail', text)
-                self.assertIn(f'- Keep doing ({keep["id"]}): When checks pass', text)
+                self.assertNotIn(avoid['id'], text, 'the lessons are not part of the standing rules')
                 self.assertEqual('Do this as well as your own memory.' in text, agent == 'claude')
                 needles = [autonomy.RULES[level], 'Learn from feedback.', 'This message may correct',
-                           autonomy.LESSONS, autonomy.SAFETY, autonomy.LAST]
+                           'More lessons: ', autonomy.SAFETY, autonomy.LAST]
                 self.assertEqual([text.index(n) for n in needles], sorted(text.index(n) for n in needles))
+        lines = autonomy.lesson_lines({}, PID, 'The checks fail and then the checks pass.')
+        self.assertEqual(lines[0], autonomy.LESSON_RULES.format(cli=autonomy.HERE / 'agent_lessons_cli.py'))
+        self.assertEqual(sorted(lines[1:]), [f'- Avoid ({avoid["id"]}, seen once): {avoid["text"]}',
+                                             f'- Keep doing ({keep["id"]}, seen once): {keep["text"]}'])
+        self.assertEqual(autonomy.lesson_lines({}, PID, 'Rename the branch.'), [], 'no match, no block')
 
     def test_off_helper_no_project_and_missing_project_have_no_learning(self):
         for options in ({'helper': True, 'pid': PID}, {'pid': None}, {'pid': '000000000000'}):
@@ -726,23 +737,25 @@ class Learning(Base):
         row = lessons.add(PID, 'When tests fail, inspect each error.', 'avoid', 'user', 'codex',
                           quote='Only the user interface may show this quote.')['lesson']
         rules = lambda: autonomy.rules({'level': 4, 'source': 'project'}, PID, agent='codex')
+        block = lambda: '\n'.join(autonomy.lesson_lines({}, PID, 'The tests fail.'))
         text = rules()
-        self.assertIn('Seen once, apply only when the situation clearly matches:', text)
-        self.assertNotIn('Confirmed:', text)
         self.assertIn('--quote', text)
-        self.assertNotIn(row['quote'], text)
         self.assertIn('The user can be wrong:', text)
-        self.assertIn(f'dispute ID "why"', text)
+        self.assertIn(f'- Avoid ({row["id"]}, seen once): {row["text"]}', block())
+        self.assertIn('a lesson marked "seen once" needs a clear match', block())
+        self.assertIn('dispute ID "why"', block())
+        self.assertNotIn(row['quote'], text + block())
         lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
-        text = rules()
-        self.assertNotIn(f'- Avoid ({row["id"]})', text)
-        self.assertIn(f'More lessons: {lessons.path(PID)}.', text)
+        self.assertEqual(block(), '', 'a disputed trial lesson does not go out')
+        self.assertIn(f'More lessons: {lessons.path(PID)}.', rules())
         lessons.keep(PID, row['id'])
-        self.assertIn('Confirmed:', rules())
+        self.assertIn(f'- Avoid ({row["id"]}): {row["text"]}\n', block() + '\n')
         lessons.dispute(PID, row['id'], '%1', 'Evidence differs.')
-        text = rules()
-        self.assertNotIn('Confirmed:', text)
-        self.assertIn(f'- Avoid ({row["id"]}): {row["text"]} (disputed)', text)
+        self.assertIn(f'- Avoid ({row["id"]}): {row["text"]} (disputed)', block())
+        for options in ({'helper': True}, {'pid': None}, {'pid': '000000000000'}):
+            self.assertEqual(autonomy.lesson_lines({}, **{'pid': PID, 'prompt': 'The tests fail.', **options}), [])
+        lessons.set_enabled(False)
+        self.assertEqual(block(), '')
 
     def test_keep_actions_and_one_action_rule(self):
         row = self.add()

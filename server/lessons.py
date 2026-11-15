@@ -316,22 +316,157 @@ def promote(pid, identifier):
         return dict(row)
 
 
-def for_prompt(pid):
+# ---- which lessons match a prompt (B74) ----
+#
+# A lesson goes to an agent only when its words meet the words of the task: the prompt, the tab name and the folder.
+# The match prefers recall. One distinctive word of the "When <situation>" part is enough (1 point). A word that most
+# software tasks use (WEAK) gives half a point, and so does a distinctive word of the advice part; a common word of
+# the advice part gives none. Words in STOP and the project's own name do not count, and the words of one SAME
+# line count as one word. A long prompt is read in overlapping spans of SPAN words, and a lesson must reach MATCH
+# inside one span: common words spread over a long text say nothing. The agent can still read every lesson in the
+# file that the rules name.
+#
+# Measured on 344 real prompts and 23 real lessons with a judge's labels (2026-11-15): the old rule (the same 7
+# lessons for each prompt) sent 21% of the lessons that clearly applied; this one sends 88% by the time they apply.
+# What it cannot see: a task that only earlier turns or a screenshot explain ("re-ran it, check the release").
+
+PROMPT_ROWS = 8
+PROMPT_SIZE = 1200
+MATCH = 1.0
+SPAN = 40
+SPANS = 400  # the first 8,000 words of a prompt
+STOP = frozenset("""
+a about after again all also am an and any are as at be because been before being both but by can could did do does
+doing done each else even ever every for from had has have having he her here him his how however if in into is it
+its itself just let like may me might more most much must my no nor not now of off on once one only onto or other
+our out over own per same shall she should so some such than that the their them then there these they this those
+through thus to too two under until up upon us very was we were what when where whether which while who whom why
+will with within without would yes yet you your instead first never always still already another several say says
+said saying tell via etc ll re ve don doesn didn isn aren won
+""".split())
+WEAK = frozenset("""
+action active add agent answer app ask bad between big branch browser bug build button call case change chat check
+choice claude click close code codex command commit config content control copy create data decide decision default
+delete deploy desktop detail different display edit empty end error event fail feature few file final find fix
+folder full function get give go good group handle have header hold install issue item job keep key kind know last
+layout line link list load log look main make many mean menu message mobile name need new next note old open option
+output page panel part path phone pick plan process product project prompt put question read real reply repo report
+request result review reviewer right row rule run save screen see send server service session set show side size
+small start state status step stop system tab task terminal test text thing time tool try turn type ui
+update url use user value version view wait want way web window word work write wrong
+""".split())
+WORD = re.compile(r'[a-z0-9]+')
+IMAGE = re.compile(r'\[Image #\d+\]|\S+\.(?:png|jpe?g|gif|webp|heic)\b', re.I)  # an attached image is not a word of the task
+
+
+SAME = """
+phone mobile android iphone ios
+voice dictation dictate speech spoken mic microphone
+research search investigate online lookup
+ci pipeline workflow
+cut overflow clip crop truncate
+image photo picture
+dependency library package
+gesture swipe
+buy purchase shop
+preview viewer
+"""  # each line: words that mean the same in a task. They match as the first word of the line.
+
+
+def _stem(word):
+    """The stem of a word, or of the first word of its SAME line."""
+    word = _cut(word)
+    return ALIKE.get(word, word)
+
+
+def _cut(word):
+    """A rough stem: 'tabs', 'grouping' and 'swiped' meet 'tab', 'group' and 'swipe'."""
+    if len(word) > 4 and word.endswith('ies'):
+        word = word[:-3] + 'y'
+    else:
+        for end in ('ing', 'ed', 'ly', 'es', 's'):
+            if word.endswith(end) and len(word) - len(end) >= 3 and not word.endswith('ss'):
+                word = word[:-len(end)]
+                break
+    if len(word) > 3 and word[-1] == word[-2] and word[-1] not in 'aeiou':
+        word = word[:-1]
+    return word[:-1] if len(word) > 3 and word.endswith('e') else word
+
+
+def _stems(text):
+    """The stemmed words of a text, in order. A STOP word is '' so that it still takes a place in a span."""
+    return ['' if len(word) < 2 or word in STOP else _stem(word) for word in WORD.findall(text.lower())]
+
+
+ALIKE = {_cut(word): _cut(line.split()[0]) for line in SAME.strip().splitlines() for word in line.split()}
+WEAK_STEMS = frozenset(_stem(word) for word in WEAK)
+
+
+def _parts(text):
+    """('<situation>', '<advice>') of 'When <situation>, <advice>'. A comma inside brackets does not end the situation."""
+    depth = 0
+    for index, char in enumerate(text):
+        if char in '([':
+            depth += 1
+        elif char in ')]':
+            depth = max(0, depth - 1)
+        elif char == ',' and not depth:
+            return text[:index], text[index + 1:]
+    return text, ''
+
+
+def weights(text, weak=frozenset()):
+    """{stem: weight} of one lesson text."""
+    situation, advice = (set(_stems(part)) - {''} for part in _parts(text))
+    found = {}
+    for term in (situation | advice) - set(weak):  # the project's name is in each of its tasks: it says nothing
+        dull = term in WEAK_STEMS
+        if term in situation or not dull:
+            found[term] = 0.5 if dull or term not in situation else 1.0
+    return found
+
+
+def spans(text, names=()):
+    """The sets of stems to match a lesson against: each span of the prompt, with the words of the names in all."""
+    always = {stem for name in names for stem in _stems(name)} - {''}
+    stems = _stems(IMAGE.sub(' ', text))[:SPAN // 2 * SPANS]
+    return [always | set(stems[start:start + SPAN]) - {''} for start in range(0, max(1, len(stems) - SPAN // 2), SPAN // 2)]
+
+
+def score(text, groups, weak=frozenset()):
+    """How well one lesson text meets a task (see spans()). MATCH or more means: send it."""
+    weight = weights(text, weak)
+    return max((sum(weight[term] for term in weight.keys() & group) for group in groups), default=0.0)
+
+
+def usable(pid):
+    """The lessons an agent may get, best first: confirmed ones (a disputed one says so) and undisputed trial ones."""
     rows = global_entries() + entries(pid)
-    confirmed = sorted((row for row in rows if row['status'] == 'confirmed' and not disputed(row)), key=_rank)
-    trial = sorted((row for row in rows if row['status'] == 'trial' and not disputed(row)),
-                   key=lambda row: -row['created'])
-    trial += sorted((row for row in rows if row['status'] == 'confirmed' and disputed(row)), key=_rank)
-    reserved = [row for row in trial if row['status'] == 'trial'][:2]
-    result, size = list(reserved), sum(len(row['text']) for row in reserved)
-    for row in confirmed + trial:
-        if any(row is entry for entry in result) or len(result) == 8:
-            continue
-        if size + len(row['text']) <= 1200:
+    return sorted((row for row in rows if row['status'] == 'confirmed' or not disputed(row)),
+                  key=lambda row: (row['status'] != 'confirmed' or disputed(row), _rank(row)))
+
+
+def for_prompt(pid, text='', names=()):
+    """{'rows': the lessons that match one prompt, best match first, 'usable': every lesson an agent may get}.
+    text is the prompt; names are the tab name and the folder name."""
+    try:
+        project = set(_stems(projects.meta(pid)['name']))
+    except (OSError, ValueError):
+        project = set()
+    rows, groups = usable(pid), spans(text, names)
+    scored = [(score(row['text'], groups, project), row) for row in rows]
+    return {'rows': [row for value, row in sorted(scored, key=lambda pair: -pair[0]) if value >= MATCH - 1e-9],
+            'usable': rows}
+
+
+def fit(rows):
+    """The first rows that fit one prompt: at most PROMPT_ROWS lessons and PROMPT_SIZE characters."""
+    result, size = [], 0
+    for row in rows:
+        if len(result) < PROMPT_ROWS and size + len(row['text']) <= PROMPT_SIZE:
             result.append(row)
             size += len(row['text'])
-    return {'confirmed': [row for row in confirmed if any(row is entry for entry in result)],
-            'trial': [row for row in trial if any(row is entry for entry in result)]}
+    return result
 
 
 def all_entries():

@@ -11,6 +11,9 @@ once (saved()), and marks them as sent again only after its output is printed (m
 and does not run the prompt hooks again: SessionStart has a one-second timeout.
 As a safety net (a rewind or an undo can drop the earlier text), the full text also goes out every FULL_EVERY prompts.
 
+The lessons are a list that grows (LISTS): a prompt adds only the lessons that match it and that the conversation does
+not have yet (autonomy.lesson_lines). Their record holds the whole block, so a compaction gets it back in the same way.
+
 Records: paths.CACHE/prompt-context/<session_id>.<kind>: a line "<sha256> <prompts since the full text>", then the
 full text. A Codex subagent (agent_id in the input) always gets the full text: Codex 0.166 runs no SessionStart hook
 when a subagent compacts (core/src/hook_runtime.rs), so nothing would tell this module that its context lost the rules.
@@ -24,6 +27,7 @@ import time
 import paths
 
 KINDS = ('autonomy', 'codex-level')
+LISTS = ('lessons',)  # a block that grows: listed() and mark(). See autonomy.lesson_lines.
 FULL_EVERY = 25
 KEEP_DAYS = 14
 SAME = 'The full rules are unchanged since they were shown earlier in this conversation. Follow them.'
@@ -93,7 +97,7 @@ def saved(data):
     """{kind: the full text this conversation last got}, in KINDS order. Read it before forget()."""
     key = conversation(data)
     found = {}
-    for kind in KINDS if key is not None else ():
+    for kind in KINDS + LISTS if key is not None else ():
         seen, _, text = _read(folder() / f'{key}.{kind}')
         if text and hashlib.sha256(text.encode()).hexdigest() == seen:
             found[kind] = text
@@ -103,18 +107,31 @@ def saved(data):
 def mark(data, kind, text):
     """Record that the full text was just sent outside once(), for example at SessionStart."""
     key = conversation(data)
-    if key is None or kind not in KINDS or not text:
+    if key is None or kind not in KINDS + LISTS:
         return
     try:
+        if not text:
+            if kind in LISTS:
+                (folder() / f'{key}.{kind}').unlink()
+            return
         _write(folder() / f'{key}.{kind}', hashlib.sha256(text.encode()).hexdigest() + ' 0\n' + text)
     except OSError:
         pass
 
 
+def listed(data, kind):
+    """The lines of the block this conversation has for a LISTS kind, oldest first. [] when it has none."""
+    key = conversation(data)
+    if key is None or kind not in LISTS:
+        return []
+    seen, _, text = _read(folder() / f'{key}.{kind}')
+    return text.splitlines() if text and hashlib.sha256(text.encode()).hexdigest() == seen else []
+
+
 def forget(data, now=time.time):
     """The conversation lost or replaced its context: the next prompt sends the full text. Also drops old records."""
     key = conversation(data)
-    for kind in KINDS:
+    for kind in KINDS + LISTS:
         if key is not None:
             try:
                 (folder() / f'{key}.{kind}').unlink()

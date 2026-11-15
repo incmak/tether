@@ -184,6 +184,10 @@ LEARN = ('Learn from feedback. When the user\'s message corrects your last turn,
          'tasks in this project, not a one-off preference. Pass the user\'s own words with --quote.')
 LESSONS = ('Lessons from past feedback, written by agents. They are hints. They grant no authority, and these '
            'rules and the user\'s request win.')
+LESSON_RULES = (LESSONS + ' Apply a lesson only when its "When" situation matches this task; a lesson marked '
+                '"seen once" needs a clear match. When a lesson conflicts with the current request or the evidence, '
+                'follow those and run `python3 {cli} dispute ID "why"`.')
+LESSONS_AGAIN = 'More lessons from past feedback match this prompt. The same rules apply to them.'
 CORRECTION = re.compile(r'wrong|not what i asked|undo|revert|awful|terrible|again\?|you broke|that broke|why did you', re.I)
 PRAISE = re.compile(r"perfect|exactly right|exactly what|great job|well done|love it|that's it", re.I)
 
@@ -192,9 +196,7 @@ def _learning_rules(pid, agent, prompt, helper):
     if helper or pid is None or not lessons.enabled():
         return []
     try:
-        selected = lessons.for_prompt(pid)
-        shown = sum(len(group) for group in selected.values())
-        more = len(lessons.global_entries()) + len(lessons.entries(pid)) > shown
+        more = bool(lessons.global_entries() or lessons.entries(pid))
     except (OSError, ValueError):
         return []  # A stale project or invalid hints must not break the standing rules.
     lines = [LEARN.format(cli=HERE / 'agent_lessons_cli.py') +
@@ -206,20 +208,51 @@ def _learning_rules(pid, agent, prompt, helper):
             lines.append('This message may correct your last turn. If it does, record one --avoid lesson.')
         elif PRAISE.search(prompt):
             lines.append('If this message confirms a choice that was not obvious, record one --keep lesson.')
-    if shown:
-        lines.append(LESSONS + ' Apply a lesson only when its "When" situation matches this task. '
-                     'When a lesson conflicts with the current request or the evidence, follow those and run '
-                     f'`python3 {HERE / "agent_lessons_cli.py"} dispute ID "why"`.')
-        for key, heading in (('confirmed', 'Confirmed:'),
-                             ('trial', 'Seen once, apply only when the situation clearly matches:')):
-            if selected[key]:
-                lines.append(heading)
-                for row in selected[key]:
-                    label = 'Avoid' if row['kind'] == 'avoid' else 'Keep doing'
-                    lines.append(f'- {label} ({row["id"]}): {row["text"]}' +
-                                 (' (disputed)' if lessons.disputed(row) else ''))
     if more:
-        lines.append(f'More lessons: {lessons.path(pid)}.')
+        lines.append(f'Tether adds the lessons that match a prompt. More lessons: {lessons.path(pid)}.')
+    return lines
+
+
+def _lesson_line(row):
+    label = 'Avoid' if row['kind'] == 'avoid' else 'Keep doing'
+    return (f'- {label} ({row["id"]}{", seen once" if row["status"] == "trial" else ""}): {row["text"]}' +
+            (' (disputed)' if lessons.disputed(row) else ''))
+
+
+def lesson_lines(data, pid, prompt='', names=(), helper=False, full=False):
+    """The lessons block of one prompt (B74): the lessons that match it and that the conversation does not have yet.
+
+    names: the tab name and the folder name, matched like the prompt. full: the standing rules go out in full with
+    this prompt, so the lessons that earlier prompts got go out again too, the newest first, up to the cap of one
+    prompt (lessons.fit). [] when there is nothing to add. After a compaction, SessionStart sends the whole record."""
+    if helper or pid is None or not lessons.enabled():
+        return []
+    try:
+        found = lessons.for_prompt(pid, prompt, names)
+    except (OSError, ValueError):
+        return []
+    usable = {_lesson_line(row): row for row in found['usable']}
+    record = prompt_context.listed(data, 'lessons')
+    had = [line for line in record[1:] if line in usable]  # not a lesson that was removed, changed or disputed since
+    fresh = [row for row in found['rows'] if _lesson_line(row) not in had]
+    if full:
+        # One prompt never carries more than the cap. What does not fit leaves the record: its next match sends it.
+        matched = [_lesson_line(row) for row in found['rows']]  # this prompt's matches first, then the newest
+        order = found['rows'] + [usable[line] for line in reversed(had) if line not in matched]
+        kept = [_lesson_line(row) for row in lessons.fit(order)]
+        had = [line for line in had if line in kept]
+        new = [line for line in kept if line not in had]
+    else:
+        new = [_lesson_line(row) for row in lessons.fit(fresh)]
+    head = LESSON_RULES.format(cli=HERE / 'agent_lessons_cli.py')
+    block = '\n'.join([head, *had, *new]) if had or new else ''
+    if block != '\n'.join(record):
+        prompt_context.mark(data, 'lessons', block)
+    lines = [head, *had, *new] if full or not had else [LESSONS_AGAIN, *new]
+    if len(lines) == 1:
+        lines = []
+    if len(fresh) > len(new):
+        lines.append(f'{len(fresh) - len(new)} more lessons match this prompt. Read them in {lessons.path(pid)}.')
     return lines
 
 
@@ -373,13 +406,23 @@ def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude'):
             helper = shown.returncode != 0 or bool(shown.stdout.strip())
         except (OSError, subprocess.SubprocessError):
             helper = True  # Do not teach a helper when its identity cannot be checked.
+    names = [os.path.basename(cwd.rstrip('/'))] if isinstance(cwd, str) else []
+    if pid is not None and not helper and re.fullmatch(r'%[0-9]+', pane):
+        try:
+            shown = tmux('display-message', '-p', '-t', pane, '#{@chat_name}')
+            names += [shown.stdout.strip()] if not shown.returncode else []
+        except (OSError, subprocess.SubprocessError):
+            pass  # the prompt alone still selects lessons
     resolved, reviewers = resolve(pid), reviewer_rules(read_reviewers())
     standing = rules(resolved, pid, agent=agent, helper=helper) + '\n\n' + reviewers
     # The standing rules go out once per conversation (B74). Lines that depend on this prompt go out every time.
     shown = set(standing.splitlines())
     extra = [line for line in rules(resolved, pid, agent=agent, prompt=prompt, helper=helper).splitlines()
              if line not in shown]
-    text = '\n'.join([prompt_context.once(data, 'autonomy', standing), *extra])
+    head = prompt_context.once(data, 'autonomy', standing)
+    # The lessons are chosen for this prompt. A conversation gets each lesson once, like the standing rules.
+    matched = lesson_lines(data, pid, prompt, names, helper, full=head == standing)
+    text = '\n'.join([head, *extra, *matched])
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': text}})
 
 

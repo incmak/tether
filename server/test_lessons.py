@@ -116,8 +116,8 @@ class Lessons(unittest.TestCase):
         self.assertEqual(lessons.global_entries()[0]['source'], 'reviewer')
         for index in range(12):
             self.add('When case ' + str(index) + ' appears, ' + 'x' * 130, force_new=True)
-        groups = lessons.for_prompt(PID)
-        selected = groups['confirmed'] + groups['trial']
+        prompt = 'The check fails: inspect the output of each case that appears.'
+        selected = lessons.fit(lessons.for_prompt(PID, prompt)['rows'])
         self.assertEqual(selected[0]['id'], row['id'])
         self.assertLessEqual(len(selected), 8)
         self.assertLessEqual(sum(len(r['text']) for r in selected), 1200)
@@ -125,7 +125,9 @@ class Lessons(unittest.TestCase):
         self.assertFalse(lessons.remove_global(row['id']))
         for row in lessons.entries(PID):
             lessons.edit(PID, row['id'], 'When errors occur, read the output.')
-        self.assertEqual(sum(map(len, lessons.for_prompt(PID).values())), 8)
+        found = lessons.for_prompt(PID, 'Errors occur.')
+        self.assertEqual((len(found['rows']), len(lessons.fit(found['rows'])), len(found['usable'])), (12, 8, 12))
+        self.assertEqual(lessons.for_prompt(PID)['rows'], [], 'no prompt, no lesson')
 
     def test_global_cap_refuses_user_and_evicts_agent(self):
         for index in range(30):
@@ -179,6 +181,70 @@ class Lessons(unittest.TestCase):
                 worker.join(timeout=2)
                 worker.close()
         self.assertEqual(len(lessons.entries(PID)), 2)
+
+
+class Matching(unittest.TestCase):
+    """Which lessons a prompt gets (B74). The texts are made up; the shapes are from real lessons and prompts."""
+    CI = 'When checking CI for a repo, pass -R owner/repo to gh and read the run logs before saying CI did not run.'
+    BAR = 'When adding a new action to the phone UI, do not add it to the bottom tab bar; put it in the menu.'
+    LINK = 'When sending deep links from outside apps (Teams, mail), link inside the PWA scope and confirm on the phone.'
+
+    def match(self, lesson, prompt, names=(), weak=frozenset()):
+        return lessons.score(lesson, lessons.spans(prompt, names), weak) >= lessons.MATCH - 1e-9
+
+    def test_stems_and_parts(self):
+        for word, other in (('tabs', 'tab'), ('grouping', 'group'), ('swiped', 'swipe'), ('repos', 'repo'),
+                            ('dependencies', 'dependency'), ('stopped', 'stop'), ('checks', 'checking')):
+            self.assertEqual(lessons._stem(word), lessons._stem(other), word)
+        self.assertEqual(lessons._stem('separately'), lessons._stem('separate'))
+        self.assertEqual(lessons._stem('mobile'), lessons._stem('phones'), 'one SAME line')
+        self.assertEqual(lessons._parts(self.LINK)[0], 'When sending deep links from outside apps (Teams, mail)')
+        self.assertEqual(lessons._parts('When there is no comma')[1], '')
+        self.assertEqual(lessons._stems('When the CI is red'), ['', '', 'ci', '', 'red'])
+
+    def test_one_distinctive_situation_word_is_enough(self):
+        self.assertTrue(self.match(self.CI, 'ci is red again'))
+        self.assertTrue(self.match(self.CI, 'Why did CI not run on my last push?'))
+        self.assertTrue(self.match(self.LINK, 'the link in the Teams message opens the browser'))
+        self.assertTrue(self.match(self.LINK, 'Mail me a deep-link to this tab.'))
+
+    def test_common_words_alone_do_not_match(self):
+        self.assertFalse(self.match(self.CI, 'check the run and read the file'), 'common advice words give nothing')
+        self.assertFalse(self.match(self.BAR, 'add a test'))
+        self.assertFalse(self.match(self.LINK, 'open the link'))
+        self.assertFalse(self.match(self.CI, ''))
+        self.assertFalse(self.match(self.CI, 'yes, continue'))
+
+    def test_common_words_together_or_two_advice_words_match(self):
+        self.assertTrue(self.match(self.BAR, 'add an action for undo'))
+        self.assertTrue(self.match(self.BAR, 'a new screen for mobile'), 'mobile means phone')
+        self.assertTrue(self.match(self.CI, 'the pipeline is red'), 'pipeline means CI')
+        self.assertTrue(self.match(self.BAR, 'put Undo in the bottom bar'))
+        self.assertTrue(self.match(self.CI, 'what does gh say for the owner?'))
+        self.assertFalse(self.match(self.BAR, 'the bar is too wide'))
+
+    def test_a_long_prompt_needs_the_words_close_together(self):
+        filler = ' '.join(['lorem'] * 60)
+        self.assertFalse(self.match(self.BAR, f'add it. {filler} a new one. {filler} the action. {filler} on a phone.'))
+        self.assertFalse(self.match(self.CI, f'check it. {filler} in the repo'))
+        self.assertTrue(self.match(self.BAR, f'{filler} {filler} add a new action on the phone {filler}'))
+        self.assertTrue(self.match(self.CI, f'{filler} {filler} {filler} and then the CI must pass'))
+        self.assertTrue(self.match(self.CI, ' '.join(['lorem'] * 9000) + ' ci') is False, 'only the first 8,000 words')
+
+    def test_names_count_in_every_part_of_the_prompt(self):
+        self.assertTrue(self.match(self.CI, 'yes, continue', names=['Fix CI on main', 'tether']))
+        self.assertTrue(self.match(self.BAR, 'add it', names=['phone-polish']))
+        self.assertFalse(self.match(self.BAR, 'add it', names=['desktop-polish']))
+
+    def test_the_project_name_and_an_image_mark_say_little(self):
+        lesson = 'When Gizmo groups tabs into stacks, keep fewer stacks than tabs.'
+        self.assertTrue(self.match(lesson, 'gizmo is slow today'))
+        self.assertFalse(self.match(lesson, 'gizmo is slow today', weak={lessons._stem('gizmo')}))
+        self.assertTrue(self.match(lesson, 'the stacks look wrong', weak={lessons._stem('gizmo')}))
+        image = 'When a big image loads on a slow link, save a small WebP first.'
+        self.assertFalse(self.match(image, '[Image #1] why is this cut off?'))
+        self.assertFalse(self.match(image, '/cache/uploads/ab12-image.png /cache/Shot_1.JPG why is this cut off?'))
+        self.assertTrue(self.match(image, 'the image appears late'))
 
 
 class LessonReview(unittest.TestCase):
@@ -280,7 +346,7 @@ class LessonReview(unittest.TestCase):
         self.assertIsNone(lessons.keep(PID, row['id']))
         self.assertIsNone(lessons.dispute(PID, '00000000', '%1', 'Evidence'))
         self.assertTrue(lessons.dispute(PID, row['id'], '%1', 'Evidence')['disputes'])
-        self.assertTrue(lessons.for_prompt(PID)['trial'][0]['disputed'])
+        self.assertTrue(lessons.for_prompt(PID, 'The checks fail: read the test details.')['rows'][0]['disputed'])
         self.assertEqual(lessons.keep_global(row['id'])['disputes'], [])
 
     def test_promotion_refuses_trial_and_disputed_without_writes(self):
@@ -297,27 +363,22 @@ class LessonReview(unittest.TestCase):
             self.assertEqual(lessons.path(PID).read_bytes(), before)
             self.assertFalse(lessons.global_path().exists())
 
-    def test_prompt_groups_disputes_and_two_reserved_newest_trials(self):
-        for index in range(9):
-            row = self.row(text=f'When confirmed case {index} occurs, inspect it.')
-            lessons.keep(PID, row['id'])
-        trials = []
+    def test_usable_lessons_put_confirmed_first_and_leave_out_disputed_trials(self):
+        confirmed = []
         for index in range(3):
-            with patch.object(lessons.time, 'time', return_value=100 + index):
-                trials.append(self.row(text=f'When trial case {index} occurs, inspect it.'))
-        groups = lessons.for_prompt(PID)
-        self.assertEqual(len(groups['confirmed']), 6)
-        self.assertEqual([row['id'] for row in groups['trial']], [row['id'] for row in reversed(trials[1:])])
-        for row in lessons.entries(PID):
-            if row['status'] == 'confirmed':
-                lessons.remove(PID, row['id'])
-        lessons.dispute(PID, trials[-1]['id'], '%1', 'Evidence differs.')
-        lessons.keep(PID, trials[0]['id'])
+            confirmed.append(self.row(text=f'When confirmed case {index} occurs, inspect it.'))
+            lessons.keep(PID, confirmed[-1]['id'])
+        trials = [self.row(text=f'When trial case {index} occurs, inspect it.') for index in range(3)]
+        usable = lessons.usable(PID)
+        self.assertEqual([row['status'] for row in usable], ['confirmed'] * 3 + ['trial'] * 3)
         lessons.dispute(PID, trials[0]['id'], '%1', 'Evidence differs.')
-        groups = lessons.for_prompt(PID)
-        self.assertEqual(groups['confirmed'], [])
-        self.assertEqual([row['id'] for row in groups['trial']], [trials[1]['id'], trials[0]['id']])
-        self.assertTrue(groups['trial'][-1]['disputed'])
+        lessons.dispute(PID, confirmed[0]['id'], '%1', 'Evidence differs.')
+        usable = lessons.usable(PID)
+        self.assertEqual({row['id'] for row in usable}, {row['id'] for row in confirmed + trials[1:]})
+        self.assertEqual((usable[-1]['id'], usable[-1]['disputed']), (confirmed[0]['id'], True), 'a disputed one is last')
+        found = lessons.for_prompt(PID, 'A trial case occurs.')
+        self.assertEqual({row['id'] for row in found['rows']}, {row['id'] for row in confirmed + trials[1:]})
+        self.assertEqual(found['usable'], usable)
 
     def test_review_due_reasons_gap_snooze_done_and_empty(self):
         start = 1000000
