@@ -265,7 +265,7 @@ def _notice(verb, name, left):
     """
     alarm = left == (1 if verb == 'added' else 0)
     if alarm:
-        body = (f'First passkey added to Tether: {name}. If you did not add it, remove it in Settings › Setup.'
+        body = (f'First passkey added to Tether: {name}. If you did not add it, delete ~/.config/mobile-tmux/passkeys.json on the Tether host.'
                 if verb == 'added' else
                 f'Last passkey removed from Tether: {name}. '
                 'Actions that need a passkey stay blocked until you add one.')
@@ -280,7 +280,7 @@ def _notice(verb, name, left):
         pass
     if alarm:
         try:
-            urgent_ping.send({'pane': '', 'name': 'Passkeys', 'next': body})
+            urgent_ping.alert(body)
         except Exception:  # Nor may an urgent ping failure.
             pass
 

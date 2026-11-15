@@ -79,7 +79,7 @@ class PasskeyCase(unittest.TestCase):
                   for name in ('CONFIG', 'TETHER', 'CLAUDE', 'CODEX')),
                 mock.patch.object(approval, '_CHALLENGES', {}),
                 mock.patch.object(approval.push, 'available', return_value=False),
-                mock.patch.object(approval.urgent_ping, 'send', return_value=False),
+                mock.patch.object(approval.urgent_ping, 'alert', return_value=False),
                 mock.patch.object(codex_level, 'models', return_value=[])):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -352,7 +352,7 @@ class Ceremonies(PasskeyCase):
                 mock.patch.object(approval.push, 'send_all') as send:
             self.add()
             self.assertEqual(send.call_args.args[0]['body'], 'First passkey added to Tether: Phone. '
-                             'If you did not add it, remove it in Settings › Setup.')
+                             'If you did not add it, delete ~/.config/mobile-tmux/passkeys.json on the Tether host.')
             send.side_effect = OSError('offline')
             identifier = approval._b64(self.identifier)
             approval.remove(self.handler, identifier, self.assertion('passkey-remove', {'id': identifier}))
@@ -364,10 +364,10 @@ class Ceremonies(PasskeyCase):
     def test_first_passkey_and_emptied_store_also_send_an_urgent_ping(self):
         # Trust on first use stays (agents run as the same user), so the owner must hear about a first passkey,
         # including one added after something emptied the store outside Tether.
-        ping = approval.urgent_ping.send
+        ping = approval.urgent_ping.alert
         self.add()
-        self.assertEqual(ping.call_args.args[0], {'pane': '', 'name': 'Passkeys', 'next': 'First passkey added to '
-                         'Tether: Phone. If you did not add it, remove it in Settings › Setup.'})
+        self.assertEqual(ping.call_args.args[0], 'First passkey added to Tether: Phone. '
+                         'If you did not add it, delete ~/.config/mobile-tmux/passkeys.json on the Tether host.')
         second = self.registration(name='Laptop', identifier=b'other')
         second['approval'] = self.assertion('passkey-add', {'name': 'Laptop'})
         approval.post(Handler(body=second))
@@ -378,11 +378,11 @@ class Ceremonies(PasskeyCase):
         self.identifier = b'again'
         self.add(name='Agent?')
         self.assertEqual(ping.call_count, 2)
-        self.assertIn('First passkey added to Tether: Agent?.', ping.call_args.args[0]['next'])
+        self.assertIn('First passkey added to Tether: Agent?.', ping.call_args.args[0])
         identifier = approval._b64(b'again')
         approval.remove(self.handler, identifier, self.assertion('passkey-remove', {'id': identifier}))
         self.assertEqual(ping.call_count, 3)
-        self.assertIn('Last passkey removed from Tether: Agent?.', ping.call_args.args[0]['next'])
+        self.assertIn('Last passkey removed from Tether: Agent?.', ping.call_args.args[0])
         ping.side_effect = OSError('offline')
         self.identifier = b'third'
         self.add(name='Phone')  # An urgent ping failure must not undo the passkey.

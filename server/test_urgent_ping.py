@@ -26,6 +26,7 @@ class UrgentPingTest(unittest.TestCase):
         for patcher in (mock.patch.object(paths, 'CONFIG', self.config),
                         mock.patch.object(urgent_ping, '_PANES', {}),
                         mock.patch.object(urgent_ping, '_SENT', deque()),
+                        mock.patch.object(urgent_ping, '_ALERTS', deque()),
                         mock.patch.object(urgent_ping, '_name', lambda pane: '')):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -55,6 +56,28 @@ class UrgentPingTest(unittest.TestCase):
         result = urgent_ping.send(dict(pane=pane, next='Choose?', **extra), clock=lambda: self.now, runner=self.runner)
         self.join_workers()
         return result
+
+    def test_security_alert_ignores_ping_off_and_has_its_own_limit(self):
+        # Ping-off needs no passkey, so an agent could switch it off before it adds the first passkey.
+        alert = lambda: urgent_ping.alert('First passkey added', clock=lambda: self.now, runner=self.runner)
+        self.assertFalse(alert())  # No command set up: nothing to send.
+        self.write_config({'enabled': False, 'command': ['ping-tool', '{title}', '{question}', '{pane}']})
+        self.assertFalse(self.send())
+        self.assertTrue(alert())
+        self.join_workers()
+        self.assertEqual(self.runner.call_args.args[0], ['ping-tool', 'Tether: Passkeys', 'First passkey added', ''])
+        self.write_config()
+        for pane in range(6):  # Routine pings fill their own limit and the empty-pane slot ...
+            self.assertTrue(self.send('' if pane == 0 else f'%{pane}'))
+        self.assertFalse(self.send('%9'))
+        self.assertTrue(alert())  # ... but a security alert still goes out.
+        self.assertTrue(alert())  # And a second event within ten minutes is not merged into the first.
+        for _ in range(7):
+            alert()
+        self.assertFalse(alert())  # Ten an hour at most.
+        self.now += 3600
+        self.assertTrue(alert())
+        self.join_workers()
 
     def test_missing_and_bad_config_do_nothing(self):
         self.assertFalse(self.send())

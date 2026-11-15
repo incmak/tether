@@ -16,6 +16,7 @@ import paths
 _LOCK = threading.Lock()
 _PANES = {}
 _SENT = deque()
+_ALERTS = deque()  # Security alerts have their own limit, so routine pings cannot use it up.
 
 
 def _name(pane):
@@ -48,9 +49,10 @@ def _url(base_url, pane):
     return base_url.rstrip('/') + '/chat/' + ('?session=' + quote(pane, safe='') if pane else '')
 
 
-def _argv(ask):
+def _argv(ask, security=False):
     config = _config()
-    if config.get('enabled') is False:
+    # The ping-off switch needs no passkey, so it must not silence a security alert.
+    if config.get('enabled') is False and not security:
         return None
     command, base_url = config.get('command'), config.get('base_url', '')
     if (not isinstance(command, list) or not command or not isinstance(base_url, str)
@@ -98,6 +100,23 @@ def send(ask, *, clock=time.monotonic, runner=subprocess.run):
         worker.start()
         _PANES[pane] = now
         _SENT.append(now)
+    return True
+
+
+def alert(text, *, clock=time.monotonic, runner=subprocess.run):
+    """Send a security alert (passkey changes) even when urgent pings are switched off; at most 10 an hour."""
+    argv = _argv({'pane': '', 'name': 'Passkeys', 'next': text}, security=True)
+    if argv is None:
+        return False
+    with _LOCK:
+        now = clock()
+        while _ALERTS and _ALERTS[0] <= now - 3600:
+            _ALERTS.popleft()
+        if len(_ALERTS) >= 10:
+            print('Security alert rate limit: dropped an alert', file=sys.stderr)
+            return False
+        threading.Thread(target=_run, args=(argv, runner), daemon=True).start()
+        _ALERTS.append(now)
     return True
 
 
