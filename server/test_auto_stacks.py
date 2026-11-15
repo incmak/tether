@@ -100,7 +100,7 @@ class WatchTests(unittest.TestCase):  # rule 6, the timer
             if len(slept) == 3:
                 raise SystemExit
         states = iter([True, False, False])
-        with mock.patch.object(auto_stacks.groups, 'drop_empty_auto', side_effect=lambda run: calls.append(1)):
+        with mock.patch.object(auto_stacks.groups, 'drop_lone_auto', side_effect=lambda run: calls.append(1)):
             with self.assertRaises(SystemExit):
                 auto_stacks.watch(run=None, sleep=sleep, restoring=lambda: next(states))
         self.assertEqual(len(calls), 2)

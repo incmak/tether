@@ -1,6 +1,6 @@
 // Fixture-only BrowserPanel test for the Selkies live view. No Tether server, container, shared browser or tmux.
 const assert = require('node:assert/strict')
-const { mkdirSync } = require('node:fs')
+const { mkdirSync, readFileSync } = require('node:fs')
 const http = require('node:http')
 const { resolve } = require('node:path')
 const { chromium } = require('playwright-core')
@@ -18,6 +18,16 @@ async function keysStayOut(page, frame) {
   assert.equal(await page.frameLocator('iframe.browser-live').locator('input').inputValue(), '')
 }
 
+// Wheel turns over the live view: the panel sends them to the tab with the exact pixels (Selkies sends whole clicks).
+function wheelCalls(page) {
+  return page.evaluate(() => window.calls.filter(call => call.path === 'browser/input').flatMap(call => call.body.events).filter(event => event.type === 'wheel'))
+}
+async function wheelOver(page, box, steps) {
+  await page.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.5)
+  for (let step = 0; step < steps; step++) { await page.mouse.wheel(0, 3); await page.waitForTimeout(16) }
+  await page.waitForTimeout(400)
+}
+
 async function main() {
   const { createServer } = await import('vite')
   const evidence = resolve(__dirname, '../.work-notes/2026-11-14-selkies-live')
@@ -26,8 +36,10 @@ async function main() {
   // The live view has its own origin: a second server on another port stands in for Tether's live listener.
   liveServer = http.createServer((req, res) => {
     if (!req.url.startsWith('/browser/live/')) { res.statusCode = 404; res.end(); return }
+    if (req.url === '/browser/live/tether-wheel.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(readFileSync(resolve(__dirname, '../server/selkies/tether-wheel.js'))); return }
     res.setHeader('Content-Type', 'text/html')
-    res.end('<!doctype html><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p><input aria-label="Fixture input" style="margin:24px"></body>')
+    res.end('<!doctype html><script src="tether-wheel.js"></script><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p><input aria-label="Fixture input" style="margin:24px">'
+      + '<script>window.selkiesWheels = 0; document.body.addEventListener("wheel", () => window.selkiesWheels++)</script></body>')
   })
   await new Promise(done => liveServer.listen(0, '127.0.0.1', done))
   const livePort = liveServer.address().port
@@ -140,6 +152,30 @@ async function main() {
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `no overflow at ${width}px`)
       await page.screenshot({ path: resolve(evidence, `live-${width}${agent ? '-agent' : ''}.png`) })
 
+      if (!agent && !giveBack && !touch) {
+        // Trackpad turns: 20 events of 3 px scroll the tab by 60 px in total, at the pointer's page point.
+        await wheelOver(page, box, 20)
+        const wheels = await wheelCalls(page)
+        assert(wheels.length >= 1, 'wheel turns reach the tab')
+        assert.equal(wheels.reduce((sum, event) => sum + event.dy, 0), 60)
+        assert(wheels.every(event => event.x === 320 && event.y === 400 && event.dx === 0 && event.modifiers === 0), JSON.stringify(wheels))
+        assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.selkiesWheels), 0, 'Selkies does not see the turns')
+        // Only the live frame may send them: a message from the panel's own page, or a malformed one, does nothing.
+        const before = (await wheelCalls(page)).length
+        await page.evaluate(() => window.postMessage({ tether: 'wheel', x: 0.5, y: 0.5, dx: 0, dy: 500 }, '*'))
+        await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.parent.postMessage({ tether: 'wheel', x: 'a', y: null, dx: 1e9, dy: NaN, alt: 'yes' }, '*'))
+        await page.waitForTimeout(300)
+        const after = await wheelCalls(page)
+        assert.equal(after.length, before + 1)
+        assert.deepEqual(after.at(-1), { type: 'wheel', x: 0, y: 0, dx: 10000, dy: 0, modifiers: 0 })
+        // Pinch zoom (ctrl) stays with Selkies.
+        await page.frameLocator('iframe.browser-live').locator('body').evaluate(body => body.dispatchEvent(new WheelEvent('wheel', { deltaY: 3, ctrlKey: true, bubbles: true, cancelable: true })))
+        await page.waitForTimeout(300)
+        assert.equal((await wheelCalls(page)).length, before + 1)
+        assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.selkiesWheels), 1)
+        console.log('Browser live view: wheel turns scroll the tab by the exact pixels')
+      }
+
       if (agent) {
         // An agent controls this tab: the person watches, and the cover keeps clicks out of the page.
         const cover = page.locator('.browser-live-block')
@@ -148,6 +184,9 @@ async function main() {
         assert(Math.abs(coverBox.width - box.width) < 1 && Math.abs(coverBox.height - box.height) < 1)
         assert.equal(await page.evaluate(([x, y]) => document.elementFromPoint(x, y).className, [box.x + box.width / 2, box.y + box.height / 2]), 'browser-live-block')
         await keysStayOut(page, frame)
+        await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.parent.postMessage({ tether: 'wheel', x: 0.5, y: 0.5, dx: 0, dy: 50 }, '*'))
+        await page.waitForTimeout(300)
+        assert.deepEqual(await wheelCalls(page), [], 'no scrolling while an agent controls the tab')
         assert.deepEqual(errors, [])
         console.log('Browser live view: agent tab is watch-only')
         await context.close()

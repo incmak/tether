@@ -1,0 +1,15 @@
+/* The toast for the search menu's "Add to the backlog" and "Start a new tab". */
+.toast.quick-toast { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; width: max-content; max-width: min(560px, calc(100% - 32px)); box-sizing: border-box; box-shadow: 0 12px 32px #0000002e; overflow-wrap: anywhere; }
+.quick-toast.error { border-color: var(--attention); }
+.quick-toast-text { display: flex; flex: 1 1 16em; align-items: baseline; gap: 10px; min-width: 0; }
+.quick-toast-text .state-dot { align-self: center; }
+.quick-toast-text small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; }
+.quick-toast-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.quick-toast-actions > button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.quick-toast-actions > button:hover { border-color: var(--muted); }
+.quick-toast-actions > .quick-toast-close { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; padding: 0; border-color: transparent; background: transparent; color: var(--muted); }
+.quick-toast-move { width: auto; min-height: 36px; font-size: 13px; }
+@media (pointer: coarse) {
+  .quick-toast-actions > button, .quick-toast-move { min-height: 44px; }
+  .quick-toast-actions > .quick-toast-close { min-width: 44px; }
+}

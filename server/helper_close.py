@@ -15,6 +15,7 @@ import sys
 import time
 
 import auto_resume
+import groups
 import helper_tabs
 import paths
 import review_links
@@ -31,7 +32,8 @@ PANE = re.compile(r'%[0-9]+')
 def close_pane(pane, run):
     """The shared close: forget the resume record, end the pane, drop its review links."""
     auto_resume.forget_pane(pane, run=run)
-    run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
+    with groups.closing(pane, run):  # its auto stack goes when empty or root-only
+        run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
     review_links.remove(pane)  # links where the pane is the worker
     for worker, reviewers in review_links.reviewed_by().items():
         if pane in reviewers:

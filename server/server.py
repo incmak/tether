@@ -87,6 +87,7 @@ import paths
 import side_shells
 import host_stats
 import tmux_merge
+import quick_tab
 import tmux_names
 import auto_resume
 import auto_stacks
@@ -99,6 +100,7 @@ import groups
 import helper_close
 import groups_api
 import codex_level
+import wakatime
 import codex_trust
 import autonomy
 import approval
@@ -254,6 +256,10 @@ def monitor_notices():
         except Exception as exc:  # the work board must never stop the monitor
             print(f'work watcher failed: {exc!r}', file=sys.stderr)
         try:
+            wakatime.TRACKER.observe()
+        except Exception as exc:  # activity time must never stop the monitor
+            print(f'wakatime observe failed: {exc!r}', file=sys.stderr)
+        try:
             work_jira.MOVER.observe()
         except Exception as exc:  # Jira on Done must never stop the monitor
             print(f'work jira failed: {exc!r}', file=sys.stderr)
@@ -379,6 +385,18 @@ def pane_identity(pane):
     return (entry.get('agent'), entry.get('owner_pid'), entry.get('process_start'), thread)
 
 
+# The search menu's "Start a new tab" (quick_tab.py).
+QUICK_ROUTER = quick_tab.Router()
+QUICK_STARTER = quick_tab.Starter()
+
+
+def quick_groups():
+    try:
+        return groups.all_groups()
+    except Exception:  # a group read error leaves only the sessions' own places
+        return {}
+
+
 def sessions():
     """Discovery shells out (ps, tmux, sqlite); every open page and the monitor ask every 2s, so share one result for a second."""
     with SESSIONS_LOCK:
@@ -391,7 +409,7 @@ def sessions():
 
 # Writes that add, remove or rename tmux panes or sessions. After one succeeds, the next list must come from tmux,
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
-TMUX_WRITES = {'/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
+TMUX_WRITES = {quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
                '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
                '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled'} | groups_api.WRITES
 
@@ -2026,6 +2044,8 @@ class Handler(BaseHTTPRequestHandler):
                 groups_api.get(self)
             elif codex_level.handles(path):
                 codex_level.get(self)
+            elif wakatime.handles(path):
+                wakatime.get(self)
             elif autonomy.handles(path):
                 autonomy.get(self)
             elif approval.handles(path):
@@ -2137,7 +2157,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not wakatime.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2165,6 +2185,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if codex_level.handles(self.path):
             codex_level.post(self)
+            return
+        if wakatime.handles(self.path):
+            wakatime.post(self, sessions, tab_folder)
             return
         if codex_trust.handles(self.path):
             codex_trust.post(self, choose=choose, agent_folder=agent_folder, chat_folder=chat_folder,
@@ -2202,7 +2225,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab') else 65536):
+            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab', quick_tab.START_PATH) else 65536):
                 self.respond(413, {'error': 'Message is too large.'})
                 return
             body = json.loads(self.rfile.read(size))
@@ -2563,6 +2586,17 @@ class Handler(BaseHTTPRequestHandler):
                         data.get('messages') or [], preview['brief'], subprocess.run)
                 self.respond(201, {'pane': new_pane})
                 return
+            if self.path in quick_tab.PATHS:
+                if self.path == quick_tab.ROUTE_PATH:
+                    # No lock: the model call takes seconds and writes nothing.
+                    self.respond(200, QUICK_ROUTER.route(body, sessions(), quick_groups(), agent_folder))
+                    return
+                with SEND_LOCK:
+                    if self.path == quick_tab.START_PATH:
+                        self.respond(201, QUICK_STARTER.start(body, sessions(), quick_groups(), agent_folder))
+                    else:
+                        self.respond(200, QUICK_STARTER.move(body, sessions(), quick_groups()))
+                return
             if self.path == '/mobile/api/delegate':
                 entries = sessions()
                 entry = delegate.validate(body, entries)
@@ -2794,7 +2828,7 @@ class Handler(BaseHTTPRequestHandler):
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in ('/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)
@@ -2882,8 +2916,9 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
                     auto_resume.forget_pane(pane, run=subprocess.run)
-                    subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
-                                   capture_output=True, timeout=5)
+                    with groups.closing(pane):  # its auto stack goes when empty or root-only
+                        subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
+                                       capture_output=True, timeout=5)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -2991,6 +3026,9 @@ if __name__ == '__main__':
     import pane_view
     import detection_rules
     detection_rules.save_last_good()
+    container = browser_container.default('test')
+    if container is not None:
+        browser.BROWSER.use_container(container)
     atexit.register(browser.stop_all)
     pane_view.zoom_repair_all()
     paths.SCOPE_TMUX = bool(os.environ.get('INVOCATION_ID'))
@@ -3013,7 +3051,8 @@ if __name__ == '__main__':
         'display_dir': lambda entry: home_path(tab_folder(entry)),
         'on_change': forget_sessions,
     }, daemon=True).start()
-    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty auto stacks go
+    groups.HOLD = auto_resume.restoring  # no auto stack dissolves while saved tabs come back
+    threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty and root-only auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()

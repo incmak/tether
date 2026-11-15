@@ -90,6 +90,22 @@ class ContainerTests(unittest.TestCase):
         self.assertNotIn('proxy_pass', text)
         self.assertFalse((browser_container.FILES / 'sock_relay.py').exists())
 
+    def test_live_page_hands_wheel_turns_to_the_panel(self):
+        # Selkies sends whole wheel clicks (a trackpad scrolled about 12 times too far); tether-wheel.js sends the
+        # turns to the panel instead. init-nginx rebuilds the web root from the dashboard folder, so mount them there.
+        self.container.start()
+        args = self.runner.ran('run')[0]
+        mounts = [arg for prev, arg in zip(args, args[1:]) if prev == '-v']
+        files, dashboard = browser_container.FILES, browser_container.DASHBOARD
+        self.assertIn('%s:%s/index.html:ro' % (files / 'dashboard-index.html', dashboard), mounts)
+        self.assertIn('%s:%s/tether-wheel.js:ro' % (files / 'tether-wheel.js', dashboard), mounts)
+        page = (files / 'dashboard-index.html').read_text()
+        self.assertIn('<script src="tether-wheel.js"></script>', page)
+        self.assertLess(page.index('tether-wheel.js'), page.index('type="module"'))  # runs before the Selkies client
+        script = (files / 'tether-wheel.js').read_text()
+        self.assertIn("tether: 'wheel'", script)
+        self.assertIn('capture: true', script)
+
     def test_each_start_gets_a_new_password_and_the_web_auth_matches_it(self):
         self.assertIsNone(self.container.web_auth())
         self.container.start()
@@ -168,6 +184,33 @@ class ContainerTests(unittest.TestCase):
         with mock.patch.object(browser_container, 'docker_path', return_value=None):
             self.assertIsNone(browser_container.default('test'))
 
+
+    def test_import_starts_no_process_and_the_server_start_picks_the_container(self):
+        # The UI fixture servers import server.py under an audit hook that forbids subprocesses (test_cold_load.cjs).
+        import os, subprocess, sys
+        with tempfile.TemporaryDirectory() as folder:
+            docker = Path(folder) / 'docker'
+            docker.write_text('#!/bin/sh\nexit 0\n')
+            docker.chmod(0o755)
+            code = ("import sys\n"
+                    "def guard(event, args):\n"
+                    "    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn'): raise RuntimeError('spawned')\n"
+                    "sys.addaudithook(guard)\n"
+                    "import browser\n"
+                    "print(browser.BROWSER.container)\n")
+            env = dict(os.environ, PATH=folder + os.pathsep + os.environ.get('PATH', ''), MOBILE_TMUX_BROWSER_SELKIES='1')
+            result = subprocess.run([sys.executable, '-c', code], cwd=Path(browser.__file__).parent, env=env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, 'None'), result.stderr[-2000:])
+        container = browser_container.Container('t', root=Path(self.tmp.name) / 'u', runner=Runner())
+        chrome = browser.Browser()
+        chrome.use_container(container)
+        self.assertIs(chrome.container, container)
+        self.assertEqual((chrome.chrome_finder(), chrome.launcher), ('container', container.launch))
+        chrome.pid = 1
+        with self.assertRaises(browser.BrowserError):
+            chrome.use_container(container)  # never swap the launcher of a running browser
+        chrome.pid = None
 
 class WindowChrome(FakeChrome):
     def answer(self, message):

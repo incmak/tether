@@ -193,6 +193,11 @@ def _step(action, *args):
         return f'skipped {action.__name__}{tuple(a for a in args if isinstance(a, str))}: {exc}'
 
 
+def _move(session_id, pane, group_id, run):
+    """groups.move that removes only an empty stack: a later move of this run may still need a root-only one."""
+    groups.move(session_id, pane, group_id, run, dissolve=False)
+
+
 def _rename_all(session_id, renames, run):
     """Rename in an order where no new name is still in use: A -> B waits for B -> C. A loop (A -> B, B -> A) goes
     through a free temporary name first."""
@@ -282,7 +287,7 @@ def apply(result, run=subprocess.run, thread_of=lambda pane: None):
                     or (move['from'] and move['from'] not in ours) or to not in ours:
                 skipped.append(f"skipped move {move['pane']}: it or its stack changed since the plan")
                 continue
-            skipped.append(_step(groups.move, session_id, move['pane'], to, run))
+            skipped.append(_step(_move, session_id, move['pane'], to, run))
         for gid in result['drops']:
             skipped.append(_step(groups.drop_if_empty, session_id, gid, run))
         roots = result.get('roots', {})

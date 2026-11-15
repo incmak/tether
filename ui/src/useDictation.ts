@@ -135,7 +135,8 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       }
       console.info('[dictation]', trail.join(' '))
       const spoken = words(), next = join(base, spoken)
-      reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started })
+      const mixed = !!spoken && hinglish(spoken)
+      reportVoice({ kind: 'dictation', event: deaf ? 'deaf' : spoken ? 'ok' : 'empty', trail: trail.join(' '), ms: Date.now() - started, ...(mixed ? { detail: 'hinglish' } : {}) })
       let notice = message
       if (notice === undefined && !handsFree) {
         if (second && deaf) notice = `This device's speech service heard nothing twice, so Tether uses the server voice here for 24 hours. Tap the mic and speak again. (speech: ${trail.join(' ')})`
@@ -151,8 +152,9 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
         return
       }
       // Words came: show them now, then let the server convert the same audio. Parakeet takes the project word hints
-      // (tmux, Tether, Codex); browser speech cannot, so it writes "t-marks" for tmux. English only: Parakeet is English.
-      if (spoken && kept && /^en\b/i.test(lang)) {
+      // (tmux, Tether, Codex); browser speech cannot, so it writes "t-marks" for tmux. English only: Parakeet is English,
+      // and it turned Hinglish that Chrome wrote well into nonsense ("mujhe lagta hai" -> "Mujilakta has", 2026-11-15).
+      if (spoken && kept && /^en\b/i.test(lang) && !mixed) {
         keepBackup = true
         cleanup(); setText(next); setListening(false)
         if (notice !== undefined) setError(notice)
@@ -183,8 +185,11 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       const server = recorded.audio.size ? await serverText(recorded.audio, refineLimit(seconds)) : null
       if (cancelled) return
       if (cleanupRecording.current === cancel) cleanupRecording.current = null
-      const used = server?.text ? 'server' : server?.late ? 'late' : 'browser'
-      const next = server?.text ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
+      // Parakeet is English only. When it drops a Hindi word that the browser heard ("deploy kar do please" became
+      // "Deploy Cardo please."), the browser text is closer to what was said.
+      const foreign = !!server?.text && dropsHindi(spoken, server.text)
+      const used = foreign ? 'hinglish' : server?.text ? 'server' : server?.late ? 'late' : 'browser'
+      const next = server?.text && !foreign ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
       setText(next); finish(next)
       reportVoice({ kind: 'dictation', event: 'refine', trail: trail.join(' '), ms: Date.now() - begun,
         detail: `used=${used} browser=${spoken.split(/\s+/).length} server=${server?.text ? server.text.split(/\s+/).length : 0} audio=${seconds.toFixed(1)}s` })
@@ -418,6 +423,32 @@ function speechConstructor() {
 
 function recorderType() {
   return ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find(kind => MediaRecorder.isTypeSupported(kind))
+}
+
+// Common Hindi and Urdu words as browser speech writes them in Latin letters. None is a common English word,
+// so two different ones mark Hinglish or Urdu speech; one alone ("ke", "bhai") can be a name.
+const HINDI_WORDS = new Set(('hai hain nahi nahin kar karo kare karna karne karke karte karta kariye kijiye mujhe mera meri mere '
+  + 'tum tumhe aap yeh woh kya kyun kyunki kaise kaun kahan yahan wahan aur ko ki ke ka mein bhai abhi phir tak thoda bahut '
+  + 'bohat lekin magar agar hua hui ho hoga tha thi gaya gayi raha rahi rahe jana dena lena liye chahiye dobara bolo wala '
+  + 'wali accha acha theek thik haan sab kuch kal aaj bhi toh ek dein matlab pehle sirf jaldi wapas usko isko unko apna apni').split(' '))
+
+function latinWords(text: string) {
+  return text.toLowerCase().split(/[^a-z]+/).filter(Boolean)
+}
+
+// The number of different Hindi or Urdu words in text.
+export function hindiWords(text: string) {
+  return new Set(latinWords(text).filter(word => HINDI_WORDS.has(word))).size
+}
+
+export function hinglish(text: string) {
+  return /[\u0900-\u097F\u0600-\u06FF]/.test(text) || hindiWords(text) >= 2  // Devanagari or Urdu script, or two different words
+}
+
+// True when the server text lost a Hindi word that the browser text has.
+export function dropsHindi(browser: string, server: string) {
+  const heard = new Set(latinWords(server))
+  return latinWords(browser).some(word => HINDI_WORDS.has(word) && !heard.has(word))
 }
 
 // How long the box waits for the server text before it keeps the browser text. Parakeet converts 3 s of speech in

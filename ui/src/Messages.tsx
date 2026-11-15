@@ -131,6 +131,9 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   if (kind === 'actions') {
     return <ToolGroup id={id} text={text} count={count} tools={tools} api={api} session={session} live={live} runningShown={runningShown} />
   }
+  // A slash command's one-line result ("Set model to `Fable 5.2` ..."): a quiet line with its `code` marks read, not a terminal box.
+  if (kind === 'terminal' && !id.startsWith('shell:') && !text.trim().includes('\n') && text.trim().length <= 240) return <p className="notice-line command-result" data-msg-id={id}><Check size={15} />
+    <span>{text.trim().split('`').map((part, index) => index % 2 ? <code key={index}>{part}</code> : <Linked key={index} text={part} />)}</span></p>
   if (kind === 'terminal') return <div data-msg-id={id}><TerminalSnapshot text={text} shell={id.startsWith('shell:')} /></div>
   const shell = role === 'user' && !kind ? shellCommand(text) : null
   if (shell) return <div className="terminal-block shell-run" data-msg-id={id} role="group" aria-label="Shell command result">

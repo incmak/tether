@@ -24,6 +24,25 @@ Only `connect` and `exchange` use device authentication instead of Tether browse
 The nginx example under `server/deploy/examples/` shows those exact routes.
 Keep all pairing-code creation, device lists, revocation, and Allow routes behind normal Tether sign-in.
 
+## Open Tether search from any app
+
+The command **Open Tether search** shows your Tether tab and opens its search menu, also when Chrome is in the background.
+Its suggested key is ⌘⇧9 on a Mac (Ctrl+Shift+9 elsewhere). Chrome allows only Ctrl+Shift plus a digit as a suggested global key.
+To use ⌥Space, as inside Tether:
+
+1. Open `chrome://extensions/shortcuts`, or click **Change the key** in the extension options.
+2. Find **Tether browser** › **Open Tether search** and click the pencil.
+3. Press ⌥Space.
+4. Set the scope to **Global**.
+
+If Raycast or another app already uses ⌥Space, that app keeps it. Pick another key, or free it in that app first.
+⌘Space stays with Spotlight.
+
+The command uses no new permission. It finds the tab at your paired origin under `/chat/`, focuses its window, and adds `#search` to its address.
+The page opens search and removes `#search` again. It adds no Back step and closes no open dialog.
+If no Tether tab is open, it opens `/chat/?go=search`. It never touches the tab under a debugger task.
+Web pages cannot send this command. Only the key press starts it.
+
 No remote script, content script, local relay, or native helper is used.
 No host permission is required at install time. Pairing requests only the chosen HTTPS origin.
 The extension sends page events and images to that Tether server while a grant is active.

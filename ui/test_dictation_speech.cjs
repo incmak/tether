@@ -692,6 +692,41 @@ async function main() {
     s.h.unmount()
   }
   {
+    // Hinglish or Urdu in Latin letters: Parakeet would turn it into nonsense, so the browser text stays.
+    const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'en-IN' }), s = setup(env)
+    await s.render().toggle(); await flush(); const final = s.render().finalText()
+    env.records[0].data(); env.recognitions[0].result(['mujhe lagta hai server slow hai', true]); env.advance(3000); s.render().stop()
+    assert.equal(await final, 'mujhe lagta hai server slow hai'); await flush()
+    assert.equal(env.calls.length, 0); assert.equal(env.streams[0].track.stops, 1)
+    assert.equal(env.voiceReports.at(-1).detail, 'hinglish')
+    s.h.unmount()
+    const { hinglish } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
+    for (const text of ['Bhai yeh bug abhi tak fix nahi hua please dobara check karo', 'mujhe lagta hai Sarvar slow hai thoda vate Karte Hain',
+      'Codex ko bolo ki diff review kare aur phir main pe push kar de', 'Mehrbani karke yeh file khol dein aur mujhe batayein ke masla kya hai',
+      'Tether mein voice log check karo', 'यह ठीक है', 'یہ ٹھیک ہے']) assert.equal(hinglish(text), true, text)
+    for (const text of ['Ask Codex to review the diff and push it to main.', 'Open Tether on the server and split the tmux pane.',
+      'Claude, please check the voice log in Tether. If the release failed, run the tests again, fix the bug, and then commit and push the change.',
+      'Today I want to finish the voice work before lunch. First, make the mic fast on the Mac.', 'Open a new tab, run the tests and tell me only the one that fails.',
+      'Ho ho ho, the PE ratio is fine.']) assert.equal(hinglish(text), false, text)
+  }
+  {
+    // One Hindi word: the server still converts. Its text wins only when it keeps the Hindi word.
+    for (const [said, server, expected, used] of [['push kar do', 'Push cardoo.', 'push kar do', 'hinglish'],
+      ['deploy kar do please', 'Deploy Cardo please.', 'deploy kar do please', 'hinglish'],
+      ['merge the branch toh', 'Merge the branch to.', 'merge the branch toh', 'hinglish'],
+      ['ask rahul to check it bhi', 'Ask Rahul to check it, bhi.', 'Ask Rahul to check it, bhi.', 'server']]) {
+      const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'en-IN' }), s = setup(env)
+      env.result = server
+      await s.render().toggle(); await flush(); const final = s.render().finalText()
+      env.records[0].data(); env.recognitions[0].result([said, true]); env.advance(2000); s.render().stop()
+      assert.equal(await final, expected); assert.match(env.voiceReports.at(-1).detail, new RegExp(`^used=${used} `))
+      s.h.unmount()
+    }
+    const { hindiWords, dropsHindi } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
+    assert.equal(hindiWords('Codex ko review karne do'), 2); assert.equal(hindiWords('push kar do'), 1); assert.equal(hindiWords('Ask Rahul to review the PR'), 0)
+    assert.equal(dropsHindi('push kar do', 'Push cardoo.'), true); assert.equal(dropsHindi('push kar do', 'Push kar do.'), false); assert.equal(dropsHindi('ship it', 'Ship it.'), false)
+  }
+  {
     // Parakeet is English only: other languages keep the browser text and send nothing.
     const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'hi-IN' }), s = setup(env)
     await s.render().toggle(); await flush(); const final = s.render().finalText()
@@ -705,7 +740,7 @@ async function main() {
     assert.equal(refineLimit(0), 3000); assert.equal(refineLimit(10), 4500); assert.equal(refineLimit(120), 8000)
   }
   console.log('Speech: desktop backup converts a deaf tap, closes on words or a quick tap, carries into the fallback, and survives a mic failure pass')
-  console.log('Speech: desktop server text replaces browser words, falls back after the limit, on cancel, on empty text and for other languages pass')
+  console.log('Speech: desktop server text replaces browser words, falls back after the limit, on cancel, on empty text, for Hinglish and for other languages pass')
 
   const closedEnv = speechEnvironment(), closed = setup(closedEnv, { text: 'Base' })
   await closed.render().toggle(); const closedFinal = closed.render().finalText(), speech = closedEnv.recognitions[0]

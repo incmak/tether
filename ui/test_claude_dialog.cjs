@@ -10,7 +10,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
 const SERVER = path.join(__dirname, '..', 'server')
-const NAMES = (process.env.ONLY || 'mcp,config,usage,effort,resume,status,help,help_narrow,plugin,stats,stats_body,stats_models,stats_narrow').split(',')
+const NAMES = (process.env.ONLY || 'mcp,config,config_list,privacy,usage,effort,resume,status,help,help_narrow,plugin,stats,stats_body,stats_models,stats_narrow').split(',')
 const DIALOGS = JSON.parse(execFileSync('python3', ['-c', `
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -24,7 +24,10 @@ function fixtures(name) {
   const pane = { id: '%1', tmux_session: '$1', label: 'Dialog test', agent: 'claude', dir: '/srv/project', state: 'Idle',
     writable: true, thread: 'dialog-thread', approval: null }
   const messages = [{ id: 'm1', role: 'user', text: 'Start the work.', time: '2026-11-15T08:00:00Z' },
-    { id: 'm2', role: 'assistant', text: 'Work started.', time: '2026-11-15T08:00:05Z' }]
+    { id: 'm2', role: 'assistant', text: 'Work started.', time: '2026-11-15T08:00:05Z' },
+    { id: 'm3', role: 'user', text: '/model', time: '2026-11-15T08:01:00Z' },
+    { id: 'm4', role: 'assistant', kind: 'terminal', text: 'Set model to `Fable 5.2` and saved as your default for new sessions', time: '2026-11-15T08:01:01Z' },
+    { id: 'm5', role: 'assistant', kind: 'terminal', text: 'Context Usage\n  38.2k/1m tokens (4%)\n  Free space: 928.8k', time: '2026-11-15T08:01:02Z' }]
   return {
     sessions: { sessions: [pane], default_thread: pane.thread },
     chat: { messages, busy: false, thread: pane.thread, agent: pane.agent, writable: true, session: pane.id, earlier: 0, limit: 100,
@@ -129,6 +132,15 @@ async function main() {
           await page.waitForTimeout(200)
           if (actions().join() !== 'tab:Usage,filter:compact,key:Escape') errors.push(`actions sent: ${actions().join()} ${JSON.stringify(sent)} box=${await card.getByRole('searchbox').inputValue()}`)
           if (await card.getByRole('button', { name: 'Type' }).count()) errors.push('"Type" shows as a key button')
+        } else if (state === 'config_list') {
+          // Enter flips the marked setting at once, so the button names the setting.
+          if (!await card.getByRole('button', { name: /^Change “Auto-compact”/ }).count()) errors.push('the Change button does not name the setting')
+          const result = page.locator('.command-result')
+          if (await result.locator('code').innerText() !== 'Fable 5.2') errors.push('a one-line command result does not show its code mark')
+          if ((await result.innerText()).includes('`')) errors.push('a command result shows raw backticks')
+          if (await page.locator('pre.terminal-snapshot').count() !== 1) errors.push('want one terminal box: the multi-line result only')
+        } else if (state === 'privacy') {
+          if (!await card.getByRole('button', { name: /^Toggle “Help improve our AI models”/ }).count()) errors.push('the Toggle button does not name the setting')
         } else if (state === 'usage') {
           if (await card.locator('progress').count() !== 3) errors.push('want 3 usage meters')
           if (await card.locator('pre').count()) errors.push('usage shows as terminal text')

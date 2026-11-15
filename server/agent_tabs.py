@@ -14,6 +14,7 @@ import helper_close
 import helper_tabs
 import paths
 import review_links
+import self_close
 import worktrees
 from terminal_input import UUID, live_status
 
@@ -61,11 +62,15 @@ def link_pair(body, entries, last_reply):
     return {'linked': True}
 
 
-def close_tab(body, caller, entries, run, status):
+def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     """Close a tab this tab started or reviews, after its work is done. A working tab stays open."""
+    if body.get('self') is True:
+        # The user asked this tab to close. fresh skips the status cache for the last check before the close.
+        return self_close.schedule(caller, run, status, sessions=sessions, lock=lock,
+                                   fresh=lambda entry: auto_resume.overlay(entry, live_status(entry)))
     pane = helper_tabs._pane(body)
     if pane == caller['id']:
-        raise ValueError('A tab cannot close itself. Ask the tab that started it.')
+        raise ValueError('To close this tab when the user asks, run `close --self`.')
     exists, record = helper_tabs.load(pane, run)
     if not exists:
         raise ValueError('That session has ended. Select another tab.')
@@ -86,22 +91,38 @@ def _start_group(body, caller, run, entries=(), *, folder='', branch=None):
     (auto_stacks.py). It may make the root's stack and move the root and the caller into it; when the start fails, they
     go back and an empty new stack goes away. branch: the --worktree branch."""
     state = {'made': None, 'moved': [], 'before': set()}  # moved: [(pane, (session id, group id))] that Tether moved
+    token = None
     with groups.LOCK():
         try:
             session_id, current = groups.group_of_pane(caller['id'], run)
             group_id, root, stack_goal = _pick_group(body, caller, run, entries, session_id, current, folder, state)
+            if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
+                token = groups.start_begin(session_id, group_id, run)
         except BaseException:
             _undo_group(run, state)
             raise
-    name = auto_stacks.helper_tab_name(role=body.get('role'), review=delegate.normalize_review(body.get('review', False)) == 'new',
-                                       name=body.get('name'), branch=branch, stack=body.get('group'),
-                                       message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
     try:
+        name = auto_stacks.helper_tab_name(role=body.get('role'),
+                                           review=delegate.normalize_review(body.get('review', False)) == 'new',
+                                           name=body.get('name'), branch=branch, stack=body.get('group'),
+                                           message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
         yield group_id, root, name
     except BaseException:
         with groups.LOCK():
+            _end_start(session_id, token, run)
+            token = None
             _undo_group(run, state)
         raise
+    finally:
+        _end_start(session_id, token, run)
+
+
+def _end_start(session_id, token, run):
+    try:
+        if token is not None:
+            groups.start_end(session_id, token, run)
+    except (groups.GroupError, OSError, subprocess.SubprocessError):
+        pass  # the marker expires (groups.START_LIMIT)
 
 
 def _owner(caller, root, entries):
@@ -275,7 +296,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                     raise ValueError('That review link is not on this tab.')
             result = 200, {'stopped': review_links.remove(worker, reviewer)}
         elif action == 'close':
-            result = 200, close_tab(body, caller, entries, run, status)
+            result = 200, close_tab(body, caller, entries, run, status, sessions, lock)
         elif action == 'list':
             links = review_links.reviewed_by()
             by_pane = {entry['id']: entry for entry in entries}

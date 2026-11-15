@@ -34,6 +34,7 @@ async function main() {
           subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },
           'browser/agents': { enabled: false, agents: [], asks: [] },
           'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
+          'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
         }
         return route.fulfill({ json: fixtures[endpoint] || {} })
       }

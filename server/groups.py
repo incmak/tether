@@ -3,7 +3,8 @@
 The session option @groups holds the list, in order, empty groups included:
   [{"id": "g1a2b3c4d", "name": "Home dashboard", "project": "<12-hex projects.py id or empty>", "auto": true}]
 "auto" is true for a stack Tether made (auto_stacks.py). Tether removes such a stack when its last tab closes or moves
-out. "by": "user" marks a stack the user made or renamed (groups_api.py): a rename clears "auto" and sets it. Tether
+out, and dissolves it when only its main session ("root") is left: the root goes to Unstacked (drop_if_alone).
+"by": "user" marks a stack the user made or renamed (groups_api.py): a rename clears "auto" and sets it. Tether
 never renames or removes a user stack. A stack with neither key was made before makers were recorded (2026-11-15);
 Tether leaves it alone too.
 The pane option @group holds a group id. A pane with no @group, or with an id that is not in @groups, is in Unstacked.
@@ -16,6 +17,7 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 import unicodedata
 
 try:
@@ -64,6 +66,11 @@ LOCK = _locked
 GONE_TAB = 'That tab has ended.'
 GONE_GROUP = 'That stack no longer exists.'
 GONE_SESSION = 'That session has ended.'
+
+
+STARTS = '@group_starts'  # session option: helper starts in flight, {token: [group id, until]} (start_begin)
+START_LIMIT = 600  # seconds: a start marker that its process never ended (a crash) stops counting then
+HOLD = None  # server.py: auto_resume.restoring. While it returns True, saved tabs come back: no stack is dissolved.
 
 
 class GroupError(ValueError):
@@ -277,9 +284,10 @@ def rename(session_id, group_id, name, run=subprocess.run, by_user=True):
     return group
 
 
-def move(session_id, pane, group_id, run=subprocess.run, by_user=False):
+def move(session_id, pane, group_id, run=subprocess.run, by_user=False, dissolve=True):
     """Put a tab in a group of its session. None or '' puts it in Unstacked. A Tether-made group that the tab leaves
-    empty goes away."""
+    empty, or with only its root, goes away (drop_if_alone). dissolve=False: only an empty one goes (a batch of moves,
+    auto_stacks_cleanup.py, whose later moves may still need the stack)."""
     with LOCK():
         groups = read(session_id, run)
         if group_id:
@@ -289,7 +297,7 @@ def move(session_id, pane, group_id, run=subprocess.run, by_user=False):
             raise GroupError(404, 'That tab is in another session. Refresh the list and try again.')
         _label(pane, group_id or '', run, by_user)
         if old and old != (group_id or ''):
-            drop_if_empty(session_id, old, run)
+            (drop_if_alone if dissolve else drop_if_empty)(session_id, old, run)
 
 
 def _labelled(session_id, group_id, run):
@@ -319,30 +327,129 @@ def ungroup(session_id, group_id, run=subprocess.run, by_user=False):
     _archive(group)
 
 
+def _starts(session_id, run):
+    """{token: [group id, until]} of the helper starts in flight in the session, without expired ones. None when tmux
+    fails or the value is not a marker list: unknown, so nothing may count as free (starting)."""
+    shown = _tmux(run, 'show-options', '-qv', '-t', session_id, STARTS)
+    if shown.returncode:
+        return None
+    try:
+        data = json.loads(shown.stdout) if shown.stdout.strip() else {}
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    now = time.time()
+    return {token: value for token, value in data.items() if isinstance(value, list) and len(value) == 2
+            and isinstance(value[0], str) and isinstance(value[1], (int, float)) and value[1] > now}
+
+
+def _save_starts(session_id, starts, run):
+    if starts:
+        _check(_tmux(run, 'set-option', '-t', session_id, STARTS, json.dumps(starts)))
+    else:
+        _tmux(run, 'set-option', '-u', '-t', session_id, STARTS)
+
+
+def start_begin(session_id, group_id, run=subprocess.run):
+    """agent_tabs._start_group, under LOCK: a helper start for group_id is in flight until start_end. The new tab gets
+    its @group only after the launch, so meanwhile the stack may look empty or root-only: it must stay. A tmux option,
+    not memory, so every process that drops stacks sees it. Returns the token for start_end."""
+    with LOCK():
+        starts = _starts(session_id, run)
+        if starts is None:
+            raise GroupError(500, 'Could not read the stack start markers.')
+        token = _new_id(set(starts))
+        starts[token] = [group_id, time.time() + START_LIMIT]
+        _save_starts(session_id, starts, run)
+    return token
+
+
+def start_end(session_id, token, run=subprocess.run):
+    with LOCK():
+        starts = _starts(session_id, run)
+        if starts is not None and starts.pop(token, None) is not None:
+            _save_starts(session_id, starts, run)
+
+
+def starting(session_id, group_id, run=subprocess.run):
+    """True while a helper start for group_id is in flight, or when that is unknown (tmux failed, a bad marker value)."""
+    starts = _starts(session_id, run)
+    return starts is None or any(value[0] == group_id for value in starts.values())
+
+
 def drop_if_empty(session_id, group_id, run=subprocess.run):
-    """Remove a Tether-made group that has no tabs. True when it went. A user group, or one with tabs, stays."""
+    """Remove a Tether-made group that has no tabs. True when it went. A user group, one with tabs, or one that a
+    helper start is about to fill stays."""
     with LOCK():
         groups = read(session_id, run)
         group = next((g for g in groups if g['id'] == group_id), None)
-        if group is None or not group.get('auto') or _labelled(session_id, group_id, run):
+        if group is None or not group.get('auto') or _labelled(session_id, group_id, run) \
+                or starting(session_id, group_id, run):
             return False
         write(session_id, [g for g in groups if g['id'] != group_id], run)
     _archive(group)
     return True
 
 
-def drop_empty_auto(run=subprocess.run):
-    """Remove every Tether-made group with no tabs, in all sessions (a tab closed). Returns [(session id, name)]."""
+def _alone(session_id, group, run):
+    """The root pane when it is the only tab of a Tether-made group and Tether may move it, else None."""
+    root = group.get('root')
+    if not group.get('auto') or not root:
+        return None
+    if _labelled(session_id, group['id'], run) != [root] or placed_by_user(root, run):
+        return None
+    return root
+
+
+def drop_if_alone(session_id, group_id, run=subprocess.run):
+    """drop_if_empty, and dissolve a Tether-made group whose only tab is its main session (its "root"): the root goes to
+    Unstacked and the group goes, as with no helpers (auto_stacks.py rule 2). It stays while a helper start for it is in
+    flight, while auto-resume brings tabs back (HOLD: their stacks are back before their tabs, so even an empty one
+    stays), or when the user placed the root by hand. True when it went."""
+    with LOCK():
+        groups = read(session_id, run)
+        group = next((g for g in groups if g['id'] == group_id), None)
+        if group is None or not group.get('auto') or (HOLD is not None and HOLD()) or starting(session_id, group_id, run):
+            return False
+        panes = _labelled(session_id, group_id, run)
+        if panes:
+            root = _alone(session_id, group, run)
+            if root is None:
+                return False
+            _label(root, '', run)
+        write(session_id, [g for g in groups if g['id'] != group_id], run)
+    _archive(group)
+    return True
+
+
+def drop_lone_auto(run=subprocess.run):
+    """drop_if_alone for every Tether-made group in all sessions (a tab closed). Returns [(session id, name)]."""
     dropped = []
     with LOCK():
         for session_id, found in all_groups(run).items():
             for group in found:
                 try:
-                    if group.get('auto') and drop_if_empty(session_id, group['id'], run):
+                    if group.get('auto') and drop_if_alone(session_id, group['id'], run):
                         dropped.append((session_id, group['name']))
                 except GroupError:
                     break  # the session ended
     return dropped
+
+
+@contextlib.contextmanager
+def closing(pane, run=subprocess.run):
+    """Around the close of a tab: afterwards, its Tether-made group goes when it is empty or holds only its root."""
+    try:
+        session_id, label = _pane(pane, run)
+    except GroupError:
+        session_id, label = None, ''
+    yield
+    if label:
+        try:
+            drop_if_alone(session_id, label, run)
+        except (GroupError, OSError, subprocess.SubprocessError):
+            pass  # the 30 s sweep (auto_stacks.watch) tries again
 
 
 def remove(session_id, group_id, run=subprocess.run):

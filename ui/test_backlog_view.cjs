@@ -1,16 +1,18 @@
 // The backlog's search, filters and sort (backlogView.ts). They change only what is shown, never the file.
 const { strict: assert } = require('node:assert')
 const { readFileSync } = require('node:fs')
-const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 
+// Compile in this realm (module._compile): a vm realm makes the search loops several times slower.
 const load = file => {
-  const output = { exports: {} }
-  runInNewContext(ts.transpileModule(readFileSync(file, 'utf8'), {
+  const mod = new module.constructor(file)
+  mod.require = name => name === './backlogItems' ? items : name === './search' ? searchModule : require(name)
+  mod._compile(ts.transpileModule(readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, { exports: output.exports, require: name => name === './backlogItems' ? items : require(name) })
-  return output.exports
+  }).outputText, file)
+  return mod.exports
 }
+const searchModule = load('src/search.ts')
 const items = load('src/backlogItems.ts')
 const v = load('src/backlogView.ts')
 const plain = value => JSON.parse(JSON.stringify(value))
@@ -81,4 +83,28 @@ const fix = rows.find(row => row.ref === 'B7')
 const search = rows.find(row => row.ref === 'B12')
 assert.ok(v.queryScore(search, 'search') > v.queryScore(fix, 'teardown'), 'A title match ranks above a detail match')
 assert.equal(v.queryScore(fix, 'zzz'), null)
-console.log('Backlog view: filters, search, IDs, sort, counts, reorder rule and highlight passed')
+
+// The same fuzzy matcher as the sidebar and ⌘K (search.ts).
+assert.deepEqual(refs(v.viewGroups(rows, view({ query: 'flkay' }))), [['tether', ['B7']]], 'One typo in a title word')
+assert.deepEqual(refs(v.viewGroups(rows, view({ query: 'fst' }))), [['tether', ['B7']]], 'Title initials: Fix flaky share test')
+assert.deepEqual(refs(v.viewGroups(rows, view({ query: 'bklg srch' }))), [['tether', ['B12']]], 'Close letters from a word start')
+assert.deepEqual(refs(v.viewGroups(rows, view({ query: 'teardwon' }))), [], 'Details match whole words only: no typo noise from long notes')
+assert.deepEqual(refs(v.viewGroups(rows, view({ query: 'thw' }))), [], 'Details give no initials or loose letters')
+const ranked = items.parseBacklog('## p\n- [ ] Notes on deploy #B1\n  - see the voice log\n- [ ] Voice latency #B2\n')
+assert.deepEqual(refs(v.viewGroups(ranked, view({ query: 'voice' }))), [['p', ['B2', 'B1']]], 'A search in the saved order shows the title match first')
+assert.deepEqual(refs(v.viewGroups(ranked, view({ query: 'voice', sort: 'oldest' }))), [['p', ['B1', 'B2']]], 'A chosen sort keeps its order')
+assert.equal(v.detailMatched(fix, 'teardown', 'tether'), true, 'Show the details when only a detail matches')
+assert.equal(v.detailMatched(fix, 'flaky', 'tether'), false, 'A title match keeps the details closed')
+assert.equal(v.detailMatched(fix, 'b7', 'tether'), false)
+const blocked = items.parseBacklog('- [ ] Deploy service #B8\n  - Blocked by B1234\n').find(row => row.ref === 'B8')
+assert.equal(v.detailMatched(blocked, 'b1234 deploy'), true, 'An ID in a longer query can match a note')
+assert.equal(v.detailMatched(blocked, 'b1234'), false, 'An ID alone matches IDs only')
+
+// Speed: 500 items with notes (the real backlog has about 30 open), two typo words, under 10 ms.
+const big = items.parseBacklog(Array.from({ length: 500 }, (_, i) => `- [ ] Item ${i} about deploy logs and share tests #B${i + 1}\n  - note ${i}: the worker restarts after a timeout`).join('\n'))
+const times = []
+// Twenty warm-up rounds first: a cold JIT is not what a user feels after the first keystroke.
+for (let round = 0; round < 35; round++) { const start = performance.now(); v.viewGroups(big, view({ query: 'shrae tmeout' })); if (round >= 20) times.push(performance.now() - start) }
+const median = times.sort((a, b) => a - b)[7]
+assert.ok(median < 10, `backlog search took ${median.toFixed(1)} ms`)
+console.log(`Backlog view: filters, fuzzy search, IDs, sort, counts, reorder rule and highlight passed (search ${median.toFixed(1)} ms over 500 items)`)

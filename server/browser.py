@@ -364,9 +364,7 @@ class Browser:
 
     def __init__(self, launcher=launch, chrome_finder=None, profile=None, clock=time.monotonic,
                  *, signed=False, display=None, container=None):
-        self.container = container  # browser_container.Container: Chromium runs there and Selkies streams it
-        if container is not None:
-            launcher, chrome_finder = container.launch, lambda: 'container'
+        self.container = None  # browser_container.Container: Chromium runs there and Selkies streams it
         self.launcher, self.clock = launcher, clock
         self.chrome_finder = chrome_finder or (find_signed_chrome if signed else find_chrome)
         self.profile = profile if profile is not None else (SIGNED_PROFILE if signed else PROFILE)
@@ -386,8 +384,19 @@ class Browser:
         self.used = clock()
         self.watcher = None
         self.idle_stop = threading.Event()
+        if container is not None:
+            self.use_container(container)
 
     # life cycle ------------------------------------------------------------------------------------------------
+
+    def use_container(self, container):
+        """Run Chromium in a Selkies container from now on. The server calls this at start, not at import: finding the
+        container runs `docker image inspect`, and importing this module must not start processes."""
+        with self.lock:
+            if self.pid or self.conn:
+                raise BrowserError('Choose the container before the browser starts.')
+            self.container = container
+            self.launcher, self.chrome_finder = container.launch, lambda: 'container'
     def running(self):
         return self.conn is not None and not self.conn.closed
 
@@ -1136,7 +1145,7 @@ def frame_event(frame, browser_id='test'):
     return ('event: frame\ndata: ' + head[:-1] + ',"jpeg":"' + data + '"}\n\n').encode()
 
 
-BROWSER = Browser(container=browser_container.default('test'))
+BROWSER = Browser()  # the server's start gives it browser_container.default('test')
 SIGNED_BROWSER = Browser(chrome_finder=find_signed_chrome, profile=SIGNED_PROFILE, signed=True)
 
 

@@ -5,7 +5,8 @@ import type { Screen } from './Rail'
 // open (layer), and its index in Tether's run of entries. Index 0 is the first Tether entry: Back from there would
 // leave the app, so the in-app Back stops there. view names an overlay that Forward can open again (setViewOpener).
 export type Place = { pane?: string; screen: Screen }
-type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string }
+// spare: the entry the browser added for an "Open Tether search" request (#search). Tether steps back over it at once.
+type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string; spare?: true }
 type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean }
 
 const overlays: Overlay[] = []
@@ -13,6 +14,7 @@ let pendingBacks = 0
 const queue: (() => void)[] = []
 let placeHandler: ((place: Place) => void) | null = null
 let viewOpener: ((view: string) => boolean) | null = null
+let searchOpener: (() => void) | null = null
 let reopening: { view: string; layer: number } | null = null
 let currentPlace: Place | null = null
 let nextId = 0
@@ -98,12 +100,20 @@ function listen() {
   window.addEventListener('popstate', event => {
     moving = false
     clearTimeout(movingTimer)
-    onPop(event)
+    if (!searchRequest()) onPop(event)
     flush()
     drain()
   })
+  // popstate comes first. hashchange is a second chance only: searchRequest removes the hash, so it acts once.
+  window.addEventListener('hashchange', () => { if (searchRequest()) { flush(); drain() } })
   function onPop(event: PopStateEvent) {
     const next = event.state as Partial<NavState> | null
+    // Browser Forward onto a spare entry: go back to the real one. Nothing opens again.
+    if (next?.spare && pendingBacks === 0) {
+      pendingBacks++
+      history.back()
+      return
+    }
     const from = index
     reopening = null
     index = next?.index ?? 0
@@ -140,6 +150,36 @@ function listen() {
       placeHandler?.(next.place)
     }
   }
+}
+
+/** The Tether extension's "Open Tether search" key moves the open tab to #search (extension/worker.js). That adds a
+ * history entry with no state and removes the Forward entries. Mark that entry spare, without the hash, and step back
+ * to the real entry, so no overlay closes and no Back step is added. Then ask the app to open search. */
+export const SEARCH_HASH = '#search'
+function searchRequest(load = false) {
+  if (typeof location === 'undefined' || location.hash !== SEARCH_HASH) return false
+  const url = new URL(location.href)
+  url.hash = ''
+  // On load the entry is the page's own: keep it, without the hash.
+  if (load || state()?.tether) history.replaceState(state(), '', url)
+  else {
+    // The browser's new entry. Its Forward entries are gone, so the in-app Forward has nothing left.
+    history.replaceState({ tether: 1, spare: true, layer: 0, index: index + 1 } satisfies NavState, '', url)
+    top = index
+    saveTop()
+    changed()
+    pendingBacks++
+    history.back()
+  }
+  run(() => searchOpener?.())
+  return true
+}
+
+/** fn opens the search menu for the extension's "Open Tether search" key. A #search address on load counts too. */
+export function setSearchOpener(fn: (() => void) | null) {
+  listen()
+  searchOpener = fn
+  if (fn) searchRequest(true)
 }
 
 /** keepForward: when there are Forward steps, add no entry, so opening this overlay (the command menu) keeps them. */

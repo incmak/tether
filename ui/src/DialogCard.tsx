@@ -36,6 +36,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   const currentText = current && 'text' in current ? current.text : ''
   useEffect(() => { list.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: 'nearest' }) }, [currentText])
 
+  const facts = dialog.blocks.flatMap(block => block.type === 'facts' ? block.rows.map(fact => fact.label) : [])
   // One button per key the dialog offers. Arrows that a tab row, a slider or the list rows already cover get no button.
   const buttons: { id: string; key: string; label: string; kbd: string; primary: boolean; close: boolean }[] = []
   const add = (hint: DialogHint) => {
@@ -49,7 +50,9 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     }
     const key = keys.find(key => !ARROWS.includes(key.key)) ?? keys[0]
     if (!key || buttons.some(button => button.key === key.key)) return
-    buttons.push({ id: key.key, key: key.key, label: capital(hint.effect), kbd: key.label, primary: key.key === 'Enter', close: key.key === 'Escape' })
+    // A key that changes a value at once says which value: Enter in /config's list flips the marked setting, with no second step.
+    const target = /^(change|toggle|cycle)$/.test(hint.effect) ? currentText || (facts.length === 1 ? facts[0] : '') : ''
+    buttons.push({ id: key.key, key: key.key, label: target ? `${capital(hint.effect)} “${target}”` : capital(hint.effect), kbd: key.label, primary: key.key === 'Enter', close: key.key === 'Escape' })
   }
   dialog.hints.forEach(add)
   if (hasList) for (const [key, label] of [['Up', '↑'], ['Down', '↓']]) if (!buttons.some(button => button.key === key)) buttons.unshift({ id: key, key, label, kbd: '', primary: false, close: false })

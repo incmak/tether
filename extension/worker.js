@@ -1,4 +1,5 @@
 import {command, request, refuse, object} from './policy.mjs';
+import {searchTarget} from './search.mjs';
 
 let socket = null, epoch = null, pending = null, grant = null;
 let connected = false, lastPong = 0, reconnect = null, retry = 1000;
@@ -166,6 +167,23 @@ chrome.action.onClicked.addListener(async () => {
   if (grant) end('action_stop');
   else if (pending) await showApproval();
   else await chrome.runtime.openOptionsPage();
+});
+// The global "Open Tether search" key: show the Tether tab and ask it to open search. Only the tab's hash changes;
+// the page treats it as a request to open the menu and nothing more. No debugger, socket or page script is used.
+chrome.commands.onCommand.addListener(async name => {
+  if (name !== 'open-search') return;
+  await ready;
+  const {origin} = await chrome.storage.local.get('origin');
+  const target = searchTarget(origin, await chrome.tabs.query({}), grant?.tab);
+  if (!target) { await chrome.runtime.openOptionsPage(); return; }
+  if (target.create) {
+    const tab = await chrome.tabs.create({url: target.create, active: true});
+    await chrome.windows.update(tab.windowId, {focused: true});
+    return;
+  }
+  if (target.tab === grant?.tab) return;
+  await chrome.windows.update(target.windowId, {focused: true});
+  await chrome.tabs.update(target.tab, target.url ? {active: true, url: target.url} : {active: true});
 });
 chrome.debugger.onDetach.addListener(source => { if (source.tabId === grant?.tab) end('debugger_detached'); });
 chrome.tabs.onRemoved.addListener(tab => { if (tab === grant?.tab) end('tab_closed'); });

@@ -73,4 +73,14 @@ store.clear()
 localStorage.setItem('tether.groupLastTab', '{bad json')
 assert.equal(g.tabFor('$1', home).id, '%2', 'Bad saved data falls back to the first tab')
 
+// A sideways strip shows the open item fully and moves only as far as it must (stack row and tab strip).
+assert.equal(g.revealLeft(0, 300, 1200, 50, 80), 0, 'An item in view keeps the strip still')
+assert.equal(g.revealLeft(0, 300, 1200, 900, 100), 712, 'An item past the right edge comes in at the right, with the gap')
+assert.equal(g.revealLeft(600, 300, 1200, 100, 80), 88, 'An item past the left edge comes in at the left, with the gap')
+assert.equal(g.revealLeft(0, 300, 1200, 1150, 50), 900, 'The strip never scrolls past its end')
+assert.equal(g.revealLeft(500, 300, 1200, 5, 40), 0, 'Or before its start')
+assert.equal(g.revealLeft(0, 300, 1200, 400, 500), 388, 'An item wider than the strip shows from its start')
+assert.equal(g.revealLeft(0, 0, 0, 0, 0), 0, 'A hidden strip stays at 0')
+assert.notEqual(g.stripKey('$1', ''), g.stripKey('$1', 'g00000001'), 'Each stack of a session keeps its own strip place')
+
 console.log('test_groups: ok')

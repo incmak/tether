@@ -9,7 +9,7 @@ import { useModal, usePolling } from './hooks'
 import { startTrial } from './lookTrial'
 import { TrialBar } from './TrialBar'
 import type { Anchor } from './hooks'
-import { goBack, goForward, setPlace, setPlaceHandler, setViewOpener, useNavAvailability } from './backNav'
+import { goBack, goForward, setPlace, setPlaceHandler, setSearchOpener, setViewOpener, useNavAvailability } from './backNav'
 import { BACK_KEY, FORWARD_KEY, isNavKey } from './navKeys'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
@@ -88,6 +88,8 @@ import { DecisionsGroup, useDecisionAnswers } from './WorkItems'
 import { WorkSheet } from './WorkBoard'
 import type { WorkView } from './WorkBoard'
 import { sizeVars } from './panelEdges'
+import { useActivityPing } from './activityPing'
+import { useQuickCreate } from './QuickToast'
 
 // One tap turns notifications for this pane off or on. Hidden until this browser has notifications on.
 
@@ -203,6 +205,7 @@ function App() {
   const previousSelection = useRef<SelectionSnapshot>({ sessions: [] })
   const orderedSessions = useMemo(() => sortByPrefs(sessions, prefs.order), [sessions, prefs.order])
   const pane = selectPane(orderedSessions, prefs.selected, previousSelection.current, data?.default_thread, prefs.lastPane)
+  useActivityPing(api, prefs.wakatime)
   useLayoutEffect(() => {
     if (!data) return
     const previous = previousSelection.current
@@ -309,6 +312,8 @@ function App() {
     })
     return () => setViewOpener(null)
   }, [])
+  // The extension's "Open Tether search" key (#search) opens search like ⌥Space; /chat/?go=search does too.
+  useEffect(() => { setSearchOpener(() => setGo('search')); return () => setSearchOpener(null) }, [])
   // Mouse buttons 4 and 5 go Back and Forward inside Tether. Stop the browser's own step, so it cannot leave the app.
   useEffect(() => {
     const mouse = (event: MouseEvent) => {
@@ -529,6 +534,8 @@ function App() {
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
+    // Like ⌥Space: inside another dialog (Settings), search does not open over it.
+    else if (go === 'search') setMenu(current => document.querySelector('dialog[open]') ? current : 'commands')
     else if (go === 'agents') {
       setDrawer(false); setAgentsPage('list')
       void navigator.serviceWorker?.getRegistration('/chat/').then(async registration => (await registration?.getNotifications({ tag: 'tether-summary' }))?.forEach(item => item.close())).catch(() => {})
@@ -665,7 +672,7 @@ function App() {
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && !document.querySelector('dialog[open]')) {
         // Every row that opens a pane: one-pane sessions and the pane rows under a session with several panes.
-        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button')].filter(row => row.offsetParent)
+        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button:not(.pane-stack-head)')].filter(row => row.offsetParent)
         const at = rows.findIndex(row => row.getAttribute('aria-current') === 'page')
         const next = rows[at < 0 ? 0 : at + (event.key === 'ArrowDown' ? 1 : -1)]
         if (next) { event.preventDefault(); next.click(); next.scrollIntoView({ block: 'nearest' }) }
@@ -712,6 +719,8 @@ function App() {
     setDrawer(false)
     leaveHome()
   }
+  // The search menu's "Add to the backlog" and "Start a new tab" rows, and their toast.
+  const quick = useQuickCreate({ api, agent: prefs.mainModel, sessions, onOpen: openPane })
   const archiveTab = (target: Pane) => {
     const owner = sessions.find(session => session.panes.some(item => item.id === target.id))
     if (!owner) return
@@ -974,7 +983,8 @@ function App() {
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
-    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} />}
+    {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} create={quick.create} />}
+    {quick.toast}
     {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}
