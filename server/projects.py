@@ -399,7 +399,8 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'Exit: 0 finished, 3 timeout (still working), 4 gone, 5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost). '
                  'When a tab you started or review is done, save a note in notes/ (what it did, outcome, findings), '
                  'then run `close --pane %N`. Busy tabs stay open. '
-                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply).\n')
+                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply). '
+                 f'Asked to coordinate this session\'s tabs: run `{sys.executable} {cli.with_name("agent_coordinator_cli.py")} claim`.\n')
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
     parts.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '

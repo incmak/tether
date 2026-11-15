@@ -101,6 +101,22 @@ def http_error(exc):
     return error
 
 
+def connection(body, path=PATH):
+    """(opener, request) for one local command from this tab to the Tether server, with the hook credential."""
+    port = int(os.environ.get('MOBILE_TMUX_PORT') or install_settings()['port'])
+    if not 1 <= port <= 65535:
+        raise ValueError('Invalid port.')
+    secret = auth.TOKEN_FILE.read_text().strip()
+    if not secret:
+        raise ValueError('Local hook authentication required.')
+    credential = auth.session_value(secret)
+    url = f'http://127.0.0.1:{port}'
+    request = Request(url + path, json.dumps(body).encode(), headers={
+        'Content-Type': 'application/json', 'Origin': url, 'X-Codex-Mobile': '1',
+        'X-Tether-Hook': credential, 'Cookie': auth.COOKIE + '=' + credential})
+    return build_opener(ProxyHandler({})), request
+
+
 def main(argv=None):
     pane = os.environ.get('TMUX_PANE')
     if not pane:
@@ -113,20 +129,9 @@ def main(argv=None):
         return 1
     body['session'] = pane
     try:
-        port = int(os.environ.get('MOBILE_TMUX_PORT') or install_settings()['port'])
-        if not 1 <= port <= 65535:
-            raise ValueError('Invalid port.')
-        secret = auth.TOKEN_FILE.read_text().strip()
-        if not secret:
-            raise ValueError('Local hook authentication required.')
-        credential = auth.session_value(secret)
-        url = f'http://127.0.0.1:{port}'
         waiting = body['action'] == 'wait'
         seconds = body.pop('timeout') if waiting else None
-        request = Request(url + PATH, json.dumps(body).encode(), headers={
-            'Content-Type': 'application/json', 'Origin': url, 'X-Codex-Mobile': '1',
-            'X-Tether-Hook': credential, 'Cookie': auth.COOKIE + '=' + credential})
-        opener = build_opener(ProxyHandler({}))
+        opener, request = connection(body)
         if not waiting:
             with opener.open(request, timeout=150 if 'worktree' in body else 60 if body['action'] == 'send' else 30) as response:
                 result = json.loads(response.read(262144))

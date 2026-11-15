@@ -23,6 +23,7 @@ from agents import records
 import agents
 import codex_messages
 import continuations
+import coordinator
 import pane_icons
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
 from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, picker_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
@@ -267,6 +268,10 @@ def monitor_notices():
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
         try:
+            coordinator.FEED.observe(entries, shared_status, review_send, last_reply)
+        except Exception as exc:  # the coordinator feed must never stop the monitor
+            print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
+        try:
             tab_brief.BRIEFER.observe(entries, shared_status, lambda entry: timeline(entry['id'])['finished'],
                                       brief_messages, apply_brief_name, brief_enabled)
         except Exception as exc:  # tab briefs must never stop the monitor
@@ -430,7 +435,7 @@ def sessions():
 
 # Writes that add, remove or rename tmux panes or sessions. After one succeeds, the next list must come from tmux,
 # so a page that refreshes right away sees the new pane (or no longer sees the closed one).
-TMUX_WRITES = {quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
+TMUX_WRITES = {coordinator.PATH, quick_tab.START_PATH, quick_tab.MOVE_PATH, '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/shell', '/mobile/api/session',
                '/mobile/api/tmux-sessions', '/mobile/api/rename', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/side-shell',
                '/mobile/api/side-shell/end', '/mobile/api/start', '/mobile/api/merge', '/mobile/api/auto-resume', '/mobile/api/review-stalled', undo_api.PATH} | groups_api.WRITES
 
@@ -2281,7 +2286,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and self.path != coordinator.PATH:
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2367,7 +2372,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab', quick_tab.START_PATH) else 65536):
+            if not 0 < size <= (16384 if approval.handles(self.path) else 262144 if self.path in ('/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/delegate', '/mobile/api/agent-tab', coordinator.PATH, quick_tab.START_PATH) else 65536):
                 self.respond(413, {'error': 'Message is too large.'})
                 return
             body = json.loads(self.rfile.read(size))
@@ -2437,6 +2442,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(200, {'results': [{'port': port, 'state': state} for port, state in stopped.items()]})
                 except dev_previews.Refused as exc:
                     self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})
+                return
+            if self.path == coordinator.PATH:
+                coordinator.serve(self, body, sessions=sessions, run=subprocess.run, status=shared_status,
+                                  send=review_send, last_reply=last_reply, timeline=timeline)
                 return
             if self.path == '/mobile/api/preview':
                 try:
@@ -3062,7 +3071,7 @@ class Handler(BaseHTTPRequestHandler):
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)
