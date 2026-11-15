@@ -80,6 +80,7 @@ async function main() {
         }
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
         if (endpoint.startsWith('ui-usage')) return route.fulfill({ json: report })
+        if (endpoint === 'activity') return route.fulfill({ json: { enabled: false, agents: false, zone: 'UTC', since: null, store: '', days: [], projects: [], publish: { folder: '', file: '', busy: false, pending: false, published: null, last: null } } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })
