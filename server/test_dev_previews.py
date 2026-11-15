@@ -629,6 +629,7 @@ class ProxyTests(unittest.TestCase):
                 answer += data
         except OSError:
             pass
+        client.close()  # as a browser does after an answer with Connection: close
         return answer
 
     def head(self, method='GET', path='/', version='HTTP/1.1', origin=True):
@@ -891,6 +892,39 @@ class ProxyTests(unittest.TestCase):
         fits = b''.join(b'X-Fill-%d: %s\r\n' % (index, b'a' * 4000) for index in range(15))  # 60 KB
         self.assertTrue(self.raw(self.head() + fits + b'\r\n').startswith(b'HTTP/1.1 200 '))
         self.assertEqual(len(calls), 1)
+
+    def late(self, first, rest):
+        """Send `first`, wait until the proxy answers, send `rest`, then close our side: what did the proxy answer?"""
+        client = socket.create_connection(('127.0.0.1', self.port), timeout=10)
+        self.addCleanup(client.close)
+        client.sendall(first)
+        answer = client.recv(65536)  # Tether has answered and ended its side
+        time.sleep(0.2)
+        client.sendall(rest)
+        client.shutdown(socket.SHUT_WR)
+        closed = time.monotonic()
+        while data := client.recv(65536):
+            answer += data
+        self.assertLess(time.monotonic() - closed, 1, 'Tether stops reading when the client closes')
+        return answer
+
+    def test_an_answer_survives_a_client_that_is_still_sending(self):
+        # B139: Tether answers before the client has sent everything. A close with unread input made the kernel reset
+        # the connection, and the reset dropped the answer before the client read it (RFC 9112, 9.6: lingering close).
+        self.sign_in()
+        many = b''.join(b'X-Many-%d: a\r\n' % index for index in range(120))
+        cases = [
+            ('431 from Tether, signed in', self.head() + b'X-Big: ' + b'a' * 70000 + b'\r\n', b'431', b'</html>'),
+            ('431 from Tether, no cookie', b'GET / HTTP/1.1\r\nHost: x\r\nX-Big: ' + b'a' * 70000 + b'\r\n', b'431', b'</html>'),
+            ('431 from the parser: too many headers', self.head() + many + b'\r\n', b'431', b'</html>'),
+            ('302 from the sign-in link, body unread', ('GET %s HTTP/1.1\r\nHost: x\r\nContent-Length: 200000\r\n\r\n'
+                                                        % self.previews.open(self.dev_port, '/')['frame']).encode() + b'a' * 1000,
+             b'302', b'\r\n\r\n')]
+        for name, first, status, end in cases:
+            with self.subTest(name):
+                answer = self.late(first, b'X-More: ' + b'a' * 100000 + b'\r\n\r\n')
+                self.assertTrue(answer.startswith(b'HTTP/1.1 ' + status + b' '), answer[:40])
+                self.assertIn(end, answer)
 
     def test_ambiguous_requests_are_refused(self):
         # Review finding 5 (RFC 9112, 6.3): the proxy and the dev server must read the same message.
@@ -1173,6 +1207,50 @@ class LimitTests(ProxyTests):
         self.assertIn(b'took too long', data)
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(self.free_slots(3), 3)
+
+
+class LingerTests(unittest.TestCase):
+    """The lingering close after Tether's own answer ends when the client closes, goes quiet, or takes too long."""
+
+    def pair(self):
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        return ours, theirs
+
+    def timed(self, sock, **limits):
+        started = time.monotonic()
+        dev_previews.linger(sock, **limits)
+        return time.monotonic() - started
+
+    def test_it_ends_when_the_client_closes(self):
+        ours, theirs = self.pair()
+        theirs.sendall(b'late bytes')
+        theirs.shutdown(socket.SHUT_WR)
+        self.assertLess(self.timed(ours, seconds=5, idle=5), 1)
+        self.assertEqual(theirs.recv(1), b'', 'our side was ended first')
+
+    def test_a_quiet_client_holds_it_only_for_the_idle_time(self):
+        ours, _theirs = self.pair()
+        self.assertLess(self.timed(ours, seconds=5, idle=0.2), 1)
+
+    def test_a_client_that_never_stops_holds_it_only_for_the_total_time(self):
+        ours, theirs = self.pair()
+        stop = threading.Event()
+        def send():
+            while not stop.is_set():
+                try:
+                    theirs.sendall(b'x' * 1024)
+                except OSError:
+                    return
+                time.sleep(0.01)
+        sender = threading.Thread(target=send)
+        sender.start()
+        self.addCleanup(sender.join, 5)
+        self.addCleanup(stop.set)
+        took = self.timed(ours, seconds=0.5, idle=0.2)
+        self.assertGreater(took, 0.4, 'it read while the bytes came')
+        self.assertLess(took, 1.5)
 
 
 class GuardThreadTests(unittest.TestCase):

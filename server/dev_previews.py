@@ -87,6 +87,8 @@ MAX_SOCKETS = 64          # WebSockets (and other upgrades) among them
 ACCEPT_WAIT = 5           # how long a new connection waits for a free slot before it is closed
 HEAD_DEADLINE = 20        # the whole request head must arrive in this time, however slowly it drips
 WRITE_TIMEOUT = 60        # a peer that takes no bytes for this long loses the connection
+LINGER = 2                # after Tether's own answer, how long it reads and drops what the client still sends
+LINGER_IDLE = 0.5         # ... and how long it waits for more bytes before it closes (like nginx lingering_timeout)
 LEASE_CHECK = 5           # an open WebSocket ends this soon after its lease ends
 HOP_HEADERS = {'connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'expect', 'host', 'cookie',
                'origin', 'referer', 'forwarded', 'content-length', 'transfer-encoding', 'te', 'trailer', 'upgrade'}
@@ -788,6 +790,21 @@ def raw_head_ok(lines):
     return all(FIELD_LINE.fullmatch(line[:-2]) for line in lines[1:-1])
 
 
+def linger(sock, seconds=LINGER, idle=LINGER_IDLE):
+    """A lingering close (RFC 9112, 9.6): end our side, then read and drop what the client still sends until it
+    closes, sends nothing for `idle` seconds, or `seconds` pass. A close with unread input makes the kernel send a
+    reset, and a reset can drop the answer before the client reads it."""
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + seconds
+        while (left := deadline - time.monotonic()) > 0:
+            sock.settimeout(min(left, idle))
+            if not sock.recv(65536):
+                return
+    except OSError:  # a timeout too
+        pass
+
+
 class PoolServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 128  # one page of a dev server asks for many modules at once
@@ -819,10 +836,17 @@ class PoolHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'  # so the base class answers Expect: 100-continue
     timeout = 60
 
+    linger = False
+
     def setup(self):
         super().setup()
         self.rfile = HeadRecorder(self.rfile)
         self.server.guard.watch(self.connection)
+
+    def finish(self):
+        super().finish()
+        if self.linger:
+            linger(self.connection)
 
     def log_message(self, *_args):
         pass
@@ -830,8 +854,15 @@ class PoolHandler(BaseHTTPRequestHandler):
     def version_string(self):
         return 'Tether'
 
+    def send_error(self, code, message=None, explain=None):
+        # The base class's own answers to a head it cannot parse (400, 414, 431 for too many headers, 505).
+        self.server.guard.unwatch(self.connection)  # the answer is on its way: the head deadline no longer applies
+        self.linger = True
+        super().send_error(code, message, explain)
+
     def answer(self, status, body, headers=()):
         self.close_connection = True
+        self.linger = True  # the client may still be sending the head or a body that Tether did not read
         try:
             self.send_response(status)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -877,6 +908,7 @@ class PoolHandler(BaseHTTPRequestHandler):
         name, mark = '%s%d%s' % (COOKIE_PREFIX, port, MARKER_SUFFIX), marker(port, lease.dev_port)
         fresh = not any(secrets.compare_digest(value.encode('utf-8', 'replace'), mark.encode()) for value in cookie_values(cookies, name))
         self.close_connection = True
+        self.linger = True  # a body sent with the sign-in link is never read
         try:
             self.send_response(302)
             self.send_header('Location', safe_path(query.get('next', ['/'])[0]))
