@@ -15,12 +15,11 @@ def browser_check(data):
     script = r"""
 const fs = require('fs'), path = require('path'), Module = require('module'), ts = require('typescript');
 const filename = path.resolve('src/layouts.ts');
-const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {compilerOptions: {
+// layouts.ts and each TypeScript file it imports (for example ./tones) compile on load.
+Module._extensions['.ts'] = (mod, file) => mod._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), {compilerOptions: {
   module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true
-}}).outputText;
-const mod = new Module(filename); mod.filename = filename; mod.paths = Module._nodeModulePaths(path.dirname(filename));
-mod._compile(code, filename);
-const api = mod.exports, data = JSON.parse(fs.readFileSync(0, 'utf8'));
+}}).outputText, file);
+const api = require(filename), data = JSON.parse(fs.readFileSync(0, 'utf8'));
 const checked = data.map(item => { try { return {layout: api.validateLayout(item, 'fixture')}; }
   catch (error) { return {error: error.message}; } });
 const custom = api.validateLayout({...data[0], variants: {sessions:'avatars', chat:'bubbles', tabs:'pills'}, phone:'keep', manifest:2}, 'fixture');
