@@ -137,6 +137,54 @@ class ValidationTests(unittest.TestCase):
         delegate.validate(body(thread=None, review=True), [entry(thread=None)])
 
 
+class CheckPlaceTests(unittest.TestCase):
+    def test_delegate_place_rules(self):
+        for body in ({'cwd': '/a', 'worktree': 'b'}, {'stack': 'A', 'group': 'g0123abcd'}, {'group': 'Login'},
+                     {'group': 3}, {'stack': 4}):
+            with self.assertRaises(ValueError):
+                delegate.check_place(body)
+        for body in ({}, {'group': ''}, {'group': 'g0123abcd'}, {'stack': 'Login'}, {'cwd': '/a'}, {'worktree': 'b'}):
+            delegate.check_place(body)
+
+    def test_agent_tab_fields_stay_valid_in_validate(self):
+        # An agent tab sends --stack as a name in "group", and may send cwd with a worktree.
+        entries = [{'id': '%1', 'agent': 'claude', 'thread': None}]
+        delegate.validate({'session': '%1', 'agent': 'claude', 'message': 'x', 'group': 'Login', 'cwd': '/a', 'worktree': 'b'}, entries)
+
+
+class FirstTaskTests(unittest.TestCase):
+    MODELS = {'claude': [{'id': 'opus', 'label': 'Opus'}], 'codex': [{'id': 'gpt-x', 'label': 'GPT X'}]}
+
+    def test_first_task_accepts_clean_tasks_and_listed_models(self):
+        self.assertEqual(delegate.first_task({'agent': 'claude', 'message': 'Fix\tit\nnow'}, self.MODELS),
+                         {'agent': 'claude', 'message': 'Fix\tit\nnow'})
+        self.assertEqual(delegate.first_task({'agent': 'codex', 'message': 'x', 'model': 'gpt-x'}, self.MODELS),
+                         {'agent': 'codex', 'message': 'x', 'model': 'gpt-x'})
+
+    def test_first_task_rejects_bad_values(self):
+        for value in (None, [], {}, {'agent': 'gemini', 'message': 'x'}, {'agent': 'claude', 'message': ' '},
+                      {'agent': 'claude', 'message': 'x' * 20001}, {'agent': 'claude', 'message': 'a\x1b[2J'},
+                      {'agent': 'claude', 'message': 3}, {'agent': 'codex', 'message': 'x', 'model': 'opus'},
+                      {'agent': 'claude', 'message': 'x', 'model': 1}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                delegate.first_task(value, self.MODELS)
+
+    def test_launch_in_names_tab_writes_prompt_and_types_command(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        run = Mock(return_value=subprocess.CompletedProcess([], 0, '', ''))
+        with patch.object(paths, 'CACHE', Path(temporary.name)), patch.object(delegate.time, 'time', return_value=5):
+            name = delegate.launch_in('%40', {'agent': 'claude', 'message': ' Fix the bug '}, run=run)
+        self.assertEqual(name, 'Fix the bug')
+        calls = [call.args[0][1:] for call in run.call_args_list]
+        self.assertEqual(calls[0], ['set-option', '-p', '-t', '%40', '@chat_name', name, ';',
+                                    'set-option', '-p', '-t', '%40', '@chat_name_at', '5000'])
+        path, = (Path(temporary.name) / 'delegate').glob('*.md')
+        self.assertEqual(path.read_text(), 'Fix the bug')
+        self.assertEqual(calls[1], ['send-keys', '-t', '%40', '-l', f'claude "$(cat {shlex.quote(str(path))})"'])
+        self.assertEqual(calls[2], ['send-keys', '-t', '%40', 'Enter'])
+
+
 class TaskModelsTests(unittest.TestCase):
     def setUp(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -655,13 +703,50 @@ class EndpointTests(unittest.TestCase):
             self.assertTrue(Path(folder).is_dir())
             self.assertFalse(any('remove' in call.args[0] for call in run.call_args_list))
 
-    def test_browser_ignores_cwd_in_body(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(server, 'sessions', return_value=[entry()]), \
+    def test_body_cwd_must_be_a_real_folder(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as chosen, \
+                patch.object(server, 'sessions', return_value=[entry()]), \
                 patch.object(server, 'agent_folder', return_value=folder), \
                 patch.object(delegate, 'start', return_value=('%13', 'task')) as start:
-            self.assertEqual(self.request(body(cwd='/untrusted/body/path'))[0], 201)
+            self.assertEqual(self.request(body(cwd='/untrusted/body/path')), (400, {'error': 'Folder not found.'}))
+            start.assert_not_called()
+            self.assertEqual(self.request(body(cwd=chosen))[0], 201)
             self.assertEqual(start.call_args.args[2], folder)
-            self.assertNotIn('cwd', start.call_args.kwargs)
+            self.assertEqual(start.call_args.kwargs['cwd'], os.path.realpath(chosen))
+            self.assertNotIn('group', start.call_args.kwargs)
+
+    def test_stack_is_made_for_the_new_tab_and_removed_when_start_fails(self):
+        stack = {'id': 'g0123abcd', 'name': 'Login'}
+        with tempfile.TemporaryDirectory() as folder, patch.object(server, 'sessions', return_value=[entry()]), \
+                patch.object(server, 'agent_folder', return_value=folder), \
+                patch.object(server.groups, 'pane_session', return_value='$4'), \
+                patch.object(server.groups, 'create', return_value=stack) as create, \
+                patch.object(server.groups, 'remove') as remove, \
+                patch.object(delegate, 'start', return_value=('%13', 'task')) as start:
+            self.assertEqual(self.request(body(stack='Login')), (201, {'pane': '%13', 'name': 'task', 'group': stack}))
+            create.assert_called_once_with('$4', 'Login', by_user=True)
+            self.assertEqual(start.call_args.kwargs['group'], 'g0123abcd')
+            remove.assert_not_called()
+            start.side_effect = OSError('tmux failed')
+            self.assertEqual(self.request(body(stack='Login'))[0], 503)
+            remove.assert_called_once_with('$4', 'g0123abcd')
+
+    def test_existing_group_is_checked_and_passed(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(server, 'sessions', return_value=[entry()]), \
+                patch.object(server, 'agent_folder', return_value=folder), \
+                patch.object(server.groups, 'pane_session', return_value='$4'), \
+                patch.object(server.groups, 'check_group') as check, \
+                patch.object(server.groups, 'create') as create, \
+                patch.object(delegate, 'start', return_value=('%13', 'task')) as start:
+            self.assertEqual(self.request(body(group='g0123abcd'))[0], 201)
+            check.assert_called_once_with('$4', 'g0123abcd')
+            self.assertEqual(start.call_args.kwargs['group'], 'g0123abcd')
+            create.assert_not_called()
+            for bad in (body(group='bad'), body(group=3), body(stack=4), body(stack='x', group=''),
+                        body(cwd=folder, worktree='feature/x')):
+                start.reset_mock()
+                self.assertEqual(self.request(bad)[0], 400)
+                start.assert_not_called()
 
     def test_specific_validation_errors_and_auth_guards_prevent_launch(self):
         with patch.object(server, 'sessions', return_value=[entry()]), patch.object(delegate, 'start') as start:

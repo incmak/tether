@@ -215,7 +215,7 @@ class Rules(Base):
                 self.assertEqual(positions, sorted(positions))
                 self.assertIn('Claude, Fable 5.2 (latest), high effort', text)
                 self.assertIn('second advisor (Codex, Newest Model (latest), high effort)', text)
-                self.assertIn(f'python3 {cli.__file__} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words; the advisor joins this session\'s stack by itself; GOAL only names the stack the first time)', text)
+                self.assertIn(f'python3 {cli.__file__} ask --stack "GOAL" "QUESTION"` (GOAL: your goal in 1–3 words; it names the advisor tab; the advisor tab opens in your stack)', text)
 
     def test_none_adds_no_advisor_and_keeps_evidence_product_and_user_rules(self):
         advisor.write(OFF)

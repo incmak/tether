@@ -90,7 +90,7 @@ function setup(env, options = {}) {
   const h = harness()
   let text = options.text || '', done = 0
   const { useDictation } = load('useDictation.ts', {
-    react: h.hooks, './api': { errorText: error => error.message },
+    react: h.hooks, './api': { errorText: error => error.message, SESSION_NAME: /^[^.:]{1,64}$/, SESSION_NAME_HELP: '' },
     './sound': { prepareChime: () => env.chimes.push('prepare'), playChime: async () => env.chimes.push('play') },
     './speech': { stopSpeaking: () => env.spoken++ },
     './voiceLog': { reportVoice() {} },
@@ -117,6 +117,7 @@ function taskSetup(env) {
     './Worktree': { WorktreeField: () => null }, './Skeleton': { Spinner: () => null },
     './keys': { keyLabel: () => 'Alt+V' }, './useDictation': { useDictation: s.useDictation }, './NewTask.css': {},
     './CodexTrust': { CodexTrustCard: () => null }, './codexTrustState': { useCodexTrust: () => ({ status: null, busy: false, error: '', trust() {}, justTrusted: false }) },
+    './CreateFields': { FolderField: () => null, NameField: () => null }, './groups': { groupNameError: () => '' },
   }, env.globals)
   const props = {
     api: async (path, body) => {
@@ -217,7 +218,7 @@ async function main() {
     find(tree, byLabel('Start voice input')).props.onClick(); await flush()
     env.advance(1000); env.records[0].data(); tree = s.render()
     assert.equal(find(tree, byLabel('Task')).props.readOnly, true)
-    assert.equal(find(tree, byLabel('Task')).props.disabled, undefined)
+    assert.equal(!!find(tree, byLabel('Task')).props.disabled, false)
     assert.equal(find(tree, node => node.props?.className === 'primary task-create').props.disabled, false)
     if (shortcut) find(tree, byLabel('Task')).props.onKeyDown(key({ code: 'Enter', key: 'Enter', altKey: false, ctrlKey: true }))
     else formOf(tree).props.onSubmit({ preventDefault() {} })

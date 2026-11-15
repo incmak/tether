@@ -86,33 +86,20 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
 
 
 @contextlib.contextmanager
-def _start_group(body, caller, run, entries=(), *, folder='', branch=None):
-    """Yield (group id, root pane, new tab name) for a new helper tab ("" = Unstacked), under the auto stack rules
-    (auto_stacks.py). It may make the root's stack and move the root and the caller into it; when the start fails, they
-    go back and an empty new stack goes away. branch: the --worktree branch."""
-    state = {'made': None, 'moved': [], 'before': set()}  # moved: [(pane, (session id, group id))] that Tether moved
-    token = None
+def _start_group(body, caller, run, entries=(), *, branch=None):
+    """Yield (group id, root pane, new tab name) for a new helper tab ("" = Unstacked): the caller's place (_pick_group).
+    branch: the --worktree branch."""
+    token = session_id = None
     with groups.LOCK():
-        try:
-            session_id, current = groups.group_of_pane(caller['id'], run)
-            group_id, root, stack_goal = _pick_group(body, caller, run, entries, session_id, current, folder, state)
-            if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
-                token = groups.start_begin(session_id, group_id, run)
-        except BaseException:
-            _undo_group(run, state)
-            raise
+        session_id, current = groups.group_of_pane(caller['id'], run)
+        group_id, root, stack_goal = _pick_group(body, caller, run, entries, session_id, current)
+        if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
+            token = groups.start_begin(session_id, group_id, run)
     try:
-        name = auto_stacks.helper_tab_name(role=body.get('role'),
-                                           review=delegate.normalize_review(body.get('review', False)) == 'new',
+        name = auto_stacks.helper_tab_name(role=body.get('role'), review=delegate.normalize_review(body.get('review', False)) == 'new',
                                            name=body.get('name'), branch=branch, stack=body.get('group'),
                                            message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
         yield group_id, root, name
-    except BaseException:
-        with groups.LOCK():
-            _end_start(session_id, token, run)
-            token = None
-            _undo_group(run, state)
-        raise
     finally:
         _end_start(session_id, token, run)
 
@@ -131,84 +118,21 @@ def _owner(caller, root, entries):
     return dict(helper_tabs.new_record(caller), root_pane=root, root_thread=helper_tabs._thread(root_entry))
 
 
-def _move_in(session_id, pane, group_id, run, state):
-    if not state['moved'] and state['made'] is None:
-        state['before'] = set(groups.panes_in(session_id, group_id, run))
-    if groups.auto_move(session_id, pane, group_id, run):
-        state['moved'].append((pane, (session_id, group_id)))
-
-
-def _pick_group(body, caller, run, entries, session_id, current, folder, state):
-    """(group id, root pane, stack goal). One stack per root: join the root's stack, else make it."""
-    if 'group' in body and groups.clean_name(body['group']).lower() in groups.RESERVED:
-        return '', caller['id'], None  # --stack Unstacked: the agent asked for no stack
+def _pick_group(body, caller, run, entries, session_id, current):
+    """(group id, root pane, stack goal). A new helper tab opens in its caller's place: the caller's stack, or Unstacked.
+    Tether makes no stack and moves no tab here: stacks come from the user, New stack, or Suggest stacks, so a session
+    keeps fewer stacks than tabs (notes/auto-stacks.md). --stack GOAL only names the helper tab; --stack Unstacked puts
+    it in no stack."""
     by_id = {entry['id']: entry for entry in entries}
     by_id.setdefault(caller['id'], caller)
     root = auto_stacks.root_of(caller['id'], lambda pane: by_id.get(pane, {}).get('thread'), run)
-    root_group, root_alive = (current, True) if root == caller['id'] else (None, False)
-    if root != caller['id']:
-        try:
-            root_session, root_group = groups.group_of_pane(root, run)
-            root_alive = root_session == session_id
-        except groups.GroupError:
-            root_group = None
-        root_group = root_group if root_alive else None
-    movable = [pane for pane in dict.fromkeys([root if root_alive else None, caller['id']])
-               if pane and not groups.placed_by_user(pane, run)]
-    family = groups.of_root(session_id, root, run) if root_group is None else None
-    if root_group is not None:
-        target = root_group
-    elif family is not None:
-        target = family  # the root's stack exists, but the root is not in it (the user moved it out): no second stack
-    elif root != caller['id'] and current is not None:
-        target = current  # the root left its stack or closed: the caller's stack is the family's
-    else:
-        if root == caller['id'] and current is None and caller['id'] not in movable:
-            return '', root, None  # the user placed this main session in Unstacked by hand
-        if not movable:
-            return '', root, None
-        source = dict(by_id.get(root) or caller)
-        if source['id'] == caller['id'] and folder:
-            source['folder'] = folder
-        source['named_by_user'] = root_alive and auto_stacks.named_by_user(root, run)
-        task = (auto_stacks.helper_tab_name(name=body.get('name'), message=body.get('message') or '')
-                if not body.get('role') and delegate.normalize_review(body.get('review', False)) != 'new' else None)
-        stack = body.get('group') if isinstance(body.get('group'), str) else None
-        made = groups.create_unique(session_id, auto_stacks.stack_name(source, stack, task), run, root=root)
-        state['made'] = (session_id, made['id'])
-        target = made
-    for pane in movable:  # a tab in no stack joins; a tab in another stack stays there
-        if (current if pane == caller['id'] else root_group) is None:
-            _move_in(session_id, pane, target['id'], run, state)
-    return target['id'], root, target['name']
-
-
-def _undo_group(run, state):
-    """After a failed start: move each tab Tether moved back to Unstacked, unless the user has moved it since, then drop
-    the stack Tether made if it is empty and still Tether's. When another tab joined the stack meanwhile (a second start
-    for the same root), the family is there: the tabs stay. Errors are ignored: the start error is the one to report."""
-    moved = {pane for pane, _ in state['moved']}
-    joined = False
-    for session_id, group in {place for _, place in state['moved']}:
-        try:
-            joined = joined or bool(set(groups.panes_in(session_id, group, run)) - moved - state['before'])
-        except (groups.GroupError, OSError, subprocess.SubprocessError):
-            joined = True  # unknown: keep the tabs where they are
-    for pane, place in reversed(state['moved']):
-        if joined:
-            break
-        try:
-            if not groups.placed_by_user(pane, run):
-                session_id, group = groups.group_of_pane(pane, run)
-                if group is not None and (session_id, group['id']) == place:
-                    groups.move(session_id, pane, '', run)
-        except (groups.GroupError, OSError, subprocess.SubprocessError):
-            pass
-    try:
-        if state['made'] is not None:
-            groups.drop_if_empty(*state['made'], run)  # never a stack the user renamed meanwhile
-    except (groups.GroupError, OSError, subprocess.SubprocessError):
-        pass
+    goal = body.get('group') if isinstance(body.get('group'), str) else None
+    if goal is not None and groups.clean_name(goal).lower() in groups.RESERVED:
+        return '', root, None  # --stack Unstacked: the agent asked for no stack
+    named = auto_stacks.goal(goal) if goal else None  # a fallback for the helper tab name
+    if current is None:
+        return '', root, named
+    return current['id'], root, named or current['name']
 
 
 def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
@@ -252,7 +176,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
         with lock, worktrees.keeping(made):
             fresh = sessions()
             caller = delegate.validate(request, fresh)
-            with _start_group(body, caller, run, fresh, folder=directory, branch=made['branch']) as (group, root, title):
+            with _start_group(body, caller, run, fresh, branch=made['branch']) as (group, root, title):
                 pane, name = delegate.start(caller, request, directory, run=run,
                                             recent=lambda: snapshot(caller).get('messages') or [],
                                             cwd=made['path'], worktree=made['branch'],
@@ -274,7 +198,7 @@ def serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, s
                                   or not os.path.isdir(body['cwd'])):
                 raise ValueError('Choose an absolute path to an existing directory.')  # before a stack is made
             directory = folder(caller)
-            with _start_group(body, caller, run, entries, folder=directory) as (group, root, title):
+            with _start_group(body, caller, run, entries) as (group, root, title):
                 pane, name = delegate.start(caller, request,
                                             directory if directory and os.path.isdir(directory) else str(paths.HOME),
                                             run=run, recent=lambda: snapshot(caller).get('messages') or [],

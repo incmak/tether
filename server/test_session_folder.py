@@ -36,6 +36,27 @@ class SessionFolderRoutes(unittest.TestCase):
                     self.assertEqual(self.request(route)[0], status)
                     create.assert_called_with('test-session', folder)
 
+    def test_first_task_is_checked_first_and_started_in_the_new_pane(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(prefs_sync, 'FILE', Path(folder) / 'prefs.json'), \
+                patch.object(server, 'create_session', return_value='%99') as create, \
+                patch.object(server.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '$99\n')), \
+                patch.object(server.delegate, 'launch_in') as launch:
+            task = {'agent': 'claude', 'message': 'Fix it'}
+            self.assertEqual(self.request('/mobile/api/tmux-sessions', {'name': 'work', 'cwd': folder, 'task': task}),
+                             (201, {'session': '$99', 'name': 'work', 'pane': '%99'}))
+            create.assert_called_once_with('work', folder)
+            launch.assert_called_once_with('%99', task)
+            create.reset_mock()
+            launch.reset_mock()
+            status, _ = self.request('/mobile/api/tmux-sessions', {'name': 'work', 'task': {'agent': 'x', 'message': 'y'}})
+            self.assertEqual(status, 400)
+            create.assert_not_called()
+            launch.assert_not_called()
+            launch.side_effect = OSError('send-keys failed')
+            self.assertEqual(self.request('/mobile/api/tmux-sessions', {'name': 'work', 'cwd': folder, 'task': task}),
+                             (201, {'session': '$99', 'name': 'work', 'pane': '%99', 'task_error': 'send-keys failed'}))
+
     def test_missing_saved_folder_refuses_creation(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(prefs_sync, 'FILE', Path(folder) / 'prefs.json'), \

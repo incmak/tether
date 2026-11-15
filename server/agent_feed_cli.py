@@ -120,17 +120,18 @@ def feed_status(args):
         if record is None:
             print(f'No project named {name}.', file=sys.stderr)
             return 2
-        state = shown.get(name)
-        if not state:
+        states = shown.get(name)
+        if not states:
             print(f'{name}: by hand')
             continue
-        feed = f'{record["feed"]} {record.get("feedTarget") or ""}'.strip()
-        if state['by'] == 'agent':
-            print(f'{name}: {feed}, read by the project\'s own agent')
-            continue
-        when = time.strftime('%H:%M', time.localtime(state['at'])) if state.get('at') else 'not yet'
-        line = f'{name}: {feed}, {state["status"]} (last read {when}, {state["items"]} items)'
-        print(line + (f': {state["error"]}' if state.get('error') else ''))
+        for state in states:
+            feed = f'{state["kind"]} {state["target"]}'.strip()
+            if state['by'] == 'agent':
+                print(f'{name}: {feed}, read by the project\'s own agent')
+                continue
+            when = time.strftime('%H:%M', time.localtime(state['at'])) if state.get('at') else 'not yet'
+            line = f'{name}: {feed}, {state["status"]} (last read {when}, {state["items"]} items)'
+            print(line + (f': {state["error"]}' if state.get('error') else ''))
     return 0
 
 

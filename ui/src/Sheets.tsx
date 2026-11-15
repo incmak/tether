@@ -18,7 +18,8 @@ import { KeepChoice, keepNeeded } from './Project'
 import type { Keep, ProjectMarks } from './Project'
 import { GlobalCodexLevel } from './CodexLevel'
 import { CopyNames } from './CopyNames'
-import { NewGroup, TabGroupPicker } from './Groups'
+import { NewGroup, SuggestStacks, TabGroupPicker } from './Groups'
+import type { MainModel } from './prefs'
 import { placeName } from './groups'
 
 type PaneLevel = 'all' | 'important' | 'urgent' | 'off'
@@ -110,7 +111,8 @@ export function useActionsDialog(at: Anchor | undefined, close: () => void) {
   return { ...modal, ...popover, className: at ? 'sheet popover' : 'sheet' }
 }
 
-export function SessionActions({ api, session, tabCount, pane, pinned, archived, canMoveUp, canMoveDown, startDelete = false, at, place, targets, marks, onMarks, onPin, onArchive, onMove, onProject, onDone, onClose, color, onColor, groups = [], group, onGroup }: {
+export function SessionActions({ api, session, tabCount, pane, pinned, archived, canMoveUp, canMoveDown, startDelete = false, at, place, targets, marks, onMarks, onPin, onArchive, onMove, onProject, onDone, onClose, color, onColor, groups = [], group, onGroup, mainModel }: {
+  mainModel?: MainModel
   color?: string; onColor?: (color: TagColor | null) => void; groups?: SessionGroup[]; group?: string; onGroup?: (group: SessionGroup | null, created?: SessionGroup) => void
   api: Api; session: Session; tabCount: number; pane: string; pinned: boolean; archived: boolean; canMoveUp: boolean; canMoveDown: boolean; startDelete?: boolean; at?: Anchor; place?: Place; targets: Session[]; marks?: ProjectMarks; onMarks?: () => void
   onPin: () => void; onArchive: () => void; onMove: (step: -1 | 1) => void; onProject: () => void; onDone: (newPane?: string, direction?: 'right' | 'down') => void; onClose: () => void
@@ -121,6 +123,7 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   // "Merge into…": choose a session, then confirm, as a drop of the whole session asks first.
   const [merging, setMerging] = useState<Session | 'pick' | null>(null)
   const [grouping, setGrouping] = useState(false)
+  const [stacking, setStacking] = useState(false)
   const [keep, setKeep] = useState<Keep | null>(null)  // which project a merge keeps, when both sessions have one
   const [name, setName] = useState(session.name)
   const [pending, setPending] = useState(false)
@@ -145,7 +148,9 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   return <dialog {...dialog} aria-labelledby="actions-title">
     <div className="sheet-heading"><h2 id="actions-title">{session.name}</h2>{!at && <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>}</div>
     <p className="sheet-sub">{count(words, tabCount)} · {session.dir}</p>
-    {grouping && onGroup
+    {stacking
+      ? <SuggestStacks api={api} session={session} mainModel={mainModel} onBack={() => setStacking(false)} onDone={() => onDone(undefined)} />
+      : grouping && onGroup
       ? <GroupPicker groups={groups} value={group} onPick={(picked, created) => { onGroup(picked, created); onClose() }} onBack={() => setGrouping(false)} />
       : merging === 'pick'
       ? <SessionPicker label={`Merge ${session.name} into`} targets={targets.filter(target => target.id !== session.id)} pending={pending} onPick={target => { setKeep(null); setMerging(target) }} onCancel={() => setMerging(null)} />
@@ -178,6 +183,7 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
           <button disabled={pending || !canMoveUp} onClick={() => onMove(-1)}><ArrowUp size={18} />Move up</button>
           <button disabled={pending || !canMoveDown} onClick={() => onMove(1)}><ArrowDown size={18} />Move down</button>
           <button disabled={pending} onClick={() => setMerging('pick')}><Merge size={18} />Merge into…</button>
+          {session.panes.length > 1 && <button disabled={pending} onClick={() => setStacking(true)}><Sparkles size={18} />Suggest stacks…</button>}
           <hr />
           <PlaceItems place={place} pending={pending} onClose={onClose} />
           <button disabled={pending} onClick={() => void split('right')}><Columns2 size={18} />{words.newRight}{words.tmux && <kbd>Ctrl-b %</kbd>}</button>
@@ -189,7 +195,8 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   </dialog>
 }
 
-export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor }: {
+export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel }: {
+  mainModel?: MainModel
   color?: string; onColor?: (color: TagColor | null) => void
   api: Api; session: Session | undefined; tabCount: number; archived: boolean; pane: Pane; panes: Pane[]; at?: Anchor; place?: Place; targets: Session[]; onArchive: () => void; onFork?: () => void; onDone: (newPane?: string, direction?: 'right' | 'down') => void; onClose: () => void
 }) {
@@ -229,7 +236,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       : mode === 'group' && session
       ? <TabGroupPicker api={api} session={session} pane={pane} pending={pending} run={run} onNew={() => setMode('new-group')} onBack={() => setMode('menu')} />
       : mode === 'new-group' && session
-      ? <NewGroup api={api} session={session} pane={pane} onClose={() => setMode('group')} onDone={() => onDone(undefined)} />
+      ? <NewGroup api={api} session={session} pane={pane} mainModel={mainModel} onClose={() => setMode('group')} onDone={() => onDone(undefined)} />
       : mode === 'review'
       ? <ReviewLinkPicker pane={pane} panes={panes} pending={pending} onBack={() => setMode('menu')} onPick={(worker, reviewer) => void run(async () => { await api('review-link', { worker, reviewer }); return undefined })} />
       : mode === 'icon'

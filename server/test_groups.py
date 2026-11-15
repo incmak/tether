@@ -145,7 +145,7 @@ class RenderTests(Bundles):
         self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
         self.assertNotIn('### Project notes', text)
-        self.assertIn("`--stack GOAL` (1–3 words; new tabs join this session's stack by themselves; GOAL only names it the first time)", text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
 
     def test_marks_cover_the_group_revision(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -268,6 +268,94 @@ class TmuxTests(Bundles):
         self.assertEqual(groups.rename(self.a, docs['id'], 'docs', run)['name'], 'docs')  # its own name, new case
         groups.create(self.b, 'Docs', run)  # another session may use the name
 
+    def test_arrange_reuses_names_makes_stacks_and_skips_closed_tabs(self):
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run)
+        made = groups.arrange(self.a, [{'name': 'docs', 'panes': [self.a1, '%999']}, {'name': 'Release', 'panes': [self.a2, self.a1]},
+                                       {'name': 'Gone', 'panes': ['%998']}], run)
+        self.assertEqual([g['name'] for g in made], ['Docs', 'Release'])
+        self.assertEqual(made[0]['id'], docs['id'])
+        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Docs', 'Release'])
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (docs['id'], made[1]['id']))
+        self.assertTrue(groups.placed_by_user(self.a1, run), 'auto stacks must leave arranged tabs alone')
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [{'name': 'Main', 'panes': [self.a1]}], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [{'name': 'X', 'panes': ['a1']}], run)), 400)
+        self.assertEqual(self.status(lambda: groups.arrange('$999', [{'name': 'X', 'panes': [self.a1]}], run)), 404)
+
+    def test_arrange_moves_helpers_with_owner_and_removes_emptied_stacks(self):
+        run = self.run_tmux
+        self.tmux('new-window', '-t', self.a + ':')
+        a3 = [pane for pane in self.panes(self.a) if pane not in (self.a1, self.a2)][0]
+        self.tmux('set-option', '-p', '-t', a3, '@tether_helper', json.dumps({'owner_pane': self.a1, 'sent_at': 1}))
+        old = groups.create(self.a, 'Old', run, pane=self.a2, auto=True)
+        keep = groups.create(self.a, 'Keep', run, by_user=True)  # empty before the apply: it stays
+        made = groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1, self.a2]}, {'name': 'Other', 'panes': [a3]}], run)
+        self.assertEqual([g['name'] for g in made], ['Work'])
+        self.assertEqual(made[0].get('by'), 'user')
+        self.assertEqual({self.label(pane) for pane in (self.a1, self.a2, a3)}, {made[0]['id']})
+        names = [g['name'] for g in groups.read(self.a, run)]
+        self.assertNotIn(old['name'], names)
+        self.assertIn(keep['name'], names)
+        # A helper whose owner is not in the plan stays where it is.
+        groups.move(self.a, a3, '', run)
+        groups.arrange(self.a, [{'name': 'Solo', 'panes': [a3, self.a2]}], run)
+        self.assertEqual(self.label(a3), '')
+        # unstack: the tab (and its helpers) go to no stack; the stack it emptied goes.
+        self.tmux('set-option', '-p', '-t', a3, '@tether_helper', json.dumps({'owner_pane': self.a2, 'sent_at': 1}))
+        self.tmux('set-option', '-p', '-t', a3, '@group', groups.read(self.a, run)[-1]['id'])
+        self.assertEqual(groups.arrange(self.a, [], run, unstack=[self.a2]), [])
+        self.assertEqual((self.label(self.a2), self.label(a3)), ('', ''))
+        self.assertNotIn('Solo', [g['name'] for g in groups.read(self.a, run)])
+        self.assertTrue(groups.placed_by_user(self.a2, run))
+        self.assertEqual(self.status(lambda: groups.arrange(self.a, [], run, unstack=['a1'])), 400)
+
+    def test_arrange_keeps_an_emptied_stack_while_a_helper_start_is_in_flight(self):
+        run = self.run_tmux
+        old = groups.create(self.a, 'Old', run, pane=self.a2, auto=True)
+        token = groups.start_begin(self.a, old['id'], run)
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a2]}], run)
+        self.assertIn(old['id'], [g['id'] for g in groups.read(self.a, run)], 'a helper launch is about to fill it')
+        self.assertFalse(groups.drop_if_empty(self.a, old['id'], run))
+        groups.start_end(self.a, token, run)
+        self.assertTrue(groups.drop_if_empty(self.a, old['id'], run), 'the start ended with no tab there: it goes')
+
+    def test_arrange_helper_follows_owner_only_while_the_owner_holds_the_same_conversation(self):
+        run = self.run_tmux
+        one, two = '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'
+        self.tmux('new-window', '-t', self.a + ':')
+        a3 = [pane for pane in self.panes(self.a) if pane not in (self.a1, self.a2)][0]
+        self.tmux('set-option', '-p', '-t', a3, '@tether_helper', json.dumps(
+            {'owner_pane': self.a1, 'owner_thread': one, 'sent_at': 1}))
+        made = groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run, thread_of={self.a1: two}.get)
+        self.assertEqual(self.label(a3), '', 'the owner holds another conversation: the helper stays')
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run, thread_of={self.a1: one}.get)
+        self.assertEqual(self.label(a3), made[0]['id'], 'same conversation: the helper follows')
+        groups.move(self.a, a3, '', run)
+        groups.arrange(self.a, [{'name': 'Work', 'panes': [self.a1]}], run)
+        self.assertEqual(self.label(a3), made[0]['id'], 'conversation unknown: the link holds')
+
+    def test_reorder_puts_stacks_in_the_given_order(self):
+        run = self.run_tmux
+        one, two, three = (groups.create(self.a, name, run, by_user=True) for name in ('One', 'Two', 'Three'))
+        self.assertEqual([g['name'] for g in groups.reorder(self.a, [three['id'], one['id']], run)], ['Three', 'One', 'Two'])
+        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Three', 'One', 'Two'], 'a stack left out keeps its place after')
+        groups.reorder(self.a, ['gffffffff', two['id'], two['id']], run)
+        self.assertEqual([g['name'] for g in groups.read(self.a, run)], ['Two', 'Three', 'One'], 'gone and repeated ids are skipped')
+        self.assertEqual(groups.read(self.a, run)[0].get('by'), 'user', 'the maker stays')
+        self.assertEqual(self.status(lambda: groups.reorder(self.a, ['gffffffff'], run)), 404)
+        for bad in ([], 'g1', ['%1'], [one['id']] * 51):
+            self.assertEqual(self.status(lambda: groups.reorder(self.a, bad, run)), 400)
+
+    def test_pane_session_and_check_group(self):
+        run = self.run_tmux
+        docs = groups.create(self.a, 'Docs', run)
+        self.assertEqual(groups.pane_session(self.a2, run), self.a)
+        groups.check_group(self.a, docs['id'], run)
+        groups.check_group(self.a, '', run)
+        self.assertEqual(self.status(lambda: groups.check_group(self.b, docs['id'], run)), 404)
+        self.assertEqual(self.status(lambda: groups.pane_session('%999', run)), 404)
+
     def test_stale_ids_give_404(self):
         run = self.run_tmux
         docs = groups.create(self.a, 'Docs', run)
@@ -378,18 +466,18 @@ class TmuxTests(Bundles):
         self.assertEqual(self.status(lambda: self.start_group({'group': ''}, caller)), 400)
         self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
 
-    def test_first_helper_makes_the_root_stack_and_later_helpers_join(self):  # rules 1 and 2
-        made = self.start_group({}, {'id': self.a1, 'pane_name': 'desktop-nav'})
-        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Desktop Nav'], made))
-        self.assertTrue(groups.read(self.a, self.run_tmux)[0]['auto'])
-        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Anything'}), made, 'the next helper joins it')
-        # A helper of a helper (at any depth) uses the same root, so it joins too.
-        self.helper(self.a2, self.a1)
-        self.tmux('set-option', '-p', '-t', self.a2, '@group', made)
-        self.assertEqual(self.start_group({'group': 'Other goal'}, {'id': self.a2, 'pane_name': 'Worker'}), made)
-        self.assertEqual(self.names(self.a), ['Desktop Nav'])
+    def test_a_helper_opens_in_its_callers_place_and_makes_no_stack(self):  # notes/auto-stacks.md, rule 1
+        run = self.run_tmux
+        caller = {'id': self.a1, 'pane_name': 'desktop-nav'}
+        self.assertEqual(self.start_group({}, caller), '')
+        self.assertEqual(self.start_group({'group': 'Release notes', 'message': 'x'}, caller, branch='feature/nav'), '')
+        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''), '--stack and --worktree make no stack')
+        docs = groups.create(self.a, 'Docs', run, pane=self.a2, by_user=True)
+        self.assertEqual(self.start_group({'group': 'Other goal'}, {'id': self.a2, 'pane_name': 'Worker'}), docs['id'])
+        self.assertEqual(self.start_group({'group': 'Unstacked'}, {'id': self.a2}), '')
+        self.assertEqual((self.names(self.a), self.label(self.a1), self.label(self.a2)), (['Docs'], '', docs['id']))
 
-    def test_helper_of_a_helper_finds_the_root_through_the_chain(self):  # rule 1, depth
+    def test_helper_of_a_helper_finds_the_root_through_the_chain(self):  # the owner record keeps the root
         run = self.run_tmux
         third = terminal_input.new_window_after(self.a2, run)
         self.helper(self.a2, self.a1)
@@ -397,11 +485,9 @@ class TmuxTests(Bundles):
         with agent_tabs._start_group({}, {'id': third, 'pane_name': 'Deep'}, run,
                                      [{'id': self.a1, 'pane_name': 'Billing fix'}]) as (group, root, name):
             pass
-        self.assertEqual(root, self.a1)
-        self.assertEqual(self.names(self.a), ['Billing Fix'])
-        self.assertEqual([self.label(p) for p in (self.a1, self.a2, third)], [group, '', group],
-                         'the root and the caller move in; a tab that is not part of this start stays')
-        # A stored root_pane keeps the root known after a tab in between closes.
+        self.assertEqual((group, root), ('', self.a1))
+        self.assertEqual(([self.label(p) for p in (self.a1, self.a2, third)], self.names(self.a)), (['', '', ''], []),
+                         'nothing moves')
         one = '11111111-1111-4111-8111-111111111111'
         self.helper(third, '%999', root_pane=self.a1, root_thread=one)
         self.assertEqual(agent_tabs.auto_stacks.root_of(third, {self.a1: one}.get, run), self.a1)
@@ -415,20 +501,6 @@ class TmuxTests(Bundles):
 
     def test_lone_main_session_stays_unstacked_until_a_helper_starts(self):  # rule 2
         self.assertEqual((self.names(self.a), self.label(self.a1), self.label(self.a2)), ([], '', ''))
-
-    def test_worktree_and_stack_flag_do_not_make_separate_stacks(self):  # rule 3
-        run = self.run_tmux
-        caller = {'id': self.a1, 'pane_name': 'can you check how…'}
-        made = self.start_group({'group': 'Release notes', 'message': 'x'}, caller, branch='feature/desktop-nav')
-        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Release Notes'], made),
-                         '--stack names the root stack the first time')
-        self.assertEqual(self.start_group({'group': 'Tab icons', 'message': 'y'}, caller, branch='b1'), made)
-        self.assertEqual(self.start_group({'name': 'Other task', 'message': 'z'}, caller, branch='b2'), made)
-        self.assertEqual(self.names(self.a), ['Release Notes'], 'no stack per worktree or per --stack')
-        # A taken name gets " 2": a second main session never joins another root's stack by name.
-        other = self.start_group({'group': 'release notes'}, {'id': self.a2})
-        self.assertNotEqual(other, made)
-        self.assertEqual(self.names(self.a), ['Release Notes', 'Release Notes 2'])
 
     def test_root_in_a_user_stack_shares_it(self):
         docs = groups.create(self.a, 'Docs', self.run_tmux, pane=self.a1, by_user=True)
@@ -452,16 +524,9 @@ class TmuxTests(Bundles):
         self.assertFalse(groups.auto_move(self.a, self.a2, docs['id'], run))
         self.assertEqual(self.label(self.a2), '')
 
-    def test_helper_of_a_user_placed_root_still_joins_when_the_helper_can_move(self):
-        run = self.run_tmux
-        groups.move(self.a, self.a1, None, run, by_user=True)
-        self.helper(self.a2, self.a1)
-        made = self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1, 'pane_name': 'Billing'}])
-        self.assertEqual((self.label(self.a1), self.label(self.a2), self.names(self.a)), ('', made, ['Billing']))
-
     def test_empty_auto_stacks_go_and_user_stacks_stay(self):  # rule 6
         run = self.run_tmux
-        made = self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'})
+        made = self.auto_stack(self.a, 'Billing', self.a1)  # the "Fixes" stack of work_fix.py is still auto
         user = groups.create(self.a, 'Mine', run, by_user=True)  # the Stacks sheet (groups_api.py)
         self.assertEqual(user['by'], 'user')
         self.tmux('set-option', '-p', '-t', self.a2, '@group', made)
@@ -470,7 +535,7 @@ class TmuxTests(Bundles):
         groups.move(self.a, self.a2, user['id'], run, by_user=True)
         self.assertEqual(self.names(self.a), ['Mine'], 'the last tab moved out: the auto stack went')
         # A tab that closes: the sweep removes the empty auto stack and keeps the user stack.
-        again = self.start_group({}, {'id': self.b1, 'pane_name': 'Beta'})
+        again = self.auto_stack(self.b, 'Beta', self.b1)
         self.tmux('set-option', '-p', '-u', '-t', self.b1, '@group')
         self.assertEqual(groups.drop_lone_auto(run), [(self.b, 'Beta')])
         self.assertEqual((self.names(self.b), self.names(self.a)), ([], ['Mine']))
@@ -478,7 +543,7 @@ class TmuxTests(Bundles):
 
     def test_a_user_rename_makes_an_auto_stack_the_users(self):  # rule 7
         run = self.run_tmux
-        made = self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'})
+        made = self.auto_stack(self.a, 'Billing', self.a1)
         groups.rename(self.a, made, 'Tether rename', run, by_user=False)  # Tether may rename its own stack
         groups.rename(self.a, made, 'Payments', run)  # the Stacks sheet: by the user
         self.assertNotIn('auto', groups.read(self.a, run)[0])
@@ -489,10 +554,17 @@ class TmuxTests(Bundles):
         self.assertEqual(self.names(self.a), ['Payments'], 'a user stack is never removed')
 
     # Dissolve: a Tether-made stack with only its main session left goes; the root goes to Unstacked (spec stack-dissolve)
+    def auto_stack(self, session, name, root, *helpers):
+        """An auto stack with its root and helpers, as the old auto stacks (and work_fix.py) make one. Returns its id."""
+        made = groups.create(session, name, self.run_tmux, pane=root, auto=True, root=root)['id']
+        for pane in helpers:
+            self.helper(pane, root)
+            self.assertTrue(groups.auto_move(session, pane, made, self.run_tmux))
+        return made
+
     def family(self):
-        """A stack made by a1's first helper a2: [a1 (root), a2 (helper)]. Returns the group id."""
-        self.helper(self.a2, self.a1)
-        made = self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1, 'pane_name': 'Billing'}])
+        """An auto stack [a1 (root), a2 (helper)] from before helpers stopped making stacks. Returns the group id."""
+        made = self.auto_stack(self.a, 'Billing', self.a1, self.a2)
         self.assertEqual((self.label(self.a1), self.label(self.a2)), (made, made))
         return made
 
@@ -514,8 +586,7 @@ class TmuxTests(Bundles):
         self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''), 'the close dissolves it at once')
         # A tab that ends by itself: the 30 s sweep.
         b2 = terminal_input.new_window_after(self.b1, run)
-        self.helper(b2, self.b1)
-        again = self.start_group({}, {'id': b2, 'pane_name': 'Worker'}, [{'id': self.b1, 'pane_name': 'Beta'}])
+        again = self.auto_stack(self.b, 'Beta', self.b1, b2)
         self.assertNotEqual(again, '')
         self.tmux('kill-pane', '-t', b2)
         self.assertEqual(groups.drop_lone_auto(run), [(self.b, 'Beta')])
@@ -554,7 +625,9 @@ class TmuxTests(Bundles):
     def test_a_start_in_flight_keeps_the_stack(self):  # rule 4: between create and the new tab's @group
         run = self.run_tmux
         caller = {'id': self.a1, 'pane_name': 'Billing'}
+        made = self.auto_stack(self.a, 'Billing', self.a1)  # root-only: its last helper closed
         with agent_tabs._start_group({}, caller, run) as (group, root, name):
+            self.assertEqual(group, made, "the helper opens in its caller's stack")
             self.assertEqual(groups.panes_in(self.a, group, run), [self.a1], 'root-only while the tab launches')
             self.assertEqual(groups.drop_lone_auto(run), [])
             self.assertFalse(groups.drop_if_empty(self.a, group, run))
@@ -577,6 +650,7 @@ class TmuxTests(Bundles):
         env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
         env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
         sweep = ['import groups', 'print(groups.drop_lone_auto())']
+        self.auto_stack(self.a, 'Billing', self.a1)
         with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
             out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
                                  capture_output=True, text=True, timeout=60)
@@ -619,9 +693,10 @@ class TmuxTests(Bundles):
             for worker in workers:
                 worker.join(30)
             stacks = groups.read(self.a, run)
-            self.assertEqual(len(stacks), 1, 'never two stacks, never none with a helper')
-            self.assertEqual((self.label(self.a1), self.label(new[0])), (stacks[0]['id'], stacks[0]['id']),
-                             'the root and the new helper are in the one stack')
+            self.assertLessEqual(len(stacks), 1, 'never a second stack')
+            place = stacks[0]['id'] if stacks else ''  # the sweep may win first: then both are Unstacked
+            self.assertEqual((self.label(self.a1), self.label(new[0])), (place, place),
+                             'the new helper is where its root is')
             groups.drop_lone_auto(run)
             self.tmux('kill-pane', '-t', new[0])
             groups.drop_lone_auto(run)
@@ -667,43 +742,6 @@ class TmuxTests(Bundles):
         self.assertEqual(self.names(self.a), ['Billing'])
         self.assertTrue(groups.drop_if_alone(self.a, made, run))
 
-    def test_two_helpers_of_one_root_at_once_give_one_stack(self):  # concurrency, threads and processes
-        import threading
-        run = self.run_tmux
-        third = terminal_input.new_window_after(self.a2, run)
-        self.helper(self.a2, self.a1)
-        self.helper(third, self.a1)
-        entries = [{'id': self.a1, 'pane_name': 'Billing'}]
-        barrier, found = threading.Barrier(2), []
-
-        def start(pane):
-            barrier.wait()
-            found.append(self.start_group({}, {'id': pane, 'pane_name': 'Worker'}, entries))
-        workers = [threading.Thread(target=start, args=(pane,)) for pane in (self.a2, third)]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join(30)
-        self.assertEqual(len(set(found)), 1)
-        self.assertEqual(self.names(self.a), ['Billing'])
-        # Separate processes (the server and an agent launcher) share the file lock.
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
-        code = ('import sys, agent_tabs\n'
-                'with agent_tabs._start_group({}, {"id": sys.argv[1]}, agent_tabs.subprocess.run, '
-                '[{"id": sys.argv[2], "pane_name": "Payments"}]) as (group, root, name):\n'
-                '    print(group)\n')
-        b2 = terminal_input.new_window_after(self.b1, run)
-        b3 = terminal_input.new_window_after(self.b1, run)
-        self.helper(b2, self.b1)
-        self.helper(b3, self.b1)
-        procs = [subprocess.Popen([os.sys.executable, '-c', code, pane, self.b1], cwd=Path(__file__).parent, env=env,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for pane in (b2, b3)]
-        out = [proc.communicate(timeout=60) for proc in procs]
-        self.assertEqual([proc.returncode for proc in procs], [0, 0], out)
-        self.assertEqual(len({stdout.strip() for stdout, _ in out}), 1)
-        self.assertEqual(self.names(self.b), ['Payments'])
-
     def test_failed_start_undoes_the_auto_stack(self):
         caller = {'id': self.a1, 'pane_name': 'Docs'}
         with self.assertRaises(RuntimeError):
@@ -723,38 +761,6 @@ class TmuxTests(Bundles):
                 groups.move(self.a, self.a1, mine['id'], self.run_tmux, by_user=True)
                 raise RuntimeError('launch failed')
         self.assertEqual((self.names(self.a), self.label(self.a1)), (['User choice'], mine['id']))
-
-    def test_rollback_keeps_a_stack_the_user_renamed_during_launch(self):  # review finding 2
-        run = self.run_tmux
-        with self.assertRaises(RuntimeError):
-            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Docs'}, run) as (group, root, name):
-                groups.rename(self.a, group, 'Mine', run)
-                raise RuntimeError('launch failed')
-        self.assertEqual(self.names(self.a), ['Mine'], 'a stack the user renamed is the user\'s: rollback keeps it')
-
-    def test_rollback_keeps_the_family_when_another_start_joined(self):  # review finding 4, overlap
-        run = self.run_tmux
-        self.helper(self.a2, self.a1)
-        with self.assertRaises(RuntimeError):
-            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
-                joined = self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1}])
-                raise RuntimeError('launch failed')
-        self.assertEqual((joined, self.label(self.a1), self.label(self.a2)), (group, group, group))
-        self.assertEqual(self.names(self.a), ['Billing'])
-
-    def test_one_stack_per_root_when_the_user_takes_the_root_out(self):  # review finding 4
-        run = self.run_tmux
-        made = self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'})
-        self.assertEqual(groups.read(self.a, run)[0]['root'], self.a1, 'the stack records its root')
-        third = terminal_input.new_window_after(self.a2, run)
-        self.tmux('set-option', '-p', '-t', third, '@group', made)  # keeps the stack alive
-        groups.move(self.a, self.a1, None, run, by_user=True)
-        self.assertEqual(self.start_group({}, {'id': self.a1, 'pane_name': 'Billing'}), made)
-        self.helper(self.a2, self.a1)
-        self.assertEqual(self.start_group({}, {'id': self.a2, 'pane_name': 'Worker'}, [{'id': self.a1}]), made)
-        self.assertEqual((self.names(self.a), self.label(self.a1)), (['Billing'], ''), 'no "Billing 2"')
-        groups.rename(self.a, made, 'Payments', run)
-        self.assertNotIn('root', groups.read(self.a, run)[0], 'a user stack is no family stack')
 
     def test_a_stale_cached_root_is_not_used(self):  # review finding 3
         run = self.run_tmux
@@ -866,14 +872,6 @@ class TmuxTests(Bundles):
         self.assertEqual(auto_stacks_cleanup._rename_all(self.a, renames, run), [])
         self.assertEqual(self.names(self.a), ['Two', 'Three', 'Y', 'X'])
 
-    def test_setup_failure_removes_the_new_stack(self):
-        caller = {'id': self.a1, 'pane_name': 'Docs'}
-        with mock.patch.object(groups, 'auto_move', side_effect=groups.GroupError(404, 'gone')):
-            with self.assertRaises(groups.GroupError):
-                with agent_tabs._start_group({}, caller, self.run_tmux):
-                    self.fail('setup failed, so no start')
-        self.assertEqual((self.names(self.a), self.label(self.a1)), ([], ''))
-
     def test_free_name_numbers_taken_and_reserved_names(self):
         taken = [{'id': 'g00000001', 'name': 'Docs', 'project': ''}, {'id': 'g00000002', 'name': 'docs 2', 'project': ''}]
         self.assertEqual(groups.free_name(taken, 'DOCS'), 'DOCS 3')
@@ -941,6 +939,14 @@ class TmuxTests(Bundles):
         bad = Handler(f'{groups_api.PREFIX}context?session={self.a.replace("$", "%24")}&group=gffffffff')
         groups_api.get(bad, run, self.home)
         self.assertEqual(bad.status, 404)
+        # arrange reads each tab's conversation from sessions(): a helper whose owner changed conversations stays.
+        self.tmux('set-option', '-p', '-t', self.a2, '@tether_helper', json.dumps(
+            {'owner_pane': self.a1, 'owner_thread': '11111111-1111-4111-8111-111111111111', 'sent_at': 1}))
+        listing = [{'id': self.a1, 'thread': '22222222-2222-4222-8222-222222222222'}, {'id': self.a2, 'thread': 'bad'}]
+        handler = Handler(groups_api.PREFIX + 'arrange', {'session': self.a, 'stacks': [{'name': 'Work', 'panes': [self.a1]}]})
+        groups_api.post(handler, run, sessions=lambda: listing)
+        self.assertEqual(handler.status, 200, handler.body)
+        self.assertEqual((self.label(self.a1), self.label(self.a2)), (handler.body['groups'][0]['id'], ''))
 
 
 class CliAndServerTests(unittest.TestCase):

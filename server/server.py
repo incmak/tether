@@ -66,6 +66,7 @@ import friday_proxy
 import live_mode
 import attention
 import suggest_groups
+import suggest_names
 import thread_started
 import shell_log
 import terminal_replies
@@ -100,7 +101,7 @@ import groups
 import helper_close
 import groups_api
 import codex_level
-import wakatime
+import activity_time
 import ui_usage
 import codex_trust
 import autonomy
@@ -257,9 +258,10 @@ def monitor_notices():
         except Exception as exc:  # the work board must never stop the monitor
             print(f'work watcher failed: {exc!r}', file=sys.stderr)
         try:
-            wakatime.TRACKER.observe()
+            activity_time.STORE.observe(entries, shared_status, tab_folder)
+            activity_time.STORE.maybe_publish()
         except Exception as exc:  # activity time must never stop the monitor
-            print(f'wakatime observe failed: {exc!r}', file=sys.stderr)
+            print(f'activity time failed: {exc!r}', file=sys.stderr)
         try:
             work_jira.MOVER.observe()
         except Exception as exc:  # Jira on Done must never stop the monitor
@@ -2045,8 +2047,8 @@ class Handler(BaseHTTPRequestHandler):
                 groups_api.get(self)
             elif codex_level.handles(path):
                 codex_level.get(self)
-            elif wakatime.handles(path):
-                wakatime.get(self)
+            elif activity_time.handles(path):
+                activity_time.get(self, path)
             elif ui_usage.handles(path):
                 ui_usage.get(self)
             elif autonomy.handles(path):
@@ -2160,7 +2162,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not wakatime.handles(self.path) and not ui_usage.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2184,13 +2186,13 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self)
+            groups_api.post(self, sessions=sessions)
             return
         if codex_level.handles(self.path):
             codex_level.post(self)
             return
-        if wakatime.handles(self.path):
-            wakatime.post(self, sessions, tab_folder)
+        if activity_time.handles(self.path):
+            activity_time.post(self, self.path, sessions, tab_folder)
             return
         if ui_usage.handles(self.path):
             ui_usage.post(self)
@@ -2219,6 +2221,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == suggest_groups.PATH:
             suggest_groups.post(self)
+            return
+        if self.path == suggest_names.PATH:
+            suggest_names.post(self)
             return
         if self.path == '/mobile/api/task-models':
             self.respond(200, delegate.task_models())
@@ -2393,6 +2398,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'session': pane, 'label': body['name']})
                 return
             if self.path == '/mobile/api/tmux-sessions':
+                task = delegate.first_task(body['task']) if 'task' in body else None
                 if 'worktree' in body:
                     if not valid_name(body.get('name')):
                         raise ValueError(NAME_HELP)
@@ -2408,8 +2414,15 @@ class Handler(BaseHTTPRequestHandler):
                                        check=True, capture_output=True, timeout=5)
                     result = subprocess.run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{session_id}'],
                                             check=True, capture_output=True, text=True, timeout=5)
-                self.respond(201, {'session': result.stdout.strip(), 'name': body['name'],
-                                   **({'worktree': made} if made else {})})
+                    # The session exists now: a failed first task must not hide it, so the reply says what failed.
+                    failed = None
+                    if task:
+                        try:
+                            delegate.launch_in(pane, task)
+                        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                            failed = str(exc) or 'The first task did not start.'
+                self.respond(201, {'session': result.stdout.strip(), 'name': body['name'], **({'pane': pane} if task else {}),
+                                   **({'task_error': failed} if failed else {}), **({'worktree': made} if made else {})})
                 return
             if self.path == '/mobile/api/pane-name':
                 pane, name = body.get('pane'), body.get('name')
@@ -2605,16 +2618,36 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/delegate':
                 entries = sessions()
+                delegate.check_place(body)
                 entry = delegate.validate(body, entries)
                 folder = agent_folder(entry)
+                chosen = chat_folder(body['cwd']) if 'cwd' in body else None
                 made = worktrees.from_body(body, folder if folder and os.path.isdir(folder) else str(paths.HOME))
+                # stack: a new stack for the new tab (New stack with a first task). It goes away again when the start fails.
+                stack = None
                 with SEND_LOCK, worktrees.keeping(made):
                     if made:
                         entry = delegate.validate(body, sessions())
-                    pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
-                                                run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
-                                                **({'cwd': made['path'], 'worktree': made['branch']} if made else {}))
-                self.respond(201, {'pane': pane, 'name': name, **({'worktree': made} if made else {})})
+                    if 'stack' in body:
+                        stack = groups.create(groups.pane_session(entry['id']), body['stack'], by_user=True)
+                    elif 'group' in body:
+                        groups.check_group(groups.pane_session(entry['id']), body['group'])
+                    try:
+                        place = {'cwd': made['path'], 'worktree': made['branch']} if made else {'cwd': chosen} if chosen else {}
+                        if stack or 'group' in body:
+                            place['group'] = stack['id'] if stack else body['group']
+                        pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
+                                                    run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
+                                                    **place)
+                    except Exception:
+                        if stack:
+                            try:
+                                groups.remove(groups.pane_session(entry['id']), stack['id'])
+                            except (groups.GroupError, OSError, subprocess.SubprocessError):
+                                pass
+                        raise
+                self.respond(201, {'pane': pane, 'name': name, **({'worktree': made} if made else {}),
+                                   **({'group': stack} if stack else {})})
                 return
             if self.path == '/mobile/api/fork':
                 pane = body.get('session')

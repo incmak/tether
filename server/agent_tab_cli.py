@@ -41,7 +41,7 @@ def arguments(argv):
     start.add_argument('--role', choices=('advisor', 'second-advisor'), help='name the tab after this tab and mark it with the role icon')
     start.add_argument('--cwd')
     start.add_argument('--worktree', metavar='BRANCH')
-    start.add_argument('--stack', '--group', dest='group', metavar='NAME', help='1 to 3 words. The new tab joins the stack of this main session by itself; NAME only names that stack the first time (Unstacked or Main = no stack); --group is the old name')
+    start.add_argument('--stack', '--group', dest='group', metavar='NAME', help='1 to 3 words that name the new tab. The tab opens in your stack, or in no stack; Tether makes no stack for it (Unstacked or Main = no stack); --group is the old name')
     start.add_argument('task', nargs='?', default='')
     stop = actions.add_parser('stop')
     stop.add_argument('--worker', required=True)

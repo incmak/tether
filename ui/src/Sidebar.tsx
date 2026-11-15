@@ -250,7 +250,8 @@ interface Props {
   onRetry: () => unknown
   onReload: () => void
   onOpen: (pane: Pane) => void
-  onNew: () => void
+  /** New session. `at` = where its popover opens, on a desk. */
+  onNew: (at?: Anchor) => void
   onActions: (session: Session, remove?: boolean, at?: Anchor) => void
   onPaneActions: (pane: Pane, at?: Anchor) => void
   archivedTabs: Pane[]
@@ -511,7 +512,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   return <div className={`sidebar-inner ${ghost ? 'touch-carrying' : ''}`} ref={root}>
     <div className="sidebar-top">
       <div className="sidebar-brand"><img src="/chat/icon.svg" alt="" width="22" height="22" />Tether</div>
-      <span className="sidebar-top-actions">{onMessageAll && <button className="icon-button" aria-label="Message all sessions" title="Message all sessions" onClick={onMessageAll}><MessagesSquare size={19} /></button>}<button className="icon-button" aria-label="New session" title="New session" onClick={onNew}><Plus size={20} /></button>
+      <span className="sidebar-top-actions">{onMessageAll && <button className="icon-button" aria-label="Message all sessions" title="Message all sessions" onClick={onMessageAll}><MessagesSquare size={19} /></button>}<button className="icon-button" aria-label="New session" title="New session" aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onNew(matchMedia('(hover: hover)').matches ? { x: box.left, y: box.bottom + 6 } : undefined) }}><Plus size={20} /></button>
       {onClose && <button className="icon-button" aria-label="Close sessions" onClick={onClose}><X size={20} /></button>}</span>
     </div>
     <div className="sidebar-search-row"><label className="sidebar-search"><Search size={16} aria-hidden="true" /><input type="search" placeholder="Search" aria-label="Search sessions" aria-keyshortcuts={onCommandMenu ? undefined : 'Control+K Meta+K'} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={searchKeys} />{onCommandMenu

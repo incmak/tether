@@ -270,3 +270,53 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
                          reviewer_thread=thread if isinstance(thread, str) and UUID.fullmatch(thread) else None,
                          name=name, agent=agent)
     return pane, name
+
+
+def check_place(body):
+    """The place fields of POST /mobile/api/delegate (the New tab and New stack popovers): cwd or worktree, and a stack
+    id (group) or a new stack name (stack). Agent tabs use other rules: there "group" is a --stack name."""
+    if 'cwd' in body and 'worktree' in body:
+        raise ValueError('Choose a folder or a new worktree, not both.')
+    if 'stack' in body and 'group' in body:
+        raise ValueError('Choose a stack or a new stack name, not both.')
+    if 'group' in body and not (body['group'] == '' or (isinstance(body['group'], str) and re.fullmatch(r'g[0-9a-f]{8}', body['group']))):
+        raise ValueError('Choose a stack.')
+    if 'stack' in body and not isinstance(body['stack'], str):
+        raise ValueError('Enter a stack name.')
+
+
+def first_task(value, models=None):
+    """The optional first task of a new session (POST tmux-sessions "task"): {agent, message, model?}. Returns a clean
+    dict or raises ValueError. Check it before the session is made, so a bad task makes no session."""
+    if not isinstance(value, dict) or value.get('agent') not in ('claude', 'codex'):
+        raise ValueError('Choose Claude or Codex for the first task.')
+    message = value.get('message')
+    if not isinstance(message, str) or not 1 <= len(message.strip()) <= 20000:
+        raise ValueError('Enter a task with 1 to 20000 characters.')
+    if any(unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in message):
+        raise ValueError('The task contains terminal control characters.')
+    model = value.get('model')
+    if model is not None:
+        models = task_models() if models is None else models
+        allowed = [row['id'] for row in models.get(value['agent'], [])]
+        if value['agent'] == 'claude':
+            allowed += [slug for slug, _ in CLAUDE_MODELS]
+        if not isinstance(model, str) or model not in allowed:
+            raise ValueError('Choose a model from the list.')
+    return {'agent': value['agent'], 'message': message, **({'model': model} if model is not None else {})}
+
+
+def launch_in(pane, task, run=subprocess.run):
+    """Start the agent of a checked first task in a fresh pane (a new session's only tab). Returns the tab name."""
+    agent = task['agent']
+    profile = codex_provider.launch_profile() if agent == 'codex' else None
+    _check_profile(profile)
+    name = task_name(task['message'])
+    run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
+         'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))],
+        check=True, capture_output=True, timeout=5)
+    path = write_prompt(task['message'].strip())
+    command = launch_command(None, agent, path, name, profile=profile, model=task.get('model'))
+    run([paths.TMUX, 'send-keys', '-t', pane, '-l', command], check=True, capture_output=True, timeout=5)
+    run([paths.TMUX, 'send-keys', '-t', pane, 'Enter'], check=True, capture_output=True, timeout=5)
+    return name

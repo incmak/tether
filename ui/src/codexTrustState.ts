@@ -7,9 +7,9 @@ import { withApproval } from './approval'
 export type TrustState = 'trusted' | 'untrusted' | 'restart' | 'other'
 /** target_id: the identity of the folder `target` names; the approval binds it, so a swapped folder is refused. */
 export interface TrustStatus { state: TrustState; folder: string | null; target: string | null; target_id?: string | null }
-/** mode 'new': a new Codex tab, in the folder of tab `session` or the default session folder; worktree: a new worktree there.
+/** mode 'new': a new Codex tab, in `cwd`, the folder of tab `session` or the default session folder; worktree: a new worktree there.
  *  mode 'running': the Codex tab `session`. */
-export interface TrustSubject { mode: 'new' | 'running'; session?: string; worktree?: boolean }
+export interface TrustSubject { mode: 'new' | 'running'; session?: string; cwd?: string; worktree?: boolean }
 
 /** Reads the trust state for the subject; null while it loads, when it fails (the check only advises) and when off. */
 export function useCodexTrust(api: Api, subject: TrustSubject | null, refresh = '') {
