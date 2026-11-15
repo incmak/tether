@@ -22,6 +22,7 @@ import server
 import terminal_input
 import agents
 from test_tts import handler
+from own_time import own_time
 
 
 QUESTIONS = [
@@ -148,7 +149,7 @@ class StoreTests(unittest.TestCase):
     def test_stream_with_old_poll_passes_gate_and_keeps_wait(self):
         with patch.dict(server.WATCHED, {'%9': self.now - 100}, clear=True), \
                 patch.dict(server.WATCHING, {'%9': 1}, clear=True), \
-                patch.object(server.time, 'monotonic', side_effect=lambda: self.now):
+                own_time(server, monotonic=Mock(side_effect=lambda: self.now)):
             store = bridge.Pending(lambda: self.now, lambda: self.now, watching=server.ask_watching)
             ask = store.register(ENTRY, self.registration)
             self.assertEqual(ask['wait'], 30)
@@ -570,7 +571,7 @@ class WatchPollTests(unittest.TestCase):
         registration = dict(session_id=ENTRY['thread'], nonce='nonce-12345678901234567890',
                             tool_use_id='tool-1', tool_input=DATA['tool_input'], pid=456)
         with patch.dict(server.WATCHED, clear=True), patch.dict(server.WATCHING, clear=True), \
-                patch.object(server.time, 'monotonic', return_value=100), \
+                own_time(server, monotonic=Mock(return_value=100)), \
                 patch.object(server, 'choose', return_value=ENTRY), patch.object(server, 'chat_payload', return_value={}), \
                 patch.object(bridge, 'hook_process', return_value='start'), patch.object(bridge, 'install_settings', return_value={}):
             for suffix in ['', '&watch=0', '&preview=1']:

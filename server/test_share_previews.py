@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 import share_api
 import share_previews as previews
 import share_store as share
+from own_time import own_time
 
 JPEG = b'\xff\xd8\xffpreview'
 PROBE = {'format': {'duration': '2.4'},
@@ -355,7 +356,7 @@ print(json.dumps([os.getpriority(os.PRIO_PROCESS, 0),
         self.store.thumbnail(complete['id'], JPEG, 'image/jpeg')
         self.store.change('delete', [trash['id']])
         previews._failed.add((str(self.store.root), failed['id']))
-        with patch.object(previews, 'enqueue') as enqueue, patch.object(previews.time, 'monotonic', return_value=100) as now:
+        with patch.object(previews, 'enqueue') as enqueue, own_time(previews, monotonic=Mock(return_value=100)) as now:
             previews.backfill(self.store)
             self.assertEqual({call.args[1] for call in enqueue.call_args_list}, {f['id'] for f in (video, audio, pdf, image)})
             enqueue.reset_mock()

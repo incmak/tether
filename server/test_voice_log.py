@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import server
 import voice_log
+from own_time import own_time
 
 
 def handler(body=None, path=voice_log.PATH):
@@ -76,7 +77,7 @@ class VoiceLogTests(unittest.TestCase):
         self.assertEqual(self.stderr.getvalue(), '')
 
     def test_rate_limit_and_expiry(self):
-        with patch.object(voice_log.time, 'monotonic', return_value=100) as clock:
+        with own_time(voice_log, monotonic=Mock(return_value=100)) as clock:
             for _ in range(60):
                 value = handler({'kind': 'dictation', 'event': 'empty'})
                 voice_log.post(value)

@@ -3,10 +3,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import codex_provider
 import terminal_input as terminal
+from own_time import own_time
 
 PROFILE = 'model = "gpt-6.1-sol"\nmodel_provider = "azure"\nmodel_reasoning_effort = "medium"\n'
 CONFIG = '[model_providers.azure]\nname = "Azure"\nbase_url = "https://example.invalid"\n\n[model_providers.azure.auth]\ncommand = "%s"\nargs = ["never-run"]\n'
@@ -36,7 +37,7 @@ class CodexProviderTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout='')
         profile = codex_provider.launch_profile(self.home) if agent == 'codex' else None
         command = 'codex' + (' -p ' + profile if profile else '') if agent == 'codex' else agent
-        with patch.object(terminal, 'shell_prompt', side_effect=['$', '$', '$ ' + command]), patch.object(terminal.time, 'sleep'):
+        with patch.object(terminal, 'shell_prompt', side_effect=['$', '$', '$ ' + command]), own_time(terminal, sleep=Mock()):
             terminal.start_agent({'id': '%1', 'agent': 'shell'}, agent, run=run, profile=profile)
         return typed[0]
 

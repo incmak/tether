@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import agents
 import claude_probe
@@ -13,6 +13,7 @@ import live_usage
 import paths
 import saved_accounts
 import server
+from own_time import own_time
 
 
 class AccountSwitchUsage(unittest.TestCase):
@@ -43,7 +44,8 @@ class AccountSwitchUsage(unittest.TestCase):
                 'fiveHour': {'pct': 0, 'resetsAt': '2030-01-01T00:00:00Z'},
                 'sevenDay': {'pct': 0}}}]}}
             return subprocess.CompletedProcess(command, 0 if listing else code, json.dumps(data), 'failed')
-        with patch('time.time', return_value=100):
+        clock = Mock(return_value=100)
+        with own_time(saved_accounts, time=clock), own_time(agents, time=clock), own_time(claude_probe, time=clock):
             return saved_accounts.switch(agent, 1, run=run)
 
     def metric(self, name, reported, percent):

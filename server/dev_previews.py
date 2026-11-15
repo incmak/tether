@@ -699,17 +699,23 @@ class Guard:
             self.deadlines.pop(id(sock), None)
 
     def _run(self):
+        """Runs while a connection waits for its head; watch() starts it again for the next one."""
         while True:
             time.sleep(min(0.25, self.head / 4))
             now = time.monotonic()
             with self.lock:
                 late = [key for key, (_, deadline) in self.deadlines.items() if deadline <= now]
                 socks = [self.deadlines.pop(key)[0] for key in late]
+                done = not self.deadlines
+                if done:
+                    self.thread = None
             for sock in socks:
                 try:
                     sock.shutdown(socket.SHUT_RDWR)  # the handler's read ends; its thread closes the socket
                 except OSError:
                     pass
+            if done:
+                return
 
 
 class Reader:

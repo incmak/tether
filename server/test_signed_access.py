@@ -25,6 +25,7 @@ import signed_access as signed
 from test_browser import FakeHandler
 from test_browser_cdp import Chrome, Capture
 from test_browser_device import playwright_modules
+from own_time import own_time
 
 
 def wait_for(predicate, seconds=3):
@@ -519,7 +520,7 @@ class AccessTests(Requests, unittest.TestCase):
             return None
         with patch.object(self.real, 'first_frame', return_value=frame), \
                 patch.object(self.real, 'wait_frame', side_effect=lambda *args: changed() if self.access.grants else closed()), \
-                patch.object(browser_api.time, 'sleep'):
+                own_time(browser_api, sleep=Mock()):
             browser_api.stream(handler, self.real, target, 640, 480, 'signed')
         self.assertIn('"id": "' + ident + '"', handler.wfile.getvalue().decode())
         self.assertIn('"requests": []', handler.wfile.getvalue().decode())

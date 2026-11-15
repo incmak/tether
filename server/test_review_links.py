@@ -10,7 +10,9 @@ from unittest.mock import Mock, patch
 
 import review_links
 import server
+from own_time import own_time
 from terminal_input import DraftError
+
 
 THREAD = '0f8fad5b-d9cb-469f-a165-70867728950e'
 WORKER_THREAD = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
@@ -24,7 +26,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.enterContext(patch.object(review_links, 'FILE', self.file))
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_turns', {}))
-        self.clock = self.enterContext(patch.object(review_links.time, 'monotonic', return_value=1000))
+        self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
         self.worker = dict(id='%13', agent='codex', thread=WORKER_THREAD, transcript='/project/worker.jsonl')
         self.reviewer = dict(id='%12', agent='claude', thread=THREAD, writable=True)
         self.states = {'%13': 'Idle', '%12': 'Idle'}
@@ -711,14 +713,14 @@ class ReviewLinksTests(unittest.TestCase):
 
     def test_unpinned_reviewer_expires_only_after_start_wait(self):
         self.assertEqual(review_links.START_WAIT, 300)
-        with patch.object(review_links.time, 'time', return_value=1000):
+        with own_time(review_links, time=Mock(return_value=1000)):
             self.add(reviewer_thread=None, seen_working=True)
         self.reviewer['thread'] = 'pending-1-1'
         for now in (1031, 1299, 1300):
-            with patch.object(review_links.time, 'time', return_value=now):
+            with own_time(review_links, time=Mock(return_value=now)):
                 self.observe()
             self.assertEqual(len(self.links()), 1)
-        with patch.object(review_links.time, 'time', return_value=1301):
+        with own_time(review_links, time=Mock(return_value=1301)):
             self.observe()
         self.assertEqual(self.links(), [])
         self.send.assert_not_called()
@@ -1364,14 +1366,14 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.links()[0]['rounds'], 1)
 
     def test_missing_worker_survives_grace_then_counts_loss(self):
-        with patch.object(review_links.time, 'time', return_value=1000):
+        with own_time(review_links, time=Mock(return_value=1000)):
             self.add()
         original = self.links()
         for now in (1001, 1029):
-            with patch.object(review_links.time, 'time', return_value=now):
+            with own_time(review_links, time=Mock(return_value=now)):
                 self.observe(entries=[self.reviewer])
             self.assertEqual(self.links(), original)
-        with patch.object(review_links.time, 'time', return_value=1030):
+        with own_time(review_links, time=Mock(return_value=1030)):
             self.observe(entries=[self.reviewer])
         self.assertEqual(self.links()[0]['lost_ticks'], 1)
         self.status.assert_not_called()
@@ -1379,10 +1381,10 @@ class ReviewLinksTests(unittest.TestCase):
         self.reply.assert_not_called()
 
     def test_missing_reviewer_survives_within_grace(self):
-        with patch.object(review_links.time, 'time', return_value=1000):
+        with own_time(review_links, time=Mock(return_value=1000)):
             self.add()
         original = self.links()
-        with patch.object(review_links.time, 'time', return_value=1001):
+        with own_time(review_links, time=Mock(return_value=1001)):
             review_links.observe([self.worker], self.status, self.send, self.reply)
         self.assertEqual(self.links(), original)
         self.status.assert_not_called()
@@ -1391,7 +1393,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_changed_reviewer_thread_counts_loss_even_with_missing_worker(self):
         for entries in ([self.worker, dict(self.reviewer, thread='new-thread')],
                         [dict(self.reviewer, thread='new-thread')]):
-            with patch.object(review_links.time, 'time', return_value=1000):
+            with own_time(review_links, time=Mock(return_value=1000)):
                 self.add()
                 review_links.observe(entries, self.status, self.send, self.reply)
             self.assertEqual(self.links()[0]['lost_ticks'], 1)
@@ -1531,7 +1533,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_start_wait_expiry_alert_uses_reason_from_step_copy(self):
         self.add(reviewer_thread=None)
         self.reviewer['thread'] = None
-        with patch.object(review_links.time, 'time', return_value=self.links()[0]['created'] + 301), \
+        with own_time(review_links, time=Mock(return_value=self.links()[0]['created'] + 301)), \
                 patch('review_links.sys.stderr', new_callable=io.StringIO) as stderr:
             self.observe()
         self.assertEqual(self.links(), [])
@@ -1718,7 +1720,7 @@ class ReviewLinksTests(unittest.TestCase):
         with patch.object(server, 'sessions', return_value=[entry]), \
                 patch.object(server, 'live_status', return_value={'state': 'Idle'}), \
                 patch.object(server.NOTIFIER, 'observe'), \
-                patch.object(server.time, 'sleep', side_effect=StopIteration):
+                own_time(server, sleep=Mock(side_effect=StopIteration)):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(self.links(), [dict(link, lost_ticks=1, lost_reason='worker tab is gone')])
@@ -1775,7 +1777,7 @@ class ServerWatcherTests(unittest.TestCase):
         entries = [{'id': '%12'}]
         with patch.object(server, 'sessions', return_value=entries), \
                 patch.object(server.review_links, 'observe') as observe, \
-                patch.object(server.time, 'sleep', side_effect=[None, StopIteration]):
+                own_time(server, sleep=Mock(side_effect=[None, StopIteration])):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
         self.assertEqual(observe.call_count, 2)
@@ -1787,7 +1789,7 @@ class ServerWatcherTests(unittest.TestCase):
         entries = [{'id': '%12'}]
         with patch.object(server, 'sessions', side_effect=[KeyError('pane'), entries]) as sessions, \
                 patch.object(server.review_links, 'observe') as observe, \
-                patch.object(server.time, 'sleep', side_effect=[None, StopIteration]) as sleep, \
+                own_time(server, sleep=Mock(side_effect=[None, StopIteration])) as clock, \
                 patch('server.sys.stderr', new_callable=io.StringIO) as stderr:
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
@@ -1795,7 +1797,7 @@ class ServerWatcherTests(unittest.TestCase):
         observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
                                         review_reply=server.review_reply)
-        self.assertEqual([call.args for call in sleep.call_args_list], [(2,), (2,)])
+        self.assertEqual([call.args for call in clock.call_args_list], [(2,), (2,)])
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 
     def test_review_alert_uses_native_payload_keys(self):

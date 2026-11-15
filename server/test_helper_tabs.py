@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError, URLError
 
 import agent_tab_cli as cli
+from own_time import own_time
 import agent_tabs
 import auth
 import delegate
@@ -152,7 +153,7 @@ class HelperTests(unittest.TestCase):
             self.entries[0].update(thread=thread, pending_conversation=False)
             self.assertIsNone(helpers.new_record(self.entries[0])['owner_thread'])
         self.entries[0]['thread'] = OWNER
-        with patch.object(helpers.time, 'time', return_value=123):
+        with own_time(helpers, time=Mock(return_value=123)):
             self.assertEqual(helpers.new_record(self.entries[0]), dict(owner_pane='%12', owner_thread=OWNER,
                              helper_thread=None, sent_at=123, before=None))
 
@@ -188,7 +189,7 @@ class HelperTests(unittest.TestCase):
             self.entries[1]['writable'] = True
         helper = self.entries.pop()
         self.reset_record(helper_thread=None)
-        with patch.object(helpers.time, 'time', return_value=1001):
+        with own_time(helpers, time=Mock(return_value=1001)):
             self.assertEqual(self.request('send'), (503, {'error': 'That helper is still starting. Try again in a moment.', 'draft': False}))
         self.entries.append(helper)
         del self.run.options['%13']
@@ -230,7 +231,7 @@ class HelperTests(unittest.TestCase):
             for elapsed in (helpers.START_WAIT - 1, helpers.START_WAIT, helpers.START_WAIT + 1):
                 with self.subTest(helper_thread=helper_thread, elapsed=elapsed):
                     self.reset_record(helper_thread=helper_thread)
-                    with patch.object(helpers.time, 'time', return_value=1000 + elapsed):
+                    with own_time(helpers, time=Mock(return_value=1000 + elapsed)):
                         expected = (503, {'error': 'That helper is still starting. Try again in a moment.',
                                           'draft': False}) if helper_thread is None and elapsed < helpers.START_WAIT else (
                             400, {'error': 'That session has ended. Select another tab.'})
@@ -275,7 +276,7 @@ class HelperTests(unittest.TestCase):
         self.status.side_effect, self.send.side_effect = status, send
         for agent in ('claude', 'codex'):
             self.entries[1]['agent'] = agent
-            with self.subTest(agent=agent), patch.object(helpers.time, 'time', return_value=1234):
+            with self.subTest(agent=agent), own_time(helpers, time=Mock(return_value=1234)):
                 self.assertEqual(self.request('send'), (200, {'sent': True, 'pane': '%13', 'delivery': 'queued'}))
                 self.assertEqual(self.request('wait')[0], 200)
 
@@ -518,8 +519,8 @@ class HelperCLITests(unittest.TestCase):
         self.enterContext(patch.object(auth, 'session_value', return_value='test-credential'))
         self.opener = self.enterContext(patch.object(cli, 'build_opener')).return_value
         self.now = 0
-        self.enterContext(patch.object(cli.time, 'monotonic', side_effect=lambda: self.now))
-        self.sleep = self.enterContext(patch.object(cli.time, 'sleep', side_effect=self.advance))
+        self.sleep = Mock(side_effect=self.advance)
+        self.enterContext(own_time(cli, monotonic=lambda: self.now, sleep=self.sleep))
 
     def advance(self, seconds):
         self.now += seconds

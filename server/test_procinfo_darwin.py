@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import procinfo
+from own_time import own_time
 
 PS = '21717 21716 21717 21765 Ss     501\n21765 21717 21765 21765 S+     501\n'
 ZSH = struct.pack('i', 2) + b'/bin/zsh\0\0\0\0zsh\0-i\0\0\0'
@@ -96,7 +97,7 @@ class DarwinFixtures(unittest.TestCase):
 
 class DarwinTests(DarwinFixtures):
     def test_snapshot_cached_for_one_second(self):
-        with patch.object(procinfo.time, 'monotonic', return_value=10) as clock:
+        with own_time(procinfo, monotonic=Mock(return_value=10)) as clock:
             self.assertEqual(procinfo.pids(), [21717, 21765])
             self.assertEqual(procinfo.parent(21765), 21717)
             self.assertEqual(procinfo.uid(21717), 501)
@@ -109,7 +110,7 @@ class DarwinTests(DarwinFixtures):
             self.assertEqual(self.ps.call_count, 2)
 
     def test_missing_pid_refreshes_cached_snapshot_once(self):
-        with patch.object(procinfo.time, 'monotonic', return_value=10):
+        with own_time(procinfo, monotonic=Mock(return_value=10)):
             procinfo.pids()
             self.ps.return_value += '42 1 42 -1 S 501\n'
             self.assertEqual(procinfo.parent(42), 1)
@@ -138,7 +139,7 @@ class DarwinTests(DarwinFixtures):
         self.assertEqual(procinfo.start_ticks(21765), '1700000000.123456')
         self.sysctl.assert_called_with([1, 14, 1, 21765])
         self.assertEqual(procinfo.start_ms('1700000000.123456', now=0), 1_700_000_000_123)
-        with patch.object(procinfo.time, 'time', return_value=200.75):
+        with own_time(procinfo, time=Mock(return_value=200.75)):
             self.assertEqual(procinfo.uptime(), 100.25)
         self.sysctl.assert_called_with([1, 21])
         self.sysctl.return_value, self.sysctl.side_effect = b'', None

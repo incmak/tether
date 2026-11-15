@@ -13,6 +13,7 @@ import paths
 import server
 import terminal_input as terminal
 import terminal_input
+from own_time import own_time
 
 
 class ReviewDraftTests(unittest.TestCase):
@@ -22,7 +23,7 @@ class ReviewDraftTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(terminal, '_quiet_drafts', {}))
         self.enterContext(patch.object(terminal, 'verify'))
-        self.enterContext(patch.object(terminal.time, 'sleep'))
+        self.enterContext(own_time(terminal, sleep=Mock()))
         self.draft = self.enterContext(patch.object(terminal, 'prompt_draft', return_value=['my draft']))
         self.run = Mock(return_value=subprocess.CompletedProcess([], 0, stdout=''))
         self.clock = Mock(return_value=100)
@@ -366,7 +367,7 @@ class SessionControlTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout='')
             entry = {'id': '%1', 'agent': 'shell'}
             with patch.object(terminal, 'shell_prompt', side_effect=['user@host:~$', 'user@host:~$', 'user@host:~$ ' + cmd]), \
-                 patch.object(terminal.time, 'sleep'):
+                 own_time(terminal, sleep=Mock()):
                 terminal.start_agent(entry, agent, run=run)
             self.assertEqual(calls[0], ('load-buffer', cmd.encode()))
             self.assertEqual(calls[-1], ('send-keys', 'Enter'))
@@ -377,18 +378,18 @@ class SessionControlTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout='')
         # Delayed echo: initial, pre-paste check, poll 1 (not arrived yet), poll 2 (arrived with extra spacing)
         with patch.object(terminal, 'shell_prompt', side_effect=['user@host:~$', 'user@host:~$', 'user@host:~$', 'user@host:~$  agy  ']), \
-             patch.object(terminal.time, 'sleep'):
+             own_time(terminal, sleep=Mock()):
             terminal.start_agent(entry, 'antigravity', run=run)
 
         # zsh-autosuggestions draws grey text after the pasted command
         with patch.object(terminal, 'shell_prompt', side_effect=['alex@example-host:~ %', 'alex@example-host:~ %', 'alex@example-host:~ % claude --resume']), \
-             patch.object(terminal.time, 'sleep'):
+             own_time(terminal, sleep=Mock()):
             terminal.start_agent(entry, 'claude', run=run)
 
         # Timeout failure if command never appears
         with patch.object(terminal, 'shell_prompt', return_value='user@host:~$'), \
-             patch.object(terminal.time, 'monotonic', side_effect=[0, 0, 10]), \
-             patch.object(terminal.time, 'sleep'):
+             own_time(terminal, monotonic=Mock(side_effect=[0, 0, 10])), \
+             own_time(terminal, sleep=Mock()):
             with self.assertRaises(RuntimeError) as ctx:
                 terminal.start_agent(entry, 'antigravity', run=run)
             self.assertIn('Could not confirm the launch command', str(ctx.exception))
@@ -485,8 +486,8 @@ class ShellPromptTests(unittest.TestCase):
         self.entry = {'id': '%1', 'agent': 'shell', 'pane_pid': 123, 'pane_start': '42'}
         self.enterContext(patch.object(terminal, 'Path', side_effect=lambda value: proc if value == '/proc' else Path(value)))
         self.enterContext(patch.object(terminal, 'process_start', return_value='42'))
-        self.enterContext(patch.object(terminal.time, 'sleep'))
-        self.enterContext(patch.object(terminal.time, 'monotonic', side_effect=[0, 0, 10]))
+        self.enterContext(own_time(terminal, sleep=Mock()))
+        self.enterContext(own_time(terminal, monotonic=Mock(side_effect=[0, 0, 10])))
 
     def pane(self, width, screen, row, column, pasted=None):
         state = [screen, row, column]
@@ -515,7 +516,7 @@ class ShellPromptTests(unittest.TestCase):
             with self.subTest(agent=agent):
                 # The first command character fills the prompt row; the rest wraps below it.
                 run, calls = self.pane(28, prompt, 0, 27, (prompt + command[0] + '\n' + command[1:], 1, len(command) - 1))
-                with patch.object(terminal.time, 'monotonic', side_effect=[0, 0, 10]):
+                with own_time(terminal, monotonic=Mock(side_effect=[0, 0, 10])):
                     terminal.start_agent(self.entry, agent, run=run)
                 self.assertEqual([argv[-1] for argv, _ in calls if 'send-keys' in argv], ['Enter'])
                 self.assertEqual([kwargs['input'] for argv, kwargs in calls if 'load-buffer' in argv], [command.encode()])
@@ -603,9 +604,8 @@ class DraftHandlingTests(unittest.TestCase):
     entry = {'id': '%1', 'agent': 'claude'}
 
     def setUp(self):
-        for target in (patch.object(terminal, 'verify'), patch.object(terminal.time, 'sleep')):
-            target.start()
-            self.addCleanup(target.stop)
+        self.enterContext(patch.object(terminal, 'verify'))
+        self.enterContext(own_time(terminal, sleep=Mock()))
 
     def test_existing_draft_blocks_send_with_draft_error(self):
         pane = FakeClaudePane('push it')
@@ -1091,7 +1091,7 @@ class AttentionTests(unittest.TestCase):
     def test_live_status_reports_input_needed(self):
         entry = dict(self.CLAUDE, owner_pid=1, writable=True, registry='/nonexistent')
         run = lambda argv, **kwargs: __import__('types').SimpleNamespace(stdout=self.MENU, returncode=0)
-        with patch.object(terminal, 'capture_quota_notices'), patch.object(terminal.time, 'monotonic', side_effect=[0, 5]):
+        with patch.object(terminal, 'capture_quota_notices'), own_time(terminal, monotonic=Mock(side_effect=[0, 5])):
             self.assertEqual(terminal.live_status(entry, run)['state'], 'Idle')
             status = terminal.live_status(entry, run)
         self.assertEqual(status['state'], 'Input needed')
@@ -1129,7 +1129,7 @@ class PanelAndProgramTests(unittest.TestCase):
     def test_read_only_panel_is_closed_but_menus_are_not(self):
         usage = 'Status   Config   Usage\n\nCurrent session  4% used\n\nEsc to cancel\n'
         menu = 'Pick one\n\u276f 1. Yes\n  2. No\n\nEnter to select \u00b7 Esc to cancel\n'
-        with patch.object(terminal.time, 'sleep'):
+        with own_time(terminal, sleep=Mock()):
             sent, run = self.keys(usage)
             self.assertTrue(terminal.close_info_panel(self.CLAUDE, run))
             self.assertEqual(sent, ['Escape'])
@@ -1145,7 +1145,7 @@ class PanelAndProgramTests(unittest.TestCase):
                 + '   What\'s contributing to your usage?\n   96%  Stop sessions you no longer need\n'
                 + '   Subagents               % of usage\n   general-purpose                16%\n'
                 + '   edgarization-expert             1%                    \u2193\n')
-        with patch.object(terminal.time, 'sleep'):
+        with own_time(terminal, sleep=Mock()):
             sent, run = self.keys(tall)
             self.assertTrue(terminal.close_info_panel(self.CLAUDE, run))
         self.assertEqual(sent, ['Escape'])
@@ -1837,9 +1837,7 @@ class SmallPanePromptTests(unittest.TestCase):
     SCREEN = 'Claude Code\nPrevious reply\nMore output\nStill more output\nStatus\n'
 
     def setUp(self):
-        pause = patch.object(terminal.time, 'sleep')
-        pause.start()
-        self.addCleanup(pause.stop)
+        self.enterContext(own_time(terminal, sleep=Mock()))
 
     def run_pane(self, height=5, clients='/dev/pts/20\t100\t6\t\n', screen=None,
                  window_height=None, sizing='latest'):
@@ -1966,7 +1964,7 @@ class SmallPanePromptTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout='')
             return small_run(argv, **kwargs)
         with patch.object(terminal, 'verify'), patch.object(terminal, 'leave_scrollback'), \
-                patch.object(terminal.time, 'sleep'):
+                own_time(terminal, sleep=Mock()):
             with self.assertRaises(terminal.PaneTooSmall):
                 terminal.submit(entry, 'hello', run=run)
         self.assertEqual(commands.count('send-keys'), 1)
@@ -2016,9 +2014,8 @@ class PickerEnterTests(unittest.TestCase):
     entry = {'id': '%1', 'agent': 'claude'}
 
     def setUp(self):
-        for target in (patch.object(terminal, 'verify'), patch.object(terminal.time, 'sleep')):
-            target.start()
-            self.addCleanup(target.stop)
+        self.enterContext(patch.object(terminal, 'verify'))
+        self.enterContext(own_time(terminal, sleep=Mock()))
 
     def run_pane(self, after_enter):
         state = {'enters': 0, 'screen': 'history\n' + '─' * 8 + '\n❯\xa0\n' + '─' * 8}

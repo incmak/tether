@@ -8,11 +8,12 @@ import threading
 import time
 import unittest
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import files
 import paths
 import share_store as share
+from own_time import own_time
 
 
 class Reader:
@@ -305,7 +306,7 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(set(upload), {'id', 'name', 'size', 'offset', 'mime', 'created', 'expires'})
             self.assertEqual(self.part(upload).stat().st_mode & 0o777, 0o600)
             for first, last in ((0, 3), (3, 20), (20, len(data))):
-                with patch.object(share.time, 'time', return_value=time.time() + 10):
+                with own_time(share, time=Mock(return_value=time.time() + 10)):
                     result = self.store.append_upload(upload['id'], io.BytesIO(data[first:last]), last - first, first)
                     self.assertEqual(result['upload']['expires'], share.time.time() + share.UPLOAD_TTL)
                 self.assertEqual(result['upload']['offset'], last)
@@ -474,7 +475,7 @@ class StoreTests(unittest.TestCase):
                 restarted.append_upload(upload['id'], io.BytesIO(b'ab'), 2, 0)
             self.assertEqual((caught.exception.status, caught.exception.offset), (409, 0))
             # Even an expired lease must not permit a second writer or startup truncation.
-            with patch.object(share.time, 'time', return_value=time.time() + 121):
+            with own_time(share, time=Mock(return_value=time.time() + 121)):
                 share.Store(self.root)
                 self.error(409, restarted.append_upload, upload['id'], io.BytesIO(b'ab'), 2, 0)
         finally:

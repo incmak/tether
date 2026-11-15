@@ -17,6 +17,7 @@ import autonomy_setup as setup
 import paths
 import urgent_ping
 from test_approval import HAS_CRYPTO, Handler, PasskeyCase
+from own_time import own_time
 
 
 class Base(unittest.TestCase):
@@ -263,7 +264,7 @@ class Ping(Base):
                 self.assertIn('Question|Test ping from Tether', run.call_args.args[0])
 
     def test_test_cooldown_is_shared_and_allows_sixty_seconds(self):
-        with mock.patch.object(setup.time, 'monotonic', side_effect=[0, 59.99, 60]), \
+        with own_time(setup, monotonic=mock.Mock(side_effect=[0, 59.99, 60])), \
                 mock.patch.object(urgent_ping, 'run_test', return_value={'ok': True}) as run:
             self.assertEqual(setup.test_ping(), {'ok': True})
             with self.assertRaisesRegex(ValueError, '^Wait a minute before the next test\\.$'):
@@ -335,7 +336,7 @@ class SetupApproval(PasskeyCase):
         setup.save_ping('briskbot', {'mention': 'user'}, 'https://tether.test')
         handler = self.post({'action': 'ping-off'})
         self.assertEqual((handler.status, handler.body['ping']['state']), (200, 'off'))
-        with mock.patch.object(setup.time, 'monotonic', side_effect=[0, 59.99, 60]), \
+        with own_time(setup, monotonic=mock.Mock(side_effect=[0, 59.99, 60])), \
                 mock.patch.object(urgent_ping, 'run_test', return_value={'ok': True}) as run:
             self.assertEqual(self.post({'action': 'ping-test'}).status, 200)
             handler = self.post({'action': 'ping-test'})

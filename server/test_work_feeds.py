@@ -25,6 +25,7 @@ import work_feeds
 import work_fix
 import work_items
 from test_work_items import PROJECT, Handler
+from own_time import own_time
 
 REAL_START_TRIAGE = work_fix.start_triage  # Home replaces it with a fake
 NOW = 1_800_000_000.0
@@ -72,7 +73,7 @@ class Home(unittest.TestCase):
     def save(self, record, create=False, at=NOW):
         """Save the project as if at the time at (the feed reads from its save time)."""
         revision = work_items.registry()['revision']
-        with mock.patch.object(work_items.time, 'time', return_value=at):
+        with own_time(work_items, time=mock.Mock(return_value=at)):
             return work_items.save_project(record, revision, create=create)
 
     def poll(self, now=NOW, sessions=lambda: [{'id': '%1'}]):

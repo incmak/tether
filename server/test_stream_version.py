@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import server
+from own_time import own_time
 
 
 def payload_for(text):
@@ -24,8 +25,8 @@ class StreamVersionTests(unittest.TestCase):
                 patch.object(server, 'change_signature', side_effect=lambda config: next(clock)), \
                 patch.object(server, 'capture', return_value='screen'), \
                 patch.object(server, 'chat_payload', side_effect=lambda *a, **k: payload_for(next(texts))), \
-                patch.object(server.time, 'monotonic', side_effect=lambda: next(ticks) * 0.5), \
-                patch.object(server.time, 'sleep'):
+                own_time(server, monotonic=Mock(side_effect=lambda: next(ticks) * 0.5)), \
+                own_time(server, sleep=Mock()):
             handler.stream_chat('p1', False, lifetime=10, have=have)
         return handler.wfile.getvalue().decode()
 

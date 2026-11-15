@@ -10,6 +10,7 @@ fake = types.ModuleType('faster_whisper')
 fake.WhisperModel = mock.MagicMock()
 fake.decode_audio = mock.MagicMock()
 import os
+from own_time import own_time
 os.environ['TETHER_VOICE_ENGINE'] = 'whisper'  # never load or download Parakeet in tests
 with mock.patch.dict(sys.modules, {'faster_whisper': fake}):
     import transcribe_worker as worker
@@ -82,7 +83,7 @@ class FinalPassTest(unittest.TestCase):
         worker.MODEL.transcribe.return_value = (iter([segment(' first part', 10.0), segment(' second part', 20.0), segment(' never', 30.0)]), None)
         worker.LIVE_MODEL.transcribe.return_value = (iter([segment(' rough rest', 0.0)]), None)
         samples = [0.0] * (40 * worker.RATE)
-        with mock.patch.object(worker.time, 'monotonic', side_effect=lambda: next(clock, 99.0)), mock.patch.object(worker, 'FINAL_BUDGET', 20.0):
+        with own_time(worker, monotonic=mock.Mock(side_effect=lambda: next(clock, 99.0))), mock.patch.object(worker, 'FINAL_BUDGET', 20.0):
             self.assertEqual(worker.final(samples), 'first part second part rough rest')
         rest = worker.LIVE_MODEL.transcribe.call_args.args[0]
         self.assertEqual(len(rest), 20 * worker.RATE)  # the fast model starts where the accurate one stopped

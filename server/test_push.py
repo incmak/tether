@@ -7,13 +7,14 @@ from urllib.parse import quote
 
 import push
 import server
+from own_time import own_time
 
 
 class PushTests(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(server.WATCHING, clear=True))
         self.enterContext(patch.dict(server.WATCHED, clear=True))
-        self.clock = self.enterContext(patch.object(server.time, 'monotonic', return_value=100))
+        self.clock = self.enterContext(own_time(server, monotonic=Mock(return_value=100)))
         self.entry = {'id': '%7', 'label': 'Agent task'}
 
     def poll(self, watch):

@@ -20,6 +20,7 @@ import files
 import office_addon as office
 import paths
 import server
+from own_time import own_time
 
 
 class ResultHandler(BaseHTTPRequestHandler):
@@ -555,7 +556,7 @@ class OfficeTests(unittest.TestCase):
         with mock.patch.object(subprocess, 'run', return_value=result) as run, \
                 mock.patch.object(office, '_free_port', side_effect=[17695, 17696, 17697]), \
                 mock.patch.object(office, '_healthy', return_value=False), \
-                mock.patch.object(office.time, 'monotonic', side_effect=[0, 181]), \
+                own_time(office, monotonic=mock.Mock(side_effect=[0, 181])), \
                 mock.patch('sys.stderr', new_callable=io.StringIO) as error:
             self.assertEqual(office.main(['install']), 1)
             self.assertIn('180 seconds', error.getvalue())

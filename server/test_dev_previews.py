@@ -1175,6 +1175,48 @@ class LimitTests(ProxyTests):
         self.assertEqual(self.free_slots(3), 3)
 
 
+class GuardThreadTests(unittest.TestCase):
+    """The head-deadline thread runs only while a connection waits for its head."""
+
+    def wait_for(self, check, wait=5):
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not check():
+            time.sleep(0.02)
+        return check()
+
+    def watched(self, guard):
+        """A socket pair whose head deadline (60 s) cannot pass during the test, and the guard thread watching it."""
+        ours, theirs = socket.socketpair()
+        self.addCleanup(ours.close)
+        self.addCleanup(theirs.close)
+        guard.watch(ours)
+        with guard.lock:
+            return ours, theirs, guard.thread
+
+    def test_thread_closes_a_late_head_then_stops_and_starts_again(self):
+        guard = Guard(head=60)
+        for round in range(2):
+            with self.subTest(round=round):
+                ours, theirs, thread = self.watched(guard)
+                self.assertTrue(thread.is_alive())
+                with guard.lock:
+                    guard.deadlines[id(ours)] = (ours, 0)  # the head is now late
+                theirs.settimeout(5)
+                self.assertEqual(theirs.recv(1), b'')  # the late socket was shut down
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertTrue(self.wait_for(lambda: guard.thread is None))
+
+    def test_thread_keeps_running_while_a_connection_waits(self):
+        guard = Guard(head=60)
+        ours, theirs, thread = self.watched(guard)
+        time.sleep(0.6)  # two or more checks of the deadlines
+        self.assertTrue(thread.is_alive())
+        guard.unwatch(ours)
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+
+
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
 class ApiTests(unittest.TestCase):
     """POST and GET /mobile/api/dev-preview on Tether's main origin, through the real request handler."""

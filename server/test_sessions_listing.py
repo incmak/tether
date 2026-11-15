@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import server
+from own_time import own_time
 
 
 class SessionsListingTests(unittest.TestCase):
@@ -22,10 +23,9 @@ class SessionsListingTests(unittest.TestCase):
                    patch.object(server, 'discover', return_value=[]),
                    patch.object(server.window_size, 'apply'),
                    patch.object(server, 'settings', return_value={}),
-                   patch.object(server.time, 'monotonic', side_effect=lambda: self.clock[0])]
+                   own_time(server, monotonic=Mock(side_effect=lambda: self.clock[0]))]
         for item in patches:
-            item.start()
-            self.addCleanup(item.stop)
+            self.enterContext(item)
         server.forget_sessions()
 
     def test_pages_within_a_second_share_one_build(self):

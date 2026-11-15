@@ -18,6 +18,7 @@ import autonomy
 import paths
 import server
 import terminal_input as terminal
+from own_time import own_time
 
 
 class CodexHooksTests(unittest.TestCase):
@@ -145,14 +146,14 @@ class CodexHooksTests(unittest.TestCase):
 
     def test_hooks_idle_overrides_screen_and_transcript(self):
         self.feed('Stop')
-        with patch.object(hooks.time, 'time', return_value=110), \
+        with own_time(hooks, time=Mock(return_value=110)), \
                 patch.object(terminal, 'transcript_busy', side_effect=AssertionError('hooks must win')):
             self.assertEqual(self.status('Working (8s)\n› ')['state'], 'Idle')
 
     def test_waiting_without_screen_options_shows_read_only_card(self):
         self.tool()
         self.permission()
-        with patch.object(hooks.time, 'time', return_value=110):
+        with own_time(hooks, time=Mock(return_value=110)):
             result = self.status('\n'.join('row-%02d' % row for row in range(30)))
         self.assertEqual(result['state'], 'Approval')
         card = result['approval']
@@ -165,7 +166,7 @@ class CodexHooksTests(unittest.TestCase):
     def test_working_screen_after_approval_overrides_waiting(self):
         self.tool()
         self.permission()
-        with patch.object(hooks.time, 'time', return_value=110):
+        with own_time(hooks, time=Mock(return_value=110)):
             self.assertEqual(self.status('Working (8s • esc to interrupt)\n› ')['state'], 'Working')
 
     def test_claude_mode_ignores_interrupt(self):
@@ -194,7 +195,7 @@ class CodexHooksTests(unittest.TestCase):
                 patch.object(server.history, 'read', return_value={'usage': {}, 'model': 'test'}), \
                 patch.object(server, 'codex_metrics', return_value={}), \
                 patch.object(server.footer, 'codex', return_value={'context': {'percent': 10}}), \
-                patch.object(server.time, 'time', return_value=170):
+                own_time(server, time=Mock(return_value=170)):
             handler.do_GET()
         self.assertEqual(replies[0][0], 200)
         return replies[0][1]

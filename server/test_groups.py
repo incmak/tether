@@ -24,6 +24,7 @@ import projects
 import server
 import terminal_input
 import tmux_merge
+from own_time import own_time
 
 PID = 'a1b2c3d4e5f6'
 
@@ -655,7 +656,7 @@ class TmuxTests(Bundles):
             out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
                                  capture_output=True, text=True, timeout=60)
             self.assertEqual((out.returncode, out.stdout.strip()), (0, '[]'), out.stderr)
-            with mock.patch.object(groups.time, 'time', lambda: 10 ** 12):  # a marker its process never ended
+            with own_time(groups, time=mock.Mock(return_value=10 ** 12)):  # a marker its process never ended
                 self.assertFalse(groups.starting(self.a, group, run))
         self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')], 'no helper came: it dissolves after')
 

@@ -15,6 +15,7 @@ import browser_api
 import browser_display
 from browser_display import JpegSplitter, VirtualDisplay
 from test_browser import FakeHandler
+from own_time import own_time
 
 
 class WindowDisplayTests(unittest.TestCase):
@@ -226,7 +227,7 @@ class WindowRouteTests(unittest.TestCase):
             except StopIteration:
                 raise BrokenPipeError
         signed.display.wait_frame.side_effect = next_frame
-        with patch.object(browser_api.time, 'sleep') as sleep, patch.object(browser_api.Flow, 'wait_room') as room:
+        with own_time(browser_api, sleep=Mock()) as sleep, patch.object(browser_api.Flow, 'wait_room') as room:
             browser_api.get(handler, signed_browser=signed)
         messages = handler.wfile.getvalue().decode()
         data = [json.loads(line[6:]) for line in messages.splitlines() if line.startswith('data: ')]

@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import server
 import subagents
 import tool_details
+from own_time import own_time
 
 
 class SubagentTests(unittest.TestCase):
@@ -26,9 +27,7 @@ class SubagentTests(unittest.TestCase):
         self.owner_start = self.enterContext(patch.object(subagents, 'process_start', return_value='456'))
         self.start_ms = self.enterContext(patch.object(subagents.procinfo, 'start_ms',
                                                      return_value=(self.now - 300) * 1000))
-        self.clock = patch.object(subagents.time, 'time', return_value=self.now)
-        self.clock.start()
-        self.addCleanup(self.clock.stop)
+        self.clock = self.enterContext(own_time(subagents, time=Mock(return_value=self.now)))
         self.enterContext(patch.object(subagents, '_fd_links', return_value=[]))
         self.enterContext(patch.object(subagents.task_process, 'LEDGER', self.root / 'task-stops.json'))
         self.process_children = self.enterContext(patch.object(subagents.task_process, 'children', return_value=[]))
@@ -474,7 +473,7 @@ class SubagentTests(unittest.TestCase):
     def test_cached_state_and_duration_age_without_file_changes(self):
         self.agent(age=899)
         self.assertEqual(subagents.detail(self.config, 'abc')['state'], 'running')
-        with patch.object(subagents.time, 'time', return_value=self.now + 2):
+        with own_time(subagents, time=Mock(return_value=self.now + 2)):
             entry = subagents.detail(self.config, 'abc')
             self.assertEqual(entry['state'], 'running')
             self.assertEqual(entry['seconds'], 122)
@@ -849,7 +848,7 @@ class ProcessTasksTests(unittest.TestCase):
         fallback = self.tmp / 'cwd-slug' / self.new / 'tasks'
         fallback.mkdir(parents=True)
         self.fds.return_value = []
-        with patch.object(subagents.time, 'monotonic', return_value=subagents.time.monotonic() + 31):
+        with own_time(subagents, monotonic=Mock(return_value=subagents.time.monotonic() + 31)):
             self.assertEqual(subagents._tasks_dir(self.config), fallback)
         subagents._tasks_cache.clear()
         self.assertIsNone(subagents._tasks_dir(dict(self.config, thread='../*')))

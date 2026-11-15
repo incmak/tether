@@ -21,6 +21,7 @@ import approval
 import codex_level
 import paths
 import server
+from own_time import own_time
 
 
 def cbor(value):
@@ -225,7 +226,7 @@ class Ceremonies(PasskeyCase):
             with self.subTest(action=action, payload=payload), self.assertRaises(approval.ApprovalError):
                 self.require(self.assertion(), action, payload)
         value = self.assertion()
-        with mock.patch.object(approval.time, 'monotonic', return_value=approval._CHALLENGES[value['challenge_id']]['time'] + 120):
+        with own_time(approval, monotonic=mock.Mock(return_value=approval._CHALLENGES[value['challenge_id']]['time'] + 120)):
             with self.assertRaises(approval.ApprovalError):
                 self.require(value)
         value = self.assertion()
@@ -299,7 +300,7 @@ class Ceremonies(PasskeyCase):
             approval.options(self.handler, 'get', 'setup-hook', {})
         self.assertEqual(len(approval._CHALLENGES), 50)
         self.assertNotIn(opts['challenge_id'], approval._CHALLENGES)
-        with mock.patch.object(approval.time, 'monotonic', return_value=10**12):
+        with own_time(approval, monotonic=mock.Mock(return_value=10**12)):
             approval.options(self.handler, 'get', 'setup-hook', {})
         self.assertEqual(len(approval._CHALLENGES), 1)
 

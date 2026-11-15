@@ -7,6 +7,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from own_time import own_time
 
 try:
     from . import friday_agent as friday
@@ -573,7 +574,7 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_loop_lag_reports_resets_and_flushes_on_cancel(self):
         clock = [0, 0, .08, .08, 10.1, 10.1, 10.13, 10.13]
-        with patch.object(friday.time, 'monotonic', side_effect=clock), \
+        with own_time(friday, monotonic=Mock(side_effect=clock)), \
                 patch.object(friday.asyncio, 'sleep', new_callable=AsyncMock) as sleep, \
                 patch('sys.stderr') as stderr:
             sleep.side_effect = [None, None, None, asyncio.CancelledError()]
@@ -701,7 +702,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.rt.PocketTTSService, 'run_tts', source), \
                 patch.dict(friday.os.environ, {'TETHER_FRIDAY_PREROLL': '.15'}), \
-                patch.object(friday.time, 'monotonic', side_effect=lambda: clock[0]), \
+                own_time(friday, monotonic=Mock(side_effect=lambda: clock[0])), \
                 patch('builtins.print') as log:
             output = [(clock[0], frame) async for frame in service.run_tts('reply', 'context')]
         self.assertEqual([frame for _, frame in output], ['start', audio, 'control', audio, audio, 'stop'])
@@ -769,7 +770,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.rt.PocketTTSService, 'run_tts', source), \
                 patch.dict(friday.os.environ, {'TETHER_FRIDAY_PREROLL': '.15',
                     'TETHER_FRIDAY_PREROLL_MAX': '1.5', 'TETHER_FRIDAY_PREROLL_WAIT': '2'}), \
-                patch.object(friday.time, 'monotonic', side_effect=lambda: clock[0]), \
+                own_time(friday, monotonic=Mock(side_effect=lambda: clock[0])), \
                 patch('builtins.print') as log:
             output = [frame async for frame in service.run_tts('A long sentence.', 'context')]
             self.assertEqual(output, [audio] * 4)
@@ -812,7 +813,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         patch.dict(friday.os.environ, {'TETHER_FRIDAY_PREROLL': '.15',
                             'TETHER_FRIDAY_PREROLL_MAX': '1.5',
                             'TETHER_FRIDAY_PREROLL_WAIT': str(wait)}), \
-                        patch.object(friday.time, 'monotonic', side_effect=lambda: clock[0]), \
+                        own_time(friday, monotonic=Mock(side_effect=lambda: clock[0])), \
                         patch('builtins.print') as log:
                     output = [(clock[0], frame) async for frame in service.run_tts(
                         'Interrupted sentence', 'context')]

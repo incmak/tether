@@ -7,13 +7,14 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import claude_hooks
 import footer
 import paths
 import server
 from agent_browser_cli import note
+from own_time import own_time
 
 
 class HookTests(unittest.TestCase):
@@ -509,7 +510,7 @@ class HookTests(unittest.TestCase):
         screen = '─' * 80 + '\n❯\n' + '─' * 80 + '\n⏸ plan mode on'
         for captured, expected in ((99, 'accept'), (109, 'plan')):
             with patch.object(server, 'choose', return_value=self.config), patch.object(server, 'capture', return_value=screen), \
-                    patch.object(server.time, 'time', side_effect=[captured, 110]):
+                    own_time(server, time=Mock(side_effect=[captured, 110])):
                 handler.do_GET()
             self.assertEqual(results[-1][0], 200)
             self.assertEqual(footer.mode_key(results[-1][1]['mode']), expected)

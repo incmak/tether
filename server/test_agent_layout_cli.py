@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 
 import agent_layout_cli as cli
 import auth
 import custom_layouts as layouts
 from test_custom_layouts import GOOD, changed
+from own_time import own_time
 
 
 class CliTests(unittest.TestCase):
@@ -49,7 +50,7 @@ class CliTests(unittest.TestCase):
     def test_generate_polls_and_optional_save(self):
         clean = layouts.validate(GOOD, 'cockpit')
         self.client.request.side_effect = [{'job': 'job-1'}, {'state': 'running'}, {'state': 'done', 'layout': clean}, {'layout': clean}]
-        with patch.object(cli.time, 'sleep') as sleep:
+        with own_time(cli, sleep=Mock()) as sleep:
             self.assertEqual(cli.main(['generate', 'like Telegram', '--save']), 0)
         sleep.assert_called_once_with(1.5)
         self.assertEqual(json.loads(self.output.getvalue()), clean)
@@ -63,7 +64,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(cli.main(['generate', 'quiet']), 1)
         self.assertIn('Bad contrast.', self.errors.getvalue())
         self.client.request.side_effect = [{'job': 'job-2'}]
-        with patch.object(cli.time, 'monotonic', side_effect=[0, 421]):
+        with own_time(cli, monotonic=Mock(side_effect=[0, 421])):
             self.assertEqual(cli.main(['generate', 'quiet']), 1)
         self.assertIn('took too long', self.errors.getvalue())
 

@@ -13,6 +13,7 @@ from unittest import mock
 import backgrounds
 import prefs_sync
 import server
+from own_time import own_time
 
 
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOuoAAAAASUVORK5CYII=')
@@ -216,7 +217,7 @@ class BackgroundTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 413)
 
     def test_list_order_and_delete(self):
-        with mock.patch.object(backgrounds.time, 'time', side_effect=[10, 30, 20]):
+        with own_time(backgrounds, time=mock.Mock(side_effect=[10, 30, 20])):
             items = [backgrounds.save(PNG) for _ in range(3)]
         self.assertEqual([item['created'] for item in self.get()[1]['items']], [30, 20, 10])
         self.assertEqual(self.post('/delete', {'id': items[1]['id']}), (200, {'ok': True}))

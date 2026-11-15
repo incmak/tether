@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import uuid
 
 import agents
@@ -17,6 +17,7 @@ import footer
 import model_picker
 import paths
 import terminal_input as terminal
+from own_time import own_time
 
 
 class Screen:
@@ -250,7 +251,7 @@ class NarrowControlTests(unittest.TestCase):
 
     def test_wrapped_panel_close_hint_is_recognised(self):
         run = Screen('Usage\nCurrent session\nEsc to\ncancel\n', 20)
-        with patch.object(terminal.time, 'sleep'):
+        with own_time(terminal, sleep=Mock()):
             with patch.object(terminal, 'capture', return_value=run.styled), patch.object(terminal.subprocess, 'run') as send:
                 self.assertTrue(terminal.close_info_panel({'id': '%test', 'agent': 'claude'}, run=send))
                 self.assertEqual(send.call_args.args[0][-1], 'Escape')
@@ -337,7 +338,7 @@ class CapturedScreenTests(unittest.TestCase):
                         return state(argv, **kwargs)
                     return subprocess.CompletedProcess(argv, 0, '', '')
 
-                with patch.object(terminal, 'verify'), patch.object(terminal, 'leave_scrollback'), patch.object(terminal.time, 'sleep'):
+                with patch.object(terminal, 'verify'), patch.object(terminal, 'leave_scrollback'), own_time(terminal, sleep=Mock()):
                     terminal.submit({'id': '%test', 'agent': agent}, '/model', run=run)
                 self.assertEqual(enters, [True])
 

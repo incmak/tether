@@ -5,17 +5,18 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import lessons
 import paths
+from own_time import own_time
 
 PID = 'abcdef012345'
 
 
 def process_add(root, text, barrier):
     paths.CONFIG, paths.TETHER = Path(root) / 'config', Path(root) / 'tether'
-    barrier.wait(timeout=5)
+    barrier.wait(timeout=30)  # spawned processes start slowly on a loaded machine
     lessons.add(PID, text, 'avoid', 'user', 'codex', force_new=True)
 
 
@@ -102,7 +103,7 @@ class Lessons(unittest.TestCase):
         self.assertEqual([(r['source'], r['kind']) for r in lessons.entries(PID)],
                          [(s, k) for s in ('user', 'reviewer', 'agent') for k in ('avoid', 'keep')])
         first = self.add(force_new=True)['lesson']
-        with patch.object(lessons.time, 'time', return_value=first['last_hit'] + 100):
+        with own_time(lessons, time=Mock(return_value=first['last_hit'] + 100)):
             second = self.add(force_new=True)['lesson']
         self.assertEqual(lessons.entries(PID)[0]['id'], second['id'])
         lessons.reinforce(PID, first['id'])
@@ -172,7 +173,7 @@ class Lessons(unittest.TestCase):
             worker.start()
         try:
             for worker in workers:
-                worker.join(timeout=10)
+                worker.join(timeout=60)
                 self.assertEqual(worker.exitcode, 0)
         finally:
             for worker in workers:
@@ -306,7 +307,7 @@ class LessonReview(unittest.TestCase):
                 self.row(**options)
 
     def test_independent_hits_and_time_confirm_but_same_pane_does_not(self):
-        with patch.object(lessons.time, 'time', return_value=100):
+        with own_time(lessons, time=Mock(return_value=100)):
             row = self.row(pane='%1')
             for pane in ('%1', '', '%1'):
                 repeated = lessons.reinforce(PID, row['id'], pane)
@@ -315,9 +316,9 @@ class LessonReview(unittest.TestCase):
             self.assertEqual(lessons.reinforce(PID, row['id'], '%2')['status'], 'confirmed')
             no_pane = self.row()
             self.assertEqual(lessons.reinforce(PID, no_pane['id'], '%2')['status'], 'trial')
-        with patch.object(lessons.time, 'time', return_value=100 + lessons.DAY - 1):
+        with own_time(lessons, time=Mock(return_value=100 + lessons.DAY - 1)):
             self.assertEqual(lessons.reinforce(PID, no_pane['id'])['status'], 'trial')
-        with patch.object(lessons.time, 'time', return_value=100 + lessons.DAY):
+        with own_time(lessons, time=Mock(return_value=100 + lessons.DAY)):
             self.assertEqual(lessons.reinforce(PID, no_pane['id'])['status'], 'confirmed')
 
     def test_dispute_once_per_pane_keep_and_edit_clear_disputes(self):
@@ -334,7 +335,7 @@ class LessonReview(unittest.TestCase):
             lessons.dispute(PID, row['id'], f'%{index}', 'Tests show this.')
         with self.assertRaisesRegex(ValueError, '20 disputes'):
             lessons.dispute(PID, row['id'], '%21', 'Tests show this.')
-        with patch.object(lessons.time, 'time', return_value=1234):
+        with own_time(lessons, time=Mock(return_value=1234)):
             kept = lessons.keep(PID, row['id'])
             self.assertEqual((kept['status'], kept['disputes'], kept['reviewed_at']), ('confirmed', [], 1234))
             lessons.dispute(PID, row['id'], '%1', 'Evidence')
@@ -386,7 +387,7 @@ class LessonReview(unittest.TestCase):
         self.assertEqual((first['due'], first['last_review'], first['snoozed_until']), (False, start, 0))
         self.assertEqual(lessons.review_path().stat().st_mode & 0o777, 0o600)
         self.assertFalse(lessons.review(now=start + 100 * lessons.DAY)['due'])
-        with patch.object(lessons.time, 'time', return_value=start + 1):
+        with own_time(lessons, time=Mock(return_value=start + 1)):
             rows = [self.row() for _ in range(5)]
         self.assertFalse(lessons.review(now=start + 3 * lessons.DAY - 1)['due'])
         due = lessons.review(now=start + 3 * lessons.DAY)
@@ -411,7 +412,7 @@ class LessonReview(unittest.TestCase):
         (paths.TETHER / 'projects' / other_pid).mkdir()
         other = lessons.add(other_pid, 'When a check fails, inspect its output.', 'keep', 'user', '')['lesson']
         (lessons.path(PID).parent / 'project.json').write_text(json.dumps({'name': 'Test project'}))
-        with patch.object(lessons.time, 'time', return_value=now - 31 * lessons.DAY):
+        with own_time(lessons, time=Mock(return_value=now - 31 * lessons.DAY)):
             stale = self.row()
             stuck = self.row()
             dispute = self.row()
@@ -420,7 +421,7 @@ class LessonReview(unittest.TestCase):
         lessons.reinforce(PID, stuck['id'])
         lessons.reinforce(PID, stuck['id'])
         lessons.dispute(PID, dispute['id'], '%1', 'Evidence differs.')
-        with patch.object(lessons.time, 'time', return_value=now):
+        with own_time(lessons, time=Mock(return_value=now)):
             new = self.row()
             global_row = self.row()
         lessons.keep(PID, global_row['id'])

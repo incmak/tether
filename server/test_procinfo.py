@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import procinfo
+from own_time import own_time
 
 
 class ProcinfoTests(unittest.TestCase):
@@ -42,7 +43,7 @@ class ProcinfoTests(unittest.TestCase):
         self.assertFalse(procinfo.foreground_differs(42, self.proc))
 
     def test_start_time_math(self):
-        with patch.object(procinfo.os, 'sysconf', return_value=100), patch.object(procinfo.time, 'time', return_value=2000.5):
+        with patch.object(procinfo.os, 'sysconf', return_value=100), own_time(procinfo, time=Mock(return_value=2000.5)):
             expected = int((2000.5 - 1000.25 + 12345 / 100) * 1000)
             self.assertEqual(procinfo.start_ms('12345', self.proc, now=2000.5), expected)
             self.assertEqual(procinfo.start_ms('12345', self.proc), expected)
@@ -54,7 +55,7 @@ class ProcinfoTests(unittest.TestCase):
         ticks = '12345'
         expected = int((fixed - boottime + int(ticks) / os.sysconf('SC_CLK_TCK')) * 1000)
         with patch.object(procinfo, 'uptime', return_value=boottime - 4 * 86400), \
-                patch.object(procinfo.time, 'clock_gettime', return_value=boottime):
+                own_time(procinfo, clock_gettime=Mock(return_value=boottime)):
             self.assertEqual(procinfo.start_ms(ticks, now=fixed), expected)
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux process clock')

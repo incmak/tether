@@ -15,6 +15,7 @@ import chat_hidden
 import paths
 import server
 import terminal_input
+from own_time import own_time
 
 CHAT = '12345678-1234-1234-1234-123456789abc'
 OTHER = '87654321-1234-1234-1234-123456789abc'
@@ -126,7 +127,7 @@ class BackendTests(unittest.TestCase):
         screen = ['──────────\n❯ \n──────────\n']
         clock = [100.0]
         with patch.dict(terminal._escape_seen, clear=True), \
-                patch.object(server.time, 'monotonic', side_effect=lambda: clock[0]), \
+                own_time(terminal, monotonic=Mock(side_effect=lambda: clock[0])), \
                 patch.object(terminal, 'capture', side_effect=lambda *args, **kwargs: screen[0]), \
                 patch('builtins.print') as log:
             def press():
@@ -735,7 +736,7 @@ class BackendTests(unittest.TestCase):
         chats = [dict(id=CHAT, agent='claude', title='One', cwd='/Users/test/a', time='2026-01-01'),
                  dict(id=OTHER, agent='codex', title='Two', cwd='/tmp/work', time=None)]
         stale = '00000000-0000-0000-0000-000000000000'
-        with patch.object(chat_hidden.time, 'time', side_effect=[1, 2, 3, 4, 5]):
+        with own_time(chat_hidden, time=Mock(side_effect=[1, 2, 3, 4, 5])):
             chat_hidden.set_chat('claude', CHAT, True)
             chat_hidden.set_chat('codex', OTHER, True)
             chat_hidden.set_chat('claude', stale, True)

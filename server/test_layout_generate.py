@@ -6,11 +6,12 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import custom_layouts as layouts
 import layout_generate as generation
 from test_custom_layouts import GOOD, changed
+from own_time import own_time
 
 
 class Handler:
@@ -176,7 +177,7 @@ class GenerateTests(unittest.TestCase):
             self.complete(generation.start('x'))
         self.assertEqual(len(generation._jobs), 3)
         self.assertIsNone(generation.poll(first))
-        with patch.object(generation.time, 'monotonic', return_value=time.monotonic() + 601):
+        with own_time(generation, monotonic=Mock(return_value=time.monotonic() + 601)):
             self.assertIsNone(generation.poll(next(iter(generation._jobs))))
         self.assertEqual(generation._jobs, {})
 

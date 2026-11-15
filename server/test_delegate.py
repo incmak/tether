@@ -14,6 +14,7 @@ import delegate
 import paths
 import model_catalog
 import server
+from own_time import own_time
 
 THREAD = '0f8fad5b-d9cb-469f-a165-70867728950e'
 
@@ -173,7 +174,7 @@ class FirstTaskTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run = Mock(return_value=subprocess.CompletedProcess([], 0, '', ''))
-        with patch.object(paths, 'CACHE', Path(temporary.name)), patch.object(delegate.time, 'time', return_value=5):
+        with patch.object(paths, 'CACHE', Path(temporary.name)), own_time(delegate, time=Mock(return_value=5)):
             name = delegate.launch_in('%40', {'agent': 'claude', 'message': ' Fix the bug '}, run=run)
         self.assertEqual(name, 'Fix the bug')
         calls = [call.args[0][1:] for call in run.call_args_list]
@@ -435,7 +436,7 @@ class LaunchTests(unittest.TestCase):
                       else 'latest\t120\t40\n' if argv[1] == 'display-message' else '%13\n')
             return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
         run = Mock(side_effect=result)
-        with patch.object(delegate.review_links, 'add') as add, patch.object(delegate.time, 'time', return_value=123):
+        with patch.object(delegate.review_links, 'add') as add, own_time(delegate, time=Mock(return_value=123)):
             pane, name = delegate.start(entry(), body(review=True), '/project', run=run)
         self.assertEqual((pane, name), ('%13', 'Fix the bug'))
         calls = [call.args[0] for call in run.call_args_list]
@@ -465,7 +466,7 @@ class LaunchTests(unittest.TestCase):
                       else 'latest\t120\t40\n' if argv[1] == 'display-message' else '%13\n')
             return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
         run = Mock(side_effect=result)
-        with patch.object(delegate.time, 'time', return_value=123):
+        with own_time(delegate, time=Mock(return_value=123)):
             delegate.start(entry(), body(), '/project', run=run, cwd=str(self.root), worktree='feature/foo')
         calls = [call.args[0] for call in run.call_args_list]
         self.assertEqual(calls[2][1:], ['new-window', '-a', '-t', '@3', '-c', str(self.root), '-P', '-F', '#{pane_id}'])

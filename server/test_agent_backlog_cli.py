@@ -119,7 +119,7 @@ class BacklogCliTests(unittest.TestCase):
         plain = self.home / 'notes dir!'
         plain.mkdir()
         self.assertEqual(cli.project_name(plain), 'notes dir')
-        self.assertEqual(cli.project_name(self.root / 'tether' / 'missing'), 'missing')
+        self.assertEqual(cli.project_name(self.home / 'gone' / 'missing'), 'missing')
 
     def test_tmux_answer_wins_over_the_variable_after_a_merge(self):
         with mock.patch.object(cli.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='$9\n')):

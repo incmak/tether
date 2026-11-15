@@ -12,10 +12,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import choice_state
 import terminal_input as terminal
+from own_time import own_time
 
 
 def styled(text, code='1;7'):
@@ -253,10 +254,10 @@ class ChoiceStateTests(unittest.TestCase):
         def run(argv, **kwargs):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, screen, '')
-        with patch.object(terminal.time, 'monotonic', return_value=0):
+        with own_time(terminal, monotonic=Mock(return_value=0)):
             terminal.live_status(entry, run)
         calls.clear()
-        with patch.object(terminal.time, 'monotonic', return_value=4):
+        with own_time(terminal, monotonic=Mock(return_value=4)):
             found = terminal.live_status(entry, run)
         self.assertEqual(found['attention']['choice']['focus'], 1)
         self.assertEqual(len(calls), 1)

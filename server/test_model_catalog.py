@@ -4,12 +4,13 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import codex_level
 import delegate
 import model_catalog as catalog
 import paths
+from own_time import own_time
 
 
 class Catalog(unittest.TestCase):
@@ -20,7 +21,7 @@ class Catalog(unittest.TestCase):
         self.binary = self.root / 'claude'
         self.binary.write_bytes(b'claude-fable-5-2 claude-opus-5-5')
         self.which = self.enterContext(patch.object(catalog.shutil, 'which', return_value=str(self.binary)))
-        self.clock = self.enterContext(patch.object(catalog.time, 'time', return_value=1_000_000))
+        self.clock = self.enterContext(own_time(catalog, time=Mock(return_value=1_000_000)))
         self.models = self.enterContext(patch.object(codex_level, 'models', return_value=[
             {'slug': 'gpt-new', 'name': 'GPT New', 'efforts': ['high', 'ultra'], 'fast': True}]))
 

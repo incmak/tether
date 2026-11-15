@@ -1,9 +1,10 @@
 """Unnumbered Claude pickers use panel text and never receive an automatic Esc."""
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import terminal_input as terminal
+from own_time import own_time
 
 
 FIXTURES = Path(__file__).parent / 'test_fixtures' / 'pickers'
@@ -116,7 +117,7 @@ class CursorPickerTests(unittest.TestCase):
                 self.assertTrue(found is None or found['reason'] != 'picker')
 
     def test_close_info_panel_does_not_escape_a_picker(self):
-        with patch.object(terminal.time, 'sleep'), patch.object(terminal, 'capture', return_value=self.screen), \
+        with own_time(terminal, sleep=Mock()), patch.object(terminal, 'capture', return_value=self.screen), \
                 patch.object(terminal.subprocess, 'run') as send:
             self.assertFalse(terminal.close_info_panel(self.entry, run=send))
         send.assert_not_called()

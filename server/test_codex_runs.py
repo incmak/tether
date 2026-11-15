@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import codex_runs
 import server
+from own_time import own_time
 
 NOW = 1_793_865_600
 
@@ -320,7 +321,7 @@ class RunsTests(unittest.TestCase):
         with patch.object(server, 'choose', return_value={'id': '%1', 'pane_pid': 100}) as choose, \
                 patch.object(codex_runs.codex_level, 'processes', return_value=self.procs) as processes, \
                 patch.object(codex_runs, 'runs_for_pane', side_effect=fixture_runs), \
-                patch.object(codex_runs.time, 'time', return_value=NOW):
+                own_time(codex_runs, time=Mock(return_value=NOW)):
             handler.do_GET()
             handler.do_GET()
         self.assertEqual(choose.call_args.args, ('%1',))
