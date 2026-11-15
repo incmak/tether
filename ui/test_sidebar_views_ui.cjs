@@ -135,8 +135,16 @@ async function main() {
     // Alt+Down steps through the Catch up rows.
     await page.keyboard.press('Alt+ArrowDown')
     await page.waitForTimeout(300)
-    // Voice fix is the next row; once open, its turn counts as read and it leaves Finished.
-    check('Alt+Down opens the next Catch up row', await page.locator('.chat-title h1').first().textContent() === 'Voice fix' && await page.locator(`${SIDE} .catchup-row`, { hasText: 'Voice fix' }).count() === 0, await page.locator('.chat-title h1').first().textContent())
+    // Voice fix is the next row; it stays in its place while it is open.
+    check('Alt+Down opens the next Catch up row', await page.locator('.chat-title h1').first().textContent() === 'Voice fix' && await page.locator(`${SIDE} .catchup-row[aria-current="page"]`, { hasText: 'Voice fix' }).count() === 1, await page.locator('.chat-title h1').first().textContent())
+    const title = () => page.locator('.chat-title h1').first().textContent()
+    await page.keyboard.press('Alt+ArrowUp')
+    await page.waitForTimeout(300)
+    check('Alt+Up goes back to the row before', await title() === 'BriskBot', await title())
+    // Voice fix was read when you left it, so Alt+Down goes on to the working list.
+    await page.keyboard.press('Alt+ArrowDown')
+    await page.waitForTimeout(300)
+    check('Alt+Down skips the read row and reaches the working list', await title() === 'Sidebar build' && await page.locator(`${SIDE} .catchup-row`, { hasText: 'Voice fix' }).count() === 0, await title())
     // Mark all as read empties Finished. (New prefs in the address start from fresh storage, so the turn is unread again.)
     await open('%3', 1280, 800, { sideMode: 'catchup' })
     await page.locator(`${SIDE} [aria-label="Mark all finished as read"]`).click()
@@ -152,6 +160,7 @@ async function main() {
     check('the session row counts its waiting tabs (2)', (await tether.locator('.session-main .rollup').textContent()).startsWith('2'))
     check('a session with waiting tabs is open', await tether.locator('.pane-children').count() === 1)
     check('the stack row counts its waiting tabs (2)', await tether.locator('.pane-stack-head', { hasText: 'Release' }).locator('.rollup').textContent() === '2')
+    check('a tab whose ask waits has the Needs you dot', await tether.locator('.pane-children button', { hasText: 'Release notes' }).locator('.state-dot.approval').count() === 1)
     check('the stack row says it to a screen reader', (await tether.locator('.pane-stack-head', { hasText: 'Release' }).getAttribute('aria-label')).includes('2 need you'))
     check('a quiet session with several tabs starts folded', await page.locator(`${SIDE} .session-list > li[data-id="$3"] .pane-children`).count() === 0)
     await page.locator(`${SIDE} .session-list > li[data-id="$3"] .session-main`).click()
@@ -195,6 +204,10 @@ async function main() {
     sessions = calm
     await open('%3', 1280, 800)
     check('nothing waits: "You are caught up."', (await page.locator(`${SIDE} .catchup-empty`).textContent()).includes('You are caught up.') && await page.locator(`${SIDE} .side-mode-count`).count() === 0)
+    // An approval with no ask: the row opens the tab; the deck (which answers asks) is not offered.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })
+    check('a wait with no ask has no "Answer one by one"', await page.locator(`${SIDE} .catchup-row`, { hasText: 'BriskBot' }).count() === 1 && await page.locator(`${SIDE} [aria-label="Answer one by one"]`).count() === 0)
     sessions = busy
 
     // 7. Phone, 320 px: the drawer shows both views with no sideways scroll.

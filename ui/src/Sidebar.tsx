@@ -664,13 +664,15 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
   const words = useWords()
   // Active only: each session's quiet tabs fold into one row until you show them.
   const [quietShown, setQuietShown] = useState<string[]>([])
+  // A tab that waits on you shows the Needs you dot, also when only its ask (not its state) says so: the same rule as the counts.
+  const statusOf = (panes: Pane[]) => { const state = status(panes, prefs.seen, selected); return state.kind !== 'approval' && waitCount(panes, now, prefs.attention) ? { ...state, kind: 'approval' as const, label: 'Needs you' } : state }
   const slotKey = (id: string) => { const at = slots.indexOf(id); return at < 0 ? null : <kbd className="slot-key" aria-label={`In slot ${at + 1}`}>⌥{at + 1}</kbd> }
   return <ul className={`session-list ${reorder ? 'reordering' : ''}`} ref={list}>
     {/* eslint-disable-next-line react-hooks/refs -- Sample the drag marker on reorder renders; state would add visible updates on pointer down and up. */}
     {(preview ? [...items].sort((a, b) => preview.indexOf(a.id) - preview.indexOf(b.id)) : items).map(session => {
       const multi = session.panes.length > 1
       const active = session.panes.some(pane => pane.id === selected)
-      const state = status(session.panes, prefs.seen, selected)
+      const state = statusOf(session.panes)
       // During a search each session shows its matching tabs, open, and the session row opens the first match (not the last-used tab).
       const only = matches?.get(session.id)
       const tabs = !only ? session.panes : (only.tabs instanceof Set ? session.panes.filter(pane => only.tabScores.has(pane.id)) : [...session.panes]).sort((a, b) => only.tabScores.get(b.id)! - only.tabScores.get(a.id)!)
@@ -687,7 +689,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
       const visibleTab = (pane: Pane) => showQuiet || !quietTabs.includes(pane)
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
-      const paneRow = (pane: Pane) => { const paneState = status([pane], prefs.seen, selected), paneTag = tagDot(prefs.colors?.[pane.id]); return <li key={pane.id} data-ui-item><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} className={pane.id === selected ? 'selected' : ''} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}</button></li> }
+      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]); return <li key={pane.id} data-ui-item><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} className={pane.id === selected ? 'selected' : ''} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={() => onOpen(pane)} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{[paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}</button></li> }
       const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).map(place => ({ ...place, shown: place.panes.filter(visibleTab) })).filter(place => place.shown.length) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
         <div className={`swipe-row ${swiped === session.id ? 'swiped' : ''}`}

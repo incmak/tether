@@ -6,7 +6,7 @@ import type { Pane } from './api'
 import type { Prefs } from './prefs'
 import { SortButton } from './Attention'
 import type { ReviewEntry } from './Attention'
-import { LATE } from './attention'
+import { LATE, waitingAsks } from './attention'
 import { age } from './needs'
 import { SkeletonRows } from './Skeleton'
 import { catchUpGoals, finishedPanes, waitedSince } from './catchUp'
@@ -34,21 +34,27 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
   const ids = { needs: useId(), finished: useId(), working: useId() }
   const [allFinished, setAllFinished] = useState(false)
   const [showWorking, setShowWorking] = useState(false)
+  // A finished row you open stays in its place while it is open, so the keyboard and focus keep their place.
+  const [kept, setKept] = useState<string>()
   if (!loaded) return error ? null : <SkeletonRows count={4} label="Finding what needs you…" className="sidebar-skeleton" meta={false} />
   const nameOf = (pane: Pane) => chatTitle(pane, sessions.find(session => session.id === pane.tmux_session))
   const newest = prefs.waitingOrder === 'newest'
   const goals = catchUpGoals(sessions, now, prefs.attention)
   const shownGoals = newest ? [...goals].reverse().map(goal => ({ ...goal, panes: [...goal.panes].reverse() })) : goals
   const waiting = goals.reduce((sum, goal) => sum + goal.panes.length, 0)
-  const finished = finishedPanes(sessions, prefs.seen, selected, now, prefs.attention)
+  const unread = finishedPanes(sessions, prefs.seen, selected, now, prefs.attention)
+  const keptPane = kept && kept === selected && !unread.some(pane => pane.id === kept) ? sessions.flatMap(session => session.panes).find(pane => pane.id === kept && pane.finished) : undefined
+  const finished = keptPane ? [...unread, keptPane].sort((a, b) => (b.finished ?? 0) - (a.finished ?? 0)) : unread
+  // The deck answers asks. A tab that waits only by its state (an approval with no ask) opens from its row.
+  const asks = prefs.attention ? waitingAsks(goals.flatMap(goal => goal.panes), now).length : 0
   const working = runningPanes(sessions).filter(item => item.pane.state === 'Working')
-  const markRead = () => update(current => ({ seen: { ...current.seen, ...Object.fromEntries(finished.map(pane => [pane.id, pane.finished ?? now])) } }))
+  const markRead = () => update(current => ({ seen: { ...current.seen, ...Object.fromEntries(unread.map(pane => [pane.id, pane.finished ?? now])) } }))
   const shownFinished = allFinished ? finished : finished.slice(0, FINISHED_SHOWN)
   return <div className="catchup">
     {waiting > 0 || review ? <section className="catchup-part" aria-labelledby={ids.needs}>
       <h2 className="catchup-head" id={ids.needs}><span className="catchup-mark need" aria-hidden="true" />Needs you<span className="catchup-count">· {waiting}</span>
         {waiting > 1 && <SortButton order={prefs.waitingOrder ?? 'oldest'} onOrder={waitingOrder => update(() => ({ waitingOrder }))} />}
-        {onDeck && waiting > 0 && <button type="button" className="icon-button waiting-sort" aria-label="Answer one by one" title="Answer one by one" onClick={onDeck}><GalleryVerticalEnd size={15} aria-hidden="true" /></button>}
+        {onDeck && asks > 0 && <button type="button" className="icon-button waiting-sort" aria-label="Answer one by one" title="Answer one by one" onClick={onDeck}><GalleryVerticalEnd size={15} aria-hidden="true" /></button>}
       </h2>
       {shownGoals.map(goal => <GoalBlock key={goal.key} goal={goal} now={now} selected={selected} nameOf={nameOf} onOpen={onOpen} />)}
       {review && <button type="button" className="catchup-row catchup-review" aria-label={`Review lessons: ${review.label}`} title={review.label} onClick={review.onOpen}>
@@ -56,9 +62,9 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
     </section> : null}
     {finished.length > 0 && <section className="catchup-part" aria-labelledby={ids.finished}>
       <h2 className="catchup-head" id={ids.finished}><span className="catchup-mark done" aria-hidden="true" />Finished since you looked<span className="catchup-count">· {finished.length}</span>
-        <button type="button" className="icon-button waiting-sort" aria-label="Mark all finished as read" title="Mark all as read" onClick={markRead}><CheckCheck size={15} aria-hidden="true" /></button>
+        {unread.length > 0 && <button type="button" className="icon-button waiting-sort" aria-label="Mark all finished as read" title="Mark all as read" onClick={markRead}><CheckCheck size={15} aria-hidden="true" /></button>}
       </h2>
-      <ul className="catchup-rows">{shownFinished.map(pane => <li key={pane.id}><button type="button" className="catchup-row" aria-current={pane.id === selected ? 'page' : undefined} onClick={() => onOpen(pane)}>
+      <ul className="catchup-rows">{shownFinished.map(pane => <li key={pane.id}><button type="button" className="catchup-row" aria-current={pane.id === selected ? 'page' : undefined} onClick={() => { setKept(pane.id); onOpen(pane) }}>
         <span className="catchup-dot done" aria-hidden="true" />
         <span className="catchup-name">{nameOf(pane)}</span>
         <span className="catchup-age"><span className="visually-hidden">finished </span>{age(pane.finished ?? now, now)}</span>
