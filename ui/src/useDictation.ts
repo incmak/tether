@@ -185,8 +185,11 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
       const server = recorded.audio.size ? await serverText(recorded.audio, refineLimit(seconds)) : null
       if (cancelled) return
       if (cleanupRecording.current === cancel) cleanupRecording.current = null
-      const used = server?.text ? 'server' : server?.late ? 'late' : 'browser'
-      const next = server?.text ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
+      // One Hindi word ("push kar do") is not proof of Hinglish, but Parakeet's answer is: on Hinglish it shares few words
+      // with the browser text ("Push cardoo."); on English with a name ("Ask Rahul ke…") most words match.
+      const foreign = !!server?.text && hindiWords(spoken) > 0 && shared(spoken, server.text) < 0.5
+      const used = foreign ? 'hinglish' : server?.text ? 'server' : server?.late ? 'late' : 'browser'
+      const next = server?.text && !foreign ? join(base, server.text.replace(/(?<=\S) slash (?=\S)/gi, '/')) : browser
       setText(next); finish(next)
       reportVoice({ kind: 'dictation', event: 'refine', trail: trail.join(' '), ms: Date.now() - begun,
         detail: `used=${used} browser=${spoken.split(/\s+/).length} server=${server?.text ? server.text.split(/\s+/).length : 0} audio=${seconds.toFixed(1)}s` })
@@ -424,13 +427,28 @@ function recorderType() {
 
 // Common Hindi and Urdu words as browser speech writes them in Latin letters. None is a common English word,
 // so two different ones mark Hinglish or Urdu speech; one alone ("ke", "bhai") can be a name.
-const HINDI_WORDS = new Set(('hai hain nahi nahin karo kare karna karte karta kariye kijiye mujhe mera meri mere tum tumhe aap '
-  + 'yeh woh kya kyun kaise aur ko ki ke ka mein bhai abhi phir tak thoda bahut bohat lekin hua hui ho tha thi '
-  + 'jana chahiye dobara bolo wala wali accha acha theek thik haan sab kuch kal aaj').split(' '))
+const HINDI_WORDS = new Set(('hai hain nahi nahin kar karo kare karna karne karke karte karta kariye kijiye mujhe mera meri mere '
+  + 'tum tumhe aap yeh woh kya kyun kyunki kaise kaun kahan yahan wahan aur ko ki ke ka mein bhai abhi phir tak thoda bahut '
+  + 'bohat lekin magar agar hua hui ho hoga tha thi gaya gayi raha rahi rahe jana dena lena liye chahiye dobara bolo wala '
+  + 'wali accha acha theek thik haan sab kuch kal aaj bhi toh ek dein matlab pehle sirf jaldi wapas usko isko unko apna apni').split(' '))
+
+function latinWords(text: string) {
+  return text.toLowerCase().split(/[^a-z]+/).filter(Boolean)
+}
+
+// The number of different Hindi or Urdu words in text.
+export function hindiWords(text: string) {
+  return new Set(latinWords(text).filter(word => HINDI_WORDS.has(word))).size
+}
 
 export function hinglish(text: string) {
-  if (/[\u0900-\u097F\u0600-\u06FF]/.test(text)) return true  // Devanagari or Urdu script
-  return new Set(text.toLowerCase().split(/[^a-z]+/).filter(word => HINDI_WORDS.has(word))).size >= 2  // two different words
+  return /[\u0900-\u097F\u0600-\u06FF]/.test(text) || hindiWords(text) >= 2  // Devanagari or Urdu script, or two different words
+}
+
+// The part of the browser words that the server text also has.
+export function shared(browser: string, server: string) {
+  const words = latinWords(browser), heard = new Set(latinWords(server))
+  return words.length ? words.filter(word => heard.has(word)).length / words.length : 1
 }
 
 // How long the box waits for the server text before it keeps the browser text. Parakeet converts 3 s of speech in

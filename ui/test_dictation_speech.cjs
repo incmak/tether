@@ -710,6 +710,21 @@ async function main() {
       'Ho ho ho, the PE ratio is fine.']) assert.equal(hinglish(text), false, text)
   }
   {
+    // One Hindi word: the server still converts, and its answer decides. Few shared words mean Hinglish.
+    for (const [said, server, expected, used] of [['push kar do', 'Push cardoo.', 'push kar do', 'hinglish'],
+      ['ask the team to ship it toh', 'Ask the team to ship it, though.', 'Ask the team to ship it, though.', 'server']]) {
+      const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'en-IN' }), s = setup(env)
+      env.result = server
+      await s.render().toggle(); await flush(); const final = s.render().finalText()
+      env.records[0].data(); env.recognitions[0].result([said, true]); env.advance(2000); s.render().stop()
+      assert.equal(await final, expected); assert.match(env.voiceReports.at(-1).detail, new RegExp(`^used=${used} `))
+      s.h.unmount()
+    }
+    const { hindiWords, shared } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
+    assert.equal(hindiWords('Codex ko review karne do'), 2); assert.equal(hindiWords('push kar do'), 1); assert.equal(hindiWords('Ask Rahul to review the PR'), 0)
+    assert.equal(shared('push kar do', 'Push cardoo.'), 1 / 3); assert.equal(shared('', 'x'), 1)
+  }
+  {
     // Parakeet is English only: other languages keep the browser text and send nothing.
     const env = speechEnvironment({ userAgent: DESKTOP_UA, language: 'hi-IN' }), s = setup(env)
     await s.render().toggle(); await flush(); const final = s.render().finalText()
