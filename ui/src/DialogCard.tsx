@@ -1,6 +1,7 @@
 // A Claude Code slash-command dialog (/mcp, /config, /resume, /status ...), read from the screen by server/claude_dialog.py.
 // The card drives the real dialog: every tap is one action the server checks against the dialog's own key hints.
 import { useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { Search } from 'lucide-react'
 import type { ClaudeDialog, DialogAction, DialogBlock, DialogHint, DialogItem } from './api'
 import { Linked } from './Messages'
@@ -38,6 +39,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   // One button per key the dialog offers. Arrows that a tab row, a slider or the list rows already cover get no button.
   const buttons: { id: string; key: string; label: string; kbd: string; primary: boolean; close: boolean }[] = []
   const add = (hint: DialogHint) => {
+    if (hint.go) return  // "↓ stats", "↑ tabs": the card's own tabs and buttons move the focus
     const keys = hint.keys.filter(key => key.key && key.key !== '/' || key.key === '/' && !box)
     const arrows = keys.filter(key => ARROWS.includes(key.key))
     if (arrows.length && arrows.length === keys.filter(key => key.key !== 'Tab').length) {
@@ -72,7 +74,28 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
       : <p key={at} className={block.dim ? 'dlg-text dim' : 'dlg-text'}><Linked text={block.lines.join(' ')} /></p>
     if (block.type === 'facts') return <dl key={at} className="dlg-facts">{block.rows.map((fact, index) => <div key={index}><dt>{fact.label}</dt><dd><Linked text={fact.value} /></dd></div>)}</dl>
     if (block.type === 'meter') return <div key={at} className="dlg-meter"><progress max={100} value={block.percent} aria-label={block.text} /><span>{block.text}</span></div>
-    if (block.type === 'tabs') return <p key={at} className="dlg-subtabs" aria-label="Views">{block.tabs.map(tab => <span key={tab} className={tab === block.tab ? 'current' : ''} aria-current={tab === block.tab || undefined}>{tab}</span>)}</p>
+    if (block.type === 'tabs') return <div key={at} className="dlg-pills" role="tablist" aria-label="Views">
+      {block.tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === block.tab} aria-disabled={off || undefined} aria-busy={busy === `subtab-${tab}` || undefined}
+        onClick={() => { if (tab !== block.tab) void act(`subtab-${tab}`, { action: 'subtab', tab }) }}>{tab}</button>)}
+    </div>
+    if (block.type === 'options') return <div key={at} className="dlg-pills" role="radiogroup" aria-label="Range">
+      {block.options.map(option => <button key={option} type="button" role="radio" aria-checked={option === block.value} aria-disabled={off || undefined} aria-busy={busy === `option-${option}` || undefined}
+        onClick={() => { if (option !== block.value) void act(`option-${option}`, { action: 'option', value: option }) }}>{option}</button>)}
+    </div>
+    if (block.type === 'shortcuts') return <dl key={at} className="dlg-keys">{block.items.map((item, index) => <div key={index}><dt><kbd>{item.keys}</kbd></dt><dd>{item.effect}</dd></div>)}</dl>
+    if (block.type === 'entries') return <ul key={at} className="dlg-entries">{block.items.map((item, index) => <li key={index}><strong>{item.title}</strong>{item.lines.map((line, row) => <small key={row}>{line}</small>)}</li>)}</ul>
+    if (block.type === 'heatmap') {
+      // One column per week, one row per weekday, as Claude Code draws it with shade characters.
+      const weeks = Math.max(...block.rows.map(row => row.cells.length))
+      const active = block.rows.reduce((count, row) => count + [...row.cells].filter(cell => cell !== '0').length, 0)
+      return <figure key={at} className="dlg-heat" style={{ '--weeks': weeks } as CSSProperties}>
+        <div className="dlg-heat-months" aria-hidden="true">{block.months.map(([offset, name], index) => <span key={index} style={{ gridColumn: `${offset + 1} / span 4` }}>{name}</span>)}</div>
+        <div className="dlg-heat-grid" role="img" aria-label={`Activity by day over ${weeks} weeks: ${active} active days. A darker square is a busier day.`}>
+          {block.rows.map((row, day) => [...row.cells].map((cell, week) => <i key={`${day}-${week}`} data-level={cell} style={{ gridRow: day + 1, gridColumn: week + 1 }} />))}
+        </div>
+        <figcaption>Less{['0', '1', '2', '3', '4'].map(level => <i key={level} data-level={level} />)}More</figcaption>
+      </figure>
+    }
     if (block.type === 'scale') return <div key={at} className="dlg-scale">
       <div role="radiogroup" aria-label={dialog.title}>
         {block.options.map(option => <button key={option} type="button" role="radio" aria-checked={option === block.value} aria-disabled={off || undefined}

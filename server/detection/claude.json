@@ -104,6 +104,11 @@
       "regex": "(\\d{1,3})% used",
       "flags": [],
       "comment": "Read the percentage of a usage bar."
+    },
+    "DIALOG_MOVE": {
+      "regex": "([↑↓←→])\\s+(\\w[\\w ]{0,20})",
+      "flags": [],
+      "comment": "Read a footer hint that names where an arrow key moves the focus."
     }
   }
 }

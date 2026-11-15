@@ -18,6 +18,7 @@ RULE = detection_rules.pattern('claude', 'DIALOG_RULE')
 MORE = detection_rules.pattern('claude', 'DIALOG_MORE', groups=2)
 HINT = detection_rules.pattern('claude', 'DIALOG_HINT', groups=2)
 FACT = detection_rules.pattern('claude', 'DIALOG_FACT', groups=2)
+MOVE = detection_rules.pattern('claude', 'DIALOG_MOVE', groups=2)
 PERCENT = detection_rules.pattern('claude', 'DIALOG_PERCENT', groups=1)
 MARKS = '✔✓⚠✘✗◯◉☐☑●○×'
 CURSORS = '❯›'
@@ -31,6 +32,7 @@ KEYS = {'enter': ('Enter', 'Enter'), 'return': ('Enter', 'Enter'), 'esc': ('Esca
         'up': ('Up', '↑'), 'down': ('Down', '↓'), 'left': ('Left', '←'), 'right': ('Right', '→'),
         '⇧←': ('S-Left', 'Shift+←'), '⇧→': ('S-Right', 'Shift+→')}
 STEP = .15           # seconds between a key and the next look at the screen
+CYCLE_STEP = .4      # seconds between presses of a key that cycles a choice
 TYPE_STEP = .03      # seconds between typed characters
 SETTLE = 10          # looks at the screen after a key before the key counts as "did nothing"
 
@@ -55,11 +57,106 @@ def hints(text):
     found = []
     for part in re.split(r'\s+[·•]\s+|,\s+', ' '.join(text.split())):
         match = HINT.fullmatch(part)
+        move = MOVE.fullmatch(part) if not match else None
+        if move and not re.fullmatch(r'\d+ more', move[2]):
+            # "↑ tabs", "↓ stats" (/stats): the arrow moves the focus to that part. `go` marks it.
+            key, label = KEYS[move[1]]
+            found.append({'keys': [{'key': key, 'label': label}], 'effect': move[2], 'text': part, 'go': True})
+            continue
         keys = [_key(token) for token in ([match[1]] if match[1] == '/' else match[1].split('/'))] if match else [None]
         if not all(keys):
             return None
         found.append({'keys': [{'key': key, 'label': label} for key, label in keys], 'effect': match[2].strip(), 'text': part})
     return found or None
+
+
+MONTHS = {'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'}
+SHADES = '·░▒▓█'
+ENTRY_START = re.compile(r'(?<!\+ )(?<!\S)(?=(?:double tap|shift \+|ctrl \+|alt \+|backslash|/[a-z]+ (?:for|to)\b|[!/@] for\b))')
+
+
+def _heatmap(body, index):
+    """/stats activity chart: a row of month names, then one row of shade characters per weekday."""
+    names = body[index][0].split()
+    if len(names) < 6 or not set(names) <= MONTHS:
+        return None
+    rows, at, wrapped = [], index + 1, False
+    if at < len(body) and body[at][0].split() and set(body[at][0].split()) <= MONTHS:
+        names, at, wrapped = names + body[at][0].split(), at + 1, True  # a narrow pane wraps the month row
+    while at < len(body) and len(rows) < 7 and (match := re.fullmatch(r'\s*(?:(\w{3}) )?\s*([' + SHADES + r']{10,})', body[at][0])):
+        cells = match[2]
+        at += 1
+        if at < len(body) and re.fullmatch(r'\s*[' + SHADES + r']+', body[at][0]) and len(body[at][0]) - len(body[at][0].lstrip()) < match.start(2):
+            cells, at, wrapped = cells + body[at][0].strip(), at + 1, True  # and each weekday row
+        rows.append((match[1] or '', cells, match.start(2)))
+    if len(rows) != 7 or len({start for _, _, start in rows}) != 1:
+        return None
+    start = rows[0][2]
+    months = [[max(0, match.start() - start), match.group()] for match in re.finditer(r'\S+', body[index][0])]
+    if wrapped:
+        months = [[place * 4, name] for place, name in enumerate(names)]  # one name per four weeks, as in a wide pane
+    block = {'type': 'heatmap', 'months': months, 'rows': [{'label': label, 'cells': ''.join(str(SHADES.index(char)) for char in cells)} for label, cells, _ in rows]}
+    if at < len(body) and re.fullmatch(r'\s*Less [' + SHADES + r' ]+ More', body[at][0]):
+        at += 1
+    return block, at
+
+
+def _paragraph(body, index):
+    end = index
+    while end < len(body) and body[end][0].strip():
+        end += 1
+    return end
+
+
+def _shortcuts(body, index):
+    """/help's shortcut table, read column by column into entries ("ctrl + o" / "verbose output"). None when any
+    part does not read as "<keys> for|to <effect>": the table then stays as the terminal drew it."""
+    end = _paragraph(body, index)
+    rows = [text for text, _ in body[index:end]]
+    if len(rows) < 2 or len(re.findall(r' (?:for|to)(?: |$)', ' '.join(rows))) < 4:
+        return None
+    cells = [[(match.start(), match.group()) for match in re.finditer(r'\S(?:.*?\S)?(?= {2,}|$)', row)] for row in rows]
+    if len(cells[0]) == 1 and len(cells[1]) > 1:
+        return None  # a heading with no blank row under it (narrow pane): the table starts on the next row
+    starts = sorted({start for row in cells for start, _ in row})
+    columns = [start for at, start in enumerate(starts) if not at or start - starts[at - 1] > 1]
+    if not 2 <= len(columns) <= 4:
+        return None
+    items = []
+    for column in columns:
+        parts = [cell for row in cells for start, cell in row if abs(start - column) <= 1]
+        widest = max(map(len, parts))
+        text, last = '', ''
+        for part in parts:
+            # A word as wide as the column is cut there ("/keybinding" + "s to customize"): join it with no space.
+            cut = last and ' ' not in last and len(last) == widest and not ENTRY_START.match(part)
+            text += ('' if cut or not text else ' ') + part
+            last = part
+        for entry in ENTRY_START.split(text):
+            match = re.fullmatch(r'(.+?) (?:for|to) (.+)', entry.strip())
+            if entry.strip() and not match:
+                return None
+            if match:
+                items.append({'keys': match[1], 'effect': match[2]})
+    return ({'type': 'shortcuts', 'items': items}, end) if len(items) >= 4 else None
+
+
+def _entries(body, index):
+    """/stats Models: blocks that start with "● name" and continue on indented rows, drawn in two columns."""
+    end = _paragraph(body, index)
+    rows = [text for text, _ in body[index:end]]
+    if len(rows) < 2 or not rows[0].strip().startswith('● ') or rows[1].strip().startswith('● '):
+        return None
+    second = re.search(r' {2,}●', rows[0][rows[0].index('●') + 1:])
+    split = rows[0].index('●') + second.end() if second else None
+    items = []
+    for part in ([[row[:split] for row in rows], [row[split:] for row in rows]] if split else [rows]):
+        for row in part:
+            if row.strip().startswith('● '):
+                items.append({'title': row.strip()[2:], 'lines': []})
+            elif row.strip() and items:
+                items[-1]['lines'].append(row.strip())
+    return {'type': 'entries', 'items': items}, end
 
 
 def _dim(style, tone):
@@ -146,9 +243,9 @@ def _footer(rows):
         start -= 1
     for index in range(start, end):
         found = hints(' '.join(row[0].strip() for row in rows[index:end]))
-        # Every dialog footer of 2.1.325 names Esc. Body text can look like a hint: a clipped /help shortcut table ends
-        # in "ctrl + t to toggle  ctrl + s to ↓".
-        if found and any(key['key'] == 'Escape' for hint in found for key in hint['keys']) and all(len(hint['effect']) <= 40 for hint in found):
+        # Every dialog footer of 2.1.325 names Esc, or an arrow that moves the focus ("↓ stats"). Body text can look
+        # like a hint: a clipped /help shortcut table ends in "ctrl + t to toggle  ctrl + s to ↓".
+        if found and (any(key['key'] == 'Escape' for hint in found for key in hint['keys']) or any(hint.get('go') for hint in found)) and all(len(hint['effect']) <= 40 for hint in found):
             return index, found
     return end, []
 
@@ -205,7 +302,16 @@ def parse(frame):
     tone = {(5, 246), (5, 244), (5, 245), 90}
     if found and start < len(rows):
         tone |= {style['fg'] for char, style in zip(*rows[start]) if char != ' ' and style['fg'] is not None}
-    head = _title(rows[first], tone)
+    title_row = rows[first]
+    if (first + 1 < start and rows[first + 1][0].strip() and len(re.split(r' {2,}', title_row[0].strip())) >= 3
+            and not any(style['reverse'] or style['bg'] is not None for style in title_row[1])
+            and any(style['reverse'] or style['bg'] is not None for style in rows[first + 1][1])):
+        # A narrow pane wraps the tab row, and the active tab is on its second row.
+        more = rows[first + 1]
+        cut = len(more[0]) - len(more[0].lstrip())
+        title_row = (title_row[0] + '   ' + more[0][cut:], title_row[1] + title_row[1][-1:] * 3 + more[1][cut:])
+        first += 1
+    head = _title(title_row, tone)
     if head.get('tabs') and first + 1 < start and rows[first + 1][0].strip() and not any(
             style['bold'] or style['reverse'] or style['bg'] is not None for style in rows[first + 1][1]) and (
             len(rows[first][0].rstrip()) + 3 + len(rows[first + 1][0].strip().split('  ')[0]) > width - MARGIN):
@@ -235,7 +341,7 @@ def parse(frame):
     def text_block(line, dim, mono, raw=None, source=None):
         last = blocks[-1] if blocks else None
         if last and last['type'] == 'text' and not last.get('_closed') and (
-                (mono or last['mono']) and last['dim'] == dim or _wrapped(last['_rows'][-1], line, width)):
+                mono and last['mono'] or (mono or last['mono']) and last['dim'] == dim or _wrapped(last['_rows'][-1], line, width)):
             last['lines'].append(line)
             last['mono'] = last['mono'] or mono
             last['dim'] = last['dim'] and dim
@@ -325,6 +431,27 @@ def parse(frame):
             index += 1
             continue
         current = previous = None
+        special = _heatmap(body, index) or _entries(body, index) or _shortcuts(body, index)
+        if special:
+            blocks.append(special[0])
+            index = special[1]
+            continue
+        if re.fullmatch(r'Less [' + SHADES + r' ]+ More', stripped) and any(block['type'] == 'heatmap' for block in blocks):
+            index += 1  # the chart's legend; the card draws its own
+            continue
+        choices = [part.strip() for part in re.split(r' · ', re.sub(r'\s[✻✶✳✢✽*]$', '', stripped))]
+        if len(choices) >= 2 and styles[indent]['bold'] is not None:
+            # "All time · Last 7 days · Last 30 days" (/stats): the bold one is current, the others are grey.
+            spans, at = [], indent
+            for choice in choices:
+                at = text.index(choice, at)
+                spans.append(styles[at:at + len(choice)])
+                at += len(choice)
+            bold = [all(style['bold'] for style in span) for span in spans]
+            if sum(bold) == 1 and all(flag or all(_dim(style, tone) for style in span) for flag, span in zip(bold, spans)):
+                blocks.append({'type': 'options', 'options': choices, 'value': choices[bold.index(True)]})
+                index += 1
+                continue
         if any(style['bg'] is not None for char, style in zip(text, styles) if char in ' █▉▊▋▌▍▎▏') or re.match(r'^[█▉▊▋▌▍▎▏]+\s*$', stripped):
             # A usage bar. A wide pane puts "25% used" on the same row, a narrow pane on the next one.
             label = re.sub(r'^[█▉▊▋▌▍▎▏\s]+', '', stripped)
@@ -345,7 +472,7 @@ def parse(frame):
                 blocks.append({'type': 'tabs', 'tabs': names, 'tab': active})
                 index += 1
                 continue
-        columns = [re.fullmatch(r'([^:]{1,30}): (\S.*)', cell) for cell in re.split(r' {2,}', stripped)]
+        columns = [re.fullmatch(r'([^:]{1,30}): ?(\S.*)', cell) for cell in re.split(r' {2,}', stripped)]
         if len(columns) >= 2 and all(columns):
             last = blocks[-1] if blocks else None
             if not (last and last['type'] == 'facts' and not last.get('_closed')):
@@ -405,6 +532,8 @@ def parse(frame):
                     text_block(lead, True, False)
                     index = span + 1
                     continue
+            for inner in re.findall(r'\(([^()]*\bto\b[^()]*)\)', stripped):
+                extra.extend(hints(inner) or [])  # "(↑/↓ to scroll)", "(ctrl+s to filter by marketplace)"
             if inline:
                 extra.extend(inline)
             else:
@@ -512,11 +641,14 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             sleep(TYPE_STEP)
         sleep(STEP)
 
-    def state(dialog):
-        return (dialog['text'], dialog.get('tab'), dialog.get('tab_focus'), dialog['focus'],
-                [item['selected'] for item in _items(dialog)], [block.get('value') for block in dialog['blocks']])
+    def marks(dialog):
+        # What a move key can change. Not the whole text: a spinner or a loading row also changes it (seen in /stats),
+        # and the next key would then go out before this one shows.
+        return (dialog.get('tab'), dialog.get('tab_focus'), dialog['focus'], [hint['text'] for hint in dialog['hints']],
+                [item['selected'] for item in _items(dialog)], [item['text'] for item in _items(dialog)][:1],
+                [block.get('value', block.get('tab')) for block in dialog['blocks'] if block['type'] in ('scale', 'search', 'tabs', 'options')])
 
-    def step(dialog, *keys):
+    def step(dialog, *keys, state=marks):
         """Press, then wait for Claude Code to draw the result. A decision on a screen that is not drawn yet presses
         the next key too early: the cursor then goes past its row, and a tab row wraps around."""
         before = state(dialog)
@@ -571,7 +703,9 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             if want not in (dialog.get('tabs') or []):
                 break
             offered = {key['key']: hint['effect'] for hint in dialog['hints'] for key in hint['keys']}
-            to_tabs = next((key for key, effect in offered.items() if re.search(r'\btabs?\b', effect) and key not in ('Left', 'Right', 'Tab')), None)
+            # From the hint list, not from `offered`: /stats names ↑ twice ("↑ tabs" and "↑/↓ to scroll").
+            to_tabs = next((key['key'] for hint in dialog['hints'] for key in hint['keys']
+                            if re.search(r'\btabs?\b', hint['effect']) and key['key'] not in ('Left', 'Right', 'Tab')), None)
             if cycle:
                 key = 'Tab'  # Tab goes forward and wraps. An arrow after it would go back and forth (seen in /plugin).
             elif dialog.get('tab_focus'):
@@ -588,6 +722,40 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
             cycle = cycle or key == 'Tab' and moved
             idle = 0 if moved else idle + 1
         raise RuntimeError('Could not open that tab. Use the terminal for this dialog.')
+    if action in ('subtab', 'option'):
+        # A part of the body that Claude changes with one key: Tab for the views of /stats, "r to cycle dates" for its
+        # date range. Both work only while the body has the focus; "↓ stats" in the footer says it does not yet.
+        kind, name, want = ('tabs', 'tab', body.get('tab')) if action == 'subtab' else ('options', 'value', body.get('value'))
+        choices = 'tabs' if action == 'subtab' else 'options'
+        idle = 0
+        for _ in range(12):
+            part = next((block for block in dialog['blocks'] if block['type'] == kind), None)
+            if part is None or want not in part[choices]:
+                raise ValueError('This dialog has no such choice.')
+            if part[name] == want:
+                return
+            offered = {key['key']: hint['effect'] for hint in dialog['hints'] for key in hint['keys']}
+            enter = next((hint['keys'][0]['key'] for hint in dialog['hints'] if hint.get('go') and hint['keys'][0]['key'] == 'Down'), None)
+            cycle = next((key for key, effect in offered.items() if re.search(r'\bcycle\b', effect)), None)
+            if enter:
+                key = enter
+            elif action == 'option' and cycle:
+                # /stats loads a date range for seconds and shows the old one meanwhile. Waiting for each would hold
+                # SEND_LOCK that long, so press once per step of the cycle and let the card show the result.
+                count = (part[choices].index(want) - part[choices].index(part[name])) % len(part[choices])
+                for _ in range(count):
+                    press(cycle)
+                    sleep(CYCLE_STEP)
+                return
+            elif action == 'subtab' and 'Tab' not in offered and not any(re.search(r'\b(?:change|toggle)\b', effect) for effect in offered.values()):
+                key = 'Tab'  # not in the footer; checked on Claude Code 2.1.325
+            else:
+                break
+            dialog, moved = step(dialog, key)
+            idle = 0 if moved else idle + 1
+            if idle >= 2:
+                break
+        raise RuntimeError('Could not change that. Use the terminal for this dialog.')
     if action == 'scale':
         want = body.get('value')
         for _ in range(12):

@@ -99,12 +99,46 @@ class Parse(unittest.TestCase):
             self.assertTrue(all(0 <= meter['percent'] <= 100 and meter['text'].endswith('% used') for meter in meters))
             self.assertIn('Total cost', [row['label'] for row in block(found, 'facts')['rows']])
 
-    def test_stats_keeps_the_chart_as_drawn(self):
+    def test_stats_activity_chart_is_data(self):
         found = dialog('stats')
         self.assertEqual(block(found, 'tabs'), {'type': 'tabs', 'tabs': ['Overview', 'Models'], 'tab': 'Overview'})
-        chart = next(item for item in found['blocks'] if item['type'] == 'text' and item['mono'])
-        self.assertGreater(len(chart['lines']), 5)
+        chart = block(found, 'heatmap')
+        self.assertEqual(len(chart['rows']), 7)
+        self.assertEqual([row['label'] for row in chart['rows']], ['', 'Mon', '', 'Wed', '', 'Fri', ''])
+        self.assertTrue(all(set(row['cells']) <= set('01234') and len(row['cells']) >= 50 for row in chart['rows']))
+        self.assertEqual(chart['months'][0], [0, 'Nov'])
+        self.assertEqual(chart['months'][1][0], 4)
+        self.assertFalse(any(item['type'] == 'text' and item['mono'] for item in found['blocks']))  # no terminal drawing left
+        self.assertFalse(any('Less' in line for item in found['blocks'] if item['type'] == 'text' for line in item['lines']))
         self.assertIn('Favorite model', [row['label'] for row in block(found, 'facts')['rows']])
+        self.assertEqual(block(found, 'options'), {'type': 'options', 'options': ['All time', 'Last 7 days', 'Last 30 days'], 'value': 'All time'})
+
+    def test_stats_footer_names_no_esc(self):
+        # Before the body has the focus the footer is "↓ stats"; then "↑ tabs · r to cycle dates · ctrl+s to copy".
+        self.assertEqual([(hint['text'], hint.get('go')) for hint in dialog('stats')['hints']], [('↓ stats', True)])
+        found = dialog('stats_body')
+        self.assertEqual(keys(found), ['Up', 'r', 'C-s'])
+        self.assertEqual(found['hints'][0]['effect'], 'tabs')
+        self.assertEqual(claude_dialog.allowed(found), {'Up', 'r', 'C-s', 'Escape'})
+        self.assertIsNone(claude_dialog.hints('↓ 16 more'))  # a list's overflow row is no key hint
+
+    def test_stats_date_range_shows_while_it_loads(self):
+        self.assertEqual(block(dialog('stats_cycling'), 'options')['value'], 'Last 7 days')  # a spinner follows the row
+
+    def test_stats_models_view(self):
+        found = dialog('stats_models')
+        self.assertEqual(block(found, 'tabs')['tab'], 'Models')
+        entries = block(found, 'entries')['items']
+        self.assertEqual([entry['title'].split(' (')[0] for entry in entries], ['Opus 5.5', 'Sonnet 5.5', 'Fable 5.2', 'Opus 4.8'])  # left column, then right
+        self.assertTrue(all(len(entry['lines']) == 2 and entry['lines'][0].startswith('In: ') for entry in entries))
+        self.assertIn('Down', keys(found))  # "(↑/↓ to scroll)" beside the model count
+
+    def test_narrow_stats_joins_the_wrapped_chart_and_tab_row(self):
+        found = dialog('stats_narrow')
+        self.assertEqual((found['title'], found['tab']), ('Settings', 'Stats'))
+        chart = block(found, 'heatmap')
+        self.assertEqual(len({len(row['cells']) for row in chart['rows']} - {len(chart['rows'][0]['cells']) - 1}), 1)
+        self.assertEqual(chart['months'][-1], [36, 'Nov'])
 
     def test_effort_scale(self):
         for name in ('effort', 'effort_narrow'):
@@ -119,17 +153,31 @@ class Parse(unittest.TestCase):
         self.assertEqual(block(found, 'facts')['rows'], [{'label': 'Help improve our AI models', 'value': 'false'}])
         self.assertEqual(keys(found), ['Enter', 'Tab', 'Space', 'Escape'])
 
-    def test_help_tabs_and_shortcut_table(self):
-        found = dialog('help')
-        self.assertEqual((found['tabs'], found['tab']), (['General', 'Commands', 'Custom commands'], 'General'))
-        self.assertEqual(block(found, 'heading')['text'], 'Shortcuts')
-        self.assertTrue(any(item['type'] == 'text' and item['mono'] for item in found['blocks']))
+    def test_help_shortcut_table_is_a_list(self):
+        for name in ('help', 'help_narrow'):
+            found = dialog(name)
+            self.assertEqual((found['tabs'], found['tab']), (['General', 'Commands', 'Custom commands'], 'General'))
+            self.assertEqual(block(found, 'heading')['text'], 'Shortcuts')
+            items = {item['keys']: item['effect'] for item in block(found, 'shortcuts')['items']}
+            self.assertEqual(len(items), 17, name)
+            self.assertEqual(items['!'], 'shell mode')
+            self.assertEqual(items['ctrl + shift + _'], 'undo')  # "shift +" inside a key is no new entry
+            self.assertEqual(items['backslash (\\) + return (⏎)'], 'newline')  # wraps onto the next row
+            self.assertEqual(items['/keybindings'], 'customize')
+            self.assertFalse(any(item['type'] == 'text' and item['mono'] for item in found['blocks']), name)
         self.assertEqual(dialog('help_commands')['tab'], 'Custom commands')
+
+    def test_clipped_shortcut_table_stays_text(self):
+        lines = frame('help').rstrip().split('\n')
+        cut = next(index for index, line in enumerate(lines) if 'backslash' in line)
+        found = claude_dialog.parse('\n'.join(lines[:cut + 1]))
+        self.assertFalse(any(item['type'] == 'shortcuts' for item in found['blocks']))  # "… return (⏎) for" has no effect yet
+        self.assertTrue(any(item['type'] == 'text' and item['mono'] for item in found['blocks']))
 
     def test_body_text_that_looks_like_a_hint_is_no_footer(self):
         # A short pane clips /help: its last rows are then part of the shortcut table.
         lines = frame('help').rstrip().split('\n')
-        cut = next(index for index, line in enumerate(lines) if 'ctrl + t to toggle tasks' in line)
+        cut = next(index for index, line in enumerate(lines) if 'backslash' in line)
         found = claude_dialog.parse('\n'.join(lines[:cut + 1]))
         self.assertEqual(found['hints'], [])
         self.assertEqual(claude_dialog.allowed(found), {'Escape', 'Left', 'Right'})
@@ -140,7 +188,8 @@ class Parse(unittest.TestCase):
             self.assertEqual(found['tabs'], ['Discover', 'Installed', 'Marketplaces', 'Errors', 'Stats'], name)
             self.assertEqual(items(found)[0]['mark'], '◯')
             self.assertEqual(block(found, 'list')['more_below'], 6101)
-            self.assertEqual(keys(found), ['Type', 'Space', 'Enter', 'Escape'])
+            self.assertEqual(keys(found)[:4], ['Type', 'Space', 'Enter', 'Escape'])
+        self.assertEqual(keys(dialog('plugin'))[4:], ['C-s'])  # "(ctrl+s to filter by marketplace)"
 
     def test_hints_in_the_subtitle(self):
         found = dialog('skills')
@@ -337,6 +386,37 @@ class Act(unittest.TestCase):
             self.act(terminal, title='Settings', action='tab', tab='Status')
         self.assertEqual(terminal.sent, [])
 
+    def test_stats_view_and_date_range(self):
+        # "↓ stats": the body has no focus yet, so Down goes first. Tab changes the view, "r" the date range.
+        frames = [frame('stats'), frame('stats_body'), frame('stats_models')]
+        terminal = Terminal(frames, {(0, 'Down'): 1, (1, 'Tab'): 2, (2, 'Tab'): 1})
+        self.act(terminal, title='Settings', action='subtab', tab='Models')
+        self.assertEqual(terminal.sent, [['Down'], ['Tab']])
+        self.act(terminal, title='Settings', action='subtab', tab='Overview')
+        self.assertEqual(terminal.sent[2:], [['Tab']])
+        self.act(terminal, title='Settings', action='option', value='Last 30 days')
+        self.assertEqual(terminal.sent[3:], [['r'], ['r']])  # two steps on in the cycle; no wait for the slow load
+        self.act(terminal, title='Settings', action='option', value='All time')
+        self.assertEqual(len(terminal.sent), 5)
+        with self.assertRaisesRegex(ValueError, 'no such choice'):
+            self.act(terminal, title='Settings', action='option', value='Last year')
+        with self.assertRaisesRegex(ValueError, 'no such choice'):
+            self.act(Terminal([frame('mcp')]), title='Manage MCP servers', action='subtab', tab='Models')
+
+    def test_a_spinner_is_not_the_result_of_a_key(self):
+        # /stats redraws a spinner while it loads. That change must not count as "Tab worked": a second Tab would undo it.
+        loading = frame('stats_body').replace('Favorite model', 'Favorite  model')
+        self.assertEqual(block(claude_dialog.parse(loading), 'tabs')['tab'], 'Overview')
+        terminal = Terminal([frame('stats_body'), loading], {(0, 'Tab'): 1})
+        with self.assertRaisesRegex(RuntimeError, 'Could not change'):
+            self.act(terminal, title='Settings', action='subtab', tab='Models')  # the text changed, the view did not
+        self.assertEqual(terminal.sent, [['Tab'], ['Tab']])
+
+    def test_tab_row_from_the_stats_body(self):
+        terminal = Terminal([frame('stats_models'), frame('stats'), frame('usage')], {(0, 'Up'): 1, (1, 'Left'): 2})
+        self.act(terminal, title='Settings', action='tab', tab='Usage')
+        self.assertEqual(terminal.sent, [['Up'], ['Left']])  # "↑ tabs", though "↑/↓ to scroll" names ↑ too
+
     def test_scale(self):
         high = frame('effort').replace('\x1b[1m\x1b[38;5;114mmedium\x1b[0m', '\x1b[38;5;246mmedium\x1b[39m').replace(
             '\x1b[38;5;246mhigh\x1b[39m', '\x1b[1m\x1b[38;5;114mhigh\x1b[0m')
@@ -427,7 +507,7 @@ class Attention(unittest.TestCase):
         self.assertEqual(self.attention('usage')['reason'], 'dialog')
 
     def test_each_command_of_the_backlog_item_gets_a_card(self):
-        for name in ('help', 'mcp', 'memory', 'resume', 'tasks', 'privacy', 'effort', 'plugin', 'status', 'config', 'usage', 'stats', 'skills'):
+        for name in ('help', 'mcp', 'memory', 'resume', 'tasks', 'privacy', 'effort', 'plugin', 'status', 'config', 'usage', 'stats', 'stats_body', 'stats_models', 'skills'):
             terminal_input._attention_seen.clear()
             self.assertEqual(self.attention(name)['reason'], 'dialog', name)
 

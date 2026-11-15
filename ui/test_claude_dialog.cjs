@@ -10,7 +10,7 @@ const { getBrowser } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const SHOTS = process.env.SHOTS || ''
 const SERVER = path.join(__dirname, '..', 'server')
-const NAMES = (process.env.ONLY || 'mcp,config,usage,effort,resume,status,help,plugin,stats').split(',')
+const NAMES = (process.env.ONLY || 'mcp,config,usage,effort,resume,status,help,help_narrow,plugin,stats,stats_body,stats_models,stats_narrow').split(',')
 const DIALOGS = JSON.parse(execFileSync('python3', ['-c', `
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -103,11 +103,12 @@ async function main() {
         await card.waitFor()
         const dialog = DIALOGS[state]
         const actions = () => sent.filter(item => item.endpoint === 'dialog').map(item => [item.action, item.key ?? item.label ?? item.tab ?? item.value ?? item.text].join(':'))
+        const pres = await card.locator('pre').count()
         if (!(await card.locator('.choice-head').innerText()).includes(dialog.title)) errors.push('wrong card title')
         if ((await page.locator('body').innerText()).includes('needs attention')) errors.push('the raw fallback title shows')
         if (/Esc to (cancel|close)/.test(await card.innerText())) errors.push('the terminal key hints show as text')
-        if (dialog.tabs && await card.getByRole('tab').count() !== dialog.tabs.length) errors.push('tabs are missing')
-        if (dialog.tabs && await card.getByRole('tab', { selected: true }).innerText() !== dialog.tab) errors.push('wrong tab is selected')
+        if (dialog.tabs && await card.locator('.perm-tabs').getByRole('tab').count() !== dialog.tabs.length) errors.push('tabs are missing')
+        if (dialog.tabs && await card.locator('.perm-tabs').getByRole('tab', { selected: true }).innerText() !== dialog.tab) errors.push('wrong tab is selected')
         if (state === 'mcp') {
           if (await card.locator('.dlg-list button').count() !== 9) errors.push('want 9 server rows')
           if (await card.locator('.dlg-list [aria-current="true"]').count() !== 1) errors.push('want one marked row')
@@ -150,13 +151,32 @@ async function main() {
           if (await card.locator('.dlg-facts div').count() < 10) errors.push('facts are missing')
           if (await card.locator('pre').count()) errors.push('status shows as terminal text')
           if (await card.getByRole('button').filter({ hasNotText: /Cancel|Status|Config|Usage|Stats/ }).count()) errors.push('unexpected buttons')
-        } else if (state === 'help') {
-          if (await card.locator('pre').count() !== 1) errors.push('the shortcut table is missing')
+        } else if (state === 'help' || state === 'help_narrow') {
+          if (pres) errors.push('the shortcut table shows as terminal text')
+          if (await card.locator('.dlg-keys div').count() !== 17) errors.push('want 17 shortcuts')
+          if (!(await card.locator('.dlg-keys div').nth(8).innerText()).includes('toggle tasks')) errors.push('shortcuts are out of order')
         } else if (state === 'plugin') {
           if (await card.getByRole('tab').count() !== 5) errors.push('want 5 tabs')
           if (!await card.getByRole('button', { name: /^Toggle/ }).count()) errors.push('no toggle button')
-        } else if (state === 'stats') {
-          if (!await card.getByRole('button', { name: /^Close/ }).count()) errors.push('a dialog with no key hints has no Close button')
+        } else if (state === 'stats' || state === 'stats_body' || state === 'stats_narrow') {
+          if (!await card.getByRole('button', { name: /^Close/ }).count()) errors.push('a dialog with no Esc hint has no Close button')
+          if (pres) errors.push('the activity chart shows as terminal text')
+          const cells = await card.locator('.dlg-heat-grid i').count()
+          if (cells < 7 * 38) errors.push(`the activity chart has ${cells} squares`)
+          const chart = await card.locator('.dlg-heat').boundingBox(), panel = await card.boundingBox()
+          if (chart.x < panel.x || chart.x + chart.width > panel.x + panel.width) errors.push('the activity chart is wider than the card')
+          const square = await card.locator('.dlg-heat-grid i').first().boundingBox()
+          if (square.width < 2.5) errors.push(`chart squares are ${square.width.toFixed(1)} px wide`)
+          if (await card.getByRole('button', { name: /^(↑|↓)$/ }).count()) errors.push('focus arrows show as buttons')
+          await card.getByRole('radio', { name: 'Last 30 days' }).click()
+          await card.getByRole('tab', { name: 'Models' }).click()
+          await page.waitForTimeout(200)
+          if (actions().join() !== 'option:Last 30 days,subtab:Models') errors.push(`actions sent: ${actions().join()}`)
+          if (state === 'stats_body' && !await card.getByRole('button', { name: /^Cycle dates/ }).count()) errors.push('no button for the "r" key')
+        } else if (state === 'stats_models') {
+          if (await card.locator('.dlg-entries li').count() !== 4) errors.push('want 4 model entries')
+          if (pres !== 1) errors.push('want the tokens chart as the one terminal drawing')
+          if (await card.getByRole('tab', { selected: true }).last().innerText() !== 'Models') errors.push('the Models view is not marked')
         }
         for (const button of await card.getByRole('button').all()) {
           const size = await button.boundingBox()
