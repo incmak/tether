@@ -660,13 +660,17 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   useEffect(() => {
     if (!data) return
     // Claude writes no chat record for some slash commands (/usage opens a panel). Once the pane is not working, it ran them.
-    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && data.state !== 'Working' && Date.now() - item.at > 3000
+    // Some run at once while Claude works and then show as a card: /btw (a side question), /mcp, /config, /permissions.
+    // /btw never waits in Claude's queue, so its bubble also leaves once its saved answer is in the chat, or after 10 s.
+    const opened = ['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')
+    const asked = (item: Pending) => /^\/btw\s/.test(item.text.trim()) && (Date.now() - item.at > 10000 || data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === squash(item.text.trim().slice(4))))
+    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && Date.now() - item.at > 3000 && (data.state !== 'Working' || opened || asked(item))
     // /clear (and a new chat) starts a new transcript: the count taken in the old one does not apply there.
     const seen = (item: Pending) => item.thread !== undefined && item.thread !== (data.thread ?? null) ? 0 : item.seen
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Reconcile persisted queued sends with the received transcript before scheduling the slash-command recheck.
     setPending(list => { const left = list.filter(item => matches(data.messages, item.key, imagesOnly(item.text)) <= seen(item) && Date.now() - item.at < 1800000 && !ran(item)); return left.length === list.length ? list : left })
     // An idle pane sends no new data, so check a slash command again once its 3 s have passed.
-    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + 3100 - Date.now())
+    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + (/^\/btw\s/.test(item.text.trim()) && Date.now() - item.at > 3100 ? 10100 : 3100) - Date.now())
     if (!slash.length) return
     const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(100, Math.min(...slash)))
     return () => window.clearTimeout(timer)
@@ -1101,7 +1105,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
-      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
+      : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
       ...codexRunItems(codexRuns),
       ...agentBrowserItems(api, agentBrowser, activePane.id),
       { id: 'update', label: 'Update ready', active: !!footer.update, content: <>{footer.update && <div className="cli-update" role="status"><RefreshCw size={16} /><span><strong>Claude Code update ready</strong><small>{footer.update.replace(/^[^\w/]+\s*/, '')}</small></span><button type="button" className="secondary" disabled={!writable || state === 'Working'} onClick={() => void send('/restart')}>Restart</button></div>}</> },
