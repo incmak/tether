@@ -67,10 +67,9 @@ def check(build: Path, target: Path, repo: Path) -> list[str]:
     """Return warnings, or raise Refused when the build would remove live work."""
     stamp = read_json(build / STAMP, 'The build stamp')
     live = read_json(target / RECORD, 'The live record')
-    unfinished = read_json(target / PENDING, 'The unfinished deploy record')
-    if unfinished is not None:
-        raise Refused(f'A deploy of {unfinished["commit"]} did not finish, so the live commit is unknown. Check which '
-                      'assets/index-*.js the live index.html loads, then run --record-live COMMIT for its commit.')
+    if (target / PENDING).exists():
+        raise Refused(f'An earlier deploy did not finish ({target / PENDING}), so the live commit is unknown. Check '
+                      'which assets/index-*.js the live index.html loads, then run --record-live COMMIT for its commit.')
     if stamp is None:
         raise Refused(f'The build has no {STAMP}, so its commit is unknown. Rebuild with the current '
                       'ui/vite.config.ts in a git checkout.')
@@ -138,24 +137,30 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
     target.mkdir(parents=True, exist_ok=True)
     # Until the record is written, the live commit is unknown. If this run stops after the entry page is published,
     # the pending file makes the next deploy refuse instead of comparing against a stale record.
-    if stamp is None:
-        # A forced install of an unknown commit leaves nothing to compare with. The next stamped deploy records again.
-        (target / RECORD).unlink(missing_ok=True)
-        (target / PENDING).unlink(missing_ok=True)
-        warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
-    else:
-        write_record(target, stamp, PENDING)
+    # Until the new record is written, the live commit is unknown. The pending file makes the next deploy refuse if this
+    # run stops after the entry page is published. Before that, the old entry page is still live, so the old record and
+    # any earlier pending file are restored as they were.
+    pending = target / PENDING
+    earlier = pending.read_bytes() if pending.exists() else None
+    write_record(target, stamp or {'commit': None}, PENDING)
     try:
         count = copy_build(build, target, entry)
-        if stamp is not None:
-            write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'),
-                                  'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
     except BaseException:
         live_entry = target / 'index.html'
         if not (live_entry.is_file() and live_entry.read_bytes() == entry.read_bytes()):
-            (target / PENDING).unlink(missing_ok=True)  # the old entry page is still live, so the old record holds
+            if earlier is None:
+                pending.unlink(missing_ok=True)
+            else:
+                pending.write_bytes(earlier)
         raise
-    (target / PENDING).unlink(missing_ok=True)
+    if stamp is None:
+        # A forced install of an unknown commit leaves nothing to compare with. The next stamped deploy records again.
+        (target / RECORD).unlink(missing_ok=True)
+        warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
+    else:
+        write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'),
+                              'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+    pending.unlink()
     return count
 
 

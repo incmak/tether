@@ -210,14 +210,8 @@ class DeployGuardTest(unittest.TestCase):
     def test_failure_before_publish_keeps_the_old_record_valid(self):
         self.set_live(self.base)
         self.stamp(self.live)
-        replace = deploy_ui.os.replace
-        def fail_asset(source, target):
-            if Path(target).name == 'new.js':
-                raise OSError('disk error')
-            replace(source, target)
-        with patch.object(deploy_ui.os, 'replace', side_effect=fail_asset):
-            with self.assertRaises(OSError):
-                self.deploy()
+        with self.fail_asset_install(), self.assertRaises(OSError):
+            self.deploy()
         self.assertEqual((self.target / 'index.html').read_text(), 'old entry')
         self.assertFalse((self.target / '.live-commit.pending').exists())
         self.assertEqual(self.deploy(), 2)
@@ -229,6 +223,35 @@ class DeployGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(deploy_ui.Refused, 'git did not start'):
                 self.deploy()
             self.assertEqual(self.deploy(force=True), 2)
+
+    def fail_asset_install(self):
+        replace = deploy_ui.os.replace
+        def fail_asset(source, target):
+            if Path(target).name == 'new.js':
+                raise OSError('disk error')
+            replace(source, target)
+        return patch.object(deploy_ui.os, 'replace', side_effect=fail_asset)
+
+    def test_failed_unstamped_force_keeps_the_live_record(self):
+        self.set_live(self.live)
+        with self.fail_asset_install(), self.assertRaises(OSError):
+            self.deploy(force=True)
+        self.assertEqual(self.record()['commit'], self.live)
+        self.assertFalse((self.target / '.live-commit.pending').exists())
+        self.stamp(self.base)
+        with self.assertRaisesRegex(deploy_ui.Refused, 'drops live commits'):
+            self.deploy()
+
+    def test_failed_forced_recovery_keeps_the_earlier_pending_file(self):
+        self.set_live(self.base)
+        (self.target / '.live-commit.pending').write_text(json.dumps({'commit': self.live}))
+        self.stamp(self.live)
+        with self.fail_asset_install(), self.assertRaises(OSError):
+            self.deploy(force=True)
+        self.assertEqual(json.loads((self.target / '.live-commit.pending').read_text()), {'commit': self.live})
+        self.stamp(self.base)
+        with self.assertRaisesRegex(deploy_ui.Refused, 'did not finish'):
+            self.deploy()
 
 
 if __name__ == '__main__':
