@@ -16,10 +16,11 @@
   --text: #302f2b;
   --muted: #6c6a62;
   --line: #d9d6cd;
-  --hover: #e4e1d8;
-  --accent: #c96442;
+  --hover: #e6e3da;
+  --accent: #c96442;       /* borders, focus rings, icons, marks: 3:1 */
   --accent-text: #fffaf5;
-  --accent-fill: #b55a3b;  /* filled controls: --accent-text on it is 4.5:1. From tones.ts; test_contrast.cjs checks it. */
+  --accent-fill: #b55a3b;  /* filled controls: --accent-text on it is 4.5:1 */
+  --accent-ink: #8d462e;   /* accent-colored text: 4.5:1 on each surface. Both tones come from tones.ts; test_contrast.cjs checks them. */
   --attention: #8c6b22;
   --done: #2f8a68;
   --pin: #3f6f8f;
@@ -39,6 +40,7 @@
     --muted: #b1ada3;
     --line: #48473f;
     --hover: #363630;
+    --accent-ink: #de9f8a;
     --attention: #d9b761;
     --done: #62c49c;
     --pin: #8db8d6;
@@ -59,6 +61,7 @@
   --muted: #b1ada3;
   --line: #48473f;
   --hover: #363630;
+  --accent-ink: #de9f8a;
   --attention: #d9b761;
   --done: #62c49c;
   --pin: #8db8d6;

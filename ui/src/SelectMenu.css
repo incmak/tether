@@ -21,7 +21,7 @@
 .sm-trailing { display: flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; margin-inline-end: 3px; border-radius: 7px; color: var(--muted); }
 .sm-trailing:hover { background: var(--line); color: var(--text); }
 @media (pointer: fine) { .sm-row:not(.active, .pin) .sm-trailing { opacity: 0; } }
-.sm-check { display: flex; flex: none; width: 15px; color: var(--accent); }
+.sm-check { display: flex; flex: none; width: 15px; color: var(--accent-ink); }
 .sm-text { display: grid; flex: 1; min-width: 0; gap: 1px; }
 .sm-label, .sm-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sm-label { font-size: 13.5px; line-height: 1.3; }

@@ -6,7 +6,7 @@
 .phone-tabs .composer-area { padding-bottom: 12px; }
 .phone-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; display: flex; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: var(--sidebar); border-top: 1px solid var(--line); }
 .phone-tabbar > button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; color: var(--muted); font-size: 11px; font-weight: 500; }
-.phone-tabbar > button[aria-current=page] { color: var(--accent); font-weight: 600; }
+.phone-tabbar > button[aria-current=page] { color: var(--accent-ink); font-weight: 600; }
 .phone-tabbar > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: var(--radius); }
 /* More menu (PhoneTabs.tsx): Share, Browser and the assistant, above the More tab. While it is open the bar is above
    the floating bubbles, and a tap outside the menu only closes it. */
@@ -14,7 +14,7 @@
 .phone-more-backdrop { position: fixed; inset: 0 0 calc(56px + env(safe-area-inset-bottom)); }
 .phone-more-menu { position: absolute; right: max(8px, env(safe-area-inset-right)); bottom: calc(100% + 8px); width: max-content; min-width: 208px; max-width: calc(100vw - 16px); padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 6px 24px #0000001f; }
 .phone-more-menu button { display: flex; align-items: center; justify-content: flex-start; gap: 12px; width: 100%; min-height: 48px; padding: 0 12px; border-radius: var(--radius); color: var(--text); font-size: 15px; text-align: left; }
-.phone-more-menu button[aria-current=page] { color: var(--accent); font-weight: 600; }
+.phone-more-menu button[aria-current=page] { color: var(--accent-ink); font-weight: 600; }
 .phone-more-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .phone-more-menu button svg { flex: none; }
 .phone-more-menu button small { margin-left: auto; padding-left: 8px; color: var(--muted); font-size: 12px; font-weight: 400; }
@@ -34,7 +34,7 @@
 .xp-head { flex-shrink: 0; display: flex; align-items: center; gap: 2px; min-height: 52px; padding: 4px 8px 4px 4px; }
 .xp-title, .xp-head h1, .xp-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 18px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .xp-head .icon-button:disabled { opacity: .35; }
-.xp-text-button { min-height: var(--control-lg); padding: 0 10px; color: var(--accent); font-size: 16px; font-weight: 600; border-radius: var(--radius); }
+.xp-text-button { min-height: var(--control-lg); padding: 0 10px; color: var(--accent-ink); font-size: 16px; font-weight: 600; border-radius: var(--radius); }
 .xp-search { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin: 0 16px 8px; padding: 0 12px; min-height: 44px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); }
 .xp-search:focus-within { border-color: var(--accent); }
 .xp-search input { flex: 1; min-width: 0; height: 42px; border: 0; background: none; color: var(--text); font-size: 16px; outline: none; }
@@ -47,7 +47,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-chip[aria-current] { background: var(--bubble); border-color: var(--bubble); color: var(--text); font-weight: 600; }
 .xp-secret-bar { flex-shrink: 0; display: flex; align-items: center; gap: 8px; margin: 0 16px 10px; padding: 0 4px 0 12px; min-height: 44px; border-radius: var(--radius); background: color-mix(in srgb, var(--attention) 14%, transparent); color: var(--text); font-size: 13px; }
 .xp-secret-bar span { flex: 1; }
-.xp-secret-bar button { min-height: var(--control-lg); padding: 0 12px; font-weight: 600; color: var(--accent); }
+.xp-secret-bar button { min-height: var(--control-lg); padding: 0 12px; font-weight: 600; color: var(--accent-ink); }
 .xp-bar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; padding: 0 8px 0 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .xp-count { font-size: 13px; color: var(--muted); }
 .xp-sort { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control-lg); padding: 0 8px; font-size: 13px; font-weight: 500; color: var(--text); }
@@ -60,7 +60,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-row-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; min-height: 60px; padding: 8px 8px; text-align: left; }
 .xp-row-main:disabled { opacity: .45; }
 .xp-icon { flex-shrink: 0; color: var(--muted); }
-.xp-icon-dir { color: var(--accent); }
+.xp-icon-dir { color: var(--accent-ink); }
 .xp-row-text { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; }
 .xp-name { display: flex; align-items: center; gap: 6px; font-size: 15px; }
 .xp-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -78,7 +78,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-actionbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 16; display: flex; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: var(--sidebar); border-top: 1px solid var(--line); }
 .xp-actionbar button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 56px; font-size: 11px; font-weight: 500; color: var(--text); }
 .xp-actionbar button:disabled { opacity: .35; }
-.xp-actionbar .xp-act-accent { color: var(--accent); font-weight: 600; }
+.xp-actionbar .xp-act-accent { color: var(--accent-ink); font-weight: 600; }
 .xp-actionbar .xp-act-danger { color: var(--error); }
 
 /* Upload progress, above the tab bar. */
@@ -87,7 +87,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-upload-text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
 .xp-upload .meter-bar > span { background: var(--accent); }
 .xp-upload-foot { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted); }
-.xp-upload-foot button { min-height: var(--control-lg); padding: 0 4px 0 16px; color: var(--accent); font-weight: 600; font-size: 14px; }
+.xp-upload-foot button { min-height: var(--control-lg); padding: 0 4px 0 16px; color: var(--accent-ink); font-weight: 600; font-size: 14px; }
 .xp-toast.app-toast { width: max-content; margin: 0; overflow-wrap: anywhere; max-height: calc(100dvh - 112px); overflow-y: auto; bottom: 96px; z-index: 30; }
 
 /* Sheets */
@@ -127,7 +127,7 @@ button.xp-chip::after { content: ''; position: absolute; inset: -6px -3px; }
 .xp-media :is(img, video) { max-width: 100%; max-height: 100%; object-fit: contain; }
 .xp-media audio { width: 100%; }
 .xp-note { margin: 0; padding: 40px 24px; text-align: center; color: var(--muted); font-size: 15px; line-height: 1.5; }
-.xp-note a { color: var(--accent); text-decoration: underline; }
+.xp-note a { color: var(--accent-ink); text-decoration: underline; }
 .xp-preview-foot { flex-shrink: 0; display: flex; gap: 10px; margin: 0; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--surface); }
 p.xp-preview-foot { font-size: 13px; }
 .xp-preview-foot .primary { flex: 1; min-width: 0; min-height: var(--control-lg); }

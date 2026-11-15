@@ -50,7 +50,7 @@ const highlight = HighlightStyle.define([
   { tag: tags.emphasis, fontStyle: 'italic' },
   { tag: tags.strong, fontWeight: '600' },
   { tag: tags.strikethrough, textDecoration: 'line-through' },
-  { tag: [tags.link, tags.url], color: 'var(--accent)', textDecoration: 'underline' },
+  { tag: [tags.link, tags.url], color: 'var(--accent-ink)', textDecoration: 'underline' },
   { tag: tags.monospace, color: 'var(--cm-string)' },
   { tag: tags.invalid, color: 'var(--error)' },
 ])

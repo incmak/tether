@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Api } from './api'
 import manifest from '../../server/ui_manifest.json'
-import { accentFill, contrast, luminance } from './tones'
+import { accentFill, accentInk, contrast, luminance } from './tones'
 
 // Layouts are data: { id, name, grid, panels, style, theme }. The desktop shell draws the same panels in a different
 // grid; the phone keeps its own UI and takes only the theme and the style. Classic is today's UI and adds nothing.
@@ -225,6 +225,7 @@ export function applyLayoutTheme(value: LayoutTheme | null) {
     '--error': value.error ?? (mode === 'dark' ? '#f09888' : '#a43b31'), '--done': value.done, '--pin': value.pin,
   }
   tokens['--accent-fill'] = accentFill(value.accent, accentText)
+  tokens['--accent-ink'] = accentInk(value.accent, ['--bg', '--sidebar', '--surface', '--bubble', '--hover'].map(name => tokens[name]!))
   // Every value passed the hex check, so the text holds no CSS other than these tokens.
   style.textContent = `:root:root:root{color-scheme:${mode};color:${value.text};background:${value.bg};${Object.entries(tokens).filter(([, colour]) => colour).map(([name, colour]) => `${name}:${colour};`).join('')}}`
   document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach(meta => { meta.content = value.bg })

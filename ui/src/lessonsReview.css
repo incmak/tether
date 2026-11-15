@@ -15,7 +15,7 @@
 .review-flag { border-left-color: var(--line); color: var(--muted); }
 .review-actions { display: flex; align-items: center; gap: 4px; flex: none; margin-left: auto; }
 .review-actions .secondary { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; }
-.review-kept { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 10px; color: var(--accent); font-size: 14px; font-weight: 600; }
+.review-kept { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 10px; color: var(--accent-ink); font-size: 14px; font-weight: 600; }
 .review-footer { flex: none; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin: 0 -24px; padding: 14px 24px max(16px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: inherit; }
 .lesson-text .lesson-quote { color: var(--text); font-style: italic; overflow-wrap: anywhere; }
 .review-entry { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 0 6px; }

@@ -20,7 +20,7 @@
 .work-swatch.hue-4 { background: var(--work-hue-4); }
 .work-swatch.hue-5 { background: var(--work-hue-5); }
 
-.home-group.decisions .home-group-head h2 svg, .home-decisions-mark { flex: none; color: var(--accent); }
+.home-group.decisions .home-group-head h2 svg, .home-decisions-mark { flex: none; color: var(--accent-ink); }
 .work-card-body { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px 8px; }
 .work-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .work-id { flex: none; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
@@ -179,7 +179,7 @@
 
 /* Sidebar: a tab's item id and stage. */
 .work-mark { flex: none; margin-left: 6px; padding: 0 5px; border-radius: var(--radius-sm); background: var(--hover); color: var(--muted); font: 600 10.5px/16px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
-.work-mark.needs { background: var(--accent-soft); color: var(--accent); }
+.work-mark.needs { background: var(--accent-soft); color: var(--accent-ink); }
 .work-mark .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .home-group-head .work-board-link { margin-left: auto; }
 

@@ -95,7 +95,7 @@
 .dlg-row-text small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
 .dlg-row-value { flex: none; max-width: 46%; color: var(--muted); font-size: 12.5px; text-align: right; overflow-wrap: anywhere; }
 .dlg-mark { flex: none; width: 16px; text-align: center; color: var(--muted); }
-.dlg-mark.ok { color: var(--success, var(--accent)); }
+.dlg-mark.ok { color: var(--success, var(--accent-ink)); }
 .dlg-mark.warn { color: var(--attention); }
 .dlg-mark.bad { color: var(--error); }
 .dlg-help { margin-top: -2px; }

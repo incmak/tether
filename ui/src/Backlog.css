@@ -45,7 +45,7 @@ button.backlog-done-toggle { display: inline-flex; align-items: center; gap: 4px
 button.backlog-done-toggle:not(:disabled):hover { background: none; color: var(--text); }
 .backlog-done-toggle svg { transition: transform .12s; }
 .backlog-done-toggle svg.open { transform: rotate(90deg); }
-.backlog-sheet .link-button { border: 0; padding: 0; min-height: 24px; background: none; color: var(--accent, var(--text)); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.backlog-sheet .link-button { border: 0; padding: 0; min-height: 24px; background: none; color: var(--accent-ink); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .backlog-sheet .backlog-clear-done { font-size: 13px; }
 .backlog-empty { display: grid; justify-items: center; gap: 6px; margin: 36px auto; max-width: 34ch; overflow-wrap: anywhere; color: var(--muted); font-size: 14px; line-height: 1.45; text-align: center; }
 .backlog-empty p { margin: 0; }
@@ -96,7 +96,7 @@ button.backlog-resize:focus-visible { outline: 2px solid var(--accent); outline-
 button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--text); }
 .backlog-state { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; font-size: 13px; }
 .backlog-pill { flex: none; padding: 0 6px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 18px; }
-.backlog-state.doing .backlog-pill { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.backlog-state.doing .backlog-pill { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-ink); }
 .backlog-state.done .backlog-pill { background: var(--hover); color: var(--muted); }
 .backlog-result { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
 .backlog-row.done .backlog-result { color: var(--muted); }
@@ -111,7 +111,7 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 .backlog-send-name > span { overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .backlog-send li button { display: inline-flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 8px; font-size: 13px; white-space: nowrap; }
 .backlog-send-empty { margin: 0; color: var(--muted); font-size: 13px; }
-.sidebar-backlog-new { flex: none; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 11px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
+.sidebar-backlog-new { flex: none; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-ink); font-size: 11px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) { .backlog-send li button { min-height: 38px; } }
 /* The first load: bones in the real row classes (BacklogBones). The checkbox bone keeps the box's size; tags lose their outline. */
 .backlog-bones .bone.backlog-box { display: block; border-radius: 4px; }
@@ -156,7 +156,7 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 .backlog-nav button:hover { background: var(--hover); }
 .backlog-nav button svg { flex: none; color: var(--muted); }
 .backlog-nav button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
-.backlog-nav button[aria-pressed="true"] svg { color: var(--accent); }
+.backlog-nav button[aria-pressed="true"] svg { color: var(--accent-ink); }
 .backlog-nav-count { color: var(--muted); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
 .backlog.page .backlog-list { margin-inline: 0; padding-inline: 0; }
 @media (pointer: coarse) { .backlog-nav button { min-height: 44px; } }

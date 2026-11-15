@@ -41,7 +41,7 @@
 .sd-brief-actions button, .sd-edit-buttons button { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 8px 12px; font-size: 13px; }
 .sd-note { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .sd-error { margin: 12px 0 0; color: var(--error); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-.sd-link { min-height: 44px; padding: 0 4px; border: 0; background: transparent; color: var(--accent); font: inherit; text-decoration: underline; }
+.sd-link { min-height: 44px; padding: 0 4px; border: 0; background: transparent; color: var(--accent-ink); font: inherit; text-decoration: underline; }
 .sd-edit { display: grid; gap: 8px; margin-top: 6px; }
 .sd-edit > label { font-size: 13px; font-weight: 600; }
 .sd-edit :is(input, textarea) { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, sans-serif; }

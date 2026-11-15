@@ -2,7 +2,7 @@
 .review-toggle { position: relative; margin-left: auto; }
 /* The eye starts the right-hand group, so the buttons after it stay beside it. */
 .chat-header .review-toggle ~ :is(.side-pin-toggle, .search-toggle, .terminal-toggle) { margin-left: 0; }
-.review-toggle[aria-expanded="true"] { color: var(--accent); }
+.review-toggle[aria-expanded="true"] { color: var(--accent-ink); }
 .review-count { position: absolute; top: 2px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: var(--radius-sm); background: var(--surface); box-shadow: 0 0 0 1px var(--line); color: var(--muted); font-size: 10px; font-weight: 600; line-height: 14px; text-align: center; font-variant-numeric: tabular-nums; }
 
 .sheet.popover.review-pop { width: 300px; padding: 6px; }

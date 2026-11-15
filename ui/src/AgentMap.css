@@ -94,7 +94,7 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
 .tool-inline strong { flex: none; color: var(--text); font-weight: 600; }
 .tool-inline > span, .tool-inline > code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-inline > span { color: var(--text); opacity: .85; }
-.agent-tools .tool-inline > code { color: var(--accent); border-radius: 0; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: none; padding: 0; }
+.agent-tools .tool-inline > code { color: var(--accent-ink); border-radius: 0; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: none; padding: 0; }
 /* The chat's tool detail, inside a sheet: keep the chat's code block look, not the sheet's inline code chips. */
 .agent-tools pre code { padding: 0; border-radius: 0; background: none; font: inherit; overflow-wrap: normal; }
 

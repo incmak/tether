@@ -7,7 +7,7 @@
 .browser-signed .browser-saved { flex-wrap: wrap; }
 .browser-signed .browser-saved > svg { flex: none; }
 .browser-signed .browser-saved > span { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
-.browser-window-link { min-height: 24px !important; padding: 2px 0; color: var(--accent); text-align: left; text-decoration: underline; text-underline-offset: 2px; }
+.browser-window-link { min-height: 24px !important; padding: 2px 0; color: var(--accent-ink); text-align: left; text-decoration: underline; text-underline-offset: 2px; }
 @container (max-width: 420px) {
   /* Keep every toolbar control reachable at 320px, including the touch keyboard. */
   .browser-signed .browser-bar { flex-wrap: wrap; }
