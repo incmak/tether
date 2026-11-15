@@ -17,5 +17,8 @@ assert(!match(mic, 'notifications'), 'Category descriptions must not return unre
 assert(match(colors, 'rose'), 'Search accepts unaccented palette names')
 assert(match(colors, 'appearance'))
 assert(!match(colors, 'no-such-setting'))
-assert.equal(output.SETTINGS_GROUPS.length, 5)
+assert.equal(output.SETTINGS_GROUPS.length, 6)
+const keys = { id: 'keys-layout', group: 'shortcuts', title: 'Layout keys', keywords: 'keyboard shortcut Split right ⌘\\' }
+assert(match(keys, 'keyboard split'), 'A key is found by its action')
+assert(match(keys, 'shortcuts'), 'The Keyboard shortcuts category name finds its keys')
 console.log('Settings search: case, whitespace, multiword intersection, aliases, categories, accents and unrelated-result exclusion pass')

@@ -1377,11 +1377,15 @@ button.live-chip:active { background: var(--line); }
 .shortcuts-note { font-size: 13px; color: var(--muted); }
 .shortcuts-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; margin: 18px 0 16px; }
 .shortcuts-groups h3 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; color: var(--muted); }
-.shortcuts-groups dl { margin: 0; }
-.shortcuts-groups dl > div { display: flex; align-items: center; gap: 10px; min-height: 34px; border-bottom: 1px solid var(--line); }
-.shortcuts-groups dt { flex: 1; font-size: 13.5px; line-height: 1.35; }
-.shortcuts-groups dd { margin: 0; }
-.shortcuts-groups kbd { font: 12px ui-monospace, SFMono-Regular, monospace; color: var(--text); white-space: nowrap; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 2px 6px; background: var(--bg); }
+.shortcuts-rows { margin: 0; }
+.shortcuts-rows > div { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.shortcuts-rows dt { flex: 1; font-size: 13.5px; line-height: 1.35; }
+.shortcuts-rows dd { margin: 0; }
+.shortcuts-rows kbd { font: 12px ui-monospace, SFMono-Regular, monospace; color: var(--text); white-space: nowrap; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: var(--radius-sm); padding: 2px 6px; background: var(--bg); }
+.shortcuts-filter { display: flex; align-items: center; gap: 6px; height: 36px; margin-top: 14px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--muted); }
+.shortcuts-filter:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; }
+.shortcuts-filter input { flex: 1; min-width: 0; height: 100%; min-height: 0; margin: 0; padding: 0; border: 0; background: none; color: var(--text); font-size: 14px; outline: none; box-shadow: none; }
+.shortcuts-empty { margin: 18px 0; color: var(--muted); font-size: 14px; }
 .shortcuts-sheet .hint { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
 @media (max-width: 760px) { .shortcuts-groups { grid-template-columns: minmax(0, 1fr); gap: 18px; } }
 

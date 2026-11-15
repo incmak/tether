@@ -17,6 +17,8 @@ import { Choice, Notifications, SessionSettings, SystemSettings } from './Settin
 import { matchesSetting, SETTINGS_GROUPS } from './settingsIndex'
 import type { SettingIndex, SettingsGroup } from './settingsIndex'
 import { keyLabel } from './keys'
+import { ShortcutRows } from './Shortcuts'
+import { SHORTCUT_GROUPS } from './shortcutList'
 import { DigestSettings } from './Attention'
 import { LayoutPicker, StylePicker } from './LookSettings'
 import './Settings.css'
@@ -69,6 +71,9 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('learning', 'agents', 'Learning from feedback', 'learn learning lessons feedback self-learning reward punishment correct mistake memory remember improve', <Field scope="This server"><LearningSettings api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),
+    // The same list as the ⌘/ sheet. A search here finds a key by its action, like "split" or "backlog".
+    ...SHORTCUT_GROUPS.map(keys => item(`keys-${keys.name.toLowerCase()}`, 'shortcuts', `${keys.name} keys`, `keyboard shortcut hotkey key ${keys.items.map(([label, key]) => `${label} ${key} ${keyLabel(key)}`).join(' ')}`,
+      <section className="preferences-nested"><h3>{keys.name}</h3><ShortcutRows group={keys} /></section>)),
     item('system', 'system', 'Updates and resources', 'version release reload refresh cpu memory host processes btop monitor', <Field scope="This server"><SystemSettings api={api} onReload={onReload} /></Field>),
   ]
   const searching = !!query.trim()

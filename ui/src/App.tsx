@@ -59,7 +59,7 @@ import { CommandMenu } from './CommandMenu'
 import type { Command } from './CommandMenu'
 import { Shortcuts } from './Shortcuts'
 import { StatusBar } from './StatusBar'
-import { toggleTerminal, toggleVoice } from './keys'
+import { IS_MAC, toggleTerminal, toggleVoice } from './keys'
 import { copyPaneName, nameKindOf } from './CopyNames'
 import { Rail } from './Rail'
 import type { Screen } from './Rail'
@@ -148,7 +148,7 @@ function App() {
   }
   // Phone (or no workspace): "Watch" on an agent's browser card opens the browser full screen.
   const [browserSheet, setBrowserSheet] = useState(false)
-  // Desktop workspace: the ⌘K command menu or the ? shortcuts sheet.
+  // The ⌘K command menu, or the ⌘/ shortcuts sheet (any screen).
   const [menu, setMenu] = useState<'commands' | 'shortcuts' | null>(null)
   // Home-screen shortcuts open /chat/?go=attention|new|usage (manifest.webmanifest).
   const [go, setGo] = useState(() => new URL(location.href).searchParams.get('go'))
@@ -582,6 +582,19 @@ function App() {
         setMenu(current => current === 'commands' ? null : document.querySelector('dialog[open]') ? current : 'commands')
         return
       }
+      // ⌘/ opens or closes the keyboard shortcuts from any screen, also over another sheet: no sheet uses the key. ⌘? stays with the Mac Help menu.
+      // Off a Mac, Ctrl+/ in the terminal stays there: it is undo (^_) in a shell.
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'Slash' && (IS_MAC || !(event.target as Element | null)?.closest?.('.xterm'))) {
+        event.preventDefault()
+        setMenu(current => current === 'shortcuts' ? null : 'shortcuts')
+        return
+      }
+      // ? does the same when no text box or sheet has focus.
+      if (event.key === '?' && !typing && !event.ctrlKey && !event.metaKey && !event.altKey && !document.querySelector('dialog[open]')) {
+        event.preventDefault()
+        setMenu('shortcuts')
+        return
+      }
       // ⌥B opens the backlog sheet and ⌥⇧B the backlog page, also from a text field. ⌘B is the sidebar. Read event.code: Alt+B types ∫ on a Mac.
       if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyB' && !document.querySelector('dialog[open]')) {
         event.preventDefault()
@@ -624,7 +637,6 @@ function App() {
         const act = (run: () => void) => { event.preventDefault(); run() }
         if (mod && !event.altKey && !event.shiftKey && event.code === 'KeyB') return act(rail.toggleSidebar)
         if (event.altKey && !mod && !event.shiftKey && event.code === 'KeyN') return act(() => setNewSession(true))
-        if (event.key === '?' && !typing && !mod && !event.altKey) return act(() => setMenu('shortcuts'))
       }
       if (slots && !document.querySelector('dialog[open]')) {
         // Browsers keep Cmd+1-9, Cmd+W and Cmd+N, so slot keys use Alt. Read event.code: Alt+letter types a symbol on a Mac.
@@ -825,7 +837,7 @@ function App() {
     // After the menu closes: its own entry goes first, then the step.
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
     ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
-    { label: 'Keyboard shortcuts', key: '?', run: () => setMenu('shortcuts') },
+    { label: 'Keyboard shortcuts', key: '⌘/', run: () => setMenu('shortcuts') },
     { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
     { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
     { label: 'Plan usage', run: () => setPlanSheet(true) },
@@ -957,7 +969,7 @@ function App() {
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {menu === 'commands' && <CommandMenu sessions={sortByPrefs(sessions, prefs.order).filter(item => !isArchived(item, prefs.archived))} seen={prefs.seen} selected={openId} slots={view && multi ? view.slots : []} commands={commands} onPane={openPane} onSession={showSession} onClose={() => setMenu(null)} groups={prefs} stacks={data?.groups} backlog={menuBacklog} />}
-    {(view || (wide && home)) && menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
+    {menu === 'shortcuts' && <Shortcuts onClose={() => setMenu(null)} />}
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} onRefresh={work.refresh} onOpen={openPane} onClose={() => setWorkSheet(false)} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}

@@ -175,3 +175,46 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
   .backlog.page .backlog-main { max-width: 920px; }
   .backlog.page .backlog-search { flex-basis: 320px; }
 }
+
+/* The page's detail pane (B76): beside the list from 1200px, over it with Back below that. */
+.backlog.page { position: relative; }
+.backlog-row.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 2px 0 var(--accent); }
+.backlog .backlog-open { display: block; width: 100%; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 3px; background: none; color: inherit; font: inherit; line-height: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer; }
+.backlog .backlog-open:hover { background: none; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px; }
+.backlog .backlog-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backlog-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; font-size: 14px; line-height: 1.5; }
+.backlog-detail.overlay { position: absolute; inset: 0; z-index: 2; padding: 2px 2px 12px; background: var(--surface); }
+/* Under the overlay the views and the list keep their scroll place but do not show: the views row would peek out beside it. */
+.backlog.page .backlog-main[inert], .backlog.page .backlog-nav[inert] { visibility: hidden; }
+.backlog-detail-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 34px; }
+.backlog-detail-bar > .icon-button { margin-left: auto; width: 32px; height: 32px; min-width: 0; min-height: 0; }
+button.backlog-detail-back { display: inline-flex; align-items: center; gap: 2px; min-height: 34px; padding: 0 10px 0 6px; }
+.backlog-detail-project { display: inline-flex; align-items: center; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.backlog-detail-project svg { flex: none; }
+.backlog-detail-title { margin: 0; font-size: 19px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; outline: none; }
+.backlog-detail.done .backlog-detail-title { color: var(--muted); text-decoration: line-through; }
+.backlog-sheet textarea.backlog-detail-reword { width: 100%; box-sizing: border-box; resize: vertical; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; line-height: 1.4; }
+.backlog-sheet textarea.backlog-detail-reword:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
+.backlog-detail-done { display: inline-flex; align-items: center; gap: 8px; width: fit-content; cursor: pointer; }
+.backlog-detail-done .backlog-box { margin: 0; }
+.backlog-detail-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--muted); font-size: 13px; }
+.backlog-detail-field > span:first-child { min-width: 64px; }
+.backlog-detail-part { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid var(--line); }
+.backlog-detail-part h4 { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--muted); font-size: 12px; font-weight: 600; }
+.backlog-detail .backlog-details { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.backlog-detail-note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.backlog-detail-kept { display: grid; gap: 8px; }
+.backlog-detail-kept p { margin: 0; }
+.backlog-detail-none { margin: 0; color: var(--muted); font-size: 13px; }
+.backlog-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.backlog-detail-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; font-size: 13px; }
+.backlog-detail .backlog-send { margin-top: 0; }
+@media (pointer: coarse) { .backlog-detail-actions button, button.backlog-detail-back { min-height: 44px; } .backlog-detail-bar > .icon-button { width: 44px; height: 44px; } }
+@media (min-width: 1200px) {
+  .backlog-detail { flex: none; width: clamp(340px, 30vw, 440px); padding-left: 24px; border-left: 1px solid var(--line); }
+  .backlog.page.with-detail .backlog-main { flex: 1 1 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .backlog-detail { animation: backlog-detail-in .16s ease-out; }
+  @keyframes backlog-detail-in { from { opacity: 0; transform: translateX(8px); } }
+}
