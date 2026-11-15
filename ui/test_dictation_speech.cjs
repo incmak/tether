@@ -722,9 +722,12 @@ async function main() {
       assert.equal(await final, expected); assert.match(env.voiceReports.at(-1).detail, new RegExp(`^used=${used} `))
       s.h.unmount()
     }
-    const { hindiWords, dropsHindi } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
+    const { hindiWords, dropsHindi, fixHinglish } = load('useDictation.ts', { react: harness().hooks, './api': {}, './sound': {}, './speech': {}, './voiceLog': {} }, {})
     assert.equal(hindiWords('Codex ko review karne do'), 2); assert.equal(hindiWords('push kar do'), 1); assert.equal(hindiWords('Ask Rahul to review the PR'), 0)
     assert.equal(dropsHindi('push kar do', 'Push cardoo.'), true); assert.equal(dropsHindi('push kar do', 'Push kar do.'), false); assert.equal(dropsHindi('ship it', 'Ship it.'), false)
+    for (const [heard, fixed] of [['teetar ka belt check karo', 'Tether ka build check karo'], ['yah Bagh fix karna hai jaldi', 'yah bug fix karna hai jaldi'],
+      ['Mujhe Ek Pyar banana hai for the voice fix', 'Mujhe Ek PR banana hai for the voice fix'], ['jungle mein bagh hai', 'jungle mein bagh hai'],
+      ['the teetar seat belt check', 'the teetar seat belt check'], ['mujhe tumse pyar hai', 'mujhe tumse pyar hai']]) assert.equal(fixHinglish(heard), fixed)
   }
   {
     // Parakeet is English only: other languages keep the browser text and send nothing.

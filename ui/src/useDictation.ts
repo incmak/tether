@@ -101,7 +101,7 @@ export function useDictation({ text, setText, chime, handsFree, onHandsFreeDone,
     const backup = backupAllowed() ? openBackup() : null
     void backup?.then(found => { if (found && !done) ready = found })
     const join = (...parts: string[]) => parts.filter(Boolean).join(' ')
-    const words = () => join(earlier, committed, interim).replace(/(?<=\S) slash (?=\S)/gi, '/')
+    const words = () => fixHinglish(join(earlier, committed, interim).replace(/(?<=\S) slash (?=\S)/gi, '/'))
     const detach = () => {
       recognition.onresult = null; recognition.onend = null; recognition.onerror = null
       recognition.onaudiostart = null; recognition.onsoundstart = null; recognition.onspeechstart = null; recognition.onnomatch = null
@@ -439,6 +439,20 @@ function latinWords(text: string) {
 // The number of different Hindi or Urdu words in text.
 export function hindiWords(text: string) {
   return new Set(latinWords(text).filter(word => HINDI_WORDS.has(word))).size
+}
+
+// Browser speech writes some project words as Hindi words when the sentence is Hinglish (2026-11-15 voice test):
+// "teetar" for Tether, "belt check" for build check, "Bagh fix" for bug fix, "Pyar banana" for PR banana.
+// Each fix needs a Hindi word in the text and, where the Hindi word is real ("bagh" is tiger), a work word next to it.
+const HINGLISH_FIXES: [RegExp, string][] = [
+  [/\b(?:teetar|teeter|titar)\b/gi, 'Tether'],
+  [/\bbelt(?= (?:check|kar|karo|chala|chalao|banao|fail|pass)\b)/gi, 'build'],
+  [/\bbagh(?= (?:fix|report|kar|karo|karna)\b)/gi, 'bug'],
+  [/\bpyar(?= (?:banana|bana|banao|raise|review|merge|open|kholo|bhejo|bhej)\b)/gi, 'PR'],
+]
+
+export function fixHinglish(text: string) {
+  return hindiWords(text) ? HINGLISH_FIXES.reduce((fixed, [find, word]) => fixed.replace(find, word), text) : text
 }
 
 export function hinglish(text: string) {
