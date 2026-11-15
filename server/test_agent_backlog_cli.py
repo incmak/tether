@@ -62,6 +62,19 @@ class BacklogCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('No open item matches', err)
 
+    def test_archive_reports_a_dry_run_then_moves_the_finished_items(self):
+        self.assertEqual(self.run_cli('add', 'Keep')[0], 0)
+        self.assertEqual(self.run_cli('add', 'Finish')[0], 0)
+        self.assertEqual(self.run_cli('done', 'B2', 'shipped')[0], 0)
+        code, out, err = self.run_cli('archive', '--dry-run')
+        self.assertEqual((code, err), (0, ''))
+        self.assertTrue(out.startswith('Would move 1 finished items to DONE.md.'), out)
+        self.assertIn('Finish', backlog.read()['text'])
+        code, out, _ = self.run_cli('archive')
+        self.assertTrue(out.startswith('Moved 1 finished items'), out)
+        self.assertNotIn('Finish', backlog.read()['text'])
+        self.assertIn('Finish', (backlog.folder() / 'DONE.md').read_text())
+
     def test_project_name(self):
         self.assertEqual(cli.project_name(self.repo / 'server'), 'tether')
         self.assertEqual(cli.project_name(self.home), '')

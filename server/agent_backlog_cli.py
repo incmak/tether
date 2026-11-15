@@ -73,6 +73,8 @@ def main(argv=None):
     begin = commands.add_parser('start', help='mark an open item as in progress by this tab')
     begin.add_argument('item', help='the item ID, like B12, or part of the item text')
     begin.add_argument('--agent', choices=sorted(CHAT_ENV))
+    archive = commands.add_parser('archive', help='move every finished item to backlog/DONE.md now')
+    archive.add_argument('--dry-run', action='store_true', help='only count what would move')
     done = commands.add_parser('done', help='tick an open item, with what was done')
     done.add_argument('item', help='the item ID, like B12, or part of the item text')
     done.add_argument('result', nargs='?', default='', help='what was done: the commit, PR, or outcome')
@@ -99,6 +101,10 @@ def main(argv=None):
             print('Added the detail.')
         elif args.command == 'start':
             print(f'Started: {backlog.start(args.item, source(args.agent or guess_agent()), project)}')
+        elif args.command == 'archive':
+            count, before, after = backlog.archive_done(args.dry_run)
+            verb = 'Would move' if args.dry_run else 'Moved'
+            print(f'{verb} {count} finished items to DONE.md. The backlog: {before:,} -> {after:,} characters.')
         else:
             who = source(args.agent or guess_agent())
             print(f'Done: {backlog.mark_done(args.item, project, args.result, who)}')

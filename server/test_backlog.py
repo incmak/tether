@@ -112,6 +112,23 @@ class BacklogTests(unittest.TestCase):
         backlog.save('- [ ] Replacement\n', backlog.read()['version'])
         self.assertEqual(self.text(), '- [ ] Replacement #B3\n')
 
+    def test_archive_done_moves_every_finished_item_and_a_dry_run_moves_none(self):
+        text = '- [x] Old #B1\n  - why\n- [ ] Open #B2\n\n## tether\n- [x] Fixed #B3\n- [ ] Next #B4\n'
+        backlog.save(text, backlog.read()['version'])
+        self.assertEqual(backlog.archive_done(dry_run=True), (2, len(text), len(text) - len('- [x] Old #B1\n  - why\n- [x] Fixed #B3\n')))
+        self.assertEqual(self.text(), text)
+        self.assertFalse((backlog.folder() / 'DONE.md').exists())
+        count, before, after = backlog.archive_done()
+        self.assertEqual((count, before, after), (2, len(text), len(self.text())))
+        self.assertEqual(self.text(), '- [ ] Open #B2\n\n## tether\n- [ ] Next #B4\n')
+        done = (backlog.folder() / 'DONE.md').read_text()
+        self.assertIn('## Inbox (moved ', done)
+        self.assertIn('- [x] Old #B1\n  - why\n', done)
+        self.assertIn('## tether (moved ', done)
+        self.assertEqual(backlog.archive_done(), (0, len(self.text()), len(self.text())))
+        backlog.add('New')
+        self.assertIn('- [ ] New #B5', self.text())
+
     def test_details_after_a_blank_line_move_with_their_item(self):
         text = ('- [x] Old #B1\n  - first\n\n  - second\n\n- [ ] Open #B2\n  - ' + 'x' * backlog.ARCHIVE_AT + '\n')
         with mock.patch.object(backlog, 'ARCHIVE_TO', backlog.LIMIT):

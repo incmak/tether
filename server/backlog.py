@@ -117,12 +117,9 @@ def _item_end(lines, at):
     return end
 
 
-def _archive(text):
-    """Move finished items in file order, with their detail lines, to DONE.md until the text is at ARCHIVE_TO or less.
-    last-id keeps the moved IDs from being given again. DONE.md is written first: a failed write keeps the items in the
-    list, never loses them."""
-    if len(text) <= ARCHIVE_AT:
-        return text
+def _finished(text, everything):
+    """The finished top-level items to move, in file order: (moved [(section, block)], lines, the line numbers to drop).
+    everything: all of them; else only until the text is at ARCHIVE_TO or less."""
     lines = text.split('\n')
     size, moved, section, drop = len(text), [], 'Inbox', set()
     for at, line in enumerate(lines):
@@ -140,8 +137,18 @@ def _archive(text):
             gap += 1  # no blank line is left where a blank-separated item was
         drop.update(range(at, gap))
         size -= sum(len(part) + 1 for part in lines[at:end])
-        if size <= ARCHIVE_TO:
+        if not everything and size <= ARCHIVE_TO:
             break
+    return moved, lines, drop
+
+
+def _archive(text, everything=False):
+    """Move finished items in file order, with their detail lines, to DONE.md: past ARCHIVE_AT until the text is at
+    ARCHIVE_TO or less, or all of them with everything. last-id keeps the moved IDs from being given again. DONE.md is
+    written first: a failed write keeps the items in the list, never loses them."""
+    if not everything and len(text) <= ARCHIVE_AT:
+        return text
+    moved, lines, drop = _finished(text, everything)
     if not moved:
         return text
     stamp = time.strftime('%Y-%m-%d %H:%M')
@@ -154,18 +161,18 @@ def _archive(text):
     path = folder() / 'DONE.md'
     if path.is_symlink():
         raise invalid('The backlog archive is a link. Tether does not open it.')
-    head = '' if path.exists() else '# Finished backlog items\n\nMoved here from BACKLOG.md when the list grew near its limit.\n'
+    head = '' if path.exists() else '# Finished backlog items\n\nMoved here from BACKLOG.md, by hand (agent_backlog_cli.py archive) or when the list grew long.\n'
     handle = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     with os.fdopen(handle, 'a', encoding='utf-8') as archive:
         archive.write(head + '\n'.join(out) + '\n')
     return '\n'.join(line for at, line in enumerate(lines) if at not in drop)
 
 
-def _replace(current, text):
+def _replace(current, text, everything=False):
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
-    text = _archive(text)
+    text = _archive(text, everything)
     if len(text) > LIMIT:
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     _keep(current)  # an agent may have edited the file directly since the last copy
@@ -214,6 +221,17 @@ def save(text, version):
         if current['version'] != version:
             raise ProjectError(409, 'The backlog changed while you were editing.')
         return _replace(current['text'], with_ids(text, current['text']))
+
+
+def archive_done(dry_run=False):
+    """Move every finished item, with its detail lines, to DONE.md now. Returns (items moved, characters before, after)."""
+    with _locked():
+        current = read()['text']
+        moved, lines, drop = _finished(current, True)
+        after = len('\n'.join(line for at, line in enumerate(lines) if at not in drop))
+        if moved and not dry_run:
+            after = len(_replace(current, current, everything=True)['text'])
+        return len(moved), len(current), after
 
 
 def _one_line(text):
