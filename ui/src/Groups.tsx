@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, FolderInput, FolderOutput, Pencil, Plus, ScrollText, Trash2, X } from 'lucide-react'
 import type { Api, GroupInfo, Pane } from './api'
 import { errorText } from './api'
@@ -7,8 +7,11 @@ import type { Anchor } from './hooks'
 import { useActionsDialog } from './Sheets'
 import type { Session } from './Sidebar'
 import { chatTitle, needsYou } from './Sidebar'
-import { groupNameError, groupOf, placesOf, rememberTab, tabFor, topState, waitingElsewhere } from './groups'
+import { groupNameError, groupOf, placesOf, rememberTab, revealLeft, tabFor, topState, waitingElsewhere } from './groups'
 import type { Place } from './groups'
+
+// The stack row remounts with each tab, like the tab strip: keep its scroll place for each session.
+const rowScroll = new Map<string, number>()
 
 /** What the group row needs from the app, beyond what a chat already has. */
 export interface GroupHooks {
@@ -41,7 +44,24 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
   const [creating, setCreating] = useState(false)
   const [picking, setPicking] = useState(false)
   const places = placesOf(session.panes, groups)
-  if (places.length < 2) return <>{children}{creating && <NewGroup api={api} session={session} onClose={() => setCreating(false)} onDone={() => { setCreating(false); onUpdate() }} />}</>
+  // Before paint: restore the row's scroll, then show the open stack fully. A click on a stack in view keeps the row still.
+  const row = useRef<HTMLElement>(null)
+  const shown = places.length > 1
+  useLayoutEffect(() => {
+    const box = row.current
+    if (!box) return
+    box.scrollLeft = rowScroll.get(session.id) ?? 0
+    const active = box.querySelector<HTMLElement>('[aria-current="true"]')
+    if (active) {
+      const start = active.getBoundingClientRect().left - box.getBoundingClientRect().left + box.scrollLeft
+      box.scrollLeft = revealLeft(box.scrollLeft, box.clientWidth, box.scrollWidth, start, active.offsetWidth, 24)
+    }
+    rowScroll.set(session.id, box.scrollLeft)
+    const save = () => rowScroll.set(session.id, box.scrollLeft)
+    box.addEventListener('scroll', save, { passive: true })
+    return () => box.removeEventListener('scroll', save)
+  }, [session.id, current, shown])
+  if (!shown) return <>{children}{creating && <NewGroup api={api} session={session} onClose={() => setCreating(false)} onDone={() => { setCreating(false); onUpdate() }} />}</>
 
   const here = places.find(place => place.id === current) ?? places[0]
   const go = (place: Place, at?: Anchor) => {
@@ -51,7 +71,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
   }
   const waiting = waitingElsewhere(places, current)
   return <>
-    <nav className="group-row" aria-label={`Stacks of ${session.name}`}>
+    <nav ref={row} className="group-row" aria-label={`Stacks of ${session.name}`}>
       {places.map(place => {
         const state = topState(place.panes, hooks.seen, hooks.selected)
         const word = STATE_WORD[state]
