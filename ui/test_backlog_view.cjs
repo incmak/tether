@@ -96,6 +96,9 @@ assert.deepEqual(refs(v.viewGroups(ranked, view({ query: 'voice', sort: 'oldest'
 assert.equal(v.detailMatched(fix, 'teardown', 'tether'), true, 'Show the details when only a detail matches')
 assert.equal(v.detailMatched(fix, 'flaky', 'tether'), false, 'A title match keeps the details closed')
 assert.equal(v.detailMatched(fix, 'b7', 'tether'), false)
+const blocked = items.parseBacklog('- [ ] Deploy service #B8\n  - Blocked by B1234\n').find(row => row.ref === 'B8')
+assert.equal(v.detailMatched(blocked, 'b1234 deploy'), true, 'An ID in a longer query can match a note')
+assert.equal(v.detailMatched(blocked, 'b1234'), false, 'An ID alone matches IDs only')
 
 // Speed: 500 items with notes (the real backlog has about 30 open), two typo words, under 10 ms.
 const big = items.parseBacklog(Array.from({ length: 500 }, (_, i) => `- [ ] Item ${i} about deploy logs and share tests #B${i + 1}\n  - note ${i}: the worker restarts after a timeout`).join('\n'))

@@ -49,8 +49,9 @@ export const matchesQuery = (item: Item, query: string, project = '') => querySc
 
 /** True when a detail is why the item matches: a word that the title, ID, project and status do not match. Show the details then. */
 export function detailMatched(item: Item, query: string, project = '') {
-  const words = searchWords(query).filter(word => !isRef(word))
-  if (!words.length || !matchesQuery(item, query, project)) return false
+  // An ID alone matches the ID only. In a longer query an ID is a plain word and can match a note ("Blocked by B1234").
+  const words = searchWords(query)
+  if (!words.length || (words.length === 1 && isRef(words[0])) || !matchesQuery(item, query, project)) return false
   const [title, meta, details] = itemFields(item, project)
   return words.some(word => wordScore(title, word) === null && wordScore(meta, word) === null && wordScore(details, word) !== null)
 }
