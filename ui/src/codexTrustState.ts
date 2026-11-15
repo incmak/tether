@@ -5,7 +5,8 @@ import type { Api } from './api'
 import { withApproval } from './approval'
 
 export type TrustState = 'trusted' | 'untrusted' | 'restart' | 'other'
-export interface TrustStatus { state: TrustState; folder: string | null; target: string | null }
+/** target_id: the identity of the folder `target` names; the approval binds it, so a swapped folder is refused. */
+export interface TrustStatus { state: TrustState; folder: string | null; target: string | null; target_id?: string | null }
 /** mode 'new': a new Codex tab, in the folder of tab `session` or the default session folder; worktree: a new worktree there.
  *  mode 'running': the Codex tab `session`. */
 export interface TrustSubject { mode: 'new' | 'running'; session?: string; worktree?: boolean }
@@ -29,7 +30,7 @@ export function useCodexTrust(api: Api, subject: TrustSubject | null, refresh = 
     if (!subject || !status?.target || busy) return
     setBusy(true); setError(null)
     try {
-      const next = await withApproval<TrustStatus>(api, 'codex-trust', 'codex-trust', { op: 'trust', ...subject, target: status.target })
+      const next = await withApproval<TrustStatus>(api, 'codex-trust', 'codex-trust', { op: 'trust', ...subject, target: status.target, target_id: status.target_id })
       setTrusted({ key, status: next })
     } catch (failure) {
       setError({ key, text: errorText(failure) })

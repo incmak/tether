@@ -69,7 +69,7 @@ async function main() {
             publicKey: { challenge: b64(Buffer.alloc(32, 3)), rpId: 'localhost', userVerification: 'required', timeout: 60000, allowCredentials: [{ type: 'public-key', id: b64(Buffer.from('cred-1')) }] } } })
           if (endpoint === 'codex-trust') {
             const running = body.mode === 'running'
-            const status = trusted ? { state: running ? 'restart' : 'trusted', folder: FOLDER, target: null } : { state: 'untrusted', folder: body.worktree ? TARGET : FOLDER, target: TARGET }
+            const status = trusted ? { state: running ? 'restart' : 'trusted', folder: FOLDER, target: null } : { state: 'untrusted', folder: body.worktree ? TARGET : FOLDER, target: TARGET, target_id: '64:7' }
             if (body.op === 'status') return route.fulfill({ json: status })
             if (!approved(body)) return route.fulfill({ status: 403, json: { error: 'Approve with your passkey.', approval: 'required' } })
             if (slow) await new Promise(resolve => setTimeout(resolve, 700))
@@ -145,7 +145,7 @@ async function main() {
       await page.getByText('Folder trusted. This Codex tab still runs read-only.').waitFor()
       const sent = trustPosts(first)
       check(`${at} running: first try has no approval, second has a passkey`, sent.length === 2 && !sent[0].body.approval && approved(sent[1].body), JSON.stringify(sent.map(post => !!post.body.approval)))
-      check(`${at} running: binds tab and target`, sent.every(post => post.body.mode === 'running' && post.body.session === '%2' && post.body.target === TARGET))
+      check(`${at} running: binds tab and target`, sent.every(post => post.body.mode === 'running' && post.body.session === '%2' && post.body.target === TARGET && post.body.target_id === '64:7'))
       check(`${at} running: says what to do next`, await page.getByText(/type \/quit in this tab/).isVisible())
       check(`${at} running: restart message is a status`, await page.locator('.codex-trust[role="status"]').count() === 1)
       check(`${at} running: no page overflow after trust`, !(await overflow()))
@@ -173,7 +173,7 @@ async function main() {
       await newCard.getByRole('button', { name: 'Trust folder' }).click()
       await dialog.getByText('The new Codex tab can edit files here.').waitFor()
       const newSent = trustPosts(before)
-      check(`${at} new: binds the source tab`, newSent.length >= 2 && newSent.every(post => post.body.mode === 'new' && post.body.session === '%2' && post.body.target === TARGET))
+      check(`${at} new: binds the source tab`, newSent.length >= 2 && newSent.every(post => post.body.mode === 'new' && post.body.session === '%2' && post.body.target === TARGET && post.body.target_id === '64:7'))
       await page.screenshot({ path: path.join(SHOTS, `new-task-trusted-${width}.png`) })
       await page.keyboard.press('Escape')
     }

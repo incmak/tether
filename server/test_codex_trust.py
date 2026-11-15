@@ -1,10 +1,13 @@
 """Trust a folder for Codex (codex_trust.py). Files live in temporary folders; no real Codex config is read."""
+import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
 import stat
 import subprocess
+import tempfile
+import threading
 import tomllib
 import unittest
 from unittest import mock
@@ -63,7 +66,7 @@ class Edit(Base):
         self.write(text)
         codex_trust.write_trust('/workspace/app')
         result = self.config.read_text()
-        self.assertEqual(result, text.replace('trust_level = "untrusted"  # old', 'trust_level = "trusted"'))
+        self.assertEqual(result, text.replace('trust_level = "untrusted"  # old', 'trust_level = "trusted"  # old'))
         self.assertEqual(tomllib.loads(result)['projects']['/Users/old/mac'], {'trust_level': 'trusted'})
 
     def test_table_without_trust_level_gets_the_line_after_its_header(self):
@@ -99,6 +102,11 @@ class Edit(Base):
         self.assertEqual((backup.read_text(), stat.S_IMODE(backup.stat().st_mode)), (KEEP, 0o640))
         self.assertEqual(sorted(path.name for path in self.home.iterdir()),
                          ['.config.toml.tether-lock', 'config.toml', codex_trust.BACKUP])
+
+    def test_inline_comment_and_single_quotes_kept(self):
+        self.write(KEEP + "[projects.'/workspace/app']\ntrust_level = 'untrusted' # important\n")
+        codex_trust.write_trust('/workspace/app')
+        self.assertTrue(self.config.read_text().endswith("[projects.'/workspace/app']\ntrust_level = \"trusted\" # important\n"))
 
     def test_symlinked_config_is_refused(self):
         real = self.root / 'elsewhere.toml'
@@ -140,13 +148,86 @@ class Api(Base):
     def new(self, **extra):
         return {'op': 'status', 'mode': 'new', **extra}
 
+    def trust_body(self, **extra):
+        status = self.call(self.new(**extra)).body
+        return {'op': 'trust', 'mode': 'new', **extra, 'target': status['target'], 'target_id': status.get('target_id')}
+
+    def git_repo(self, folder):
+        (folder / '.git').mkdir(parents=True)
+        (folder / '.git' / 'HEAD').write_text('ref: refs/heads/main\n')
+
+    def test_trust_binds_the_folder_identity_seen_in_status(self):
+        self.write(KEEP)
+        body = self.trust_body()
+        self.assertRegex(str(body['target_id']), r'^\d+:\d+$')
+        with mock.patch.object(approval, 'require') as require:
+            for wrong in (None, '1:2', 7):
+                self.assertEqual(self.call({**body, 'target_id': wrong}).status, 409)
+        require.assert_not_called()
+        self.assertEqual(self.config.read_text(), KEEP)
+
+    def test_folder_replaced_after_approval_writes_nothing(self):
+        other = self.root / 'other'
+        self.git_repo(other)
+        for swap in ('symlink', 'new folder'):
+            with self.subTest(swap=swap):
+                self.write(KEEP)
+                body = self.trust_body()
+                moved = self.root / f'moved-{swap.replace(" ", "-")}'
+
+                def replace(*args, swap=swap, moved=moved):
+                    self.repo.rename(moved)
+                    if swap == 'symlink':
+                        self.repo.symlink_to(other)
+                    else:
+                        self.git_repo(self.repo)
+                with mock.patch.object(approval, 'require', side_effect=replace):
+                    handler = self.call({**body, 'approval': 'proof'})
+                self.assertEqual(handler.status, 409, handler.body)
+                self.assertEqual(self.config.read_text(), KEEP)
+                if self.repo.is_symlink():
+                    self.repo.unlink()
+                else:
+                    shutil.rmtree(self.repo)
+                moved.rename(self.repo)
+
+    def test_codex_home_replaced_after_approval_writes_nothing(self):
+        elsewhere = self.root / 'elsewhere'
+        elsewhere.mkdir()
+        (elsewhere / 'config.toml').write_text(KEEP)
+        for swap in ('symlink', 'new folder'):
+            with self.subTest(swap=swap):
+                self.write(KEEP)
+                body = self.trust_body()
+                moved = self.root / f'home-{swap.replace(" ", "-")}'
+
+                def replace(*args, swap=swap, moved=moved):
+                    self.home.rename(moved)
+                    if swap == 'symlink':
+                        self.home.symlink_to(elsewhere)
+                    else:
+                        self.home.mkdir()
+                        self.config.write_text(KEEP)
+                with mock.patch.object(approval, 'require', side_effect=replace):
+                    handler = self.call({**body, 'approval': 'proof'})
+                self.assertEqual(handler.status, 409, handler.body)
+                self.assertEqual((elsewhere / 'config.toml').read_text(), KEEP)
+                self.assertEqual(sorted(path.name for path in elsewhere.iterdir()), ['config.toml'])
+                self.assertEqual(self.config.read_text(), KEEP)
+                if self.home.is_symlink():
+                    self.home.unlink()
+                else:
+                    shutil.rmtree(self.home)
+                moved.rename(self.home)
+
     def test_status_names_the_canonical_repository_root(self):
         self.write(KEEP)
         (self.repo / 'sub').mkdir()
         link = self.root / 'link'
         link.symlink_to(self.repo)
         handler = self.call(self.new(cwd=str(link / 'sub')))
-        self.assertEqual(handler.body, {'state': 'untrusted', 'folder': str(link / 'sub'), 'target': str(self.repo)})
+        self.assertEqual(handler.body, {'state': 'untrusted', 'folder': str(link / 'sub'), 'target': str(self.repo),
+                                        'target_id': codex_trust._identity(self.repo)})
 
     def test_status_uses_an_existing_entry_for_the_folder(self):
         self.write(KEEP + f'[projects.{project_launch.toml_string(str(self.repo))}]\nnote = 1\n')
@@ -163,7 +244,7 @@ class Api(Base):
 
     def test_unapproved_trust_writes_nothing(self):
         self.write(KEEP)
-        body = {'op': 'trust', 'mode': 'new', 'target': str(self.repo)}
+        body = self.trust_body()
         for extra in ({}, {'approval': {'challenge_id': 'x', 'credential': {}}}):
             handler = self.call({**body, **extra})
             self.assertEqual(handler.status, 403)
@@ -181,7 +262,7 @@ class Api(Base):
 
     def test_approved_trust_writes_and_binds_the_payload(self):
         self.write(KEEP)
-        body = {'op': 'trust', 'mode': 'new', 'target': str(self.repo)}
+        body = self.trust_body()
         with mock.patch.object(approval, 'require') as require:
             handler = self.call({**body, 'approval': 'proof'})
         require.assert_called_once_with(mock.ANY, 'codex-trust', body, 'proof')
@@ -194,7 +275,7 @@ class Api(Base):
     def test_passkey_assertion_for_another_target_is_refused(self):
         self.write(KEEP)
         self.add()
-        body = {'op': 'trust', 'mode': 'new', 'target': str(self.repo)}
+        body = self.trust_body()
         wrong = self.assertion('codex-trust', {**body, 'target': '/workspace/other'})
         self.assertEqual(self.call({**body, 'approval': wrong}).status, 403)
         self.assertEqual(self.config.read_text(), KEEP)
@@ -210,9 +291,11 @@ class Api(Base):
         body = {'op': 'status', 'mode': 'running', 'session': '%5'}
         with mock.patch.object(codex_trust.procinfo, 'argv', return_value=[b'codex', b'-m', b'gpt-test', b'']), \
                 mock.patch.object(codex_trust.procinfo, 'cwd', return_value=str(self.root)):
-            self.assertEqual(self.call(body).body, {'state': 'untrusted', 'folder': str(self.repo), 'target': str(self.repo)})
+            identity = codex_trust._identity(self.repo)
+            self.assertEqual(self.call(body).body, {'state': 'untrusted', 'folder': str(self.repo), 'target': str(self.repo),
+                                                    'target_id': identity})
             with mock.patch.object(approval, 'require'):
-                handler = self.call({**body, 'op': 'trust', 'target': str(self.repo)})
+                handler = self.call({**body, 'op': 'trust', 'target': str(self.repo), 'target_id': identity})
             self.assertEqual((handler.status, handler.body.get('state')), (200, 'restart'), handler.body)
             self.assertEqual(self.call(body).body['state'], 'restart')
             turn['payload']['sandbox_policy']['type'] = 'workspace-write'
@@ -234,6 +317,29 @@ class Api(Base):
         self.write(KEEP)
         self.assertEqual(self.call(self.new(cwd=str(linked))).body['target'], str(self.repo))
         self.assertEqual(self.call(self.new(worktree=True)).body['target'], str(self.repo))
+
+
+class SharedLock(unittest.TestCase):
+    """codex_provider.set_default and codex_trust.write_trust write the same file: one lock serves both."""
+    def test_provider_switch_waits_for_the_config_lock(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        home = Path(folder.name)
+        (home / 'foundry.config.toml').write_text('model_provider = "azure"\n')
+        (home / 'config.toml').write_text('model_provider = "openai"\n')
+        lock = os.open(home / '.config.toml.tether-lock', os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            worker = threading.Thread(target=codex_provider.set_default, args=('foundry', home))
+            worker.start()
+            worker.join(0.5)
+            self.assertTrue(worker.is_alive(), 'the provider switch did not wait for the lock')
+            self.assertEqual((home / 'config.toml').read_text(), 'model_provider = "openai"\n')
+        finally:
+            os.close(lock)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual((home / 'config.toml').read_text(), 'model_provider = "azure"\n')
 
 
 if __name__ == '__main__':

@@ -7,12 +7,14 @@ Codex runs read-only in a folder that has no [projects."<path>"] entry with a tr
       mode 'new': a new Codex tab in the folder of tab `session`, in `cwd`, or in the default session folder;
                   with worktree: true, in a new worktree of that repository.
       mode 'running': the Codex tab `session`.
-      -> {state, folder, target}. state: 'trusted' (nothing to do), 'untrusted' (trusting `target` makes Codex
+      -> {state, folder, target, target_id?}. state: 'trusted' (nothing to do), 'untrusted' (trusting `target` makes Codex
          writable), 'restart' (the folder is trusted, but the running tab started read-only), 'other' (Codex is
          read-only or unknown for another reason, such as a profile, or Tether cannot tell).
-  POST {op: 'trust', ...the same fields, target, approval}
+         target_id (when untrusted): the identity (st_dev:st_ino) of the folder `target` names.
+  POST {op: 'trust', ...the same fields, target, target_id, approval}
       Writes trust_level = "trusted" for `target`, only with a passkey approval (approval.py): agents hold Tether's token,
-      so a plain call must never let an agent trust a folder itself.
+      so a plain call must never let an agent trust a folder itself. The approval binds target and target_id. After
+      the approval Tether checks again that the same folder and the same Codex folder are there, then writes.
 
 The key is the one the Codex 0.166 TUI writes (tui/src/config_update.rs, config/src/loader/mod.rs project_trust_key):
 an existing entry for the folder (canonical spelling first), else one for its repository root, else the canonical
@@ -23,9 +25,8 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
-import threading
 from pathlib import Path
 
 import approval
@@ -37,7 +38,6 @@ from project_launch import _canon, _repo_root, _toml, codex_writable, toml_strin
 PATH = '/mobile/api/codex-trust'
 BACKUP = 'config.toml.bak-tether-trust'
 TRUSTED = 'trust_level = "trusted"'
-_LOCK = threading.Lock()
 WRITABLE = ('workspace-write', 'danger-full-access', 'external-sandbox')
 
 
@@ -45,6 +45,15 @@ class TrustError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
         self.status = status
+
+
+def _identity(path, follow=True):
+    """st_dev:st_ino of a directory, or None. follow=False: None for a symbolic link."""
+    try:
+        info = os.stat(path, follow_symlinks=follow)
+    except (OSError, ValueError):
+        return None
+    return f'{info.st_dev}:{info.st_ino}' if stat.S_ISDIR(info.st_mode) else None
 
 
 def handles(path):
@@ -144,7 +153,9 @@ def status(body, **context):
         state = 'untrusted'
     else:
         state = 'other'
-    return {'state': state, 'folder': folder, 'target': target if state == 'untrusted' else None}
+    if state != 'untrusted':
+        return {'state': state, 'folder': folder, 'target': None}
+    return {'state': state, 'folder': folder, 'target': target, 'target_id': _identity(target)}
 
 
 def _header(line):
@@ -186,8 +197,12 @@ def edit(text, key):
         if found is None:
             lines.insert(start + 1, TRUSTED + newline)
         else:
-            ending = newline if lines[found].endswith('\n') else ''
-            lines[found] = re.match(r'\s*', lines[found]).group() + TRUSTED + ending
+            value = re.match(r'(\s*trust_level\s*=\s*)("[^"\\\n]*"|' + r"'[^'\n]*')(.*)$", lines[found], re.S)
+            if value:  # change only the value: an inline comment stays
+                lines[found] = value.group(1) + '"trusted"' + value.group(3)
+            else:  # another value form: the check below refuses a wrong result
+                ending = newline if lines[found].endswith('\n') else ''
+                lines[found] = re.match(r'\s*', lines[found]).group() + TRUSTED + ending
         result = ''.join(lines)
     expected = copy.deepcopy(before)
     projects = expected.setdefault('projects', {})
@@ -207,14 +222,14 @@ CANNOT_EDIT = ('Tether cannot change this form of the [projects] table in Codex 
                'Add the entry in Codex: start codex in the folder and choose to trust it.')
 
 
-def _read_regular(path):
-    """(bytes, mode) of a regular, non-symlink file, or (None, None) when it does not exist."""
+def _read_regular(name, directory):
+    """(bytes, mode) of the regular, non-symlink file `name` in the open directory `directory`, or (None, None)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
     except FileNotFoundError:
         return None, None
     except OSError as exc:
-        if os.path.islink(path):
+        if stat.S_ISLNK(os.stat(name, dir_fd=directory, follow_symlinks=False).st_mode):
             raise TrustError(409, 'Codex config.toml is a symbolic link. Tether does not change it.') from exc
         raise
     with os.fdopen(fd, 'rb') as handle:
@@ -224,16 +239,29 @@ def _read_regular(path):
         return handle.read(), stat.S_IMODE(info.st_mode)
 
 
-def write_trust(key, folder=None):
-    """Add or set [projects.<key>] trust_level = "trusted". A lock, a one-time backup, and an atomic replace."""
-    folder = Path(folder or home())
-    config = folder / 'config.toml'
-    with _LOCK:
-        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock_fd = os.open(folder / '.config.toml.tether-lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            old, mode = _read_regular(config)
+def _open_home(folder, expect):
+    """An open fd of the Codex folder. Refuses a symbolic link, and a folder other than `expect` (st_dev:st_ino)."""
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if folder.is_symlink():
+            raise TrustError(409, 'The Codex folder is a symbolic link. Tether does not change it.') from exc
+        raise
+    info = os.fstat(fd)
+    if expect is not None and f'{info.st_dev}:{info.st_ino}' != expect:
+        os.close(fd)
+        raise TrustError(409, 'The Codex folder changed after you approved. Nothing changed. Try again.')
+    return fd
+
+
+def write_trust(key, folder=None, expect=None):
+    """Add or set [projects.<key>] trust_level = "trusted". Every step works in one open fd of the Codex folder, so a
+    swapped folder cannot redirect the write. The lock is shared with codex_provider; a one-time backup; atomic."""
+    directory = _open_home(Path(folder or home()), expect)
+    try:
+        with codex_provider.config_lock(directory):
+            old, mode = _read_regular('config.toml', directory)
             try:
                 text = (old or b'').decode('utf-8')
             except UnicodeDecodeError:
@@ -241,33 +269,32 @@ def write_trust(key, folder=None):
             new = edit(text, key)
             if old is not None:
                 try:
-                    backup = os.open(folder / BACKUP, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+                    backup = os.open(BACKUP, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=directory)
                 except FileExistsError:
                     pass  # the first backup stays: it is the config before Tether ever changed trust
                 else:
                     with os.fdopen(backup, 'wb') as handle:
                         handle.write(old)
                         os.fchmod(handle.fileno(), mode)
-            fd, temp = tempfile.mkstemp(prefix='.config.toml.tether-', dir=folder)
+            temp = f'.config.toml.tether-{secrets.token_hex(8)}'
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
             try:
                 with os.fdopen(fd, 'wb') as handle:
                     handle.write(new.encode('utf-8'))
                     os.fchmod(handle.fileno(), 0o600 if mode is None else mode)
                     handle.flush()
                     os.fsync(handle.fileno())
-                if _read_regular(config)[0] != old:  # Codex has no lock: refuse when it wrote in the meantime
+                if _read_regular('config.toml', directory)[0] != old:  # Codex has no lock: refuse when it wrote
                     raise TrustError(409, 'Codex config.toml changed while Tether wrote it. Try again.')
-                os.replace(temp, config)
+                os.replace(temp, 'config.toml', src_dir_fd=directory, dst_dir_fd=directory)
             finally:
-                if os.path.exists(temp):
-                    os.unlink(temp)
-            directory = os.open(folder, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            os.close(lock_fd)
+                try:
+                    os.unlink(temp, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+            os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _body(handler):
@@ -297,10 +324,16 @@ def post(handler, **context):
         if now['state'] != 'untrusted':
             raise TrustError(409, 'Codex can already edit in this folder.' if now['state'] in ('trusted', 'restart')
                              else 'Trusting this folder does not let Codex edit here. Nothing changed.')
-        if body.get('target') != now['target']:
+        if body.get('target') != now['target'] or not now['target_id'] or body.get('target_id') != now['target_id']:
             raise TrustError(409, 'The folder changed. Check it again, then trust it.')
+        real, codex_home = _canon(now['target']), _identity(home(), follow=False)
         approval.require(handler, 'codex-trust', payload, body.get('approval'))
-        write_trust(now['target'])
+        # The approval can take a while: the folder must still be the same directory, with the same canonical path.
+        again = status(body, **context)
+        if (again['state'], again['target'], again.get('target_id'), _canon(now['target'])) != \
+                ('untrusted', now['target'], now['target_id'], real):
+            raise TrustError(409, 'The folder changed after you approved. Nothing changed. Check it again, then trust it.')
+        write_trust(now['target'], expect=codex_home)
         result = status(body, **context)
         if body.get('mode') == 'running' and result['state'] == 'trusted':
             result['state'] = 'restart'  # a tab with no turn yet started before the trust, so it still runs read-only
