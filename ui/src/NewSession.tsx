@@ -8,6 +8,8 @@ import { FoundryTag } from './CodexProvider'
 import { ChatPicker, resumeInNewSession } from './ChatPicker'
 import { WORKTREE_TIMEOUT, WorktreeField } from './Worktree'
 import type { MadeWorktree } from './Worktree'
+import { CodexTrustCard } from './CodexTrust'
+import { useCodexTrust } from './codexTrustState'
 
 
 
@@ -53,6 +55,7 @@ export function NewSession({ api, onClose, onCreated }: { api: Api; onClose: () 
   const [error, setError] = useState('')
   const controller = useRef<AbortController | null>(null)
   const modal = useModal(true, () => { if (!pending) onClose() })
+  const trust = useCodexTrust(api, agent === 'codex' ? { mode: 'new', worktree: worktree !== null } : null)
   useEffect(() => () => controller.current?.abort(), [])
   async function create(event: React.FormEvent) {
     event.preventDefault()
@@ -110,6 +113,7 @@ export function NewSession({ api, onClose, onCreated }: { api: Api; onClose: () 
       <input autoFocus id="session-name" value={name} maxLength={64} onChange={event => setName(event.target.value)} disabled={pending} autoComplete="off" />
       <fieldset disabled={pending}><legend>Start with</legend><div className="agent-options">{(['claude', 'codex', 'shell'] as const).map(choice => <label key={choice} className={choice === agent ? 'selected' : ''}><input type="radio" name="agent" value={choice} checked={agent === choice} onChange={() => setAgent(choice)} /><AgentIcon agent={choice} /><span className="agent-choice-name">{agentNames[choice]}{choice === 'codex' && <FoundryTag api={api} below />}</span></label>)}</div></fieldset>
       <WorktreeField api={api} value={worktree} onChange={value => { setWorktree(value); if (error) setError('') }} disabled={pending} />
+      <CodexTrustCard trust={trust} />
       {error && <p className="error" role="alert">{error}</p>}
       <button className="primary create-button" disabled={pending}>{pending ? 'Creating session…' : 'Create session'}<Plus size={18} /></button>
     </form>

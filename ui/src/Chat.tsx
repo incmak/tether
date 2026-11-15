@@ -61,6 +61,8 @@ import { PreviewDrawer } from './PreviewDrawer'
 import { PreviewOpener, artifactsOf } from './preview'
 import type { PreviewTarget } from './preview'
 import { codexRunItems, useCodexRuns } from './CodexRuns'
+import { CodexTrustCard } from './CodexTrust'
+import { useCodexTrust } from './codexTrustState'
 import { HOLD_MS } from './gesture'
 
 
@@ -930,6 +932,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   }
   const background = (footer.agents ?? []).filter(agent => !agent.main)
   const codexRuns = useCodexRuns(api, activePane.id, activePane.agent !== 'shell')
+  const codexTrust = useCodexTrust(api, activePane.agent === 'codex' ? { mode: 'running', session: activePane.id } : null, activePane.thread ?? '')
   // A card key that Claude did not take leaves its error under the message box. Clear it when the card changes or closes.
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
@@ -1104,6 +1107,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
       : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
       ...codexRunItems(codexRuns),
+      { id: 'codex-trust', label: codexTrust.status?.state === 'untrusted' ? 'Codex read-only' : 'Folder trusted', active: codexTrust.status?.state === 'untrusted' || codexTrust.status?.state === 'restart' || codexTrust.justTrusted, content: <CodexTrustCard trust={codexTrust} running /> },
       ...agentBrowserItems(api, agentBrowser, activePane.id),
       { id: 'update', label: 'Update ready', active: !!footer.update, content: <>{footer.update && <div className="cli-update" role="status"><RefreshCw size={16} /><span><strong>Claude Code update ready</strong><small>{footer.update.replace(/^[^\w/]+\s*/, '')}</small></span><button type="button" className="secondary" disabled={!writable || state === 'Working'} onClick={() => void send('/restart')}>Restart</button></div>}</> },
     ]} />
