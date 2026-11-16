@@ -80,12 +80,32 @@ assert.ok(feed(createStripWheel(), 1, 40, scene()).every(plan => plan.do === 'bl
 // A horizontal scroller in the title row keeps its own scroll.
 assert.ok(feed(createStripWheel(), 1, 40, scene({ native: true })).every(plan => plan.do === 'pass'))
 
-// 7. A vertical wheel (a mouse too) and a pinch pass through, also over a strip.
+// 7. A vertical scroll over a strip that overflows scrolls it sideways: down moves right, up moves left. A mouse notch
+// glides; a trackpad's small deltas follow 1:1. Outside the strips (the band too) and over a strip that does not
+// overflow, it passes. A pinch passes.
 {
   const wheel = createStripWheel()
-  assert.equal(wheel(event(0, 0, 140, { deltaY: 120 }), scene()).do, 'pass')
-  assert.equal(wheel(event(0, 400, 172, { deltaY: 3, deltaX: 1 }), scene()).do, 'pass')
-  assert.equal(wheel(event(30, 800, 172, { ctrlKey: true }), scene()).do, 'pass')
+  assert.deepEqual({ ...wheel(event(0, 0, 140, { deltaY: 100 }), scene()) }, { do: 'scroll', strip: 1, dx: 100, glide: true })
+  assert.deepEqual({ ...wheel(event(0, 400, 100, { deltaY: -100 }), scene()) }, { do: 'scroll', strip: 0, dx: -100, glide: true })
+  assert.deepEqual({ ...wheel(event(0, 800, 100, { deltaY: 3, deltaMode: 1 }), scene()) }, { do: 'scroll', strip: 0, dx: 48 }, 'Firefox: 3 lines')
+  assert.deepEqual({ ...wheel(event(0, 1200, 140, { deltaY: 4, deltaX: 1 }), scene()) }, { do: 'scroll', strip: 1, dx: 4 }, 'trackpad')
+  assert.equal(wheel(event(0, 1600, 172, { deltaY: 100 }), scene()).do, 'pass', 'the band below the tab strip')
+  assert.equal(wheel(event(0, 2000, 40, { deltaY: 100 }), scene()).do, 'pass', 'the title row')
+  assert.equal(wheel(event(0, 2400, 140, { deltaY: 100 }), () => ({ strips: [stacks, strip(121, 165, { scrollWidth: 1000 })], native: false })).do, 'pass', 'no overflow')
+  assert.equal(wheel(event(30, 2800, 172, { ctrlKey: true }), scene()).do, 'pass')
+}
+// The setting off: a vertical scroll over a strip still scrolls it; a sideways swipe passes (Back/Forward).
+{
+  const wheel = createStripWheel(false)
+  assert.equal(wheel(event(0, 0, 140, { deltaY: 100 }), scene()).do, 'scroll')
+  assert.ok(feed(wheel, 1, 140, scene(), 400).every(plan => plan.do === 'pass'))
+}
+// A trackpad swipe over a strip whose first event leans vertical, then goes sideways: the strip follows the sideways
+// deltas.
+{
+  const wheel = createStripWheel()
+  assert.equal(wheel(event(1, 0, 140, { deltaY: 3 }), scene()).dx, 3)
+  assert.deepEqual({ ...wheel(event(-20, 16, 140, { deltaY: 2 }), scene()) }, { do: 'scroll', strip: 1, dx: -20 })
 }
 
 // 8. One decision per gesture: a later event with a vertical tilt still scrolls the strip; after QUIET_MS a new one.
@@ -97,7 +117,7 @@ assert.ok(feed(createStripWheel(), 1, 40, scene({ native: true })).every(plan =>
   assert.equal(wheel(event(20, 16 + QUIET_MS + 1, 140), scene({ native: true })).do, 'pass', 'a new gesture: native over the strip')
 }
 
-// Review: a gesture that starts vertical passes, all of it, also when it turns sideways: its later events cannot be
+// Review: a gesture that starts vertical outside the strips passes, all of it, also when it turns sideways: its later events cannot be
 // cancelled, so a scroll by hand would scroll twice.
 {
   const wheel = createStripWheel()

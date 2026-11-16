@@ -454,11 +454,15 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // rest of the header it does nothing (stripScroll.ts). The listeners sit on the header parts only: a non-passive wheel
   // listener on the chat would make Chromium wait for the main thread before each chat scroll starts, also while a
   // reply streams. So the band below the tab strip, which lies over the chat, is left out.
+  // A mouse wheel (vertical) over a strip scrolls it sideways, with the setting on or off.
   useEffect(() => {
     const panel = panelRef.current
-    if (!headerSwipe || !panel) return
+    if (!panel) return
     const desk = matchMedia(WORKSPACE_QUERY)
-    const decide = createStripWheel()
+    const decide = createStripWheel(headerSwipe)
+    // A run of wheel notches glides to one target: each notch adds to where the last one was going, not to where the
+    // strip is mid-animation.
+    let glide: { strip: Element; left: number; at: number } | null = null
     const wheel = (event: WheelEvent) => {
       const target = event.target as Element | null
       if (!desk.matches || target?.closest(SKIP)) return
@@ -466,7 +470,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const plan = decide(event, dx => ({ strips: strips.map(boxOf), native: scrollsItself(target, panel, dx) }))
       if (plan.do === 'pass' || !event.cancelable) return
       event.preventDefault()
-      if (plan.do === 'scroll') strips[plan.strip]?.scrollBy({ left: plan.dx, behavior: 'instant' })
+      const strip = plan.do === 'scroll' ? strips[plan.strip] : undefined
+      if (!strip || plan.do !== 'scroll') return
+      if (!plan.glide || reduceMotion()) { glide = null; strip.scrollBy({ left: plan.dx, behavior: 'instant' }); return }
+      const from = glide && glide.strip === strip && event.timeStamp - glide.at < 400 ? glide.left : strip.scrollLeft
+      const left = Math.max(0, Math.min(strip.scrollWidth - strip.clientWidth, from + plan.dx))
+      glide = { strip, left, at: event.timeStamp }
+      strip.scrollTo({ left, behavior: 'smooth' })
     }
     let zone: Element[] = []
     const attach = () => {
@@ -478,7 +488,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     const observer = new MutationObserver(attach)  // the stack row and the strip come and go with the tabs
     observer.observe(panel, { childList: true })
     attach()
-    panel.dataset.stripScroll = ''
+    if (headerSwipe) panel.dataset.stripScroll = ''
     return () => { observer.disconnect(); for (const part of zone) part.removeEventListener('wheel', wheel as EventListener); delete panel.dataset.stripScroll }
   }, [headerSwipe])
   const swipeCancel = () => {

@@ -10,6 +10,9 @@
 //   event's delta and cancels the event. Below the tab strip lies the chat, which has no listener: no band there. A trackpad sends its momentum as wheel events, so this follows the fingers 1:1.
 // - At a strip's end and over a strip that does not overflow: cancel (no Back) and scroll by hand, which moves nothing
 //   until the fingers turn back. Over the rest of the header: cancel.
+// - A vertical scroll (a mouse wheel; a trackpad swipe up or down) over a strip that overflows scrolls that strip
+//   sideways: down or away moves it to the right. The header itself never scrolls up or down, so nothing is lost.
+//   This holds with the swipe setting off too: the setting is about Back and Forward. Touch screens send no wheel.
 // Chromium sends only the first wheel event of a scroll sequence as cancelable when it is not cancelled, so the
 // decision is made once per gesture and held until QUIET_MS without wheel events.
 
@@ -36,8 +39,10 @@ export interface StripBox { top: number; bottom: number; left: number; right: nu
  * strip or any other horizontal scroller). */
 export interface Scene { strips: StripBox[]; native: boolean }
 /** pass: let the browser have it. block: preventDefault. scroll: preventDefault and scroll strips[strip] by dx (when
- * the event can be cancelled: else the browser scrolls too). */
-export type Plan = { do: 'pass' } | { do: 'block' } | { do: 'scroll'; strip: number; dx: number }
+ * the event can be cancelled: else the browser scrolls too). glide: one mouse-wheel notch; animate it, do not jump. */
+export type Plan = { do: 'pass' } | { do: 'block' } | { do: 'scroll'; strip: number; dx: number; glide?: boolean }
+/** A delta this large in one event is a mouse-wheel notch (Chromium: 100 px; Firefox: 3 lines), not a trackpad. */
+export const NOTCH = 50
 
 /** The strip whose rect, grown by BAND on each side, holds the point; the nearer one by y when two zones overlap. */
 export function nearestStrip(strips: StripBox[], x: number, y: number): number {
@@ -55,19 +60,31 @@ export function room(box: StripBox, dx: number) {
   return dx > 0 ? box.scrollWidth - box.clientWidth - box.scrollLeft > 0.5 : dx < 0 ? box.scrollLeft > 0.5 : false
 }
 
-export function createStripWheel() {
+/** swipe: the setting "Swipe on the tab bar scrolls it". Off, sideways gestures pass (Back and Forward); a vertical
+ * scroll over a strip still scrolls it sideways. */
+export function createStripWheel(swipe = true) {
   let last = -Infinity
   let held: Plan | null = null  // this gesture's decision
+  let vertical = false  // held scrolls a strip by the vertical delta
   return function wheel(event: WheelLike, look: (dx: number) => Scene): Plan {
     if (event.ctrlKey) return { do: 'pass' }  // a pinch zoom
     const scale = event.deltaMode === 1 ? LINE : event.deltaMode === 2 ? PAGE : 1
     const dx = event.deltaX * scale, dy = event.deltaY * scale
     const fresh = event.timeStamp - last > QUIET_MS
     last = event.timeStamp
-    if (!fresh && held) return held.do === 'scroll' ? { ...held, dx } : held
-    // A gesture is ours only when it starts sideways; a vertical scroll (a mouse wheel too) passes through, all of it:
-    // its later events are not cancelable.
-    if (Math.abs(dx) <= Math.abs(dy)) { held = { do: 'pass' }; return held }
+    if (!fresh && held) return held.do === 'scroll' ? vertical ? along(held.strip, Math.abs(dx) > Math.abs(dy) ? dx : dy) : { ...held, dx } : held
+    vertical = false
+    if (Math.abs(dx) <= Math.abs(dy)) {
+      // A vertical scroll: over a strip that overflows it scrolls the strip sideways; elsewhere it passes, all of it
+      // (its later events are not cancelable). Each later event moves the strip by its larger delta, so a trackpad
+      // swipe whose first event leans vertical still scrolls sideways.
+      const strips = look(0).strips
+      const strip = strips.findIndex(box => box.bottom > box.top && event.clientY >= box.top && event.clientY <= box.bottom && event.clientX >= box.left && event.clientX <= box.right)
+      vertical = strip >= 0 && strips[strip].scrollWidth - strips[strip].clientWidth > 0.5
+      held = vertical ? along(strip, dy) : { do: 'pass' }
+      return held
+    }
+    if (!swipe) { held = { do: 'pass' }; return held }
     const scene = look(dx)
     const strip = nearestStrip(scene.strips, event.clientX, event.clientY)
     // At a strip's end or over a strip that does not overflow, the scroll moves nothing, and a turn back still scrolls.
@@ -76,6 +93,10 @@ export function createStripWheel() {
     else held = { do: 'block' }
     return held
   }
+}
+
+function along(strip: number, dy: number): Plan {
+  return Math.abs(dy) >= NOTCH ? { do: 'scroll', strip, dx: dy, glide: true } : { do: 'scroll', strip, dx: dy }
 }
 
 /** Can an ancestor of target, up to and with stop, scroll by dx on its own? */

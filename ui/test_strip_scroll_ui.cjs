@@ -168,13 +168,26 @@ async function main() {
     await page.screenshot({ path: path.join(SHOTS, 'strip-scroll-title-1280.png') })
     wheels = await swipe(1, await box('.chat-scroll').then(b => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 })))
     check('chat: the swipe passes to the browser (B81 Back/Forward)', none(wheels), JSON.stringify(wheels))
-    // 6. A vertical wheel over the strip: not taken, nothing scrolls sideways.
+    // 6. A mouse wheel (vertical) over a strip scrolls it sideways and glides; no tab switch. Up scrolls back.
+    const notches = async (dy, count, at) => {
+      await page.mouse.move(at.x, at.y)
+      await page.evaluate(() => { window.__wheels = [] })
+      for (let i = 0; i < count; i++) await page.mouse.wheel(0, dy)
+      await page.waitForTimeout(600)
+      return page.evaluate(() => window.__wheels)
+    }
     await setScroll(TABS, 0)
-    await page.mouse.move(x, tabs.y + tabs.height / 2)
-    await page.evaluate(() => { window.__wheels = [] })
-    await page.mouse.wheel(0, 120)
-    await page.waitForTimeout(200)
-    check('vertical wheel over the tab strip: passes, no tab switch', none(await page.evaluate(() => window.__wheels)) && await selected() === '%2' && await scrolled(TABS) === 0)
+    wheels = await notches(100, 3, { x, y: tabs.y + tabs.height / 2 })
+    check('mouse wheel down over the tab strip: scrolls it right, cancelled, no tab switch', await scrolled(TABS) >= 250 && wheels.every(Boolean) && await selected() === '%2', `${await scrolled(TABS)} ${JSON.stringify(wheels)}`)
+    const right = await scrolled(TABS)
+    await notches(-100, 1, { x, y: tabs.y + tabs.height / 2 })
+    check('mouse wheel up over the tab strip: scrolls it back left', Math.abs(await scrolled(TABS) - (right - 100)) <= 2, `${right} -> ${await scrolled(TABS)}`)
+    await setScroll(ROW, 0)
+    await notches(100, 2, { x, y: row.y + row.height / 2 })
+    check('mouse wheel over the stack row: scrolls it right', await scrolled(ROW) >= 150, String(await scrolled(ROW)))
+    await setScroll(TABS, 0)
+    wheels = await notches(100, 1, { x: title.x + title.width / 2, y: title.y + title.height / 2 })
+    check('mouse wheel over the title row: passes, no strip scroll', wheels.length > 0 && wheels.every(v => !v) && await scrolled(TABS) === 0, JSON.stringify(wheels))
     // 7. A strip that does not overflow (three tabs, no stacks): a swipe does nothing, cancelled.
     sessions = few
     await open(1280)
