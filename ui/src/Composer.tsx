@@ -188,7 +188,11 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
   }, [canAttach, disabled, pane.id, thread]) // eslint-disable-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     const input = textarea.current
-    if (input) { input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 180)}px` }
+    if (input) {
+      input.style.height = 'auto'
+      // A long tab name in the placeholder must not enlarge an empty message box.
+      if (draft) input.style.height = `${Math.min(input.scrollHeight, 180)}px`
+    }
   }, [draft])
   // Hands-free: a read-aloud reply asks for the mic (listenRequest). A pause after speech stops it and sends.
   const dictationRef = useRef(dictation)
@@ -307,7 +311,7 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
           ? <button className="primary send-button run-button" aria-label="Run command" disabled={disabled || sending || !!uploading || !draft.slice(1).trim()}><CornerDownLeft size={16} />Run</button>
           : <button className="primary send-button" aria-label={pane.agent === 'shell' ? 'Run command' : 'Send message'} disabled={disabled || sending || !!uploading || (!draft.trim() && !files.length && !pastes.length)}><ArrowUp size={21} /></button>}
     </div></div>
-  </form>{shellMode && <p className="shell-hint" id={hintId}>Runs on {host} · Esc or Backspace on empty leaves shell mode</p>}{(error || speechError) && <p className="composer-error error" role="alert">{error || speechError}{error && errorAction}</p>}</div>
+  </form>{shellMode && <p className="shell-hint" id={hintId}>Runs on {host} · Esc or Backspace on empty leaves shell mode</p>}{(error || speechError) && <p className="composer-error error" role="alert" tabIndex={0}>{error || speechError}{error && errorAction}</p>}</div>
 }
 
 // Desktop (a mouse or trackpad): Enter sends, Shift+Enter adds a line. Phone soft keyboard: Enter adds a line, as before.

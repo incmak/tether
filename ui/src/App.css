@@ -310,8 +310,8 @@ label.broadcast-row:hover { background: var(--hover); }
 /* The + sheet's layer is a popover in the top layer: no z-index of a chat overlay can paint over it. */
 .attach-layer { position: fixed; inset: 0; width: auto; height: auto; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; overflow: visible; }
 .attach-layer > .attach-backdrop { display: block; position: absolute; inset: 0; }
-.attach-layer > .attach-menu { position: fixed; left: var(--attach-left, 16px); bottom: var(--attach-bottom, 72px); }
-.attach-menu { position: absolute; bottom: 52px; left: 0; z-index: 5; width: max-content; min-width: 264px; max-width: calc(100vw - 48px); padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 6px 24px #0000001f; }
+.attach-layer > .attach-menu { position: fixed; left: clamp(8px, var(--attach-left, 16px), calc(100vw - var(--attach-menu-width) - 8px)); width: var(--attach-menu-width); min-width: 0; bottom: var(--attach-bottom, 72px); max-height: max(44px, calc(100dvh - var(--attach-bottom, 72px) - 8px)); overflow-y: auto; overscroll-behavior: contain; }
+.attach-menu { --attach-menu-width: 264px; position: absolute; bottom: 52px; left: 0; z-index: 5; width: max-content; min-width: 264px; max-width: calc(100vw - 48px); padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 6px 24px #0000001f; }
 .attach-menu > button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: var(--control-lg); padding: 0 12px; border-radius: var(--radius); font-size: 15px; white-space: nowrap; text-align: left; }
 .attach-menu button svg { flex: none; }
 .attach-grip, .attach-backdrop { display: none; }
@@ -353,6 +353,8 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .action-list button { display: flex; align-items: center; gap: 14px; min-height: 48px; padding: 0 6px; border-radius: var(--radius); font-size: 16px; text-align: left; }
 .action-list button:hover { background: var(--hover); }
 .action-list button:disabled { opacity: .45; }
+.sheet-sub:not(:has(> svg)) { display: block; }
+[aria-labelledby="pane-title"] .action-list button small { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .action-list button small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .action-list kbd { margin-left: auto; font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }
 .action-list hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; width: 100%; }
@@ -360,7 +362,7 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .rename-form input { width: 100%; margin: 9px 0 6px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
 .sheet-buttons { display: flex; gap: 10px; justify-content: flex-end; }
-.app-toast { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%); z-index: 20; max-width: calc(100% - 32px); margin: 0; }
+.app-toast { --toast-bottom: 110px; position: fixed; left: 50%; bottom: var(--toast-bottom); transform: translateX(-50%); z-index: 20; max-width: calc(100% - 32px); margin: 0; }
 .state-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .state-dot.working { width: 10px; height: 10px; background: none; border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: spin .9s linear infinite; }
 .state-dot.approval { background: var(--attention); width: 8px; height: 8px; }
@@ -380,7 +382,7 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .sidebar-error button, .inline-error button { text-decoration: underline; padding: 0 12px; }
 .sidebar-error .retry { display: flex; margin-top: 2px; }
 .sidebar-error .retry-button { padding: 0; text-decoration: none; }
-.chat-panel { display: flex; flex-direction: column; position: relative; flex: 1; min-width: 0; }
+.chat-panel { container-type: inline-size; display: flex; flex-direction: column; position: relative; flex: 1; min-width: 0; }
 .chat-header { touch-action: pan-y; display: flex; align-items: center; min-height: 83px; gap: 12px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(10px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); z-index: 2; }
 .chat-title { min-width: 0; }
 .chat-title h1 { font-size: 16px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; margin-bottom: 5px; }
@@ -395,7 +397,7 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .keys-menu > span { display: block; font-size: 12px; color: var(--muted); padding: 10px; }
 .keys-menu button { display: flex; align-items: center; gap: 10px; min-height: var(--control-lg); justify-content: flex-start; width: 100%; padding: 6px 12px; border-radius: var(--radius-sm); text-align: left; font-size: 14px; }
 kbd { font-size: 12px; color: var(--muted); }
-.thread { display: flex; flex: 1; min-height: 0; position: relative; }
+.thread { overflow: clip; display: flex; flex: 1; min-height: 0; position: relative; }
 .chat-scroll { overflow-y: auto; overscroll-behavior-y: contain; width: 100%; }
 .messages { max-width: 780px; margin: 0 auto; padding: 28px 20px 14px; overflow-wrap: anywhere; }
 .messages a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
@@ -480,7 +482,8 @@ a { -webkit-touch-callout: default; }
 .send-button:not(.run-button, .stop-button) svg { width: 21px; height: 21px; }
 .mic { color: var(--muted); }
 .mic.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.composer-error { font-size: 13px; line-height: 1.5; margin: 9px 6px 0; }
+.composer-error { min-height: 0; max-height: 25dvh; overflow: auto; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; margin: 9px 6px 0; }
+.composer-error:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .composer-error button { margin-left: 8px; padding: 4px 10px; border-radius: var(--radius); border: 1px solid currentColor; background: none; color: inherit; font: inherit; font-weight: 600; min-height: var(--control); }
 .chat-empty { padding: clamp(35px, 11dvh, 110px) 4px 50px; }
 .chat-empty > svg { color: var(--muted); margin-bottom: 22px; }
@@ -496,6 +499,8 @@ a { -webkit-touch-callout: default; }
 .approval-banner > div { display: flex; gap: 8px; margin-top: 10px; }
 .approval-banner button { min-width: 44px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .toast { background: var(--surface); margin: 0 18px 8px; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--radius); font-size: 14px; line-height: 1.5; }
+/* Fixed toasts keep the viewport margin even when the text comes from a long path or server error. */
+.toast.app-toast { margin: 0; max-height: calc(100dvh - var(--toast-bottom) - 16px); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; }
 .read-only { font-size: 13px; color: var(--muted); padding: 4px 20px; text-align: center; }
 dialog { color: var(--text); background: var(--surface); border: 1px solid var(--line); }
 dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress, 0)); transition: opacity var(--sheet-duration, 0ms) cubic-bezier(.32,.72,0,1); }
@@ -514,6 +519,7 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 }
 .sheet-heading .icon-button { position: relative; }
 .sheet-heading .icon-button::before { content: ''; position: absolute; width: max(100%, 44px); height: max(100%, 44px); left: 50%; top: 50%; transform: translate(-50%, -50%); }
+.sheet-heading h2 { min-width: 0; overflow-wrap: anywhere; }
 .sheet-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .sheet h2 { font-family: ui-serif, Georgia, serif; font-size: 28px; font-weight: 400; }
 .sheet form > p { color: var(--muted); margin: 8px 0 26px; font-size: 14px; line-height: 1.6; }
@@ -551,11 +557,11 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .action-list .danger-item { color: var(--error); }
 .session-main, .pane-children button, .pane-tabs button { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
 .sheet-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Tables scroll sideways; cells keep whole words instead of breaking letter by letter. */
+/* Tables scroll sideways at readable column widths; unbroken values still stay inside their cells. */
 .assistant-message table { overflow-wrap: normal; word-break: normal; font-size: .9em; line-height: 1.45; -webkit-overflow-scrolling: touch; }
-.assistant-message td, .assistant-message th { min-width: 9em; max-width: 22em; vertical-align: top; }
+.assistant-message td, .assistant-message th { overflow-wrap: anywhere; min-width: 9em; max-width: 22em; vertical-align: top; }
 .assistant-message td:last-child, .assistant-message th:last-child { min-width: 14em; }
-.assistant-message td code { white-space: nowrap; }
+.assistant-message td code { white-space: normal; }
 .sidebar-brand img { border-radius: var(--radius-sm); }
 
 /* Suggestions above the message box: "/" commands and skills, "@" files. */
@@ -575,6 +581,8 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .message-actions { display: flex; gap: 2px; margin: 4px 0 -16px -10px; color: var(--muted); }
 .message-actions .icon-button { color: inherit; }
 .code-header { display: flex; align-items: center; justify-content: space-between; margin-top: 16px; padding: 0 4px 0 14px; min-height: 38px; border: 1px solid var(--line); border-bottom: 0; border-radius: var(--radius) var(--radius) 0 0; background: var(--hover); color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.code-header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-header > button { flex: none; }
 .code-header + pre { margin-top: 0 !important; border-top-left-radius: 0; border-top-right-radius: 0; }
 .code-copy { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border-radius: var(--radius-sm); color: inherit; font: 12px system-ui, sans-serif; }
 
@@ -684,10 +692,10 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .composer-pills { display: inline-flex; gap: 2px; min-width: 0; flex: 1 1 auto; }
 .model-list { display: flex; flex-direction: column; margin-bottom: 18px; }
 .model-list button { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 8px; border-radius: var(--radius); font-size: 16px; text-align: left; }
-.model-list button span { flex: 1; }
-.model-list button small { color: var(--muted); font-size: 12px; }
+.model-list button span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.model-list button small { flex: none; color: var(--muted); font-size: 12px; }
 .model-list button[aria-checked="true"] { background: var(--hover); }
-.model-list button svg { color: var(--accent); }
+.model-list button svg { flex: none; color: var(--accent); }
 .effort-levels { flex-wrap: wrap; }
 
 /* Sidebar row swipe: Pin and Delete sit under the row; a left swipe slides the row aside. */
@@ -719,7 +727,7 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .pull-note { position: relative; z-index: 1; height: 40px; transform: translate3d(0, -40px, 0); opacity: 0; pointer-events: none; display: flex; align-items: flex-end; justify-content: center; margin: 0 0 -40px; padding-bottom: 8px; overflow: hidden; font-size: 13px; color: var(--muted); }
 
 /* Mode menu above the mode pill; session details; reply times; model list refresh. */
-.mode-container { position: relative; display: inline-flex; flex: none; min-width: 0; max-width: 40%; }
+.mode-container { position: relative; display: inline-flex; flex: 0 1 auto; min-width: 0; }
 .mode-menu { left: auto; right: 0; bottom: 40px; min-width: 180px; }
 .mode-menu button { justify-content: space-between; }
 .message-time { align-self: center; margin-left: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -805,7 +813,7 @@ button.live-chip:active { background: var(--line); }
 
 /* The terminal's question as a drawer above the message box. */
 .choice-dock { margin: 0 12px 8px; border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); box-shadow: 0 -6px 24px rgb(0 0 0 / 0.12); overflow: hidden; }
-.choice-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 0 16px; border: 0; background: none; color: var(--text); font-size: 14.5px; font-weight: 600; text-align: left; }
+.choice-head { overflow-wrap: anywhere; display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 0 16px; border: 0; background: none; color: var(--text); font-size: 14.5px; font-weight: 600; text-align: left; }
 .choice-head svg { margin-left: auto; color: var(--muted); transition: transform 0.15s; }
 .choice-dock:not(.open) .choice-head svg { transform: rotate(180deg); }
 .choice-mark { width: 8px; height: 8px; border-radius: 50%; background: var(--attention); flex: none; }
@@ -813,7 +821,7 @@ button.live-chip:active { background: var(--line); }
 .panel-pre { margin: 0 16px 10px; padding: 10px 12px; overflow-x: auto; border-radius: var(--radius); background: var(--hover); color: var(--text); font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; -webkit-user-select: text; user-select: text; }
 .choice-text.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); padding: 10px; border-radius: var(--radius); background: var(--hover); }
 .ask-card { max-height: 34vh; overflow: auto; margin: 0 16px 10px; font-size: 14px; line-height: 1.45; color: var(--text); }
-.ask-header { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; color: var(--muted); }
+.ask-header { overflow-wrap: anywhere; margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; color: var(--muted); }
 .ask-question { margin: 0 0 8px; overflow-wrap: anywhere; }
 .ask-options { margin: 0 0 8px; padding-left: 22px; list-style: decimal outside; display: grid; gap: 6px; }
 .ask-options li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -821,11 +829,11 @@ button.live-chip:active { background: var(--line); }
 .ask-options small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .ask-hint { margin: 0; font-size: 12px; color: var(--muted); }
 .choice-options { display: flex; flex-direction: column; max-height: 38vh; overflow: auto; border-top: 1px solid var(--line); }
-.choice-options button { display: flex; align-items: flex-start; gap: 12px; min-height: 52px; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text); text-align: left; font-size: 15px; }
+.choice-options button { flex: none; display: flex; align-items: flex-start; gap: 12px; min-height: 52px; padding: 12px 16px; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text); text-align: left; font-size: 15px; }
 .choice-options button:active, .choice-options button.current { background: var(--hover); }
 .choice-options button > span:last-child { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .choice-options strong { font-weight: 500; overflow-wrap: anywhere; }
-.choice-options small { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.choice-options small { overflow-wrap: anywhere; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .choice-number { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: var(--radius); background: var(--hover); color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .picker-card { margin: 0 16px 10px; }
 .picker-subtitle { margin: 0 0 8px; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: pre-line; overflow-wrap: anywhere; }
@@ -1304,9 +1312,9 @@ button.live-chip:active { background: var(--line); }
 /* Workspace headers: one line for the title and its status, a thin pane strip. About 125px in all, not 200px. */
 .workspace .chat-header { min-height: 48px; gap: 2px; padding: 6px 8px 6px 16px; }
 .workspace .chat-header .icon-button svg { width: 16px; height: 16px; }
-.workspace .chat-title { display: flex; align-items: baseline; gap: 10px; flex: 1; margin-right: 6px; }
+.workspace .chat-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; flex: 1; margin-right: 6px; }
 .workspace .chat-title h1 { flex: 0 1 auto; min-width: 0; margin: 0; font-size: 15px; }
-.workspace .chat-title > div { flex: 0 1 auto; min-width: 0; }
+.workspace .chat-title > div { flex: 0 0 auto; max-width: 100%; min-width: 0; }
 .workspace .pane-tabs { padding: 4px 12px; }
 .workspace .pane-tabs button { min-height: var(--control-sm); padding: 0 10px; border-radius: var(--radius); font-size: 12.5px; }
 .workspace .pane-tab-pill { border-radius: var(--radius); }
@@ -1932,6 +1940,7 @@ button.live-chip:active { background: var(--line); }
 .suggest-note { margin: 0 0 10px; font-size: 13px; color: var(--muted); }
 .suggest-list { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow: auto; margin: 0 0 12px; padding: 0; list-style: none; }
 .suggest-list li { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.suggest-list strong { overflow-wrap: anywhere; }
 .suggest-list span { color: var(--muted); overflow-wrap: anywhere; }
 
 /* Groups (Groups.tsx): a row of groups above the tab strip on wide screens; on phones a switcher left of the strip. */
@@ -2041,3 +2050,56 @@ button.live-chip:active { background: var(--line); }
 @media (hover: hover) and (pointer: fine) { .session-groups :is(li.pane-row, .session-row):not(:hover, :focus-within) > .row-close { opacity: 0; } }
 .pane-tabs .visually-hidden, .session-groups .pane-children .visually-hidden, .session-main .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .pane-tabs button.tab-close { transition: none; } }
+
+/* A resizable chat can be narrower than a phone. Give its title and pickers their own rows. */
+@container (max-width: 280px) {
+  .chat-header { flex-wrap: wrap; }
+  .chat-header .chat-title { flex: 1 1 100%; order: -1; }
+  .chat-header .chat-title h1 { width: 100%; }
+}
+@container (max-width: 240px) {
+  .composer-controls { flex-wrap: wrap; }
+  .composer-controls > div:first-child { flex: 1 1 100%; flex-wrap: wrap; }
+  .composer-controls > div:last-child { margin-left: auto; }
+  .composer-pills { flex: 1 1 100%; flex-wrap: wrap; }
+  .composer-pills .pill, .composer-pills .mode-container { max-width: 100%; }
+}
+
+/* Short windows keep a readable message area. Attachments scroll before the input and Send give way. */
+@media (max-height: 500px) {
+  .chat-header { min-height: 48px; padding-block: 2px; }
+  .thread { min-height: 25%; }
+  .chat-header .chat-title { min-height: var(--control-lg); }
+  .chat-header .chat-title h1 { margin-bottom: 0; line-height: 1.2; }
+  .pane-tabs { padding-block: 2px; }
+  .composer-area { display: flex; flex-direction: column; min-height: 0; flex-shrink: 1; max-height: 60%; padding-block: 4px; }
+  .composer { display: flex; flex-direction: column; min-height: 0; padding: 4px 10px; }
+  .composer-input, .composer-controls { flex-shrink: 0; }
+  .composer textarea { min-height: 24px; max-height: 56px; }
+  .composer-controls { margin-top: 4px; }
+  .attachments { min-height: 28px; overflow: auto; margin-top: 0; }
+}
+
+/* Landscape has room beside the input: files and pastes share that row instead of covering Send. */
+@media (max-height: 500px) and (min-width: 600px) {
+  .composer:has(.attachments) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: minmax(var(--control-lg), 1fr) auto; column-gap: 8px; min-height: calc(2 * var(--control-lg) + 10px); }
+  .composer:has(.attachments) .attachments { min-height: 0; margin: 0; }
+  .composer:has(.attachments) .composer-input { grid-column: 2; grid-row: 1; }
+  .composer:has(.attachments) textarea { max-height: var(--control-lg); }
+  .composer:has(.attachments) .composer-controls { grid-column: 1 / -1; margin-top: 0; }
+}
+
+/* An open question has priority over message history, while the input keeps its space. */
+@media (max-height: 500px) {
+  .status-stack { min-height: 0; flex-shrink: 1; scroll-padding-top: calc(var(--control-lg) + 4px); scroll-padding-bottom: 4px; }
+  .status-stack:not([hidden]) { display: grid; grid-template-columns: var(--control-lg) minmax(0, 1fr); grid-template-rows: var(--control-lg) auto; align-content: start; }
+  .status-grip { grid-column: 1; grid-row: 1 / -1; align-self: start; top: 0; width: var(--control-lg); height: var(--control-lg); }
+  .status-grip::before { inset: 0; height: auto; }
+  .status-grip span { width: 24px; }
+  .status-rail { grid-column: 1 / -1; grid-row: 1 / -1; align-self: start; padding-bottom: 2px; }
+  .status-grip + .status-rail { grid-column: 2; top: 0; }
+  .status-content { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+  .chat-page:has(.status-content:not([hidden])) .thread { min-height: 0; }
+  .chat-page:has(.status-content:not([hidden])) .composer-area { flex-shrink: 0; }
+  .chat-page:has(.status-content:not([hidden])) .composer textarea { max-height: 28px; }
+}

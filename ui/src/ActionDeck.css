@@ -21,7 +21,7 @@
 .action-deck button.primary:disabled { opacity: .5; }
 .deck-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .deck-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; }
-.deck-status { margin: 0; color: var(--muted); font-size: 13px; }
+.deck-status { overflow-wrap: anywhere; margin: 0; color: var(--muted); font-size: 13px; }
 .deck-empty { display: grid; justify-items: center; gap: 8px; padding: 24px 0; color: var(--muted); }
 .deck-empty p { margin: 0; }
 .action-deck .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

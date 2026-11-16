@@ -1,7 +1,7 @@
 /* Choice state from the terminal (ticked boxes, tabs, filter, hidden rows) and the phone form for a bridged Claude question. */
 .choice-meta { display: flex; flex-direction: column; gap: 6px; margin: 0 16px 8px; }
 .choice-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.choice-tabs li { padding: 3px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.choice-tabs li { max-width: 100%; overflow-wrap: anywhere; padding: 3px 10px; border: 1px solid var(--line); border-radius: var(--radius-lg); color: var(--muted); font-size: 12.5px; line-height: 1.4; }
 .choice-tabs li.active { border-color: var(--accent); color: var(--text); font-weight: 500; }
 .choice-filter { display: flex; align-items: baseline; gap: 8px; margin: 0; font-size: 13px; color: var(--muted); }
 .choice-filter code { padding: 1px 6px; border-radius: var(--radius-sm); background: var(--hover); color: var(--text); font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
@@ -18,7 +18,7 @@
 .ask-form { display: flex; flex-direction: column; gap: 14px; max-height: 60vh; overflow: auto; overscroll-behavior: contain; margin: 0 16px 10px; }
 .status-content .ask-form { max-height: none; overflow: visible; }
 .ask-form-question { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
-.ask-form-question legend { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; padding: 0; }
+.ask-form-question legend { min-width: 0; max-width: 100%; overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; padding: 0; }
 .ask-form-question .ask-question { margin: 0; font-size: 15px; line-height: 1.45; }
 .ask-form-hint { margin: 0; color: var(--muted); font-size: 12.5px; }
 .ask-form-option { position: relative; display: flex; align-items: flex-start; gap: 10px; min-height: 48px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; }
@@ -42,3 +42,6 @@
 .ask-bar { display: flex; flex-direction: column; gap: 8px; margin: 8px 12px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--radius-lg); background: var(--hover); font-size: 14px; line-height: 1.4; }
 .ask-bar p { margin: 0; }
 .ask-progress { margin: 8px 16px 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase; color: var(--muted); }
+
+/* Read-only picker cards do not use the slot picker's negative row margins. */
+.picker-card .picker-list { margin-inline: 0; }

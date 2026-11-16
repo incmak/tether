@@ -207,7 +207,7 @@ function ViewerContent({ image, close, onShow, onDetails, move, index, total, it
           event.preventDefault(); lastTap.current = null; toggle(end.clientX, end.clientY)
         } else lastTap.current = { x: end.clientX, y: end.clientY, time: Date.now() }
       }}>
-      {image.error || failed ? <p className="viewer-error" role="alert">{image.error || 'This media could not load.'}</p>
+      {image.error || failed ? <p className="viewer-error" role="alert" tabIndex={0}>{image.error || 'This media could not load.'}</p>
         : kind === 'video' ? <video src={image.url} controls autoPlay playsInline onError={() => setFailure(image.url)} />
         : kind === 'audio' ? <audio src={image.url} controls autoPlay onError={() => setFailure(image.url)} />
         : <div ref={track} className="viewer-track" style={{ width: zoomed ? Math.max(size.width, width) : size.width, height: zoomed ? Math.max(size.height, height) : size.height }}>
