@@ -1,6 +1,6 @@
 {
   "purpose": "Small browser-responsive OfficeViewer fixtures; no private content or external media.",
-  "generator": "python3 .release-work/2026-11-16/responsive/files/fixtures/make_office.py",
+  "generator": "python3 ui/responsive_files/make_office.py",
   "dependencies": {
     "Python": "standard library only",
     "SheetJS": "0.20.3"
