@@ -5,9 +5,9 @@
 .agent-browser-ask p { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
 .agent-browser-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 8px; }
 .agent-browser-tabs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.agent-browser-tabs li { display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.agent-browser-tabs li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 8px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .agent-browser-tabs li > svg { color: var(--muted); flex: none; }
-.agent-browser-tabs span { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
+.agent-browser-tabs span { flex: 1 1 120px; min-width: 0; display: flex; flex-direction: column; font-size: 14px; }
 .agent-browser-tabs :is(strong, small) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-browser-tabs small { color: var(--muted); font-size: 12px; }
 /* An ended grant: the reason is the point, so it wraps. */
@@ -52,7 +52,6 @@
 .signed-ask-text p { margin: 0; }
 .signed-ask-reason { overflow-wrap: anywhere; }
 .signed-ask-meta { color: var(--muted); font-size: 12px !important; }
-.agent-browser-tabs li > button + button { margin-left: -4px; }
 
 /* Allow on a signed-in request: a steady ring plus a halo that pulses outward and a light sweep, so the waiting
    request is easy to spot. The agent waits only 2 minutes. Reduced motion keeps the ring only. */
@@ -83,3 +82,5 @@
   50% { box-shadow: 0 0 14px 2px rgb(145 119 199 / .45); }
 }
 @media (prefers-reduced-motion: reduce) { .status-chip.gemini-glow { animation: none; box-shadow: 0 0 8px rgb(145 119 199 / .35); } }
+
+.agent-browser-tab-actions { display: flex; flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; gap: 8px; margin-left: auto; }

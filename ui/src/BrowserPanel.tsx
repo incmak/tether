@@ -63,7 +63,17 @@ function useMenu() {
     document.addEventListener('pointerdown', outside)
     return () => document.removeEventListener('pointerdown', outside)
   }, [open])
-  const onKeyDown = (event: ReactKeyboardEvent) => { if (event.key === 'Escape' && open) { event.stopPropagation(); setOpen(false); ref.current?.querySelector<HTMLButtonElement>('button')?.focus() } }
+  useLayoutEffect(() => {
+    if (!open) return
+    const fit = () => {
+      const menu = ref.current?.querySelector<HTMLElement>('.browser-menu')
+      if (menu) menu.style.maxHeight = `${Math.max(24, Math.min(360, innerHeight - menu.getBoundingClientRect().top - 8))}px`
+    }
+    fit()
+    window.addEventListener('resize', fit)
+    return () => window.removeEventListener('resize', fit)
+  }, [open])
+  const onKeyDown = (event: ReactKeyboardEvent) => { if (event.key === 'Escape' && open) { event.preventDefault(); event.stopPropagation(); setOpen(false); ref.current?.querySelector<HTMLButtonElement>('button')?.focus() } }
   return { open, setOpen, ref, onKeyDown }
 }
 
@@ -841,7 +851,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   return <div className={`browser-panel${which === 'signed' ? ' browser-signed' : ''}`} onKeyDown={event => { if (noting && event.key === 'Escape' && !event.defaultPrevented) stopNotes() }}>
     <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
       {switcher}
-      {tabs.map(item => {
+      <div className="browser-tab-strip">{tabs.map(item => {
         const name = tabName(item)
         return <div key={item.id} className={item.id === tab?.id ? 'browser-tab active' : 'browser-tab'} title={item.mode === 'saved' ? `${name} · ${which === 'signed' ? signedNote(host) : savedNote(host)}` : item.mode === 'agent' ? `${name} · Agent` : `${name} · Private`}>
           <button type="button" role="tab" aria-selected={item.id === tab?.id} className="browser-tab-main" onClick={() => choose(item.id)}>
@@ -850,7 +860,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           </button>
           <button type="button" className="browser-tab-close" aria-label={`Close ${name}`} onClick={() => void closeTab(item.id)}><X size={14} /></button>
         </div>
-      })}
+      })}</div>
       {which !== 'chrome' && <div className="browser-menu-anchor" ref={tabMenu.ref} onKeyDown={tabMenu.onKeyDown}>
         <button type="button" className="browser-icon" aria-label="New tab" aria-haspopup={which === 'signed' ? undefined : 'menu'} aria-expanded={which === 'signed' ? undefined : tabMenu.open} onClick={() => which === 'signed' ? void newTab('saved') : tabMenu.setOpen(!tabMenu.open)}><Plus size={17} /></button>
         {tabMenu.open && <div className="browser-menu" role="menu">
@@ -904,7 +914,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={() => { drag.current = null; const press = pressed.current; pressed.current = null; if (press) push({ type: 'up', x: press.x, y: press.y, button: press.button, buttons: 0, clicks: 1, modifiers: 0 }) }} onContextMenu={event => event.preventDefault()}
           onMouseDown={event => event.preventDefault() /* keep focus in the keys box, not the stage */} />
         {noting && <canvas ref={marksRef} className={`browser-marks tool-${tool}`} aria-label="Draw notes on the frame" style={view} onPointerDown={onMarkDown} onPointerMove={onMarkMove} onPointerUp={onMarkUp} onPointerCancel={onMarkUp} />}
-        {noting && label && <input className="browser-label" style={{ left: label.left, top: label.top }} aria-label="Note text" autoFocus value={label.text}
+        {noting && label && <input className="browser-label" style={{ left: Math.max(0, Math.min(label.left, view.width - 180)), top: Math.max(15, Math.min(label.top, view.height - 15)), width: Math.min(180, view.width) }} aria-label="Note text" autoFocus value={label.text}
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>

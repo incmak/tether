@@ -2,6 +2,9 @@
 .setup-step + .setup-step { border-top: 1px solid var(--line); }
 .setup-buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .setup-step .switch-row > button, .setup-buttons button { flex: none; }
+.setup-step .switch-row { flex-wrap: wrap; }
+.setup-step .switch-row > span:not(.setup-buttons) { flex: 1 1 180px; }
+.setup-step .switch-row > .setup-buttons { display: flex; flex: 0 1 auto; }
 .setup-review { display: grid; gap: 10px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 13px; line-height: 1.45; }
 .setup-review p { margin: 0; overflow-wrap: anywhere; }
 .setup-review pre { margin: 0; max-height: 220px; overflow: auto; padding: 10px; border-radius: var(--radius-sm); background: var(--bg); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -26,7 +26,7 @@
 .live :focus-visible { outline: 2px solid var(--text); outline-offset: 3px; border-radius: var(--radius); }
 .live:focus { outline: none; }
 
-.live-stage { position: relative; isolation: isolate; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 8px; min-height: 0; min-width: 0; overflow: hidden;
+.live-stage { position: relative; isolation: isolate; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; gap: 8px; min-height: 0; min-width: 0; overflow: hidden;
   padding-left: max(14px, env(safe-area-inset-left, 0px)); padding-right: max(14px, env(safe-area-inset-right, 0px));
   padding-block: calc(10px + env(safe-area-inset-top, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)); }
 
@@ -78,6 +78,9 @@
 .live-reply[data-long="true"] { font-size: 17px; font-weight: 400; line-height: 1.42; letter-spacing: 0; text-align: left; text-wrap: pretty; }
 .live-who { display: block; margin-bottom: 4px; font-size: 13px; font-weight: 500; letter-spacing: 0; text-align: center; color: var(--muted); }
 .live-problem { font-size: 14px; color: var(--error); }
+/* Errors need room, while the live status still announces an active or recovering call. */
+.live-center:has(.live-problem) .live-orb { --orb: min(24cqw, 14cqh, 96px); }
+@container live (max-height: 560px) { .live-center:has(.live-problem) .live-orb { display: none; } }
 .live[data-asking="true"] .live-said:not([data-small="true"]), .live[data-asking="true"] .live-reply:not([data-long="true"]) { font-size: clamp(18px, 6cqw, 23px); }
 @keyframes live-in { from { opacity: 0; transform: translateY(.35em); } to { opacity: 1; transform: none; } }
 
@@ -143,15 +146,21 @@
 /* Words scroll and can be selected, so a drag that starts on them does not move the window. */
 .live-window [data-no-drag] { cursor: auto; touch-action: pan-y; user-select: text; -webkit-user-select: text; }
 .live-window.moving, .live-window.moving * { cursor: grabbing; user-select: none; -webkit-user-select: none; }
-.live-window .live-stage { padding: 14px 12px 12px; border-radius: inherit; }
+.live-window .live-stage { padding: 24px 12px 12px; border-radius: inherit; }
 /* The move handle is a grabber pill at the top, as on an iOS sheet. It stays a real, focusable button. */
-.live-window .live-top .live-grip { position: absolute; top: -14px; left: 50%; translate: -50% 0; width: 48px; height: 14px; margin: 0; border-radius: 99px; cursor: grab; touch-action: none; }
+.live-window .live-top .live-grip { position: absolute; top: -24px; left: 50%; translate: -50% 0; width: 48px; height: 24px; margin: 0; border-radius: 99px; cursor: grab; touch-action: none; }
 .live-window .live-grip svg { display: none; }
 .live-window .live-grip::before { content: ''; position: absolute; left: 8px; right: 8px; top: 5px; height: 4px; border-radius: 99px; background: color-mix(in oklab, var(--text) 22%, transparent); transition: background-color .15s ease; }
 .live-window .live-top .live-grip:hover { background: none; }
 .live-window .live-grip:hover::before, .live-window.moving .live-grip::before { background: color-mix(in oklab, var(--text) 45%, transparent); }
 /* Short window: everything steps down, and Friday's words take what room is left. */
 @container live (max-height: 470px) {
+  /* Approval text and its buttons take priority when the voice stage has little height. */
+  .live-center:has(.live-problem) .live-status { font-size: 12px; line-height: 1.25; }
+  .live-problem { font-size: 13px; line-height: 1.25; }
+  .live[data-asking="true"] .live-center .live-orb { display: none; }
+  .live[data-asking="true"] .live-approval { max-height: calc(100cqh - 220px); }
+  .live[data-asking="true"] .live-approval small { display: none; }
   .live-window .live-stage { gap: 6px; }
   .live-window .live-center .live-orb { --orb: 72px; }
   .live-window .live-center { gap: 4px; }
@@ -161,9 +170,9 @@
   .live-window .live-approval small { display: none; }
   .live-window .live-row { margin-top: 8px; }
   .live-window .live-row button { min-height: 40px; }
-  .live-window .live-round { width: 44px; height: 44px; }
-  .live-window .live-controls { --live-ctl-h: 48px; gap: 8px; }
-  .live-window .live-ctl { gap: 2px; font-size: 11px; }
+  .live .live-round { width: 44px; height: 44px; }
+  .live .live-controls { --live-ctl-h: 48px; gap: 8px; }
+  .live .live-ctl { gap: 2px; font-size: 11px; }
 }
 
 /* Resize: thin strips on each edge and corner, plus a visible, focusable grip at the bottom right. */

@@ -203,7 +203,7 @@ export function ChatPicker({ api, exclude, here, onChat, onTab, onMove, disabled
       {shownTabs.length > 0 && <section><h3>Open tabs</h3><ul>{shownTabs.map(pane => <li key={pane.id}>
         <button type="button" className="cp-main" disabled={!!busy} onClick={() => onTab(pane)}>
           <span className="cp-icon"><AgentIcon agent={pane.agent} icon={pane.pane_icon} size={15} /></span>
-          <span className="cp-text"><span className="cp-title">{paneTitle(pane)}</span><span className="cp-meta"><span className="cp-session"><TerminalSquare size={11} aria-hidden="true" />{pane.label}</span>{pane.dir && <bdi dir="ltr">{pane.dir}</bdi>}</span></span>
+          <span className="cp-text"><span className="cp-title">{paneTitle(pane)}</span><span className="cp-meta"><span className="cp-session"><TerminalSquare size={11} aria-hidden="true" /><span className="cp-session-text" title={pane.label}>{pane.label}</span></span>{pane.dir && <bdi dir="ltr">{pane.dir}</bdi>}</span></span>
           <span className={`cp-end ${pane.state === 'Working' ? 'working' : needsYou(pane.state) ? 'needs' : ''}`}>{needsYou(pane.state) ? 'Needs you' : pane.state === 'Working' ? 'Working' : 'Open'}</span>
         </button>
         {onMove && pane.tmux_session !== here && <button type="button" className="cp-move" disabled={!!busy} aria-label={`Move ${paneTitle(pane)} here`} title="Move this tab here" onClick={() => void run(`move-${pane.id}`, () => onMove(pane))}>{busy === `move-${pane.id}` ? <Spinner /> : <ArrowRightToLine size={14} />}<span>Move here</span></button>}

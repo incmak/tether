@@ -10,7 +10,7 @@
 }
 @keyframes agent-pulse { 50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); } }
 
-.sheet.agent-map { overflow-y: auto; container: agent-map / inline-size; }
+.sheet.agent-map { overflow-y: auto; overflow-wrap: anywhere; container: agent-map / inline-size; }
 @media (min-width: 600px) {
   .sheet.agent-map { width: calc(100% - 48px); max-width: 960px; }
   .sheet.agent-map.agent-detail { max-width: 640px; }

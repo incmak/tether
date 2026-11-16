@@ -189,8 +189,8 @@ function SignedGrantCard({ api, grant }: { api: Api; grant: SignedGrant }) {
       <li>
         <KeyRound size={15} aria-hidden="true" />
         <span><strong>{grant.browser === 'chrome' ? 'Your Chrome tab' : 'Signed-in tab'}</strong><small>{left ? `${left} min left` : 'Ending'} · {grant.browser === 'chrome' ? 'Keep Chrome’s debugging bar open' : grant.reason}</small></span>
-        <button type="button" className="secondary" onClick={() => watchTab(grant.tab, grant.pane, grant.browser === 'chrome' ? 'chrome' : 'signed')}>Watch</button>
-        <button type="button" className="secondary" onClick={() => void answerSigned(api, 'end', grant.id).catch(failure => setError(errorText(failure)))}>End now</button>
+        <div className="agent-browser-tab-actions"><button type="button" className="secondary" onClick={() => watchTab(grant.tab, grant.pane, grant.browser === 'chrome' ? 'chrome' : 'signed')}>Watch</button>
+        <button type="button" className="secondary" onClick={() => void answerSigned(api, 'end', grant.id).catch(failure => setError(errorText(failure)))}>End now</button></div>
       </li>
     </ul>
     {error && <p className="error" role="alert">{error}</p>}

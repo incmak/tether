@@ -73,7 +73,9 @@ const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.nee
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 export function Live({ api, panes, selected, commands, onClose, onBacklog, reveal = 0, from = null }: { api: Api; panes: Pane[]; selected?: Pane; commands: Command[]; onClose: () => void; onBacklog?: () => void; reveal?: number; from?: DOMRect | null }) {
-  const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: 300, minH: 360, bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
+  // The floating window refits on viewport resize; its minimum must fit the same viewport too.
+  const viewport = window.visualViewport
+  const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: Math.min(300, (viewport?.width ?? window.innerWidth) - 16), minH: Math.min(360, (viewport?.height ?? window.innerHeight) - 16), bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
   const root = useRef<HTMLDivElement>(null)
   const bubbleButton = useRef<HTMLButtonElement>(null)
   // Motion between window, bubble and full screen. The fold plays first, then the mode changes; the layout

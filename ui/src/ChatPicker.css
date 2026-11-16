@@ -30,20 +30,21 @@
 .cp-meta bdi { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cp-session { display: inline-flex; align-items: center; gap: 3px; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 .cp-session svg { flex: none; }
+.cp-session-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cp-end { flex: none; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .cp-end.working { color: var(--accent); }
 .cp-end.needs { color: var(--error); }
 .cp-move { display: flex; align-items: center; gap: 5px; flex: none; min-height: 28px; margin-inline-end: 6px; padding: 0 8px; border-radius: 7px; background: var(--surface); box-shadow: 0 0 0 1px var(--line); color: var(--text); font-size: 12px; white-space: nowrap; }
 .cp-move:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 @media (hover: hover) {
-  .cp-move { position: absolute; inset-inline-end: 0; opacity: 0; }
+  .cp-move { opacity: 0; }
   .cp-list li:hover .cp-move, .cp-move:focus-visible { opacity: 1; }
 }
 @media (hover: none) { .cp-move span { display: none; } .cp-move { min-width: 44px; min-height: 44px; justify-content: center; margin: 0; background: none; box-shadow: none; color: var(--muted); } }
 .cp-more { display: block; width: 100%; min-height: 36px; margin-top: 4px; border-radius: 8px; color: var(--muted); font-size: 12.5px; }
 .cp-more:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .cp-empty { margin: 0; padding: 28px 12px; color: var(--muted); font-size: 13px; text-align: center; }
-.cp-error { margin: 0; font-size: 12.5px; }
+.cp-error { margin: 0; font-size: 12.5px; overflow-wrap: anywhere; }
 
 /* The two modes at the top of the + popover and New session. */
 .pick-modes { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--hover); }
@@ -78,7 +79,7 @@
 
 .past-opening { margin: 0 10px 8px; color: var(--muted); font-size: 12.5px; }
 .sm-trigger.resume-place { margin: 9px 0 24px; }
-.cp-empty .link-button, .cp-error .link-button, .group-empty .link-button { display: inline; min-height: 0; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.cp-empty .link-button, .cp-error .link-button:not(.retry-button), .group-empty .link-button { display: inline; min-height: 0; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .past-list .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
 /* Remove a past chat from a list. Always there on touch; on a pointer it shows with the row. */
