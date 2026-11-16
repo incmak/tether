@@ -63,6 +63,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import auth
 import paths
+import prefs_sync
 
 DEFAULT_PORTS = '7700-7709'
 MAX_POOL = 32
@@ -651,11 +652,12 @@ def response_code(head):
 
 
 def frame_ancestors(host, main_port):
-    """Who may frame a forwarded page: the page itself and Tether's main origin on the same host."""
+    """Who may frame a forwarded page: the page itself, Tether's main origin on the same host, and the host menu's other
+    Tether servers (one of them may show this Tether in a frame, and CSP checks every ancestor)."""
     name = urlsplit('//' + host).hostname or ''
     if not re.fullmatch(r'[a-z0-9.-]{1,253}', name):
         return "'self'"
-    return "'self' https://%s http://%s:%d https://%s:%d" % (name, name, main_port, name, main_port)
+    return ' '.join(["'self' https://%s http://%s:%d https://%s:%d" % (name, name, main_port, name, main_port)] + prefs_sync.host_origins())
 
 
 PAGE = ('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'

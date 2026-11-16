@@ -7,7 +7,11 @@ import type { Screen } from './Rail'
 export type Place = { pane?: string; screen: Screen }
 // spare: the entry the browser added for an "Open Tether search" request (#search). Tether steps back over it at once.
 type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string; spare?: true }
-type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean }
+// home: for an overlay that holds a cross-origin frame, the key of the entry under it (Navigation API).
+type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean; home?: string }
+// The Navigation API, where the browser has it (Chrome, Edge, Android Chrome).
+type Nav = { currentEntry: { key: string } | null; traverseTo: (key: string) => { finished: Promise<unknown> } }
+const nav = () => (typeof window === 'undefined' ? undefined : (window as unknown as { navigation?: Nav }).navigation)
 
 const overlays: Overlay[] = []
 let pendingBacks = 0
@@ -182,8 +186,9 @@ export function setSearchOpener(fn: (() => void) | null) {
   if (fn) searchRequest(true)
 }
 
-/** keepForward: when there are Forward steps, add no entry, so opening this overlay (the command menu) keeps them. */
-export function openOverlay(close: () => void, view?: string, keepForward = false): number {
+/** keepForward: when there are Forward steps, add no entry, so opening this overlay (the command menu) keeps them.
+ * frame: the overlay holds a frame whose page adds its own history entries after the overlay's entry (HostView). */
+export function openOverlay(close: () => void, view?: string, keepForward = false, frame = false): number {
   listen()
   const overlay: Overlay = { id: ++nextId, close, layer: overlays.length + 1, noEntry: true }
   const count = overlays.length
@@ -199,7 +204,10 @@ export function openOverlay(close: () => void, view?: string, keepForward = fals
     if (!overlays.includes(overlay)) return
     const next: NavState = { ...state(), tether: 1, layer: overlay.layer, place: currentPlace ?? undefined, view }
     if ((state()?.layer ?? 0) > count) replace(next)
-    else push(next)
+    else {
+      if (frame) overlay.home = nav()?.currentEntry?.key
+      push(next)
+    }
     overlay.noEntry = false
   })
   return overlay.id
@@ -210,7 +218,19 @@ export function closeOverlay(id: number) {
   if (at < 0) return
   const [overlay] = overlays.splice(at, 1)
   run(() => {
-    if (!overlay.noEntry && state()?.layer === overlay.layer) back()
+    if (overlay.noEntry || state()?.layer !== overlay.layer) return
+    if (!overlay.home) { back(); return }
+    // history.back() would step into the frame's entries, which stay after the frame closes and show nothing.
+    // traverseTo skips them; the next push drops them. Without the Navigation API the entry stays, and a later
+    // Back steps over it as over any closed overlay.
+    const navigation = nav()
+    if (!navigation) return
+    pendingBacks++
+    navigation.traverseTo(overlay.home).finished.catch(() => {
+      // The browser refused: no popstate comes, so do not wait for one.
+      if (pendingBacks > 0) pendingBacks--
+      flush()
+    })
   })
 }
 
@@ -259,7 +279,7 @@ export function useNavAvailability() {
   return useSyncExternalStore(watch => { listen(); changed(); watchers.add(watch); return () => watchers.delete(watch) }, () => snapshot, () => snapshot)
 }
 
-export type StepOptions = { view?: string; keepForward?: boolean }
+export type StepOptions = { view?: string; keepForward?: boolean; frame?: boolean }
 
 export function useBackStep(open: boolean, close: () => void, options?: StepOptions) {
   const latest = useRef(close)
@@ -268,7 +288,7 @@ export function useBackStep(open: boolean, close: () => void, options?: StepOpti
   useLayoutEffect(() => { step.current = options })
   useEffect(() => {
     if (!open) return
-    const id = openOverlay(() => latest.current(), step.current?.view, step.current?.keepForward)
+    const id = openOverlay(() => latest.current(), step.current?.view, step.current?.keepForward, step.current?.frame)
     return () => closeOverlay(id)
   }, [open])
 }

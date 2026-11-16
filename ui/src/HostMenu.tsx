@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronsUpDown, Plus, X } from 'lucide-react'
 import type { Host } from './prefs'
+import { knowHosts, openHost } from './HostView'
 import './HostMenu.css'
 
 const MAX_HOSTS = 20  // Match the 'hosts' checks in server/prefs_sync.py.
@@ -38,7 +39,7 @@ async function reach(origin: string): Promise<Reach> {
 
 const REACH_LABEL: Record<Reach, string> = { checking: 'Checking', on: 'Online', off: 'Not reachable' }
 
-/** The footer's host name. A tap lists the other Tether servers; each opens at its own address with its own sign-in. */
+/** The footer's host name. A tap lists the other Tether servers; each opens inside this app (see HostView). */
 export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[]; onChange: (hosts: Host[]) => void }) {
   const [open, setOpen] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -62,6 +63,8 @@ export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[
     window.addEventListener('resize', place)
     return () => window.removeEventListener('resize', place)
   }, [open])
+
+  useEffect(() => { knowHosts(hosts) }, [hosts])
 
   const close = (focus = false) => { setOpen(false); setAdding(false); setError(''); if (focus) trigger.current?.focus() }
 
@@ -107,13 +110,17 @@ export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[
     {open && at && createPortal(<div ref={menu} className="host-menu" id={menuId} role="group" aria-label="Tether hosts" style={{ left: at.left, bottom: at.bottom }}>
       <div className="host-row current"><span className="state-dot done" aria-hidden="true" /><span className="host-text"><span className="host-name">{host}</span><span className="host-address">This Tether</span></span><Check size={16} aria-label="Open now" /></div>
       {hosts.map(item => <div className="host-row" key={item.url}>
-        <a className="host-open" href={item.url + '/chat/'} target="_blank" rel="noopener noreferrer" onClick={() => close()}>
+        <a className="host-open" href={item.url + '/chat/'} target="_blank" rel="noopener noreferrer" onClick={event => {
+          // A plain tap opens the host inside this app. Ctrl, Shift or a middle click still opens a browser tab.
+          if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); openHost(item) }
+          close()
+        }}>
           <span className={`state-dot ${status[item.url] === 'on' ? 'done' : status[item.url] === 'off' ? 'idle' : ''}`} aria-hidden="true" />
           <span className="host-text"><span className="host-name">{item.name}</span><span className="host-address">{REACH_LABEL[status[item.url] ?? 'checking']} · {new URL(item.url).host}</span></span>
         </a>
         <button type="button" className="icon-button host-remove" aria-label={`Remove ${item.name}`} title="Remove from the list" onClick={() => onChange(hosts.filter(other => other.url !== item.url))}><X size={15} /></button>
       </div>)}
-      {!hosts.length && !adding && <p className="host-note">Add your other Tether servers. Each one opens with its own sign-in.</p>}
+      {!hosts.length && !adding && <p className="host-note">Add your other Tether servers. Each one opens inside this app.</p>}
       {adding
         ? <form className="host-form" onSubmit={add} noValidate>
           <label><span>Address</span><input type="url" inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} placeholder="https://mac.example.com" value={address} onChange={event => { setAddress(event.target.value); setError('') }} autoFocus /></label>

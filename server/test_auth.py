@@ -212,6 +212,9 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(seen, [])
 
     def test_live_origin_serves_only_the_live_view_after_sign_in(self):
+        patcher = mock.patch.object(server.prefs_sync, 'host_origins', return_value=[])  # not this machine's list
+        patcher.start()
+        self.addCleanup(patcher.stop)
         import browser
         hostile = (b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: tether=planted; Path=/\r\n'
                    b'set-cookie2: x=1\r\nClear-Site-Data: "cookies"\r\nX-Frame-Options: DENY\r\n'
@@ -354,10 +357,18 @@ class AuthTests(unittest.TestCase):
                 self.assertIn(b'http-equiv="refresh"', body)
 
     def test_live_ancestors_allow_only_the_main_origin(self):
+        patcher = mock.patch.object(server.prefs_sync, 'host_origins', return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.assertEqual(server.live_ancestors('phone.example.test:7698'),
                          'https://phone.example.test http://phone.example.test:%d https://phone.example.test:%d' % ((server.MAIN_PORT,) * 2))
         for bad in ('', 'evil.test x', "a'b", '[::1]:7698'):
             self.assertEqual(server.live_ancestors(bad), "'none'", bad)
+
+    def test_live_ancestors_add_the_host_menu_servers(self):
+        with mock.patch.object(server.prefs_sync, 'host_origins', return_value=['https://mac.example.test']):
+            self.assertTrue(server.live_ancestors('phone.example.test').endswith(' https://mac.example.test'))
+            self.assertEqual(server.live_ancestors('bad host'), "'none'")
 
     def test_panel_browser_live_view_without_a_container_is_unavailable(self):
         import browser

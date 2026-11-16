@@ -350,9 +350,12 @@ class HeaderTests(unittest.TestCase):
             self.assertIsNone(dev_previews.response_code(head), head)
 
     def test_only_tether_may_frame_the_page(self):
-        self.assertEqual(dev_previews.frame_ancestors('box.example:7700', 7683),
-                         "'self' https://box.example http://box.example:7683 https://box.example:7683")
-        self.assertEqual(dev_previews.frame_ancestors('bad host;x', 7683), "'self'")
+        with unittest.mock.patch.object(dev_previews.prefs_sync, 'host_origins', return_value=[]):
+            self.assertEqual(dev_previews.frame_ancestors('box.example:7700', 7683),
+                             "'self' https://box.example http://box.example:7683 https://box.example:7683")
+            self.assertEqual(dev_previews.frame_ancestors('bad host;x', 7683), "'self'")
+        with unittest.mock.patch.object(dev_previews.prefs_sync, 'host_origins', return_value=['https://mac.example']):
+            self.assertTrue(dev_previews.frame_ancestors('box.example:7700', 7683).endswith(' https://mac.example'))
 
     def test_who_may_send_a_request(self):
         # Review finding 1: ports share a site, so the cookie comes with requests from other pool ports too.
@@ -1007,6 +1010,9 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.request('GET', '/away')[0].getheader('Location'), 'https://example.com/x')
 
     def test_response_headers_cannot_act_on_tether(self):
+        patcher = unittest.mock.patch.object(dev_previews.prefs_sync, 'host_origins', return_value=[])  # not this machine's list
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.sign_in()
         response, data = self.request('GET', '/cookies')
         self.assertEqual((response.status, data), (200, b'ok'))

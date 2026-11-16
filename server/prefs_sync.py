@@ -43,6 +43,22 @@ def load():
             'version': data.get('version', 0) if isinstance(data, dict) and isinstance(data.get('version'), int) else 0}
 
 
+ORIGIN = re.compile(r'https?://[a-z0-9.-]{1,253}(:[0-9]{1,5})?')
+
+
+def host_origins():
+    """The origins of the host menu's other Tether servers, for a frame-ancestors list. The user added each one, and
+    each may show this Tether in a frame (ui/src/HostView.tsx), so this Tether's own frames must load inside it too.
+    Only plain lower-case origins pass, so no value can add a CSP token."""
+    hosts = load()['prefs'].get('hosts', [])
+    found = []
+    for item in hosts:
+        url = item.get('url') if isinstance(item, dict) else None
+        if isinstance(url, str) and ORIGIN.fullmatch(url.rstrip('/')) and url.rstrip('/') not in found:
+            found.append(url.rstrip('/'))
+    return found
+
+
 def session_folder(value=None):
     """Resolve a new session's folder. Recheck at creation if a saved folder moved."""
     if value is None:

@@ -20,6 +20,14 @@ class PrefsHostsTests(unittest.TestCase):
         self.assertEqual(stored['prefs']['hosts'], hosts)
         self.assertEqual(prefs_sync.load(), stored)
 
+    def test_host_origins_for_frame_ancestors(self):
+        prefs_sync.save({'hosts': [{'name': 'Mac', 'url': 'https://mac.example.com/'}, {'name': 'Box', 'url': 'http://10.0.0.2:7683'},
+                                   {'name': 'Upper', 'url': 'https://Mac.Example.com'}]})
+        # Mixed case is not a plain origin: it never reaches a CSP header.
+        self.assertEqual(prefs_sync.host_origins(), ['https://mac.example.com', 'http://10.0.0.2:7683'])
+        prefs_sync.save({'hosts': []})
+        self.assertEqual(prefs_sync.host_origins(), [])
+
     def test_empty_hosts_replace_previous_list(self):
         prefs_sync.save({'hosts': [{'name': 'Host', 'url': 'https://x'}]})
         stored = prefs_sync.save({'hosts': []})

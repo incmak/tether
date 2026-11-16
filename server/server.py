@@ -154,11 +154,12 @@ def strict_response_code(head):
 
 def live_ancestors(host):
     """The frame-ancestors source list for the live view: only Tether's main origin on the same host may frame it.
-    That is https on the default port (tailscale serve) or the main port itself (a direct connection)."""
+    That is https on the default port (tailscale serve) or the main port itself (a direct connection). The host menu's
+    other Tether servers count too: one of them may show this Tether in a frame, and CSP checks every ancestor."""
     name = urlsplit('//' + host).hostname or ''
     if not re.fullmatch(r'[a-z0-9.-]{1,253}', name):
         return "'none'"
-    return 'https://%s http://%s:%d https://%s:%d' % (name, name, MAIN_PORT, name, MAIN_PORT)
+    return ' '.join(['https://%s http://%s:%d https://%s:%d' % (name, name, MAIN_PORT, name, MAIN_PORT)] + prefs_sync.host_origins())
 SEND_LOCK = threading.Lock()
 side_question.SEND_LOCK = SEND_LOCK  # the copy key waits for a message that Tether types
 WATCHING = {}
