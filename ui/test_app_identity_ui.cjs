@@ -27,7 +27,8 @@ const fixture = {
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
 let prefs = {}, version = 1
 const COLORS = [['clay', 'Clay', '#C96442'], ['blue', 'Blue', '#2F6BD8'], ['green', 'Green', '#2E7D4F']].map(([id, label, hex]) => ({ id, label, hex }))
-let identity = { name: 'Tether', color: 'clay' }
+const BLANK = { name: 'Tether', color: 'clay', icon: 'color', art: null, draft: null, job: null }
+let identity = { ...BLANK }
 
 async function main() {
   let browser, page, server, failed = 0
@@ -62,19 +63,29 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (request.method() !== 'GET') {
+          if (endpoint === 'app-identity/upload') {
+            posts.push({ endpoint, kind: request.headers()['content-type'], size: request.postDataBuffer()?.length })
+            identity = { ...identity, draft: 'd2' }
+            return route.fulfill({ json: { ...identity, colors: COLORS } })
+          }
           const body = request.postDataJSON(); posts.push({ endpoint, body })
+          if (endpoint === 'app-identity/generate') return route.fulfill({ status: 202, json: { job: 'j1' } })
           if (endpoint === 'prefs') {
             prefs = { ...prefs, ...body.changes }; version++
             return route.fulfill({ json: { prefs, version } })
           }
           if (endpoint === 'app-identity') {
-            identity = { name: body.name, color: body.color }
+            if (body.useDraft) identity = { ...identity, icon: 'custom', art: identity.draft, draft: null }
+            else if (body.discardDraft) identity = { ...identity, draft: null }
+            else identity = { ...identity, name: body.name, color: body.color, icon: body.icon }
             return route.fulfill({ json: { ...identity, colors: COLORS } })
           }
           return route.fulfill({ json: { ok: true } })
         }
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
         if (endpoint === 'app-identity') return route.fulfill({ json: { ...identity, colors: COLORS } })
+        if (endpoint === 'app-identity/generate') { identity = { ...identity, draft: 'd1' }; return route.fulfill({ json: { state: 'done' } }) }
+        if (endpoint.startsWith('app-identity/preview/')) return route.fulfill({ body: await fs.readFile(path.join(DIST, 'icon-192.png')), contentType: 'image/png' })
         if (endpoint === 'activity') return route.fulfill({ json: { enabled: false, agents: false, zone: 'UTC', since: null, store: '', days: [], projects: [], publish: { folder: '', file: '', busy: false, pending: false, published: null, last: null } } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -98,7 +109,7 @@ async function main() {
     for (const [width, height] of sizes) {
       const at = `${width}px`
       prefs = { selected: '%1' }; version++
-      identity = { name: 'Tether', color: 'clay' }
+      identity = { ...BLANK }
       posts.length = 0
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
@@ -112,7 +123,7 @@ async function main() {
       const save = page.getByRole('button', { name: 'Save app name and icon' })
       check(`${at} save waits for a change`, await save.isDisabled())
       await name.fill('  Work   box ')
-      await page.getByRole('radio', { name: 'Blue' }).check()
+      await page.locator('.preferences-colors label').filter({ hasText: 'Blue' }).click()
       const preview = page.locator('.app-identity-preview')
       check(`${at} preview shows the name`, (await preview.textContent()) === 'Work box')
       check(`${at} preview shows the colour`, await preview.locator('rect').getAttribute('fill') === '#2F6BD8')
@@ -126,10 +137,36 @@ async function main() {
       check(`${at} title follows`, await page.title() === 'Work box')
       check(`${at} save turns off after saving`, await save.isDisabled())
       await name.fill('')
-      await page.getByRole('radio', { name: 'Green' }).check()
+      await page.locator('.preferences-colors label').filter({ hasText: 'Green' }).click()
       await save.click()
       check(`${at} empty name is refused here`, await page.getByRole('alert').textContent() === 'Type a name.' && posts.filter(post => post.endpoint === 'app-identity').length === 1)
       await page.screenshot({ path: path.join(SHOTS, `app-identity-error-${width}.png`) })
+      // Own picture: make one with AI, use it, then upload another and discard it.
+      await name.fill('Work box')
+      await page.getByRole('radio', { name: /My own picture/ }).check()
+      check(`${at} empty state names both ways`, await page.getByText('No picture yet.').isVisible())
+      const make = page.getByRole('button', { name: 'Make with AI' })
+      check(`${at} make waits for a description`, await make.isDisabled())
+      await page.getByRole('textbox', { name: 'Describe a picture for AI' }).fill('a lighthouse at night')
+      await make.click()
+      check(`${at} shows progress`, await page.getByRole('status').filter({ hasText: 'about 1 minute' }).isVisible())
+      const draft = page.getByRole('img', { name: 'New icon with the Tether badge' })
+      await draft.waitFor({ timeout: 15000 })
+      check(`${at} sends the description`, posts.some(post => post.endpoint === 'app-identity/generate' && post.body.prompt === 'a lighthouse at night'))
+      check(`${at} draft loads`, await draft.evaluate(image => image.complete && image.naturalWidth > 0))
+      check(`${at} no page overflow with a draft`, !(await overflow()))
+      await page.screenshot({ path: path.join(SHOTS, `app-identity-draft-${width}.png`) })
+      await page.getByRole('button', { name: 'Use this icon' }).click()
+      await page.getByRole('status').filter({ hasText: 'Your picture is now the app icon' }).waitFor()
+      check(`${at} preview shows the picture`, await preview.locator('img').count() === 1)
+      check(`${at} use posts useDraft only`, posts.some(post => post.endpoint === 'app-identity' && post.body.useDraft === true && !('name' in post.body)))
+      await page.locator('.app-identity-own input[type=file]').setInputFiles({ name: 'me.png', mimeType: 'image/png', buffer: await fs.readFile(path.join(DIST, 'icon-192.png')) })
+      await draft.waitFor()
+      check(`${at} upload sends the image bytes`, posts.some(post => post.endpoint === 'app-identity/upload' && post.kind === 'image/png' && post.size > 100))
+      await page.getByRole('button', { name: 'Discard' }).click()
+      await draft.waitFor({ state: 'detached' })
+      check(`${at} discard removes the draft`, !identity.draft)
+      await page.screenshot({ path: path.join(SHOTS, `app-identity-own-${width}.png`) })
       await page.keyboard.press('Escape'); await page.keyboard.press('Escape')
     }
     check('no page errors', !pageErrors.length, pageErrors.join('\n'))

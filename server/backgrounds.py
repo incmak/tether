@@ -257,41 +257,46 @@ def _prompt(prompt, tuned, size):
     return prompt + '\n\nGenerate one image and save it as bg.png in the working folder. If the image tool saves elsewhere, copy the image to bg.png. Report the saved image path.'
 
 
+def codex_image(prompt, deadline, prefix='tether-image-'):
+    """Run Codex image generation once in a private folder and return the image bytes. Raises Bad or TimeoutExpired.
+    The prompt must ask Codex to save the image as bg.png in the working folder."""
+    codex = shutil.which('codex')
+    if not codex:
+        raise Bad('Codex is not installed on this server.')
+    with tempfile.TemporaryDirectory(prefix=prefix) as temporary:
+        folder = Path(temporary)
+        features = subprocess.run([codex, 'features', 'list'], cwd=folder, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=min(10, max(0.01, deadline - time.monotonic())))
+        if features.returncode or not re.search(r'^image_generation\s+\S+\s+true\s*$', features.stdout, re.M):
+            raise Bad('Codex image generation is off or unavailable.')
+        started_ns = time.time_ns()
+        command = [codex, 'exec', '--sandbox', 'workspace-write', '--skip-git-repo-check',
+                   '--enable', 'image_generation', '--json', '--', prompt]
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen(command, cwd=folder, stdin=subprocess.DEVNULL,
+                                       stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # Stop descendants as well, so a timed-out job cannot leave a worker behind.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+                raise
+            if code:
+                raise Bad('Codex could not make that image. Please try again.')
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 1024 * 1024))
+            output = log.read().decode('utf-8', errors='replace')
+        return find_generated_image(folder, started_ns, output).read_bytes()
+
+
 def _run_job(ident, prompt, tuned, size):
     try:
-        deadline = time.monotonic() + TIMEOUT
-        codex = shutil.which('codex')
-        if not codex:
-            raise Bad('Codex is not installed on this server.')
-        with tempfile.TemporaryDirectory(prefix='tether-background-') as temporary:
-            folder = Path(temporary)
-            features = subprocess.run([codex, 'features', 'list'], cwd=folder, stdin=subprocess.DEVNULL,
-                                      capture_output=True, text=True, timeout=min(10, TIMEOUT))
-            if features.returncode or not re.search(r'^image_generation\s+\S+\s+true\s*$', features.stdout, re.M):
-                raise Bad('Codex image generation is off or unavailable.')
-            started_ns = time.time_ns()
-            command = [codex, 'exec', '--sandbox', 'workspace-write', '--skip-git-repo-check',
-                       '--enable', 'image_generation', '--json', '--', _prompt(prompt, tuned, size)]
-            with tempfile.TemporaryFile() as log:
-                process = subprocess.Popen(command, cwd=folder, stdin=subprocess.DEVNULL,
-                                           stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                try:
-                    code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
-                    # Stop descendants as well, so a timed-out job cannot leave a worker behind.
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait()
-                    raise
-                if code:
-                    raise Bad('Codex could not make that image. Please try again.')
-                log.seek(0, os.SEEK_END)
-                log.seek(max(0, log.tell() - 1024 * 1024))
-                output = log.read().decode('utf-8', errors='replace')
-            image = find_generated_image(folder, started_ns, output)
-            item = save(image.read_bytes(), source='ai', prompt=prompt)
+        data = codex_image(_prompt(prompt, tuned, size), time.monotonic() + TIMEOUT, 'tether-background-')
+        item = save(data, source='ai', prompt=prompt)
         result = {'state': 'done', 'item': item}
     except subprocess.TimeoutExpired:
         result = {'state': 'failed', 'error': 'The image took too long. Please try again.'}

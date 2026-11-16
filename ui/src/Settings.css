@@ -69,6 +69,14 @@
 .preferences .app-identity > button { justify-self: start; }
 .app-identity-preview { display: grid; justify-items: center; gap: 6px; width: 96px; margin-bottom: 6px; padding: 12px 4px; border-radius: 12px; background: var(--hover); }
 .app-identity-preview span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.preferences .app-identity textarea { width: 100%; min-width: 0; min-height: 64px; font-size: 16px; resize: vertical; }
+.app-identity-kind label { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.app-identity-own { display: grid; gap: 10px; }
+.app-identity-own > label { font-size: 14px; font-weight: 600; }
+.app-identity-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-identity-actions button { min-height: 44px; }
+.app-identity-draft { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; }
+.app-identity-art { display: block; border-radius: 22%; }
 .preferences-colors { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
 .preferences-colors label { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 42px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; cursor: pointer; }
 .preferences-colors label:has(input:checked) { border-color: var(--accent); background: var(--hover); }
