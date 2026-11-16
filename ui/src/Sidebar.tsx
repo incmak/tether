@@ -982,7 +982,7 @@ function UsageSheet({ data, api, onDone, onClose }: { data: UsageData; api: Api;
   </section>
   return <dialog {...modal} className="sheet" aria-labelledby="usage-title">
     <div className="sheet-heading"><h2 id="usage-title">Plan usage</h2><button type="button" className="icon-button usage-refresh" aria-label="Refresh" aria-busy={loading} disabled={loading} onClick={reload}><RefreshCw className={loading ? 'spin' : undefined} /></button><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
-    <p className="sheet-sub">Limits are for your whole account, not one session.</p>
+    <p className="sheet-sub sheet-note">Limits are for your whole account, not one session.</p>
     {section('Claude', data.claude, <>No report yet. In a Claude chat, send <code>! bash ~/apps/tmux-chat/tools/enable-claude-usage.sh</code> once. The meter fills in after the next Claude reply.</>, 'claude')}
     {section('Codex', data.codex, 'No report yet. The meter fills in after the next Codex reply.', 'codex')}
     <p className="hint">For Codex's full panel, send <code>/status</code> in a Codex chat. It opens in the terminal.</p>

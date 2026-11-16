@@ -246,6 +246,11 @@ async function main() {
       await audit(`${w}: mode menu fits`, '.mode-menu')
       await shot(`${w}-mode`)
       check(`${w}: last mode option is reachable`, await page.locator('.mode-menu button').last().evaluate(el => { const r = el.getBoundingClientRect(); return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) }))
+      await page.locator('.mode-menu button').first().focus()
+      await page.keyboard.press('Escape')
+      check(`${w}: Escape closes the mode menu`, await page.locator('.mode-menu').count() === 0)
+      check(`${w}: Escape returns focus to Mode`, await mode.evaluate(el => el === document.activeElement))
+      await mode.click()
       if (checkOnly) { await page.locator('.mode-menu [aria-checked=true]').focus(); await page.keyboard.press('Enter') } else await page.locator('.mode-menu [aria-checked=true]').click()
       for (const trigger of ['/', '@']) {
         await page.locator('.composer textarea').first().fill(trigger)

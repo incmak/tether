@@ -354,6 +354,8 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .action-list button:hover { background: var(--hover); }
 .action-list button:disabled { opacity: .45; }
 .sheet-sub:not(:has(> svg)) { display: block; }
+/* A sentence under a sheet title wraps; names and paths in .sheet-sub keep one line. */
+.sheet-sub.sheet-note { overflow: visible; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 [aria-labelledby="pane-title"] .action-list button small { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .action-list button small { margin-left: auto; color: var(--muted); font-size: 13px; }
 .action-list kbd { margin-left: auto; font-size: 12px; color: var(--muted); font-family: ui-monospace, monospace; }

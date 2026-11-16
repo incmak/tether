@@ -40,7 +40,7 @@ export function ContinueWith({ api, pane, thread, idle, onClose, onCreated }: {
   return <dialog {...modal} className="sheet model-sheet" aria-labelledby="continue-title"
     onCancel={event => { if (busy) event.preventDefault(); else modal.onCancel(event) }}>
     <div className="sheet-heading"><h2 id="continue-title">Continue with…</h2><button type="button" className="icon-button" aria-label="Close" disabled={busy} onClick={onClose}><X /></button></div>
-    <p className="sheet-sub">Keep this conversation visible with another agent or provider. The original session stays available.</p>
+    <p className="sheet-sub sheet-note">Keep this conversation visible with another agent or provider. The original session stays available.</p>
     <div className="model-list" role="radiogroup" aria-label="Continue with">
       {choices.map(choice => {
         const status = available.find(item => item.id === choice.id)

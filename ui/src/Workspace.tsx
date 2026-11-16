@@ -179,7 +179,7 @@ export function SlotPicker({ index, sessions, slots, onPane, onSession, onClose 
   const shown = sessions.filter(session => match(session.name) || session.panes.some(pane => match(label(pane))))
   return <dialog {...modal} className="sheet slot-picker" aria-labelledby="slot-picker-title">
     <div className="sheet-heading"><h2 id="slot-picker-title">Show in slot {index + 1}</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
-    <p className="sheet-sub">Pick a pane for this slot, or a whole session to fill the slots with its panes.</p>
+    <p className="sheet-sub sheet-note">Pick a pane for this slot, or a whole session to fill the slots with its panes.</p>
     <label className="sidebar-search picker-search"><Search size={15} aria-hidden="true" /><input type="search" autoFocus placeholder="Search" aria-label="Search panes and sessions" value={query} onChange={event => setQuery(event.target.value)} /></label>
     <ul className="picker-list">
       {shown.map(session => session.panes.length > 1
