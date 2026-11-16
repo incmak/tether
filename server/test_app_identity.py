@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -75,6 +76,18 @@ class AppIdentityTest(unittest.TestCase):
         app_identity.save({'color': 'blue'})
         self.assertIsNone(app_identity.serve('icon-monochrome-512.png', PUBLIC / 'icon-monochrome-512.png'))
         self.assertIsNone(app_identity.serve('sw.js', PUBLIC / 'sw.js'))
+
+    def test_notifications_use_the_server_icon(self):
+        # Each notification's large icon is a file that serve() replaces, so it shows this server's own icon at once.
+        # The small status-bar badge stays the Tether mark on every server.
+        worker = (PUBLIC / 'sw.js').read_text()
+        icons = set(re.findall(r"icon: '/chat/([^']+)'", worker))
+        badges = set(re.findall(r"badge: '/chat/([^']+)'", worker))
+        self.assertEqual(icons, {'icon-192.png'})
+        self.assertEqual(badges, {'badge-96.png'})
+        app_identity.save({'color': 'blue'})
+        self.assertIsNotNone(app_identity.serve('icon-192.png', PUBLIC / 'icon-192.png'))
+        self.assertIsNone(app_identity.serve('badge-96.png', PUBLIC / 'badge-96.png'))
 
 
 class Handler:

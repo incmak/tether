@@ -102,7 +102,7 @@ export function AppIdentitySettings({ api }: { api: Api }) {
       const data = await api<Identity>('app-identity', { name: trimmed, color, icon })
       take(data)
       document.title = data.name
-      setNotice('Saved. A new install uses this name and icon. An app that is already installed changes within about a day, after you close it. To change it now, remove the app and install it again.')
+      setNotice('Saved. New notifications show this icon now. A new install uses this name and icon. An app that is already installed changes within about a day, after you close it. To change it now, remove the app and install it again.')
     } catch (failure) { setError(errorText(failure)) } finally { setPending(false) }
   }
 
@@ -134,7 +134,7 @@ export function AppIdentitySettings({ api }: { api: Api }) {
       setSaved(data)
       if (useDraft) {
         setIcon('custom')
-        setNotice('Your picture is now the app icon. A new install uses it. An installed app changes within about a day, after you close it.')
+        setNotice('Your picture is now the app icon. New notifications show it now. A new install uses it. An installed app changes within about a day, after you close it.')
       }
     } catch (failure) {
       setArtError(errorText(failure))
@@ -145,7 +145,7 @@ export function AppIdentitySettings({ api }: { api: Api }) {
 
   return <section className="settings-group" aria-labelledby="settings-app-identity"><h3 id="settings-app-identity">Installed app</h3>
     <form className="app-identity" onSubmit={save}>
-      <p id="app-identity-help" className="setting-note">Give each Tether server its own name and icon, so you can tell the installed apps apart on your home screen.</p>
+      <p id="app-identity-help" className="setting-note">Give each Tether server its own name and icon, so you can tell the installed apps and their notifications apart.</p>
       <div className="app-identity-preview" aria-hidden="true">{showArt ? <ArtIcon which="art" stamp={saved.art ?? ''} /> : <AppIcon hex={hex} />}<span>{trimmed || 'Tether'}</span></div>
       <label htmlFor="app-identity-name">App name</label>
       <input id="app-identity-name" value={name} maxLength={NAME_LIMIT} placeholder={host === 'the server' ? 'Tether' : host} autoComplete="off" spellCheck={false} aria-describedby="app-identity-help app-identity-length" disabled={pending && !saved} onChange={event => { setName(event.target.value); setNotice(''); setError('') }} />
