@@ -18,6 +18,7 @@ import { DEFAULT_VIEW, SORT_LABELS, STATUS_LABELS, WHO_LABELS, canReorder, detai
 import type { SortKey, StatusFilter, View, Who } from './backlogView'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import './Backlog.css'
+import { wheelSideways } from './wheelSideways'
 
 // The app's one backlog (server: backlog.py). People use the checklist or the text; agents use a command. Every save
 // carries the version the person last saw. A checklist change applies itself again to a newer file, so only rewriting
@@ -743,7 +744,7 @@ export function Backlog({ api, guard: guardRef, active = true, panes = [], onOpe
         onChange={value => setView({ sort: value as SortKey })} options={(Object.keys(SORT_LABELS) as SortKey[]).map(value => ({ value, label: SORT_LABELS[value], detail: value === 'manual' ? 'Drag to reorder' : undefined }))} />
     </div>
   </div>
-  const nav = page && <nav className="backlog-nav" aria-label="Backlog views" inert={overlay}>
+  const nav = page && <nav ref={wheelSideways} className="backlog-nav" aria-label="Backlog views" inert={overlay}>
     <h3 className="backlog-nav-head">Views</h3>
     <ul>{statuses.map(value => { const Icon = STATUS_ICONS[value]; return <li key={value}>
       <button type="button" aria-pressed={view.status === value} onClick={() => setView({ status: value })}><Icon size={15} aria-hidden="true" /><span>{STATUS_LABELS[value]}</span><span className="backlog-nav-count">{saved ? statusCount(value) : ''}</span></button>

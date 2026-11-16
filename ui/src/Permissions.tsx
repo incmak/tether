@@ -1,6 +1,7 @@
 // Claude Code's /permissions dialog, read from the screen by server/permissions_dialog.py.
 // The tabs and keys drive the real dialog; Tether keeps no permission state of its own.
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
+import { wheelSideways } from './wheelSideways'
 import type { PermissionsDialog } from './api'
 
 const BLOCKED = 'Recently blocked'
@@ -29,6 +30,7 @@ export function PermissionsPanel({ dialog, disabled, want, onKey }: { dialog: Pe
   const autoTab = dialog.tabs.indexOf('Auto mode')
   // Narrow screens scroll the tab row; keep the active tab in view.
   const tabRow = useRef<HTMLDivElement>(null)
+  const tabRowRef = useCallback((node: HTMLDivElement | null) => { tabRow.current = node; const stop = wheelSideways(node); return () => { tabRow.current = null; stop?.() } }, [])
   useEffect(() => { tabRow.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }) }, [dialog.tab])
   // Drop the drawn search box (Tether cannot type into it; its border wraps on a phone) and the leading blank lines.
   // Each row keeps its index in dialog.lines, so the selected row stays right.
@@ -36,7 +38,7 @@ export function PermissionsPanel({ dialog, disabled, want, onKey }: { dialog: Pe
   const first = rows.findIndex(({ line }) => line.trim())
   const body = first > 0 ? rows.slice(first) : rows
   return <div className="perm-panel">
-    <div ref={tabRow} className="perm-tabs" role="tablist" aria-label="Permissions tabs">
+    <div ref={tabRowRef} className="perm-tabs" role="tablist" aria-label="Permissions tabs">
       {dialog.tabs.map((tab, index) => <button key={tab} type="button" role="tab" aria-selected={tab === dialog.tab} disabled={disabled || active < 0} onClick={() => void go(index)}>{tab}</button>)}
     </div>
     {blocked && !dialog.empty && <p className="perm-note">Retry once lets Claude try the action one more time. Claude’s safety check reviews it again and can block it again. It saves no rule.</p>}

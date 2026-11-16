@@ -8,6 +8,7 @@ import { Markdown } from '@tiptap/markdown'
 import { TableKit } from '@tiptap/extension-table'
 import { TaskItem, TaskList } from '@tiptap/extension-list'
 import type { EditorProps } from './textEdit'
+import { wheelSideways } from './wheelSideways'
 
 // StarterKit's trailing node adds an empty last paragraph on the first transaction, which only adds trailing newlines; a file ends with one newline.
 const markdownOf = (editor: Editor) => editor.getMarkdown().replace(/\n*$/, '\n')
@@ -66,7 +67,7 @@ function Toolbar({ editor }: { editor: Editor }) {
     if (href) run.setLink({ href }).run()
     else run.unsetLink().run()
   }
-  return <div className="rich-toolbar" role="toolbar" aria-label="Formatting">
+  return <div ref={wheelSideways} className="rich-toolbar" role="toolbar" aria-label="Formatting">
     <Tool label="Undo" icon={Undo2} disabled={!state.undo} onClick={() => chain().undo().run()} />
     <Tool label="Redo" icon={Redo2} disabled={!state.redo} onClick={() => chain().redo().run()} />
     <Gap />

@@ -1,6 +1,7 @@
 // A Claude Code slash-command dialog (/mcp, /config, /resume, /status ...), read from the screen by server/claude_dialog.py.
 // The card drives the real dialog: every tap is one action the server checks against the dialog's own key hints.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { wheelSideways } from './wheelSideways'
 import type { CSSProperties } from 'react'
 import { Search } from 'lucide-react'
 import type { ClaudeDialog, DialogAction, DialogBlock, DialogHint, DialogItem } from './api'
@@ -30,6 +31,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   const hasScale = dialog.blocks.some(block => block.type === 'scale')
   const canType = dialog.hints.some(hint => hint.keys.some(key => key.label === 'Type' || key.key === '/'))
   const tabRow = useRef<HTMLDivElement>(null)
+  const tabRowRef = useCallback((node: HTMLDivElement | null) => { tabRow.current = node; const stop = wheelSideways(node); return () => { tabRow.current = null; stop?.() } }, [])
   useEffect(() => { tabRow.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' }) }, [dialog.tab])
   const list = useRef<HTMLUListElement>(null)
   const current = dialog.blocks.flatMap(block => block.type === 'list' ? block.items : []).find(item => 'selected' in item && item.selected)
@@ -135,7 +137,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
   // On a phone the bottom bar hides while a text box has the focus. A press on a button would move the focus, the bar
   // would return, and the button would move away under the finger. So a press on a button leaves the focus in the box.
   return <div className="dlg-card" onMouseDown={event => { if (document.activeElement instanceof HTMLInputElement && (event.target as Element).closest('button')) event.preventDefault() }}>
-    {dialog.tabs && <div ref={tabRow} className="perm-tabs" role="tablist" aria-label={`${dialog.title} tabs`}>
+    {dialog.tabs && <div ref={tabRowRef} className="perm-tabs" role="tablist" aria-label={`${dialog.title} tabs`}>
       {dialog.tabs.map(tab => <button key={tab} type="button" role="tab" aria-selected={tab === dialog.tab} aria-busy={busy === `tab-${tab}` || undefined} aria-disabled={off || undefined}
         onClick={() => { if (tab !== dialog.tab) void act(`tab-${tab}`, { action: 'tab', tab }) }}>{tab}</button>)}
     </div>}

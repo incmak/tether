@@ -7,6 +7,7 @@ import { errorText } from './api'
 import { ImageViewer, type Media } from './ImageViewer'
 import { backfillThumb, cancelUpload, CHUNK, inspect, listShare, listUploads, putThumb, rawUrl, renameShare, restoreShare, sameFile, shareToChat, textPreview, thumbUrl, trashShare, uploadResumable, uploadShare, type ShareFile, type ShareFilter, type ShareKind, type ShareUpload, type ShareUsage, type Wait } from './shareApi'
 import './Share.css'
+import { wheelSideways } from './wheelSideways'
 
 const PdfView = lazy(() => import('./SharePdfView').then(m => ({ default: m.PdfView })))
 
@@ -369,7 +370,7 @@ export function Share({ wide, onAddToMessage }: { wide: boolean; onAddToMessage?
         <button type="button" className="primary" onClick={() => input.current?.click()}><Plus aria-hidden="true" />Add</button>
         <input ref={input} type="file" multiple hidden onChange={e => { void add(e.target.files); e.target.value = '' }} />
       </header>
-      <nav className="tab-bar sh-views" aria-label="Show">{VIEWS.map(v => <button key={v.id} type="button" aria-pressed={view === v.id} onClick={() => { setView(v.id); setOpenId(null) }}>{v.label}</button>)}</nav>
+      <nav ref={wheelSideways} className="tab-bar sh-views" aria-label="Show">{VIEWS.map(v => <button key={v.id} type="button" aria-pressed={view === v.id} onClick={() => { setView(v.id); setOpenId(null) }}>{v.label}</button>)}</nav>
       <div className="sh-scroll">
         {!hideAgents && view === 'all' && !q && agentDrops.length > 0 && <section className="sh-agents" aria-label="From agents">
           <header><h2 className="sh-day">From agents</h2>

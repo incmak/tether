@@ -19,6 +19,7 @@ import { useHost } from './host'
 import { PasteChip } from './Pasted'
 import { inlinePaste, joinPastes, longPaste, pasteOf } from './pasteText'
 import type { Paste } from './pasteText'
+import { wheelSideways } from './wheelSideways'
 
 
 
@@ -260,7 +261,7 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
       box.setSelectionRange(at, at)
     }
   }
-  return <div className="composer-area">{pane.agent === 'shell' && <div className="shell-key-strip" role="group" aria-label="Terminal keys" onMouseDown={keepFocus}>
+  return <div className="composer-area">{pane.agent === 'shell' && <div ref={wheelSideways} className="shell-key-strip" role="group" aria-label="Terminal keys" onMouseDown={keepFocus}>
     {([['Escape', 'esc', 'Send Escape to terminal'], ['Tab', 'tab', 'Insert tab'], ['C-c', 'ctrl+c', 'Stop command'], ['ArrowUp', '↑', 'Previous command'], ['ArrowDown', '↓', 'Next command'], ['ArrowLeft', '←', 'Move cursor left'], ['ArrowRight', '→', 'Move cursor right']] as const).map(([key, label, title]) => <button key={key} type="button" title={title} aria-label={title} disabled={disabled || sending || listening || transcribing} onClick={() => terminalKey(key)}>{label}</button>)}
   </div>}<Suggestions ref={suggest} api={api} pane={pane} draft={draft} setDraft={setDraft} focus={() => textarea.current?.focus()} run={text => { setDraft(text); void submit(undefined, text, true) }} sendAnyway={() => void submit(undefined, undefined, true)} /><form className={shellMode ? 'composer shell-mode' : 'composer'} ref={form} onSubmit={submit} onMouseDown={keepFocus}>
     {files.length + pastes.length > 0 && <ul className="attachments" aria-label="Attached files and pasted text">{files.map((file, index) => <li key={file.path} className="chip">{file.url ? <button type="button" className="chip-view" aria-label={`View ${file.name}`} onClick={() => setViewing({ name: file.name, url: file.url! })}><img src={file.url} alt="" /><span>{file.name}</span></button> : <><Paperclip size={13} /><span>{file.name}</span></>}<button type="button" aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter((_, at) => at !== index))}><X size={14} /></button></li>)}{pastes.map(paste => <PasteChip key={paste.id} paste={paste} open={openPaste === paste.id} onToggle={() => setOpenPaste(openPaste === paste.id ? null : paste.id)} onEdit={() => { setDraft(inlinePaste(draft, paste)); setPastes(current => current.filter(item => item.id !== paste.id)); setOpenPaste(null); textarea.current?.focus() }} onRemove={() => { setPastes(current => current.filter(item => item.id !== paste.id)); textarea.current?.focus() }} />)}</ul>}

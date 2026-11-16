@@ -81,12 +81,12 @@ assert.ok(feed(createStripWheel(), 1, 40, scene()).every(plan => plan.do === 'bl
 assert.ok(feed(createStripWheel(), 1, 40, scene({ native: true })).every(plan => plan.do === 'pass'))
 
 // 7. A vertical scroll over a strip that overflows scrolls it sideways: down moves right, up moves left. A mouse notch
-// glides; a trackpad's small deltas follow 1:1. Outside the strips (the band too) and over a strip that does not
+// glides (wheelSideways.ts); a trackpad's small deltas follow 1:1. Outside the strips (the band too) and over a strip that does not
 // overflow, it passes. A pinch passes.
 {
   const wheel = createStripWheel()
-  assert.deepEqual({ ...wheel(event(0, 0, 140, { deltaY: 100 }), scene()) }, { do: 'scroll', strip: 1, dx: 100, glide: true })
-  assert.deepEqual({ ...wheel(event(0, 400, 100, { deltaY: -100 }), scene()) }, { do: 'scroll', strip: 0, dx: -100, glide: true })
+  assert.deepEqual({ ...wheel(event(0, 0, 140, { deltaY: 100 }), scene()) }, { do: 'scroll', strip: 1, dx: 100 })
+  assert.deepEqual({ ...wheel(event(0, 400, 100, { deltaY: -100 }), scene()) }, { do: 'scroll', strip: 0, dx: -100 })
   assert.deepEqual({ ...wheel(event(0, 800, 100, { deltaY: 3, deltaMode: 1 }), scene()) }, { do: 'scroll', strip: 0, dx: 48 }, 'Firefox: 3 lines')
   assert.deepEqual({ ...wheel(event(0, 1200, 140, { deltaY: 4, deltaX: 1 }), scene()) }, { do: 'scroll', strip: 1, dx: 4 }, 'trackpad')
   assert.equal(wheel(event(0, 1600, 172, { deltaY: 100 }), scene()).do, 'pass', 'the band below the tab strip')

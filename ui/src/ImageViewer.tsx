@@ -3,6 +3,7 @@ import { ArrowDownToLine, ChevronLeft, ChevronRight, Ellipsis, FolderOpen, X, Zo
 import { useModal } from './hooks'
 import { holdThemeColor } from './schemes'
 import './ImageViewer.css'
+import { wheelSideways } from './wheelSideways'
 
 export type Media = { name: string; url: string; kind?: 'image' | 'video' | 'audio'; error?: string; downloadUrl?: string; thumbnailUrl?: string }
 
@@ -224,7 +225,7 @@ function ViewerContent({ image, close, onShow, onDetails, move, index, total, it
     {total > 1 && <footer className="viewer-footer">
       <nav className="viewer-filmstrip" aria-label="Media navigation">
         <button type="button" className="viewer-button viewer-previous" onClick={() => move(-1)} disabled={index === 0} aria-label="Previous image" title="Previous image"><ChevronLeft size={22} strokeWidth={1.8} /></button>
-        <div className="viewer-thumbnails">{items.slice(Math.max(0, Math.min(index - 2, items.length - 5)), Math.max(5, index + 3)).map(item => <button
+        <div ref={wheelSideways} className="viewer-thumbnails">{items.slice(Math.max(0, Math.min(index - 2, items.length - 5)), Math.max(5, index + 3)).map(item => <button
           type="button" className="viewer-thumbnail" key={item.url} aria-label={`View ${item.name}`} aria-current={item.url === image.url ? 'true' : undefined}
           title={item.name} onClick={() => onSelect?.(item)}><img src={item.thumbnailUrl ?? item.url} alt="" loading="lazy" draggable={false} /></button>)}</div>
         <button type="button" className="viewer-button viewer-next" onClick={() => move(1)} disabled={index === total - 1} aria-label="Next image" title="Next image"><ChevronRight size={22} strokeWidth={1.8} /></button>

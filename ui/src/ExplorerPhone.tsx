@@ -15,6 +15,7 @@ import { OfficeViewer, isOffice } from './OfficeViewer'
 import type { OfficeFile } from './OfficeViewer'
 import { TextViewer } from './TextViewer'
 import type { TextFile } from './TextViewer'
+import { wheelSideways } from './wheelSideways'
 
 // The phone Files screen (slice 4). Layout from ExplorerPhone.dc.html: path chips, a sort cycle, search, Select mode with
 // an action bar, a + sheet, a ⋯ sheet per row and a full-screen preview. Writes use POST /mobile/api/files/* (API.md).
@@ -257,7 +258,7 @@ export function ExplorerPhone({ api, target, onTarget, chatName, onAddToChat, on
         <input type="search" autoFocus value={query} placeholder={`Search in ${folderName}`} enterKeyHint="search" onChange={event => setQuery(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter') { setSearch(query.trim()); event.currentTarget.blur() } }} />
       </label>}
-      <nav className="xp-crumbs" aria-label="Path">
+      <nav ref={wheelSideways} className="xp-crumbs" aria-label="Path">
         {crumbs(cwd).map((crumb, at, all) => at === all.length - 1
           ? <span key={crumb.path} className="xp-chip" aria-current="page">{crumb.label}</span>
           : <button key={crumb.path} type="button" className="xp-chip" onClick={() => go(crumb.path)}>{crumb.label}</button>)}
@@ -498,7 +499,7 @@ function FolderPicker({ api, mode, paths, start, hidden, onClose, onDone }: { ap
       <div className="xp-pick-title"><h2 id="xp-pick-title">{verb} {paths.length === 1 ? baseName(paths[0]) : items(paths.length)}</h2><span>Choose a folder</span></div>
       <button type="button" className="icon-button" aria-label="Close" disabled={busy} onClick={onClose}><X /></button>
     </header>
-    <nav className="xp-crumbs" aria-label="Folder path">
+    <nav ref={wheelSideways} className="xp-crumbs" aria-label="Folder path">
       {crumbs(folder).map((crumb, at, all) => at === all.length - 1 ? <span key={crumb.path} className="xp-chip" aria-current="page">{crumb.label}</span>
         : <button key={crumb.path} type="button" className="xp-chip" disabled={busy} onClick={() => setFolder(crumb.path)}>{crumb.label}</button>)}
     </nav>

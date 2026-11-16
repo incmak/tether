@@ -17,6 +17,7 @@ import { NewItemForm, ProjectForm } from './WorkForms'
 import { BacklogBoardCard, BacklogDrawer } from './WorkBacklog'
 import type { DecisionAnswers } from './WorkItems'
 import './Work.css'
+import { wheelSideways } from './wheelSideways'
 
 // The work page: a Needs you list and the board. The board has one column per stage; a card opens the item's
 // drawer (stage track, question, tabs, Jira flag, links, history). Answers share App's answer state, so a result
@@ -156,14 +157,14 @@ export function WorkSheet({ api, board, error, panes, answers, onRefresh, onOpen
   return <dialog {...modal} className="sheet work-sheet" aria-labelledby="work-title">
     <div className="sheet-heading work-head">
       <h2 id="work-title">Work</h2>
-      <div className="tab-bar work-views" role="group" aria-label="View">
+      <div ref={wheelSideways} className="tab-bar work-views" role="group" aria-label="View">
         <button type="button" aria-pressed={view === 'needs'} onClick={() => setView('needs')}>Needs you{asking > 0 && <span className="badge accent">{asking}</span>}</button>
         <button type="button" aria-pressed={view === 'board'} onClick={() => setView('board')}>Board</button>
       </div>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
     </div>
     {board && <div className="work-filters">
-      <div className="tab-bar work-projects" role="group" aria-label="Project">
+      <div ref={wheelSideways} className="tab-bar work-projects" role="group" aria-label="Project">
         {projects.length + (hasBacklog ? 1 : 0) > 1 && <>
         <button type="button" aria-pressed={project === 'all'} onClick={() => setProject('all')}>All projects</button>
         {projects.map(entry => {

@@ -239,6 +239,46 @@ async function main() {
       assert.equal(await page.locator('[data-item="T-001"]').count(), 1)
       await context.close()
     })
+    // wheelSideways.ts: a vertical wheel over a strip of controls scrolls it sideways; a sideways swipe stays native;
+    // a run that starts elsewhere keeps scrolling there. The view switch is narrowed so it overflows.
+    await check('a mouse wheel over the view switch scrolls it sideways', async () => {
+      const { context, page } = await open(browser, { width: 1280, height: 900 })
+      const strip = page.locator('.work-views')
+      await strip.evaluate(el => {
+        el.style.maxWidth = '120px'
+        window.__wheels = []
+        addEventListener('wheel', event => window.__wheels.push(event.defaultPrevented), { passive: true })
+      })
+      const box = await strip.boundingBox(), at = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+      const left = () => strip.evaluate(el => el.scrollLeft)
+      const wheels = async (moves, settle = 700) => {
+        await page.evaluate(() => { window.__wheels = [] })
+        for (const [x, y, dx, dy] of moves) { await page.mouse.move(x, y); await page.mouse.wheel(dx, dy) }
+        await page.waitForTimeout(settle)
+        return page.evaluate(() => window.__wheels)
+      }
+      assert.ok(await strip.evaluate(el => el.scrollWidth > el.clientWidth + 20), 'the narrowed switch overflows')
+      let seen = await wheels([[at.x, at.y, 0, 100], [at.x, at.y, 0, 100]])
+      assert.ok(seen.length === 2 && seen.every(Boolean), `cancelled: ${JSON.stringify(seen)}`)
+      const right = await left()
+      assert.ok(right > 20, `down scrolls right: ${right}`)
+      await wheels([[at.x, at.y, 0, -100]])
+      assert.ok(await left() < right, 'up scrolls back left')
+      await strip.evaluate(el => { el.scrollLeft = 0 })
+      seen = await wheels([[at.x, at.y, 30, 0]], 300)
+      assert.ok(seen.length === 1 && !seen[0], 'a sideways swipe is the browser’s own scroll')
+      // A run that starts on the board, then reaches the switch less than QUIET_MS later, is not taken.
+      await strip.evaluate(el => { el.scrollLeft = 0 })
+      seen = await wheels([[at.x, at.y + 300, 0, 100], [at.x, at.y, 0, 100]])
+      assert.ok(seen.length === 2 && seen.every(value => !value) && await left() === 0, `latched to the board: ${JSON.stringify(seen)}`)
+      // Without overflow the wheel passes.
+      await strip.evaluate(el => { el.style.maxWidth = '' })
+      if (await strip.evaluate(el => el.scrollWidth <= el.clientWidth)) {
+        seen = await wheels([[at.x, at.y, 0, 100]], 300)
+        assert.ok(seen.length === 1 && !seen[0], 'no overflow: passes')
+      }
+      await context.close()
+    })
     for (const width of [320, 400, 768, 1024, 1280]) {
       await check(`no page overflow at ${width}px`, async () => {
         const { context, page } = await open(browser, { width, height: 860 })

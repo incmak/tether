@@ -12,6 +12,7 @@ import { MacPairing } from './MacPairing'
 import { openLive } from './liveStream'
 import type { LiveStream } from './liveStream'
 import './BrowserPanel.css'
+import { wheelSideways } from './wheelSideways'
 
 // Same shape as PanelProps in src/panels.ts (frame lane); kept here until the lanes merge.
 // onPopOut: show a button that moves the panel into its own window (BrowserWindow.tsx).
@@ -844,12 +845,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
 
   // Your Chrome opens tabs only through Allow, so an empty Chrome view is the pairing card.
   if (which === 'chrome' && !tabs.length) return <div className="browser-panel">
-    <div className="browser-tabs" role="toolbar" aria-label="Browser">{switcher}</div>
+    <div ref={wheelSideways} className="browser-tabs" role="toolbar" aria-label="Browser">{switcher}</div>
     <MacPairing api={baseApi} connected={!!browsers.find(row => row.id === 'chrome')?.available} />
   </div>
 
   return <div className={`browser-panel${which === 'signed' ? ' browser-signed' : ''}`} onKeyDown={event => { if (noting && event.key === 'Escape' && !event.defaultPrevented) stopNotes() }}>
-    <div className="browser-tabs" role="tablist" aria-label="Browser tabs">
+    <div ref={wheelSideways} className="browser-tabs" role="tablist" aria-label="Browser tabs">
       {switcher}
       <div className="browser-tab-strip">{tabs.map(item => {
         const name = tabName(item)

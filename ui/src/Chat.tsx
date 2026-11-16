@@ -41,6 +41,7 @@ import type { ToolSummary } from './api'
 import { StatusStack } from './StatusStack'
 import { PaneTabs, movePill } from './PaneTabs'
 import { HEADER, PARENTS, SKIP, STRIPS, boxOf, createStripWheel, scrollsItself } from './stripScroll'
+import { scrollSideways } from './wheelSideways'
 import { WorktreeMark } from './Worktree'
 import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
@@ -460,9 +461,6 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (!panel) return
     const desk = matchMedia(WORKSPACE_QUERY)
     const decide = createStripWheel(headerSwipe)
-    // A run of wheel notches glides to one target: each notch adds to where the last one was going, not to where the
-    // strip is mid-animation.
-    let glide: { strip: Element; left: number; at: number } | null = null
     const wheel = (event: WheelEvent) => {
       const target = event.target as Element | null
       if (!desk.matches || target?.closest(SKIP)) return
@@ -471,12 +469,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       if (plan.do === 'pass' || !event.cancelable) return
       event.preventDefault()
       const strip = plan.do === 'scroll' ? strips[plan.strip] : undefined
-      if (!strip || plan.do !== 'scroll') return
-      if (!plan.glide || reduceMotion()) { glide = null; strip.scrollBy({ left: plan.dx, behavior: 'instant' }); return }
-      const from = glide && glide.strip === strip && event.timeStamp - glide.at < 400 ? glide.left : strip.scrollLeft
-      const left = Math.max(0, Math.min(strip.scrollWidth - strip.clientWidth, from + plan.dx))
-      glide = { strip, left, at: event.timeStamp }
-      strip.scrollTo({ left, behavior: 'smooth' })
+      if (strip && plan.do === 'scroll') scrollSideways(strip, plan.dx, event.timeStamp)
     }
     let zone: Element[] = []
     const attach = () => {

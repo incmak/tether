@@ -39,9 +39,10 @@ export interface StripBox { top: number; bottom: number; left: number; right: nu
  * strip or any other horizontal scroller). */
 export interface Scene { strips: StripBox[]; native: boolean }
 /** pass: let the browser have it. block: preventDefault. scroll: preventDefault and scroll strips[strip] by dx (when
- * the event can be cancelled: else the browser scrolls too). glide: one mouse-wheel notch; animate it, do not jump. */
-export type Plan = { do: 'pass' } | { do: 'block' } | { do: 'scroll'; strip: number; dx: number; glide?: boolean }
-/** A delta this large in one event is a mouse-wheel notch (Chromium: 100 px; Firefox: 3 lines), not a trackpad. */
+ * the event can be cancelled: else the browser scrolls too). */
+export type Plan = { do: 'pass' } | { do: 'block' } | { do: 'scroll'; strip: number; dx: number }
+/** A delta this large in one event is a mouse-wheel notch (Chromium: 100 px; Firefox: 3 lines), not a trackpad: it
+ * glides (wheelSideways.ts). */
 export const NOTCH = 50
 
 /** The strip whose rect, grown by BAND on each side, holds the point; the nearer one by y when two zones overlap. */
@@ -72,7 +73,7 @@ export function createStripWheel(swipe = true) {
     const dx = event.deltaX * scale, dy = event.deltaY * scale
     const fresh = event.timeStamp - last > QUIET_MS
     last = event.timeStamp
-    if (!fresh && held) return held.do === 'scroll' ? vertical ? along(held.strip, Math.abs(dx) > Math.abs(dy) ? dx : dy) : { ...held, dx } : held
+    if (!fresh && held) return held.do === 'scroll' ? { ...held, dx: vertical && Math.abs(dy) >= Math.abs(dx) ? dy : dx } : held
     vertical = false
     if (Math.abs(dx) <= Math.abs(dy)) {
       // A vertical scroll: over a strip that overflows it scrolls the strip sideways; elsewhere it passes, all of it
@@ -81,7 +82,7 @@ export function createStripWheel(swipe = true) {
       const strips = look(0).strips
       const strip = strips.findIndex(box => box.bottom > box.top && event.clientY >= box.top && event.clientY <= box.bottom && event.clientX >= box.left && event.clientX <= box.right)
       vertical = strip >= 0 && strips[strip].scrollWidth - strips[strip].clientWidth > 0.5
-      held = vertical ? along(strip, dy) : { do: 'pass' }
+      held = vertical ? { do: 'scroll', strip, dx: dy } : { do: 'pass' }
       return held
     }
     if (!swipe) { held = { do: 'pass' }; return held }
@@ -93,10 +94,6 @@ export function createStripWheel(swipe = true) {
     else held = { do: 'block' }
     return held
   }
-}
-
-function along(strip: number, dy: number): Plan {
-  return Math.abs(dy) >= NOTCH ? { do: 'scroll', strip, dx: dy, glide: true } : { do: 'scroll', strip, dx: dy }
 }
 
 /** Can an ancestor of target, up to and with stop, scroll by dx on its own? */

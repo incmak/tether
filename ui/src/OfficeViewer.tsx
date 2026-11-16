@@ -5,6 +5,7 @@ import type { WorkBook } from 'xlsx'
 import { errorText, NetworkError, reach, request } from './api'
 import { useModal } from './hooks'
 import { useHost, useOfficeEditing } from './host'
+import { wheelSideways } from './wheelSideways'
 
 export type OfficeFile = { path: string; url: string }
 /** Office files Tether shows in its own viewer: spreadsheets, Word documents and slide decks. */
@@ -184,7 +185,7 @@ function Sheets({ book, name }: { book: WorkBook; name: string }) {
   }, [book, index])
   const shown = table?.index === index ? table : null
   return <>
-    {book.SheetNames.length > 1 && <div className="office-tabs" role="tablist" aria-label="Sheets">
+    {book.SheetNames.length > 1 && <div ref={wheelSideways} className="office-tabs" role="tablist" aria-label="Sheets">
       {book.SheetNames.map((sheet, at) => <button key={at} type="button" role="tab" aria-selected={at === index} onClick={() => setChosen(at)}>{sheet}</button>)}
     </div>}
     <div className="text-viewer-body office-sheet" tabIndex={0} role={book.SheetNames.length > 1 ? 'tabpanel' : undefined} aria-label={`${book.SheetNames[index]} in ${name}`}>

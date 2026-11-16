@@ -20,6 +20,7 @@ import type { OfficeFile } from './OfficeViewer'
 import { baseName, crumbs, filesUrl, formatModified, formatSize, fullDate, gitText, joinPath, kindLabel, parentOf, readSecrets, shapeOf } from './files'
 import type { FileEntry, FileList, FilePreview, FileSearch, FileStat, PlacesData, SecretsState, Shape, SortKey, ViewMode } from './files'
 import './Explorer.css'
+import { wheelSideways } from './wheelSideways'
 
 const MENU_ICONS = { open: FolderOpen, add: AtSign, terminal: SquareTerminal, rename: Pencil, duplicate: CopyPlus, copyTo: Copy, moveTo: FolderInput, copyPath: Copy, pin: BookMarked, download: Download, trash: Trash2 }
 
@@ -501,7 +502,7 @@ export function Explorer({ api, panes, pane, target, onTarget, onAddToMessage, o
       onDrop={event => { if (!canUpload || !event.dataTransfer.files.length) return; event.preventDefault(); setDropping(false); upload([...event.dataTransfer.files]) }}>
       {dropping && <div className="fx-drop" aria-hidden="true"><Upload size={22} />Drop to upload to {folderName}</div>}
       <input ref={uploadInput} type="file" multiple hidden onChange={event => { upload([...event.target.files ?? []]); event.target.value = '' }} />
-      <div className="fx-tabs" role="tablist" aria-label="Folder tabs">
+      <div ref={wheelSideways} className="fx-tabs" role="tablist" aria-label="Folder tabs">
         {tabs.map((item, at) => <div key={item.id} className="fx-tab" data-on={at === active || undefined}>
           <button type="button" role="tab" aria-selected={at === active} className="fx-tab-label" title={item.path} onClick={() => pickTab(at)}>{baseName(item.path)}</button>
           {tabs.length > 1 && <button type="button" className="fx-ib fx-tab-close" aria-label={`Close tab ${baseName(item.path)}`} onClick={() => closeTab(at)}><X size={12} strokeWidth={2.4} /></button>}

@@ -6,6 +6,7 @@ import { baseName, crumbs, filesUrl, joinPath, parentOf } from './files'
 import type { FileList, PlacesData } from './files'
 import type { MainModel } from './prefs'
 import { Spinner } from './Skeleton'
+import { wheelSideways } from './wheelSideways'
 
 // Fields shared by the New tab, New stack and New session popovers (NewTask.tsx): a name with suggestions, and a folder.
 
@@ -132,12 +133,12 @@ function FolderBrowser({ id, api, start, onPick }: { id: string; api: Api; start
         if (typedPath) enter(filter.trim().replace(/\/+$/, '') || '/')
         else if (matches.length === 1) enter(joinPath(folder, matches[0]))
       }} />
-    {!filter && recent.length > 0 && <div className="create-recent" role="group" aria-label="Recent folders">
+    {!filter && recent.length > 0 && <div ref={wheelSideways} className="create-recent" role="group" aria-label="Recent folders">
       {recent.map(path => <button type="button" key={path} title={path} onClick={() => onPick(path)}>{baseName(path)}</button>)}
     </div>}
     <div className="create-crumbs">
       <button type="button" className="icon-button" aria-label="Parent folder" disabled={!parentOf(folder)} onClick={() => { const up = parentOf(folder); if (up) enter(up) }}><ArrowUp size={15} /></button>
-      <nav aria-label="Folder path">{crumbs(folder).map((crumb, at, all) => <span key={crumb.path}>
+      <nav ref={wheelSideways} aria-label="Folder path">{crumbs(folder).map((crumb, at, all) => <span key={crumb.path}>
         {at > 0 && <span className="create-sep" aria-hidden="true">/</span>}
         {at === all.length - 1 ? <span aria-current="location">{crumb.label}</span> : <button type="button" onClick={() => enter(crumb.path)}>{crumb.label}</button>}
       </span>)}</nav>
