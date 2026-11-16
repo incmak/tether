@@ -24,6 +24,7 @@ import secrets
 import shutil
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import zlib
@@ -61,6 +62,7 @@ SERVED = ('manifest.webmanifest', 'index.html') + ICON_FILES
 # the centre, inside Android's 0.40 safe circle.
 BADGE, RING, BADGE_END = 112, 6, 404
 _lock = threading.Lock()
+_store = threading.RLock()  # one change at a time to app-identity.json and the icon files
 _cache = {}  # key -> bytes
 _jobs = {}  # job id -> {'state': 'running'|'done'|'failed', 'error'?}
 
@@ -118,14 +120,24 @@ def clean_name(value):
 
 def _write(target, data):
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(target.name + '.tmp')
-    temporary.write_bytes(data)
-    os.replace(temporary, target)
+    descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix='.' + target.name + '.')
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            stream.write(data)
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def save(body):
     if not isinstance(body, dict):
         raise Bad('Send a JSON object.')
+    with _store:
+        return _save(body)
+
+
+def _save(body):
     current = load()
     name = clean_name(body['name']) if 'name' in body else current['name']
     color = body.get('color', current['color'])
@@ -134,13 +146,17 @@ def save(body):
     icon = body.get('icon', current['icon'])
     if icon not in ('color', 'custom'):
         raise Bad('Choose a colour icon or your own icon.')
-    if body.get('useDraft') is True:
+    if body.get('useDraft') is True or body.get('discardDraft') is True:
+        # The draft the page showed: another page or the AI job may have replaced it since.
         if not _draft().is_file():
-            raise Bad('Make or upload an icon first.')
-        os.replace(_draft(), _art())
-        icon = 'custom'
-    elif body.get('discardDraft') is True:
-        _draft().unlink(missing_ok=True)
+            raise Bad('Make or upload an icon first.', 409)
+        if body.get('draft') != _stamp(_draft()):
+            raise Bad('The picture changed on another device. Check the new one first.', 409)
+        if body.get('useDraft') is True:
+            os.replace(_draft(), _art())
+            icon = 'custom'
+        else:
+            _draft().unlink()
     if icon == 'custom' and not _art().is_file():
         raise Bad('Make or upload an icon first.')
     _write(_file(), json.dumps({'name': name, 'color': color, 'icon': icon}).encode())
@@ -172,7 +188,9 @@ def _icon_prompt(prompt):
 def _run_job(ident, prompt):
     try:
         data = backgrounds.codex_image(_icon_prompt(prompt), time.monotonic() + TIMEOUT, 'tether-app-icon-')
-        _write(_draft(), encode_png(SIDE, SIDE, square_art(data), 6))
+        image = encode_png(SIDE, SIDE, square_art(data), 6)
+        with _store:
+            _write(_draft(), image)
         result = {'state': 'done'}
     except subprocess.TimeoutExpired:
         result = {'state': 'failed', 'error': 'The icon took too long. Please try again.'}
@@ -206,8 +224,10 @@ def generate(body):
 def upload(data, kind):
     if kind not in ('image/png', 'image/jpeg', 'image/webp'):
         raise Bad('Choose a PNG, JPEG or WebP image.', 415)
-    _write(_draft(), encode_png(SIDE, SIDE, square_art(data), 6))
-    return state()
+    image = encode_png(SIDE, SIDE, square_art(data), 6)
+    with _store:
+        _write(_draft(), image)
+        return state()
 
 
 # ---- HTTP ----
@@ -386,11 +406,16 @@ def _decode(data):
     if header is None:
         raise ValueError('not a PNG')
     width, height, depth, kind, _, _, interlace = header
-    if depth != 8 or kind not in CHANNELS or interlace or width * height > 4096 * 4096:
+    if depth != 8 or kind not in CHANNELS or interlace or not 0 < width <= 4096 or not 0 < height <= 4096:
         raise ValueError('unsupported PNG')
     channels = CHANNELS[kind]
-    stream = zlib.decompress(b''.join(raw))
     stride = width * channels
+    # Read no more than the image needs, so a small file cannot expand to gigabytes.
+    expected = (stride + 1) * height
+    inflater = zlib.decompressobj()
+    stream = inflater.decompress(b''.join(raw), expected + 1)
+    if len(stream) != expected:
+        raise ValueError('PNG data does not match its size')
     rows, previous, offset = [], bytearray(stride), 0
     for _ in range(height):
         method = stream[offset]
@@ -421,6 +446,8 @@ def decode_rgba(data):
     width, height, kind, channels, rows, palette, alpha = _decode(data)
     out = bytearray(width * height * 4)
     at = 0
+    # tRNS for grey and RGB names one colour, as 16-bit samples, that is fully transparent.
+    key = tuple(alpha[index + 1] for index in range(0, len(alpha), 2)) if kind in (0, 2) and alpha else None
     for line in rows:
         if kind == 6:
             out[at:at + width * 4] = line
@@ -428,9 +455,10 @@ def decode_rgba(data):
             continue
         for i in range(0, len(line), channels):
             if kind == 2:
-                pixel = (line[i], line[i + 1], line[i + 2], 255)
+                rgb = (line[i], line[i + 1], line[i + 2])
+                pixel = (*rgb, 0 if rgb == key else 255)
             elif kind == 0:
-                pixel = (line[i], line[i], line[i], 255)
+                pixel = (line[i], line[i], line[i], 0 if (line[i],) == key else 255)
             elif kind == 4:
                 pixel = (line[i], line[i], line[i], line[i + 1])
             else:

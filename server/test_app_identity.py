@@ -105,15 +105,15 @@ class CustomIconTest(unittest.TestCase):
         self.photo = app_identity.encode_png(width, height, pixels)
 
     def use_photo(self):
-        app_identity.upload(self.photo, 'image/png')
-        return app_identity.save({'useDraft': True})
+        draft = app_identity.upload(self.photo, 'image/png')['draft']
+        return app_identity.save({'useDraft': True, 'draft': draft})
 
     def test_upload_makes_draft_then_use_makes_custom(self):
         state = app_identity.upload(self.photo, 'image/png')
         self.assertTrue(state['draft'])
         self.assertEqual(state['icon'], 'color')  # a draft does not change the installed icon
         self.assertIsNone(app_identity.serve('icon-512.png', PUBLIC / 'icon-512.png'))
-        state = app_identity.save({'useDraft': True})
+        state = app_identity.save({'useDraft': True, 'draft': state['draft']})
         self.assertEqual((state['icon'], state['draft']), ('custom', None))
         width, height, art = app_identity.decode_rgba(app_identity._art().read_bytes())
         self.assertEqual((width, height), (512, 512))
@@ -164,8 +164,42 @@ class CustomIconTest(unittest.TestCase):
             self.assertEqual(app_identity.upload(self.photo, 'image/png')['icon'], 'color')  # pure-Python path
 
     def test_discard_draft(self):
-        app_identity.upload(self.photo, 'image/png')
-        self.assertIsNone(app_identity.save({'discardDraft': True})['draft'])
+        draft = app_identity.upload(self.photo, 'image/png')['draft']
+        self.assertIsNone(app_identity.save({'discardDraft': True, 'draft': draft})['draft'])
+
+    def test_use_refuses_a_draft_the_page_did_not_show(self):
+        shown = app_identity.upload(self.photo, 'image/png')['draft']
+        stamp = app_identity._draft().stat().st_mtime_ns + 10**9
+        os.utime(app_identity._draft(), ns=(stamp, stamp))  # another device replaced the draft
+        for body in ({'useDraft': True, 'draft': shown}, {'discardDraft': True, 'draft': shown}, {'useDraft': True}):
+            with self.subTest(body=body), self.assertRaises(app_identity.Bad) as refused:
+                app_identity.save(body)
+            self.assertEqual(refused.exception.status, 409)
+        self.assertEqual(app_identity.load()['icon'], 'color')
+        self.assertTrue(app_identity._draft().is_file())
+        self.assertEqual(sorted(path.name for path in app_identity._folder().iterdir()), ['draft.png'])  # no temporary files
+
+    def test_decoder_refuses_a_decompression_bomb(self):
+        header = app_identity._chunk(b'IHDR', app_identity.struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0))
+        body = app_identity._chunk(b'IDAT', app_identity.zlib.compress(bytes(16 * 1024 * 1024), 9))
+        bomb = b'\x89PNG\r\n\x1a\n' + header + body + app_identity._chunk(b'IEND', b'')
+        with self.assertRaises(ValueError):
+            app_identity.decode_rgba(bomb)
+        with mock.patch.object(app_identity.shutil, 'which', return_value=None), self.assertRaises(app_identity.Bad):
+            app_identity.upload(bomb, 'image/png')
+        zero = b'\x89PNG\r\n\x1a\n' + app_identity._chunk(b'IHDR', app_identity.struct.pack('>IIBBBBB', 0, 1, 8, 6, 0, 0, 0))
+        with self.assertRaises(ValueError):
+            app_identity.decode_rgba(zero + app_identity._chunk(b'IEND', b''))
+
+    def test_rgb_and_grey_transparency_key(self):
+        def png(kind, rows, key):
+            header = app_identity._chunk(b'IHDR', app_identity.struct.pack('>IIBBBBB', 2, 1, 8, kind, 0, 0, 0))
+            data = app_identity._chunk(b'IDAT', app_identity.zlib.compress(b'\x00' + bytes(rows)))
+            return b'\x89PNG\r\n\x1a\n' + header + app_identity._chunk(b'tRNS', key) + data + app_identity._chunk(b'IEND', b'')
+        rgb = app_identity.decode_rgba(png(2, (0, 0, 0, 9, 9, 9), b'\x00\x00\x00\x00\x00\x00'))[2]
+        self.assertEqual((rgb[3], rgb[7]), (0, 255))
+        grey = app_identity.decode_rgba(png(0, (0, 9), b'\x00\x09'))[2]
+        self.assertEqual((grey[3], grey[7]), (255, 0))
 
     def test_generate_runs_one_job_and_saves_a_draft(self):
         with mock.patch.object(app_identity.backgrounds, 'codex_image', return_value=self.photo) as run, \

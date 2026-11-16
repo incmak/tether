@@ -44,6 +44,8 @@ export function AppIdentitySettings({ api }: { api: Api }) {
   const [notice, setNotice] = useState('')
   const picker = useRef<HTMLInputElement>(null)
   const polling = useRef<AbortController | null>(null)
+  // Aborts when Settings closes, so no request or poll starts after that.
+  const life = useRef(new AbortController())
 
   function take(data: Identity, keepChoices = false) {
     setSaved(data)
@@ -52,7 +54,9 @@ export function AppIdentitySettings({ api }: { api: Api }) {
 
   async function follow(job: string) {
     polling.current?.abort()
+    if (life.current.signal.aborted) return
     const controller = new AbortController()
+    life.current.signal.addEventListener('abort', () => controller.abort(), { once: true })
     polling.current = controller
     const stop = AbortSignal.any([controller.signal, AbortSignal.timeout(JOB_LIMIT)])
     setMaking('ai'); setArtError('')
@@ -71,13 +75,15 @@ export function AppIdentitySettings({ api }: { api: Api }) {
   }
 
   useEffect(() => {
+    if (life.current.signal.aborted) life.current = new AbortController()  // React may mount twice in development
+    const lifetime = life.current
     const controller = new AbortController()
     void api<Identity>('app-identity', undefined, controller.signal).then(data => {
       if (controller.signal.aborted) return
       take(data)
       if (data.job) void follow(data.job)
     }, failure => { if (!controller.signal.aborted) setError(errorText(failure)) }).finally(() => { if (!controller.signal.aborted) setPending(false) })
-    return () => { controller.abort(); polling.current?.abort() }
+    return () => { controller.abort(); lifetime.abort() }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per api; follow() reads only stable values
   }, [api])
 
@@ -105,29 +111,36 @@ export function AppIdentitySettings({ api }: { api: Api }) {
     if (!text) { setArtError('Describe the picture first.'); return }
     setMaking('ai'); setArtError(''); setNotice('')
     try {
-      const { job } = await api<{ job: string }>('app-identity/generate', { prompt: text })
+      const { job } = await api<{ job: string }>('app-identity/generate', { prompt: text }, life.current.signal)
       await follow(job)
-    } catch (failure) { setArtError(errorText(failure)); setMaking('') }
+    } catch (failure) { if (!life.current.signal.aborted) { setArtError(errorText(failure)); setMaking('') } }
   }
 
   async function upload(file: File | undefined) {
     if (!file) return
     if (file.size > 12 * 1024 * 1024) { setArtError('Choose an image of 12 MB or less.'); return }
     setMaking('upload'); setArtError(''); setNotice('')
-    try { take(await api<Identity>('app-identity/upload', file, undefined, undefined, 60000), true) }
-    catch (failure) { setArtError(errorText(failure)) } finally { setMaking('') }
+    try { take(await api<Identity>('app-identity/upload', file, life.current.signal, undefined, 60000), true) }
+    catch (failure) { if (!life.current.signal.aborted) setArtError(errorText(failure)) } finally { if (!life.current.signal.aborted) setMaking('') }
   }
 
   async function decide(useDraft: boolean) {
+    const draft = saved?.draft
+    if (!draft) return
     setMaking('upload'); setArtError(''); setNotice('')
     try {
-      const data = await api<Identity>('app-identity', useDraft ? { useDraft: true } : { discardDraft: true })
+      // The draft revision this page shows: the server refuses with 409 if another device replaced it.
+      const data = await api<Identity>('app-identity', useDraft ? { useDraft: true, draft } : { discardDraft: true, draft })
       setSaved(data)
       if (useDraft) {
         setIcon('custom')
         setNotice('Your picture is now the app icon. A new install uses it. An installed app changes within about a day, after you close it.')
       }
-    } catch (failure) { setArtError(errorText(failure)) } finally { setMaking('') }
+    } catch (failure) {
+      setArtError(errorText(failure))
+      // Show the draft that is there now.
+      void api<Identity>('app-identity').then(data => take(data, true), () => {})
+    } finally { setMaking('') }
   }
 
   return <section className="settings-group" aria-labelledby="settings-app-identity"><h3 id="settings-app-identity">Installed app</h3>
