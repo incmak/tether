@@ -1,0 +1,75 @@
+"""DELETE /mobile/api/session: a close names the chat the page saw, and a tab that now holds another chat stays open."""
+import contextlib
+import io
+import json
+import subprocess
+import unittest
+from unittest.mock import Mock, patch
+
+import server
+
+
+class CloseTabTest(unittest.TestCase):
+    def setUp(self):
+        self.killed = []
+        self.listed = [{'id': '%1', 'thread': 'chat-a'}, {'id': '%2', 'thread': None}]
+
+    def run_tmux(self, argv, **_):
+        if argv[1] == 'list-panes':
+            return subprocess.CompletedProcess(argv, 0, '%1\n%2\n', '')
+        if argv[1] == 'kill-pane':
+            self.killed.append(argv[-1])
+        return subprocess.CompletedProcess(argv, 0, '', '')
+
+    def close(self, payload):
+        handler = object.__new__(server.Handler)
+        handler.command, handler.path = 'DELETE', '/mobile/api/session'
+        encoded = json.dumps(payload).encode()
+        handler.rfile, handler.wfile = io.BytesIO(encoded), io.BytesIO()
+        handler.headers = {'Host': 'phone.test', 'Origin': 'http://phone.test', 'X-Codex-Mobile': '1',
+                           'Content-Length': str(len(encoded))}
+        handler.deny = Mock(return_value=False)
+        handler.respond = Mock()
+        with patch.object(server.subprocess, 'run', self.run_tmux), \
+                patch.object(server, 'sessions', lambda: self.listed), \
+                patch.object(server, 'forget_sessions') as forget, \
+                patch.object(server.undo, 'capture_safe', return_value=None), \
+                patch.object(server.undo, 'record_tab_close'), \
+                patch.object(server.auto_resume, 'forget_pane'), \
+                patch.object(server.groups, 'closing', lambda pane: contextlib.nullcontext()):
+            handler._delete_plain()
+        return handler.respond.call_args.args, forget
+
+    def test_close_with_the_same_chat_kills_the_pane(self):
+        (status, body), forget = self.close({'pane': '%1', 'thread': 'chat-a'})
+        self.assertEqual((status, body), (200, {'closed': '%1'}))
+        self.assertEqual(self.killed, ['%1'])
+        forget.assert_called()  # a fresh look, not the one-second cache
+
+    def test_close_of_a_tab_that_now_holds_another_chat_is_refused(self):
+        (status, body), _ = self.close({'pane': '%1', 'thread': 'chat-old'})
+        self.assertEqual(status, 409)
+        self.assertIn('another chat', body['error'])
+        self.assertEqual(self.killed, [])
+
+    def test_shell_without_a_chat_closes_and_a_new_chat_in_it_is_refused(self):
+        self.assertEqual(self.close({'pane': '%2', 'thread': None})[0][0], 200)
+        self.listed[1]['thread'] = 'chat-new'
+        self.killed.clear()
+        self.assertEqual(self.close({'pane': '%2', 'thread': ''})[0][0], 409)
+        self.assertEqual(self.killed, [])
+
+    def test_tab_missing_from_the_listing_is_refused_when_a_chat_is_named(self):
+        self.listed = []
+        self.assertEqual(self.close({'pane': '%1', 'thread': 'chat-a'})[0][0], 409)
+        self.assertEqual(self.killed, [])
+
+    def test_close_without_a_thread_keeps_the_old_behavior(self):
+        (status, _), forget = self.close({'pane': '%1'})
+        self.assertEqual(status, 200)
+        forget.assert_not_called()
+        self.assertEqual(self.killed, ['%1'])
+
+
+if __name__ == '__main__':
+    unittest.main()

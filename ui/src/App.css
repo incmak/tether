@@ -2017,3 +2017,27 @@ button.live-chip:active { background: var(--line); }
 .undo-row-text small { color: var(--muted); font-size: 12px; }
 .undo-row-text .undo-why { color: var(--error); }
 .undo-list button { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; }
+/* × close on each tab (PaneTabs) and each chat row (Sidebar): the tab menu's close question, not a second path.
+   Pointer: the × shows on hover, on keyboard focus of its tab, and always on the open tab. Touch: on the open tab
+   in the strip, on every row in the sidebar. The target is 24x24 or larger (WCAG 2.2 2.5.8). */
+.pane-tabs.closable [role=tab] { padding-right: 30px; }
+@media (hover: none) { .pane-tabs.closable [role=tab]:not(.active) { padding-right: 12px; } }
+.pane-tabs.closable button.tab-close { position: relative; z-index: 2; flex: none; display: grid; place-items: center; width: 24px; height: 24px; min-height: 24px; align-self: center; margin: 0 2px 0 -30px; padding: 0; border: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); background: transparent; opacity: 0; pointer-events: none; transition: opacity .12s, background-color .12s; }
+/* The desk's .workspace .pane-tabs button rules must not win over these, or the × flickers under the pointer. */
+.workspace .pane-tabs.closable button.tab-close { min-height: 24px; padding: 0; }
+.pane-tabs.closable :is([role=tab]:hover + button.tab-close, [role=tab]:focus-visible + button.tab-close, button.tab-close:hover, button.tab-close:focus-visible, button.tab-close.current) { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .pane-tabs.closable button.tab-close:not(.current) { display: none; } }
+.pane-tabs.closable button.tab-close:hover { background: var(--hover); color: var(--text); }
+.pane-tabs.closable button.tab-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-tabs:has(.dragging) .tab-close { visibility: hidden; }
+/* A chosen tab or row (Ctrl/Cmd+click, Shift+click, or Select on touch). */
+.pane-tabs button.picked, .pane-tabs.has-pill button.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--text); }
+.pane-children button.picked, .session-main.picked { background: color-mix(in srgb, var(--accent) 14%, transparent); box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent); color: var(--text); }
+.pane-children li.pane-row { display: flex; align-items: center; }
+.pane-children li.pane-row > button:first-child { flex: 1; min-width: 0; }
+.session-groups button.row-close { flex: none; display: grid; place-items: center; width: var(--control-sm); height: var(--control-sm); min-height: 0; margin: 0 4px 0 2px; padding: 0; border-radius: var(--radius-sm, 6px); color: var(--muted); }
+.session-groups button.row-close:hover { background: var(--hover); color: var(--text); }
+.session-groups button.row-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { .session-groups :is(li.pane-row, .session-row):not(:hover, :focus-within) > .row-close { opacity: 0; } }
+.pane-tabs .visually-hidden, .session-groups .pane-children .visually-hidden, .session-main .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .pane-tabs button.tab-close { transition: none; } }

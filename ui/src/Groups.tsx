@@ -254,26 +254,40 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
 }
 
 /** Name a new stack that `pane` moves into (the tab menu's "New stack with this tab"). */
-export function NewGroup({ api, session, pane, mainModel, onClose, onDone }: { api: Api; session: Session; pane: Pane; mainModel?: MainModel; onClose: () => void; onDone: () => void }) {
+/** "New stack with this tab" (or with the selected tabs): make the stack with the first tab, then move the others in. */
+export function NewGroup({ api, session, panes, mainModel, onClose, onDone }: { api: Api; session: Session; panes: Pane[]; mainModel?: MainModel; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
   const [tried, setTried] = useState(false)
-  const problem = groupNameError(name, session.groups)
+  // After a failed move, the stack exists and some tabs moved: a retry moves only the rest.
+  const [made, setMade] = useState<{ group: string; moved: string[] } | null>(null)
+  const problem = made ? undefined : groupNameError(name, session.groups)
   async function create(event: React.FormEvent) {
     event.preventDefault(); setTried(true)
     if (problem) return
     setPending(true); setError('')
-    try { await api('groups/create', { session: session.id, name: name.trim(), pane: pane.id }); onDone() }
-    catch (failure) { setError(errorText(failure)); setPending(false) }
+    let state = made
+    try {
+      if (!state) {
+        const created = await api<{ group: GroupInfo }>('groups/create', { session: session.id, name: name.trim(), pane: panes[0].id })
+        state = { group: created.group.id, moved: [panes[0].id] }
+      }
+      for (const item of panes) {
+        if (state.moved.includes(item.id)) continue
+        await api('groups/move', { session: session.id, pane: item.id, group: state.group })
+        state = { ...state, moved: [...state.moved, item.id] }
+      }
+      onDone()
+    } catch (failure) { setMade(state); setError(errorText(failure)); setPending(false) }
   }
   return <form className="rename-form new-group" onSubmit={create} noValidate>
-    <NameField api={api} kind="stack" label="Stack name" value={name} disabled={pending} autoFocus mainModel={mainModel} problem={tried ? problem : undefined}
+    <NameField api={api} kind="stack" label="Stack name" value={name} disabled={pending || !!made} autoFocus mainModel={mainModel} problem={tried ? problem : undefined}
       onChange={value => { setName(value); setError('') }}
-      context={() => ({ tabs: [chatTitle(pane, session)], folder: pane.dir, taken: ['Unstacked', 'Main', ...(session.groups ?? []).map(group => group.name)] })} />
-    <p className="hint">{chatTitle(pane, session)} moves into it. A stack has its own tabs and its own agent context.</p>
+      context={() => ({ tabs: panes.map(item => chatTitle(item, session)), folder: panes[0].dir, taken: ['Unstacked', 'Main', ...(session.groups ?? []).map(group => group.name)] })} />
+    <p className="hint">{panes.length === 1 ? `${chatTitle(panes[0], session)} moves` : `${panes.length} tabs move`} into it. A stack has its own tabs and its own agent context.</p>
     {error && <p className="error" role="alert">{error}</p>}
-    <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onClose}>Back</button><button className="primary" disabled={pending}>{pending ? 'Making…' : 'Make stack'}</button></div>
+    <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onClose}>Back</button><button className="primary" disabled={pending}>{pending ? 'Making…' : made ? 'Move the rest' : 'Make stack'}</button></div>
   </form>
 }
 
@@ -331,19 +345,24 @@ export function SuggestStacks({ api, session, mainModel, onBack, onDone }: { api
   </section>
 }
 
-/** The tab menu's "Move to stack…": Unstacked, each group, or a new group with this tab. */
-export function TabGroupPicker({ api, session, pane, pending, run, onNew, onBack }: {
-  api: Api; session: Session; pane: Pane; pending: boolean; run: (action: () => Promise<string | undefined>) => Promise<void>; onNew: () => void; onBack: () => void
+/** The tab menu's "Move to stack…" (or Group for the selected tabs): Unstacked, each group, or a new group with these tabs. */
+export function TabGroupPicker({ api, session, panes, pending, run, onNew, onBack }: {
+  api: Api; session: Session; panes: Pane[]; pending: boolean; run: (action: () => Promise<string | undefined>) => Promise<void>; onNew: () => void; onBack: () => void
 }) {
-  const current = groupOf(pane, session.groups)
   const places: { id: string; name: string }[] = [{ id: '', name: 'Unstacked' }, ...(session.groups ?? [])]
-  const move = (group: string) => void run(async () => { await api('groups/move', { session: session.id, pane: pane.id, group: group || null }); return undefined })
+  const shared = new Set(panes.map(item => groupOf(item, session.groups)))
+  const current = shared.size === 1 ? [...shared][0] : undefined  // the place when all the tabs are in one
+  // One move per tab with the single-tab route, so each move can be undone; a tab already there stays.
+  const move = (group: string) => void run(async () => {
+    for (const item of panes) if (groupOf(item, session.groups) !== group) await api('groups/move', { session: session.id, pane: item.id, group: group || null })
+    return undefined
+  })
   return <div className="action-list">
     {places.map(place => <button key={place.id || 'main'} type="button" disabled={pending || place.id === current} aria-current={place.id === current ? 'true' : undefined} onClick={() => move(place.id)}>
       <FolderInput size={18} />{place.name}{place.id === current && <small>Here now</small>}
     </button>)}
     <hr />
-    <button type="button" disabled={pending} onClick={onNew}><Plus size={18} />New stack with this tab</button>
+    <button type="button" disabled={pending} onClick={onNew}><Plus size={18} />{panes.length === 1 ? 'New stack with this tab' : `New stack with these ${panes.length} tabs`}</button>
     <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onBack}>Back</button></div>
   </div>
 }

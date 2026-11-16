@@ -156,7 +156,7 @@ async function main() {
     const sideStacks = await page.locator(`${SIDE} .pane-stack-head .pane-child-name`).allTextContents()
     const rowStacks = await page.locator(`${ROW} .group-tab .group-name`).allTextContents()
     check('the sidebar lists the stacks in the header order', JSON.stringify(sideStacks) === JSON.stringify(rowStacks), `${sideStacks} / ${rowStacks}`)
-    const shipTabs = await page.locator(`${SIDE} .pane-stack`, { has: page.locator('.pane-stack-head', { hasText: 'Ship' }) }).locator('.pane-stack-tabs button').count()
+    const shipTabs = await page.locator(`${SIDE} .pane-stack`, { has: page.locator('.pane-stack-head', { hasText: 'Ship' }) }).locator('.pane-stack-tabs button:not(.row-close)').count()
     check('each stack holds its own tabs (Ship: 12)', shipTabs === 12, String(shipTabs))
     const marked = await page.locator(`${SIDE} .pane-stack-head.current .pane-child-name`).allTextContents()
     const openRow = await page.locator(`${SIDE} .pane-stack`, { has: page.locator('[aria-current="page"]') }).locator('.pane-stack-head .pane-child-name').allTextContents()
@@ -168,7 +168,7 @@ async function main() {
     await page.locator('.chat-panel .group-tab[aria-current="true"]', { hasText: 'Voice and dictation' }).waitFor()
     check('a sidebar stack heading opens its stack', await current() === 'Voice and dictation')
     // Alt+Down steps through tab rows only, never onto a heading.
-    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head)')].length)
+    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head, .row-close)')].length)
     check('keyboard rows leave out the stack headings', rows === 22, String(rows))
 
     // 6. Phone width: no horizontal page scroll; the sidebar drawer is not part of this check.

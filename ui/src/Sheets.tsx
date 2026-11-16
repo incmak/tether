@@ -1,13 +1,14 @@
 import { Bone, Loading, Skeleton } from './Skeleton'
 import { useWords, count } from './words'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FolderInput, Eye, Archive, ArchiveRestore, ArrowDown, BookMarked, ArrowUp, Bell, Check, Columns2, GitFork, LayoutDashboard, Merge, ArrowRightLeft, Plus, PanelBottom, PanelRight, Pencil, Pin, PinOff, Shapes, Sparkles, RotateCw, Rows2, Square, Trash2, X } from 'lucide-react'
+import { FolderInput, Eye, Archive, ListChecks, ArchiveRestore, ArrowDown, BookMarked, ArrowUp, Bell, Check, Columns2, GitFork, LayoutDashboard, Merge, ArrowRightLeft, Plus, PanelBottom, PanelRight, Pencil, Pin, PinOff, Shapes, Sparkles, RotateCw, Rows2, Square, Trash2, X } from 'lucide-react'
 import { ColorRow, GroupPicker } from './Organize'
 import type { SessionGroup, TagColor } from './Organize'
 import { ReviewLinkPicker } from './ReviewLinks'
 import { SelectMenu } from './SelectMenu'
 import { SESSION_NAME, SESSION_NAME_HELP, canFork, creditsLabel, errorText, usageLabel } from './api'
 import type { Api, Catalog, Footer, ModelOptions, Pane, PastChat } from './api'
+import { closeTab } from './tabSelection'
 import { loadCatalog } from './Suggest'
 import { chatSlug, resumeChat } from './ChatPicker'
 import { useModal, usePopover } from './hooks'
@@ -195,13 +196,15 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   </dialog>
 }
 
-export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel }: {
+export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel, startClose = false, onSelect }: {
   mainModel?: MainModel
+  startClose?: boolean  // the × on a tab opens this sheet at the close question; Cancel then closes the sheet
+  onSelect?: () => void  // "Select tabs": start choosing several tabs (the way to multi-select on touch)
   color?: string; onColor?: (color: TagColor | null) => void
   api: Api; session: Session | undefined; tabCount: number; archived: boolean; pane: Pane; panes: Pane[]; at?: Anchor; place?: Place; targets: Session[]; onArchive: () => void; onFork?: () => void; onDone: (newPane?: string, direction?: 'right' | 'down') => void; onClose: () => void
 }) {
   const words = useWords()
-  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'group' | 'new-group'>('menu')
+  const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'group' | 'new-group'>(startClose ? 'close' : 'menu')
   const [name, setName] = useState(pane.pane_name ?? '')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -234,9 +237,9 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Cancel</button><button className="primary" disabled={pending}>{pending ? 'Saving…' : 'Save'}</button></div>
         </form>
       : mode === 'group' && session
-      ? <TabGroupPicker api={api} session={session} pane={pane} pending={pending} run={run} onNew={() => setMode('new-group')} onBack={() => setMode('menu')} />
+      ? <TabGroupPicker api={api} session={session} panes={[pane]} pending={pending} run={run} onNew={() => setMode('new-group')} onBack={() => setMode('menu')} />
       : mode === 'new-group' && session
-      ? <NewGroup api={api} session={session} pane={pane} mainModel={mainModel} onClose={() => setMode('group')} onDone={() => onDone(undefined)} />
+      ? <NewGroup api={api} session={session} panes={[pane]} mainModel={mainModel} onClose={() => setMode('group')} onDone={() => onDone(undefined)} />
       : mode === 'review'
       ? <ReviewLinkPicker pane={pane} panes={panes} pending={pending} onBack={() => setMode('menu')} onPick={(worker, reviewer) => void run(async () => { await api('review-link', { worker, reviewer }); return undefined })} />
       : mode === 'icon'
@@ -244,7 +247,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       : mode === 'close'
       ? <div className="confirm-box" role="alertdialog" aria-labelledby="close-pane-title">
           <p id="close-pane-title"><strong>Close this {words.pane}?</strong> {last ? `It is the last ${words.pane}, so this also ends the session ${session?.name ?? ''}.` : 'This stops anything running in it.'} You cannot undo this.</p>
-          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => setMode('menu')}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(async () => { await api('session', { pane: pane.id }, undefined, 'DELETE'); return undefined })}>{pending ? 'Closing…' : `Close ${words.pane}`}</button></div>
+          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => startClose ? onClose() : setMode('menu')}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(async () => { await closeTab(api, pane); return undefined })}>{pending ? 'Closing…' : `Close ${words.pane}`}</button></div>
         </div>
       : <div className="action-list">
           {onColor && <ColorRow value={color} disabled={pending} onChange={onColor} />}
@@ -260,6 +263,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <button disabled={pending} onClick={() => void split('down')}><Rows2 size={18} />{words.newBelow}{words.tmux && <kbd>Ctrl-b "</kbd>}</button>
           {onFork && canFork(pane) && <button disabled={pending} onClick={onFork}><GitFork size={18} />New chat from this</button>}
           <hr />
+          {onSelect && <button disabled={pending} onClick={() => { onSelect(); onClose() }}><ListChecks size={18} />Select {words.panes}</button>}
           <button disabled={pending} onClick={() => { onArchive(); onClose() }}>{archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}{archived ? 'Restore' : 'Archive'} {words.pane}</button>
           <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close {words.pane}{words.tmux && <kbd>Ctrl-b x</kbd>}</button>
         </div>}

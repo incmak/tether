@@ -1,7 +1,9 @@
 import { createPortal, flushSync } from 'react-dom'
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { useWords } from './words'
-import { Eye, Lightbulb, Plus } from 'lucide-react'
+import { Eye, Lightbulb, Plus, X } from 'lucide-react'
+import { pickMode, orderAround } from './tabSelection'
+import type { TabPickControls } from './tabSelection'
 import type { Api, Pane } from './api'
 import { NewTask } from './NewTask'
 import { AgentIcon, needsYou, paneTitle, shownIndex } from './Sidebar'
@@ -35,6 +37,8 @@ interface Props {
   onReorder: (ids: string[]) => void
   /** Desktop: a tab dropped on a group in the group row ([data-group-drop]) moves into it. */
   onDropGroup?: (pane: string, group: string) => void
+  /** Several chosen tabs (Ctrl/Cmd/Shift+click) and the × close on each tab (tabSelection.ts). */
+  pick?: TabPickControls
   api: Api
   onUpdate: () => void
   micOk: boolean
@@ -102,7 +106,7 @@ const REORDER_CURVE = 'cubic-bezier(.32,.72,0,1)'
 
 // Tabs for the panes of one session. Reorder: long-press a tab, then drag it (a mouse drags at once).
 // A long press without a drag opens the pane actions, as before. Only Tether's order changes; tmux panes stay put.
-export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ session, pane, onOpenPane, onPaneActions, onSplit, onReorder, onDropGroup, api, onUpdate, micOk, chime, onNotice }, ref) {
+export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ session, pane, onOpenPane, onPaneActions, onSplit, onReorder, onDropGroup, pick, api, onUpdate, micOk, chime, onNotice }, ref) {
   const strip = useRef<HTMLDivElement>(null)
   const words = useWords()
   useImperativeHandle(ref, () => strip.current!)
@@ -141,6 +145,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       const tabs = new Map([...box.querySelectorAll<HTMLElement>('[data-pane]')].map(tab => [tab.dataset.pane!, positionOf(tab)]))
       const add = box.querySelector<HTMLElement>('.tab-add')
       if (add) tabs.set('+', positionOf(add))
+      for (const close of box.querySelectorAll<HTMLElement>('.tab-close')) tabs.set(`×${close.dataset.closeFor}`, positionOf(close))
       positions.current = { session: session.id, active: pane.id, scroll: box.scrollLeft, tabs, pill: tabs.get(pane.id) }
     }
     const save = () => { scrollByStrip.set(key, box.scrollLeft); capture() }
@@ -150,8 +155,8 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
     if (closing && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const timing = { duration: 220, easing: SLIDE_CURVE }
       const dx = box.scrollLeft - before.scroll
-      for (const tab of box.querySelectorAll<HTMLElement>('[data-pane], .tab-add')) {
-        const old = before.tabs.get(tab.dataset.pane ?? '+')
+      for (const tab of box.querySelectorAll<HTMLElement>('[data-pane], .tab-add, .tab-close')) {
+        const old = before.tabs.get(tab.dataset.closeFor ? `×${tab.dataset.closeFor}` : tab.dataset.pane ?? '+')
         if (old) animations.push(tab.animate([{ transform: `translate(${old.left - tab.offsetLeft + dx}px, ${old.top - tab.offsetTop}px)` }, { transform: 'translate(0, 0)' }], timing))
       }
       const pill = box.querySelector<HTMLElement>('.pane-tab-pill')
@@ -374,15 +379,29 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
   const byId = new Map(session.panes.map(item => [item.id, item]))
   const shown = preview ? preview.map(id => byId.get(id)).filter((item): item is Pane => !!item) : session.panes
   // While tabs are reordered, each tab draws its own highlight again.
-  return <div className={preview ? 'pane-tabs' : 'pane-tabs has-pill'} ref={strip} role="tablist" aria-label={`Panes of ${session.name}`}>
+  return <div className={[preview ? 'pane-tabs' : 'pane-tabs has-pill', pick ? 'closable' : ''].filter(Boolean).join(' ')} ref={strip} role="tablist" aria-label={`Panes of ${session.name}`} data-select-scope="">
     <span className="pane-tab-pill" aria-hidden="true" />
-    {shown.map(item => <button key={item.id} data-pane={item.id} role="tab" aria-selected={item.id === pane.id} className={[item.id === pane.id ? 'active' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', item.role === 'advisor' ? 'advisor-tab' : '', item.role === 'advisor' && item.state === 'Working' ? 'advising' : ''].filter(Boolean).join(' ')}
-      onClick={() => { if (!suppressClick.current) onOpenPane(item) }}
+    {shown.map(item => { const picked = !!pick?.picked.has(item.id); return <Fragment key={item.id}><button data-pane={item.id} data-select-pane={item.id} role="tab" aria-selected={item.id === pane.id} aria-keyshortcuts={pick ? 'Delete' : undefined} className={[item.id === pane.id ? 'active' : '', picked ? 'picked' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', item.role === 'advisor' ? 'advisor-tab' : '', item.role === 'advisor' && item.state === 'Working' ? 'advising' : ''].filter(Boolean).join(' ')}
+      onClick={event => {
+        if (suppressClick.current) return
+        // Ctrl/Cmd+click adds or removes the tab, Shift+click picks a range; while choosing on touch, a tap picks.
+        const mode = pick && pickMode(event, pick.choosing)
+        if (mode) pick.onPick(item.id, mode, orderAround(event.currentTarget), pane.id)
+        else onOpenPane(item)
+      }}
+      // Delete on a focused tab closes it, as in the WAI-ARIA tabs pattern; it asks first, like the ×.
+      onKeyDown={event => { if (pick && event.key === 'Delete' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) { event.preventDefault(); const box = event.currentTarget.getBoundingClientRect(); pick.onCloseTab(item.id, { x: box.left, y: box.bottom + 4 }) } }}
       // A touch long press is handled above (drag, or actions on release). A right-click still opens the actions.
       onMouseEnter={clipTitle} onContextMenu={event => { event.preventDefault(); if (!drag.current?.touch && !suppressClick.current) onPaneActions(item.id, anchorOf(event)) }}>
       {item.role === 'advisor' ? <><AgentIcon agent={item.agent} size={14} /><Lightbulb size={13} className="tab-advisor" aria-hidden="true" /></> : <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} />}<span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
       {item.state === 'Working' || needsYou(item.state) ? <span className={`state-dot ${item.state === 'Working' ? 'working' : 'approval'}`} aria-label={item.state === 'Working' ? item.role === 'advisor' ? 'Advising' : 'Working' : 'Needs you'} /> : item.state === 'Stopped' ? <span className="state-dot" aria-label="Stopped" /> : null}
-    </button>)}
+      {picked && <span className="visually-hidden">, selected</span>}
+    </button>
+    {/* A sibling, not inside the tab: a tab holds no other control. It sits over the tab's right edge (App.css). Not a
+        Tab stop: the focused tab's Delete key does the same. Hidden while tabs are dragged, so it never lags behind. */}
+    {pick && !preview && <button type="button" className={item.id === pane.id ? 'tab-close current' : 'tab-close'} data-close-for={item.id} tabIndex={-1} aria-label={`Close ${paneTitle(item)}`} title={`Close ${words.pane} (Delete)`}
+      onClick={event => pick.onCloseTab(item.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}
+    </Fragment> })}
     <button className="tab-add" aria-label={`${words.newRight} with a task`} title={`${words.newRight} with a task`} aria-haspopup="dialog" aria-expanded={!!taskAt}
       onClick={event => { const box = event.currentTarget.getBoundingClientRect(); setTaskAt({ x: box.right - 360, y: box.bottom + 6 }) }}><Plus size={16} /></button>
     {taskAt && createPortal(<NewTask api={api} pane={pane} at={taskAt} micOk={micOk} chime={chime} onClose={() => setTaskAt(null)} onEmpty={() => { setTaskAt(null); onSplit('right') }}

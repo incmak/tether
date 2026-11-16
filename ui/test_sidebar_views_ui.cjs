@@ -185,7 +185,7 @@ async function main() {
     check('Show brings the quiet tabs back', await tether.locator('.pane-stack-head', { hasText: 'Quiet stack' }).count() === 1 && await tether.locator('.quiet-more').getAttribute('aria-expanded') === 'true')
     await page.locator(`${SIDE} .group > .quiet-more`).click()
     check('Show brings the quiet sessions back', await page.locator(`${SIDE} .session-list > li[data-id="$4"]`).count() === 1)
-    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head, .quiet-more)')].length)
+    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head, .quiet-more, .row-close)')].length)
     check('keyboard rows count every shown tab', rows === 6, String(rows))
 
     // 4. The view stays after a reload (this device).

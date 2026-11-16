@@ -3050,6 +3050,12 @@ class Handler(BaseHTTPRequestHandler):
                     if pane not in active_panes:
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
+                    if 'thread' in body:  # the page names the chat it saw: refuse when the tab now holds another one
+                        forget_sessions()
+                        entry = next((item for item in sessions() if item['id'] == pane), None)
+                        if entry is None or (body['thread'] or None) != (entry.get('thread') or None):
+                            self.respond(409, {'error': 'That tab now holds another chat. Reload and try again.'})
+                            return
                     closed = undo.capture_safe(pane, entries=sessions)
                     auto_resume.forget_pane(pane, run=subprocess.run)
                     with groups.closing(pane):  # its auto stack goes when empty or root-only

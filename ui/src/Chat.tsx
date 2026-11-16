@@ -1,4 +1,5 @@
 import { RetryButton } from './Retry'
+import type { TabPickControls } from './tabSelection'
 import { takeBootChat } from './boot'
 import { noticeAction } from './noticeActions'
 import { terminalText } from './terminalText'
@@ -68,7 +69,7 @@ import { useCodexTrust } from './codexTrustState'
 import { HOLD_MS } from './gesture'
 
 
-interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void }
+interface ChatProps { liveReplyPreview: boolean; /** Desktop: a trackpad swipe over the stack row or tab strip scrolls it, not Back/Forward (Settings). */ headerSwipe?: boolean; pane: Pane; session: Session | undefined; api: Api; onMenu: () => void; onUpdate: () => void; draft: string; setDraft: (text: string) => void; onOpenPane: (pane: Pane) => void; onSessionActions: (at?: Anchor) => void; onPaneActions: (pane: string, at?: Anchor) => void; onSplit: (direction: 'right' | 'down') => void; onFork: () => void; onContinued: (id: string) => void; onReorder: (ids: string[]) => void; micOk: boolean; chime: boolean; readAloud: boolean; handsFree: boolean; slot?: SlotControls; running?: number; sidePin?: SidePinControls; allPanes: Pane[]; headerExtra?: ReactNode; askBar?: ReactNode; groupHooks?: GroupHooks; onDropGroup?: (pane: string, group: string) => void; onBacklogAdd?: (text: string, pane: Pane) => void; /** The × close and multi-select on the tab strip (tabSelection.ts). */ tabPick?: TabPickControls }
 /** Desktop workspace controls for a Chat shown in a slot next to other slots. */
 export interface SlotControls { index: number; zoomed: boolean; onZoom: () => void; onClose?: () => void; onPick?: () => void; onDragStart?: (event: React.DragEvent) => void; onSwapTo?: (to: number) => void }
 export interface SidePinControls { pinned: boolean; index: number; total: number; note: string; onToggle(): void; onNote(text: string): void; onStep(dir: 1 | -1): void }
@@ -225,7 +226,7 @@ function useSteadyPreview(text: string | undefined) {
   return text && preview.ready ? text : undefined
 }
 
-export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd }: ChatProps) {
+export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd, tabPick }: ChatProps) {
   const agentBrowser = useAgentBrowser(api)
   const words = useWords()
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
@@ -1055,9 +1056,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     </header>
     {session && view && (grouped && groupHooks
       ? <GroupBar api={api} session={session} pane={pane} hooks={groupHooks} onOpenPane={onOpenPane} onUpdate={onUpdate}>
-          {panes.length > 1 && <PaneTabs ref={tabs} session={view} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />}
+          {panes.length > 1 && <PaneTabs ref={tabs} session={view} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />}
         </GroupBar>
-      : <PaneTabs ref={tabs} session={session} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
+      : <PaneTabs ref={tabs} session={session} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
     {term && data?.attention?.askBridge && <AskBar agent={agentNames[activePane.agent]} disabled={!writable || acting} onOpen={() => setTerm(false)} onTerminal={() => askAnswer(data.attention!.askBridge!, null)} />}
     {term ? <LiveTerminal paneId={activePane.id} onChat={() => setTerm(false)} /> : <>
     {(offline || (error && data)) && <div className="reconnect-banner" role="status"><WifiOff size={15} /><span>{offline ? 'You are offline. Tether reconnects when the network is back.' : `Cannot reach ${host}. Reconnecting…`}</span><RetryButton label="Retry now" className="" onRetry={refresh} /></div>}
