@@ -123,8 +123,16 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
     onHandsFreeDone: () => form.current?.requestSubmit(), onFinished: () => textarea.current?.focus() })
   const { listening, transcribing, seconds, error: speechError, setError: setSpeechError, canRecord, toggle: toggleMic } = dictation
   // Upload files in order and return how many worked. onSaved runs after each good upload.
-  async function attach(list: FileList | File[], onSaved?: (index: number) => void): Promise<number> {
+  // A second batch (another drop during an upload) waits for the first, so Send stays off until all files are in.
+  const uploadQueue = useRef<Promise<unknown>>(Promise.resolve())
+  function attach(list: FileList | File[], onSaved?: (index: number) => void): Promise<number> {
     const chosen = Array.from(list)
+    if (chosen.length) setUploading(current => current || `Uploading ${chosen[0].name || 'file'}…`)
+    const run = uploadQueue.current.then(() => attachNow(chosen, onSaved))
+    uploadQueue.current = run.catch(() => undefined)
+    return run
+  }
+  async function attachNow(chosen: File[], onSaved?: (index: number) => void): Promise<number> {
     if (!chosen.length) return 0
     setSpeechError('')
     let count = 0

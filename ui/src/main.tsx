@@ -6,9 +6,11 @@ import { CrashScreen } from './CrashScreen'
 import { ZoomBadge } from './ZoomBadge'
 import { registerShareWorker } from './shared'
 import { reloadOnStaleChunk } from './staleChunk'
+import { guardFileDrops } from './chatDrop'
 
 registerShareWorker()
 reloadOnStaleChunk()
+guardFileDrops()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
