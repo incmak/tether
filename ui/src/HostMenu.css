@@ -1,9 +1,9 @@
 /* The footer's host name and its list of other Tether servers. The list opens upward, over the session list, in a portal so a clipped sidebar cannot cut it. */
 .host-menu-root { position: relative; flex: 1 1 auto; min-width: 0; }
-.host-switch { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; min-height: var(--control); margin-left: -8px; padding: 0 8px; border-radius: var(--radius); color: var(--muted); font-size: 12px; }
+.host-switch { display: flex; width: 100%; align-items: center; gap: 8px; min-width: 0; max-width: 100%; min-height: var(--control); margin-left: -8px; padding: 0 8px; border-radius: var(--radius); color: var(--muted); font-size: 12px; }
 .host-switch:hover, .host-switch[aria-expanded="true"] { background: var(--hover); color: var(--text); }
 .host-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.host-switch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-switch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-switch svg { flex: none; opacity: .7; }
 
 .host-menu { position: fixed; z-index: 60; width: min(300px, calc(100vw - 32px)); max-height: min(70vh, 480px); overflow-y: auto; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 6px 24px #0000001f; color: var(--text); font-size: 14px; }
@@ -26,7 +26,7 @@
 .host-form { display: grid; gap: 10px; margin-top: 4px; padding: 10px 8px 4px; border-top: 1px solid var(--line); }
 .host-form label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
 .host-optional { font-weight: 400; }
-.host-form input { min-height: var(--control-lg); padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: 16px; /* 16px: iOS does not zoom */ }
+.host-form input { min-width: 0; width: 100%; min-height: var(--control-lg); padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); font-size: 16px; /* 16px: iOS does not zoom */ }
 .host-form input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
 .host-error { margin: 0; color: var(--error); font-size: 13px; }
 .host-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -35,4 +35,11 @@
   .host-switch { min-height: 40px; }
   .host-add { min-height: 44px; }
   .host-remove { width: 44px; height: 44px; }
+}
+
+/* At the minimum sidebar width the host gets its own row above the footer actions. */
+.sidebar-footer { container-type: inline-size; }
+@container (max-width: 200px) {
+  .footer-row { flex-wrap: wrap; }
+  .host-menu-root { flex-basis: 100%; }
 }

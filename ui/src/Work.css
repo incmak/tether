@@ -251,3 +251,9 @@
 .work-backlog-icon { flex: none; color: var(--muted); }
 .work-more { align-self: flex-start; margin-top: 6px; }
 .work-backlog-details { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; overflow-wrap: anywhere; }
+
+/* A project name is user text, including in the form heading and project filter. */
+.work-form-sheet .sheet-heading h2 { min-width: 0; overflow-wrap: anywhere; }
+.work-sheet .work-projects > button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.work-result, .work-error, .work-form-error { overflow-wrap: anywhere; }
+.work-error > span { min-width: 0; }

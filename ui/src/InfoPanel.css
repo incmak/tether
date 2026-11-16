@@ -48,7 +48,7 @@
 .dlg-keys dt { flex: 0 1 auto; min-width: 0; max-width: 60%; }
 .dlg-keys dd { margin: 0; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
 .dlg-keys kbd { display: inline-block; max-width: 100%; white-space: normal; padding: 1px 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text); font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-.dlg-entries { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px 16px; list-style: none; margin: 0 16px; padding: 0; }
+.dlg-entries { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr)); gap: 8px 16px; list-style: none; margin: 0 16px; padding: 0; }
 .dlg-entries li { display: grid; gap: 1px; font-size: 13px; line-height: 1.45; }
 .dlg-entries strong { font-weight: 600; }
 .dlg-entries small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }

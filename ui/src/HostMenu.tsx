@@ -51,12 +51,12 @@ export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[
   const menu = useRef<HTMLDivElement>(null)
   const menuId = useId()
   // The menu opens in a portal: a layout can clip the sidebar (rounded or glass panels), which would cut the menu.
-  const [at, setAt] = useState<{ left: number; bottom: number } | null>(null)
+  const [at, setAt] = useState<{ left: number; bottom: number; parent: HTMLElement } | null>(null)
   useLayoutEffect(() => {
     if (!open) return
     const place = () => {
       const box = trigger.current?.getBoundingClientRect()
-      if (box) setAt({ left: Math.max(8, Math.min(box.left - 2, window.innerWidth - 308)), bottom: window.innerHeight - box.top + 6 })
+      if (box) setAt({ left: Math.max(8, Math.min(box.left - 2, window.innerWidth - 308)), bottom: window.innerHeight - box.top + 6, parent: trigger.current?.closest('dialog') ?? document.body })
     }
     place()
     window.addEventListener('resize', place)
@@ -68,7 +68,7 @@ export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[
   useEffect(() => {
     if (!open) return
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node) && !menu.current?.contains(event.target as Node)) close() }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); close(true) } }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true) } }
     document.addEventListener('pointerdown', outside)
     document.addEventListener('keydown', escape, true)
     return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape, true) }
@@ -122,6 +122,6 @@ export function HostMenu({ host, hosts, onChange }: { host: string; hosts: Host[
           <div className="host-form-actions"><button type="button" className="ghost" onClick={() => { setAdding(false); setError('') }}>Cancel</button><button type="submit" className="primary">Add host</button></div>
         </form>
         : <button type="button" className="host-add" onClick={() => setAdding(true)}><Plus size={16} aria-hidden="true" />Add a host</button>}
-    </div>, document.body)}
+    </div>, at.parent)}
   </div>
 }

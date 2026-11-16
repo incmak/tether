@@ -11,9 +11,9 @@
 .backlog-group + .backlog-group { margin-top: 10px; }
 .backlog-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0; padding: 8px 2px 4px; color: var(--muted); font-family: inherit; font-size: 12px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .backlog-count { font-weight: 400; font-variant-numeric: tabular-nums; }
-.backlog-row { position: relative; display: grid; grid-template-columns: 18px 18px minmax(0, 1fr) auto; align-items: start; column-gap: 7px; padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 14px; line-height: 1.4; }
+.backlog-row { position: relative; display: grid; grid-template-columns: 24px 24px minmax(0, 1fr) auto; align-items: start; column-gap: 7px; padding: 8px 2px; border-bottom: 1px solid var(--line); font-size: 14px; line-height: 1.4; }
 .backlog-group li:last-child, .backlog-done li:last-child { border-bottom: 0; }
-.backlog-row.done { grid-template-columns: 18px minmax(0, 1fr) auto; }
+.backlog-row.done { grid-template-columns: 24px minmax(0, 1fr) auto; }
 .backlog-row.dragged { opacity: .45; }
 .backlog-row.drop-before::before, .backlog-row.drop-after::after { content: ''; position: absolute; inset-inline: 0; height: 2px; background: var(--accent); border-radius: 1px; pointer-events: none; }
 .backlog-row.drop-before::before { top: -1px; }
@@ -21,7 +21,7 @@
 button.backlog-grip { position: relative; display: grid; place-items: center; width: 18px; min-width: 0; height: 22px; min-height: 0; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); cursor: grab; touch-action: none; }
 button.backlog-grip::before { content: ''; position: absolute; width: 44px; height: 44px; left: 50%; top: 50%; transform: translate(-50%, -50%); }
 button.backlog-grip:not(:disabled):hover { background: var(--hover); color: var(--text); }
-.backlog-box { width: 16px; height: 16px; margin: 3px 0 0; accent-color: var(--accent); cursor: pointer; }
+.backlog-box { width: 24px; height: 24px; min-width: 24px; min-height: 24px; margin: 3px 0 0; accent-color: var(--accent); cursor: pointer; }
 .backlog-body { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .backlog-row.done .backlog-text-line { color: var(--muted); text-decoration: line-through; }
 .backlog-actions { display: inline-flex; margin: -5px -2px -5px 2px; }
@@ -31,7 +31,7 @@ button.backlog-grip:not(:disabled):hover { background: var(--hover); color: var(
   .backlog-row:hover .backlog-actions, .backlog-row:focus-within .backlog-actions, .backlog-row:hover .backlog-grip, .backlog-row:focus-within .backlog-grip { opacity: 1; }
 }
 .backlog-tag { justify-self: start; width: fit-content; min-height: 0; padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; background: none; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; }
-button.backlog-tag { cursor: pointer; }
+button.backlog-tag { min-height: 24px; cursor: pointer; }
 button.backlog-tag:not(:disabled):hover { background: var(--hover); color: var(--text); }
 button.backlog-notes-toggle { justify-self: start; padding: 0; font-size: 12px; }
 .backlog-list .backlog-details { gap: 2px; color: var(--muted); font-size: 13px; }
@@ -45,9 +45,9 @@ button.backlog-done-toggle { display: inline-flex; align-items: center; gap: 4px
 button.backlog-done-toggle:not(:disabled):hover { background: none; color: var(--text); }
 .backlog-done-toggle svg { transition: transform .12s; }
 .backlog-done-toggle svg.open { transform: rotate(90deg); }
-.backlog-sheet .link-button { border: 0; padding: 0; min-height: 0; background: none; color: var(--accent, var(--text)); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.backlog-sheet .link-button { border: 0; padding: 0; min-height: 24px; background: none; color: var(--accent, var(--text)); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .backlog-sheet .backlog-clear-done { font-size: 13px; }
-.backlog-empty { display: grid; justify-items: center; gap: 6px; margin: 36px auto; max-width: 34ch; color: var(--muted); font-size: 14px; line-height: 1.45; text-align: center; }
+.backlog-empty { display: grid; justify-items: center; gap: 6px; margin: 36px auto; max-width: 34ch; overflow-wrap: anywhere; color: var(--muted); font-size: 14px; line-height: 1.45; text-align: center; }
 .backlog-empty p { margin: 0; }
 .backlog-empty strong { color: var(--text); }
 .backlog-clear { display: flex; align-items: center; gap: 6px; margin: 14px 2px; color: var(--muted); font-size: 14px; }
@@ -55,7 +55,7 @@ button.backlog-done-toggle:not(:disabled):hover { background: none; color: var(-
 .backlog-undo > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .backlog-undo .icon-button { width: 26px; height: 26px; min-width: 0; min-height: 0; }
 .backlog-status { min-height: 1.5em; margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
-.backlog .error, .backlog .confirm-box, .backlog-leave { margin: 0; font-size: 13px; }
+.backlog .error, .backlog .confirm-box, .backlog-leave { overflow-wrap: anywhere; margin: 0; font-size: 13px; }
 .backlog-leave { margin-top: 10px; }
 .backlog-sheet[open] { display: flex; flex-direction: column; height: min(var(--backlog-h, 720px), calc(100dvh - 24px)); max-height: none; overflow: hidden; }
 @media (min-width: 600px) { .backlog-sheet[open] { max-width: min(var(--backlog-w, 500px), calc(100vw - 32px)); height: min(var(--backlog-h, min(720px, 90dvh)), calc(100dvh - 32px)); } }
@@ -84,8 +84,8 @@ button.backlog-resize:focus-visible { outline: 2px solid var(--accent); outline-
 .sidebar-backlog > span:first-of-type { flex: 1; }
 .sidebar-backlog-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 @media (pointer: coarse) {
-  .backlog-row { grid-template-columns: 26px 22px minmax(0, 1fr) auto; padding-block: 11px; font-size: 15px; }
-  .backlog-row.done { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .backlog-row { grid-template-columns: 26px 24px minmax(0, 1fr) auto; padding-block: 11px; font-size: 15px; }
+  .backlog-row.done { grid-template-columns: 24px minmax(0, 1fr) auto; }
   .backlog-box { width: 20px; height: 20px; margin-top: 1px; }
   .backlog-actions .icon-button { width: 34px; height: 34px; }
   button.backlog-tag { padding-block: 3px; }
@@ -135,21 +135,21 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 .sm-trigger.backlog-filter { width: auto; max-width: 180px; min-height: 34px; padding: 0 8px 0 10px; border-radius: var(--radius); font-size: 13px; }
 .sm-trigger.backlog-filter > svg:first-child { color: var(--muted); }
 .backlog mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text); }
-.backlog-row.fixed { grid-template-columns: 18px minmax(0, 1fr) auto; }
+.backlog-row.fixed { grid-template-columns: 24px minmax(0, 1fr) auto; }
 .backlog-status .link-button { font-size: 12px; }
 .backlog-empty .secondary { margin-top: 6px; }
 @media (max-width: 420px) { .backlog-search { flex-basis: 100%; } .backlog .backlog-search input { font-size: 16px; } }
 @media (pointer: coarse) {
   .backlog-search, .sm-trigger.backlog-filter { height: 44px; min-height: 44px; }
   .backlog .backlog-search input { font-size: 16px; }
-  .backlog-row.fixed { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .backlog-row.fixed { grid-template-columns: 24px minmax(0, 1fr) auto; }
 }
 
 /* The full page: a side list of views and projects, and the list. A phone gets the side list as a row of chips. */
 .backlog-heading-buttons { display: inline-flex; align-items: center; gap: 4px; }
 .sheet.backlog-sheet.backlog-page[open] { width: 100%; max-width: none; height: calc(100dvh - 12px); }
 .backlog.page { flex-direction: column; gap: 12px; }
-.backlog-nav { display: flex; flex: none; gap: 6px; margin-inline: -24px; padding: 0 24px 2px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.backlog-nav { display: flex; flex: none; gap: 6px; margin-inline: -18px; padding: 0 18px 2px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
 .backlog-nav-head { display: none; }
 .backlog-nav ul { display: contents; }
 .backlog-nav button { display: inline-flex; flex: none; align-items: center; gap: 6px; min-height: 34px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px; background: none; color: var(--text); font-size: 13px; white-space: nowrap; cursor: pointer; }
@@ -179,7 +179,7 @@ button.backlog-tag-open { border-color: color-mix(in srgb, var(--accent) 40%, va
 /* The page's detail pane (B76): beside the list from 1200px, over it with Back below that. */
 .backlog.page { position: relative; }
 .backlog-row.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); box-shadow: inset 2px 0 var(--accent); }
-.backlog .backlog-open { display: block; width: 100%; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 3px; background: none; color: inherit; font: inherit; line-height: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer; }
+.backlog .backlog-open { display: block; width: 100%; min-height: 24px; margin: 0; padding: 0; border: 0; border-radius: 3px; background: none; color: inherit; font: inherit; line-height: inherit; text-align: start; overflow-wrap: anywhere; cursor: pointer; }
 .backlog .backlog-open:hover { background: none; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px; }
 .backlog .backlog-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .backlog-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; font-size: 14px; line-height: 1.5; }
@@ -217,4 +217,12 @@ button.backlog-detail-back { display: inline-flex; align-items: center; gap: 2px
 @media (prefers-reduced-motion: no-preference) {
   .backlog-detail { animation: backlog-detail-in .16s ease-out; }
   @keyframes backlog-detail-in { from { opacity: 0; transform: translateX(8px); } }
+}
+
+/* Short landscape windows scroll the body, so the tools cannot crush the list into a sliver. */
+@media (max-width: 839.98px) and (max-height: 480px) {
+  .backlog:not(.with-detail) { overflow-y: auto; overflow-x: hidden; }
+  .backlog:not(.with-detail) .backlog-nav { margin-inline: 0; padding-inline: 0; }
+  .backlog:not(.with-detail) .backlog-main { flex: 0 0 auto; min-height: auto; }
+  .backlog:not(.with-detail) .backlog-list { flex: 0 0 auto; overflow-y: visible; }
 }

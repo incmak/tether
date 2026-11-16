@@ -14,9 +14,9 @@
 .panel-grip:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; border-radius: var(--radius-xs, 4px); }
 
 /* The close button sits near the top of a column handle and near the left of a row handle. */
-.panel-close { position: absolute; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 120ms ease; }
-.panel-edge.vertical .panel-close { top: 64px; left: -5px; }
-.panel-edge.horizontal .panel-close { left: 16px; top: -5px; }
+.panel-close { position: absolute; display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 120ms ease; }
+.panel-edge.vertical .panel-close { top: 64px; left: -6px; }
+.panel-edge.horizontal .panel-close { left: 16px; top: -6px; }
 .panel-edge:hover .panel-close, .panel-edge:focus-within .panel-close { opacity: 1; }
 .panel-close:hover { color: var(--text); border-color: var(--accent); }
 .panel-close:focus-visible { opacity: 1; outline: 2px solid var(--text); outline-offset: 2px; }
@@ -30,7 +30,7 @@
 .panel-reopen.side-left { border-left: 0; border-radius: 0 10px 10px 0; transform: rotate(180deg); }
 .panel-reopen.side-right { border-right: 0; border-radius: 10px 0 0 10px; }
 .panel-reopen.side-left svg { transform: rotate(180deg); }  /* undo the tab's turn so the arrow still points at the chat */
-.panel-reopen.side-top, .panel-reopen.side-bottom { height: 22px; }
+.panel-reopen.side-top, .panel-reopen.side-bottom { height: 24px; }
 .panel-reopen.side-top { border-top: 0; border-radius: 0 0 10px 10px; }
 .panel-reopen.side-bottom { border-bottom: 0; border-radius: 10px 10px 0 0; }
 @media (prefers-reduced-motion: reduce) { .panel-grip span, .panel-close { transition: none; } }

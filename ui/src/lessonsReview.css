@@ -1,5 +1,5 @@
 /* The lessons review sheet (LessonsReview.tsx) and its entry points. */
-.sheet.lessons-review { display: flex; flex-direction: column; max-width: 640px; padding-bottom: 0; }
+.sheet.lessons-review { overflow-wrap: anywhere; display: flex; flex-direction: column; max-width: 640px; padding-bottom: 0; }
 .sheet.lessons-review:not([open]) { display: none; }
 .lessons-review .sheet-heading { flex: none; }
 .lessons-review .sheet-heading h2 { margin: 0; }

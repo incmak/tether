@@ -112,12 +112,12 @@
 @media (prefers-reduced-motion: reduce) { .home-head-bone, .home-summary-bone { animation-duration: .01s; } }
 
 /* No agents, or no server */
-.home-blank { display: flex; flex-direction: column; }
+.home-blank { display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior-y: contain; }
 .home-blank > .mobile-menu { margin: max(12px, env(safe-area-inset-top)) 8px 0; }
-.home-blank > div { margin: auto; padding: 26px; max-width: 600px; }
+.home-blank > div { min-width: 0; margin: auto; padding: 26px; max-width: min(600px, 100%); }
 .home-blank > div > svg { color: var(--muted); margin-bottom: 22px; }
 .home-blank h1 { font-family: ui-serif, Georgia, serif; font-size: clamp(27px, 4vw, 36px); font-weight: 400; letter-spacing: -.8px; line-height: 1.2; }
-.home-blank p { color: var(--muted); font-size: 15px; line-height: 1.6; margin-top: 14px; }
+.home-blank p { overflow-wrap: anywhere; color: var(--muted); font-size: 15px; line-height: 1.6; margin-top: 14px; }
 .home-blank-action { margin-top: 25px; }
 /* The page's one action: a 44 px target with any pointer. */
 .home-blank button.home-blank-action { min-height: 44px; padding-inline: 16px; }
