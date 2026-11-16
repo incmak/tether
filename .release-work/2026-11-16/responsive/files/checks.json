@@ -1,0 +1,54 @@
+{
+  "base": "833a745",
+  "viewports": [
+    {
+      "width": 320,
+      "base_failed_checks": 15,
+      "after_passed_checks": 40,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 390,
+      "base_failed_checks": 13,
+      "after_passed_checks": 40,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 740,
+      "base_failed_checks": 12,
+      "after_passed_checks": 40,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 768,
+      "base_failed_checks": 12,
+      "after_passed_checks": 40,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 900,
+      "base_failed_checks": 17,
+      "after_passed_checks": 43,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 1024,
+      "base_failed_checks": 15,
+      "after_passed_checks": 43,
+      "after_failed_checks": 0
+    },
+    {
+      "width": 1440,
+      "base_failed_checks": 12,
+      "after_passed_checks": 43,
+      "after_failed_checks": 0
+    }
+  ],
+  "typecheck": "passed",
+  "eslint": {
+    "errors": 0,
+    "warnings": 94
+  },
+  "existing_phone_bar": "PASS",
+  "build": "PASS"
+}

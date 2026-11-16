@@ -343,14 +343,14 @@ export function ExplorerPhone({ api, target, onTarget, chatName, onAddToChat, on
       const locked = !!row.secret || inSecret(row.full)
       return <ActionSheet title={row.name} sub={row.full} onClose={close}>
         {!(preview && preview.full === row.full) && <button type="button" onClick={run(() => open(row))}>{row.dir ? <Folder size={20} /> : <File size={20} />}{row.dir ? 'Open' : 'Preview'}</button>}
-        {!locked && canAdd && <button type="button" onClick={run(() => addToChat([row.full]))}><MessageSquarePlus size={20} />{addLabel}</button>}
+        {!locked && canAdd && <button type="button" title={addLabel} onClick={run(() => addToChat([row.full]))}><MessageSquarePlus size={20} /><span className="xp-action-label">{addLabel}</span></button>}
         {!locked && <>
           <button type="button" onClick={run(() => setDialog({ kind: 'rename', row }))}><Pencil size={20} />Rename</button>
           <button type="button" onClick={run(() => void duplicate(row))}><CopyPlus size={20} />Duplicate</button>
           <button type="button" onClick={run(() => setDialog({ kind: 'pick', mode: 'move', paths: [row.full] }))}><FolderInput size={20} />Move to…</button>
         </>}
         <button type="button" onClick={run(() => void copyPath(row.full))}><ClipboardCopy size={20} />Copy path</button>
-        {!locked && !row.dir && onPin && <button type="button" onClick={run(() => onPin.run(row.full))}><BookMarked size={20} />{onPin.label}</button>}
+        {!locked && !row.dir && onPin && <button type="button" title={onPin.label} onClick={run(() => onPin.run(row.full))}><BookMarked size={20} /><span className="xp-action-label">{onPin.label}</span></button>}
         {!locked && <>
           <button type="button" onClick={run(() => download([row]))}><Download size={20} />{row.dir ? 'Download as zip' : 'Download'}</button>
           <hr />

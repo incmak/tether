@@ -3,7 +3,7 @@
 .share.narrow { position: absolute; inset: 0; z-index: 5; padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
 .sh-main { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
-.sh-head { flex-shrink: 0; display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 8px 16px; }
+.sh-head { flex-wrap: wrap; flex-shrink: 0; display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 8px 16px; }
 .sh-head h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; }
 .sh-usage { margin-right: auto; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sh-search { width: min(320px, 36%); }
@@ -20,7 +20,7 @@
 .sh-resume > span { display: grid; flex: 1; min-width: 0; color: var(--text); font-size: 13px; }
 .sh-resume b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .sh-resume small { color: var(--muted); font-size: 12px; }
-.sh-empty { padding: 48px 16px; text-align: center; color: var(--muted); }
+.sh-empty { overflow-wrap: anywhere; padding: 48px 16px; text-align: center; color: var(--muted); }
 .sh-more { height: 1px; }
 .sh-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
@@ -93,7 +93,7 @@
 .sh-ring circle + circle { stroke: currentColor; stroke-linecap: round; transition: stroke-dashoffset .15s linear; }
 
 /* Selection bar */
-.sh-actionbar { position: absolute; left: 16px; right: 16px; bottom: 16px; z-index: 20; display: flex; align-items: center; gap: 4px; max-width: 640px; margin: 0 auto; padding: 6px; border-radius: var(--radius-lg); background: var(--text); color: var(--bg); box-shadow: 0 10px 30px rgb(0 0 0 / .22); }
+.sh-actionbar { flex-wrap: wrap; position: absolute; left: 16px; right: 16px; bottom: 16px; z-index: 20; display: flex; align-items: center; gap: 4px; max-width: 640px; margin: 0 auto; padding: 6px; border-radius: var(--radius-lg); background: var(--text); color: var(--bg); box-shadow: 0 10px 30px rgb(0 0 0 / .22); }
 .sh-actionbar > span { flex: 1; padding-left: 4px; font-weight: 600; white-space: nowrap; }
 .sh-actionbar button { display: inline-flex; align-items: center; gap: 6px; min-height: var(--control); padding: 0 10px; border-radius: var(--radius); color: var(--bg); font-size: var(--control-text); font-weight: 500; }
 .sh-actionbar button:not(:disabled):hover { background: color-mix(in srgb, var(--bg) 16%, transparent); }
@@ -114,7 +114,7 @@
 .sh-pane h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15.5px; font-weight: 650; }
 .sh-pane-title p { color: var(--muted); font-size: 12.5px; }
 .sh-rename { flex: 1; }
-.sh-pane-actions { display: flex; align-items: center; gap: 6px; padding: 0 16px 12px; }
+.sh-pane-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 16px 12px; }
 .sh-pane-actions .primary { flex: 1; }
 .sh-pane-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 0 16px 24px; }
 .sh-sheet .sh-pane-actions { order: 3; padding: 10px 16px; border-top: 1px solid var(--line); }
@@ -139,3 +139,7 @@
 
 /* Phone: the selection bar takes the tab bar's place. */
 .app-shell.phone-tabs:has(.sh-actionbar) .phone-tabbar { visibility: hidden; }
+
+/* Error actions keep a usable hit area alongside wrapped server messages. */
+.share .retry-button { min-height: 24px; }
+@media (pointer: coarse) { .share .retry-button { min-height: 44px; } }

@@ -83,3 +83,6 @@
   .rich-tool { width: 36px; height: 36px; }
   .rich-block { height: 36px; font-size: 16px; }
 }
+
+/* The phone Word page must stretch; a centered auto-width flex item keeps long words at their intrinsic width. */
+.office-doc.narrow .docx-wrapper { align-items: stretch; }

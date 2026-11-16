@@ -1,0 +1,40 @@
+{
+  "purpose": "Small browser-responsive OfficeViewer fixtures; no private content or external media.",
+  "generator": "python3 .release-work/2026-11-16/responsive/files/fixtures/make_office.py",
+  "dependencies": {
+    "Python": "standard library only",
+    "SheetJS": "0.20.3"
+  },
+  "sources": [
+    "https://learn.microsoft.com/en-us/office/open-xml/word/structure-of-a-wordprocessingml-document",
+    "https://learn.microsoft.com/en-us/office/open-xml/presentation/structure-of-a-presentationml-document",
+    "ui/node_modules/@aiden0z/pptx-renderer/README.md",
+    "ui/src/OfficeViewer.tsx"
+  ],
+  "validation": {
+    "passed": [
+      "ZIP CRC via Python testzip and unzip -t",
+      "All XML parts parse",
+      "Every internal relationship resolves to an existing ZIP part",
+      "Every content type override names an existing ZIP part",
+      "DOCX includes 3 paragraphs with both long tokens",
+      "PPTX includes 2 registered slides with both long tokens",
+      "Browser renders DOCX and both PPTX slides at all seven viewports; responsive Files UI harness passes."
+    ],
+    "unverified": [
+      "Full XSD validation: defusedxml is not installed."
+    ]
+  },
+  "files": {
+    "responsive.docx": {
+      "bytes": 1108,
+      "sha256": "da59c81d3508131354cf7abb71577fc6d4a90d853b6d7b236ecc48e307f1b419",
+      "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    },
+    "responsive.pptx": {
+      "bytes": 7389,
+      "sha256": "95c228ecb1c85005b8d22bb48f173d17ce0101c77e3926743a689e2f843f03fa",
+      "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    }
+  }
+}

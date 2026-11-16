@@ -6,6 +6,7 @@ import { errorText, NetworkError, reach, request } from './api'
 import { useModal } from './hooks'
 import { useHost, useOfficeEditing } from './host'
 import { wheelSideways } from './wheelSideways'
+import './TextEditor.css'
 
 export type OfficeFile = { path: string; url: string }
 /** Office files Tether shows in its own viewer: spreadsheets, Word documents and slide decks. */

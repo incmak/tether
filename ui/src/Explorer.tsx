@@ -530,6 +530,7 @@ export function Explorer({ api, panes, pane, target, onTarget, onAddToMessage, o
       </div>
 
       <div className="fx-toolbar">
+        <div className="fx-tb-actions">
         {picked.length > 0 ? <>
           <span className="fx-selcount">{picked.length} selected</span>
           {plain(picked) && <button type="button" className="fx-tb fx-tb-primary" title={addLabel} onClick={() => addToMessage(picked)}><AtSign size={14} aria-hidden="true" /><span className="fx-tb-text">{addLabel}</span></button>}
@@ -547,7 +548,8 @@ export function Explorer({ api, panes, pane, target, onTarget, onAddToMessage, o
           </>}
           {!inSecret && <button type="button" className="fx-tb" title="Open a terminal in this folder, beside the chat" onClick={() => terminalHere(cwd)}><SquareTerminal size={14} aria-hidden="true" />Terminal here</button>}
         </> : search ? <span className="fx-toolbar-note" role="status">{loadingList ? 'Searching…' : `${count}${truncated ? '+' : ''} ${count === 1 ? 'match' : 'matches'} in ${folderName} and its folders`}</span> : null}
-        <span className="fx-spacer" />
+        </div>
+        <div className="fx-tb-fixed">
         <button type="button" className="fx-tb" aria-pressed={hidden} onClick={() => patch({ hidden: !hidden })}>Hidden files</button>
         <button type="button" className="fx-tb" aria-pressed={secrets.on} title="Show folders that hold keys and tokens, read only, for 10 minutes" onClick={() => void switchSecrets(!secrets.on)}>
           <Lock size={13} aria-hidden="true" />{secrets.on ? <>Secret folders <span className="fx-tb-time">{Math.max(1, Math.ceil(secretsLeft / 60))} min left</span></> : 'Show secret folders'}
@@ -555,6 +557,7 @@ export function Explorer({ api, panes, pane, target, onTarget, onAddToMessage, o
         <div className="fx-viewswitch" role="group" aria-label="View">
           <button type="button" className="fx-ib" aria-label="List view" aria-pressed={view === 'list'} onClick={() => patch({ view: 'list' })}><List size={15} /></button>
           <button type="button" className="fx-ib" aria-label="Grid view" aria-pressed={view === 'grid'} onClick={() => patch({ view: 'grid' })}><LayoutGrid size={15} /></button>
+        </div>
         </div>
       </div>
 

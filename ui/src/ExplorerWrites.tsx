@@ -22,8 +22,8 @@ export function ItemMenu({ at, title, items, onClose }: { at: Anchor; title: str
     <div className="action-list" role="menu">
       {items.map(item => <div key={item.label} className="fx-menu-row">
         {item.gap && <hr />}
-        <button type="button" role="menuitem" className={item.danger ? 'danger-item' : undefined} onClick={() => { onClose(); item.run() }}>
-          <item.icon size={16} aria-hidden="true" />{item.label}{item.key && <kbd>{item.key}</kbd>}
+        <button type="button" role="menuitem" className={item.danger ? 'danger-item' : undefined} title={item.label} onClick={() => { onClose(); item.run() }}>
+          <item.icon size={16} aria-hidden="true" /><span className="fx-tb-text">{item.label}</span>{item.key && <kbd>{item.key}</kbd>}
         </button>
       </div>)}
     </div>
@@ -120,13 +120,13 @@ export function FolderPicker({ api, move, names, start, sources, onCancel, onPic
       {shown?.error ? <li className="error" role="alert">{shown.error}</li>
         : !shown ? <Loading as="li" className="fx-pick-note" />
         : !shown.folders?.length ? <li className="fx-pick-note">No folders here.</li>
-        : shown.folders.map(name => <li key={name}><button type="button" onClick={() => setFolder(folder === '/' ? `/${name}` : `${folder}/${name}`)}><FolderOpen size={15} aria-hidden="true" />{name}</button></li>)}
+        : shown.folders.map(name => <li key={name}><button type="button" onClick={() => setFolder(folder === '/' ? `/${name}` : `${folder}/${name}`)}><FolderOpen size={15} aria-hidden="true" /><span className="fx-tb-text" title={name}>{name}</span></button></li>)}
     </ul>
     {error && <p className="error" role="alert">{error}</p>}
     {blocked && <p className="fx-pick-note" role="status">A folder cannot go into itself. Choose another folder.</p>}
     <div className="sheet-buttons">
       <button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button>
-      <button type="button" className="primary" disabled={pending || blocked || same} onClick={() => void pick()}><Check size={16} aria-hidden="true" />{pending ? `${move ? 'Moving' : 'Copying'}…` : `${verb} to ${baseName(folder)}`}</button>
+      <button type="button" className="primary" disabled={pending || blocked || same} onClick={() => void pick()}><Check size={16} aria-hidden="true" /><span className="fx-tb-text">{pending ? `${move ? 'Moving' : 'Copying'}…` : `${verb} to ${baseName(folder)}`}</span></button>
     </div>
   </dialog>
 }
