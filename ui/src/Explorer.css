@@ -135,9 +135,9 @@ a.fx-tb:hover { background: var(--hover); }
 .fx-uploads { position: fixed; right: 16px; bottom: 16px; z-index: 30; width: min(340px, calc(100vw - 32px)); padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 8px 28px rgb(0 0 0 / .18); font-size: 12.5px; }
 .fx-uploads-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .fx-uploads-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
-.fx-uploads ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.fx-uploads ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .fx-upload-line { display: flex; justify-content: space-between; gap: 10px; }
-.fx-upload-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-upload-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fx-upload-state { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 .fx-uploads li[data-state="failed"] .fx-upload-state, .fx-upload-error { color: var(--error); }
 .fx-upload-error { margin: 2px 0 0; }

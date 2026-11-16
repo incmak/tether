@@ -242,6 +242,26 @@ async function main() {
     await page.locator('.drawer .side-active').click()
     check('320 px: Sessions with Active only fits', await fits())
     await page.screenshot({ path: path.join(SHOTS, '320-sessions.png') })
+
+    // 8. A narrow sidebar with a two-digit count: the switch, Collapse all and Active only never overlap or clip.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), ...Array.from({ length: 30 }, (_, i) => pane(`%${100 + i}`, '$1', `Ask ${i}`, `tether:1.${i}`, { ask: ask(`%${100 + i}`, 60 + i) }))], default_thread: 't3' }
+    for (const width of [180, 210, 248, 320]) {
+      await open('%3', 1280, 800, { sideMode: 'sessions' })
+      await page.evaluate(w => document.querySelector('.app-shell').style.setProperty('--lw-sessions', `${w}px`), width)
+      await page.locator(`${SIDE} .side-fold`).waitFor()
+      const bad = await page.evaluate(() => {
+        const row = document.querySelector('.sidebar .side-modes'), side = document.querySelector('.sidebar').getBoundingClientRect()
+        const parts = [...row.querySelectorAll('.side-mode-switch button, .side-fold, .side-active')]
+        const out = []
+        for (const el of parts) { const r = el.getBoundingClientRect(); if (el.scrollWidth > el.clientWidth + 1) out.push(`${el.textContent || el.className} clips`); if (r.left < side.left || r.right > side.right) out.push(`${el.textContent || el.className} leaves the sidebar`) }
+        parts.forEach((a, i) => parts.slice(i + 1).forEach(b => { const x = a.getBoundingClientRect(), y = b.getBoundingClientRect(); if (Math.min(x.right, y.right) - Math.max(x.left, y.left) > 0.5 && Math.min(x.bottom, y.bottom) - Math.max(x.top, y.top) > 0.5) out.push(`${a.textContent || a.className} overlaps ${b.textContent || b.className}`) }))
+        return out
+      })
+      check(`${width} px sidebar: the mode row fits with a two-digit count`, bad.length === 0, bad.join('; '))
+      await page.screenshot({ path: path.join(SHOTS, `side-modes-${width}.png`), clip: { x: 0, y: 0, width: Math.min(width + 80, 1280), height: 260 } })
+    }
+    sessions = busy
+
     check('no page errors', pageErrors.length === 0, pageErrors.join('\n').slice(0, 800))
   } catch (error) {
     failed++

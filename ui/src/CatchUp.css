@@ -1,7 +1,7 @@
 /* The sidebar views: the Catch up / Sessions switch, Catch up itself, and the Sessions tree's counts and quiet rows. */
-.side-modes { display: flex; align-items: center; gap: 8px; margin: 0 12px 8px; }
-.side-mode-switch { display: flex; flex: 1; min-width: 0; padding: 2px; border-radius: var(--radius); background: var(--hover); }
-.side-mode-switch button { display: inline-flex; flex: 1; justify-content: center; align-items: center; gap: 6px; min-width: 0; min-height: 28px; padding: 0 8px; border: 0; border-radius: calc(var(--radius) - 2px); background: none; color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.side-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 12px 8px; }
+.side-mode-switch { display: flex; flex: 1 1 0; min-width: max-content; padding: 2px; border-radius: var(--radius); background: var(--hover); }
+.side-mode-switch button { display: inline-flex; flex: 1; justify-content: center; align-items: center; gap: 6px; min-width: max-content; min-height: 28px; padding: 0 8px; border: 0; border-radius: calc(var(--radius) - 2px); background: none; color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; white-space: nowrap; cursor: pointer; }
 .side-mode-switch button:hover { color: var(--text); }
 .side-mode-switch button[aria-pressed='true'] { background: var(--bg); color: var(--text); box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 12%, transparent); }
 .side-mode-count, .rollup { flex: none; padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); font-size: 11px; font-weight: 600; line-height: 17px; font-variant-numeric: tabular-nums; }

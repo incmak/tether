@@ -137,16 +137,18 @@ export function UploadPanel() {
   if (!uploads.length) return null
   const going = uploads.filter(item => item.state === 'waiting' || item.state === 'sending')
   const failed = uploads.filter(item => item.state === 'failed').length
+  // Failed files first, so a failure never hides under "and N more"; then the file in progress, the queue, and the finished files.
+  const shown = (['failed', 'sending', 'waiting', 'done'] as const).flatMap(state => uploads.filter(item => item.state === state)).slice(0, 6)
   const folders = [...new Set(uploads.map(item => item.folder))]
   const where = folders.length === 1 ? baseName(folders[0]) : `${folders.length} folders`
   const title = going.length ? `Uploading ${going.length} ${going.length === 1 ? 'file' : 'files'} to ${where}`
-    : failed ? `${failed} ${failed === 1 ? 'upload' : 'uploads'} failed` : `Uploaded ${uploads.length} ${uploads.length === 1 ? 'file' : 'files'} to ${where}`
+    : failed ? (failed === uploads.length ? `${failed} ${failed === 1 ? 'upload' : 'uploads'} failed` : `${failed} of ${uploads.length} uploads failed`) : `Uploaded ${uploads.length} ${uploads.length === 1 ? 'file' : 'files'} to ${where}`
   return <section className="fx-uploads" aria-label="Uploads">
     <div className="fx-uploads-head">
       <h2 role="status">{title}</h2>
       {!going.length && <button type="button" className="fx-ib" aria-label="Hide uploads" onClick={clearUploads}><X size={14} /></button>}
     </div>
-    <ul>{uploads.slice(-6).map(item => {
+    <ul>{shown.map(item => {
       const percent = item.size ? Math.floor(item.sent / item.size * 100) : item.state === 'done' ? 100 : 0
       const state = item.state === 'waiting' ? 'Waiting' : item.state === 'sending' ? `${percent}%` : item.state === 'done' ? 'Done' : 'Failed'
       return <li key={item.id} data-state={item.state}>
@@ -155,7 +157,7 @@ export function UploadPanel() {
         {item.error && <p className="fx-upload-error">{item.error}</p>}
       </li>
     })}</ul>
-    {uploads.length > 6 && <p className="fx-sub">and {uploads.length - 6} more</p>}
+    {uploads.length > shown.length && <p className="fx-sub">and {uploads.length - shown.length} more</p>}
     {going.length > 0 && <p className="fx-sub">Uploads keep going if you switch to a chat.</p>}
   </section>
 }

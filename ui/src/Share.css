@@ -79,8 +79,8 @@
 .sh-uploads header { display: flex; align-items: center; gap: 10px; min-height: var(--control-sm); color: var(--text); }
 .sh-uploads header b { flex: 1; font-weight: 600; }
 .sh-uploads header > span { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.sh-uploads ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
-.sh-uploads li { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; font-size: 13px; color: var(--text); }
+.sh-uploads ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.sh-uploads li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; font-size: 13px; color: var(--text); }
 .sh-up-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sh-up-meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .sh-up-meta.error { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--error); }
