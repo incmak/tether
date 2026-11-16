@@ -62,6 +62,13 @@
 .preferences .session-folder-setting > button { justify-self: start; }
 .preferences .session-folder-setting + .preferences-scope { margin-top: 10px; }
 .preferences .session-folder-setting + h3 { display: none; }
+.preferences .app-identity { display: grid; gap: 10px; }
+.preferences .app-identity > label { font-size: 14px; font-weight: 600; }
+.preferences .app-identity input[type="text"], .preferences .app-identity input:not([type]) { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+.preferences .app-identity .setting-note { margin: 0; }
+.preferences .app-identity > button { justify-self: start; }
+.app-identity-preview { display: grid; justify-items: center; gap: 6px; width: 96px; margin-bottom: 6px; padding: 12px 4px; border-radius: 12px; background: var(--hover); }
+.app-identity-preview span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .preferences-colors { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
 .preferences-colors label { position: relative; display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 42px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; cursor: pointer; }
 .preferences-colors label:has(input:checked) { border-color: var(--accent); background: var(--hover); }
