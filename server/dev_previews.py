@@ -314,10 +314,11 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
     holders, for example a reloader and its worker. complete is False when the scan stopped early or could not read a
     process of this user: a holder may be missing then, so the caller must not trust the result.
     A non-dumpable process of this user (sshd, gpg-agent, sd-pam: always there) hides its descriptors. Counting each
-    as a gap would hide every dev server, so it counts only when it descends from a holder: it may have inherited
-    the socket (fork, then PR_SET_DUMPABLE 0). Such a socket is left out, as if no holder were visible, and every
-    caller refuses a socket without a visible holder. So a dev server that runs ssh (non-dumpable) leaves the list
-    until ssh ends. Not covered: a descriptor sent over a Unix socket to an
+    as a gap would hide every dev server, so it counts only when it may have inherited the socket: it descends from
+    a holder, or it is in the session of a holder (workers that a supervisor forked, then PR_SET_DUMPABLE 0). Such
+    a socket is left out, as if no holder were visible, and every caller refuses a socket without a visible holder.
+    So a dev server leaves the list while ssh (non-dumpable) runs in its terminal session. Not covered: a process
+    that left the session (setsid) after it inherited the socket, and a descriptor sent over a Unix socket to an
     unrelated non-dumpable process (SCM_RIGHTS). Same-uid programs can do that on purpose only; this rule guards
     against mistakes, not against this user's own programs (see process_kind)."""
     wanted = {'socket:[%d]' % inode: inode for inode in inodes if inode}
@@ -352,23 +353,37 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
                 continue  # the descriptor closed
             if inode is not None and pid not in found.setdefault(inode, []):
                 found[inode].append(pid)
+    sessions = {}
+    for inode, holders in found.items():
+        for holder in holders:
+            sessions.setdefault(_stat(holder, root)[1], set()).add(inode)
+    sessions.pop(None, None)
     for pid in hidden:
+        session = _stat(pid, root)[1]
         ancestors = _ancestors(pid, root)
-        for inode in [inode for inode, holders in found.items() if ancestors.intersection(holders)]:
+        for inode in [inode for inode, holders in found.items()
+                      if ancestors.intersection(holders) or inode in sessions.get(session, ())]:
             del found[inode]  # it may hold the socket too
     return found, True
 
 
+def _stat(pid, root='/proc'):
+    """(parent pid, session id) from /proc/PID/stat, readable for non-dumpable processes too; (None, None) if gone."""
+    try:
+        text = _read('%s/%d/stat' % (root, pid))
+        fields = text[text.rindex(b')') + 1:].split()
+        return int(fields[1]), int(fields[3])
+    except (OSError, ValueError, IndexError):
+        return None, None
+
+
 def _ancestors(pid, root='/proc', depth=128):
-    """The pids above `pid` up to init, from /proc/PID/stat (readable for non-dumpable processes too)."""
+    """The pids above `pid` up to init."""
     seen = set()
-    while pid > 1 and len(seen) < depth:
-        try:
-            text = _read('%s/%d/stat' % (root, pid))
-            pid = int(text[text.rindex(b')') + 1:].split()[1])
-        except (OSError, ValueError, IndexError):
-            break
-        seen.add(pid)
+    while pid and pid > 1 and len(seen) < depth:
+        pid = _stat(pid, root)[0]
+        if pid is not None:
+            seen.add(pid)
     return seen
 
 

@@ -1598,6 +1598,33 @@ class RealStopTests(unittest.TestCase):
         self.assertNotIn(port, [row['port'] for row in previews.servers()])  # it may hold the listener too
         self.assertEqual(previews.verify(client), 'other')
 
+    def test_a_hidden_sibling_of_a_holder_counts_as_a_holder(self):
+        # Review of 94633ef: a supervisor forks two workers that inherit the listener, then closes its copy.
+        import signal, subprocess
+        script = ('import ctypes,os,socket,time\n'
+                  's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); port=s.getsockname()[1]\n'
+                  'kids=[]\n'
+                  'for hide in (False, True):\n'
+                  '    pid=os.fork()\n'
+                  '    if pid == 0:\n'
+                  '        if hide: ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n'
+                  '        time.sleep(60); os._exit(0)\n'
+                  '    kids.append(pid)\n'
+                  's.close(); print(port, *kids, flush=True); time.sleep(60)')
+        parent = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.PIPE, text=True,
+                                  start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(parent.pid, signal.SIGKILL), parent.wait(), parent.stdout.close()))
+        port, visible, hidden = map(int, parent.stdout.readline().split())
+        holders, complete = dev_previews.socket_holders([row['inode'] for row in DevPreviews(ports=[]).listeners(fresh=True)
+                                                         if row['port'] == port], os.getuid())
+        self.assertTrue(complete)
+        self.assertEqual(holders, {})  # the visible worker alone is not trusted
+        previews = DevPreviews(ports=[], **LOCAL)
+        self.assertNotIn(port, [row['port'] for row in previews.servers()])
+        with self.assertRaises(dev_previews.Refused):
+            previews.target(port, fresh=True)
+        self.assertEqual(previews.stop([port], wait=0), {port: 'refused'})
+
     def test_a_connection_that_is_never_accepted_is_not_forwarded(self):
         with socket.socket() as server:
             server.bind(('127.0.0.1', 0))
