@@ -401,8 +401,68 @@ def tidy_user_text(text):
     return PASTED.sub('\n', ARTIFACT_NOTE.sub('', text)).strip('\n') if '<' in text else text
 
 
+def scheduled_fire(record):
+    """{'id', 'prompt'} for the hidden record that starts a scheduled (CronCreate) turn; None otherwise."""
+    if record.get('type') != 'user' or record.get('isSidechain') or not isinstance(record.get('scheduledTaskId'), str):
+        return None
+    content = (record.get('message') or {}).get('content')
+    if isinstance(content, list):
+        content = '\n'.join(part.get('text', '') for part in content if isinstance(part, dict) and part.get('type') == 'text')
+    return {'id': record['scheduledTaskId'][:64], 'prompt': content if isinstance(content, str) else ''}
+
+
+def person_prompt(record):
+    """True for a prompt the person sent: typed, or queued while Claude was busy. A compact summary, a tool result,
+    a scheduled fire and the prompts Claude Code writes itself (task notices, peer messages) are not."""
+    if record.get('isSidechain') or record.get('isMeta') or record.get('isCompactSummary') or record.get('turnOrigin') == 'scheduled':
+        return False
+    if record.get('type') == 'attachment':
+        attachment = record.get('attachment') or {}
+        text = attachment.get('prompt') if attachment.get('type') == 'queued_command' else None
+    elif record.get('type') == 'user':
+        content = (record.get('message') or {}).get('content')
+        text = content if isinstance(content, str) else '\n'.join(
+            part.get('text', '') for part in content if isinstance(part, dict) and part.get('type') == 'text') if isinstance(content, list) else None
+    else:
+        return False
+    return isinstance(text, str) and bool(text.strip()) and task_notice(text, 0, None) is None
+
+
+def scheduled_runs(state, index, record):
+    """Keep each job's last run: its start time and Claude's last words in that turn (the result)."""
+    runs = state.setdefault('scheduled', {})
+    fire = scheduled_fire(record)
+    if fire:
+        runs.pop(fire['id'], None)
+        runs[fire['id']] = {'at': record.get('timestamp'), 'message': str(index), 'result': ''}
+        while len(runs) > 20:
+            runs.pop(next(iter(runs)))
+        state['scheduled_turn'] = fire['id']
+        return
+    current = state.get('scheduled_turn')
+    if not current or record.get('isSidechain') or record.get('isMeta'):
+        return
+    if person_prompt(record):
+        state['scheduled_turn'] = None  # the person's own prompt starts a new turn
+        return
+    message = record.get('message') or {}
+    content = message.get('content')
+    if record.get('type') == 'assistant' and isinstance(content, list) and current in runs:
+        text = '\n'.join(part.get('text', '') for part in content if isinstance(part, dict) and part.get('type') == 'text').strip()
+        if text:
+            runs[current]['result'] = text[:600]
+
+
 def claude_consume(messages, index, record, clean):
     """Fold one transcript record into the list of chat messages."""
+    fire = scheduled_fire(record)
+    if fire:
+        # A session cron job (CronCreate) started this turn. Claude Code writes its prompt as a hidden record.
+        import session_crons
+        messages.append({'id': str(index), 'role': 'assistant', 'kind': 'notice', 'title': 'Scheduled run',
+                         'text': session_crons.label(fire['prompt']) or fire['id'], 'time': record.get('timestamp'),
+                         'quiet': 'schedule', 'watch': session_crons.label(fire['prompt']) or fire['id'], 'cron': fire['id']})
+        return
     if record.get('isSidechain') or record.get('isMeta'):
         return
     if record.get('type') == 'attachment':
@@ -537,6 +597,7 @@ def claude_model(thread):
 def claude_snapshot(entry, clean):
     def consume(state, index, record):
         claude_consume(state['messages'], index, record, clean)
+        scheduled_runs(state, index, record)
         if record.get('type') == 'custom-title' and isinstance(record.get('customTitle'), str):
             state['name'] = ' '.join(record['customTitle'].split()) or None  # set by /rename or claude --name
         if record.get('isSidechain') or record.get('isMeta'):
@@ -591,4 +652,5 @@ def claude_snapshot(entry, clean):
     report.update(allowance_inherited=inherited, allowance_reported_at=rate_metrics.get('reported_at'),
                   model=(metrics.get('model') or {}).get('display_name') or (metrics.get('model') or {}).get('id') or '')
     return {'messages': merge_quota_notices(dict(entry, agent='claude'), messages), 'dropped': state['dropped'],
-            'busy': entry.get('busy', False), 'usage': report, 'plan': state.get('plan'), 'ask': state.get('ask'), 'claude_name': state.get('name')}
+            'busy': entry.get('busy', False), 'usage': report, 'plan': state.get('plan'), 'ask': state.get('ask'), 'claude_name': state.get('name'),
+            'scheduled': {key: dict(value) for key, value in state.get('scheduled', {}).items()}}

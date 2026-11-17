@@ -433,6 +433,10 @@ def overlay(config, result, now=None, screen_read_at=None):
             merged['task_details'] = [{key: task[key] for key in
                                       ('id', 'type', 'status', 'description', 'command', 'started')
                                       if task.get(key) is not None and task.get(key) != ''} for task in tasks]
+        if 'session_crons' in state:
+            # Jobs stay until the next Stop list, however long ago that was: a quiet job is still scheduled.
+            import session_crons
+            merged['crons'] = session_crons.summary(state['session_crons'], now)
         # Screen rows include the main agent and richer task details. They lack
         # hook IDs, so even fresh empty hooks cannot safely remove those rows.
         merged['agents'] = list(result.get('agents', []))
@@ -450,6 +454,21 @@ def overlay(config, result, now=None, screen_read_at=None):
         return merged
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return result
+
+
+def crons(config, now=None):
+    """The session's cron jobs for the tab list, from the last Stop hook; [] when unknown or ended."""
+    if config.get('agent') != 'claude' or config.get('ambiguous') or not valid_session(config.get('thread')):
+        return []
+    import paths
+    import session_crons
+    try:
+        state = json.loads((paths.CACHE / 'hooks' / (config['thread'] + '.json')).read_text())
+        if state.get('session_id') != config['thread'] or state.get('ended'):
+            return []
+        return session_crons.summary(state.get('session_crons'), time.time() if now is None else now)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return []
 
 
 def session_start_context(data, agent, env=os.environ):

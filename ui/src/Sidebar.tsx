@@ -8,12 +8,12 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
+import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
 import type { Agent, Api, ChatAgent, GroupInfo, Pane, PastChat, UsageData, UsageReport, UsageWindow } from './api'
-import { SESSION_NAME, SESSION_NAME_HELP, errorText } from './api'
+import { SESSION_NAME, SESSION_NAME_HELP, cronSummary, errorText } from './api'
 import { anchorOf, clipTitle, useModal, usePolling } from './hooks'
 import type { Anchor } from './hooks'
 import { AccountLogin } from './AccountLogin'
@@ -55,6 +55,13 @@ export const PANE_ICONS = { bug: Bug, flask: FlaskConical, palette: Palette, roc
 type PaneIcon = keyof typeof PANE_ICONS
 const LucideIcon = lazy(() => import('lucide-react/dynamic').then(module => ({ default: module.DynamicIcon })))
 // Claude gets an asterisk, like the ✳ Claude Code shows in its own title. icon: the pane's own icon, when it has one.
+// A tab with session cron jobs (Claude's CronCreate) shows a clock; its name, schedule and next run are in the tooltip
+// and in the row's accessible name.
+function CronMark({ pane }: { pane: Pane }) {
+  if (!pane.crons?.length) return null
+  const text = cronSummary(pane.crons)
+  return <span className="cron-mark" title={`Scheduled: ${text}`}><CalendarClock size={12} aria-hidden="true" /><span className="visually-hidden">, scheduled: {text}</span></span>
+}
 export function AgentIcon({ agent, icon, size = 16 }: { agent: Agent; icon?: string; size?: number }) {
   const Own = agent === 'shell' ? Terminal : agent === 'codex' ? Code2 : Asterisk
   if (icon?.startsWith('svg-')) return <span className="drawn-icon" aria-hidden="true" style={{ width: size, height: size, ['--icon' as string]: `url("/mobile/api/icon/${encodeURIComponent(icon.slice(4))}.svg")` }} />
@@ -711,7 +718,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
       const visibleTab = (pane: Pane) => showQuiet || !quietTabs.includes(pane)
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
-      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]), picked = !!tabPick?.picked.has(pane.id), name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' '); return <li key={pane.id} data-ui-item className={tabPick ? 'pane-row' : undefined}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} data-select-pane={pane.id} className={[pane.id === selected ? 'selected' : '', picked ? 'picked' : ''].filter(Boolean).join(' ')} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={event => pickOr(event, pane.id, () => onOpen(pane))} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{name} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} />{paneTag}{slotKey(pane.id)}{picked && <span className="visually-hidden">, selected</span>}</button>
+      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]), picked = !!tabPick?.picked.has(pane.id), name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' '); return <li key={pane.id} data-ui-item className={tabPick ? 'pane-row' : undefined}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} data-select-pane={pane.id} className={[pane.id === selected ? 'selected' : '', picked ? 'picked' : ''].filter(Boolean).join(' ')} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={event => pickOr(event, pane.id, () => onOpen(pane))} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{name} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{paneTag}{slotKey(pane.id)}{picked && <span className="visually-hidden">, selected</span>}</button>
         {tabPick && !reorder && <button type="button" className="row-close" aria-label={`Close ${name || session.name}`} title={`Close ${words.pane}`} onClick={event => tabPick.onCloseTab(pane.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}</li> }
       const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).map(place => ({ ...place, shown: place.panes.filter(visibleTab) })).filter(place => place.shown.length) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
@@ -790,7 +797,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
             {multi && !filtered && <ChevronRight size={14} className="chevron" aria-hidden="true" />}
             {!multi && dot(state)}
             {!multi && avatar(session.name)}
-            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <WorkMark mark={workMarks?.[session.panes[0].id]} />}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
+            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <><WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
             {!multi && slotKey(session.panes[0].id)}
             {multi && (waits > 0 ? <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span> : !open && state.kind !== 'idle' && dot(state))}
             {!multi && tabPick?.picked.has(session.panes[0].id) && <span className="visually-hidden">, selected</span>}

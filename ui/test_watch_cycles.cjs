@@ -75,4 +75,54 @@ assert.equal(foldWatchCycles([quiet('q'), reply('limit', '  ' + 'x'.repeat(400) 
 assert.equal(foldWatchCycles([quiet('q'), reply('case', 'NEEDS YOU:   YES')])[0].members.length, 1)
 assert.deepEqual([...foldWatchCycles([quiet('x', 'X'), quiet('y', 'Y'), quiet('x2', 'X')])[0].watches], ['X', 'Y'])
 
-console.log('watch cycles: quiet runs fold; boundaries, labels, identity, and input purity pass')
+
+// Scheduled runs (session cron jobs): any finished tools and short replies fold under the run's notice.
+const fire = (id, watch = 'Inbox watcher', cron = 'c1') => ({ id, role: 'assistant', kind: 'notice', title: 'Scheduled run', quiet: 'schedule', watch, cron, text: watch, time: id })
+const work = (id, tool = {}) => rearm(id, { name: 'Bash', ...tool })
+const quietRun = [fire('s1'), work('w1'), reply('b1', 'Checking.'), work('w2', { name: 'Read' }), reply('b2', 'Nothing new.\n\nNeeds you: no')]
+const scheduled = foldWatchCycles([...quietRun, fire('s2'), reply('b3', 'Nothing new.'), user])
+assert.equal(scheduled.length, 2)
+assert.equal(scheduled[0].kind, 'watch')
+assert.equal(scheduled[0].schedule, true)
+assert.equal(scheduled[0].reported, false)
+assert.equal(scheduled[0].cycles, 2)
+assert.equal(scheduled[0].members.length, 7)
+assert.deepEqual([...scheduled[0].watches], ['Inbox watcher'])
+assert.equal(scheduled[0].result, 'Nothing new.')
+assert.equal(scheduled[1], user)
+
+// A run that acted says so in its own words; it never merges into runs that found nothing, so its line shows it.
+const acted = foldWatchCycles([...quietRun, fire('s2'), work('post', { name: 'mcp__teams__send' }), reply('b4', 'Posted the reply.\n\nNeeds you: no'), fire('s3'), reply('b5', 'Nothing new.')])
+assert.deepEqual(acted.map(item => [item.cycles, item.result]), [[1, 'Nothing new.'], [1, 'Posted the reply.'], [1, 'Nothing new.']])
+assert.ok(acted.every(item => item.kind === 'watch' && item.schedule))
+// A run with no reply at all has no result to show.
+assert.equal(foldWatchCycles([fire('s1'), work('w1'), user])[0].result, '')
+// Two jobs never share one line.
+assert.equal(foldWatchCycles([fire('s1'), reply('a', 'Nothing new.'), fire('s2', 'Deploy check', 'c2'), reply('b', 'Nothing new.')]).length, 2)
+// Two jobs with the same label are still two jobs.
+assert.equal(foldWatchCycles([fire('s1'), reply('a', 'Nothing new.'), fire('s2', 'Inbox watcher', 'c2'), reply('b', 'Nothing new.')]).length, 2)
+
+// A run that reports something keeps the report outside the fold, and the fold does not claim the run was quiet.
+const report = reply('long', 'Two new messages need an answer.\n\nNeeds you: yes')
+const reported = foldWatchCycles([fire('s1'), work('w1'), report])
+assert.equal(reported.length, 2)
+assert.equal(reported[0].reported, true)
+assert.equal(reported[0].members.length, 2)
+assert.equal(reported[1], report)
+
+// A run with nothing folded but its notice keeps the plain notice.
+const bare = foldWatchCycles([fire('s1'), report])
+assert.equal(bare.length, 2)
+assert.equal(bare[0].kind, 'notice')
+
+// A failed tool ends the fold; watch cycles and scheduled runs never share one fold.
+const failed = work('bad', { is_error: true })
+assert.equal(foldWatchCycles([fire('s1'), failed])[1], failed)
+const mixed = foldWatchCycles([quiet('q1'), fire('s1'), reply('b1', 'Nothing new.')])
+assert.equal(mixed.length, 2)
+assert.equal(mixed[0].schedule, undefined)
+assert.equal(mixed[1].schedule, true)
+// A watch cycle still accepts only Monitor re-arms.
+assert.equal(foldWatchCycles([quiet('q'), work('w')]).length, 2)
+
+console.log('watch cycles: quiet runs and scheduled runs fold; boundaries, labels, identity, and input purity pass')

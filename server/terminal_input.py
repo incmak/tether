@@ -767,6 +767,9 @@ def live_status(entry, run=subprocess.run):
         import footer  # footer imports this module
         # Background work from Claude's footer line ("1 shell", "2 local agents"), so the session list can show it.
         status['tasks'] = footer.parse(screen)['tasks']
+        import claude_hooks
+        # Scheduled jobs (CronCreate), so the tab list can mark a tab that wakes itself up.
+        status['crons'] = [{key: job[key] for key in ('id', 'label', 'every', 'next') if key in job} for job in claude_hooks.crons(entry)]
     return status
 
 

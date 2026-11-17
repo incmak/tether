@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Blocks, Check, ChevronRight, Copy, Folder, Gauge, Layers, ListTodo, Pencil, RefreshCw, Sparkles, Target, X } from 'lucide-react'
+import { Blocks, CalendarClock, Check, ChevronRight, Copy, Folder, Gauge, Layers, ListTodo, Pencil, RefreshCw, Sparkles, Target, X } from 'lucide-react'
 import { errorText, goalStatusLabel } from './api'
 import type { Api, Footer, Pane, TabBrief, TabBriefLink } from './api'
 import { useModal, usePolling } from './hooks'
@@ -20,7 +20,7 @@ export interface SessionDetailsActions {
   onFiles: (folder: string) => void
   onModel?: () => void  // undefined while the agent works or the tab is read-only: the model picker would refuse
   onUsage?: () => void
-  onLive: (show: 'goal' | 'tasks') => void
+  onLive: (show: 'goal' | 'tasks' | 'crons') => void
   onTools?: () => void
   onBacklog: (query: string) => void
   onRenamed: () => void
@@ -190,9 +190,10 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
         </ul>
       </Section>}
 
-      {(tasks.length > 0 || background.length > 0 || !!pane.finished || links.length > 0) && <Section title="Activity">
+      {(tasks.length > 0 || !!footer.crons?.length || background.length > 0 || !!pane.finished || links.length > 0) && <Section title="Activity">
         <ul className="sd-rows">
           {tasks.length > 0 && <Row label="Background tasks" icon={<Layers size={16} />} onClick={() => onLive('tasks')}>{tasks.map(task => taskLabel(task, footer.task_details)).join(', ')}</Row>}
+          {!!footer.crons?.length && <Row label="Scheduled jobs" icon={<CalendarClock size={16} />} onClick={() => onLive('crons')}>{footer.crons.map(job => `${job.label} · ${job.every}`).join(', ')}</Row>}
           {background.map((agent, index) => <Row key={index} label="Background agent">{[agent.name, agent.task, agent.detail].filter(Boolean).join(' · ')}</Row>)}
           {!!pane.finished && <Row label="Last reply"><time dateTime={new Date(pane.finished * 1000).toISOString()} title={new Date(pane.finished * 1000).toLocaleString()}>{ago(pane.finished)}</time></Row>}
           {links.map(item => <Row key={item.id} label={`Backlog ${item.id} · ${item.state === 'doing' ? 'In progress' : item.state === 'done' ? 'Done' : 'Added here'}`} icon={<ListTodo size={16} />} onClick={() => onBacklog(item.id)} hint="Open in the backlog">{item.title}</Row>)}

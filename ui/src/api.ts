@@ -89,6 +89,7 @@ export interface Pane {
   since?: number | null
   finished?: number | null
   tasks?: string[]  // background work from Claude's footer: "1 shell", "1 monitor"
+  crons?: PaneCron[]  // Claude's session cron jobs (CronCreate), from its last Stop hook (server/claude_hooks.crons)
   attention?: Attention | null
   needs?: Needs | null  // a one-line summary while the pane waits on you (the desktop "Needs you" list)
   ask?: Ask | null  // Attention mode: the ask that waits on you until you answer it (server/attention.py)
@@ -96,6 +97,22 @@ export interface Pane {
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
+/** A session cron job. every: the schedule in words; next: the next run in Unix seconds, approximate (Claude Code adds jitter). */
+export interface PaneCron { id: string; label: string; every: string; next?: number }
+export interface FooterCron extends PaneCron { schedule: string; recurring: boolean }
+// A clock time for a Unix second: "14:05" today, "Wed 09:00" within a week, else the date.
+export const cronTime = (seconds: number, now = Date.now()) => {
+  const date = new Date(seconds * 1000), today = new Date(now)
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  if (date.toDateString() === today.toDateString()) return time
+  if (seconds * 1000 - now < 6 * 86400000) return `${date.toLocaleDateString([], { weekday: 'short' })} ${time}`
+  return `${date.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${time}`
+}
+export const cronsLabel = (crons: { label: string }[]) => crons.length === 1 ? crons[0].label : `${crons.length} scheduled jobs`
+// One line per job for a tooltip or a screen reader: name, schedule, next run.
+export const cronSummary = (crons: PaneCron[]) => crons.map(job => [job.label, job.every, job.next != null ? `next about ${cronTime(job.next)}` : ''].filter(Boolean).join(' · ')).join('; ')
+/** The last run of each cron job in this conversation: when it fired, the notice id, and the agent's last words in that turn. */
+export interface ScheduledRun { at: string; message: string; result: string }
 /** state: running while the model writes; off when no model may be used; skipped when the chat was too long when first seen. at: Unix seconds. */
 export interface TabBrief { name?: string; description?: string; description_by?: 'ai' | 'user'; state?: 'running' | 'done' | 'failed' | 'off' | 'skipped'; error?: string; at?: number }
 /** A backlog item that names this tab or chat (server/backlog.py linked). */
@@ -119,6 +136,12 @@ export interface ChatMessage {
   watches?: string[]
   cycles?: number
   rearmed?: boolean
+  // A folded run of session cron turns (watchCycles.ts); reported: the last turn went on to show more after the fold.
+  schedule?: boolean
+  reported?: boolean
+  result?: string
+  // The session cron job that started this turn ('Scheduled run' notice).
+  cron?: string
   title?: string
   tools?: ToolSummary[]
   count?: string
@@ -148,6 +171,7 @@ export interface ChatData {
   started?: string | null  // ISO time of the thread's first record; null when unknown
   attention?: Attention | null
   footer?: Footer
+  scheduled?: Record<string, ScheduledRun>
 }
 // free: Claude's own-answer row ("Type something."). The answer goes in the message box, not a tap.
 export interface Choice { id: number; text: string; detail?: string; selected?: boolean; free?: boolean }
@@ -333,7 +357,7 @@ export const creditsLabel = (credits?: Footer['credits']) => credits?.unlimited 
 export interface Footer { observed?: boolean; suggestion?: string; notices?: string[]; effort?: string; mode?: string; status?: string; agents?: FooterAgent[]; update?: string
   model?: string; context?: { percent: number; tokens?: number | null; limit?: number | null }; windows?: UsageWindow[]
   credits?: { balance?: string | number | null; unlimited?: boolean; has_credits?: boolean }
-  goal?: string; goal_status?: string; tasks?: string[]; task_details?: FooterTask[]; ide?: string
+  goal?: string; goal_status?: string; tasks?: string[]; task_details?: FooterTask[]; ide?: string; crons?: FooterCron[]
   spinner?: { verb: string; detail: string } | null
   running?: { title: string; elapsed: string; command: string } | null
   denied?: { text: string; reason: string } | null

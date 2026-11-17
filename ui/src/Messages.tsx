@@ -2,7 +2,7 @@ import { terminalText } from './terminalText'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
@@ -91,14 +91,17 @@ function TerminalSnapshot({ text, shell }: { text: string; shell: boolean }) {
 }
 // A watcher that expired with nothing to report, re-armed by the agent, shows as one quiet line. The notice, the re-arm
 // and the agent's short reply stay one tap away. foldWatchCycles (watchCycles.ts) decides what counts as quiet.
-export type WatchRun = { members: ChatMessage[]; watches: string[]; cycles: number; rearmed: boolean }
+export type WatchRun = { members: ChatMessage[]; watches: string[]; cycles: number; rearmed: boolean; schedule?: boolean; reported?: boolean; result?: string }
 const watchName = (label: string) => label.split(':')[0].trim() || label
 function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun; time?: string; api: Api; session: string }) {
   const names = [...new Set(run.watches.map(watchName))]
-  const what = run.cycles > 1 ? `${run.cycles} quiet cycles · ${names.join(', ')}` : `${names[0] ?? 'Watch'} · no events · ${run.rearmed ? 're-armed' : 'ended'}`
+  const what = run.schedule
+    // A scheduled run can act, so its line shows what the run said, never a claim that nothing happened.
+    ? `${names[0] ?? 'Scheduled run'}${run.cycles > 1 ? ` · ${run.cycles} runs` : ''} · ${run.result || (run.reported ? 'report below' : 'no reply')}`
+    : run.cycles > 1 ? `${run.cycles} quiet cycles · ${names.join(', ')}` : `${names[0] ?? 'Watch'} · no events · ${run.rearmed ? 're-armed' : 'ended'}`
   const when = stamp(time)
   return <details className="watch-row" data-msg-id={id}>
-    <summary><RefreshCw size={13} aria-hidden="true" /><span className="watch-what">{what}</span>{when && <time dateTime={time}>{run.cycles > 1 ? `last ${when}` : when}</time>}<ChevronRight className="chevron" size={14} aria-hidden="true" /></summary>
+    <summary>{run.schedule ? <CalendarClock size={13} aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />}<span className="watch-what" title={what}>{what}</span>{when && <time dateTime={time}>{run.cycles > 1 ? `last ${when}` : when}</time>}<ChevronRight className="chevron" size={14} aria-hidden="true" /></summary>
     <div className="watch-members">{run.members.map(item => item.kind
       ? <Message key={item.id} api={api} session={session} actions={false} id={item.id} role={item.role} kind={item.kind} title={item.title} text={item.text} count={item.count} time={item.time} tools={item.tools} />
       : <div key={item.id} className="watch-reply" data-msg-id={item.id}>{item.text.split(/\n\s*\n/).map((part, at) => <p key={at}><Linked text={part.trim()} /></p>)}<MessageActions text={item.text} time={item.time} /></div>)}</div>
@@ -108,7 +111,7 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   if (kind === 'watch' && watch) return <WatchGroup id={id} run={watch} time={time} api={api} session={session} />
   // A line Claude Code prints between turns: a hook that blocked it, a "while you were away" recap, a notice.
   if (kind === 'notice' && title) {
-    const icon = title.endsWith('hook blocked') ? <ShieldAlert size={15} /> : title === 'While you were away' ? <Clock3 size={15} /> : <Info size={15} />
+    const icon = title.endsWith('hook blocked') ? <ShieldAlert size={15} /> : title === 'While you were away' ? <Clock3 size={15} /> : title === 'Scheduled run' ? <CalendarClock size={15} /> : <Info size={15} />
     if (text.includes('\n') || text.length > 240) return <details className="tool-row compact-row notice-row" data-msg-id={id}><summary>{icon}{title}<ChevronRight size={15} /></summary><pre><Linked text={text} /></pre></details>
     return <p className="notice-line" data-msg-id={id}>{icon}<span><strong>{title}</strong> · <Linked text={text} /></span></p>
   }
@@ -307,7 +310,7 @@ export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remar
 export const convertMessage = (message: ChatMessage): ThreadMessageLike => ({
   id: message.id, role: message.role, content: message.text,
   metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,
-    watch: message.kind === 'watch' ? { members: message.members ?? [], watches: message.watches ?? [], cycles: message.cycles ?? 1, rearmed: !!message.rearmed } : undefined } },
+    watch: message.kind === 'watch' ? { members: message.members ?? [], watches: message.watches ?? [], cycles: message.cycles ?? 1, rearmed: !!message.rearmed, schedule: !!message.schedule, reported: !!message.reported, result: message.result } : undefined } },
 })
 
 // Phone photos are large and carry location data: re-draw JPEG/HEIC photos (this drops the metadata) and shrink big images.

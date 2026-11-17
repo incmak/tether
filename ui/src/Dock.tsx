@@ -3,10 +3,10 @@ import { VoiceField } from './VoiceField'
 import { PermissionsPanel } from './Permissions'
 import { DialogCard } from './DialogCard'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import { Search, Clock3, Check, Terminal, X, RefreshCw, Gauge, SquareTerminal, Layers } from 'lucide-react'
+import { Search, Clock3, Check, Terminal, X, RefreshCw, Gauge, SquareTerminal, Layers, CalendarClock } from 'lucide-react'
 import { TextMessagePartProvider } from '@assistant-ui/react'
-import { errorText, goalStatusLabel } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Footer, FooterTask, LiveState, Pane, PromptAction } from './api'
+import { cronTime, errorText, goalStatusLabel } from './api'
+import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Footer, FooterCron, FooterTask, LiveState, Pane, PromptAction, ScheduledRun } from './api'
 import { useModal, usePolling } from './hooks'
 import { Linked, PanelText, PanelPre, CopyButton, Markdown } from './Messages'
 import { Elapsed } from './Notices'
@@ -208,8 +208,27 @@ const since = (time?: number | null) => {
   return minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} min ago` : minutes < 1440 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min ago` : `${Math.floor(minutes / 1440)} d ago`
 }
 
-// The goal's last check, or the conversation's background tasks and their latest output.
-export function LiveSheet({ api, pane, show, taskDetails, onClose, onTerminal }: { api: Api; pane: Pane; show: 'goal' | 'tasks'; taskDetails?: FooterTask[]; onClose: () => void; onTerminal: () => void }) {
+const runTime = (iso: string) => {
+  const at = Date.parse(iso)
+  return Number.isNaN(at) ? '' : `${cronTime(at / 1000)} (${since(at / 1000)})`
+}
+// Session cron jobs: what each one is, when it runs, and what its last run said.
+function CronList({ crons, scheduled }: { crons: FooterCron[]; scheduled?: Record<string, ScheduledRun> }) {
+  if (!crons.length) return <p className="live-empty">No scheduled jobs in this conversation. A job ends when its conversation ends.</p>
+  return <ul className="live-tasks hook-tasks">{crons.map(job => {
+    const last = scheduled?.[job.id]
+    return <li key={job.id}>
+      <p className="live-task-title"><CalendarClock size={15} /><strong>{job.label}</strong></p>
+      <p className="live-meta">{job.every}{job.every !== job.schedule && <> · <code>{job.schedule}</code></>}{job.recurring ? '' : ' · runs once'}</p>
+      <p className="live-meta">{job.next != null ? `Next run about ${cronTime(job.next)}` : 'Next run: unknown for this schedule'}</p>
+      <p className="live-label">Last run</p>
+      {last ? <><p className="live-meta">{runTime(last.at)}</p>{last.result ? <p className="live-reason">{last.result}</p> : <p className="live-meta">No reply in that run yet.</p>}</> : <p className="live-meta">Not run yet in the loaded conversation.</p>}
+    </li>
+  })}</ul>
+}
+
+// The goal's last check, the conversation's background tasks and their latest output, or its scheduled jobs.
+export function LiveSheet({ api, pane, show, taskDetails, crons, scheduled, onClose, onTerminal }: { api: Api; pane: Pane; show: 'goal' | 'tasks' | 'crons'; taskDetails?: FooterTask[]; crons?: FooterCron[]; scheduled?: Record<string, ScheduledRun>; onClose: () => void; onTerminal: () => void }) {
   const modal = useModal(true, onClose)
   const [stopping, setStopping] = useState<string | null>(null)
   const [stopError, setStopError] = useState('')
@@ -223,9 +242,10 @@ export function LiveSheet({ api, pane, show, taskDetails, onClose, onTerminal }:
     finally { setStopping(null) }
   }
   const goal = state?.goal
-  const hookTasks = show === 'tasks' && taskDetails !== undefined
+  // These come from Claude's hooks with the footer, not from the live endpoint.
+  const hookTasks = (show === 'tasks' && taskDetails !== undefined) || show === 'crons'
   return <dialog {...modal} className="sheet live-sheet" aria-labelledby="live-title">
-    <div className="sheet-heading"><h2 id="live-title">{show === 'goal' ? 'Goal' : 'Background tasks'}</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
+    <div className="sheet-heading"><h2 id="live-title">{show === 'goal' ? 'Goal' : show === 'crons' ? 'Scheduled jobs' : 'Background tasks'}</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
     {!hookTasks && error && <p className="live-empty" role="alert">Could not load: {error}</p>}
     {stopError && <p className="live-empty" role="alert">{stopError}</p>}
     {!hookTasks && !state && !error && <Loading className="live-empty" />}
@@ -238,7 +258,8 @@ export function LiveSheet({ api, pane, show, taskDetails, onClose, onTerminal }:
       {goal.time_used_seconds != null && <p className="live-meta">Time used: {Math.floor(goal.time_used_seconds / 60)} min {goal.time_used_seconds % 60} sec</p>}
       {goal.set_at && <p className="live-meta">Set {since(goal.set_at)}</p>}
     </div> : <p className="live-empty">No goal found in this conversation.</p>)}
-    {hookTasks && (taskDetails.length ? <ul className="live-tasks hook-tasks">{taskDetails.map(task => <li key={task.id}>
+    {show === 'crons' && <CronList crons={crons ?? []} scheduled={scheduled} />}
+    {hookTasks && show === 'tasks' && (taskDetails?.length ? <ul className="live-tasks hook-tasks">{taskDetails.map(task => <li key={task.id}>
       <p className="live-task-title">{task.type === 'monitor' ? <Gauge size={15} /> : task.type === 'shell' ? <Terminal size={15} /> : <Layers size={15} />}<strong>{task.description || task.type || 'Task'}</strong></p>
       <p className="live-meta">{task.type || 'Task'}{task.status ? ` · ${task.status}` : ''}{task.started != null && <> · <Elapsed since={task.started * 1000} /></>}</p>
       {task.command && <code className="live-command">{task.command}</code>}
