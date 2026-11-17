@@ -2383,7 +2383,7 @@ class Handler(BaseHTTPRequestHandler):
                     stopped = dev_previews.PREVIEWS.stop(body.get('ports'), force=body.get('force') is True)
                     self.respond(200, {'results': [{'port': port, 'state': state} for port, state in stopped.items()]})
                 except dev_previews.Refused as exc:
-                    self.respond(503 if exc.code == 'unsupported' else 400, {'error': str(exc), 'code': exc.code})
+                    self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})
                 return
             if self.path == '/mobile/api/preview':
                 try:

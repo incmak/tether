@@ -243,27 +243,52 @@ def _read(path):
         return stream.read(65536)
 
 
+def cgroup_kind(text):
+    """'service' when a cgroup record puts the process in a systemd service (or below one), None when it does not,
+    'unknown' when the records cannot be read. cgroup v2 has one line, '0::/path'; v1 and hybrid have several, and each
+    is checked. Below a user manager (user@1000.service) the units are that user's own: a program started in a terminal
+    or tmux sits in a .scope there, Tether's helpers in their .service."""
+    paths = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(':', 2)
+        if len(parts) != 3 or not parts[2].startswith('/'):
+            return 'unknown'
+        paths.append(parts[2])
+    if not paths:
+        return 'unknown'
+    for path in paths:
+        units = [unit for unit in path.split('/') if unit]
+        managers = [index for index, unit in enumerate(units) if unit.startswith('user@') and unit.endswith('.service')]
+        if managers:
+            units = units[managers[-1] + 1:]
+        if any(unit.endswith('.service') for unit in units):
+            return 'service'
+    return None
+
+
 def process_kind(pid, root='/proc', own_pid=None):
     """What the process `pid` is, for the dev server list (Linux): 'dev' for a program the person or an agent
     started, else 'tether' (Tether or a program it started), 'service' (a systemd service, such as Tether's voice
     and model helpers), 'agent' (Claude Code, Codex) or 'unknown' (Tether cannot tell). Only 'dev' is listed,
-    forwarded or stopped: the other kinds fail closed."""
+    forwarded or stopped: the other kinds fail closed. A dev server inside a .service (tmux run as a service) is
+    refused too. Tether trusts the processes of its own user not to disguise themselves: they could signal any of
+    this user's processes without Tether. The rule guards against mistakes, such as stopping Tether's own helpers."""
     own_pid = os.getpid() if own_pid is None else own_pid
     base = '%s/%d' % (root, pid)
     try:
         status = _read(base + '/status').decode('utf-8', 'replace')
         parent = int(re.search(r'^PPid:\s*(\d+)', status, re.M).group(1))
-        groups = _read(base + '/cgroup').decode('utf-8', 'replace').splitlines()
+        group = cgroup_kind(_read(base + '/cgroup').decode('utf-8', 'replace'))
         command = _read(base + '/cmdline').split(b'\0')
         comm = _read(base + '/comm').decode('utf-8', 'replace').strip()
     except (OSError, AttributeError, ValueError):
         return 'unknown'
     if own_pid and own_pid in (pid, parent):
         return 'tether'
-    # cgroup v2 has one line, '0::/path'; v1 has several. A leaf that ends in .service is a systemd service, and every
-    # program it starts stays in its cgroup. A program started in a terminal or tmux sits in a .scope or a session.
-    if any(line.rsplit('/', 1)[-1].endswith('.service') for line in groups if line.strip()):
-        return 'service'
+    if group:
+        return group
     names = {comm} | {os.path.basename(part.decode('utf-8', 'replace')) for part in command[:2] if part}
     if names & AGENTS:
         return 'agent'
@@ -271,16 +296,17 @@ def process_kind(pid, root='/proc', own_pid=None):
 
 
 def socket_holders(inodes, uid, root='/proc', limit=50000):
-    """{inode: [pid, ...]}: this user's processes that hold each socket (Linux). A socket may have several holders,
-    for example a reloader and its worker."""
+    """({inode: [pid, ...]}, complete): this user's processes that hold each socket (Linux). A socket may have several
+    holders, for example a reloader and its worker. complete is False when the scan stopped early or could not read a
+    process of this user: a holder may be missing then, so the caller must not trust the result."""
     wanted = {'socket:[%d]' % inode: inode for inode in inodes if inode}
     found = {}
     if not wanted:
-        return found
+        return found, True
     try:
         pids = [int(name) for name in os.listdir(root) if name.isdigit()]
     except OSError:
-        return found
+        return found, False
     looked = 0
     for pid in pids:
         base = '%s/%d' % (root, pid)
@@ -288,19 +314,26 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
             if os.stat(base).st_uid != uid:
                 continue
             links = os.listdir(base + '/fd')
-        except OSError:
+        except FileNotFoundError:
+            continue  # it ended
+        except PermissionError:
+            # A non-dumpable process of this user (sshd, gpg-agent, sd-pam) hides its descriptors. Such programs do
+            # not share a listening socket with a dev server; a socket that only they hold has no visible holder and
+            # is left out, so this fails closed too.
             continue
+        except OSError:
+            return found, False
         for link in links:
             looked += 1
             if looked > limit:
-                return found
+                return found, False
             try:
                 inode = wanted.get(os.readlink('%s/fd/%s' % (base, link)))
             except OSError:
-                continue
+                continue  # the descriptor closed
             if inode is not None and pid not in found.setdefault(inode, []):
                 found[inode].append(pid)
-    return found
+    return found, True
 
 
 def holds(pid, inode, root='/proc'):
@@ -321,11 +354,13 @@ def holds(pid, inode, root='/proc'):
 def process_names(inodes, uid, root='/proc', own_pid=None):
     """{inode: {'name', 'folder', 'pids', 'kind'}} for this user's listening sockets (Linux): the command, its folder's
     name, the processes that hold the socket and their kind (process_kind). The kind is 'dev' only when every holder
-    is a dev server. A socket without a visible holder is left out."""
+    is a dev server and the scan saw every process. A socket without a visible holder is left out."""
+    holders, complete = socket_holders(inodes, uid, root)
     found = {}
-    for inode, pids in socket_holders(inodes, uid, root).items():
+    for inode, pids in holders.items():
         kinds = {process_kind(pid, root, own_pid) for pid in pids}
-        entry = {'name': '', 'folder': '', 'pids': sorted(pids), 'kind': kinds.pop() if len(kinds) == 1 else 'unknown'}
+        kind = kinds.pop() if len(kinds) == 1 and complete else 'unknown'
+        entry = {'name': '', 'folder': '', 'pids': sorted(pids), 'kind': kind}
         base = '%s/%d' % (root, min(pids))
         try:
             command = _read(base + '/cmdline').split(b'\0')[0].decode('utf-8', 'replace')
@@ -337,19 +372,29 @@ def process_names(inodes, uid, root='/proc', own_pid=None):
     return found
 
 
-def stop_process(pid, inode, force=False, root='/proc'):
-    """Send SIGTERM (or SIGKILL) to `pid` when it still holds the socket `inode`. True when the signal went out.
-    A pidfd names this very process: if it ends and its pid goes to another program between the check and the
-    signal, the signal goes nowhere (Linux 5.3 or later; elsewhere Tether stops nothing)."""
+def stop_process(pid, inode, force=False, kind=process_kind, root='/proc'):
+    """Signal `pid` with SIGTERM (or SIGKILL): 'sent', 'gone' (it no longer holds the socket `inode`) or 'refused' (it
+    is no longer a dev server). The pidfd pins this very process first; then Tether checks that it still holds the
+    socket and is still a dev server, and only then signals it. A pid that went to another program before the pin
+    fails the socket check: socket inodes are not shared between processes that did not pass them on (Linux 5.3 or
+    later; elsewhere Tether stops nothing)."""
     import signal as signals
     if not hasattr(os, 'pidfd_open') or not hasattr(signals, 'pidfd_send_signal'):
         raise OSError('pidfd is not available')
-    descriptor = os.pidfd_open(pid)
+    try:
+        descriptor = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return 'gone'
     try:
         if not holds(pid, inode, root):
-            return False
-        signals.pidfd_send_signal(descriptor, signals.SIGKILL if force else signals.SIGTERM)
-        return True
+            return 'gone'
+        if kind(pid) != 'dev':
+            return 'refused'
+        try:
+            signals.pidfd_send_signal(descriptor, signals.SIGKILL if force else signals.SIGTERM)
+        except ProcessLookupError:
+            return 'gone'
+        return 'sent'
     finally:
         os.close(descriptor)
 
@@ -371,7 +416,7 @@ class DevPreviews:
     """The pool: which dev port each pool port forwards, and who may use it. Thread-safe."""
 
     def __init__(self, ports=(), denied=(), clock=time.time, listeners=read_listeners, uid=None, names=process_names,
-                 peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None, signal=None):
+                 peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None, signal=None, kind=None):
         self.peer_uid = peer_uid  # None: no socket table on this system. Nothing is forwarded then (verify, open).
         self.store = store        # the file that keeps the assignments; None keeps them in memory (tests)
         self.assigned = None      # pool port -> dev port, read from the file at first use
@@ -381,7 +426,10 @@ class DevPreviews:
         self.read = listeners
         self.uid = os.getuid() if uid is None else uid
         self.names = names        # (inodes, uid) -> {inode: {'name', 'folder', 'pids', 'kind'}}: process_names
-        self.signal = signal or stop_process  # (pid, inode, force) -> True when the signal went out: stop_process
+        self.kind = kind or process_kind  # pid -> 'dev', 'tether', 'service', 'agent' or 'unknown'
+        # (pid, inode, force) -> 'sent', 'gone' or 'refused': stop_process
+        self.signal = signal or (lambda pid, inode, force: stop_process(pid, inode, force, kind=self.kind))
+        self.stopping = threading.Lock()  # one stop request at a time: each one scans /proc and waits
         self.owners = {}          # inode -> (monotonic time, process_names entry): the proxy asks often
         self.lock = threading.Lock()
         self.leases = {}  # pool port -> Lease
@@ -427,11 +475,11 @@ class DevPreviews:
                     known[inode] = entry
         return known
 
-    def ours(self, port, fresh=False):
+    def ours(self, port, fresh=False, listening=None):
         """This user's listeners on `port` that a localhost link reaches, and whether another user's listener or a
         listener on another address shares the port."""
         mine, other = [], False
-        for entry in self.listeners(fresh):
+        for entry in self.listeners(fresh) if listening is None else listening:
             if entry['port'] != port:
                 continue
             if entry['uid'] != self.uid or connect_address(entry['address']) is None:
@@ -473,7 +521,33 @@ class DevPreviews:
             owner = self.peer_uid(sock)
         except (OSError, ValueError):
             return 'unknown'
-        return 'unknown' if owner is None else 'ours' if owner == self.uid else 'other'
+        if owner is None:
+            return 'unknown'
+        if owner != self.uid:
+            return 'other'
+        try:
+            return 'ours' if self.still_dev(sock.getpeername()[1]) else 'other'
+        except (OSError, ValueError):
+            return 'unknown'
+
+    def still_dev(self, port):
+        """True when every listener of this user on `port` belongs to a dev server now. The proxy asks for each
+        connection: within the short listener cache another program of this user (a Tether helper, say) may have
+        taken the port. The listener table is read again (a few ms); a known socket is checked against the processes
+        that held it, and only a new socket costs a full scan."""
+        mine, _ = self.ours(port, fresh=True)
+        if not mine:
+            return False
+        inodes = [entry['inode'] for entry in mine]
+        owners = self.owner(inodes)
+
+        def good(inode, entry):
+            live = [pid for pid in entry.get('pids', ()) if holds(pid, inode)]
+            return entry.get('kind') == 'dev' and bool(live) and all(self.kind(pid) == 'dev' for pid in live)
+        if all(good(inode, owners[inode]) for inode in inodes):
+            return True
+        owners = self.owner(inodes, fresh=True)
+        return all(good(inode, owners[inode]) for inode in inodes)
 
     # assignments -----------------------------------------------------------------------------------------------
     def _assignments(self):
@@ -558,56 +632,68 @@ class DevPreviews:
     def stop(self, ports, force=False, wait=STOP_WAIT):
         """The person stops dev servers: {port: 'stopped' | 'still-running' | 'refused' | 'not-found'}. Each process
         that holds the port's socket gets SIGTERM (SIGKILL when `force`), only when it is a dev server now
-        (process_kind). A stopped port also gives back its preview port. Waits up to `wait` seconds."""
+        (process_kind, checked again on the pinned process: stop_process). A stopped port also gives back its preview
+        port. One request at a time; it scans /proc once for all ports and ends `wait` seconds after it starts."""
         if (type(ports) is not list or not 0 < len(ports) <= MAX_STOP
                 or any(type(port) is not int or not 0 < port <= 65535 for port in ports)):
             raise Refused('bad-port', 'Name 1 to %d port numbers.' % MAX_STOP)
         if self.peer_uid is None:
             raise Refused('unsupported', UNSUPPORTED)
-        result, sent = {}, {}
-        for port in dict.fromkeys(ports):
-            try:
-                self.check_port(port)
-            except Refused:
-                result[port] = 'refused'
-                continue
-            mine, other = self.ours(port, fresh=True)
-            if not mine:
-                result[port] = 'refused' if other else 'not-found'
-                continue
-            owners = self.owner([entry['inode'] for entry in mine], fresh=True)
-            if other or any(owners[entry['inode']].get('kind') != 'dev' or not owners[entry['inode']].get('pids')
-                            for entry in mine):
-                result[port] = 'refused'
-                continue
-            result[port] = 'still-running'
-            try:
-                for entry in mine:
-                    for pid in owners[entry['inode']]['pids']:
-                        try:
-                            self.signal(pid, entry['inode'], force)
-                        except ProcessLookupError:
-                            continue  # it ended already
-            except OSError:
-                result[port] = 'refused'  # no pidfd here, or no permission: Tether stops nothing it cannot pin down
-                continue
-            sent[port] = {entry['inode'] for entry in mine}
-        deadline = time.monotonic() + wait
-        while True:
-            alive = {entry['inode'] for entry in self.listeners(fresh=True)}
-            for port, inodes in sent.items():
-                if result[port] == 'still-running' and not inodes & alive:
-                    result[port] = 'stopped'
-            if all(result[port] == 'stopped' for port in sent) or time.monotonic() >= deadline:
-                break
-            time.sleep(0.1)
-        for port, state in result.items():
-            if state == 'stopped' and port in sent:
+        if not self.stopping.acquire(blocking=False):
+            raise Refused('busy', 'Tether is stopping other dev servers. Try again in a moment.')
+        try:
+            deadline = time.monotonic() + wait
+            listening = self.listeners(fresh=True)
+            result, found = {}, {}
+            for port in dict.fromkeys(ports):
+                try:
+                    self.check_port(port)
+                except Refused:
+                    result[port] = 'refused'
+                    continue
+                mine, other = self.ours(port, listening=listening)
+                if other:
+                    result[port] = 'refused'
+                elif not mine:
+                    result[port] = 'not-found'
+                else:
+                    found[port] = mine
+            owners = self.owner([entry['inode'] for mine in found.values() for entry in mine], fresh=True)
+            sent = {}
+            for port, mine in found.items():
+                if any(owners[entry['inode']].get('kind') != 'dev' or not owners[entry['inode']].get('pids')
+                       for entry in mine):
+                    result[port] = 'refused'
+                    continue
+                answers = set()
+                try:
+                    for entry in mine:
+                        for pid in owners[entry['inode']]['pids']:
+                            answers.add(self.signal(pid, entry['inode'], force))
+                except OSError:
+                    answers.add('refused')  # no pidfd here, or no permission: Tether stops nothing it cannot pin
+                if 'refused' in answers:
+                    result[port] = 'refused'
+                    continue
+                result[port] = 'still-running'
+                sent[port] = {entry['inode'] for entry in mine}
+            while sent:
+                alive = {entry['inode'] for entry in self.listeners(fresh=True)}
+                for port, inodes in sent.items():
+                    if result[port] == 'still-running' and not inodes & alive:
+                        result[port] = 'stopped'
+                if all(result[port] == 'stopped' for port in sent) or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.1)
+        finally:
+            self.stopping.release()
+        for port in sent:
+            if result[port] == 'stopped':
                 try:
                     self.release(port)
                 except Refused:
                     pass  # no preview port, or the list cannot be saved: the server is stopped all the same
-        return result
+        return {port: result[port] for port in dict.fromkeys(ports)}  # in the order of the request
 
     # leases ----------------------------------------------------------------------------------------------------
     def _sweep(self, now):

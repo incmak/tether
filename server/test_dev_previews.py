@@ -46,7 +46,8 @@ def dev_names(inodes, uid):
 
 
 # The proxy tests run their dev server in this very process: Tether's own pid rule would refuse it.
-LOCAL_NAMES = functools.partial(dev_previews.process_names, own_pid=0)
+LOCAL = {'names': functools.partial(dev_previews.process_names, own_pid=0),
+         'kind': functools.partial(dev_previews.process_kind, own_pid=0)}
 
 
 @unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')
@@ -585,7 +586,7 @@ class ProxyTests(unittest.TestCase):
         self.upstream.handle_error = lambda *_args: None  # a cut connection is part of several tests
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.dev_port = self.upstream.server_port
-        self.previews = DevPreviews(names=LOCAL_NAMES)
+        self.previews = DevPreviews(**LOCAL)
         self.logged = []
         key = unittest.mock.patch.object(dev_previews, 'marker_key', lambda: b'test-marker-key')  # not the real access token
         key.start()
@@ -1343,6 +1344,35 @@ class KindTests(unittest.TestCase):
         self.assertEqual(kind(500 + 1), 'unknown')  # gone, or hidden from Tether
         self.assertEqual(dev_previews.process_kind(10, self.root, own_pid=10), 'tether')
 
+    def test_cgroups(self):
+        user = '/user.slice/user-1000.slice/user@1000.service'
+        cases = {
+            '0::%s/app.slice/tmux-spawn-1.scope\n' % user: None,
+            '0::%s/app.slice/tether-voice.service\n' % user: 'service',
+            '0::%s/app.slice/tether-voice.service/workers\n' % user: 'service',  # a subgroup of a service
+            '0::/system.slice/tether.service\n': 'service',
+            '0::/user.slice/user-1000.slice/session-3.scope\n': None,
+            '0::/\n': None,  # a container
+            '12:pids:/system.slice/tether.service\n1:name=systemd:/user.slice/session-3.scope\n': 'service',  # v1
+            '1:name=systemd:/user.slice/session-3.scope\n0::/system.slice/x.service/sub\n': 'service',  # hybrid
+            '': 'unknown',
+            '\n': 'unknown',
+            'nonsense\n': 'unknown',
+            '0::relative\n': 'unknown',
+        }
+        for text, kind in cases.items():
+            self.assertEqual(dev_previews.cgroup_kind(text), kind, text)
+
+    def test_an_incomplete_scan_trusts_no_holder(self):
+        scope = '/session-3.scope'
+        self.proc(30, 'node', scope, inode=9101)
+        self.proc(31, 'node', scope, inode=9101)
+        holders, complete = dev_previews.socket_holders([9101], os.getuid(), root=self.root, limit=1)
+        self.assertFalse(complete)
+        with unittest.mock.patch.object(dev_previews, 'socket_holders', lambda *_args: ({9101: [30]}, False)):
+            found = dev_previews.process_names([9101], os.getuid(), root=self.root, own_pid=0)
+        self.assertEqual(found[9101]['kind'], 'unknown')
+
     def test_names_need_every_holder_to_be_a_dev_server(self):
         scope = '/session-3.scope'
         self.proc(20, 'node', scope, argv=['/usr/bin/node', 'next'], inode=9001)
@@ -1375,7 +1405,7 @@ class StopTests(unittest.TestCase):
             self.sent.append((pid, force))
             if gone:
                 self.listening = [entry for entry in self.listening if entry['inode'] != inode]
-            return True
+            return 'sent'
         return DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, names=kinds(self.table),
                            signal=signal, **more)
 
@@ -1418,6 +1448,23 @@ class StopTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'unsupported')
         self.assertEqual(self.sent, [])
 
+    def test_one_scan_for_many_ports_and_one_request_at_a_time(self):
+        calls = []
+        names = kinds(self.table)
+        previews = self.make()
+        previews.names = lambda inodes, uid: calls.append(len(inodes)) or names(inodes, uid)
+        previews.stop(list(range(2000, 2000 + dev_previews.MAX_STOP - 2)) + [5173, 5174], wait=0)
+        self.assertEqual(calls, [2])
+        with previews.stopping:
+            with self.assertRaises(Refused) as caught:
+                previews.stop([5173])
+        self.assertEqual(caught.exception.code, 'busy')
+
+    def test_a_holder_that_changed_kind_is_refused(self):
+        previews = self.make()
+        previews.signal = lambda pid, inode, force: 'refused'  # stop_process saw an agent on the pinned pid
+        self.assertEqual(previews.stop([5173], wait=0), {5173: 'refused'})
+
     def test_no_pidfd_stops_nothing(self):
         def signal(pid, inode, force):
             raise OSError('pidfd is not available')
@@ -1439,7 +1486,7 @@ class RealStopTests(unittest.TestCase):
 
     def test_stop_a_child_dev_server(self):
         child, port = self.start_server()
-        previews = DevPreviews(ports=[], names=LOCAL_NAMES)
+        previews = DevPreviews(ports=[], **LOCAL)
         self.assertIn(port, [row['port'] for row in previews.servers()])
         self.assertEqual(previews.stop([port]), {port: 'stopped'})
         self.assertEqual(child.wait(5), -15)  # SIGTERM
@@ -1457,8 +1504,33 @@ class RealStopTests(unittest.TestCase):
 
     def test_a_process_that_no_longer_holds_the_socket_gets_no_signal(self):
         child, port = self.start_server()
-        self.assertFalse(dev_previews.stop_process(child.pid, 1))  # inode 1 is not its socket
+        self.assertEqual(dev_previews.stop_process(child.pid, 1), 'gone')  # inode 1 is not its socket
         self.assertIsNone(child.poll())
+
+    def test_the_pinned_process_is_checked_again(self):
+        # Review of b81a324, item 1: a holder that became an agent after the list was read gets no signal.
+        child, port = self.start_server()
+        inode = next(entry['inode'] for entry in dev_previews.read_listeners() if entry['port'] == port)
+        self.assertEqual(dev_previews.stop_process(child.pid, inode, kind=lambda pid: 'agent'), 'refused')
+        self.assertIsNone(child.poll())
+        self.assertEqual(dev_previews.stop_process(child.pid, inode, kind=lambda pid: 'dev'), 'sent')
+        self.assertEqual(child.wait(5), -15)
+
+    def test_the_proxy_checks_the_owner_for_each_connection(self):
+        # Review of b81a324, item 2: within the cache, a Tether helper of the same user may take the port.
+        kind = ['dev']
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0))
+            server.listen()
+            port = server.getsockname()[1]
+            previews = DevPreviews(ports=[], names=LOCAL['names'], kind=lambda pid: kind[0])
+            self.assertEqual(previews.target(port), '127.0.0.1')
+            with socket.create_connection(('127.0.0.1', port)) as client:
+                accepted, _ = server.accept()
+                with accepted:
+                    self.assertEqual(previews.verify(client), 'ours')
+                    kind[0] = 'service'
+                    self.assertEqual(previews.verify(client), 'other')
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
@@ -1474,7 +1546,7 @@ class ApiTests(unittest.TestCase):
         self.addCleanup(quiet.stop)
         self.main = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         threading.Thread(target=self.main.serve_forever, daemon=True).start()
-        self.previews = DevPreviews(ports=[7700], denied={self.main.server_port}, names=LOCAL_NAMES)
+        self.previews = DevPreviews(ports=[7700], denied={self.main.server_port}, **LOCAL)
         patcher = unittest.mock.patch.object(dev_previews, 'PREVIEWS', self.previews)
         patcher.start()
         self.addCleanup(patcher.stop)
