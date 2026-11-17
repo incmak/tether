@@ -200,3 +200,9 @@
 .ui-usage-empty { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
 .ui-usage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 8px; font-size: 13px; }
 .ui-usage-actions .danger-text { color: var(--error); }
+
+/* Notifications inside another Tether's frame (SettingsControls.tsx FramedNotifications). */
+.framed-notifications { display: grid; gap: 8px; justify-items: start; }
+.framed-notifications p { margin: 0; overflow-wrap: anywhere; }
+/* A long host name wraps inside the button, not past the screen edge. */
+.framed-notifications .secondary { max-width: 100%; height: auto; padding-block: 8px; white-space: normal; overflow-wrap: anywhere; text-align: start; }

@@ -1,6 +1,6 @@
 // Installed app name and icon (Settings › Appearance, src/AppIdentity.tsx, server/app_identity.py) against an existing
 // build: the setting loads, previews the name and colour, saves both, renders at 320 px and 1280 px without overflow,
-// and names the save in a status line. Every API request stays in this page's fixtures.
+// and names the save in a status line. The sidebar brand shows the saved name and icon, and follows a save at once. Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_app_identity_ui.cjs).
 const http = require('node:http')
 const fs = require('node:fs/promises')
@@ -29,6 +29,8 @@ let prefs = {}, version = 1
 const COLORS = [['clay', 'Clay', '#C96442'], ['blue', 'Blue', '#2F6BD8'], ['green', 'Green', '#2E7D4F']].map(([id, label, hex]) => ({ id, label, hex }))
 const BLANK = { name: 'Tether', color: 'clay', icon: 'color', art: null, draft: null, job: null }
 let identity = { ...BLANK }
+// The name the server writes into index.html, as server/app_identity.py page() does; null serves the build as it is.
+let served = null
 
 async function main() {
   let browser, page, server, failed = 0
@@ -95,7 +97,11 @@ async function main() {
       if (url.origin === origin && url.pathname.startsWith('/chat/')) {
         const file = url.pathname === '/chat/' ? path.join(DIST, 'index.html') : path.resolve(DIST, '.' + decodeURIComponent(url.pathname.slice('/chat'.length)))
         if (!(file === path.join(DIST, 'index.html') || file.startsWith(DIST + path.sep))) return route.fulfill({ status: 404, body: '' })
-        try { return route.fulfill({ body: await fs.readFile(file), contentType: mime[path.extname(file)] || 'application/octet-stream' }) } catch { return route.fulfill({ status: 404, body: '' }) }
+        try {
+          let body = await fs.readFile(file)
+          if (served && file === path.join(DIST, 'index.html')) body = body.toString().replace('<title>Tether</title>', `<title>${served}</title><meta name="apple-mobile-web-app-title" content="${served}" />`)
+          return route.fulfill({ body, contentType: mime[path.extname(file)] || 'application/octet-stream' })
+        } catch { return route.fulfill({ status: 404, body: '' }) }
       }
       return route.abort('blockedbyclient')
     })
@@ -115,6 +121,8 @@ async function main() {
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
       await page.locator('.chat-panel[data-pane="%1"]').first().waitFor()
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
+      const brand = page.locator('.sidebar-brand:visible')
+      check(`${at} sidebar shows the default name and mark`, (await brand.textContent()) === 'Tether' && await brand.locator('img').getAttribute('src') === '/chat/icon.svg')
       await page.getByRole('button', { name: 'Settings' }).first().click()
       await page.getByRole('searchbox', { name: 'Search settings' }).fill('home screen icon')
       const name = page.getByRole('textbox', { name: 'App name' })
@@ -135,6 +143,11 @@ async function main() {
       const sent = posts.find(post => post.endpoint === 'app-identity')
       check(`${at} posts the trimmed name and colour`, sent && sent.body.name === 'Work box' && sent.body.color === 'blue', JSON.stringify(sent))
       check(`${at} title follows`, await page.title() === 'Work box')
+      const sidebarBrand = page.locator('.sidebar-brand')
+      check(`${at} sidebar name follows the save`, (await sidebarBrand.first().textContent()) === 'Work box')
+      const firstIcon = await sidebarBrand.first().locator('img').getAttribute('src')
+      check(`${at} sidebar icon loads again`, /^\/chat\/icon\.svg\?v=\d+$/.test(firstIcon || ''), firstIcon)
+      check(`${at} tab icon loads again`, await page.locator('link[rel="icon"]').getAttribute('href') === firstIcon)
       check(`${at} save turns off after saving`, await save.isDisabled())
       await name.fill('')
       await page.locator('.preferences-colors label').filter({ hasText: 'Green' }).click()
@@ -159,6 +172,7 @@ async function main() {
       await page.getByRole('button', { name: 'Use this icon' }).click()
       await page.getByRole('status').filter({ hasText: 'Your picture is now the app icon' }).waitFor()
       check(`${at} preview shows the picture`, await preview.locator('img').count() === 1)
+      check(`${at} sidebar icon follows the new picture`, await page.locator('.sidebar-brand img').first().getAttribute('src') !== firstIcon)
       check(`${at} use posts useDraft only`, posts.some(post => post.endpoint === 'app-identity' && post.body.useDraft === true && post.body.draft === 'd1' && !('name' in post.body)))
       await page.locator('.app-identity-own input[type=file]').setInputFiles({ name: 'me.png', mimeType: 'image/png', buffer: await fs.readFile(path.join(DIST, 'icon-192.png')) })
       await draft.waitFor()
@@ -169,6 +183,28 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `app-identity-own-${width}.png`) })
       await page.keyboard.press('Escape'); await page.keyboard.press('Escape')
     }
+    // A saved name that the server wrote into the page: the sidebar shows it from the start. The longest name (30
+    // characters) ends in an ellipsis at 320 px and leaves the header buttons whole.
+    for (const [width, height] of sizes) {
+      const at = `${width}px`
+      served = 'Wwwwwwwwwwwwwwwwwwwwwwwwwwwwww'
+      await page.setViewportSize({ width, height })
+      await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
+      await page.locator('.chat-panel[data-pane="%1"]').first().waitFor()
+      if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
+      const brand = page.locator('.sidebar-brand:visible')
+      check(`${at} sidebar shows the served name`, (await brand.textContent()) === served)
+      const fit = await page.evaluate(() => {
+        const name = [...document.querySelectorAll('.sidebar-brand span')].find(item => item.getClientRects().length)
+        const top = name.closest('.sidebar-top'), last = top.querySelector('.sidebar-top-actions').lastElementChild
+        return { cut: name.scrollWidth > name.clientWidth, inside: last.getBoundingClientRect().right <= top.getBoundingClientRect().right + 0.5, title: name.title }
+      })
+      check(`${at} a long name ends in an ellipsis`, width > 800 || fit.cut, JSON.stringify(fit))
+      check(`${at} header buttons stay whole`, fit.inside && fit.title === served, JSON.stringify(fit))
+      check(`${at} no page overflow with a long name`, !(await overflow()))
+      await page.locator('.sidebar-top:visible').screenshot({ path: path.join(SHOTS, `sidebar-brand-${width}.png`) })
+    }
+    served = null
     check('no page errors', !pageErrors.length, pageErrors.join('\n'))
   } catch (error) {
     failed++

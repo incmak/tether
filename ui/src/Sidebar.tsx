@@ -17,6 +17,7 @@ import { SESSION_NAME, SESSION_NAME_HELP, cronSummary, errorText } from './api'
 import { anchorOf, clipTitle, useModal, usePolling } from './hooks'
 import type { Anchor } from './hooks'
 import { AccountLogin } from './AccountLogin'
+import { useBrand } from './brand'
 import { orderAround, pickMode } from './tabSelection'
 import type { TabPickControls } from './tabSelection'
 import { CodexProviderSwitch } from './CodexProvider'
@@ -540,9 +541,10 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
     else if (event.key === 'ArrowDown' && first) { event.preventDefault(); first.focus() }
     else if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery('') }
   }
+  const brand = useBrand()
   return <div className={`sidebar-inner ${ghost ? 'touch-carrying' : ''}`} ref={root}>
     <div className="sidebar-top">
-      <div className="sidebar-brand"><img src="/chat/icon.svg" alt="" width="22" height="22" />Tether</div>
+      <div className="sidebar-brand"><img src={brand.icon} alt="" width="22" height="22" /><span title={brand.name}>{brand.name}</span></div>
       <span className="sidebar-top-actions">{onFactory && <button className="icon-button" aria-label="Factory view" title="Factory view" aria-haspopup="dialog" onClick={onFactory}><Factory size={19} /></button>}{onMessageAll && <button className="icon-button" aria-label="Message all sessions" title="Message all sessions" onClick={onMessageAll}><MessagesSquare size={19} /></button>}<button className="icon-button" aria-label="New session" title="New session" aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onNew(matchMedia('(hover: hover)').matches ? { x: box.left, y: box.bottom + 6 } : undefined) }}><Plus size={20} /></button>
       {onClose && <button className="icon-button" aria-label="Close sessions" onClick={onClose}><X size={20} /></button>}</span>
     </div>

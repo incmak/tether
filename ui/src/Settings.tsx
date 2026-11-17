@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, ArrowUpRight, ChevronRight, Search, X } from 'lucide-react'
 import type { Api } from './api'
@@ -35,9 +35,9 @@ function Field({ children, scope }: { children: ReactNode; scope: Scope }) {
   return <div className="preferences-field">{children}<span className="preferences-scope">{scope}</span></div>
 }
 
-export function Settings({ api, prefs, update, onReload, onClose, start }: { api: Api; prefs: Prefs; update: (change: (current: Prefs) => Partial<Prefs>) => void; onReload: () => void; onClose: () => void; start?: 'layout-maker' }) {
+export function Settings({ api, prefs, update, onReload, onClose, start }: { api: Api; prefs: Prefs; update: (change: (current: Prefs) => Partial<Prefs>) => void; onReload: () => void; onClose: () => void; start?: 'layout-maker' | 'notifications' }) {
   const modal = useModal(true, onClose, undefined, { view: 'settings' })
-  const [selected, setSelected] = useState<SettingsGroup | null>(start === 'layout-maker' ? 'appearance' : null)
+  const [selected, setSelected] = useState<SettingsGroup | null>(start === 'layout-maker' ? 'appearance' : start === 'notifications' ? 'voice' : null)
   const [query, setQuery] = useState('')
   const search = useRef<HTMLInputElement>(null)
   const body = useRef<HTMLDivElement>(null)
@@ -86,6 +86,8 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
   const searching = !!query.trim()
   const visible = searching ? items.filter(item => matchesSetting(item, query)) : items.filter(item => item.group === selected)
   const group = SETTINGS_GROUPS.find(group => group.id === selected)
+  // Opened from /chat/?go=notifications: show the notification switch, not the top of its group.
+  useEffect(() => { if (start === 'notifications') body.current?.querySelector('[data-setting="notifications"]')?.scrollIntoView({ block: 'start' }) }, [start])
   function choose(id: SettingsGroup) { setSelected(id); setQuery(''); body.current?.scrollTo({ top: 0 }) }
   function quick(value: string) { setQuery(value); search.current?.focus() }
   const navigation = <nav className="preferences-nav" aria-label="Settings categories">{SETTINGS_GROUPS.map(({ id, title, description, icon: Icon }) => <button type="button" key={id} aria-current={selected === id && !searching ? 'page' : undefined} onClick={() => choose(id)}><Icon size={19} strokeWidth={1.6} /><span><strong>{title}</strong><small>{description}</small></span><ChevronRight size={16} /></button>)}</nav>
@@ -108,7 +110,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     <div className="preferences-search"><Search size={18} aria-hidden="true" /><input ref={search} type="search" aria-label="Search settings" placeholder="Search settings…" value={query} autoComplete="off" onChange={event => setQuery(event.target.value)} />{query && <button type="button" className="icon-button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus() }}><X size={16} /></button>}<kbd aria-hidden="true">{keyLabel('⌘K')}</kbd></div>
     <div className="preferences-layout"><aside>{navigation}<p>Changes save automatically.<br />The folder and the app name use their Save buttons.</p></aside><div ref={body} className="preferences-content">
       {searching ? <><div className="preferences-content-heading"><span className="preferences-eyebrow">Search results</span><h3>{visible.length} {visible.length === 1 ? 'match' : 'matches'}</h3><p role="status">Results for “{query.trim()}”</p></div>{!visible.length && <div className="preferences-empty"><Search size={24} /><h4>No matching settings</h4><p>Try “folder”, “notifications”, “font” or “browser”.</p><button type="button" className="secondary" onClick={() => { setQuery(''); search.current?.focus() }}>Clear search</button></div>}</> : group ? <div className="preferences-content-heading"><button type="button" className="preferences-back" onClick={() => setSelected(null)}><ArrowLeft size={16} />All settings</button><h3>{group.title}</h3><p>{group.description}</p></div> : <div className="preferences-overview"><span className="preferences-eyebrow">Your workspace, your way</span><h3>Make Tether fit your work.</h3><p>Choose a category, or search for a setting.</p><div className="preferences-mobile-index">{navigation}</div><div className="preferences-quick"><h4>Quick access</h4>{[['Default folder', 'default folder'], ['Theme', 'theme'], ['Notifications', 'push notifications']].map(([label, query]) => <button type="button" key={label} onClick={() => quick(query)}>{label}<ArrowUpRight size={15} /></button>)}</div></div>}
-      <div className="preferences-list">{visible.map((item, index) => <section key={item.id} className="preferences-entry" aria-label={item.title}>{searching && (index === 0 || visible[index - 1].group !== item.group) && <button type="button" className="preferences-result-group" onClick={() => choose(item.group)}>{SETTINGS_GROUPS.find(group => group.id === item.group)!.title}<ChevronRight size={13} /></button>}{item.content}</section>)}</div>
+      <div className="preferences-list">{visible.map((item, index) => <section key={item.id} className="preferences-entry" aria-label={item.title} data-setting={item.id}>{searching && (index === 0 || visible[index - 1].group !== item.group) && <button type="button" className="preferences-result-group" onClick={() => choose(item.group)}>{SETTINGS_GROUPS.find(group => group.id === item.group)!.title}<ChevronRight size={13} /></button>}{item.content}</section>)}</div>
     </div></div>
   </dialog>
 }

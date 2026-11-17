@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { errorText } from './api'
 import type { Api } from './api'
 import { useHost } from './host'
+import { brandChanged } from './brand'
 
 interface Color { id: string; label: string; hex: string }
 type IconKind = 'color' | 'custom'
@@ -101,7 +102,7 @@ export function AppIdentitySettings({ api }: { api: Api }) {
     try {
       const data = await api<Identity>('app-identity', { name: trimmed, color, icon })
       take(data)
-      document.title = data.name
+      brandChanged(data.name)
       setNotice('Saved. New notifications show this icon now. A new install uses this name and icon. An app that is already installed changes within about a day, after you close it. To change it now, remove the app and install it again.')
     } catch (failure) { setError(errorText(failure)) } finally { setPending(false) }
   }
@@ -133,6 +134,7 @@ export function AppIdentitySettings({ api }: { api: Api }) {
       const data = await api<Identity>('app-identity', useDraft ? { useDraft: true, draft } : { discardDraft: true, draft })
       setSaved(data)
       if (useDraft) {
+        brandChanged(data.name)
         setIcon('custom')
         setNotice('Your picture is now the app icon. New notifications show it now. A new install uses it. An installed app changes within about a day, after you close it.')
       }

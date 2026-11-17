@@ -1,6 +1,7 @@
 // Other hosts inside the app (src/HostView.tsx, src/HostMenu.tsx) against an existing build. Two origins serve the
 // same build: "localhost" is this Tether and "127.0.0.1" is the other one. A tap on the other host opens it in a frame
 // inside this page, not in a browser tab; Back comes home; the framed Tether's own host menu can send you home.
+// In the frame, Settings › Notifications offers the server's own window, where the browser lets it ask (B187).
 // Every API request stays in this page's fixtures.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_host_view_ui.cjs).
 const fs = require('node:fs/promises')
@@ -152,6 +153,44 @@ async function main() {
       await view.getByRole('button', { name: 'Back to Studio' }).click()
       await view.waitFor({ state: 'detached' })
     }
+    // Notifications in the frame: the browser refuses the permission prompt there, so Settings offers the server's own
+    // window, opened at its notification setting.
+    // A long host name must wrap inside the hint and its link at 320 px.
+    names[OTHER] = 'workstation-with-a-long-hostname'
+    for (const [width, height] of sizes) {
+      const at = `${width}px framed`
+      await page.setViewportSize({ width, height })
+      await page.goto(`${HOME}/chat/`, { waitUntil: 'load' })
+      await page.locator('.chat-panel[data-pane="%1"]').first().waitFor()
+      await openMenu(width)
+      await page.getByRole('group', { name: 'Tether hosts' }).getByRole('link', { name: /Mac/ }).click()
+      await view.waitFor()
+      const frame = page.frameLocator('iframe.host-view-frame')
+      await frame.locator('.chat-panel[data-pane="%1"]').first().waitFor()
+      if (width < 800) await frame.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
+      await frame.getByRole('button', { name: 'Settings' }).first().click()
+      await frame.getByRole('searchbox', { name: 'Search settings' }).fill('push notifications')
+      const hint = frame.locator('.framed-notifications')
+      await hint.waitFor()
+      check(`${at} names the server's own window`, (await hint.textContent()).includes(`Turn on notifications in ${names[OTHER]}'s own window`))
+      const own = hint.getByRole('link', { name: `Open ${names[OTHER]} in the browser` })
+      check(`${at} link opens the notification setting in a new window`, await own.getAttribute('href') === `${OTHER}/chat/?go=notifications` && await own.getAttribute('target') === '_blank')
+      check(`${at} no switch that cannot work`, await frame.getByRole('switch', { name: /Push notifications/ }).count() === 0)
+      check(`${at} no page overflow`, !(await overflow()) && await page.frames()[1].evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+      const box = await own.boundingBox()
+      check(`${at} the link fits the screen`, box && box.x >= 0 && box.x + box.width <= width, JSON.stringify(box))
+      await page.screenshot({ path: path.join(SHOTS, `host-view-notifications-${width}.png`) })
+      await view.getByRole('button', { name: 'Back to Studio' }).click()
+      await view.waitFor({ state: 'detached' })
+    }
+    // The server's own window, opened from that link: Settings shows the notification switch.
+    await page.goto(`${HOME}/chat/?go=notifications`, { waitUntil: 'load' })
+    const push = page.getByRole('switch', { name: /Push notifications/ })
+    await push.waitFor()
+    check('?go=notifications opens the notification setting', await push.isVisible() && new URL(page.url()).search === '')
+    await page.keyboard.press('Escape')
+    await page.goto(`${HOME}/chat/`, { waitUntil: 'load' })
+    await page.locator('.chat-panel[data-pane="%1"]').first().waitFor()
     // An old server never says it started: after 10 s a note offers the browser.
     await openMenu(1280)
     await page.getByRole('group', { name: 'Tether hosts' }).getByRole('link', { name: /Old/ }).click()

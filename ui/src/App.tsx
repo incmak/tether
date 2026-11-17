@@ -145,7 +145,7 @@ function App() {
   const [tabTask, setTabTask] = useState<{ pane: Pane; at: Anchor } | null>(null)
   const [resume, setResume] = useState<PastChat | null>(null)
   const [notice, setNotice] = useState('')
-  const [settings, setSettings] = useState<boolean | 'layout-maker'>(false)
+  const [settings, setSettings] = useState<boolean | 'layout-maker' | 'notifications'>(false)
   // The backlog: a sheet, or a full page with views and projects. `query` opens it on a search (the command menu does this).
   const [backlog, setBacklog] = useState<null | { mode: 'sheet' | 'page'; query?: string }>(null)
   const menuBacklog = useMemo(() => ({ api, open: (query: string) => setBacklog({ mode: 'page', query }) }), [api])
@@ -576,6 +576,8 @@ function App() {
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'factory') { setDrawer(false); setFactory(true) }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
+    // A framed Tether's notification hint opens this server's own window here (SettingsControls.tsx).
+    else if (go === 'notifications') { setDrawer(false); setSettings('notifications') }
     // Like ⌥Space: inside another dialog (Settings), search does not open over it.
     else if (go === 'search') setMenu(current => document.querySelector('dialog[open]') ? current : 'commands')
     else if (go === 'agents') {
@@ -1015,7 +1017,7 @@ function App() {
     {backlog && <BacklogSheet key={backlog.query ?? ''} api={api} panes={panes} onOpenPane={openPane} page={backlog.mode === 'page'} query={backlog.query}
       onResize={() => setBacklog({ ...backlog, mode: backlog.mode === 'page' ? 'sheet' : 'page' })} onClose={() => setBacklog(null)} />}
     {backlogAdd && <BacklogAddSheet key={backlogAdd.text} api={api} text={backlogAdd.text} pane={backlogAdd.pane} onClose={() => setBacklogAdd(null)} onAdded={setNotice} />}
-    {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === 'layout-maker' ? 'layout-maker' : undefined} />}
+    {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === true ? undefined : settings || undefined} />}
     {!settings && <TrialBar onRevert={revertLook} />}
     {tabTask && <NewTask api={api} pane={tabTask.pane} at={tabTask.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel} onClose={() => setTabTask(null)}
       onEmpty={() => { const target = tabTask.pane; setTabTask(null); void split('right', target) }}

@@ -4,6 +4,9 @@ import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
 import { HostResources } from './HostResources'
+import { ExternalLink } from 'lucide-react'
+import { framed } from './HostView'
+import { useHost } from './host'
 
 type Delivery = 'sound' | 'silent' | 'off'
 type Priority = 'urgent' | 'important' | 'low'
@@ -18,6 +21,24 @@ export function Choice<T extends string>({ legend, name, value, options, onChang
 
 // Push subscription is browser-specific; delivery settings apply to all subscribed devices.
 export function Notifications({ api }: { api: Api }) {
+  // Inside another Tether's frame the browser refuses: a page from another origin in a frame cannot ask for
+  // notification permission, and it reads "denied" even after this server's own window allowed it.
+  if (framed) return <FramedNotifications />
+  return <PushNotifications api={api} />
+}
+
+/** Notifications for a Tether shown inside another Tether (HostView): they turn on in this server's own window. */
+function FramedNotifications() {
+  const host = useHost()
+  const own = location.origin + '/chat/?go=notifications'
+  return <div className="framed-notifications" role="note">
+    <p><strong>Turn on notifications in {host}'s own window</strong></p>
+    <p className="setting-note">{host} is open inside another Tether here. The browser does not let a page inside another app ask for notifications. Open {host} in the browser, then turn on Push notifications there. Its notifications then come to this device.</p>
+    <a className="secondary" href={own} target="_blank" rel="noopener noreferrer">Open {host} in the browser<ExternalLink size={15} aria-hidden="true" /></a>
+  </div>
+}
+
+function PushNotifications({ api }: { api: Api }) {
   const [notice, onNotice] = useState('')
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => onNotice(''), 5000); return () => clearTimeout(timer) }, [notice])
   const supported = 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window
