@@ -1390,6 +1390,11 @@ def kinds(table):
                                 for inode in inodes if inode in table}
 
 
+def shown(previews, ports):
+    """The ids that the list shows for `ports` now: what the person confirms before a stop."""
+    return {port: dev_previews.server_id(previews.ours(port, fresh=True)[0]) for port in ports}
+
+
 @unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')
 class StopTests(unittest.TestCase):
     """stop(): the person stops dev servers, never Tether, its services or agents."""
@@ -1426,7 +1431,7 @@ class StopTests(unittest.TestCase):
         self.table[self.inode[3000]] = 'service'
         previews = self.make()
         previews.open(5173)
-        result = previews.stop([5173, 5174, 3000, 4444, 22, 5173], wait=0.5)
+        result = previews.stop([5173, 5174, 3000, 4444, 22, 5173], shown(previews, [5173, 5174, 3000, 4444, 22, 5173]), wait=0.5)
         self.assertEqual(result, {5173: 'stopped', 5174: 'stopped', 3000: 'refused', 4444: 'not-found', 22: 'refused'})
         self.assertEqual(sorted(self.sent), [(self.inode[5173], False), (self.inode[5174], False)])
         self.assertEqual(previews.assignments(), {'assigned': [], 'free': 2})  # the stopped server gave back its port
@@ -1437,26 +1442,26 @@ class StopTests(unittest.TestCase):
         previews = self.make(gone=False)
         rows = {row['port']: row['id'] for row in previews.servers()}
         self.assertEqual(rows[5173], str(self.inode[5173]))
-        self.assertEqual(previews.stop([5173, 5174], wait=0, expect={5173: '999', 5174: rows[5174]}),
+        self.assertEqual(previews.stop([5173, 5174], {5173: '999', 5174: rows[5174]}, wait=0),
                          {5173: 'changed', 5174: 'still-running'})
         self.assertEqual(self.sent, [(self.inode[5174], False)])  # nothing went to the program on 5173
-        for bad in ([5173], {'5173': 'x'}, {5173: 1}):
+        for bad in (None, [5173], {}, {5174: rows[5174]}, {'5173': 'x'}, {5173: 1}):  # every port needs its id
             with self.assertRaises(Refused):
-                previews.stop([5173], expect=bad)
+                previews.stop([5173], bad)
 
     def test_a_server_that_stays_up_can_be_forced(self):
         previews = self.make(gone=False)
-        self.assertEqual(previews.stop([5173], wait=0.2), {5173: 'still-running'})
-        self.assertEqual(previews.stop([5173], force=True, wait=0.2), {5173: 'still-running'})
+        self.assertEqual(previews.stop([5173], shown(previews, [5173]), wait=0.2), {5173: 'still-running'})
+        self.assertEqual(previews.stop([5173], shown(previews, [5173]), force=True, wait=0.2), {5173: 'still-running'})
         self.assertEqual(self.sent, [(self.inode[5173], False), (self.inode[5173], True)])
 
     def test_bad_requests(self):
         previews = self.make()
         for bad in (None, [], '5173', [5173.0], [True], [0], [70000], list(range(2000, 2000 + dev_previews.MAX_STOP + 1))):
             with self.assertRaises(Refused, msg=bad):
-                previews.stop(bad)
+                previews.stop(bad, {})
         with self.assertRaises(Refused) as caught:
-            self.make(peer_uid=None).stop([5173])
+            self.make(peer_uid=None).stop([5173], {5173: 'x'})
         self.assertEqual(caught.exception.code, 'unsupported')
         self.assertEqual(self.sent, [])
 
@@ -1465,23 +1470,23 @@ class StopTests(unittest.TestCase):
         names = kinds(self.table)
         previews = self.make()
         previews.names = lambda inodes, uid: calls.append(len(inodes)) or names(inodes, uid)
-        previews.stop(list(range(2000, 2000 + dev_previews.MAX_STOP - 2)) + [5173, 5174], wait=0)
+        previews.stop(list(range(2000, 2000 + dev_previews.MAX_STOP - 2)) + [5173, 5174], shown(previews, list(range(2000, 2000 + dev_previews.MAX_STOP - 2)) + [5173, 5174]), wait=0)
         self.assertEqual(calls, [2])
         with previews.stopping:
             with self.assertRaises(Refused) as caught:
-                previews.stop([5173])
+                previews.stop([5173], shown(previews, [5173]))
         self.assertEqual(caught.exception.code, 'busy')
 
     def test_a_holder_that_changed_kind_is_refused(self):
         previews = self.make()
         previews.signal = lambda pid, inode, force: 'refused'  # stop_process saw an agent on the pinned pid
-        self.assertEqual(previews.stop([5173], wait=0), {5173: 'refused'})
+        self.assertEqual(previews.stop([5173], shown(previews, [5173]), wait=0), {5173: 'refused'})
 
     def test_no_pidfd_stops_nothing(self):
         def signal(pid, inode, force):
             raise OSError('pidfd is not available')
         previews = DevPreviews(listeners=lambda: self.listening, uid=UID, names=kinds(self.table), signal=signal)
-        self.assertEqual(previews.stop([5173], wait=0), {5173: 'refused'})
+        self.assertEqual(previews.stop([5173], shown(previews, [5173]), wait=0), {5173: 'refused'})
 
 
 @unittest.skipUnless(sys.platform.startswith('linux') and hasattr(os, 'pidfd_open'), 'needs /proc and pidfd')
@@ -1500,7 +1505,7 @@ class RealStopTests(unittest.TestCase):
         child, port = self.start_server()
         previews = DevPreviews(ports=[], **LOCAL)
         self.assertIn(port, [row['port'] for row in previews.servers()])
-        self.assertEqual(previews.stop([port]), {port: 'stopped'})
+        self.assertEqual(previews.stop([port], shown(previews, [port])), {port: 'stopped'})
         self.assertEqual(child.wait(5), -15)  # SIGTERM
 
     def test_tether_never_stops_itself(self):
@@ -1510,7 +1515,7 @@ class RealStopTests(unittest.TestCase):
             port = own.getsockname()[1]
             previews = DevPreviews(ports=[])  # the real rule: this process is Tether
             self.assertNotIn(port, [row['port'] for row in previews.servers()])
-            self.assertEqual(previews.stop([port]), {port: 'refused'})
+            self.assertEqual(previews.stop([port], shown(previews, [port])), {port: 'refused'})
             with self.assertRaises(Refused):
                 previews.target(port)
 
@@ -1570,7 +1575,7 @@ class RealStopTests(unittest.TestCase):
         self.assertNotIn(port, [row['port'] for row in previews.servers()])  # no visible holder
         with socket.create_connection(('127.0.0.1', port)) as client:
             self.assertEqual(previews.verify(client), 'other')
-        self.assertEqual(previews.stop([port], wait=0), {port: 'refused'})
+        self.assertEqual(previews.stop([port], shown(previews, [port]), wait=0), {port: 'refused'})
         self.assertIsNone(child.poll())
 
     def shared_accept(self, hide):
@@ -1635,7 +1640,7 @@ class RealStopTests(unittest.TestCase):
         self.assertNotIn(port, [row['port'] for row in previews.servers()])
         with self.assertRaises(dev_previews.Refused):
             previews.target(port, fresh=True)
-        self.assertEqual(previews.stop([port], wait=0), {port: 'refused'})
+        self.assertEqual(previews.stop([port], shown(previews, [port]), wait=0), {port: 'refused'})
 
     def test_a_connection_that_is_never_accepted_is_not_forwarded(self):
         with socket.socket() as server:
@@ -1761,7 +1766,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual((status, data), (200, {'results': [{'port': port, 'state': 'changed'}]}))
         self.assertIsNone(child.poll())
         shown = dev_previews.server_id([entry for entry in dev_previews.read_listeners() if entry['port'] == port])
-        status, data = self.call('POST', {'ports': [port, self.main.server_port], 'expect': {str(port): shown}}, path=stop)
+        for partial in ({}, {str(port + 1): shown}):  # review of f7fe0b5: an id for every port, or nothing stops
+            self.assertEqual(self.call('POST', {'ports': [port], 'expect': partial}, path=stop)[1]['code'], 'bad-port')
+        self.assertEqual(self.call('POST', {'ports': [port]}, path=stop)[1]['code'], 'bad-port')
+        self.assertIsNone(child.poll())
+        status, data = self.call('POST', {'ports': [port, self.main.server_port],
+                                          'expect': {str(port): shown, str(self.main.server_port): 'x'}}, path=stop)
         self.assertEqual((status, data), (200, {'results': [{'port': port, 'state': 'stopped'},
                                                             {'port': self.main.server_port, 'state': 'refused'}]}))
         self.assertEqual(child.wait(5), -15)

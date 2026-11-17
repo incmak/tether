@@ -2386,7 +2386,7 @@ class Handler(BaseHTTPRequestHandler):
                             expect = {int(port): value for port, value in expect.items()}
                         except ValueError:
                             raise dev_previews.Refused('bad-port', 'Name the id that the list showed for each port.')
-                    stopped = dev_previews.PREVIEWS.stop(body.get('ports'), force=body.get('force') is True, expect=expect)
+                    stopped = dev_previews.PREVIEWS.stop(body.get('ports'), expect, force=body.get('force') is True)
                     self.respond(200, {'results': [{'port': port, 'state': state} for port, state in stopped.items()]})
                 except dev_previews.Refused as exc:
                     self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})

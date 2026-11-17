@@ -681,19 +681,19 @@ class DevPreviews:
                           'folder': first.get('folder', '')})
         return found
 
-    def stop(self, ports, force=False, wait=STOP_WAIT, expect=None):
+    def stop(self, ports, expect, force=False, wait=STOP_WAIT):
         """The person stops dev servers: {port: 'stopped' | 'still-running' | 'refused' | 'not-found' | 'changed'}.
-        `expect` maps a port to the id that the list showed (servers): when another program listens there now, the
-        port answers 'changed' and nothing is signalled, so a stop never reaches a program the person did not see. Each process
+        `expect` maps each port to the id that the list showed (servers); every port needs one. When another program
+        listens there now, the port answers 'changed' and nothing is signalled, so a stop never reaches a program
+        the person did not see. Each process
         that holds the port's socket gets SIGTERM (SIGKILL when `force`), only when it is a dev server now
         (process_kind, checked again on the pinned process: stop_process). A stopped port also gives back its preview
         port. One request at a time; it scans /proc once for all ports and ends `wait` seconds after it starts."""
         if (type(ports) is not list or not 0 < len(ports) <= MAX_STOP
                 or any(type(port) is not int or not 0 < port <= 65535 for port in ports)):
             raise Refused('bad-port', 'Name 1 to %d port numbers.' % MAX_STOP)
-        expect = {} if expect is None else expect
-        if (type(expect) is not dict or len(expect) > MAX_STOP
-                or any(type(port) is not int or type(value) is not str or len(value) > 4096 for port, value in expect.items())):
+        if (type(expect) is not dict or set(expect) != set(ports)
+                or any(type(value) is not str or len(value) > 4096 for value in expect.values())):
             raise Refused('bad-port', 'Name the id that the list showed for each port.')
         if self.peer_uid is None:
             raise Refused('unsupported', UNSUPPORTED)
@@ -714,7 +714,7 @@ class DevPreviews:
                     result[port] = 'refused'
                 elif not mine:
                     result[port] = 'not-found'
-                elif port in expect and expect[port] != server_id(mine):
+                elif expect[port] != server_id(mine):
                     result[port] = 'changed'
                 else:
                     found[port] = mine
