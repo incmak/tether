@@ -44,31 +44,36 @@ class ReleaseTest(unittest.TestCase):
         git(self.repo, 'commit', '-q', '-m', 'start')
         git(self.repo, 'push', '-q', 'origin', 'HEAD:main')
         git(base, 'clone', '-q', str(self.origin), str(self.other))
-        self.before_commit = None  # called once, just before the release commit
-        self.fail_once = None  # a git argument list that fails once
+        self.hooks = {}  # start of a git argument list -> a function that runs once, before the step; it may raise
+        self.errors = ''
 
     def run_step(self, args, cwd, **kwargs):
         if args[:3] == ['git', 'rev-parse', '--show-toplevel']:
             return str(self.repo)
         if args[0] != 'git':
             return None  # npm ci, the tests and the UI build
-        if args[:2] == ['git', 'commit'] and self.before_commit:
-            step, self.before_commit = self.before_commit, None
-            step()
-        if self.fail_once and args[:len(self.fail_once)] == self.fail_once:
-            self.fail_once = None
-            raise RuntimeError(f"{' '.join(args)} failed")
+        for start in [key for key in self.hooks if list(key) == args[:len(key)]]:
+            self.hooks.pop(start)(args, cwd)
         result = subprocess.run(args, cwd=cwd, text=True, capture_output=True)  # as release.run, but quiet
         if result.returncode:
             raise RuntimeError(f"{' '.join(args)} failed: {result.stderr.strip()}")
         return result.stdout.strip()
 
     def release(self, *args):
+        errors = io.StringIO()
         with patch.object(release, 'run', self.run_step), patch.object(release.shutil, 'which', lambda name: None), \
-                patch.object(sys, 'argv', ['release.py', *args]), patch.object(sys, 'stderr', io.StringIO()):
-            return release.main()
+                patch.object(sys, 'argv', ['release.py', *args]), patch.object(sys, 'stderr', errors), \
+                patch.object(sys, 'stdout', io.StringIO()):
+            try:
+                return release.main()
+            finally:
+                self.errors = errors.getvalue()
 
-    def move_main(self):
+    @staticmethod
+    def refuse(args, cwd):
+        raise RuntimeError(f"{' '.join(args)} failed")
+
+    def move_main(self, *_):
         (self.other / 'new').write_text('new')
         git(self.other, 'add', '-A')
         git(self.other, 'commit', '-q', '-m', 'main moves')
@@ -80,7 +85,7 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(git(self.origin, 'rev-parse', 'main'), git(self.origin, 'rev-parse', 'v0.0.2^{commit}'))
 
     def test_main_moves_during_the_run_then_the_next_run_works(self):
-        self.before_commit = self.move_main
+        self.hooks[('git', 'commit')] = self.move_main
         self.assertEqual(self.release('0.0.2'), 1)
         self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), '')
         self.assertEqual(git(self.origin, 'tag', '--list', 'v0.0.2'), '')
@@ -88,7 +93,7 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(git(self.origin, 'show', 'v0.0.2:new'), 'new')
 
     def test_failed_push_changes_nothing_then_the_next_run_works(self):
-        self.fail_once = ['git', 'push']
+        self.hooks[('git', 'push')] = self.refuse
         before = git(self.origin, 'rev-parse', 'main')
         self.assertEqual(self.release('0.0.2'), 1)
         self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), '')
@@ -97,15 +102,52 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(git(self.origin, 'rev-parse', 'main'), git(self.origin, 'rev-parse', 'v0.0.2^{commit}'))
 
     def test_interrupt_after_the_tag_removes_it(self):
-        def interrupt(args, cwd, **kwargs):
-            if args[:2] == ['git', 'push']:
-                raise KeyboardInterrupt
-            return self.run_step(args, cwd, **kwargs)
-        with patch.object(release, 'run', interrupt), patch.object(sys, 'argv', ['release.py', '0.0.2']), \
-                patch.object(sys, 'stderr', io.StringIO()):
-            self.assertEqual(release.main(), 1)
+        def interrupt(args, cwd):
+            raise KeyboardInterrupt
+        self.hooks[('git', 'push')] = interrupt
+        self.assertEqual(self.release('0.0.2'), 1)
         self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), '')
         self.assertEqual(self.release('0.0.2'), 0)
+
+    def test_a_tag_from_another_process_is_not_removed(self):
+        self.hooks[('git', 'tag', '-a')] = lambda args, cwd: git(self.repo, 'tag', 'v0.0.2', 'origin/main')
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertEqual(git(self.repo, 'rev-parse', 'v0.0.2'), git(self.repo, 'rev-parse', 'origin/main'))
+
+    def test_push_that_reached_origin_but_reported_a_failure_counts_as_done(self):
+        def push_then_fail(args, cwd):
+            subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+            raise RuntimeError('git push failed: the connection closed')
+        self.hooks[('git', 'push')] = push_then_fail
+        self.assertEqual(self.release('0.0.2'), 0)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+        self.assertEqual(git(self.origin, 'rev-parse', 'main'), git(self.origin, 'rev-parse', 'v0.0.2^{commit}'))
+
+    def test_unknown_push_result_keeps_the_tag_and_says_what_to_do(self):
+        self.hooks[('git', 'push')] = self.refuse
+        self.hooks[('git', 'ls-remote', 'origin', 'refs/tags/v0.0.2', 'refs/tags/v0.0.2^{}')] = self.refuse
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+        self.assertIn('git ls-remote origin refs/tags/v0.0.2', self.errors)
+        self.assertIn('git tag -d v0.0.2', self.errors)
+
+    def test_origin_has_another_tag_of_this_version(self):
+        def other_release(args, cwd):
+            git(self.other, 'tag', 'v0.0.2')
+            git(self.other, 'push', '-q', 'origin', 'v0.0.2')
+        self.hooks[('git', 'push')] = other_release
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertIn('different v0.0.2', self.errors)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), '')
+
+    def test_tag_that_cannot_be_removed_is_reported(self):
+        def lock_then_fail(args, cwd):
+            (self.repo / '.git/refs/tags/v0.0.2.lock').write_text('')
+            self.refuse(args, cwd)
+        self.hooks[('git', 'push')] = lock_then_fail
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+        self.assertIn('git tag -d v0.0.2', self.errors)
 
     def test_no_push_keeps_the_local_tag(self):
         self.assertEqual(self.release('0.0.2', '--no-push'), 0)

@@ -19,6 +19,19 @@ def run(args, cwd, *, capture=False, **kwargs):
     return result.stdout.strip() if capture else None
 
 
+def drop_tag(root, tag, commit):
+    """Delete the local tag only when it is the one at `commit`. Returns text for the error message."""
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=root, text=True, capture_output=True)
+    ref = f'refs/tags/{tag}'
+    if git('rev-parse', '--verify', '-q', f'{ref}^{{commit}}').stdout.strip() != commit:
+        return ''  # no tag, or a tag that this run did not make
+    # update-ref deletes only while the ref still holds this tag object.
+    if git('update-ref', '-d', ref, git('rev-parse', '--verify', '-q', ref).stdout.strip()).returncode:
+        return f'; the local tag {tag} could not be removed; run: git tag -d {tag} before the next run'
+    return ''
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('version', help='X.Y.Z or X.Y.Z-rc.N')
@@ -27,7 +40,7 @@ def main():
     parser.add_argument('--keep', action='store_true', help='keep the release worktree')
     args = parser.parse_args()
     worktree = None
-    made_tag = False
+    pending = None
     try:
         if not re.fullmatch(r'\d+\.\d+\.\d+(-rc\.?\d+)?', args.version):
             raise RuntimeError('version must match X.Y.Z or X.Y.Z-rc.N')
@@ -72,15 +85,29 @@ def main():
             worktree / 'ui', timeout=1200)
         run(['git', 'add', '--', *files], worktree)
         run(['git', 'commit', '-m', f'Release {args.version}'], worktree)
-        made_tag = not args.no_push  # this run's tag, not on origin yet: a failure removes it
+        commit = run(['git', 'rev-parse', 'HEAD'], worktree, capture=True)
+        # This run's tag is the one at this run's commit. Until origin has it, a failure removes it.
+        pending = None if args.no_push else commit
         run(['git', 'tag', '-a', tag, '-m', f'Release {args.version}'], worktree)
         if not args.no_push:
             try:
                 # One atomic push: origin takes the commit and the tag, or neither.
                 run(['git', 'push', '--atomic', 'origin', 'HEAD:main', tag], worktree)
             except RuntimeError as error:
-                raise RuntimeError(f'{error}; origin did not change; if main moved, run again') from error
-            made_tag = False
+                # A push can reach origin and still report a failure here, so read origin before the tag goes.
+                try:
+                    listed = run(['git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}'], root, capture=True)
+                except RuntimeError:
+                    pending = None
+                    raise RuntimeError(f'{error}; origin did not answer, so the result is unknown and the local tag stays. '
+                                       f'Run: git ls-remote origin refs/tags/{tag}. If it prints nothing, run: git tag -d {tag}, '
+                                       'then run the release again') from error
+                if not listed:
+                    raise RuntimeError(f'{error}; origin did not change; if main moved, run again') from error
+                if commit not in [line.split()[0] for line in listed.splitlines()]:
+                    raise RuntimeError(f'{error}; origin has a different {tag}; choose another version') from error
+                print('The push reported a failure, but origin has the release commit and the tag.', flush=True)
+            pending = None
             if shutil.which('gh'):
                 origin = run(['git', 'remote', 'get-url', 'origin'], root, capture=True)
                 match = re.search(r'[:/]([^/:]+/[^/]+?)(?:\.git)?/?$', origin)
@@ -109,8 +136,8 @@ def main():
         return 0
     except (OSError, RuntimeError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         message = str(error).replace('\n', ' ') or 'interrupted'
-        if made_tag:  # else the next run stops at 'tag already exists locally'
-            subprocess.run(['git', 'tag', '-d', tag], cwd=root, capture_output=True)
+        if pending:  # else the next run stops at 'tag already exists locally'
+            message += drop_tag(root, tag, pending)
         location = f'; worktree kept: {worktree}' if worktree else ''
         print(f'Release failed: {message}{location}', file=sys.stderr)
         return 1

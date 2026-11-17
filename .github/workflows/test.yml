@@ -24,6 +24,7 @@ jobs:
       # The Python tests load ui/src TypeScript, so install the UI packages first.
       - run: cd ui && npm ci
       - run: cd server && python3 -m unittest discover -q
+      - run: cd scripts && python3 -m unittest discover -q
   ui:
     # Match the OS supported by the pinned Playwright browser/dependency bundle.
     runs-on: ubuntu-24.04
