@@ -2380,7 +2380,13 @@ class Handler(BaseHTTPRequestHandler):
                 # The person stops dev servers from the drawer: one, several or all. Only dev servers are stopped,
                 # never Tether, its services or an agent (dev_previews.process_kind).
                 try:
-                    stopped = dev_previews.PREVIEWS.stop(body.get('ports'), force=body.get('force') is True)
+                    expect = body.get('expect')
+                    if isinstance(expect, dict):  # JSON keys are text: {"8000": "<id from the list>"}
+                        try:
+                            expect = {int(port): value for port, value in expect.items()}
+                        except ValueError:
+                            raise dev_previews.Refused('bad-port', 'Name the id that the list showed for each port.')
+                    stopped = dev_previews.PREVIEWS.stop(body.get('ports'), force=body.get('force') is True, expect=expect)
                     self.respond(200, {'results': [{'port': port, 'state': state} for port, state in stopped.items()]})
                 except dev_previews.Refused as exc:
                     self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})

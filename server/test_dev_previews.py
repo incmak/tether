@@ -113,7 +113,7 @@ class PortTests(unittest.TestCase):
                                names=lambda inodes, uid: {**dev_names(inodes, uid), 5001: {'name': 'node', 'folder': 'shop', 'pids': [7], 'kind': 'dev'}})
         found = previews.servers()
         self.assertEqual([entry['port'] for entry in found], [3000, 5173, 5174, 8000, 8001, 9113])
-        self.assertEqual(found[1], {'port': 5173, 'name': 'node', 'folder': 'shop'})
+        self.assertEqual(found[1], {'port': 5173, 'id': '5001', 'name': 'node', 'folder': 'shop'})
 
     def test_process_names_come_from_proc(self):
         with socket.socket() as listener:
@@ -1432,6 +1432,18 @@ class StopTests(unittest.TestCase):
         self.assertEqual(previews.assignments(), {'assigned': [], 'free': 2})  # the stopped server gave back its port
         self.assertEqual(previews.leases, {})
 
+    def test_a_stop_reaches_only_the_program_the_list_showed(self):
+        # Review of the UI (03e68fe): a part of Stop all, or a Force stop, may arrive after a new program took the port.
+        previews = self.make(gone=False)
+        rows = {row['port']: row['id'] for row in previews.servers()}
+        self.assertEqual(rows[5173], str(self.inode[5173]))
+        self.assertEqual(previews.stop([5173, 5174], wait=0, expect={5173: '999', 5174: rows[5174]}),
+                         {5173: 'changed', 5174: 'still-running'})
+        self.assertEqual(self.sent, [(self.inode[5174], False)])  # nothing went to the program on 5173
+        for bad in ([5173], {'5173': 'x'}, {5173: 1}):
+            with self.assertRaises(Refused):
+                previews.stop([5173], expect=bad)
+
     def test_a_server_that_stays_up_can_be_forced(self):
         previews = self.make(gone=False)
         self.assertEqual(previews.stop([5173], wait=0.2), {5173: 'still-running'})
@@ -1744,7 +1756,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call('POST', {'ports': [port]}, path=stop, Origin='http://127.0.0.1:7700')[0], 403)
         self.assertEqual(self.call('POST', {'ports': [port]}, path=stop, Cookie=None)[0], 401)
         self.assertEqual(self.call('POST', {'ports': 'all'}, path=stop)[1]['code'], 'bad-port')
-        status, data = self.call('POST', {'ports': [port, self.main.server_port]}, path=stop)
+        self.assertEqual(self.call('POST', {'ports': [port], 'expect': {'x': '1'}}, path=stop)[1]['code'], 'bad-port')
+        status, data = self.call('POST', {'ports': [port], 'expect': {str(port): '1'}}, path=stop)
+        self.assertEqual((status, data), (200, {'results': [{'port': port, 'state': 'changed'}]}))
+        self.assertIsNone(child.poll())
+        shown = dev_previews.server_id([entry for entry in dev_previews.read_listeners() if entry['port'] == port])
+        status, data = self.call('POST', {'ports': [port, self.main.server_port], 'expect': {str(port): shown}}, path=stop)
         self.assertEqual((status, data), (200, {'results': [{'port': port, 'state': 'stopped'},
                                                             {'port': self.main.server_port, 'state': 'refused'}]}))
         self.assertEqual(child.wait(5), -15)
