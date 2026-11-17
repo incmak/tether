@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--keep', action='store_true', help='keep the release worktree')
     args = parser.parse_args()
     worktree = None
+    made_tag = False
     try:
         if not re.fullmatch(r'\d+\.\d+\.\d+(-rc\.?\d+)?', args.version):
             raise RuntimeError('version must match X.Y.Z or X.Y.Z-rc.N')
@@ -71,13 +72,15 @@ def main():
             worktree / 'ui', timeout=1200)
         run(['git', 'add', '--', *files], worktree)
         run(['git', 'commit', '-m', f'Release {args.version}'], worktree)
+        made_tag = not args.no_push  # this run's tag, not on origin yet: a failure removes it
         run(['git', 'tag', '-a', tag, '-m', f'Release {args.version}'], worktree)
         if not args.no_push:
             try:
-                run(['git', 'push', 'origin', 'HEAD:main'], worktree)
+                # One atomic push: origin takes the commit and the tag, or neither.
+                run(['git', 'push', '--atomic', 'origin', 'HEAD:main', tag], worktree)
             except RuntimeError as error:
-                raise RuntimeError(f'{error}; rebase on origin/main and run again') from error
-            run(['git', 'push', 'origin', tag], worktree)
+                raise RuntimeError(f'{error}; origin did not change; if main moved, run again') from error
+            made_tag = False
             if shutil.which('gh'):
                 origin = run(['git', 'remote', 'get-url', 'origin'], root, capture=True)
                 match = re.search(r'[:/]([^/:]+/[^/]+?)(?:\.git)?/?$', origin)
@@ -106,6 +109,8 @@ def main():
         return 0
     except (OSError, RuntimeError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         message = str(error).replace('\n', ' ') or 'interrupted'
+        if made_tag:  # else the next run stops at 'tag already exists locally'
+            subprocess.run(['git', 'tag', '-d', tag], cwd=root, capture_output=True)
         location = f'; worktree kept: {worktree}' if worktree else ''
         print(f'Release failed: {message}{location}', file=sys.stderr)
         return 1
