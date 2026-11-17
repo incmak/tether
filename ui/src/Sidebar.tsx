@@ -8,7 +8,7 @@ import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Archive, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X } from 'lucide-react'
+import { Archive, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
 import { FolderMenu } from './SelectMenu'
 import type { Keep, ProjectMark, ProjectMarks } from './Project'
@@ -281,6 +281,7 @@ interface Props {
   onCommandMenu?: () => void
   /** Opens the "Message sessions" box. Absent when no agent pane takes input. */
   onMessageAll?: () => void
+  onFactory?: () => void  // the Factory view: every agent's work by phase
   /** Sessions whose project gives agents context, and panes that started with an older version. */
   marks?: ProjectMarks
   onMarks?: () => void
@@ -295,7 +296,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
+export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -535,7 +536,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
   return <div className={`sidebar-inner ${ghost ? 'touch-carrying' : ''}`} ref={root}>
     <div className="sidebar-top">
       <div className="sidebar-brand"><img src="/chat/icon.svg" alt="" width="22" height="22" />Tether</div>
-      <span className="sidebar-top-actions">{onMessageAll && <button className="icon-button" aria-label="Message all sessions" title="Message all sessions" onClick={onMessageAll}><MessagesSquare size={19} /></button>}<button className="icon-button" aria-label="New session" title="New session" aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onNew(matchMedia('(hover: hover)').matches ? { x: box.left, y: box.bottom + 6 } : undefined) }}><Plus size={20} /></button>
+      <span className="sidebar-top-actions">{onFactory && <button className="icon-button" aria-label="Factory view" title="Factory view" aria-haspopup="dialog" onClick={onFactory}><Factory size={19} /></button>}{onMessageAll && <button className="icon-button" aria-label="Message all sessions" title="Message all sessions" onClick={onMessageAll}><MessagesSquare size={19} /></button>}<button className="icon-button" aria-label="New session" title="New session" aria-haspopup="dialog" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onNew(matchMedia('(hover: hover)').matches ? { x: box.left, y: box.bottom + 6 } : undefined) }}><Plus size={20} /></button>
       {onClose && <button className="icon-button" aria-label="Close sessions" onClick={onClose}><X size={20} /></button>}</span>
     </div>
     <div className="sidebar-search-row"><label className="sidebar-search"><Search size={16} aria-hidden="true" /><input type="search" placeholder="Search" aria-label="Search sessions" aria-keyshortcuts={onCommandMenu ? undefined : 'Control+K Meta+K'} value={query} onChange={event => setQuery(event.target.value)} onKeyDown={searchKeys} />{onCommandMenu

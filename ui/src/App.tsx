@@ -78,6 +78,7 @@ import { BrowserSheet, WATCH_EVENT, browserAsks, setPaneLabels, useAgentBrowser,
 import { AgentBubble } from './AgentBubble'
 import { SidePins } from './SidePins'
 import { AgentsPage } from './AgentsView'
+import { Factory } from './Factory'
 import { choosePhoneScreen, toggleButton } from './phoneScreen'
 import { WordsContext, wordsFor } from './words'
 import type { GroupHooks } from './Groups'
@@ -171,6 +172,7 @@ function App() {
   // The Agents page (Active and Unread tabs). Tether's summary notification opens it with /chat/?go=agents.
   // 'message' opens it on the "Message sessions" box (sidebar button, command menu).
   const [agentsPage, setAgentsPage] = useState<false | 'list' | 'message'>(false)
+  const [factory, setFactory] = useState(false)
   // The work page (WorkBoard.tsx): the sidebar, the command menu and /chat/?go=board open it.
   const [workSheet, setWorkSheet] = useState<false | WorkView>(false)
   // ⌘K opens the board on a search, with one item's drawer open.
@@ -343,6 +345,7 @@ function App() {
       else if (view === 'work:board' || view === 'work:needs') setWorkSheet(view === 'work:board' ? 'board' : 'needs')
       else if (view === 'settings') setSettings(true)
       else if (view === 'agents') setAgentsPage('list')
+      else if (view === 'factory') setFactory(true)
       else if (view === 'lessons') setReviewing(true)
       else return false
       return true
@@ -571,6 +574,7 @@ function App() {
     else if (go === 'usage') setPlanSheet(true)
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
+    else if (go === 'factory') { setDrawer(false); setFactory(true) }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
     // Like ⌥Space: inside another dialog (Settings), search does not open over it.
     else if (go === 'search') setMenu(current => document.querySelector('dialog[open]') ? current : 'commands')
@@ -872,7 +876,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -902,6 +906,7 @@ function App() {
     { label: 'Backlog page', key: '⌥⇧B', run: () => setBacklog({ mode: 'page' }) },
     { label: 'Work board', run: () => setWorkSheet('board') },
     { label: 'Agents page', run: () => setAgentsPage('list') },
+    { label: 'Factory view', run: () => setFactory(true) },
     ...(canMessage ? [{ label: 'Message all sessions', run: () => setAgentsPage('message') }] : []),
     { label: `${ASSISTANT} Live mode: talk hands-free`, run: openLive },
   ] : []
@@ -1044,6 +1049,7 @@ function App() {
     <UndoCenter api={api} onChanged={() => void refresh()} history={undoHistory} onHistory={setUndoHistory} />
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} find={workFind} onRefresh={work.refresh} onOpen={openPane} onClose={() => { setWorkSheet(false); setWorkFind(undefined) }}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}
+    {factory && <Factory api={api} panes={panes ?? []} groups={data?.groups} onOpen={openPane} onClose={() => setFactory(false)} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}
     {updated && <div className="update-banner" role="status"><span>A new version of Tether is ready.</span><button type="button" onClick={reload}>Reload</button></div>}

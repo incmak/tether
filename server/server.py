@@ -107,6 +107,7 @@ import undo
 import undo_api
 import undo_store
 import codex_level
+import factory
 import activity_time
 import ui_usage
 import codex_trust
@@ -636,6 +637,13 @@ def codex_action_lines(payload):
     if commands:
         return ['Ran ' + command.strip().split('\n')[0] for command in commands]
     return [] if name in QUIET_CALLS else ['Ran a script' if name == 'exec' else name]
+
+
+# The Factory view reads each agent tab's latest tool calls with the agent's own transcript parser (factory.py).
+FACTORY_READERS = {
+    'claude': (lambda: {'messages': []}, lambda state, index, record: claude_consume(state['messages'], index, record, display_text)),
+    'codex': (lambda: codex_state(), lambda state, index, record: codex_consume(state, index, record)),
+}
 
 
 def codex_state():
@@ -2072,6 +2080,8 @@ class Handler(BaseHTTPRequestHandler):
                 query = parse_qs(urlsplit(self.path).query)
                 config = choose(query.get('session', [None])[0])
                 self.respond(200, tool_details.lookup(config, query.get('id', [''])[0]))
+            elif path == factory.PATH:
+                self.respond(200, factory.payload(sessions(), tab_folder, FACTORY_READERS))
             elif path == '/mobile/api/subagents':
                 query = parse_qs(urlsplit(self.path).query)
                 config = choose(query.get('session', [None])[0])
