@@ -1561,6 +1561,43 @@ class RealStopTests(unittest.TestCase):
         self.assertEqual(previews.stop([port], wait=0), {port: 'refused'})
         self.assertIsNone(child.poll())
 
+    def shared_accept(self, hide):
+        """A dev parent accepts one connection, then forks a child that keeps only the accepted socket."""
+        import signal, subprocess
+        script = ('import ctypes,os,socket,time\n'
+                  's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); print(s.getsockname()[1], flush=True)\n'
+                  'c=s.accept()[0]\n'
+                  'if os.fork() == 0:\n'
+                  '    s.close()\n'
+                  '    %s\n'
+                  '    print(os.getpid(), flush=True); time.sleep(60); os._exit(0)\n'
+                  'time.sleep(60)' % ('ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)' if hide else 'pass'))
+        parent = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.PIPE, text=True,
+                                  start_new_session=True)
+        self.addCleanup(lambda: (os.killpg(parent.pid, signal.SIGKILL), parent.wait(), parent.stdout.close()))
+        port = int(parent.stdout.readline())
+        client = socket.create_connection(('127.0.0.1', port))
+        self.addCleanup(client.close)
+        child = int(parent.stdout.readline())
+        return port, client, child
+
+    def test_every_holder_of_the_connection_is_checked(self):
+        # Review of 5b16c08, item 1: the dev parent holds the accepted socket, and so does a protected child.
+        port, client, child = self.shared_accept(hide=False)
+        previews = DevPreviews(ports=[], names=LOCAL['names'],
+                               kind=lambda pid: 'agent' if pid == child else LOCAL['kind'](pid))
+        self.assertIn(port, [row['port'] for row in previews.servers()])  # the listener is the parent's only
+        self.assertEqual(previews.verify(client), 'other')
+
+    def test_a_hidden_child_of_a_holder_counts_as_a_holder(self):
+        # Review of 5b16c08, item 2: the child that shares the accepted socket turns non-dumpable.
+        port, client, child = self.shared_accept(hide=True)
+        with self.assertRaises(PermissionError):
+            os.listdir('/proc/%d/fd' % child)
+        previews = DevPreviews(ports=[], **LOCAL)
+        self.assertNotIn(port, [row['port'] for row in previews.servers()])  # it may hold the listener too
+        self.assertEqual(previews.verify(client), 'other')
+
     def test_a_connection_that_is_never_accepted_is_not_forwarded(self):
         with socket.socket() as server:
             server.bind(('127.0.0.1', 0))

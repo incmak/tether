@@ -312,7 +312,14 @@ def process_kind(pid, root='/proc', own_pid=None):
 def socket_holders(inodes, uid, root='/proc', limit=50000):
     """({inode: [pid, ...]}, complete): this user's processes that hold each socket (Linux). A socket may have several
     holders, for example a reloader and its worker. complete is False when the scan stopped early or could not read a
-    process of this user: a holder may be missing then, so the caller must not trust the result."""
+    process of this user: a holder may be missing then, so the caller must not trust the result.
+    A non-dumpable process of this user (sshd, gpg-agent, sd-pam: always there) hides its descriptors. Counting each
+    as a gap would hide every dev server, so it counts only when it descends from a holder: it may have inherited
+    the socket (fork, then PR_SET_DUMPABLE 0). Such a socket is left out, as if no holder were visible, and every
+    caller refuses a socket without a visible holder. So a dev server that runs ssh (non-dumpable) leaves the list
+    until ssh ends. Not covered: a descriptor sent over a Unix socket to an
+    unrelated non-dumpable process (SCM_RIGHTS). Same-uid programs can do that on purpose only; this rule guards
+    against mistakes, not against this user's own programs (see process_kind)."""
     wanted = {'socket:[%d]' % inode: inode for inode in inodes if inode}
     found = {}
     if not wanted:
@@ -321,7 +328,7 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
         pids = [int(name) for name in os.listdir(root) if name.isdigit()]
     except OSError:
         return found, False
-    looked = 0
+    looked, hidden = 0, []
     for pid in pids:
         base = '%s/%d' % (root, pid)
         try:
@@ -331,11 +338,7 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
         except FileNotFoundError:
             continue  # it ended
         except PermissionError:
-            # A non-dumpable process of this user (sshd, gpg-agent, sd-pam: always there) hides its descriptors.
-            # Counting it as a gap would hide every dev server. It may still share a socket with a visible process,
-            # so a 'dev' kind here is not enough on its own: the proxy checks the process that holds each connection
-            # (connected_dev) and refuses one it cannot see, and a stop signals only a pinned pid that is a dev
-            # server itself (stop_process).
+            hidden.append(pid)  # non-dumpable: see the docstring
             continue
         except OSError:
             return found, False
@@ -349,7 +352,24 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
                 continue  # the descriptor closed
             if inode is not None and pid not in found.setdefault(inode, []):
                 found[inode].append(pid)
+    for pid in hidden:
+        ancestors = _ancestors(pid, root)
+        for inode in [inode for inode, holders in found.items() if ancestors.intersection(holders)]:
+            del found[inode]  # it may hold the socket too
     return found, True
+
+
+def _ancestors(pid, root='/proc', depth=128):
+    """The pids above `pid` up to init, from /proc/PID/stat (readable for non-dumpable processes too)."""
+    seen = set()
+    while pid > 1 and len(seen) < depth:
+        try:
+            text = _read('%s/%d/stat' % (root, pid))
+            pid = int(text[text.rindex(b')') + 1:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        seen.add(pid)
+    return seen
 
 
 def holds(pid, inode, root='/proc'):
@@ -549,20 +569,14 @@ class DevPreviews:
             return 'unknown'
         if not inode:
             return 'unknown'  # never accepted: Tether cannot see which process would read the bytes
-        return 'ours' if self.connected_dev(sock.getpeername()[1], inode) else 'other'
+        return 'ours' if self.connected_dev(inode) else 'other'
 
-    def connected_dev(self, port, inode):
+    def connected_dev(self, inode):
         """True when the processes that hold the dev server's end of a connection (socket `inode`) are dev servers.
         This names the very connection: a listener that closed and a new one on the port cannot stand in for it.
-        The process that accepted is usually one that holds the port's listener; those are checked first (a few ms).
-        Else Tether scans /proc, and a socket without a visible holder or an incomplete scan is refused."""
-        mine, _ = self.ours(port)
-        owners = self.owner([entry['inode'] for entry in mine])
-        candidates = sorted({pid for entry in mine for pid in owners[entry['inode']].get('pids', ())})
-        live = [pid for pid in candidates if holds(pid, inode)]
-        if not live:
-            holders, complete = socket_holders([inode], self.uid)
-            live = holders.get(inode, []) if complete else []
+        A socket without a visible holder, or with a hidden one (see socket_holders), or an incomplete scan, is refused."""
+        holders, complete = socket_holders([inode], self.uid)  # every holder, so no cached one stands in (~35 ms)
+        live = holders.get(inode, []) if complete else []
         return bool(live) and all(self.kind(pid) == 'dev' for pid in live)
 
     # assignments -----------------------------------------------------------------------------------------------
