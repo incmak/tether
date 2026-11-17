@@ -47,6 +47,8 @@ class DarwinInstallTests(unittest.TestCase):
         self.socket = self.patch(mock.patch.object(installer.socket, 'socket'))
         self.patch(mock.patch.object(installer.shutil, 'which', side_effect=lambda name: f'/mock/bin/{name}'))
         self.legacy = self.patch(mock.patch.object(installer, 'legacy_settings', side_effect=AssertionError('Linux only')))
+        self.wait_gone = self.patch(mock.patch.object(installer, 'launchd_wait_gone', return_value=True))
+        self.cli_gone = self.patch(mock.patch.object(cli, 'launchd_gone', return_value=True))
 
     def patch(self, patcher):
         result = patcher.start()
@@ -290,6 +292,64 @@ class DarwinInstallTests(unittest.TestCase):
                              mock.call(['launchctl', 'bootstrap', self.domain, str(self.units / (label + '.plist'))])])
         self.assertEqual(self.cli_run.call_args_list, expected)
 
+    def test_apply_waits_for_each_booted_out_job_before_bootstrap(self):
+        plan = self.plan()
+        events = []
+        self.probe.side_effect = lambda *command: events.append(('bootout', command[-1])) or self.result(code=0)
+        self.wait_gone.side_effect = lambda target: events.append(('wait', target)) or True
+        self.run.side_effect = lambda command, **kwargs: events.append(('bootstrap', command[-1]))
+        self.apply(plan)
+        kinds = [kind for kind, _ in events]
+        self.assertEqual(kinds, ['bootout', 'wait', 'bootout', 'wait', 'bootstrap', 'bootstrap'])
+        self.assertCountEqual([target for kind, target in events if kind == 'wait'],
+                              [f'{self.domain}/local.tether.chat', f'{self.domain}/local.tether.terminal'])
+        for i, (kind, target) in enumerate(events):  # each wait is for the job just booted out
+            if kind == 'wait':
+                self.assertEqual(events[i - 1], ('bootout', target))
+
+    def test_apply_retries_a_bootstrap_that_hits_the_unload_race(self):
+        plan = self.plan()
+        failures = {'local.tether.chat.plist': 2}
+
+        def bootstrap(command, **kwargs):
+            name = Path(command[-1]).name
+            if failures.get(name):
+                failures[name] -= 1
+                raise subprocess.CalledProcessError(5, command)
+        self.run.side_effect = bootstrap
+        with mock.patch.object(installer.time, 'sleep') as sleep:
+            self.apply(plan)
+        self.assertEqual(failures['local.tether.chat.plist'], 0)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(self.state.exists())  # choices are saved once the services are back
+
+    def test_apply_gives_up_after_repeated_bootstrap_failures(self):
+        plan = self.plan()
+        self.run.side_effect = lambda command, **kwargs: (_ for _ in ()).throw(subprocess.CalledProcessError(5, command))
+        with mock.patch.object(installer.time, 'sleep'), self.assertRaises(subprocess.CalledProcessError):
+            self.apply(plan)
+        self.assertEqual(self.run.call_count, installer.LAUNCHD_BOOTSTRAP_TRIES)
+
+    def test_cli_restart_waits_between_bootout_and_bootstrap(self):
+        events = []
+        self.cli_run.side_effect = lambda command, **kwargs: events.append(command[1])
+        self.cli_gone.side_effect = lambda target: events.append('wait') or True
+        cli.restart({'unit_names': ['tether.service']})
+        self.assertEqual(events, ['bootout', 'wait', 'bootstrap'])
+
+    def test_cli_restart_retries_bootstrap_error_5(self):
+        tries = []
+
+        def run(command, **kwargs):
+            if command[1] == 'bootstrap':
+                tries.append(1)
+                if len(tries) < 3:
+                    raise subprocess.CalledProcessError(5, command)
+        self.cli_run.side_effect = run
+        with mock.patch.object(cli.time, 'sleep'):
+            cli.restart({'unit_names': ['tether.service']})
+        self.assertEqual(len(tries), 3)
+
     def test_cli_restart_inside_update_job_keeps_the_update_job(self):
         self.cli_run.side_effect = None
         with mock.patch.dict(os.environ, {'XPC_SERVICE_NAME': 'local.tether.update'}):
@@ -331,6 +391,89 @@ class DarwinInstallTests(unittest.TestCase):
         self.assertTrue(plan['units']['tether.service'].startswith('[Unit]\n'))
         self.assertEqual([check['name'] for check in plan['checks']][:3],
                          ['Linux', 'Python >= 3.11', 'systemd user session'])
+
+
+class LaunchdHelperTests(unittest.TestCase):
+    """The real helpers, with launchctl and the clock replaced."""
+    done = subprocess.CompletedProcess([], 113, '', 'Could not find service')
+    loaded = subprocess.CompletedProcess([], 0, 'state = running', '')
+
+    def test_wait_gone_returns_at_once_when_the_job_is_not_loaded(self):
+        sleeps = []
+        with mock.patch.object(installer, 'probe', return_value=self.done) as probe:
+            self.assertTrue(installer.launchd_wait_gone('gui/1/local.tether.chat', sleep=sleeps.append))
+        probe.assert_called_once_with('launchctl', 'print', 'gui/1/local.tether.chat')
+        self.assertEqual(sleeps, [])
+
+    def test_wait_gone_polls_until_launchd_drops_the_job(self):
+        answers, sleeps = iter([self.loaded, self.loaded, self.done]), []
+        with mock.patch.object(installer, 'probe', side_effect=lambda *a: next(answers)):
+            self.assertTrue(installer.launchd_wait_gone('gui/1/x', sleep=sleeps.append))
+        self.assertEqual(len(sleeps), 2)
+
+    def test_wait_gone_gives_up_after_the_settle_time(self):
+        sleeps = []
+        with mock.patch.object(installer, 'probe', return_value=self.loaded):
+            self.assertFalse(installer.launchd_wait_gone('gui/1/x', seconds=1, sleep=sleeps.append))
+        self.assertEqual(len(sleeps), 4)
+
+    def test_wait_gone_treats_a_missing_launchctl_as_gone(self):
+        with mock.patch.object(installer, 'probe', return_value=None):
+            self.assertTrue(installer.launchd_wait_gone('gui/1/x', sleep=lambda s: None))
+
+    def test_bootstrap_retries_then_succeeds_or_raises(self):
+        calls = []
+
+        def flaky(command, **kwargs):
+            calls.append(command)
+            if len(calls) < 3:
+                raise subprocess.CalledProcessError(5, command)
+        with mock.patch.object(installer, 'run', side_effect=flaky):
+            installer.launchd_bootstrap(['launchctl', 'bootstrap', 'gui/1', 'a.plist'], sleep=lambda s: None)
+        self.assertEqual(len(calls), 3)
+        with mock.patch.object(installer, 'run', side_effect=subprocess.CalledProcessError(5, [])), \
+                self.assertRaises(subprocess.CalledProcessError):
+            installer.launchd_bootstrap(['launchctl', 'bootstrap', 'gui/1', 'a.plist'], tries=2, sleep=lambda s: None)
+
+    def test_cli_launchd_gone_reads_launchctl_print(self):
+        with mock.patch.object(cli.subprocess, 'run', return_value=self.done) as run:
+            self.assertTrue(cli.launchd_gone('gui/1/x'))
+        self.assertEqual(run.call_args.args[0], ['launchctl', 'print', 'gui/1/x'])
+        with mock.patch.object(cli.subprocess, 'run', side_effect=OSError), mock.patch.object(cli.time, 'sleep'):
+            self.assertTrue(cli.launchd_gone('gui/1/x'))
+
+
+class NewerPythonTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.bin = Path(temporary.name)
+
+    def exe(self, name):
+        path = self.bin / name
+        path.write_text('#!/bin/sh\n')
+        path.chmod(0o755)
+        return str(path)
+
+    def test_a_new_enough_python_is_kept(self):
+        self.assertIsNone(cli.newer_python(current=(3, 11, 0), candidates=[], version_of=lambda p: (3, 15)))
+        self.assertIsNone(cli.newer_python(current=(3, 15, 2), candidates=[], version_of=lambda p: (3, 15)))
+
+    def test_an_old_python_finds_the_first_new_enough_one(self):
+        old, new = self.exe('python3.9'), self.exe('python3.15')
+        versions = {old: (3, 9), new: (3, 15)}
+        self.assertEqual(cli.newer_python(current=(3, 9, 6), candidates=[old, new], version_of=versions.get), new)
+
+    def test_non_executables_and_old_ones_are_skipped(self):
+        plain = self.bin / 'python3.14'
+        plain.write_text('')  # not executable
+        old = self.exe('python3.10')
+        self.assertIsNone(cli.newer_python(current=(3, 9, 6), candidates=[str(plain), old, '/no/such/python'],
+                                           version_of=lambda p: (3, 10)))
+
+    def test_an_unreadable_version_does_not_count(self):
+        broken = self.exe('python3')
+        self.assertIsNone(cli.newer_python(current=(3, 9, 6), candidates=[broken], version_of=lambda p: ()))
 
 
 if __name__ == '__main__':

@@ -48,6 +48,63 @@ def run(command, quiet=False):
         raise subprocess.CalledProcessError(result.returncode, command)
 
 
+LAUNCHD_SETTLE_SECONDS = 10
+LAUNCHD_BOOTSTRAP_TRIES = 4
+MIN_PYTHON = (3, 11)
+
+
+def launchd_gone(target, seconds=LAUNCHD_SETTLE_SECONDS):
+    """Wait until launchd has removed a booted-out job. `launchctl bootout` returns first, and a bootstrap in
+    that window fails with "Bootstrap failed: 5" and leaves Tether unloaded."""
+    for _ in range(max(1, int(seconds / 0.25))):
+        try:
+            if subprocess.run(['launchctl', 'print', target], capture_output=True, timeout=10).returncode:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def launchd_bootstrap(domain, plist, tries=LAUNCHD_BOOTSTRAP_TRIES):
+    for attempt in range(tries):
+        try:
+            return run(['launchctl', 'bootstrap', domain, plist])
+        except subprocess.CalledProcessError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(1)
+
+
+def newer_python(current=None, candidates=None, version_of=None):
+    """A Python new enough for install.py when this one is not. On macOS `python3` on PATH is often Xcode's 3.9,
+    so a plain `tether update` would refuse every release and roll back."""
+    if (current or sys.version_info)[:2] >= MIN_PYTHON:
+        return None
+    minors = range(20, MIN_PYTHON[1] - 1, -1)
+    names = [f'python3.{minor}' for minor in minors] + ['python3']
+    paths = candidates if candidates is not None else (
+        [f'{folder}/{name}' for folder in ('/opt/homebrew/bin', '/usr/local/bin') for name in names] +
+        [found for found in (shutil.which(name) for name in names) if found])
+
+    def probe_version(path):
+        try:
+            out = subprocess.run([path, '-c', 'import sys; print(*sys.version_info[:2])'],
+                                 capture_output=True, text=True, timeout=10).stdout.split()
+            return tuple(int(part) for part in out[:2])
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return ()
+    version_of = version_of or probe_version
+    seen = set()
+    for path in paths:
+        if path in seen or not os.access(path, os.X_OK):
+            continue
+        seen.add(path)
+        if version_of(path) >= MIN_PYTHON:
+            return path
+    return None
+
+
 def launchd_label(name):
     suffix = 'chat' if name == 'tether.service' else name.removeprefix('tether-').removesuffix('.service')
     return 'local.tether.' + suffix
@@ -80,7 +137,8 @@ def restart(state):
                 run(['launchctl', 'bootout', f'{domain}/{label}'], quiet=True)
             except (OSError, subprocess.SubprocessError):
                 pass
-            run(['launchctl', 'bootstrap', domain, str(Path.home() / 'Library/LaunchAgents' / (label + '.plist'))])
+            launchd_gone(f'{domain}/{label}')
+            launchd_bootstrap(domain, str(Path.home() / 'Library/LaunchAgents' / (label + '.plist')))
         return
     run(['systemctl', '--user', 'daemon-reload'])
     run(['systemctl', '--user', 'restart', *units])
@@ -482,4 +540,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    _python = newer_python()
+    if _python:  # run as that Python, so install.py's 3.11 check passes and updates do not roll back
+        os.execv(_python, [_python, str(Path(__file__).resolve()), *sys.argv[1:]])
     sys.exit(main())

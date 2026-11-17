@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parent
 DARWIN = sys.platform == 'darwin'
@@ -32,6 +33,35 @@ def probe(*args):
         return subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+LAUNCHD_SETTLE_SECONDS = 10
+LAUNCHD_BOOTSTRAP_TRIES = 4
+
+
+def launchd_wait_gone(target, seconds=LAUNCHD_SETTLE_SECONDS, sleep=None):
+    """`launchctl bootout` returns before launchd has removed the job. A bootstrap in that window fails with
+    "Bootstrap failed: 5: Input/output error" and leaves the service unloaded, so wait until `launchctl print`
+    no longer finds the job. True when it is gone; False after `seconds` (the bootstrap retries then)."""
+    sleep = sleep or time.sleep
+    for _ in range(max(1, int(seconds / 0.25))):
+        result = probe('launchctl', 'print', target)
+        if result is None or result.returncode != 0:
+            return True
+        sleep(0.25)
+    return False
+
+
+def launchd_bootstrap(command, tries=LAUNCHD_BOOTSTRAP_TRIES, sleep=None, **kwargs):
+    """Bootstrap a LaunchAgent, retrying the same race a few times before giving up."""
+    sleep = sleep or time.sleep
+    for attempt in range(tries):
+        try:
+            return run(command, **kwargs)
+        except subprocess.CalledProcessError:
+            if attempt == tries - 1:
+                raise
+            sleep(1)
 
 
 def occupied_ports():
@@ -732,6 +762,7 @@ def apply_plan(plan, home=None):
             continue
         if DARWIN and command[:2] == ['launchctl', 'bootout']:
             probe(*command)
+            launchd_wait_gone(command[2])
             continue
         if DARWIN and command[0] == 'launchctl' and not written:
             write_units(plan, units_dir)
@@ -755,6 +786,9 @@ def apply_plan(plan, home=None):
                                          f'Tether services were not started; {state}.')
             write_units(plan, units_dir)
             written = True
+        if DARWIN and command[:2] == ['launchctl', 'bootstrap']:
+            launchd_bootstrap(command, stdout=sys.stderr)
+            continue
         # Keep stdout machine-readable for --apply --json, including pip/npm logs.
         run(command, cwd=Path(plan.get('build_repo', plan['repo'])) / 'ui' if command[0] == 'npm' else None, stdout=sys.stderr)
     if not written:
