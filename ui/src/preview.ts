@@ -1,8 +1,11 @@
 import { createContext } from 'react'
 import type { ChatMessage, ToolArtifact } from './api'
 
-/** A page to show in the preview drawer. path: the local HTML file. remote: the claude.ai link of a published artifact. */
-export interface PreviewTarget { path: string; title: string; remote?: string; dev?: DevServer }
+/** A page to show in the preview drawer. path: the local HTML file. remote: the claude.ai link of a published artifact.
+ * manage: no page; the drawer lists the dev servers that run now, to preview or stop (the chat's ... menu). */
+export interface PreviewTarget { path: string; title: string; remote?: string; dev?: DevServer; manage?: boolean }
+/** The drawer's "Dev servers" view. Each open makes a new object, so the view starts fresh. */
+export const devServersTarget = (): PreviewTarget => ({ path: 'dev-servers', title: 'Dev servers', manage: true })
 /** A dev server on the agent's machine: its port, and the path to open on it. */
 export interface DevServer { port: number; path: string }
 

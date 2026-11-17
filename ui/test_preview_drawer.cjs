@@ -12,6 +12,9 @@ const ARTIFACT = { url: REMOTE, path: '/tmp/claude-1000/x/scratchpad/plan.html',
 // A preview port answers 401 with a page that tells the drawer (server/dev_previews.py).
 const ENDED = delay => `<!doctype html><meta charset="utf-8"><title>Ended</title><body><p id="ended">This preview has ended</p><script>setTimeout(() => parent.postMessage({ tetherPreview: 'expired' }, '*'), ${delay})</script></body>`
 const SERVERS = [{ port: 5174, name: 'node', folder: 'shop-with-a-long-folder-name' }, { port: 5199, name: 'node', folder: 'old' }, { port: 8000, name: '', folder: '' }]
+// The "Dev servers" view (... menu). 8000 stops only by force; 9000 is refused (it stopped being a dev server).
+const MANAGED = [{ port: 5174, name: 'node', folder: 'shop-with-a-long-folder-name-that-has-to-wrap-on-a-phone' }, { port: 8000, name: 'python3', folder: 'site' },
+  { port: 5300, name: 'vite', folder: 'docs' }, { port: 5301, name: 'vite', folder: 'blog' }, { port: 9000, name: 'node', folder: 'api' }]
 const PAGE = '<!doctype html><meta charset="utf-8"><title>Page</title><body style="margin:0"><h1 id="made">Made by an agent</h1></body>'
 
 function fixtures() {
@@ -68,6 +71,8 @@ async function main() {
       // One width waits past the time in which an ended frame means "the browser did not keep the cookie".
       const endedAfter = width === 390 ? 8300 : 50
       let released = 0
+      let devList = SERVERS
+      const killed = new Set()
       const fixture = fixtures()
       if (page) await page.close().catch(() => {})
       page = await context.newPage()
@@ -102,6 +107,16 @@ async function main() {
               const next = `&next=${encodeURIComponent(body.path)}`
               return route.fulfill({ json: { port: pool, dev_port: body.port, frame: `/__tether_preview__/open?token=${token}${next}`, browser: `/__tether_preview__/open?token=browser${turn}${next}` } })
             }
+            if (endpoint === 'dev-preview/stop') {
+              await new Promise(resolve => setTimeout(resolve, 400))  // the server waits for the socket to close
+              const results = [...new Set(body.ports)].map(port => {
+                if (port === 9000) return { port, state: 'refused', error: 'localhost:9000 is not a dev server now.' }
+                if (port === 8000 && !body.force) return { port, state: 'still-running' }
+                killed.add(port)
+                return { port, state: 'stopped' }
+              })
+              return route.fulfill({ json: { results } })
+            }
             if (endpoint === 'dev-preview/release') { released = body.port; return route.fulfill({ json: { ok: true, assigned: [{ port: 7701, dev_port: 3000 }], free: 1 } }) }
             if (endpoint === 'browser/new') return route.fulfill({ json: { id: 'tab9', url: body.url, title: '' } })
             return route.fulfill({ json: { ok: true, accepted: true } })
@@ -109,7 +124,7 @@ async function main() {
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           if (endpoint === 'dev-preview') {
             const full = posts.findLast(post => post.endpoint === 'dev-preview')?.body.port === 5200 && !released  // the pool is full only for the new app; other posts (ui-usage) may come after
-            return route.fulfill({ json: { servers: SERVERS, previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
+            return route.fulfill({ json: { servers: devList.filter(row => !killed.has(row.port)), previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
               assigned: [{ port: 7700, dev_port: 5174 }, { port: 7701, dev_port: 3000 }], free: full ? 0 : 8 } })
           }
           return route.fulfill({ json: fixture[endpoint] || {} })
@@ -274,7 +289,7 @@ async function main() {
         await down.waitFor()
         if (!(await down.innerText()).includes('Nothing listens on port 5199')) errors.push('the dev error has no reason')
         if (!await down.getByRole('button', { name: 'Try again' }).count()) errors.push('the dev error has no retry')
-        const rows = down.getByRole('list', { name: 'Dev servers that run now' }).getByRole('button')
+        const rows = down.getByRole('list', { name: 'Dev servers that run now' }).getByRole('button', { name: /^localhost:/ })
         if (await rows.count() !== 2) errors.push(`${await rows.count()} dev servers listed, want 2 (not the dead port)`)
         for (const row of await rows.all()) {
           const size = await row.boundingBox()
@@ -327,6 +342,127 @@ async function main() {
         const releasePost = posts.find(post => post.endpoint === 'dev-preview/release')
         if (releasePost?.body.port !== 3000) errors.push(`release asked for ${JSON.stringify(releasePost?.body)}`)
         if (await drawer.locator('h2').innerText() !== 'localhost:5200') errors.push('the new app did not open after the release')
+        await closeDrawer()
+
+        // 11. The ... menu opens "Dev servers": what runs now, each row with Stop, and Select / Stop all.
+        devList = MANAGED
+        const more = page.getByRole('button', { name: /and keys$/ })
+        await more.click()
+        await page.locator('.keys-menu').getByRole('button', { name: 'Dev servers' }).click()
+        await drawer.locator('h2', { hasText: 'Dev servers' }).waitFor()
+        const list = drawer.getByRole('list', { name: /^Running now/ })
+        await list.waitFor()
+        const devRows = list.locator('> li')
+        if (await devRows.count() !== 5) errors.push(`${await devRows.count()} rows in the manager, want 5`)
+        if (await drawer.locator('iframe').count()) errors.push('the manager loads a frame')
+        if (!await drawer.getByRole('list', { name: 'Preview ports in use' }).count()) errors.push('the manager does not show the preview ports in use')
+        if (!await drawer.getByRole('button', { name: 'Refresh the list' }).count()) errors.push('the manager has no Refresh')
+        for (const row of await devRows.all()) {
+          const rowBox = await row.boundingBox(), stopBox = await row.getByRole('button', { name: /^Stop localhost:/ }).boundingBox()
+          if (rowBox.x < 0 || rowBox.x + rowBox.width > width) errors.push('a manager row leaves the view')
+          if (stopBox.width < 44 || stopBox.height < 44) errors.push(`a Stop button is ${Math.round(stopBox.width)}x${Math.round(stopBox.height)} px`)
+        }
+        if (await drawer.locator('.preview-body').evaluate(node => node.scrollWidth - node.clientWidth) > 0) errors.push('the manager scrolls sideways')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager.png`) })
+        const stopPosts = () => posts.filter(post => post.endpoint === 'dev-preview/stop')
+        const confirm = page.getByRole('alertdialog')
+        // One: Stop asks first. Escape closes only the box and gives focus back; nothing stops.
+        const stop5174 = drawer.getByRole('button', { name: 'Stop localhost:5174' })
+        await stop5174.click()
+        await confirm.waitFor()
+        if (await confirm.getByRole('heading').innerText() !== 'Stop localhost:5174?') errors.push('the confirm box has the wrong title')
+        if (!(await confirm.innerText()).includes('Unsaved work in it is lost')) errors.push('the confirm box has no warning')
+        if (!await confirm.getByRole('button', { name: 'Cancel' }).evaluate(node => node === document.activeElement)) errors.push('Cancel does not have focus')
+        if (!(await confirm.getByRole('button', { name: 'Stop', exact: true }).getAttribute('class')).includes('danger')) errors.push('Stop is not a danger button')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-confirm.png`) })
+        await page.keyboard.press('Escape')
+        await confirm.waitFor({ state: 'detached' })
+        if (!await drawer.evaluate(node => node.open)) errors.push('Escape in the confirm box closed the drawer')
+        await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Stop localhost:5174').catch(() => errors.push('focus does not return to Stop'))
+        if (stopPosts().length) errors.push('Escape stopped a server')
+        await page.keyboard.press('Enter')
+        await confirm.waitFor()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        await list.getByText('Stopping…').waitFor().catch(() => errors.push('the row does not say Stopping…'))
+        await stop5174.waitFor({ state: 'detached' })
+        if (JSON.stringify(stopPosts()[0]?.body) !== JSON.stringify({ ports: [5174], force: false })) errors.push(`stop asked for ${JSON.stringify(stopPosts()[0]?.body)}`)
+        await page.waitForFunction(() => document.activeElement?.id === 'dev-manager-title').catch(() => errors.push('focus is lost after the row went away'))
+        if (!(await drawer.getByRole('status').filter({ hasText: 'Stopped localhost:5174.' }).count())) errors.push('the stop is not announced')
+        // Still running: the row offers Force stop, which asks again.
+        await drawer.getByRole('button', { name: 'Stop localhost:8000' }).click()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        const force = list.getByRole('button', { name: 'Force stop' })
+        await force.waitFor()
+        if (!(await list.locator('li', { hasText: 'localhost:8000' }).innerText()).includes('Still running')) errors.push('the row does not say Still running')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-still.png`) })
+        await force.click()
+        if (await confirm.getByRole('heading').innerText() !== 'Force stop localhost:8000?') errors.push('the force box has the wrong title')
+        await confirm.getByRole('button', { name: 'Force stop' }).click()
+        await list.locator('li', { hasText: 'localhost:8000' }).waitFor({ state: 'detached' })
+        if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [8000], force: true })) errors.push(`force asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
+        // Several: Select gives checkboxes and a bar; Select all / Clear; Stop N asks with the list.
+        await drawer.getByRole('button', { name: 'Select', exact: true }).click()
+        const boxes = list.getByRole('checkbox')
+        if (await boxes.count() !== 3) errors.push(`${await boxes.count()} checkboxes, want 3`)
+        if (await list.getByRole('button', { name: /^Stop localhost/ }).count()) errors.push('Select mode still shows Stop per row')
+        const bar = drawer.getByRole('group', { name: 'Selected dev servers' })
+        await bar.getByRole('button', { name: 'Select all' }).click()
+        if (!(await bar.innerText()).includes('3 selected')) errors.push('Select all did not select 3')
+        await bar.getByRole('button', { name: 'Clear' }).click()
+        if (!(await bar.innerText()).includes('0 selected')) errors.push('Clear did not clear')
+        if (!await bar.getByRole('button', { name: /^Stop/ }).isDisabled()) errors.push('Stop is on with nothing selected')
+        await list.getByRole('checkbox', { name: /localhost:5300/ }).check()
+        await list.getByRole('checkbox', { name: /localhost:5301/ }).check()
+        const barBox = await bar.boundingBox()
+        if (barBox.x < 0 || barBox.x + barBox.width > width + 1) errors.push('the select bar leaves the view')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-select.png`) })
+        await bar.getByRole('button', { name: 'Stop 2' }).click()
+        if (await confirm.getByRole('heading').innerText() !== 'Stop 2 dev servers?') errors.push('the select box has the wrong title')
+        if (await confirm.getByRole('listitem').count() !== 2) errors.push('the select box does not list the servers')
+        await confirm.getByRole('button', { name: 'Stop 2' }).click()
+        await list.locator('li', { hasText: 'localhost:5301' }).waitFor({ state: 'detached' })
+        if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [5300, 5301], force: false })) errors.push(`select stop asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
+        // All: after a refresh every server runs again. One is refused and says why; it stays.
+        killed.clear()
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.locator('li', { hasText: 'localhost:5174' }).waitFor()
+        await drawer.getByRole('button', { name: 'Stop all' }).click()
+        if (await confirm.getByRole('heading').innerText() !== 'Stop 5 dev servers?') errors.push('the Stop all box has the wrong title')
+        await confirm.getByRole('button', { name: 'Stop 5' }).click()
+        await list.locator('li', { hasText: 'localhost:5174' }).waitFor({ state: 'detached' })
+        if (JSON.stringify(stopPosts().at(-1)?.body.ports) !== JSON.stringify([5174, 8000, 5300, 5301, 9000])) errors.push(`Stop all asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
+        const refused = list.locator('li', { hasText: 'localhost:9000' })
+        if (!(await refused.innerText().catch(() => '')).includes('Not stopped: localhost:9000 is not a dev server now.')) errors.push('the refused row does not say why')
+        if (!(await list.locator('li', { hasText: 'localhost:8000' }).innerText().catch(() => '')).includes('Still running')) errors.push('Stop all lost the still-running row')
+        // A row opens its preview, with a way back to the list.
+        await refused.getByRole('button', { name: /^localhost:9000/ }).click()
+        await frameShows()
+        if (await drawer.locator('h2').innerText() !== 'localhost:9000') errors.push('the picked row did not open')
+        await drawer.getByRole('button', { name: 'Back to dev servers' }).click()
+        await list.waitFor()
+        if (await drawer.locator('iframe').count()) errors.push('Back left the frame')
+        // Empty.
+        devList = []
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        const empty = drawer.getByRole('heading', { name: 'No dev servers run now' })
+        await empty.waitFor().catch(() => errors.push('no empty state'))
+        if (!(await drawer.locator('.dev-manager-empty').innerText().catch(() => '')).includes('run npm run dev in a tab')) errors.push('the empty state does not say what to do')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-empty.png`) })
+        await closeDrawer()
+        if (!await more.evaluate(node => node === document.activeElement)) errors.push('focus does not return to the ... button')
+        devList = SERVERS
+
+        // 12. The error state's list stops a server too.
+        killed.clear()
+        await page.getByRole('button', { name: 'Preview localhost:5199' }).click()
+        const downList = drawer.getByRole('list', { name: 'Dev servers that run now' })
+        await downList.waitFor()
+        await downList.getByRole('button', { name: 'Stop localhost:8000' }).click()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        await downList.getByRole('button', { name: 'Force stop' }).click()
+        await confirm.getByRole('button', { name: 'Force stop' }).click()
+        await downList.locator('li', { hasText: 'localhost:8000' }).waitFor({ state: 'detached' })
+        if (!await drawer.evaluate(node => node.open)) errors.push('a stop in the error state closed the drawer')
         await closeDrawer()
 
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)
