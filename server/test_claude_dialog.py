@@ -340,6 +340,15 @@ class Act(unittest.TestCase):
         with self.assertRaises(claude_dialog.Changed):
             self.act(terminal, title='Manage MCP servers', action='row', row=1, label='not there')
 
+    def test_row_then_scrolls_past_the_edge_in_one_action(self):
+        # "Show more below": move to the last row, then one Down. The mode changes after the move, so it is one action.
+        frames = [moved(frame('mcp'), index) if index else frame('mcp') for index in range(4)]
+        terminal = Terminal(frames, {(at, 'Down'): at + 1 for at in range(3)})
+        self.act(terminal, title='Manage MCP servers', action='row', row=3, label='claude.ai Claude Docs', then='Down')
+        self.assertEqual(terminal.sent, [['Down']] * 4)
+        with self.assertRaises(ValueError):
+            self.act(terminal, title='Manage MCP servers', action='row', row=3, label='claude.ai Claude Docs', then='Enter')
+
     def test_row_fails_when_the_cursor_does_not_move(self):
         terminal = Terminal([frame('mcp')])
         with self.assertRaisesRegex(RuntimeError, 'Could not move'):

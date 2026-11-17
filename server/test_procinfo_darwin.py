@@ -362,7 +362,8 @@ class CallerTests(DarwinFixtures):
                 patch.object(procinfo, 'table', return_value=processes) as table, \
                 patch.object(agents, 'process_start', side_effect=lambda pid: '%d.123456' % pid), \
                 patch.object(agents, 'codex_database'), \
-                patch.object(agents, 'codex_thread', return_value=('same-thread', '/r/transcript')), \
+                patch.object(agents, 'codex_claim', side_effect=lambda *_: {
+                    'kind': 'open', 'rows': [('same-thread', '/r/transcript')], 'unnamed': False, 'named': False}), \
                 patch.object(agents.codex_provider, 'pane_profile', return_value=None), \
                 patch.object(agents, 'codex_names', return_value={}):
             entries = agents.discover({}, run)

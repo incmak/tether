@@ -6,6 +6,7 @@ import type { CSSProperties } from 'react'
 import { Search } from 'lucide-react'
 import type { ClaudeDialog, DialogAction, DialogBlock, DialogHint, DialogItem } from './api'
 import { Linked } from './Messages'
+import { rovingRows, useRovingStop } from './rovingRows'
 
 const MARKS: Record<string, [string, string]> = { '✔': ['ok', 'On'], '✓': ['ok', 'On'], '⚠': ['warn', 'Needs attention'], '✘': ['bad', 'Failed'], '✗': ['bad', 'Failed'], '×': ['bad', 'Failed'],
   '◯': ['off', 'Not selected'], '○': ['off', 'Not selected'], '☐': ['off', 'Not selected'], '◉': ['ok', 'Selected'], '●': ['ok', 'Selected'], '☑': ['ok', 'Selected'] }
@@ -15,6 +16,7 @@ const ARROWS = ['Up', 'Down', 'Left', 'Right']
 export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialog; disabled: boolean; onAction: (action: DialogAction) => Promise<string | null> }) {
   const [busy, setBusy] = useState('')
   const [failed, setFailed] = useState('')
+  const roving = useRovingStop()
   const box = dialog.blocks.find(block => block.type === 'search')
   const [query, setQuery] = useState(box?.type === 'search' ? box.value : '')
   // The terminal's box is the truth: when its text changes there (a key in the terminal, a cleared filter), show that.
@@ -47,6 +49,8 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     const arrows = keys.filter(key => ARROWS.includes(key.key))
     if (arrows.length && arrows.length === keys.filter(key => key.key !== 'Tab').length) {
       if (/tab|switch/i.test(hint.effect) && dialog.tabs || hasScale && arrows.some(key => key.key === 'Left')) return
+      // The rows are buttons: a click moves the mark, and the "more" rows scroll. Up and Down need no button.
+      if (hasList && arrows.every(key => key.key === 'Up' || key.key === 'Down')) return
       for (const key of arrows) if (!buttons.some(button => button.key === key.key)) buttons.push({ id: key.key, key: key.key, label: key.label, kbd: '', primary: false, close: false })
       return
     }
@@ -57,18 +61,29 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     buttons.push({ id: key.key, key: key.key, label: target ? `${capital(hint.effect)} “${target}”` : capital(hint.effect), kbd: key.label, primary: key.key === 'Enter', close: key.key === 'Escape' })
   }
   dialog.hints.forEach(add)
-  if (hasList) for (const [key, label] of [['Up', '↑'], ['Down', '↓']]) if (!buttons.some(button => button.key === key)) buttons.unshift({ id: key, key, label, kbd: '', primary: false, close: false })
   if (!buttons.some(button => button.close)) buttons.push({ id: 'Escape', key: 'Escape', label: 'Close', kbd: 'Esc', primary: false, close: true })
   buttons.sort((a, b) => Number(a.close) - Number(b.close))
+  const primary = buttons.find(button => button.primary)
+  const textRows = dialog.blocks.flatMap(block => block.type === 'list' ? block.items.filter((item): item is DialogItem => 'text' in item) : [])
+  // "N more below": the server moves the mark to the last row and checks it, then one Down shows the next row.
+  const scroll = async (key: 'Up' | 'Down') => {
+    const row = key === 'Up' ? 0 : textRows.length - 1
+    if (busy || disabled || row < 0) return
+    setBusy(`more-${key}`); setFailed('')
+    try { setFailed(await onAction({ action: 'row', row, label: textRows[row].text, then: key }) ?? '') } finally { setBusy('') }
+  }
 
-  const row = (item: DialogItem, at: number) => {
+  const row = (item: DialogItem, at: number, tab: (key: string) => number) => {
     const mark = item.mark ? MARKS[item.mark] : undefined
+    // A click on the marked row does what Enter does there, so a choice is two clicks at most, never an arrow key.
+    const go = item.selected && primary
     return <li key={at}>
-      <button type="button" className={item.selected ? 'current' : ''} aria-current={item.selected || undefined} aria-disabled={off || undefined}
-        onClick={() => void act(`row-${at}`, { action: 'row', row: at, label: item.text })}>
+      <button type="button" data-row={`row-${at}`} tabIndex={tab(`row-${at}`)} className={item.selected ? 'current' : ''} aria-current={item.selected || undefined} aria-disabled={off || undefined} aria-busy={busy === `row-${at}` || undefined}
+        onClick={() => void (go ? act(`row-${at}`, { action: 'key', key: primary.key }) : act(`row-${at}`, { action: 'row', row: at, label: item.text }))}>
         {item.mark && <span className={`dlg-mark ${mark?.[0] ?? ''}`} role="img" aria-label={mark?.[1] ?? item.mark}>{item.mark}</span>}
         <span className="dlg-row-text"><strong>{item.text}</strong>{item.detail && <small>{item.detail}</small>}</span>
         {item.value && <span className="dlg-row-value">{item.value}</span>}
+        {go && <span className="dlg-row-go">{busy === `row-${at}` ? '…' : primary.label.split(' “')[0]}</span>}
       </button>
     </li>
   }
@@ -128,10 +143,18 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
       </div>
     }
     let index = dialog.blocks.slice(0, at).reduce((count, earlier) => count + (earlier.type === 'list' ? earlier.items.filter(item => 'text' in item).length : 0), 0)
-    return <ul key={at} ref={list} className="dlg-list" aria-label={dialog.title}>
-      {block.more_above !== 0 && <li className="dlg-more">{block.more_above > 0 ? `↑ ${block.more_above} more above` : '↑ More above'}</li>}
-      {block.items.map((item, position) => 'heading' in item ? <li key={`h${position}`} className="dlg-group">{item.heading}</li> : row(item, index++))}
-      {block.more_below !== 0 && <li className="dlg-more">{block.more_below > 0 ? `↓ ${block.more_below} more below` : '↓ More below'}</li>}
+    // `index` moves on while the rows render, so the keys and the fallback use `first`, taken before.
+    const first = index
+    const own = block.items.flatMap(item => 'text' in item ? [item] : [])
+    const keys = [...block.more_above !== 0 ? [`${at}:more-Up`] : [], ...own.map((_, offset) => `row-${first + offset}`), ...block.more_below !== 0 ? [`${at}:more-Down`] : []]
+    const marked = own.findIndex(item => item.selected)
+    const tab = (key: string) => roving.tabFor(key, keys, `row-${first + Math.max(0, marked)}`)
+    const more = (key: 'Up' | 'Down', count: number) => <li className="dlg-more"><button type="button" data-row={`${at}:more-${key}`} tabIndex={tab(`${at}:more-${key}`)} aria-disabled={off || undefined} aria-busy={busy === `more-${key}` || undefined} onClick={() => void scroll(key)}>
+      {busy === `more-${key}` ? 'Loading…' : `${key === 'Up' ? '↑' : '↓'} ${count > 0 ? `Show ${count} more` : 'Show more'} ${key === 'Up' ? 'above' : 'below'}`}</button></li>
+    return <ul key={at} ref={list} className="dlg-list" aria-label={dialog.title} onKeyDown={rovingRows} onFocus={roving.onFocus}>
+      {block.more_above !== 0 && more('Up', block.more_above)}
+      {block.items.map((item, position) => 'heading' in item ? <li key={`h${position}`} className="dlg-group">{item.heading}</li> : row(item, index++, tab))}
+      {block.more_below !== 0 && more('Down', block.more_below)}
     </ul>
   }
   // On a phone the bottom bar hides while a text box has the focus. A press on a button would move the focus, the bar
@@ -144,7 +167,7 @@ export function DialogCard({ dialog, disabled, onAction }: { dialog: ClaudeDialo
     {dialog.note && <p className="dlg-text dim">{dialog.note}</p>}
     {dialog.blocks.map(render)}
     {!dialog.blocks.length && <p className="dlg-text dim">Loading…</p>}
-    {hasList && <p className="dlg-text dim dlg-help">Tap a row to move the mark to it. The buttons act on the marked row.</p>}
+    {hasList && <p className="dlg-text dim dlg-help">{primary ? `Click a row to mark it. Click the marked row again for “${primary.label.split(' “')[0]}”, or use a button below.` : 'Click a row to mark it. The buttons act on the marked row.'} The arrow keys move between rows.</p>}
     <div className="info-actions dlg-actions" role="group" aria-label="Dialog keys">
       {buttons.map(button => <button key={button.id} type="button" className={button.primary ? 'primary' : ''} aria-disabled={off || undefined} aria-busy={busy === button.id || undefined}
         aria-label={button.kbd ? undefined : ({ Up: 'Move up', Down: 'Move down', Left: 'Left', Right: 'Right' } as Record<string, string>)[button.key]}

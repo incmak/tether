@@ -625,7 +625,7 @@ class Changed(RuntimeError):
 def act(entry, body, run=subprocess.run, sleep=time.sleep):
     """Do one action of the card on the real dialog. The caller holds SEND_LOCK and has verified the pane.
 
-    Actions: key (one of `allowed`), row (move the cursor to a list row), tab (open a tab), scale (set the slider),
+    Actions: key (one of `allowed`), row (move the cursor to a list row, then optionally press Up or Down), tab (open a tab), scale (set the slider),
     filter (replace the text of the search box). Each step reads the screen again; a dialog that closed or changed
     stops the action.
     """
@@ -677,9 +677,12 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
         press(key)
         return
     if action == 'row':
-        label, row = body.get('label'), body.get('row')
+        label, row, then = body.get('label'), body.get('row'), body.get('then')
         if not isinstance(label, str) or not isinstance(row, int) or isinstance(row, bool):
             raise ValueError('Choose a row first.')
+        # then: Up on the first row or Down on the last row shows the rows past the list, in this same action.
+        if then not in (None, 'Up', 'Down'):
+            raise ValueError('Invalid key.')
         idle = 0
         for _ in range(60):
             items = _items(dialog)
@@ -689,6 +692,8 @@ def act(entry, body, run=subprocess.run, sleep=time.sleep):
                 raise Changed('That row is no longer in the list. Review the dialog.')
             target = min(places, key=lambda index: abs(index - row))
             if at == target and dialog['focus'] == 'list':
+                if then:
+                    press(then)
                 return
             # With the search box in focus the cursor only shows where Down goes: Down gives the list the focus.
             dialog, moved = step(dialog, 'Down' if at < target or dialog['focus'] != 'list' else 'Up')

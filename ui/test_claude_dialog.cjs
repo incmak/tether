@@ -17,6 +17,16 @@ sys.path.insert(0, sys.argv[1])
 import claude_dialog
 print(json.dumps({name: claude_dialog.parse(open(sys.argv[1] + '/fixtures/claude_dialog_' + name + '.ansi').read()) for name in sys.argv[2:]}))
 `, SERVER, ...NAMES], { encoding: 'utf8', maxBuffer: 1 << 24 }))
+// The marked row of each list holds its Tab stop on the first render, wherever the mark is: also first and last.
+const marked = (name, pick) => {
+  const dialog = structuredClone(DIALOGS[name])
+  for (const block of dialog.blocks) if (block.type === 'list') {
+    const rows = block.items.filter(item => 'text' in item)
+    rows.forEach((item, at) => { item.selected = at === pick(rows.length) })
+  }
+  return dialog
+}
+if (DIALOGS.mcp) { DIALOGS.mark_first = marked('mcp', () => 0); DIALOGS.mark_last = marked('mcp', count => count - 1); NAMES.push('mark_first', 'mark_last') }
 
 function fixtures(name) {
   const dialog = DIALOGS[name]
@@ -105,6 +115,12 @@ async function main() {
         const card = page.locator('.dialog-dock')
         await card.waitFor()
         const dialog = DIALOGS[state]
+        // Before any click: one Tab stop in each list, on its marked row when it has one.
+        for (const list of await card.locator('.dlg-list').all()) {
+          const stops = await list.locator('button[tabindex="0"]').evaluateAll(nodes => nodes.map(node => node.getAttribute('aria-current') === 'true'))
+          const hasMark = await list.locator('button[aria-current="true"]').count() > 0
+          if (stops.length !== 1 || hasMark && !stops[0]) errors.push(`want one Tab stop on the marked row, got ${JSON.stringify(stops)}`)
+        }
         const actions = () => sent.filter(item => item.endpoint === 'dialog').map(item => [item.action, item.key ?? item.label ?? item.tab ?? item.value ?? item.text].join(':'))
         const pres = await card.locator('pre').count()
         if (!(await card.locator('.choice-head').innerText()).includes(dialog.title)) errors.push('wrong card title')
@@ -118,10 +134,27 @@ async function main() {
           if (await card.locator('.dlg-group').count() !== 3) errors.push('want 3 group rows')
           await card.locator('.dlg-list button', { hasText: 'scrut' }).click()
           await card.getByRole('button', { name: /^Confirm/ }).click()
-          await card.getByRole('button', { name: 'Move down' }).click()
+          if (await card.getByRole('button', { name: /^(Move up|Move down|↑|↓)$/ }).count()) errors.push('arrow buttons show next to clickable rows')
+          // The keyboard moves the focus between rows without a key to the terminal; Tab reaches the list once.
+          const marked = card.locator('.dlg-list button[aria-current="true"]')
+          if (await card.locator('.dlg-list button[tabindex="0"]').count() !== 1) errors.push('want one Tab stop in the list')
+          await marked.focus()
+          const before = sent.length
+          const focused = () => page.evaluate(() => document.activeElement?.textContent ?? '')
+          const start = await focused()
+          await page.keyboard.press('ArrowDown')
+          if (await focused() === start) errors.push('ArrowDown did not move the focus')
+          await page.keyboard.press('End')
+          const last = await focused()
+          await page.keyboard.press('Home')
+          if (await focused() === last) errors.push('Home did not move the focus')
+          if (sent.length !== before) errors.push('moving the focus sent a key')
+          // A click on the marked row runs its action, as Enter does in the terminal.
+          if (!(await marked.innerText()).includes('Confirm')) errors.push('the marked row does not name its action')
+          await marked.click()
           await card.getByRole('button', { name: /^Cancel/ }).click()
           await page.waitForTimeout(200)
-          if (actions().join() !== 'row:scrut,key:Enter,key:Down,key:Escape') errors.push(`actions sent: ${actions().join()}`)
+          if (actions().join() !== 'row:scrut,key:Enter,key:Enter,key:Escape') errors.push(`actions sent: ${actions().join()}`)
           if (sent.some(item => item.endpoint === 'dialog' && (item.title !== 'Manage MCP servers' || item.mode !== dialog.mode))) errors.push('an action has no dialog title or mode')
           if (sent.find(item => item.action === 'row').row !== 2) errors.push('wrong row index')
         } else if (state === 'config') {
@@ -135,6 +168,12 @@ async function main() {
         } else if (state === 'config_list') {
           // Enter flips the marked setting at once, so the button names the setting.
           if (!await card.getByRole('button', { name: /^Change “Auto-compact”/ }).count()) errors.push('the Change button does not name the setting')
+          // "Show more" is one checked action: the server moves the mark to the last row, then presses Down.
+          await card.locator('.dlg-more button').last().click()
+          await page.waitForTimeout(200)
+          const more = sent.filter(item => item.endpoint === 'dialog')
+          const last = await card.locator('li:not(.dlg-more) > button[data-row]').last().innerText()
+          if (more.length !== 1 || more[0].action !== 'row' || more[0].then !== 'Down' || !more[0].label || !last.includes(more[0].label)) errors.push(`Show more sent ${JSON.stringify(more)}; last row ${last}`)
           const result = page.locator('.command-result')
           if (await result.locator('code').innerText() !== 'Fable 5.2') errors.push('a one-line command result does not show its code mark')
           if ((await result.innerText()).includes('`')) errors.push('a command result shows raw backticks')

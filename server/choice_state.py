@@ -383,6 +383,8 @@ def cursor_picker(frame, agent):
         return None
     choice = found['choice']
     return {'text': found['text'],
-            'items': [{'text': item['text'], 'selected': item['selected']} for item in choice['items']],
+            # The detail goes with each row: the UI shows it, and picker_choose checks it before a key.
+            'items': [{'text': item['text'], 'selected': item['selected'], **({'detail': item['detail']} if item.get('detail') else {})}
+                      for item in choice['items']],
             'more_above': choice['more_above'], 'more_below': choice['more_below'],
             'hint': found['hint']}

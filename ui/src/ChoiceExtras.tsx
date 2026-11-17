@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check } from 'lucide-react'
 import type { AskBridge, ChoiceState } from './api'
+import { rovingRows, useRovingStop } from './rovingRows'
+import { pickRowKey } from './pickKeys'
 import './ChoiceExtras.css'
 
 // The tabs and the filter text the agent shows above a list. Read only: the keys below change them.
@@ -14,15 +16,56 @@ export function ChoiceMeta({ choice }: { choice: ChoiceState }) {
 
 const more = (count: number, arrow: string) => count === -1 ? `${arrow} more` : `${arrow} ${count} more`
 
-// An unnumbered list (pickers): the mark, the ticked boxes and the hidden rows come from the server's choice record.
-export function ChoiceList({ choice, label }: { choice: ChoiceState; label: string }) {
-  return <ul className="picker-list" aria-label={label}>
-    {choice.more_above !== 0 && <li className="picker-more">{more(choice.more_above, '↑')}</li>}
-    {choice.items.map((item, at) => <li key={at} className={[item.selected ? 'current' : '', item.disabled ? 'disabled' : ''].filter(Boolean).join(' ')} aria-current={item.selected || undefined}>
-      {item.checked !== undefined && <Box checked={item.checked} multi={choice.selection === 'multi'} />}
-      <span className="choice-item-text">{item.text}{item.detail && <small>{item.detail}</small>}</span></li>)}
-    {choice.more_below !== 0 && <li className="picker-more">{more(choice.more_below, '↓')}</li>}
+export type PickKey = 'Enter' | 'Up' | 'Down' | 'Space'
+export interface PickRow { text: string; detail?: string; selected?: boolean; checked?: boolean; disabled?: boolean }
+
+// A list the agent draws with a cursor (a picker, or a numbered menu). With `onPick`, every row is a button: a click
+// or Enter chooses it (multi: ticks it), and "more" rows show the rows past the screen. The server moves the
+// cursor and checks the row before it presses a key. Without `onPick` the list is read only.
+// `labels`: the key of each row (pickRowKey) as the server's own parser reads it. The server refuses when the list on screen
+// differs, so a row index never lands on a look-alike row.
+export function PickList({ rows, labels, label, more_above, more_below, multi, disabled, onPick }: { rows: PickRow[]; labels?: string[]; label: string; more_above: number; more_below: number; multi?: boolean; disabled?: boolean; onPick?: (row: number, labels: string[], then: PickKey) => Promise<unknown> }) {
+  const [busy, setBusy] = useState<string>('')
+  const names = labels ?? rows.map(pickRowKey)
+  const roving = useRovingStop()
+  const live = !!onPick && names.length === rows.length && rows.length > 0
+  const off = disabled || !!busy
+  const pick = async (id: string, row: number, then: PickKey) => {
+    if (!live || off) return
+    setBusy(id)
+    try { await onPick!(row, names, then) } finally { setBusy('') }
+  }
+  const marked = Math.max(0, rows.findIndex(row => row.selected))
+  const keys = [...more_above !== 0 ? ['more-↑'] : [], ...rows.map((_, at) => `row-${at}`), ...more_below !== 0 ? ['more-↓'] : []]
+  const tab = (key: string) => roving.tabFor(key, keys, `row-${marked}`)
+  const moreRow = (count: number, arrow: '↑' | '↓') => {
+    const text = count === -1 ? `Show more ${arrow === '↑' ? 'above' : 'below'}` : `Show ${count} more ${arrow === '↑' ? 'above' : 'below'}`
+    const id = `more-${arrow}`
+    return <li className="picker-more">{live
+      ? <button type="button" data-row={id} tabIndex={tab(id)} aria-disabled={off || undefined} aria-busy={busy === id || undefined}
+          onClick={() => void pick(id, arrow === '↑' ? 0 : rows.length - 1, arrow === '↑' ? 'Up' : 'Down')}>{busy === id ? 'Loading…' : `${arrow} ${text}`}</button>
+      : more(count, arrow)}</li>
+  }
+  return <ul className={live ? 'picker-list pick-list' : 'picker-list'} aria-label={label} onKeyDown={live ? rovingRows : undefined} onFocus={live ? roving.onFocus : undefined}>
+    {more_above !== 0 && moreRow(more_above, '↑')}
+    {rows.map((row, at) => {
+      const body = <>{row.checked !== undefined && <Box checked={row.checked} multi={!!multi} />}
+        <span className="choice-item-text">{row.text}{row.detail && <small>{row.detail}</small>}</span>
+        {busy === `row-${at}` && <span className="pick-busy" aria-hidden="true">…</span>}</>
+      const cls = [row.selected ? 'current' : '', row.disabled ? 'disabled' : ''].filter(Boolean).join(' ')
+      return <li key={at} className={live ? undefined : cls} aria-current={!live && row.selected || undefined}>{live
+        ? <button type="button" data-row={`row-${at}`} tabIndex={tab(`row-${at}`)} className={cls || undefined} aria-current={row.selected || undefined}
+            aria-disabled={off || row.disabled || undefined} aria-busy={busy === `row-${at}` || undefined}
+            onClick={() => { if (!row.disabled) void pick(`row-${at}`, at, multi ? 'Space' : 'Enter') }}>{body}</button>
+        : body}</li>
+    })}
+    {more_below !== 0 && moreRow(more_below, '↓')}
   </ul>
+}
+
+// The server's choice record for a picker: the mark, the ticked boxes and the hidden rows.
+export function ChoiceList({ choice, label, labels, disabled, onPick }: { choice: ChoiceState; label: string; labels?: string[]; disabled?: boolean; onPick?: (row: number, labels: string[], then: PickKey) => Promise<unknown> }) {
+  return <PickList rows={choice.items} labels={labels} label={label} more_above={choice.more_above} more_below={choice.more_below} multi={choice.selection === 'multi'} disabled={disabled} onPick={onPick} />
 }
 
 // decorative: the form's real input already tells assistive tech its state.

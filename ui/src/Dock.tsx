@@ -11,7 +11,10 @@ import { useModal, usePolling } from './hooks'
 import { Linked, PanelText, PanelPre, CopyButton, Markdown } from './Messages'
 import { Elapsed } from './Notices'
 import { LoginLink } from './LoginLink'
-import { AskForm, Box, ChoiceList, ChoiceMeta } from './ChoiceExtras'
+import { AskForm, Box, ChoiceList, ChoiceMeta, PickList } from './ChoiceExtras'
+import { pickRowKey } from './pickKeys'
+import { rovingRows, useRovingStop } from './rovingRows'
+import type { PickKey } from './ChoiceExtras'
 import './InfoPanel.css'
 
 
@@ -49,8 +52,8 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
   </div>
 }
 
-export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
-  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void }) {
+export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
+  onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number, labels: string[], then: PickKey) => Promise<unknown> }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
   const feedbackId = useId()
@@ -69,7 +72,19 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
     ...(current?.options ?? []).filter(item => item.checked !== undefined).map(item => [item.id, item.checked!] as const)])
   const multiBox = current ? current.multi : choice?.selection === 'multi'
   const spaceKey = choice?.selection === 'multi' && choice.hints.some(hint => /\bspace\b/i.test(hint))
-  const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options?.filter(option => option.id <= 9)) ?? []
+  const multiPick = choice?.selection === 'multi'
+  // A numbered list with boxes to tick (Space ticks the marked row): a click on a row ticks it, and Done sends Enter.
+  const tickPick = spaceKey && !!onPick && !approval
+  const tick = async (at: number) => { if (onPick && picked === null) await onPick(at, options.map(pickRowKey), 'Space') }
+  const roving = useRovingStop()
+  const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options) ?? []
+  // Done in a list with boxes: Enter on the marked row, through the checked pick route. The server refuses when the list
+  // closed or changed, so a late click never sends Enter to whatever the terminal shows next.
+  const done = async () => {
+    const rows = picker?.items ?? options
+    const at = rows.findIndex(row => row.selected)
+    if (onPick && at >= 0) await onPick(at, rows.map(pickRowKey), 'Enter')
+  }
   const keepPlanning = plan && approval?.actionable ? options.find(option => /^No,?\s+keep planning\b/i.test(option.text)) : undefined
   const panel = !approval && attention?.reason === 'panel'
   // Claude's /btw: a question and its answer that stay out of the main conversation.
@@ -121,12 +136,9 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
       {bridge ? <AskForm ask={bridge} disabled={disabled} onAnswer={answers => onAsk!(bridge, answers)} onEngage={onAskEngage && (() => onAskEngage(bridge))} /> : plan ? <div className="plan-text assistant-message" tabIndex={0} aria-label="Plan"><TextMessagePartProvider text={plan.text}><Markdown /></TextMessagePartProvider></div> : info ? <InfoPanel info={info} disabled={disabled} onAction={onAction} /> : perms ? <PermissionsPanel dialog={perms} disabled={disabled} want={permissionsTab} onKey={async key => { await onKey(key) }} /> : panel ? <PanelPre text={text} /> : picker ? <div className="picker-card">
         {picker.subtitle && <p className="picker-subtitle">{picker.subtitle}</p>}
         {choice && <ChoiceMeta choice={choice} />}
-        {choice ? <ChoiceList choice={choice} label={picker.title || 'Items'} /> : <ul className="picker-list" aria-label={picker.title || 'Items'}>
-          {!!picker.more_above && <li className="picker-more">↑ {picker.more_above} more</li>}
-          {picker.items!.map((item, at) => <li key={at} className={item.selected ? 'current' : ''} aria-current={item.selected || undefined}>{item.text}</li>)}
-          {!!picker.more_below && <li className="picker-more">↓ {picker.more_below} more</li>}
-        </ul>}
-        <p className="ask-hint">Use ↑ and ↓ to move the mark.{spaceKey ? ' Space ticks or clears the marked item.' : ''} Enter chooses the marked item. Esc closes the list.</p></div> : login ? <div className="login-card">
+        {choice ? <ChoiceList choice={choice} label={picker.title || 'Items'} labels={picker.items!.map(pickRowKey)} disabled={disabled} onPick={onPick} />
+          : <PickList rows={picker.items!} label={picker.title || 'Items'} more_above={picker.more_above ?? 0} more_below={picker.more_below ?? 0} disabled={disabled} onPick={onPick} />}
+        <p className="ask-hint">{onPick ? multiPick ? 'Click a row to tick or clear it, then choose Done. The arrow keys move between rows.' : 'Click a row to choose it. The arrow keys move between rows; Enter chooses.' : `Use ↑ and ↓ to move the mark.${spaceKey ? ' Space ticks or clears the marked item.' : ''} Enter chooses the marked item. Esc closes the list.`}</p></div> : login ? <div className="login-card">
         <p>{login.code ? 'Open the sign-in page and sign in. Then paste the code it shows here.' : 'Open the sign-in page and enter the device code there.'}</p>
         <LoginLink url={login.url} />
         {login.user_code && <div className="login-device"><code>{login.user_code}</code><CopyButton text={login.user_code} label="Copy code" className="copy-chip" wide /></div>}
@@ -148,15 +160,19 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
       </div>}
       {current && current.total > 1 && options.length > 0 && <p className="ask-progress">Question {current.index + 1} of {current.total} · {current.header}{current.multi ? ' · choose one or more' : ''}</p>}
       {!picker && choice && options.length > 0 && <ChoiceMeta choice={choice} />}
-      {options.length > 0 && <div className="choice-options" role="list">{options.map(option => <button key={option.id} type="button" role="listitem" className={[option.selected ? 'current' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void pick(option)}>
+      {options.length > 0 && <div className="choice-options" role="group" aria-label={attention?.question || 'Options'} onKeyDown={rovingRows} onFocus={roving.onFocus}>{options.map((option, at) => <button key={option.id} type="button" data-row={`row-${at}`} tabIndex={roving.tabFor(`row-${at}`, options.map((_, row) => `row-${row}`), `row-${Math.max(0, options.findIndex(item => item.selected))}`)} className={[option.selected ? 'current' : '', approval ? /^yes\b/i.test(option.text) ? 'accept' : /^no\b/i.test(option.text) ? 'decline' : '' : ''].filter(Boolean).join(' ')} disabled={disabled || picked !== null || feedbackVoiceBusy} onClick={() => void (tickPick ? tick(at) : pick(option))}>
         <span className="choice-number">{picked === option.id ? '…' : option.id}</span>{checkedById.has(option.id) && <Box checked={checkedById.get(option.id)!} multi={multiBox} />}{option.free
           ? <span><strong>Type your own answer</strong><small>{option.text === 'Type something.' ? 'Write it in the message box below, then send.' : `In the terminal now: “${option.text}”. Your answer from the message box replaces it.`}</small></span>
           : <span><strong>{checkedById.has(option.id) ? option.text.replace(/^\[[ ✔xX]\]\s+/, '') : option.text}</strong>{chat(option) ? <small>Close the question and talk it through in the message box.</small> : option.detail && <small>{option.detail}</small>}</span>}</button>)}</div>}
-      {!picker && choice && options.length > 0 && (choice.more_above !== 0 || choice.more_below !== 0) && <p className="choice-hints">{[choice.more_above !== 0 && (choice.more_above === -1 ? 'More options above.' : `${choice.more_above} more above.`), choice.more_below !== 0 && (choice.more_below === -1 ? 'More options below.' : `${choice.more_below} more below.`)].filter(Boolean).join(' ')} Use ↑ and ↓ to reach them.</p>}
+      {!picker && choice && options.length > 0 && (choice.more_above !== 0 || choice.more_below !== 0) && (onPick && !approval
+        ? <div className="choice-more">{([['Up', choice.more_above, 0], ['Down', choice.more_below, options.length - 1]] as const).filter(([, count]) => count !== 0).map(([key, count, row]) =>
+          <button key={key} type="button" disabled={disabled || picked !== null} onClick={() => void onPick(row, options.map(pickRowKey), key)}>
+            {key === 'Up' ? '↑' : '↓'} {count === -1 ? 'Show more' : `Show ${count} more`} {key === 'Up' ? 'above' : 'below'}</button>)}</div>
+        : <p className="choice-hints">{[choice.more_above !== 0 && (choice.more_above === -1 ? 'More options above.' : `${choice.more_above} more above.`), choice.more_below !== 0 && (choice.more_below === -1 ? 'More options below.' : `${choice.more_below} more below.`)].filter(Boolean).join(' ')} Use ↑ and ↓ to reach them.</p>)}
       {bridge || perms ? null : info ? <div className="choice-keys">{(info.body ?? text) && <CopyButton text={info.body ?? text} label="Copy panel text" className="copy-chip" />}</div> : <div className="choice-keys">
-        {!options.length && !panel && !login && [...(picker ? [] : keys), 'Up', 'Down', ...(spaceKey ? ['Space'] : []), 'Enter'].map(key => <button key={key} type="button" disabled={disabled} onClick={() => onKey(key)} aria-label={ask?.length === 1 && /^\d$/.test(key) ? `Choose ${key}: ${ask[0].options[Number(key) - 1]?.label ?? (Number(key) === ask[0].options.length + 1 ? 'Type something' : 'Chat about this')}` : undefined}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Left' ? '← Question' : key === 'Tab' ? 'Question →' : key}</button>)}
+        {!options.length && !panel && !login && (picker && onPick ? multiPick ? ['Enter'] : [] : [...(picker ? [] : keys), ...(ask ? [] : ['Up', 'Down']), ...(spaceKey ? ['Space'] : []), ...(ask ? [] : ['Enter'])]).map(key => <button key={key} type="button" disabled={disabled} onClick={() => void (key === 'Enter' && picker && onPick ? done() : onKey(key))} aria-label={ask?.length === 1 && /^\d$/.test(key) ? `Choose ${key}: ${ask[0].options[Number(key) - 1]?.label ?? (Number(key) === ask[0].options.length + 1 ? 'Type something' : 'Chat about this')}` : undefined}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Left' ? '← Question' : key === 'Tab' ? 'Question →' : key === 'Enter' && picker && onPick ? 'Done (Enter)' : key}</button>)}
         {!!options.length && current && current.total > 1 && ['Left', 'Tab'].map(key => <button key={key} type="button" disabled={disabled} onClick={() => onKey(key)}>{key === 'Left' ? '← Previous question' : 'Next question →'}</button>)}
-        {!!options.length && spaceKey && ['Up', 'Down', 'Space', 'Enter'].map(key => <button key={key} type="button" disabled={disabled} onClick={() => onKey(key)}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key}</button>)}
+        {!!options.length && spaceKey && (tickPick ? ['Enter'] : ['Up', 'Down', 'Space', 'Enter']).map(key => <button key={key} type="button" disabled={disabled} onClick={() => void (key === 'Enter' && tickPick ? done() : onKey(key))}>{key === 'Up' ? '↑' : key === 'Down' ? '↓' : key === 'Enter' && tickPick ? 'Done (Enter)' : key}</button>)}
         <button type="button" disabled={disabled} onClick={() => onKey('Escape')}>{options.length || picker ? 'Cancel (Esc)' : 'Close (Esc)'}</button>
         {!options.length && !login && !picker && text && <CopyButton text={text} label="Copy panel text" className="copy-chip" />}
       </div>}

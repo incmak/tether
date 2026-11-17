@@ -875,6 +875,15 @@ class BackendTests(unittest.TestCase):
             for target in ({'name': 'new'}, {'after': '%12'}):
                 self.assertEqual(self.request('/mobile/api/resume', {'id': CHAT, 'agent': agent, **target}),
                                  (409, {'error': 'That chat is already open.', 'pane': '%12'}))
+        # A Codex pane that waits between candidate threads may show this chat: Resume selects it, no second copy.
+        self.entries.return_value = [{'id': '%14', 'thread': 'pending-1-1', 'pending_conversation': True, 'codex_candidates': [OTHER, CHAT]}]
+        self.assertEqual(self.request('/mobile/api/resume', {'id': CHAT, 'agent': 'codex', 'name': 'new'}),
+                         (409, {'error': 'That chat is already open.', 'pane': '%14'}))
+        # A stale startup argument names the chat in %13, but %14 may show it now: select the pane that may show it.
+        self.entries.return_value = [{'id': '%13', 'thread': CHAT, 'codex_binding': 'resume'},
+                                     {'id': '%14', 'thread': 'pending-1-1', 'pending_conversation': True, 'codex_candidates': [CHAT]}]
+        self.assertEqual(self.request('/mobile/api/resume', {'id': CHAT, 'agent': 'codex', 'name': 'new'}),
+                         (409, {'error': 'That chat is already open.', 'pane': '%14'}))
         self.entries.return_value = [{'id': '%12', 'thread': OTHER}]
         for pane in ('%99', '$1', None, 12, ['%12']):
             status, body = self.request('/mobile/api/resume', {'id': CHAT, 'after': pane})

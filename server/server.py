@@ -25,7 +25,7 @@ import codex_messages
 import continuations
 import pane_icons
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
-from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
+from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, picker_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
 from quota_notices import error_message, merge as merge_quota_notices
 import tool_details
 import subagents
@@ -659,6 +659,14 @@ def codex_state():
     return {'messages': [], 'dropped': 0, 'busy': False, 'usage': None, 'model': '', 'effort': '', 'credits': None}
 
 
+def settings_time(stamp):
+    """Seconds of a rollout timestamp ("2026-11-17T18:01:43.678Z"), or None when it does not parse."""
+    try:
+        return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() if isinstance(stamp, str) else None
+    except ValueError:
+        return None
+
+
 def codex_consume(state, index, entry):
     """Fold one rollout record into the chat messages, busy flag and latest usage figures."""
     messages = state['messages']
@@ -667,6 +675,25 @@ def codex_consume(state, index, entry):
     if entry.get('type') == 'turn_context' and payload.get('model'):
         state['model'] = str(payload['model'])
         state['effort'] = payload.get('effort') or payload.get('reasoning_effort') or ''
+    if entry.get('type') == 'event_msg' and kind == 'thread_settings_applied':
+        # /model writes this at once; the next turn_context comes only with the next turn.
+        settings = payload.get('thread_settings') if isinstance(payload.get('thread_settings'), dict) else {}
+        model, effort = settings.get('model'), settings.get('reasoning_effort')
+        if isinstance(model, str) and model:
+            effort = effort if isinstance(effort, str) else ''
+            changed = state['model'] and (model, effort) != (state['model'], state['effort'])
+            state['model'], state['effort'] = model, effort
+            when = settings_time(entry.get('timestamp'))
+            last_index, last_when = state.get('settings_at') or (None, None)
+            adjacent = last_index == index - 1 and when is not None and last_when is not None and abs(when - last_when) <= 2
+            state['settings_at'] = (index, when)
+            if changed:
+                # One /model choice writes two records in a row, in the same second: the model, then the effort. Show
+                # one notice for them. A later choice is a new notice, even with no chat between the two records.
+                if adjacent and messages and messages[-1].get('kind') == 'notice' and str(messages[-1].get('text', '')).startswith('Model changed to '):
+                    messages.pop()
+                messages.append(activity.notice(index, entry.get('timestamp'), f'Model changed to {model}{" " + effort if effort else ""}.'))
+        return
     if entry.get('type') == 'event_msg':
         if kind in ('error', 'warning'):
             text = error_message(payload)
@@ -2253,7 +2280,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
+        if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
                          '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
@@ -2833,7 +2860,12 @@ class Handler(BaseHTTPRequestHandler):
                 cwd = chat['cwd'] if chat['cwd'] and os.path.isdir(chat['cwd']) else str(paths.HOME)
                 with SEND_LOCK:
                     entries = sessions()
-                    live = next((entry for entry in entries if entry.get('thread') == chat['id']), None)
+                    # A Codex pane that waits between candidate threads (agents.bind_codex) may show this chat: never open it twice.
+                    # Point at the pane that surely shows it, then one that may, then a startup-argument or folder guess.
+                    live = next((entry for entry in entries if entry.get('thread') == chat['id']
+                                 and entry.get('codex_binding') not in ('resume', 'guess')), None) or next(
+                        (entry for entry in entries if chat['id'] in entry.get('codex_candidates', ())), None) or next(
+                        (entry for entry in entries if entry.get('thread') == chat['id']), None)
                     if live is not None:
                         self.respond(409, {'error': 'That chat is already open.', 'pane': live['id']})
                         return
@@ -2996,6 +3028,13 @@ class Handler(BaseHTTPRequestHandler):
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return
+            if self.path == '/mobile/api/pick':
+                with SEND_LOCK:
+                    picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                if body.get('then', 'Enter') == 'Enter':
+                    attention.STORE.clear(config['id'], config.get('thread'))
+                self.respond(200, {'accepted': True})
+                return
             if self.path == '/mobile/api/type':
                 with SEND_LOCK:
                     type_text(config, body.get('text'), enter=body.get('enter') is True, login_url=body.get('login_url'))
@@ -3023,7 +3062,7 @@ class Handler(BaseHTTPRequestHandler):
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
         except (ValueError, UnicodeError) as exc:
-            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
+            self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
             # The journal keeps why a send was refused; the access log shows only "503".
             print(f'{self.path} refused: {type(exc).__name__}: {str(exc)[:200]}', file=sys.stderr, flush=True)

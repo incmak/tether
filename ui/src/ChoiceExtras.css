@@ -45,3 +45,14 @@
 
 /* Read-only picker cards do not use the slot picker's negative row margins. */
 .picker-card .picker-list { margin-inline: 0; }
+/* A picker the user can drive: each row and each "more" row is a button. */
+.pick-list li { padding: 0; display: block; }
+.pick-list button { display: flex; align-items: flex-start; gap: 10px; width: 100%; min-height: var(--control-lg); padding: 9px 12px; border: 0; border-radius: 0; background: none; color: var(--text); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; overflow-wrap: anywhere; }
+.pick-list button:hover:not([aria-disabled="true"]) { background: var(--hover); }
+.pick-list button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pick-list button.current { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
+.pick-list button.disabled { color: var(--muted); cursor: not-allowed; }
+.pick-list li.picker-more button { align-items: center; color: var(--accent); font-size: 13px; }
+.pick-list .pick-busy { margin-left: auto; color: var(--muted); }
+.choice-more { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 16px 0; }
+.choice-more button { min-height: var(--control-lg); }

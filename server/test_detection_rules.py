@@ -476,7 +476,8 @@ class InputGuardTests(unittest.TestCase):
         for agent, command in [('claude', 'claude'), ('codex', 'codex'), ('antigravity', 'agy')]:
             with self.subTest(agent=agent), patch.object(detection_rules, 'available', return_value=True):
                 with patch.object(terminal.procinfo, 'comm', return_value=command), \
-                        patch.object(terminal, 'process_start', return_value=123):
+                        patch.object(terminal, 'process_start', return_value=123), \
+                        patch.object(terminal, 'verify_codex'):  # its own binding check: test_codex_mapping
                     run = Mock(return_value=Mock(stdout=f'42\t{command}\t0'))
                     terminal.verify(self.entry(agent), run)
                     run.assert_called_once()

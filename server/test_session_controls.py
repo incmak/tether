@@ -986,6 +986,13 @@ class MenuChooseTests(unittest.TestCase):
         options = terminal.menu_question(FakePicker(at=2, typed='344').screen().splitlines())['options']
         self.assertEqual([option.get('free', False) for option in options], [False, False, True, False])
 
+    def test_own_answer_with_two_spaces_is_replaced_whole(self):
+        # Claude draws no columns: "keep  old wording" is one answer, and all of it is erased before the new one.
+        picker = FakePicker(at=0, typed='keep  old wording')
+        self.assertEqual(terminal.menu_question(picker.screen().splitlines(), 'claude')['options'][2]['text'], 'keep  old wording')
+        self.choose(picker, 3, answer='merge after the fix')
+        self.assertEqual((picker.typed, picker.keys[-1]), ('merge after the fix', 'Enter'))
+
     def test_choice_from_the_typed_row_moves_up_with_arrows_not_digits(self):
         picker = FakePicker(at=2, typed='344')  # the trap from 1 Nov: every digit tap typed into row 3
         self.choose(picker, 2, label='Wait')

@@ -120,8 +120,11 @@ def _parse_lsof(text):
 
 
 def _darwin_lsof(pid):
-    result = subprocess.run(['lsof', '-nP', '-a', '-p', str(pid), '-F', 'ftn'],
-                            capture_output=True, text=True, timeout=1)
+    try:
+        result = subprocess.run(['lsof', '-nP', '-a', '-p', str(pid), '-F', 'ftn'],
+                                capture_output=True, text=True, timeout=1)
+    except subprocess.TimeoutExpired as error:  # a busy process: callers treat an OSError as "files unknown"
+        raise TimeoutError(errno.ETIMEDOUT, 'lsof timed out') from error
     return _parse_lsof(result.stdout)
 
 

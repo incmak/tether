@@ -63,15 +63,170 @@ def footer_cwd(run, pane):
     return None
 
 
+# A process start token is exact to 1 s (macOS ps, Linux btime); a thread a pane begins is created after it starts.
+START_SLACK_MS = 5_000
+
+
 def started_ms(ticks):
     """Wall-clock start of a process, in milliseconds, from its platform start token."""
     return procinfo.start_ms(ticks)
 
 
-def codex_thread(connection, pid, ticks, cwd):
-    """Prefer the process's open rollout, then explicit resume arguments, then the directory/time fallback."""
-    # The open rollout identifies the process even when several panes share a folder.
-    # Subagent rollouts can be open in the same process; only interactive threads qualify.
+BOUND = ('open', 'title', 'resume')
+STRENGTH = {'open': 0, 'title': 1, 'resume': 2}  # a startup argument goes stale; a title is the pane's own word
+# Codex 0.169 terminal title (tui/src/chatwidget/status_surfaces.rs, bottom_pane/title_setup.rs, terminal_title.rs):
+# default items ["activity", "thread-name", "project-name"], joined by " | ", with a space after the activity item.
+TITLE_SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+TITLE_ACTIVITY = re.compile('^(?:●(?: [%s])?|[%s]) ' % (TITLE_SPINNER, TITLE_SPINNER))
+TITLE_ACTION = re.compile(r'^(?:● )?\[ [!.] \] Action Required(?: \| |$)')
+TITLE_MAX = 240  # MAX_TERMINAL_TITLE_CHARS in codex-rs/tui/src/terminal_title.rs
+TITLE_ID = re.compile(r'(?<![0-9a-f-])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{5})\.\.\.')
+TITLE_HIDDEN = re.compile('[\x00-\x08\x0e-\x1f\x7f-\x84\x86-\x9f­͏؜᠎​-‏‪-‮'
+                          '⁠-⁯︀-️﻿￹-￻\U0001bca0-\U0001bca3\U000e0100-\U000e01ef]')
+TITLE_ALIASES = {'spinner': 'activity', 'project': 'project-name', 'session-id': 'thread-id'}
+NAME_LAYOUTS = (('activity', 'thread-name', 'project-name'), ('thread-name', 'project-name'))
+_title_config = {}
+
+
+def codex_title_items():
+    """The items of Codex's terminal title (tui.terminal_title in config.toml), or None for the default."""
+    path = paths.CODEX / 'config.toml'
+    try:
+        stamp = path.stat().st_mtime_ns
+        if _title_config.get('stamp') != stamp:
+            import tomllib
+            tui = tomllib.loads(path.read_text()).get('tui')
+            items = tui.get('terminal_title') if isinstance(tui, dict) else None
+            _title_config.update(stamp=stamp, items=items if isinstance(items, list) else None)
+        return _title_config['items']
+    except (OSError, ValueError):
+        return None
+
+
+def title_layout():
+    """('name', activity) when the title is "[activity ]<thread name> | <project>", ('id', activity) when it shows the
+    thread id, else (None, False): a title Tether cannot read names no thread."""
+    items = codex_title_items()
+    if items is None:
+        return 'name', True
+    items = tuple(TITLE_ALIASES.get(item, item) for item in items if isinstance(item, str))
+    if 'thread-id' in items:
+        return 'id', 'activity' in items
+    return ('name', items[0] == 'activity') if items in NAME_LAYOUTS else (None, False)
+
+
+def title_cut(text, limit):
+    """Codex's truncate_terminal_title_part (by code point here, by grapheme in Codex)."""
+    return text if len(text) <= limit else text[:limit - 3] + '...'
+
+
+def title_text(text):
+    """Codex's sanitize_terminal_title: hidden and control characters dropped, each whitespace run one space."""
+    return ' '.join(TITLE_HIDDEN.sub('', text).split())
+
+
+def shown_name(name):
+    name = (name or '').strip()
+    return title_text(title_cut(name, 48)) if name else ''
+
+
+def same_name(shown, name):
+    """Whether a thread name shows as `shown` in the title. A long name is cut to 45 characters and "..."."""
+    if shown == shown_name(name):
+        return True
+    return shown.endswith('...') and len(shown) >= 40 and title_text((name or '').strip()).startswith(shown[:-3])
+
+
+def read_title(title, cwd):
+    """What a Codex title says about its thread: {('id', prefix or None)}, or the set of thread names it can show
+    ({('name', name)}, with None for an unnamed thread), or None when the title does not have the expected form.
+    A name may itself begin with a spinner frame or "[ ! ] Action Required", so a title can have two readings."""
+    layout, activity = title_layout() if title is not None and cwd else (None, False)
+    if title is not None and len(title) >= TITLE_MAX:  # Codex cuts the whole title there with no mark: any item may be cut
+        return None
+    if layout == 'id':
+        found = set(TITLE_ID.findall(title))
+        return {('id', found.pop() if found else None)} if len(found) <= 1 else None
+    if layout != 'name':
+        return None
+    texts = {title}
+    # Codex shows "Action Required" only when the layout has the activity item (terminal_title_shows_action_required).
+    for prefix in (TITLE_ACTION, TITLE_ACTIVITY) if activity else ():
+        match = prefix.match(title)
+        if match:
+            texts.add(title[match.end():])
+    projects = [title_text(title_cut(folder.name, 24)) for folder in (Path(cwd), *Path(cwd).parents) if folder.name]
+    readings = set()
+    for text in texts:
+        # project-name is the git root or project folder, or else the current folder: always cwd or one of its parents.
+        for project in filter(None, projects):
+            if text == project:
+                readings.add(('name', None))
+            elif text.endswith(' | ' + project) and len(text) > len(project) + 3:
+                readings.add(('name', text[:-len(project) - 3]))
+    return readings or None
+
+
+def pane_titles(run):
+    """Each pane's terminal title (#{pane_title}): Codex sets it, Tether never does."""
+    try:
+        result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_title}'], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if getattr(result, 'returncode', 0):
+        return None
+    return dict(line.split('\t', 1) for line in (result.stdout or '').splitlines() if '\t' in line)
+
+
+def pane_title(run, pane):
+    try:
+        result = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_title}'], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    return None if getattr(result, 'returncode', 0) else (result.stdout or '').rstrip('\n')
+
+
+def has_names(connection):
+    return any(column[1] == 'name' for column in connection.execute('PRAGMA table_info(threads)'))
+
+
+def daemon_threads(connection, processes, strict=False):
+    """The threads that a Codex app-server holds loaded (their rollouts open), or None when no app-server runs.
+    Plain `codex` 0.169 is a client of the shared daemon (`codex app-server --listen`): the daemon, not the client,
+    holds the rollout, and it unloads a thread within about a minute after its last client leaves (/clear, /new,
+    exit). So a client's conversation is always one of these."""
+    servers = []
+    for pid, (_, name) in processes.items():
+        if name == 'codex':
+            try:
+                arguments = procinfo.argv(pid)
+            except OSError:
+                if strict:
+                    raise
+                continue
+            if b'app-server' in arguments and b'--listen' in arguments:
+                servers.append(pid)
+    if not servers:
+        return None
+    loaded = set()
+    for pid in servers:
+        try:
+            targets = [target for _, target in procinfo.fd_targets(pid)]
+        except OSError:
+            if strict:  # a send check must not widen the set it checked last time
+                raise
+            return None  # an unreadable daemon says nothing: no filter rather than a wrong one
+        rollouts = [target for target in targets if Path(target).name.startswith('rollout-') and target.endswith('.jsonl')]
+        for index in range(0, len(rollouts), 500):
+            batch = rollouts[index:index + 500]
+            loaded.update(row[0] for row in connection.execute(
+                'SELECT id FROM threads WHERE rollout_path IN (%s)' % ','.join('?' * len(batch)), batch))
+    return loaded
+
+
+def open_rollout(connection, pid):
+    """The interactive thread whose rollout this process holds open. In-process Codex holds it; a client of the shared
+    app-server daemon holds none, and several open rollouts say nothing."""
     try:
         candidates = set()
         for _, target in procinfo.fd_targets(pid):
@@ -86,6 +241,10 @@ def codex_thread(connection, pid, ticks, cwd):
             return candidates.pop()
     except OSError:
         pass
+    return None
+
+
+def resume_argument(connection, pid):
     try:
         arguments = [arg.decode('utf-8', 'ignore') for arg in procinfo.argv(pid)]
     except OSError:
@@ -94,29 +253,243 @@ def codex_thread(connection, pid, ticks, cwd):
         if argument == 'resume' and UUID.match(arguments[index + 1]):
             row = connection.execute('SELECT id,rollout_path FROM threads WHERE id=?', (arguments[index + 1],)).fetchone()
             if row:
-                return row
-    since = started_ms(ticks) - 60_000
-    return connection.execute(
+                return tuple(row)
+    return None
+
+
+def loaded_only(loaded):
+    """SQL that keeps only the threads a daemon holds loaded; nothing when no daemon runs."""
+    if loaded is None:
+        return '', []
+    return ' AND id IN (%s)' % ','.join('?' * len(loaded)) if loaded else ' AND 0', sorted(loaded)
+
+
+def title_threads(connection, title, cwd, loaded):
+    """The threads a name-layout title may show, as {id: (rollout, name or None)} with each thread's own readings:
+    Codex shows the Git project or folder of the thread, so a title is read against each thread's folder. With a daemon:
+    every thread it holds, in any folder (the TUI can open a thread of another folder). Without one: this folder's."""
+    where, params = loaded_only(loaded)
+    folder, folder_params = (' AND cwd=?', (cwd,)) if loaded is None else ('', ())
+    rows = connection.execute("SELECT id,rollout_path,name,cwd FROM threads WHERE archived=0 AND source IN ('cli','vscode')"
+                              + folder + where + ' ORDER BY updated_at_ms DESC', (*folder_params, *params))
+    readings = {}
+    found = []
+    for thread, rollout, name, folder_path in rows:
+        if folder_path not in readings:
+            readings[folder_path] = read_title(title, folder_path) or set()
+        shown = readings[folder_path]
+        if name and any(value and same_name(value, name) for _, value in shown):
+            found.append((thread, rollout, True))
+        elif not name and ('name', None) in shown:
+            found.append((thread, rollout, False))
+    return found
+
+
+def codex_claim(connection, pid, ticks, cwd, title=None, loaded=None):
+    """What says which conversation this Codex process shows, strongest first. Returns {kind, rows, unnamed, named}:
+    open    - it holds the rollout open (Codex in-process);
+    title   - its terminal title names exactly one thread. A daemon client holds no rollout; its title is the only
+              word that comes from the client itself;
+    resume  - `codex resume ID` while the title shows no name (the thread is unnamed);
+    tie     - the title names several threads;
+    guess   - the newest thread of the folder since the process started. Never verified;
+    unknown - the title names a thread Tether cannot find (yet);
+    fresh   - the title shows no thread id: no conversation yet;
+    none    - nothing found.
+    `loaded` (daemon_threads) limits every claim but an open rollout to the threads a daemon holds."""
+    row = open_rollout(connection, pid)
+    if row:
+        return {'kind': 'open', 'rows': [row], 'unnamed': False, 'named': False, 'readable': True}
+    claim = codex_title_claim(connection, pid, ticks, cwd, title, loaded)
+    claim['readable'] = title is not None and has_names(connection) and (
+        read_title(title, cwd) is not None or claim['kind'] in ('title', 'tie', 'older') and bool(claim['rows'])
+        and title_layout()[0] == 'name' and bool(title_threads(connection, title, cwd, loaded)))
+    return claim
+
+
+def codex_title_claim(connection, pid, ticks, cwd, title, loaded):
+    where, params = loaded_only(loaded)
+    readings = read_title(title, cwd) if title is not None and has_names(connection) else None
+    ids = [value for kind, value in readings or () if kind == 'id']
+    if ids:
+        if not ids[0]:
+            return {'kind': 'fresh', 'rows': [], 'unnamed': False, 'named': True}
+        rows = [tuple(row) for row in connection.execute(
+            "SELECT id,rollout_path FROM threads WHERE substr(id,1,?)=? AND archived=0 AND source IN ('cli','vscode')" + where,
+            (len(ids[0]), ids[0], *params))]
+        return {'kind': 'title' if len(rows) == 1 else 'tie' if rows else 'unknown', 'rows': rows, 'unnamed': False, 'named': True}
+    shown = title_threads(connection, title, cwd, loaded) if readings is not None or title is not None and loaded is not None \
+        and has_names(connection) and title_layout()[0] == 'name' else []
+    named = [(thread, rollout) for thread, rollout, has_name in shown if has_name]
+    unnamed = readings is not None and ('name', None) in readings or any(not has_name for *_, has_name in shown)
+    if named:  # two threads of one name, or a title that may also show no name: Tether cannot tell
+        kind = 'title' if len(named) == 1 and not unnamed else 'tie'
+        also = [(thread, rollout) for thread, rollout, has_name in shown if not has_name]  # Resume must see these too
+        return {'kind': kind, 'rows': named, 'also': also, 'unnamed': False, 'named': True, 'maybe_unnamed': unnamed}
+    if (readings or shown) and not unnamed:
+        return {'kind': 'unknown', 'rows': [], 'unnamed': False, 'named': True}
+    # `codex resume ID` names the thread the process started with. It counts only while a readable title shows no name
+    # (a named thread would show it; another layout could show anything) and the daemon still holds it: /clear, /new and
+    # /resume keep the process and its arguments.
+    # With no title at all (or no names to show), the argument is the only word; sends still need a read title.
+    resumed = resume_argument(connection, pid) if unnamed or title is None or not has_names(connection) else None
+    if resumed and (loaded is None or resumed[0] in loaded) and not (unnamed and thread_name(connection, resumed[0])):
+        return {'kind': 'resume', 'rows': [resumed], 'unnamed': unnamed, 'named': False}
+    since = started_ms(ticks) - START_SLACK_MS
+    rows = [tuple(row) for row in connection.execute(
         "SELECT id,rollout_path FROM threads WHERE cwd=? AND archived=0 AND source IN ('cli','vscode') "
-        "AND (created_at_ms>=? OR updated_at_ms>=?) ORDER BY updated_at_ms DESC LIMIT 1", (cwd, since, since)).fetchone()
+        "AND created_at_ms>=?" + (" AND (name IS NULL OR name='')" if unnamed else '') + where
+        + ' ORDER BY updated_at_ms DESC', (cwd, since, *params))]
+    # Another thread the daemon holds may be open in this pane too (`/resume` in the TUI, any folder), or in a pane that
+    # closed a moment ago. It is never shown here, but it means "no conversation yet" cannot be proven. With a read
+    # title: the unnamed threads that title fits; without one: every thread the daemon holds.
+    if loaded is None:
+        older = []
+    elif readings is not None or shown:
+        older = [(thread, rollout) for thread, rollout, has_name in shown if not has_name]
+    else:
+        older = [tuple(row) for row in connection.execute(
+            "SELECT id,rollout_path FROM threads WHERE archived=0 AND source IN ('cli','vscode')" + where
+            + ' ORDER BY updated_at_ms DESC', params)]
+    older = [row for row in older if row not in rows]
+    if rows:
+        return {'kind': 'guess', 'rows': rows, 'also': older, 'unnamed': unnamed, 'named': False}
+    return {'kind': 'older' if older else 'none', 'rows': older, 'unnamed': unnamed, 'named': False}
 
 
-def match_unresolved_codex(connection, entries):
+def thread_name(connection, thread):
+    row = connection.execute('SELECT name FROM threads WHERE id=?', (thread,)).fetchone()
+    return (row[0] or '') if row else ''
+
+
+def codex_thread(connection, pid, ticks, cwd, title=None, loaded=None):
+    """The conversation this Codex process shows on its own evidence, or its best guess; None for a tie or a new one."""
+    claim = codex_claim(connection, pid, ticks, cwd, title, loaded)
+    return claim['rows'][0] if claim['rows'] and claim['kind'] not in ('tie', 'unknown') else None
+
+
+def start_key(entry):
+    return (float if procinfo.DARWIN else int)(entry.get('process_start') or 0)
+
+
+def match_unresolved_codex(connection, entries, taken=frozenset(), loaded=None):
     """A Codex pane whose folder cannot be read (a narrow pane cuts its footer off) is matched by time instead: it owns the
-    conversations begun after it started and before the next Codex process did."""
-    codex = sorted((e for e in entries if e['agent'] == 'codex'), key=lambda e: (float if procinfo.DARWIN else int)(e.get('process_start') or 0))
+    conversations begun after it started and before the next Codex process did. It never takes a thread in `taken`
+    (bound to another pane), one the daemon has not loaded, nor a named thread when its title shows no name."""
+    codex = sorted((e for e in entries if e['agent'] == 'codex'), key=start_key)
+    where, params = loaded_only(loaded)
     for index, entry in enumerate(codex):
         if not entry.get('pending_conversation'):
             continue
         since = started_ms(entry['process_start']) - 60_000
         later = codex[index + 1]['process_start'] if index + 1 < len(codex) else None
         until = started_ms(later) - 60_000 if later else None
-        row = connection.execute(
-            "SELECT id,rollout_path,cwd FROM threads WHERE archived=0 AND source IN ('cli','vscode') AND created_at_ms>=? "
-            "AND (? IS NULL OR created_at_ms<?) ORDER BY updated_at_ms DESC LIMIT 1", (since, until, until)).fetchone()
-        if row:
+        names = entry.get('codex_unnamed') and has_names(connection)
+        rows = [tuple(row) for row in connection.execute(
+                "SELECT id,rollout_path,cwd FROM threads WHERE archived=0 AND source IN ('cli','vscode') AND created_at_ms>=? "
+                "AND (? IS NULL OR created_at_ms<?)" + (" AND (name IS NULL OR name='')" if names else '') + where
+                + ' ORDER BY updated_at_ms DESC', (since, until, until, *params)) if row[0] not in taken]
+        if rows:
             entry.pop('pending_conversation', None)
-            entry.update(thread=row[0], transcript=row[1], thread_cwd=row[2])
+            entry.update(thread=rows[0][0], transcript=rows[0][1], thread_cwd=rows[0][2], candidates=[row[:2] for row in rows])
+
+
+def pending_codex(entry):
+    pending = 'pending-' + str(entry['owner_pid']) + '-' + str(entry['process_start'])
+    entry.update(thread=pending, transcript=str(HOME / '.codex/sessions/pending' / (pending + '.jsonl')), pending_conversation=True)
+    entry.pop('thread_cwd', None)
+
+
+def bind_codex(connection, entries, run, processes=None, strict=False):
+    """Give each live Codex pane its own conversation, or an empty one. Two plain `codex` panes in one folder share the
+    app-server daemon (0.169), so neither holds a rollout and the folder and time cannot tell them apart. A guess or a
+    tie never takes a thread that another pane is bound to; panes that share a guess or a tie all wait (pending) and
+    keep the threads as candidates, so Resume does not open one a second time."""
+    codex = sorted((e for e in entries if e['agent'] == 'codex' and 'owner_pid' in e), key=start_key)
+    if not codex:
+        return
+    titles = loaded = None
+    claims = {}
+    for entry in codex:
+        claim = codex_claim(connection, entry['owner_pid'], entry['process_start'], entry['cwd'])
+        if claim['kind'] != 'open':
+            if titles is None:
+                titles = pane_titles(run) or {}
+                loaded = daemon_threads(connection, processes if processes is not None else procinfo.table(run), strict)
+            claim = codex_claim(connection, entry['owner_pid'], entry['process_start'], entry['cwd'], titles.get(entry['id']), loaded)
+        claim['cwd'] = entry['cwd']
+        if claim['kind'] in ('none', 'unknown', 'older') or claim['kind'] == 'guess' and not claim['unnamed']:
+            shown = footer_cwd(run, entry['id'])  # after /cd, Codex records its conversation under the new folder
+            if shown and shown != entry['cwd']:
+                moved = codex_claim(connection, entry['owner_pid'], entry['process_start'], shown, (titles or {}).get(entry['id']), loaded)
+                if moved['kind'] in BOUND or moved['kind'] in ('tie', 'guess', 'older') and claim['kind'] in ('none', 'unknown', 'older'):
+                    claim, claim['cwd'] = moved, shown
+        claims[entry['id']] = claim
+    bound = {}
+    for entry in sorted(codex, key=lambda e: (STRENGTH.get(claims[e['id']]['kind'], 9), start_key(e))):
+        claim = claims[entry['id']]
+        if claim['kind'] in BOUND and claim['rows'][0][0] not in bound.values():
+            bound[entry['id']] = claim['rows'][0][0]
+
+    def others(pane):
+        # Only a pane's own word (an open rollout or its title) rules a thread out for another pane: a startup argument
+        # goes stale after /clear while another pane may `/resume` that thread.
+        return {thread for owner, thread in bound.items() if owner != pane and claims[owner]['kind'] in ('open', 'title')}
+    changed = True
+    while changed:  # a promoted tie binds a thread that other ties and guesses must then give up
+        changed = False
+        for pane, claim in claims.items():
+            if claim['kind'] in ('tie', 'guess', 'older'):
+                claim['rows'] = [row for row in claim['rows'] if row[0] not in others(pane)]
+                claim['also'] = [row for row in claim.get('also', []) if row[0] not in others(pane)]
+                if not claim['rows'] and claim['also']:
+                    # its main threads are open in other panes, but it may still show one of the others
+                    claim.update(kind='older', rows=claim['also'], also=[])
+                elif not claim['rows']:
+                    # every thread it could show is open in another pane; with only older ones, the pane is new
+                    claim['kind'] = 'none' if claim['kind'] == 'older' else 'held'
+        for pane, claim in claims.items():
+            if claim['kind'] == 'tie' and len(claim['rows']) == 1 and not claim.get('maybe_unnamed'):
+                thread = claim['rows'][0][0]
+                # Other panes hold the other threads of that name, and no other title names this one. A folder guess
+                # is weaker than a name and gives the thread up in the next round.
+                if not any(thread in (row[0] for row in other['rows']) for key, other in claims.items()
+                           if key != pane and other['kind'] == 'tie'):
+                    claim['kind'] = 'title'
+                    bound[pane] = thread
+                    changed = True
+    unresolved = [{'agent': 'codex', 'id': entry['id'], 'process_start': entry['process_start'],
+                   'pending_conversation': claims[entry['id']]['kind'] == 'none', 'codex_unnamed': claims[entry['id']]['unnamed']}
+                  for entry in codex]
+    strong = {thread for owner, thread in bound.items() if claims[owner]['kind'] in ('open', 'title')}
+    match_unresolved_codex(connection, unresolved, taken=strong, loaded=loaded)
+    for item in unresolved:
+        if claims[item['id']]['kind'] == 'none' and 'thread' in item:
+            claims[item['id']].update(kind='guess', rows=item['candidates'], cwd=item['thread_cwd'])
+    guesses = {}
+    for claim in claims.values():
+        if claim['kind'] == 'guess':
+            guesses[claim['rows'][0][0]] = guesses.get(claim['rows'][0][0], 0) + 1
+    for entry in codex:
+        claim = claims[entry['id']]
+        kind, rows = claim['kind'], claim['rows']
+        if bound.get(entry['id']) or kind == 'guess' and guesses[rows[0][0]] == 1:
+            entry.update(thread=rows[0][0], transcript=rows[0][1], thread_cwd=claim['cwd'], codex_binding=kind,
+                         codex_title_read=claim.get('readable', False))
+            entry.pop('pending_conversation', None)
+            if kind == 'guess' and len(rows) + len(claim.get('also', [])) > 1:
+                # The newest of several threads the pane could show: fine to read, never enough to send or resume.
+                entry['codex_candidates'] = [row[0] for row in rows + claim.get('also', [])]
+                entry['codex_unresolved'] = True
+        else:
+            # A tie, a shared guess, or a second client of a bound thread: an empty chat, never another pane's history.
+            pending_codex(entry)
+            entry['codex_title_read'] = claim.get('readable', False)
+            if kind in ('tie', 'guess', 'older') and rows:
+                entry['codex_candidates'] = [row[0] for row in rows + claim.get('also', [])]
+            if kind not in ('none', 'fresh'):
+                # The pane shows a conversation, but Tether cannot tell which one: its chat is empty and sends wait.
+                entry['codex_unresolved'] = True
 
 
 def codex_database():
@@ -155,6 +528,48 @@ def claude_transcript(cwd, session):
     return found[0]
 
 
+def claude_registries(processes):
+    """The live interactive Claude sessions (~/.claude/sessions/*.json)."""
+    claude = []
+    for path in (HOME / '.claude/sessions').glob('*.json'):
+        try:
+            registry = json.loads(path.read_text())
+            if registry.get('kind') == 'interactive' and registry.get('pid') in processes:
+                registry['registry'] = str(path)
+                claude.append(registry)
+        except (OSError, ValueError):
+            continue
+    return claude
+
+
+def codex_recheck(entry, run):
+    """The conversation the pane of `entry` shows now, by the same binding as discovery over every live Codex pane:
+    one pane's evidence can rule out another pane's thread. None when the pane no longer runs that Codex process."""
+    processes = procinfo.table(run)
+    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{@zoom_for}\t#{pane_current_path}'],
+                 capture_output=True, text=True, timeout=5, check=True)
+    claude = claude_registries(processes)
+    entries = []
+    for line in result.stdout.splitlines():
+        pane, pid, session, zoom, cwd = (line.split('\t', 4) + [''] * 4)[:5]
+        if not pid.isdigit() or zoom or session == SIDE_SHELLS:  # the panes that discover() skips
+            continue
+        tree = descendants(int(pid), processes)
+        if any(r['pid'] in tree and r.get('tmux', '').endswith('.' + pane) for r in claude) \
+                or any(processes[p][1] == 'claude' for p in tree if p in processes):
+            continue  # a Claude pane, by the rules of discover(), even when Claude runs `codex exec`
+        owner = next((p for p in tree if p in processes and processes[p][1] == 'codex'), None)
+        if owner:
+            entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': process_start(owner)})
+    connection = codex_database()
+    try:
+        bind_codex(connection, entries, run, processes, strict=True)
+    finally:
+        connection.close()
+    fresh = next((e for e in entries if e['id'] == entry['id']), None)
+    return fresh if fresh and (fresh['owner_pid'], fresh['process_start']) == (entry['owner_pid'], entry['process_start']) else None
+
+
 def discover(config, run):
     pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
@@ -171,15 +586,7 @@ def discover(config, run):
         if len(fields) > 9 and fields[-1]:
             positions[(fields[1], fields[-1])] = fields[3]
     processes = procinfo.table(run)
-    claude = []
-    for path in (HOME / '.claude/sessions').glob('*.json'):
-        try:
-            registry = json.loads(path.read_text())
-            if registry.get('kind') == 'interactive' and registry.get('pid') in processes:
-                registry['registry'] = str(path)
-                claude.append(registry)
-        except (OSError, ValueError):
-            continue
+    claude = claude_registries(processes)
     connection = codex_database()
     entries = []
     try:
@@ -239,38 +646,19 @@ def discover(config, run):
                 owner = next(p for p in tree if p in processes and processes[p][1] == 'codex')
                 started = process_start(owner)
                 entry['codex_profile'] = codex_provider.pane_profile(owner)  # 'foundry' for `codex -p foundry`; None = the plan
-                row = codex_thread(connection, owner, started, cwd)
-                thread_cwd = cwd
-                if not row:  # after /cd, Codex records its conversation under the new folder, not the pane's
-                    shown = footer_cwd(run, pane)
-                    if shown and shown != cwd:
-                        row, thread_cwd = codex_thread(connection, owner, started, shown), shown
-                if row:
-                    entry.update(agent='codex', thread=row[0], transcript=row[1], writable=True, cwd=cwd, thread_cwd=thread_cwd,
-                                 owner_pid=owner, process_start=started)
-                else:
-                    # A brand-new Codex session has no conversation yet: show an empty chat, never another session's history.
-                    pending = 'pending-' + str(owner) + '-' + started
-                    entry.update(agent='codex', thread=pending, transcript=str(HOME / '.codex/sessions/pending' / (pending + '.jsonl')),
-                                 writable=True, cwd=cwd, owner_pid=owner, process_start=started, pending_conversation=True)
+                # bind_codex (below) chooses the conversation once every pane is known: one pane's evidence can rule out another's guess.
+                entry.update(agent='codex', writable=True, cwd=cwd, owner_pid=owner, process_start=started)
             elif 'agy' in names or any(processes[p][1] in ('agy', 'exe') for p in tree if p in processes):
                 entry['agent'] = 'antigravity'
                 entry.update(antigravity_entry([p for p in tree if p in processes and processes[p][1] in ('agy', 'exe')], cwd=cwd))
             entries.append(entry)
-        match_unresolved_codex(connection, entries)
+        bind_codex(connection, entries, run, processes)
     finally:
         connection.close()
     counts = {e['label']: sum(other['label'] == e['label'] for other in entries) for e in entries}
     for entry in entries:
         if counts[entry['label']] > 1:
             entry['label'] += ':' + entry['position']
-    # Two Codex processes can never be one conversation: the older process keeps it, the newer one starts empty until it has its own.
-    claimed = set()
-    for entry in sorted((e for e in entries if e['agent'] == 'codex' and not e.get('pending_conversation')), key=lambda e: (float if procinfo.DARWIN else int)(e.get('process_start') or 0)):
-        if entry['thread'] in claimed:
-            pending = 'pending-' + str(entry['owner_pid']) + '-' + str(entry['process_start'])
-            entry.update(thread=pending, transcript=str(HOME / '.codex/sessions/pending' / (pending + '.jsonl')), pending_conversation=True)
-        claimed.add(entry['thread'])
     names = codex_names() if any(e['agent'] == 'codex' and not e.get('pending_conversation') for e in entries) else {}
     for entry in entries:
         if entry['agent'] == 'codex' and not entry.get('pending_conversation') and names.get(entry['thread']):
