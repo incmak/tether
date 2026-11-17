@@ -1,5 +1,6 @@
 """Dev server previews: which ports Tether forwards, the token and cookie flow, and the proxy on real sockets."""
 import http.client
+import functools
 import ipaddress
 import json
 import os
@@ -39,10 +40,19 @@ def fake_listeners():
     return dev_previews.parse_proc_net(PROC_TCP) + dev_previews.parse_proc_net(PROC_TCP6)
 
 
+def dev_names(inodes, uid):
+    """Every socket belongs to a dev server (pid 4000 + its position), as process_names reports it."""
+    return {inode: {'name': 'node', 'folder': 'app', 'pids': [4000 + index], 'kind': 'dev'} for index, inode in enumerate(inodes)}
+
+
+# The proxy tests run their dev server in this very process: Tether's own pid rule would refuse it.
+LOCAL_NAMES = functools.partial(dev_previews.process_names, own_pid=0)
+
+
 @unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')
 class PortTests(unittest.TestCase):
     def setUp(self):
-        self.previews = DevPreviews(ports=[7700, 7701], denied={7683}, listeners=fake_listeners, uid=UID, names=lambda *_: {})
+        self.previews = DevPreviews(ports=[7700, 7701], denied={7683}, listeners=fake_listeners, uid=UID, names=dev_names)
 
     def test_pool_setting(self):
         self.assertEqual(dev_previews.parse_ports('7700-7709'), list(range(7700, 7710)))
@@ -88,7 +98,7 @@ class PortTests(unittest.TestCase):
     def test_deny_list_wins_over_a_listener(self):
         # 9113 = 0x2399 listens for this user; once it is on the deny list it is refused, like the fixed ports.
         self.assertEqual(self.previews.target(9113), '127.0.0.1')
-        listening = DevPreviews(ports=[7700], denied={9113}, listeners=fake_listeners, uid=UID)
+        listening = DevPreviews(ports=[7700], denied={9113}, listeners=fake_listeners, uid=UID, names=dev_names)
         with self.assertRaises(Refused) as caught:
             listening.target(9113)
         self.assertEqual(caught.exception.code, 'denied')
@@ -99,7 +109,7 @@ class PortTests(unittest.TestCase):
 
     def test_servers_lists_only_what_can_be_forwarded(self):
         previews = DevPreviews(ports=[7700], listeners=fake_listeners, uid=UID,
-                               names=lambda inodes, uid: {5001: {'name': 'node', 'folder': 'shop'}})
+                               names=lambda inodes, uid: {**dev_names(inodes, uid), 5001: {'name': 'node', 'folder': 'shop', 'pids': [7], 'kind': 'dev'}})
         found = previews.servers()
         self.assertEqual([entry['port'] for entry in found], [3000, 5173, 5174, 8000, 8001, 9113])
         self.assertEqual(found[1], {'port': 5173, 'name': 'node', 'folder': 'shop'})
@@ -120,13 +130,13 @@ class LeaseTests(unittest.TestCase):
     def setUp(self):
         self.now = [1000.0]
         self.listening = fake_listeners()
-        self.previews = DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0])
+        self.previews = DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0], names=dev_names)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.file = Path(self.temp.name) / 'config' / dev_previews.STATE_FILE
 
     def pool(self, ports=range(7700, 7710), **more):
-        return DevPreviews(ports=list(ports), listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0], store=self.file, **more)
+        return DevPreviews(ports=list(ports), listeners=lambda: self.listening, uid=UID, clock=lambda: self.now[0], store=self.file, **dict({'names': dev_names}, **more))
 
     def token(self, link):
         return link.split('token=')[1].split('&')[0]
@@ -275,7 +285,7 @@ class LeaseTests(unittest.TestCase):
 
     def test_refusals(self):
         with self.assertRaises(Refused) as caught:
-            DevPreviews(ports=[], listeners=fake_listeners, uid=UID).open(5173)
+            DevPreviews(ports=[], listeners=fake_listeners, uid=UID, names=dev_names).open(5173)
         self.assertEqual(caught.exception.code, 'off')
         for port, code in ((8080, 'denied'), (9241, 'not-listening'), (7700, 'denied'), ('x', 'bad-port')):
             with self.assertRaises(Refused) as caught:
@@ -285,7 +295,7 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(self.previews.assignments()['assigned'], [])  # a refused port takes no pool port
         # Review of 8a40fd3, item 2: no socket table, no forwarding. The preview does not even start.
         with self.assertRaises(Refused) as caught:
-            DevPreviews(ports=[7700], listeners=fake_listeners, uid=UID, peer_uid=None).open(5173)
+            DevPreviews(ports=[7700], listeners=fake_listeners, uid=UID, peer_uid=None, names=dev_names).open(5173)
         self.assertEqual(caught.exception.code, 'unsupported')
         self.assertIn('need a Linux server', str(caught.exception))
 
@@ -575,7 +585,7 @@ class ProxyTests(unittest.TestCase):
         self.upstream.handle_error = lambda *_args: None  # a cut connection is part of several tests
         threading.Thread(target=self.upstream.serve_forever, daemon=True).start()
         self.dev_port = self.upstream.server_port
-        self.previews = DevPreviews()
+        self.previews = DevPreviews(names=LOCAL_NAMES)
         self.logged = []
         key = unittest.mock.patch.object(dev_previews, 'marker_key', lambda: b'test-marker-key')  # not the real access token
         key.start()
@@ -1301,6 +1311,156 @@ class GuardThreadTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
 
+class KindTests(unittest.TestCase):
+    """process_kind and process_names on a made-up /proc tree: only a dev server is listed, forwarded or stopped."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = self.temp.name
+
+    def proc(self, pid, comm, cgroup, parent=1, argv=None, inode=None):
+        base = Path(self.root) / str(pid)
+        (base / 'fd').mkdir(parents=True)
+        (base / 'status').write_text('Name:\t%s\nPPid:\t%d\n' % (comm, parent))
+        (base / 'cgroup').write_text('0::%s\n' % cgroup)
+        (base / 'comm').write_text(comm + '\n')
+        (base / 'cmdline').write_bytes(b'\0'.join(part.encode() for part in (argv or [comm])) + b'\0')
+        os.symlink('/work/shop', base / 'cwd')
+        if inode:
+            os.symlink('socket:[%d]' % inode, base / 'fd' / '3')
+
+    def test_kinds(self):
+        scope = '/user.slice/user-1000.slice/user@1000.service/app.slice/tmux-spawn-1.scope'
+        self.proc(10, 'node', scope, argv=['/usr/bin/node', 'vite'])
+        self.proc(11, 'python', '/user.slice/user-1000.slice/user@1000.service/app.slice/tether-voice.service')
+        self.proc(12, 'claude', scope)
+        self.proc(13, 'MainThread', scope, argv=['/usr/bin/node', '/opt/bin/codex'])
+        self.proc(14, 'ttyd', scope, parent=500)
+        self.proc(15, 'node', '/system.slice/docker-1.scope')
+        kind = functools.partial(dev_previews.process_kind, root=self.root, own_pid=500)
+        self.assertEqual([kind(pid) for pid in (10, 11, 12, 13, 14, 15)], ['dev', 'service', 'agent', 'agent', 'tether', 'dev'])
+        self.assertEqual(kind(500 + 1), 'unknown')  # gone, or hidden from Tether
+        self.assertEqual(dev_previews.process_kind(10, self.root, own_pid=10), 'tether')
+
+    def test_names_need_every_holder_to_be_a_dev_server(self):
+        scope = '/session-3.scope'
+        self.proc(20, 'node', scope, argv=['/usr/bin/node', 'next'], inode=9001)
+        self.proc(21, 'node', scope, inode=9002)
+        self.proc(22, 'llama-server', '/app.slice/tether-llm.service', inode=9002)  # shares the socket with a service
+        found = dev_previews.process_names([9001, 9002, 9003], os.getuid(), root=self.root, own_pid=0)
+        self.assertEqual(found[9001], {'name': 'node', 'folder': 'shop', 'pids': [20], 'kind': 'dev'})
+        self.assertEqual((found[9002]['pids'], found[9002]['kind']), ([21, 22], 'unknown'))
+        self.assertNotIn(9003, found)  # no visible holder
+
+
+def kinds(table):
+    """A names function: {inode: kind}; an inode not in `table` has no visible process."""
+    return lambda inodes, uid: {inode: {'name': 'node', 'folder': 'app', 'pids': [inode], 'kind': table[inode]}
+                                for inode in inodes if inode in table}
+
+
+@unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')
+class StopTests(unittest.TestCase):
+    """stop(): the person stops dev servers, never Tether, its services or agents."""
+
+    def setUp(self):
+        self.listening = fake_listeners()
+        self.inode = {entry['port']: entry['inode'] for entry in self.listening if entry['uid'] == UID}
+        self.sent = []
+        self.table = {inode: 'dev' for inode in self.inode.values()}
+
+    def make(self, gone=True, **more):
+        def signal(pid, inode, force):
+            self.sent.append((pid, force))
+            if gone:
+                self.listening = [entry for entry in self.listening if entry['inode'] != inode]
+            return True
+        return DevPreviews(ports=[7700, 7701], listeners=lambda: self.listening, uid=UID, names=kinds(self.table),
+                           signal=signal, **more)
+
+    def test_the_list_hides_what_is_not_a_dev_server(self):
+        self.table[self.inode[3000]] = 'service'
+        self.table[self.inode[8000]] = 'agent'
+        self.table[self.inode[8001]] = 'tether'
+        del self.table[self.inode[9113]]
+        self.assertEqual([row['port'] for row in self.make().servers()], [5173, 5174])
+        previews = self.make()
+        for port in (3000, 8000, 8001, 9113):
+            with self.assertRaises(Refused, msg=port) as caught:
+                previews.open(port)
+            self.assertEqual(caught.exception.code, 'denied', port)
+        self.assertEqual(previews.open(5173)['port'], 7700)
+
+    def test_stop_one_several_or_all(self):
+        self.table[self.inode[3000]] = 'service'
+        previews = self.make()
+        previews.open(5173)
+        result = previews.stop([5173, 5174, 3000, 4444, 22, 5173], wait=0.5)
+        self.assertEqual(result, {5173: 'stopped', 5174: 'stopped', 3000: 'refused', 4444: 'not-found', 22: 'refused'})
+        self.assertEqual(sorted(self.sent), [(self.inode[5173], False), (self.inode[5174], False)])
+        self.assertEqual(previews.assignments(), {'assigned': [], 'free': 2})  # the stopped server gave back its port
+        self.assertEqual(previews.leases, {})
+
+    def test_a_server_that_stays_up_can_be_forced(self):
+        previews = self.make(gone=False)
+        self.assertEqual(previews.stop([5173], wait=0.2), {5173: 'still-running'})
+        self.assertEqual(previews.stop([5173], force=True, wait=0.2), {5173: 'still-running'})
+        self.assertEqual(self.sent, [(self.inode[5173], False), (self.inode[5173], True)])
+
+    def test_bad_requests(self):
+        previews = self.make()
+        for bad in (None, [], '5173', [5173.0], [True], [0], [70000], list(range(2000, 2000 + dev_previews.MAX_STOP + 1))):
+            with self.assertRaises(Refused, msg=bad):
+                previews.stop(bad)
+        with self.assertRaises(Refused) as caught:
+            self.make(peer_uid=None).stop([5173])
+        self.assertEqual(caught.exception.code, 'unsupported')
+        self.assertEqual(self.sent, [])
+
+    def test_no_pidfd_stops_nothing(self):
+        def signal(pid, inode, force):
+            raise OSError('pidfd is not available')
+        previews = DevPreviews(listeners=lambda: self.listening, uid=UID, names=kinds(self.table), signal=signal)
+        self.assertEqual(previews.stop([5173], wait=0), {5173: 'refused'})
+
+
+@unittest.skipUnless(sys.platform.startswith('linux') and hasattr(os, 'pidfd_open'), 'needs /proc and pidfd')
+class RealStopTests(unittest.TestCase):
+    """A real dev server in a child process: listed, then stopped with SIGTERM. Tether's own socket is refused."""
+
+    def start_server(self):
+        import subprocess
+        child = subprocess.Popen([sys.executable, '-c', 'import socket,sys,time\n'
+                                  's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); print(s.getsockname()[1], flush=True)\n'
+                                  'time.sleep(60)'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        return child, int(child.stdout.readline())
+
+    def test_stop_a_child_dev_server(self):
+        child, port = self.start_server()
+        previews = DevPreviews(ports=[], names=LOCAL_NAMES)
+        self.assertIn(port, [row['port'] for row in previews.servers()])
+        self.assertEqual(previews.stop([port]), {port: 'stopped'})
+        self.assertEqual(child.wait(5), -15)  # SIGTERM
+
+    def test_tether_never_stops_itself(self):
+        with socket.socket() as own:
+            own.bind(('127.0.0.1', 0))
+            own.listen()
+            port = own.getsockname()[1]
+            previews = DevPreviews(ports=[])  # the real rule: this process is Tether
+            self.assertNotIn(port, [row['port'] for row in previews.servers()])
+            self.assertEqual(previews.stop([port]), {port: 'refused'})
+            with self.assertRaises(Refused):
+                previews.target(port)
+
+    def test_a_process_that_no_longer_holds_the_socket_gets_no_signal(self):
+        child, port = self.start_server()
+        self.assertFalse(dev_previews.stop_process(child.pid, 1))  # inode 1 is not its socket
+        self.assertIsNone(child.poll())
+
+
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
 class ApiTests(unittest.TestCase):
     """POST and GET /mobile/api/dev-preview on Tether's main origin, through the real request handler."""
@@ -1314,7 +1474,7 @@ class ApiTests(unittest.TestCase):
         self.addCleanup(quiet.stop)
         self.main = ThreadingHTTPServer(('127.0.0.1', 0), server.Handler)
         threading.Thread(target=self.main.serve_forever, daemon=True).start()
-        self.previews = DevPreviews(ports=[7700], denied={self.main.server_port})
+        self.previews = DevPreviews(ports=[7700], denied={self.main.server_port}, names=LOCAL_NAMES)
         patcher = unittest.mock.patch.object(dev_previews, 'PREVIEWS', self.previews)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -1398,6 +1558,23 @@ class ApiTests(unittest.TestCase):
         status, data = self.call('POST', {'port': dev}, path=release)
         self.assertEqual((status, data['code']), (404, 'not-assigned'))
         self.assertEqual(self.call('POST', {'port': other.server_port})[1]['port'], 7700)
+
+
+    def test_stop_route(self):
+        import subprocess
+        stop = '/mobile/api/dev-preview/stop'
+        child = subprocess.Popen([sys.executable, '-c', 'import socket,time\n'
+                                  's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); print(s.getsockname()[1], flush=True)\n'
+                                  'time.sleep(60)'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        port = int(child.stdout.readline())
+        self.assertEqual(self.call('POST', {'ports': [port]}, path=stop, Origin='http://127.0.0.1:7700')[0], 403)
+        self.assertEqual(self.call('POST', {'ports': [port]}, path=stop, Cookie=None)[0], 401)
+        self.assertEqual(self.call('POST', {'ports': 'all'}, path=stop)[1]['code'], 'bad-port')
+        status, data = self.call('POST', {'ports': [port, self.main.server_port]}, path=stop)
+        self.assertEqual((status, data), (200, {'results': [{'port': port, 'state': 'stopped'},
+                                                            {'port': self.main.server_port, 'state': 'refused'}]}))
+        self.assertEqual(child.wait(5), -15)
 
 
 if __name__ == '__main__':
