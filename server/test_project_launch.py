@@ -335,13 +335,15 @@ class UnitTests(unittest.TestCase):
 
     def test_claude_gets_folder_and_hook_before_the_prompt(self):
         args = project_launch.claude_args(PID, ['fix the bug'])
-        self.assertEqual(args[:2], ['--add-dir', str(projects.bundle(PID))])
-        self.assertEqual(args[2], '--settings')
+        # No --add-dir: from Claude Code 2.1.326 it stops a new tab on a trust prompt (B188).
+        self.assertNotIn('--add-dir', args)
+        self.assertEqual(args[0], '--settings')
         self.assertEqual(args[-1], 'fix the bug')
-        hook = json.loads(args[3])['hooks']['SessionStart'][0]
+        self.assertEqual(json.loads(args[1])['permissions']['additionalDirectories'], [str(projects.bundle(PID))])
+        hook = json.loads(args[1])['hooks']['SessionStart'][0]
         self.assertEqual(hook['matcher'], 'startup|resume|clear|compact')
         self.assertIn(f'hook {PID}', hook['hooks'][0]['command'])
-        self.assertNotIn('autoMemoryDirectory', json.loads(args[3]))
+        self.assertNotIn('autoMemoryDirectory', json.loads(args[1]))
         self.assertTrue((projects.bundle(PID) / 'notes').is_dir())
 
     def test_claude_plain_cases(self):
@@ -514,7 +516,8 @@ class WrapperTests(unittest.TestCase):
         argv = self.run_in_pane(f'{launcher} claude "fix it"')
         pid = self.project()
         self.assertRegex(pid, projects.ID)
-        self.assertEqual(argv[1:3], ['--add-dir', str(self.temp / 'tether/projects' / pid)])
+        self.assertEqual(argv[1], '--settings')
+        self.assertEqual(json.loads(argv[2])['permissions']['additionalDirectories'], [str(self.temp / 'tether/projects' / pid)])
         self.assertEqual(argv[-2:], ['fix it', '1'])
         pane = self.tmux('display-message', '-p', '-t', 'proj', '#{@project_rev}').stdout.strip()
         self.assertEqual(pane, f'{pid}:0')

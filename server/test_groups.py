@@ -178,7 +178,9 @@ class LaunchTests(Bundles):
     def test_claude_and_codex_get_the_group(self):
         projects.set_instructions(self.GPID, 'Docs rule.', 0)
         args = project_launch.claude_args(PID, ['task'], self.group)
-        self.assertEqual(args[:4], ['--add-dir', str(projects.bundle(PID)), str(projects.bundle(self.GPID)), '--settings'])
+        self.assertEqual(args[0], '--settings')
+        self.assertEqual(json.loads(args[1])['permissions']['additionalDirectories'],
+                         [str(projects.bundle(PID)), str(projects.bundle(self.GPID))])
         self.tmux.assert_called_with('set-option', '-p', '-t', '%4', '@project_rev', f'{PID}:0+{self.GPID}:1')
         args = project_launch.codex_args(PID, [], self.group)
         self.assertIn('## Stack: Docs', args[1])

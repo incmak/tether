@@ -102,9 +102,12 @@ def claude_args(pid, args, group=None):
     settings = {'hooks': {'SessionStart': [{'matcher': 'startup|resume|clear|compact',
                                             'hooks': [{'type': 'command', 'command': hook, 'timeout': 10}]}]}}
     record_revision(pid, group)
-    folders = [str(folder), str(projects.bundle(group['pid']))] if group else [str(folder)]
-    # --add-dir takes several folders: --settings after it ends the list, so a prompt in args stays a prompt.
-    return ['--add-dir', *folders, '--settings', json.dumps(settings), *args]
+    # The project folders go in as settings, not --add-dir: from Claude Code 2.1.326, --add-dir stops a new tab on a
+    # trust prompt for each folder not yet trusted (changelog 2.1.326; B188). additionalDirectories gives the same
+    # file access without the prompt (code.claude.com/docs/en/permissions#working-directories). The bundle has no
+    # .claude/ folder, so nothing that only --add-dir loads (skills, commands, agents) is lost.
+    settings['permissions'] = {'additionalDirectories': [str(folder), str(projects.bundle(group['pid']))] if group else [str(folder)]}
+    return ['--settings', json.dumps(settings), *args]
 
 
 def codex_has_own_instructions():
