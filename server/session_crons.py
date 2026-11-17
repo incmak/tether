@@ -1,7 +1,7 @@
 """Session cron jobs (Claude Code CronCreate): a short name, the schedule in words, and the next run.
 
 Claude Code reads a job's five cron fields in the local time zone of the machine it runs on, which is this server's
-machine. It fires a recurring job up to a few minutes late (jitter), so the next run is approximate.
+machine. It moves each run a few minutes from the scheduled time (jitter, seen early on 17 Nov), so the next run is approximate.
 """
 import datetime
 import re
