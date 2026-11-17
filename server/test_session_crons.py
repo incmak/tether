@@ -106,7 +106,10 @@ class HookCronTests(unittest.TestCase):
         self.assertEqual(claude_hooks.crons(dict(self.config, thread='other'), 110), [])
         self.assertEqual(claude_hooks.crons(dict(self.config, agent='codex'), 110), [])
         self.assertEqual(claude_hooks.crons(dict(self.config, thread='../x'), 110), [])
-        self.feed('SessionStart', 120)
+        # Compaction keeps the jobs; a new start (startup, resume, clear) drops them.
+        self.feed('SessionStart', 115, source='compact')
+        self.assertEqual(len(claude_hooks.crons(self.config, 118)), 1)
+        self.feed('SessionStart', 120, source='startup')
         self.assertEqual(claude_hooks.crons(self.config, 130), [])
         self.assertNotIn('crons', claude_hooks.overlay(self.config, {}, 130))
         self.feed('Stop', 140, session_crons=[self.job])

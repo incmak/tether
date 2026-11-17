@@ -137,8 +137,10 @@ def update(state, data, now):
             state['approval_tool_use_id'] = short(data.get('tool_use_id')) or next(reversed(state.get('tools', {})), '')
     if event == 'SessionStart':
         state.update(ended=False, busy=False, waiting=False, tools={}, agents={})
-        for key in ('background_tasks', 'session_crons', 'tasks_at'):
-            state.pop(key, None)
+        # Compaction keeps the same process: its background shells and cron jobs go on, so keep them until the next Stop.
+        if data.get('source') != 'compact':
+            for key in ('background_tasks', 'session_crons', 'tasks_at'):
+                state.pop(key, None)
     elif event == 'SessionEnd':
         state.update(ended=True, busy=False, waiting=False, tools={}, agents={})
     elif event == 'UserPromptSubmit':
