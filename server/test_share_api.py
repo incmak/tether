@@ -14,13 +14,24 @@ import auth
 import paths
 import server
 import share_api
+import share_previews
 import share_store
+
+
+def drain_previews(test, timeout=10):
+    """Wait for preview jobs that finished uploads queued. The worker opens the catalog in the test's folder, so it
+    must finish before the folder is removed (B22)."""
+    jobs = share_previews._queue
+    with jobs.all_tasks_done:
+        jobs.all_tasks_done.wait_for(lambda: not jobs.unfinished_tasks, timeout)
+    test.assertEqual(jobs.unfinished_tasks, 0, 'Share preview jobs still run after the test.')
 
 
 class ShareAPItests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(drain_previews, self)  # runs before the folder is removed
         self.root = Path(self.temp.name) / 'share'
         for item in (patch.object(auth, 'MODE', 'proxy'), patch.object(paths, 'SHARE', self.root), patch.object(share_api, '_store', None)):
             item.start()
@@ -219,6 +230,7 @@ class ResumableAPITests(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(drain_previews, self)  # runs before the folder is removed
         self.root = Path(self.temp.name) / 'share'
         for item in (patch.object(auth, 'MODE', 'proxy'), patch.object(paths, 'SHARE', self.root),
                      patch.object(share_api, '_store', None),
