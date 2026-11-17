@@ -25,7 +25,8 @@ class UnitTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.temp = Path(temp.name)
-        for name, value in (('TETHER', self.temp / 'tether'), ('CODEX', self.temp / 'codex')):
+        for name, value in (('TETHER', self.temp / 'tether'), ('CODEX', self.temp / 'codex'),
+                            ('CONFIG', self.temp / 'config')):
             patch = mock.patch.object(paths, name, value)
             patch.start()
             self.addCleanup(patch.stop)
@@ -345,6 +346,41 @@ class UnitTests(unittest.TestCase):
         self.assertIn(f'hook {PID}', hook['hooks'][0]['command'])
         self.assertNotIn('autoMemoryDirectory', json.loads(args[1]))
         self.assertTrue((projects.bundle(PID) / 'notes').is_dir())
+
+    def test_claude_advisor_goes_into_settings_never_as_a_flag(self):
+        import claude_advisor
+        self.assertNotIn('advisorModel', json.loads(project_launch.claude_args(PID, [])[1]))
+        claude_advisor.set_global('opus')
+        args = project_launch.claude_args(PID, ['fix the bug'])
+        self.assertEqual(json.loads(args[1])['advisorModel'], 'opus')
+        self.assertNotIn('--advisor', args)
+        claude_advisor.set_project(PID, True, 'off')
+        self.assertNotIn('advisorModel', json.loads(project_launch.claude_args(PID, [])[1]))
+        # A tab outside any project gets the global choice; plain runs (-p, --settings) get nothing.
+        self.assertEqual(project_launch.claude_plain_args(['hi']), ['--settings', '{"advisorModel": "opus"}', 'hi'])
+        for args in (['-p', 'hi'], ['--settings', 'x.json']):
+            self.assertEqual(project_launch.claude_plain_args(args), args)
+        claude_advisor.set_global('off')
+        self.assertEqual(project_launch.claude_plain_args(['hi']), ['hi'])
+
+    def test_claude_advisor_marks_the_pane(self):
+        import claude_advisor
+        claude_advisor.set_global('opus')
+        with mock.patch.dict(os.environ, {'TMUX': '/tmp/x,1,0', 'TMUX_PANE': '%7', 'DISABLE_TELEMETRY': '1'}), \
+                mock.patch.object(project_launch, '_tmux') as tmux, mock.patch.object(paths, 'CLAUDE', self.temp / 'c'):
+            project_launch.advisor_settings(None)
+            tmux.assert_called_with('set-option', '-p', '-t', '%7', '@advisor', 'opus!no-flags')
+            claude_advisor.set_global('off')
+            project_launch.advisor_settings(None)
+            tmux.assert_called_with('set-option', '-p', '-u', '-t', '%7', '@advisor')
+            # A restart with its own --settings clears the old mark; a plain -p run leaves the pane alone.
+            claude_advisor.set_global('opus')
+            tmux.reset_mock()
+            self.assertEqual(project_launch.claude_args(PID, ['--settings', 'x.json']), ['--settings', 'x.json'])
+            tmux.assert_called_once_with('set-option', '-p', '-u', '-t', '%7', '@advisor')
+            tmux.reset_mock()
+            project_launch.claude_plain_args(['-p', 'hi'])
+            tmux.assert_not_called()
 
     def test_claude_plain_cases(self):
         for args in (['-p', 'hi'], ['--print'], ['mcp', 'list'], ['--settings', 'x.json'], ['--settings=x.json'], ['--version'], ['update']):

@@ -7,6 +7,7 @@ import { ApiError, errorText } from './api'
 import type { Api, GroupInfo } from './api'
 import { useModal } from './hooks'
 import { ProjectCodexLevel } from './CodexLevel'
+import { ProjectClaudeAdvisor } from './ClaudeAdvisor'
 import { ProjectAutonomy } from './Autonomy'
 import type { Session } from './Sidebar'
 import { AdvisorDecision, AdvisorLog, useAdvisorLog } from './AdvisorLog'
@@ -183,6 +184,8 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
       {!group && <AdvisorLog log={advisorLog} disabled={pending} focus={decisionFocus} onOpen={row => { setDecisionFocus(undefined); setDecision(row) }} />}
 
       <ProjectAutonomy api={api} project={project.id} />
+
+      <ProjectClaudeAdvisor api={api} project={project.id} />
 
       <ProjectCodexLevel api={api} project={project.id} panes={session.panes.map(item => item.id)} />
 

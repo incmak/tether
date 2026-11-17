@@ -6,6 +6,7 @@ import { ColorRow, GroupPicker } from './Organize'
 import type { SessionGroup, TagColor } from './Organize'
 import { ReviewLinkPicker } from './ReviewLinks'
 import { SelectMenu } from './SelectMenu'
+import { TabAdvisor } from './ClaudeAdvisor'
 import { SESSION_NAME, SESSION_NAME_HELP, canFork, creditsLabel, errorText, usageLabel } from './api'
 import type { Api, Catalog, Footer, ModelOptions, Pane, PastChat } from './api'
 import { closeTab } from './tabSelection'
@@ -385,7 +386,7 @@ function markCurrent(options: ModelOptions, label?: string, effort?: string): Mo
   const match = name ? options.models.find(item => item.label.toLowerCase() === name) ?? options.models.find(item => item.label.toLowerCase().includes(name)) : undefined
   return { ...options, models: match ? options.models.map(item => ({ ...item, current: item.id === match.id })) : options.models, current_effort: effort ?? options.current_effort }
 }
-export function ModelSheet({ api, pane, thread, currentLabel, currentEffort, onClose, onDone, onContinue }: { onContinue?: () => void; api: Api; pane: Pane; thread: string | null; currentLabel?: string; currentEffort?: string; onClose: () => void; onDone: (message: string) => void }) {
+export function ModelSheet({ api, pane, thread, currentLabel, currentEffort, advisor, onClose, onDone, onContinue }: { advisor?: Footer['advisor']; onContinue?: () => void; api: Api; pane: Pane; thread: string | null; currentLabel?: string; currentEffort?: string; onClose: () => void; onDone: (message: string) => void }) {
   const initial = cachedModels(pane.agent)
   const [data, setData] = useState<ModelOptions | null>(initial && markCurrent(initial, currentLabel, currentEffort))
   const [note, setNote] = useState('')
@@ -428,6 +429,7 @@ export function ModelSheet({ api, pane, thread, currentLabel, currentEffort, onC
     </div>}
     {view === 'codex' ? <div role="tabpanel" id="model-panel" aria-labelledby="model-tab-codex"><GlobalCodexLevel api={api} /></div> : <>
     <p className="sheet-sub">{pane.agent === 'antigravity' ? 'Applies as soon as you choose.' : 'Applies to this session only.'}</p>
+    {pane.agent === 'claude' && <TabAdvisor advisor={advisor} />}
     {data && <div className="model-list" role="radiogroup" aria-label="Model">{data.models.map(item => <button key={item.id} type="button" role="radio" aria-checked={item.id === model} disabled={busy} onClick={() => setModel(item.id)}>
       <span>{item.label}</span>{item.current && <small>current</small>}{item.id === model && <Check size={18} />}</button>)}</div>}
     {data && data.efforts.length > 0 && chosen?.effort !== false && <fieldset className="choice"><legend>Effort</legend><div className="segmented effort-levels">

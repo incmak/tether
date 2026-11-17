@@ -1362,6 +1362,8 @@ button.live-chip:active { background: var(--line); }
 /* Codex provider: Azure Foundry spends Azure credit, so it shows in the accent color wherever it applies. */
 .codex-provider { width: 100%; margin: 4px 0 14px; }
 .codex-provider .hint, .codex-provider .error { margin: 8px 0 0; }
+.advisor-problems { margin: 4px 0 0; padding-left: 18px; }
+.pill-warning { flex: none; color: var(--attention); }
 .provider-warning { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid var(--attention); background: var(--hover); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; font-size: 13px; line-height: 1.5; color: var(--text); }
 .provider-tag { color: var(--attention); font-weight: 600; }
 .provider-badge { flex: none; padding: 1px 6px; border: 1px solid var(--attention); border-radius: var(--radius-sm); color: var(--attention); font-size: 11px; font-weight: 600; }

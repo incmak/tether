@@ -20,6 +20,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import codex_level  # noqa: E402
+import claude_advisor  # noqa: E402
 import advisor  # noqa: E402
 import approval  # noqa: E402
 import autonomy_setup  # noqa: E402
@@ -256,7 +257,7 @@ def lesson_lines(data, pid, prompt='', names=(), helper=False, full=False):
     return lines
 
 
-def rules(resolved, pid=None, agent='claude', prompt='', helper=False):
+def rules(resolved, pid=None, agent='claude', prompt='', helper=False, tab_advisor=''):
     # All rule strings use shared CLI helpers and plain questions. Neither provider
     # needs Claude-only tools, subagents, or hook instructions to follow them.
     level = resolved['level']
@@ -280,6 +281,8 @@ def rules(resolved, pid=None, agent='claude', prompt='', helper=False):
                                                   '; a second advisor is off.')
             lines.append(instruction.format(who=who, second=second_label, cli=HERE / 'agent_advisor_cli.py'))
         lines.append(ASK_USER)
+    if agent == 'claude' and tab_advisor:
+        lines.append(claude_advisor.rule(tab_advisor))
     if level >= 4:
         lines.append(PRODUCT)
     lines.extend(_learning_rules(pid, agent, prompt, helper))
@@ -413,11 +416,23 @@ def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude'):
             names += [shown.stdout.strip()] if not shown.returncode else []
         except (OSError, subprocess.SubprocessError):
             pass  # the prompt alone still selects lessons
+    # Claude Code's own advisor tool, when this tab started with it (project_launch.py sets @advisor).
+    tab_advisor = ''
+    if agent == 'claude' and re.fullmatch(r'%[0-9]+', pane):
+        try:
+            shown = tmux('display-message', '-p', '-t', pane, '#{@advisor}')
+            started = claude_advisor.tab_state(shown.stdout.strip()) if not shown.returncode else None
+            # Only launch problems rule it out here: the main model and the Fable consent can change in the tab.
+            blocked = started and any(item['code'] in ('disabled', 'no-flags') for item in started['problems'])
+            tab_advisor = started['model'] if started and started['source'] == 'tether' and not blocked else ''
+        except (OSError, subprocess.SubprocessError):
+            pass
     resolved, reviewers = resolve(pid), reviewer_rules(read_reviewers())
-    standing = rules(resolved, pid, agent=agent, helper=helper) + '\n\n' + reviewers
+    standing = rules(resolved, pid, agent=agent, helper=helper, tab_advisor=tab_advisor) + '\n\n' + reviewers
     # The standing rules go out once per conversation (B74). Lines that depend on this prompt go out every time.
     shown = set(standing.splitlines())
-    extra = [line for line in rules(resolved, pid, agent=agent, prompt=prompt, helper=helper).splitlines()
+    extra = [line for line in rules(resolved, pid, agent=agent, prompt=prompt, helper=helper,
+                                    tab_advisor=tab_advisor).splitlines()
              if line not in shown]
     head = prompt_context.once(data, 'autonomy', standing)
     # The lessons are chosen for this prompt. A conversation gets each lesson once, like the standing rules.

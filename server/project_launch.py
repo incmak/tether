@@ -92,8 +92,18 @@ def record_revision(pid, group=None):
         _tmux('set-option', '-p', '-t', pane, '@project_rev', mark)
 
 
+def own_settings(args):
+    """True for a run Tether leaves alone: a plain command (-p, mcp, update...) or one with its own --settings."""
+    if any(arg in CLAUDE_PLAIN for arg in args):
+        return True
+    if any(arg == '--settings' or arg.startswith('--settings=') for arg in args):
+        mark_pane('')  # an interactive tab with its own settings: Tether did not set its advisor
+        return True
+    return False
+
+
 def claude_args(pid, args, group=None):
-    if any(arg in CLAUDE_PLAIN or arg == '--settings' or arg.startswith('--settings=') for arg in args):
+    if own_settings(args):
         return args
     import projects
     folder = projects.bundle(pid)
@@ -101,13 +111,50 @@ def claude_args(pid, args, group=None):
     hook = f'{shlex.quote(sys.executable)} {shlex.quote(str(Path(__file__).resolve()))} hook {pid}'
     settings = {'hooks': {'SessionStart': [{'matcher': 'startup|resume|clear|compact',
                                             'hooks': [{'type': 'command', 'command': hook, 'timeout': 10}]}]}}
+    advisor = advisor_settings(pid)
     record_revision(pid, group)
     # The project folders go in as settings, not --add-dir: from Claude Code 2.1.326, --add-dir stops a new tab on a
     # trust prompt for each folder not yet trusted (changelog 2.1.326; B188). additionalDirectories gives the same
     # file access without the prompt (code.claude.com/docs/en/permissions#working-directories). The bundle has no
     # .claude/ folder, so nothing that only --add-dir loads (skills, commands, agents) is lost.
     settings['permissions'] = {'additionalDirectories': [str(folder), str(projects.bundle(group['pid']))] if group else [str(folder)]}
+    settings.update(advisor)
     return ['--settings', json.dumps(settings), *args]
+
+
+def advisor_settings(pid):
+    """advisorModel for the Tether advisor choice (claude_advisor.py), or {} for Off, and the pane option @advisor
+    that tells the header and the prompt rules what the tab started with. Any failure gives {}: no advisor."""
+    try:
+        import claude_advisor
+        entry = claude_advisor.launch_settings(pid)
+        value = claude_advisor.mark(entry['advisorModel']) if entry else ''
+    except Exception:  # noqa: BLE001 - a broken choice never stops a tab
+        entry, value = {}, ''
+    mark_pane(value)
+    return entry
+
+
+def mark_pane(value):
+    """Set the pane option @advisor, or clear it for ''. Outside tmux, or on any tmux failure, do nothing."""
+    pane = os.environ.get('TMUX_PANE', '')
+    if not (os.environ.get('TMUX') and re.fullmatch(r'%[0-9]+', pane)):
+        return
+    try:
+        if value:
+            _tmux('set-option', '-p', '-t', pane, '@advisor', value)
+        else:
+            _tmux('set-option', '-p', '-u', '-t', pane, '@advisor')
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def claude_plain_args(args):
+    """A Claude tab outside any project gets only the global advisor choice."""
+    if own_settings(args):
+        return args
+    entry = advisor_settings(None)
+    return ['--settings', json.dumps(entry), *args] if entry else args
 
 
 def codex_has_own_instructions():
@@ -480,6 +527,8 @@ def launch(agent, args):
             if pid or agent == 'codex':
                 group = current_group() if pid else None
                 final = (claude_args if agent == 'claude' else codex_args)(pid, list(args), group)
+            else:
+                final = claude_plain_args(list(args))
         except Exception as exc:  # noqa: BLE001 - any failure: start the plain agent
             print(f'tether-{agent}: project not loaded ({exc.__class__.__name__}). Starting plain {agent}.', file=sys.stderr)
             final = args
