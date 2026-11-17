@@ -100,8 +100,14 @@ class ChromiumTransport(FakeTransport):
         self.pid, read_fd, write_fd = browser.launch(browser.find_chrome(), Path(self.temp.name) / 'profile')
         self.conn = browser.Connection(read_fd, write_fd, self.event)
         try:
-            targets = self.conn.call('Target.getTargets')['targetInfos']
-            self.target = next(row['targetId'] for row in targets if row['type'] == 'page')
+            # Chrome opens its first page a moment after the pipe is ready; on a busy machine the first list is empty.
+            pages = []
+            def page_ready():
+                pages[:] = [row['targetId'] for row in self.conn.call('Target.getTargets')['targetInfos']
+                            if row['type'] == 'page']
+                return pages
+            wait_for(page_ready, seconds=10)
+            self.target = pages[0]
             self.session = self.conn.call('Target.attachToTarget',
                                           {'targetId': self.target, 'flatten': True})['sessionId']
         except Exception:
