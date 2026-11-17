@@ -73,6 +73,7 @@ STATE_FILE = 'dev-preview-ports.json'  # which dev port each pool port belongs t
 TICKET_LIFE = 120         # the link for the frame; the "Open in browser" link lives as long as the lease
 MAX_TICKETS = 20
 SCAN_TTL = 2.0            # how long one read of the listener table serves the proxy
+ACCEPT_LOOK = 3.0         # how long the proxy waits for a dev server to accept a connection before it checks the owner
 STOP_WAIT = 3.0           # how long a stop request waits for the dev servers to end
 MAX_STOP = 64             # ports in one stop request
 OPEN_PATH = '/__tether_preview__/open'
@@ -194,6 +195,19 @@ def connection_uid(sock, tries=4, pause=0.02, root='/proc/net'):
     """The uid that owns the other end of a connected loopback socket, from the kernel's socket table (Linux). None
     when the table does not show the connection. This names the very connection, so no other listener can stand in.
     A connection that waits for accept() may show no owner yet on some kernels: look again a few times."""
+    found = connection_owner(sock, tries, pause, root)
+    return found[0] if found is not None else None
+
+
+def connection_inode(sock, wait=ACCEPT_LOOK, root='/proc/net'):
+    """The inode of the dev server's end of a connected loopback socket once the dev server accepted it, else 0.
+    A busy dev server may accept late: look for up to `wait` seconds."""
+    found = connection_owner(sock, max(1, int(wait / 0.05)), 0.05, root)
+    return found[1] if found is not None else 0
+
+
+def connection_owner(sock, tries=4, pause=0.02, root='/proc/net'):
+    """(uid, inode) of the other end of a connected loopback socket, or None. The inode is 0 until it is accepted."""
     local, peer = sock.getsockname()[:2], sock.getpeername()[:2]
     ends = (ipaddress.ip_address(peer[0]), peer[1], ipaddress.ip_address(local[0]), local[1])
     ends = (_plain(ends[0]), ends[1], _plain(ends[2]), ends[3])
@@ -220,7 +234,7 @@ def connection_uid(sock, tries=4, pause=0.02, root='/proc/net'):
             break  # accepted: the owner is final
         if attempt + 1 < tries:
             time.sleep(pause)
-    return found[0] if found is not None else None
+    return found
 
 
 def connect_address(address):
@@ -317,9 +331,11 @@ def socket_holders(inodes, uid, root='/proc', limit=50000):
         except FileNotFoundError:
             continue  # it ended
         except PermissionError:
-            # A non-dumpable process of this user (sshd, gpg-agent, sd-pam) hides its descriptors. Such programs do
-            # not share a listening socket with a dev server; a socket that only they hold has no visible holder and
-            # is left out, so this fails closed too.
+            # A non-dumpable process of this user (sshd, gpg-agent, sd-pam: always there) hides its descriptors.
+            # Counting it as a gap would hide every dev server. It may still share a socket with a visible process,
+            # so a 'dev' kind here is not enough on its own: the proxy checks the process that holds each connection
+            # (connected_dev) and refuses one it cannot see, and a stop signals only a pinned pid that is a dev
+            # server itself (stop_process).
             continue
         except OSError:
             return found, False
@@ -416,7 +432,8 @@ class DevPreviews:
     """The pool: which dev port each pool port forwards, and who may use it. Thread-safe."""
 
     def __init__(self, ports=(), denied=(), clock=time.time, listeners=read_listeners, uid=None, names=process_names,
-                 peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None, signal=None, kind=None):
+                 peer_uid=connection_uid if sys.platform.startswith('linux') else None, store=None, signal=None, kind=None,
+                 peer_inode=connection_inode):
         self.peer_uid = peer_uid  # None: no socket table on this system. Nothing is forwarded then (verify, open).
         self.store = store        # the file that keeps the assignments; None keeps them in memory (tests)
         self.assigned = None      # pool port -> dev port, read from the file at first use
@@ -426,6 +443,7 @@ class DevPreviews:
         self.read = listeners
         self.uid = os.getuid() if uid is None else uid
         self.names = names        # (inodes, uid) -> {inode: {'name', 'folder', 'pids', 'kind'}}: process_names
+        self.peer_inode = peer_inode  # sock -> the dev server's end of this connection, once accepted (0: not yet)
         self.kind = kind or process_kind  # pid -> 'dev', 'tether', 'service', 'agent' or 'unknown'
         # (pid, inode, force) -> 'sent', 'gone' or 'refused': stop_process
         self.signal = signal or (lambda pid, inode, force: stop_process(pid, inode, force, kind=self.kind))
@@ -526,28 +544,26 @@ class DevPreviews:
         if owner != self.uid:
             return 'other'
         try:
-            return 'ours' if self.still_dev(sock.getpeername()[1]) else 'other'
+            inode = self.peer_inode(sock)
         except (OSError, ValueError):
             return 'unknown'
+        if not inode:
+            return 'unknown'  # never accepted: Tether cannot see which process would read the bytes
+        return 'ours' if self.connected_dev(sock.getpeername()[1], inode) else 'other'
 
-    def still_dev(self, port):
-        """True when every listener of this user on `port` belongs to a dev server now. The proxy asks for each
-        connection: within the short listener cache another program of this user (a Tether helper, say) may have
-        taken the port. The listener table is read again (a few ms); a known socket is checked against the processes
-        that held it, and only a new socket costs a full scan."""
-        mine, _ = self.ours(port, fresh=True)
-        if not mine:
-            return False
-        inodes = [entry['inode'] for entry in mine]
-        owners = self.owner(inodes)
-
-        def good(inode, entry):
-            live = [pid for pid in entry.get('pids', ()) if holds(pid, inode)]
-            return entry.get('kind') == 'dev' and bool(live) and all(self.kind(pid) == 'dev' for pid in live)
-        if all(good(inode, owners[inode]) for inode in inodes):
-            return True
-        owners = self.owner(inodes, fresh=True)
-        return all(good(inode, owners[inode]) for inode in inodes)
+    def connected_dev(self, port, inode):
+        """True when the processes that hold the dev server's end of a connection (socket `inode`) are dev servers.
+        This names the very connection: a listener that closed and a new one on the port cannot stand in for it.
+        The process that accepted is usually one that holds the port's listener; those are checked first (a few ms).
+        Else Tether scans /proc, and a socket without a visible holder or an incomplete scan is refused."""
+        mine, _ = self.ours(port)
+        owners = self.owner([entry['inode'] for entry in mine])
+        candidates = sorted({pid for entry in mine for pid in owners[entry['inode']].get('pids', ())})
+        live = [pid for pid in candidates if holds(pid, inode)]
+        if not live:
+            holders, complete = socket_holders([inode], self.uid)
+            live = holders.get(inode, []) if complete else []
+        return bool(live) and all(self.kind(pid) == 'dev' for pid in live)
 
     # assignments -----------------------------------------------------------------------------------------------
     def _assignments(self):

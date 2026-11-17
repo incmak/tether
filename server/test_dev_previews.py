@@ -1516,21 +1516,58 @@ class RealStopTests(unittest.TestCase):
         self.assertEqual(dev_previews.stop_process(child.pid, inode, kind=lambda pid: 'dev'), 'sent')
         self.assertEqual(child.wait(5), -15)
 
-    def test_the_proxy_checks_the_owner_for_each_connection(self):
-        # Review of b81a324, item 2: within the cache, a Tether helper of the same user may take the port.
-        kind = ['dev']
+    def test_the_proxy_checks_the_process_that_holds_the_connection(self):
+        # Review of c676232, item 1: a protected process accepts, closes its listener, and a dev server takes the
+        # port. The bytes would go to the protected process: the new listener must not stand in for it.
+        me = os.getpid()
+        kind = {'me': 'dev'}
+        previews = DevPreviews(ports=[], names=LOCAL['names'], kind=lambda pid: kind['me'] if pid == me else 'dev')
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('127.0.0.1', 0))
+        server.listen()
+        port = server.getsockname()[1]
+        self.assertEqual(previews.target(port), '127.0.0.1')
+        with socket.create_connection(('127.0.0.1', port)) as client:
+            accepted, _ = server.accept()
+            with accepted:
+                self.assertEqual(previews.verify(client), 'ours')
+                kind['me'] = 'agent'
+                server.close()
+                import subprocess
+                child = subprocess.Popen([sys.executable, '-c', 'import socket,time\n'
+                                          's=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
+                                          's.bind(("127.0.0.1", %d)); s.listen(); print(1, flush=True); time.sleep(60)' % port],
+                                         stdout=subprocess.PIPE, text=True)
+                self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+                self.assertEqual(child.stdout.readline().strip(), '1')
+                self.assertEqual(previews.target(port, fresh=True), '127.0.0.1')  # the new listener is a dev server
+                self.assertEqual(previews.verify(client), 'other')  # but this connection is not its
+
+    def test_a_hidden_process_that_accepts_is_not_forwarded(self):
+        # Review of c676232, item 2: a non-dumpable process hides its descriptors from Tether.
+        import subprocess
+        child = subprocess.Popen([sys.executable, '-c', 'import ctypes,socket,time\n'
+                                  's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()\n'
+                                  'ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n'  # PR_SET_DUMPABLE, 0
+                                  'print(s.getsockname()[1], flush=True); c=s.accept(); time.sleep(60)'],
+                                 stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        port = int(child.stdout.readline())
+        previews = DevPreviews(ports=[], **LOCAL)
+        self.assertNotIn(port, [row['port'] for row in previews.servers()])  # no visible holder
+        with socket.create_connection(('127.0.0.1', port)) as client:
+            self.assertEqual(previews.verify(client), 'other')
+        self.assertEqual(previews.stop([port], wait=0), {port: 'refused'})
+        self.assertIsNone(child.poll())
+
+    def test_a_connection_that_is_never_accepted_is_not_forwarded(self):
         with socket.socket() as server:
             server.bind(('127.0.0.1', 0))
             server.listen()
-            port = server.getsockname()[1]
-            previews = DevPreviews(ports=[], names=LOCAL['names'], kind=lambda pid: kind[0])
-            self.assertEqual(previews.target(port), '127.0.0.1')
-            with socket.create_connection(('127.0.0.1', port)) as client:
-                accepted, _ = server.accept()
-                with accepted:
-                    self.assertEqual(previews.verify(client), 'ours')
-                    kind[0] = 'service'
-                    self.assertEqual(previews.verify(client), 'other')
+            previews = DevPreviews(ports=[], peer_inode=functools.partial(dev_previews.connection_inode, wait=0.1), **LOCAL)
+            with socket.create_connection(('127.0.0.1', server.getsockname()[1])) as client:
+                self.assertEqual(previews.verify(client), 'unknown')
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'reads the real listener table from /proc')
