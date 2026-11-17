@@ -73,6 +73,8 @@ async function main() {
       let released = 0
       let devList = SERVERS
       const killed = new Set()
+      const idOf = row => row.id ?? `ino-${row.port}-${row.name}-${row.folder}`  // a new program on a port: a new id
+      const running = port => devList.find(row => row.port === port && !killed.has(port))
       let stopRuns = false, stopGate = null  // the server's lock: one stop request at a time, else 429 busy
       const fixture = fixtures()
       if (page) await page.close().catch(() => {})
@@ -115,6 +117,8 @@ async function main() {
               if (stopGate) await stopGate
               stopRuns = false
               const results = [...new Set(body.ports)].map(port => {
+                const now = running(port)
+                if (body.expect && String(port) in body.expect && now && idOf(now) !== body.expect[port]) return { port, state: 'changed' }
                 if (port === 9000) return { port, state: 'refused', error: 'localhost:9000 is not a dev server now.' }
                 if (port === 8000 && !body.force) return { port, state: 'still-running' }
                 killed.add(port)
@@ -129,7 +133,7 @@ async function main() {
           if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
           if (endpoint === 'dev-preview') {
             const full = posts.findLast(post => post.endpoint === 'dev-preview')?.body.port === 5200 && !released  // the pool is full only for the new app; other posts (ui-usage) may come after
-            return route.fulfill({ json: { servers: devList.filter(row => !killed.has(row.port)), previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
+            return route.fulfill({ json: { servers: devList.filter(row => !killed.has(row.port)).map(row => ({ ...row, id: idOf(row) })), previews: [{ port: 7700, dev_port: 5173, hint: null }, { port: 7701, dev_port: 3000, hint: 'next', worker: true }],
               assigned: [{ port: 7700, dev_port: 5174 }, { port: 7701, dev_port: 3000 }], free: full ? 0 : 8 } })
           }
           return route.fulfill({ json: fixture[endpoint] || {} })
@@ -390,7 +394,7 @@ async function main() {
         await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
         await list.getByText('Stopping…').waitFor().catch(() => errors.push('the row does not say Stopping…'))
         await stop5174.waitFor({ state: 'detached' })
-        if (JSON.stringify(stopPosts()[0]?.body) !== JSON.stringify({ ports: [5174], force: false })) errors.push(`stop asked for ${JSON.stringify(stopPosts()[0]?.body)}`)
+        if (JSON.stringify(stopPosts()[0]?.body) !== JSON.stringify({ ports: [5174], force: false, expect: { 5174: `ino-5174-node-${MANAGED[0].folder}` } })) errors.push(`stop asked for ${JSON.stringify(stopPosts()[0]?.body)}`)
         await page.waitForFunction(() => document.activeElement?.id === 'dev-manager-title').catch(() => errors.push('focus is lost after the row went away'))
         if (!(await drawer.getByRole('status').filter({ hasText: 'Stopped localhost:5174.' }).count())) errors.push('the stop is not announced')
         // Still running: the row offers Force stop, which asks again.
@@ -404,7 +408,7 @@ async function main() {
         if (await confirm.getByRole('heading').innerText() !== 'Force stop localhost:8000?') errors.push('the force box has the wrong title')
         await confirm.getByRole('button', { name: 'Force stop' }).click()
         await list.locator('li', { hasText: 'localhost:8000' }).waitFor({ state: 'detached' })
-        if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [8000], force: true })) errors.push(`force asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
+        if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [8000], force: true, expect: { 8000: 'ino-8000-python3-site' } })) errors.push(`force asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
         // Several: Select gives checkboxes and a bar; Select all / Clear; Stop N asks with the list.
         await drawer.getByRole('button', { name: 'Select', exact: true }).click()
         const boxes = list.getByRole('checkbox')
@@ -428,7 +432,8 @@ async function main() {
         // While a stop runs the selection cannot change: the answer ends the selection it stopped.
         if (!await list.getByRole('checkbox', { name: /localhost:9000/ }).isDisabled()) errors.push('the selection can change while a stop runs')
         await list.locator('li', { hasText: 'localhost:5301' }).waitFor({ state: 'detached' })
-        if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [5300, 5301], force: false })) errors.push(`select stop asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
+        const asked = stopPosts().at(-1)?.body
+        if (JSON.stringify(asked) !== JSON.stringify({ ports: [5300, 5301], force: false, expect: { 5300: 'ino-5300-vite-docs', 5301: 'ino-5301-vite-blog' } })) errors.push(`select stop asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
         // All: after a refresh every server runs again. One is refused and says why; it stays.
         killed.clear()
         await drawer.getByRole('button', { name: 'Refresh the list' }).click()
@@ -461,6 +466,27 @@ async function main() {
         if ((await renewed.innerText()).includes('Still running') || await renewed.getByRole('button', { name: 'Force stop' }).count()) errors.push('an old stop answer marked the new program')
         if (await renewed.getByRole('button', { name: 'Stop localhost:8000' }).getAttribute('aria-disabled') === 'true') errors.push('Stop stays off after the old answer')
         if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-renewed.png`) })
+        // The list read again after a stop is new truth too: Still running goes when another program has the port.
+        killed.delete(5174)
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.locator('li', { hasText: 'localhost:5174' }).waitFor()
+        await list.getByRole('button', { name: 'Stop localhost:8000' }).click()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        await renewed.getByRole('button', { name: 'Force stop' }).waitFor()
+        devList = devList.map(row => row.port === 8000 ? { ...row, folder: 'third-program' } : row)
+        await list.getByRole('button', { name: 'Stop localhost:5174' }).click()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        await list.locator('li', { hasText: 'third-program' }).waitFor()
+        if ((await renewed.innerText()).includes('Still running') || await renewed.getByRole('button', { name: 'Force stop' }).count()) errors.push('a reload after a stop kept Force stop on a new program')
+        // A stop names the program the person saw: when another one took the port, nothing stops and the row says so.
+        devList = devList.map(row => row.port === 8000 ? { ...row, folder: 'fourth-program' } : row)
+        await list.getByRole('button', { name: 'Stop localhost:8000' }).click()
+        await confirm.getByRole('button', { name: 'Stop', exact: true }).click()
+        await list.locator('li', { hasText: 'fourth-program' }).waitFor()
+        if (JSON.stringify(stopPosts().at(-1)?.body.expect) !== JSON.stringify({ 8000: 'ino-8000-replacement-third-program' })) errors.push(`Stop sent expect ${JSON.stringify(stopPosts().at(-1)?.body.expect)}`)
+        if (!(await renewed.innerText()).includes('A new program uses this port now. Nothing was stopped.')) errors.push('a changed port does not say so')
+        if (await renewed.getByRole('button', { name: 'Stop localhost:8000' }).count() !== 1) errors.push('a changed port has no Stop')
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${name}-manager-changed.png`) })
         // A row opens its preview, with a way back to the list.
         await refused.getByRole('button', { name: /^localhost:9000/ }).click()
         await frameShows()
@@ -468,10 +494,29 @@ async function main() {
         await drawer.getByRole('button', { name: 'Back to dev servers' }).click()
         await list.waitFor()
         if (await drawer.locator('iframe').count()) errors.push('Back left the frame')
-        // More servers than one request may name (64): Stop all sends them in parts.
+        // More servers than one request may name (64): Stop all sends them in parts, one after another. A Refresh
+        // while a part runs drops the parts not sent yet: a new program on 6069 is not stopped.
         devList = Array.from({ length: 70 }, (_, index) => ({ port: 6000 + index, name: 'vite', folder: `app${index}` }))
         await drawer.getByRole('button', { name: 'Refresh the list' }).click()
         await list.locator('li', { hasText: 'localhost:6069' }).waitFor()
+        const beforeHeld = stopPosts().length
+        stopGate = new Promise(resolve => { openGate = resolve })
+        await drawer.getByRole('button', { name: 'Stop all' }).click()
+        await confirm.getByRole('button', { name: 'Stop 70' }).click()
+        await list.locator('li[aria-busy="true"]').first().waitFor()
+        devList = devList.map(row => row.port === 6069 ? { ...row, folder: 'new69' } : row)
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.locator('li', { hasText: 'new69' }).waitFor()
+        openGate(); stopGate = null
+        await list.locator('li', { hasText: 'localhost:6000' }).waitFor({ state: 'detached' })
+        await page.waitForTimeout(1000)  // a second part would be sent now
+        if (stopPosts().length - beforeHeld !== 1) errors.push(`a Refresh did not drop the unsent part: ${stopPosts().length - beforeHeld} requests`)
+        if (killed.has(6069) || !await list.locator('li', { hasText: 'new69' }).count()) errors.push('Stop all reached the new program on 6069')
+        if (await list.locator('li[aria-busy="true"], li.dev-row.failed, li.dev-row.changed').count()) errors.push('rows of a dropped part kept a state')
+        killed.clear()
+        devList = Array.from({ length: 70 }, (_, index) => ({ port: 6000 + index, name: 'vite', folder: `app${index}` }))
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.locator('li', { hasText: 'localhost:6000' }).waitFor()
         const before70 = stopPosts().length
         await drawer.getByRole('button', { name: 'Stop all' }).click()
         await confirm.getByRole('button', { name: 'Stop 70' }).click()
