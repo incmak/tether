@@ -16,6 +16,7 @@ type StopResult = { port: number; state: StopState; error?: string; reason?: str
 type RowState = { state: 'stopping' | 'still-running' | 'refused' | 'failed'; text?: string }
 type Ask = { ports: number[]; force: boolean }
 
+const MAX_STOP = 64  // ports per stop request (server/dev_previews.py MAX_STOP)
 const label = (row: DevServerRow) => [row.name, row.folder].filter(Boolean).join(' · ')
 const count = (n: number) => `${n} dev server${n === 1 ? '' : 's'}`
 
@@ -51,8 +52,9 @@ function ConfirmStop({ ask, rows, fallback, onYes, onClose }: { ask: Ask; rows: 
 }
 
 /** The dev servers that run now, each with Stop. manage: the "Dev servers" view, with Select (several) and Stop all.
- * onPick: preview a server. onChanged: some servers stopped; read the list again. */
-export function DevServerList({ api, rows, manage, onPick, onChanged, titleId, title }: { api: Api; rows: DevServerRow[]; manage?: boolean; onPick: (port: number) => void; onChanged: () => void; titleId: string; title: string }) {
+ * onPick: preview a server. onChanged: some servers stopped; read the list again. refreshed: changes each time the person
+ * asks for a fresh list. */
+export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChanged, titleId, title }: { api: Api; rows: DevServerRow[]; manage?: boolean; refreshed?: number; onPick: (port: number) => void; onChanged: () => void; titleId: string; title: string }) {
   const [states, setStates] = useState<Record<number, RowState>>({})
   const [gone, setGone] = useState<number[]>([])
   const [selecting, setSelecting] = useState(false)
@@ -66,31 +68,45 @@ export function DevServerList({ api, rows, manage, onPick, onChanged, titleId, t
   const stop = ({ ports, force }: Ask) => {
     setAsk(null)
     setStates(old => ({ ...old, ...Object.fromEntries(ports.map(port => [port, { state: 'stopping' }])) }))
-    api<{ results: StopResult[] }>('dev-preview/stop', { ports, force }).then(({ results }) => {
+    const chunks: number[][] = []
+    for (let at = 0; at < ports.length; at += MAX_STOP) chunks.push(ports.slice(at, at + MAX_STOP))
+    void Promise.allSettled(chunks.map(chunk => api<{ results: StopResult[] }>('dev-preview/stop', { ports: chunk, force }))).then(answers => {
       const next: Record<number, RowState> = {}, ended: number[] = [], words: string[] = []
-      for (const result of results) {
+      answers.forEach((answer, index) => {
+        if (answer.status === 'rejected') {
+          const text = errorText(answer.reason)
+          for (const port of chunks[index]) next[port] = { state: 'failed', text }
+          words.push(`Not stopped: ${text}`)
+          return
+        }
+        for (const result of answer.value.results) {
         if (result.state === 'stopped' || result.state === 'not-found') { ended.push(result.port); continue }
         if (result.state === 'still-running') { next[result.port] = { state: 'still-running' }; words.push(`localhost:${result.port} is still running.`) }
         else { next[result.port] = { state: 'refused', text: result.error || result.reason || 'Tether does not stop this program: it is not a dev server.' }; words.push(`localhost:${result.port} was not stopped.`) }
-      }
+        }
+      })
       if (ended.length) words.unshift(ended.length === 1 ? `Stopped localhost:${ended[0]}.` : `Stopped ${count(ended.length)}.`)
       setStates(old => { const kept = { ...old, ...next }; for (const port of ended) delete kept[port]; return kept })
       setGone(old => [...old, ...ended])
       setSelected(old => old.filter(port => !ended.includes(port)))
-      if (selecting && ended.length && !Object.keys(next).length) setSelecting(false)
+      // The selection cannot change while a stop runs (busy), so it is the one that was stopped.
+      if (ended.length && !Object.keys(next).length) setSelecting(false)
       setSaid(words.join(' '))
       if (ended.length) onChanged()
       // The focused Stop button may leave with its row: keep focus in the list.
       requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById(titleId)?.focus() })
-    }, failure => {
-      const text = errorText(failure)
-      setStates(old => ({ ...old, ...Object.fromEntries(ports.map(port => [port, { state: 'failed', text }])) }))
-      setSaid(`Not stopped: ${text}`)
     })
   }
   // A new list from the server is the truth: a port that stopped and runs again shows again.
   const [listed, setListed] = useState(rows)
   if (listed !== rows) { setListed(rows); setGone([]) }
+  // The person refreshed: a program on a port may be a new one now. Still running, Not stopped and Force stop describe
+  // the old one, so only a stop that still runs keeps its state. The list read again after a stop keeps them.
+  const [seen, setSeen] = useState(refreshed)
+  if (seen !== refreshed) {
+    setSeen(refreshed)
+    setStates(old => Object.fromEntries(Object.entries(old).filter(([, row]) => row.state === 'stopping')))
+  }
   const toggle = (port: number) => setSelected(old => old.includes(port) ? old.filter(item => item !== port) : [...old, port])
   const startSelect = () => { setSelected([]); setSelecting(true) }
   const endSelect = () => { setSelecting(false); setSelected([]); requestAnimationFrame(() => document.getElementById(`${titleId}-select`)?.focus()) }
@@ -113,7 +129,7 @@ export function DevServerList({ api, rows, manage, onPick, onChanged, titleId, t
       return <li key={row.port} className={state ? `dev-row ${state.state}` : 'dev-row'} aria-busy={stopping || undefined}>
         {selecting
           ? <label className="dev-row-main">
-            <input type="checkbox" checked={selected.includes(row.port)} disabled={stopping} onChange={() => toggle(row.port)} aria-describedby={status ? statusId : undefined} />
+            <input type="checkbox" checked={selected.includes(row.port)} disabled={busy} onChange={() => toggle(row.port)} aria-describedby={status ? statusId : undefined} />
             <span className="dev-row-text"><span className="dev-row-name">{name}</span>{label(row) && <small>{label(row)}</small>}</span>
           </label>
           : <button type="button" className="dev-row-main" disabled={stopping} aria-describedby={status ? statusId : undefined} onClick={() => onPick(row.port)}>
@@ -128,7 +144,7 @@ export function DevServerList({ api, rows, manage, onPick, onChanged, titleId, t
     })}</ul>
     {selecting && <div className="dev-select-bar" role="group" aria-label="Selected dev servers">
       <span aria-live="polite">{chosen.length} selected</span>
-      <button type="button" className="secondary" onClick={() => setSelected(chosen.length === shown.length ? [] : shown.map(row => row.port))}>{chosen.length === shown.length ? 'Clear' : 'Select all'}</button>
+      <button type="button" className="secondary" disabled={busy} onClick={() => setSelected(chosen.length === shown.length ? [] : shown.map(row => row.port))}>{chosen.length === shown.length ? 'Clear' : 'Select all'}</button>
       <button type="button" className="danger" disabled={!chosen.length || busy} onClick={() => setAsk({ ports: chosen, force: false })}>Stop {chosen.length || ''}</button>
     </div>}
     <p className="visually-hidden" role="status">{said}</p>
@@ -147,6 +163,7 @@ export function DevServerManager({ api, onPick }: { api: Api; onPick: (port: num
   const [done, setDone] = useState(-1)  // the round whose answer came back
   const loading = done !== round
   const [releasing, setReleasing] = useState(0)
+  const [refreshed, setRefreshed] = useState(0)  // the person's Refresh and Try again
   useEffect(() => {
     const abort = new AbortController()
     api<DevState>('dev-preview', undefined, abort.signal).then(found => {
@@ -167,12 +184,12 @@ export function DevServerManager({ api, onPick }: { api: Api; onPick: (port: num
   return <div className="dev-manager">
     <div className="dev-manager-bar">
       <p>Programs on this machine that serve a page on a localhost port. Tap one to preview it.</p>
-      <button type="button" className="icon-button" aria-label="Refresh the list" title="Refresh" disabled={loading} onClick={reload}><RotateCw size={18} aria-hidden="true" /></button>
+      <button type="button" className="icon-button" aria-label="Refresh the list" title="Refresh" disabled={loading} onClick={() => { setRefreshed(value => value + 1); reload() }}><RotateCw size={18} aria-hidden="true" /></button>
     </div>
-    {error && <div className="dev-manager-error" role="alert"><p>{error}</p><RetryButton label="Try again" onRetry={() => { setError(''); reload() }} /></div>}
+    {error && <div className="dev-manager-error" role="alert"><p>{error}</p><RetryButton label="Try again" onRetry={() => { setError(''); setRefreshed(value => value + 1); reload() }} /></div>}
     {!data && loading && !error && <div className="dev-manager-loading" role="status"><Spinner />Looking for dev servers…</div>}
     {data && (servers.length
-      ? <DevServerList api={api} rows={servers} manage onPick={onPick} onChanged={reload} titleId="dev-manager-title" title="Running now" />
+      ? <DevServerList api={api} rows={servers} manage refreshed={refreshed} onPick={onPick} onChanged={reload} titleId="dev-manager-title" title="Running now" />
       : <div className="dev-manager-empty"><h3 id="dev-manager-empty" tabIndex={-1}>No dev servers run now</h3><p>Ask an agent to start one, or run <code>npm run dev</code> in a tab.</p></div>)}
     {!!inUse.length && <div className="preview-servers dev-in-use">
       <h3 id="dev-in-use-title">Preview ports in use</h3>

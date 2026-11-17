@@ -420,6 +420,8 @@ async function main() {
         if (await confirm.getByRole('heading').innerText() !== 'Stop 2 dev servers?') errors.push('the select box has the wrong title')
         if (await confirm.getByRole('listitem').count() !== 2) errors.push('the select box does not list the servers')
         await confirm.getByRole('button', { name: 'Stop 2' }).click()
+        // While a stop runs the selection cannot change: the answer ends the selection it stopped.
+        if (!await list.getByRole('checkbox', { name: /localhost:9000/ }).isDisabled()) errors.push('the selection can change while a stop runs')
         await list.locator('li', { hasText: 'localhost:5301' }).waitFor({ state: 'detached' })
         if (JSON.stringify(stopPosts().at(-1)?.body) !== JSON.stringify({ ports: [5300, 5301], force: false })) errors.push(`select stop asked for ${JSON.stringify(stopPosts().at(-1)?.body)}`)
         // All: after a refresh every server runs again. One is refused and says why; it stays.
@@ -434,6 +436,10 @@ async function main() {
         const refused = list.locator('li', { hasText: 'localhost:9000' })
         if (!(await refused.innerText().catch(() => '')).includes('Not stopped: localhost:9000 is not a dev server now.')) errors.push('the refused row does not say why')
         if (!(await list.locator('li', { hasText: 'localhost:8000' }).innerText().catch(() => '')).includes('Still running')) errors.push('Stop all lost the still-running row')
+        // A refresh is the new truth: Still running and Not stopped describe the old program, so they go.
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.getByRole('button', { name: 'Stop localhost:8000' }).waitFor().catch(() => errors.push('a refresh kept Force stop'))
+        if ((await list.innerText()).includes('Still running') || (await list.innerText()).includes('Not stopped')) errors.push('a refresh kept old row states')
         // A row opens its preview, with a way back to the list.
         await refused.getByRole('button', { name: /^localhost:9000/ }).click()
         await frameShows()
@@ -441,6 +447,16 @@ async function main() {
         await drawer.getByRole('button', { name: 'Back to dev servers' }).click()
         await list.waitFor()
         if (await drawer.locator('iframe').count()) errors.push('Back left the frame')
+        // More servers than one request may name (64): Stop all sends them in parts.
+        devList = Array.from({ length: 70 }, (_, index) => ({ port: 6000 + index, name: 'vite', folder: `app${index}` }))
+        await drawer.getByRole('button', { name: 'Refresh the list' }).click()
+        await list.locator('li', { hasText: 'localhost:6069' }).waitFor()
+        const before70 = stopPosts().length
+        await drawer.getByRole('button', { name: 'Stop all' }).click()
+        await confirm.getByRole('button', { name: 'Stop 70' }).click()
+        await list.locator('li', { hasText: 'localhost:6069' }).waitFor({ state: 'detached' })
+        const parts = stopPosts().slice(before70).map(post => post.body.ports.length)
+        if (JSON.stringify(parts) !== '[64,6]') errors.push(`Stop all of 70 sent parts of ${JSON.stringify(parts)}`)
         // Empty.
         devList = []
         await drawer.getByRole('button', { name: 'Refresh the list' }).click()
