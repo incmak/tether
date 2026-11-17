@@ -100,6 +100,7 @@
 .dev-stop-confirm h2 { overflow-wrap: anywhere; }
 .dev-stop-effect { margin: 0 0 12px; line-height: 1.5; }
 .dev-stop-one { margin: 0 0 18px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.dev-stop-moved { margin: 0 0 18px; color: var(--error); line-height: 1.5; overflow-wrap: anywhere; }
 .dev-stop-list { display: grid; gap: 6px; max-height: 40dvh; margin: 0 0 18px; padding: 0 0 0 20px; overflow-y: auto; line-height: 1.4; overflow-wrap: anywhere; }
 .dev-stop-list small { display: block; color: var(--muted); font-size: 12px; }
 .dev-stop[aria-disabled="true"], .dev-force[aria-disabled="true"] { opacity: .5; cursor: default; }

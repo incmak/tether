@@ -8,7 +8,7 @@ import { Spinner } from './Skeleton'
 
 /** A dev server on this machine, as GET /mobile/api/dev-preview lists it (server/dev_previews.py: only dev servers,
  * never Tether, its services or an agent CLI). */
-export type DevServerRow = { port: number; id?: string; name: string; folder: string }
+export type DevServerRow = { port: number; id?: string; name: string; folder: string }  // id: the program (its listening sockets); a row without one cannot stop
 /** What POST /mobile/api/dev-preview/stop answers for each port. changed: another program listens on the port than the
  * one the list showed (the `expect` id), and nothing was signalled. */
 type StopState = 'stopped' | 'still-running' | 'refused' | 'not-found' | 'changed'
@@ -18,7 +18,9 @@ type StopResult = { port: number; state: StopState; error?: string; reason?: str
  * changed has no id: it describes the program that the next list shows. */
 type RowState = { state: 'stopping' | 'still-running' | 'refused' | 'failed' | 'changed'; text?: string; id?: string }
 const CHANGED = 'A new program uses this port now. Nothing was stopped.'
-type Ask = { ports: number[]; force: boolean }
+/** A stop the person is asked to confirm. rows: the programs the box shows, with their ids, taken when it opens; the
+ * stop names exactly these (the server requires an id for each port). */
+type Ask = { rows: (DevServerRow & { id: string })[]; force: boolean }
 
 const MAX_STOP = 64  // ports per stop request (server/dev_previews.py MAX_STOP)
 const label = (row: DevServerRow) => [row.name, row.folder].filter(Boolean).join(' · ')
@@ -37,8 +39,10 @@ function useReturnFocus(fallback: string) {
 function ConfirmStop({ ask, rows, fallback, onYes, onClose }: { ask: Ask; rows: DevServerRow[]; fallback: string; onYes: () => void; onClose: () => void }) {
   const modal = useModal(true, onClose)
   useReturnFocus(fallback)
-  const named = ask.ports.map(port => rows.find(row => row.port === port) ?? { port, name: '', folder: '' })
+  const named = ask.rows
   const one = named.length === 1
+  // The list was read again while the box was open: a program it names left its port, or another one took it.
+  const moved = named.filter(row => rows.find(item => item.port === row.port)?.id !== row.id)
   const title = ask.force ? `Force stop ${one ? `localhost:${named[0].port}` : count(named.length)}?` : `Stop ${one ? `localhost:${named[0].port}` : count(named.length)}?`
   // The drawer is a <dialog> too: Escape here must close only this box, not the drawer under it.
   return <dialog {...modal} onCancel={event => { event.stopPropagation(); modal.onCancel(event) }} className="sheet dev-stop-confirm" role="alertdialog" aria-labelledby="dev-stop-title" aria-describedby="dev-stop-effect">
@@ -48,9 +52,10 @@ function ConfirmStop({ ask, rows, fallback, onYes, onClose }: { ask: Ask; rows: 
       : `${one ? 'The server ends' : 'These servers end'} now. Unsaved work in ${one ? 'it' : 'them'} is lost, and ${one ? 'its previews close' : 'their previews close'}.`}</p>
     {!one && <ul className="dev-stop-list">{named.map(row => <li key={row.port}><span>localhost:{row.port}</span>{label(row) && <small>{label(row)}</small>}</li>)}</ul>}
     {one && label(named[0]) && <p className="dev-stop-one">{label(named[0])}</p>}
+    {moved.length > 0 && <p className="dev-stop-moved" role="alert">{one ? `localhost:${moved[0].port} has changed` : `${moved.map(row => `localhost:${row.port}`).join(', ')} ${moved.length === 1 ? 'has' : 'have'} changed`}: the program stopped, or a new one uses the port. Nothing will stop. Close this box and check the list.</p>}
     <div className="sheet-buttons">
-      <button type="button" className="secondary" autoFocus onClick={onClose}>Cancel</button>
-      <button type="button" className="danger" onClick={onYes}>{ask.force ? 'Force stop' : one ? 'Stop' : `Stop ${named.length}`}</button>
+      <button type="button" className="secondary" autoFocus onClick={onClose}>{moved.length ? 'Close' : 'Cancel'}</button>
+      <button type="button" className="danger" disabled={moved.length > 0} onClick={onYes}>{ask.force ? 'Force stop' : one ? 'Stop' : `Stop ${named.length}`}</button>
     </div>
   </dialog>
 }
@@ -69,15 +74,23 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
   const shown = rows.filter(row => !gone.includes(row.port))
   const busy = Object.values(states).some(row => row.state === 'stopping')
   const chosen = selected.filter(port => shown.some(row => row.port === port))
+  const all = chosen.length === shown.filter(row => row.id).length
   // The list generation: the person's Refresh or Try again starts a new one. A stop answer from an older generation
   // describes programs that may have left: it only ends the Stopping state and reads the list again.
   const generation = useRef(refreshed)
   useEffect(() => { generation.current = refreshed }, [refreshed])
-  const stop = ({ ports, force }: Ask) => {
+  // The list now shown, for stop answers that come back later.
+  const current = useRef(rows)
+  useEffect(() => { current.current = rows }, [rows])
+  const holds = (port: number, id: string) => current.current.find(row => row.port === port)?.id === id
+  // Only a row with an id can stop: the server stops a port only for the program that the list named.
+  const stoppable = (ports: number[]) => ports.flatMap(port => { const row = shown.find(item => item.port === port); return row?.id ? [{ ...row, id: row.id }] : [] })
+  const askStop = (ports: number[], force: boolean) => { const named = stoppable(ports); if (named.length) setAsk({ rows: named, force }) }
+  const stop = ({ rows: named, force }: Ask) => {
     setAsk(null)
     // The programs the person saw and confirmed: the server stops a port only while that program still holds it.
-    const ids: Record<number, string> = {}
-    for (const port of ports) { const id = rows.find(row => row.port === port)?.id; if (id) ids[port] = id }
+    const ports = named.map(row => row.port)
+    const ids: Record<number, string> = Object.fromEntries(named.map(row => [row.port, row.id]))
     setStates(old => ({ ...old, ...Object.fromEntries(ports.map(port => [port, { state: 'stopping', id: ids[port] }])) }))
     const started = generation.current
     const chunks: number[][] = []
@@ -87,7 +100,7 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
       const next: Record<number, RowState> = {}, ended: number[] = [], words: string[] = []
       for (const chunk of chunks) {
         if (generation.current !== started) break  // the person refreshed: the rest is not sent
-        const expect = Object.fromEntries(chunk.filter(port => ids[port]).map(port => [port, ids[port]]))
+        const expect = Object.fromEntries(chunk.map(port => [port, ids[port]]))
         let results: StopResult[]
         try {
           results = (await api<{ results: StopResult[] }>('dev-preview/stop', { ports: chunk, force, expect })).results
@@ -112,8 +125,18 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
         return
       }
       if (ended.length) words.unshift(ended.length === 1 ? `Stopped localhost:${ended[0]}.` : `Stopped ${count(ended.length)}.`)
-      setStates(old => { const kept = { ...old, ...next }; for (const port of ended) delete kept[port]; return kept })
-      setGone(old => [...old, ...ended])
+      // The list may have been read again while the stop ran: an answer describes the program it named, so it marks a
+      // row only while that program still holds the port. Else the row goes back to normal.
+      setStates(old => {
+        const kept = { ...old }
+        for (const port of ports) {
+          const answer = next[port]
+          if (answer && (answer.state === 'changed' || holds(port, ids[port]))) kept[port] = answer
+          else delete kept[port]
+        }
+        return kept
+      })
+      setGone(old => [...old, ...ended.filter(port => holds(port, ids[port]))])
       setSelected(old => old.filter(port => !ended.includes(port)))
       // The selection cannot change while a stop runs (busy), so it is the one that was stopped.
       if (ended.length && !Object.keys(next).length) setSelecting(false)
@@ -159,18 +182,20 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
           ? <button type="button" id={`${titleId}-select`} className="secondary" onClick={endSelect}>Done</button>
           : <>
             <button type="button" id={`${titleId}-select`} className="secondary" disabled={busy} onClick={startSelect}><CheckSquare size={16} aria-hidden="true" />Select</button>
-            {shown.length > 1 && <button type="button" className="secondary danger-text" disabled={busy} onClick={() => setAsk({ ports: shown.map(row => row.port), force: false })}><SquareX size={16} aria-hidden="true" />Stop all</button>}
+            {shown.length > 1 && <button type="button" className="secondary danger-text" disabled={busy} onClick={() => askStop(shown.map(row => row.port), false)}><SquareX size={16} aria-hidden="true" />Stop all</button>}
           </>}
       </div>}
     </div>
     <ul ref={listRef} aria-labelledby={titleId}>{shown.map(row => {
-      const state = states[row.port], stopping = state?.state === 'stopping', name = `localhost:${row.port}`
+      const kept = states[row.port]
+      const state = kept && (kept.state === 'stopping' || kept.id === undefined || kept.id === row.id) ? kept : undefined
+      const stopping = state?.state === 'stopping', name = `localhost:${row.port}`
       const status = stopping ? 'Stopping…' : state?.state === 'still-running' ? 'Still running' : state?.state === 'refused' ? 'Not stopped' : state?.state === 'failed' ? 'Not stopped' : state?.state === 'changed' ? CHANGED : ''
       const statusId = `${titleId}-${row.port}-status`
       return <li key={row.port} className={state ? `dev-row ${state.state}` : 'dev-row'} aria-busy={stopping || undefined}>
         {selecting
           ? <label className="dev-row-main">
-            <input type="checkbox" checked={selected.includes(row.port)} disabled={busy} onChange={() => toggle(row.port)} aria-describedby={status ? statusId : undefined} />
+            <input type="checkbox" checked={selected.includes(row.port)} disabled={busy || !row.id} onChange={() => toggle(row.port)} aria-describedby={status ? statusId : undefined} />
             <span className="dev-row-text"><span className="dev-row-name">{name}</span>{label(row) && <small>{label(row)}</small>}</span>
           </label>
           : <button type="button" className="dev-row-main" disabled={stopping} aria-describedby={status ? statusId : undefined} onClick={() => onPick(row.port)}>
@@ -178,15 +203,15 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
           </button>}
         {status && <p id={statusId} className="dev-row-status">{stopping && <Spinner />}<span>{status}{state?.text && state.state !== 'stopping' ? `: ${state.text}` : ''}</span></p>}
         {!selecting && <div className="dev-row-actions">
-          {state?.state === 'still-running' && <button type="button" className="danger dev-force" aria-disabled={busy || undefined} onClick={() => { if (!busy) setAsk({ ports: [row.port], force: true }) }}>Force stop</button>}
-          {state?.state !== 'still-running' && <button type="button" className="icon-button dev-stop" aria-disabled={busy || undefined} aria-label={`Stop ${name}`} title={`Stop ${name}`} onClick={() => { if (!busy) setAsk({ ports: [row.port], force: false }) }}><Square size={16} aria-hidden="true" fill="currentColor" /></button>}
+          {state?.state === 'still-running' && <button type="button" className="danger dev-force" aria-disabled={busy || undefined} onClick={() => { if (!busy) askStop([row.port], true) }}>Force stop</button>}
+          {state?.state !== 'still-running' && row.id && <button type="button" className="icon-button dev-stop" aria-disabled={busy || undefined} aria-label={`Stop ${name}`} title={`Stop ${name}`} onClick={() => { if (!busy) askStop([row.port], false) }}><Square size={16} aria-hidden="true" fill="currentColor" /></button>}
         </div>}
       </li>
     })}</ul>
     {selecting && <div className="dev-select-bar" role="group" aria-label="Selected dev servers">
       <span aria-live="polite">{chosen.length} selected</span>
-      <button type="button" className="secondary" disabled={busy} onClick={() => setSelected(chosen.length === shown.length ? [] : shown.map(row => row.port))}>{chosen.length === shown.length ? 'Clear' : 'Select all'}</button>
-      <button type="button" className="danger" disabled={!chosen.length || busy} onClick={() => setAsk({ ports: chosen, force: false })}>Stop {chosen.length || ''}</button>
+      <button type="button" className="secondary" disabled={busy} onClick={() => setSelected(all ? [] : shown.filter(row => row.id).map(row => row.port))}>{all ? 'Clear' : 'Select all'}</button>
+      <button type="button" className="danger" disabled={!chosen.length || busy} onClick={() => askStop(chosen, false)}>Stop {chosen.length || ''}</button>
     </div>}
     <p className="visually-hidden" role="status">{said}</p>
     {ask && <ConfirmStop ask={ask} rows={rows} fallback={titleId} onYes={() => stop(ask)} onClose={() => setAsk(null)} />}
