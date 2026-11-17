@@ -81,6 +81,10 @@ PRODUCT = ('Own the product decisions in this task. Decide what the product and 
            'work in the backlog.')
 SAFETY = ('At every level, ask before you delete data, force-push, run a destructive migration, spend money, make a '
           'public release, or send a message to another person.')
+VERIFIED = ('End each commit message you write with a "Verified:" line that says how you checked the work, for example '
+            '"Verified: tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)". When you did not check '
+            'it, write "Verified: none (reason)". Each deploy record you write (such as a DEPLOYED.md line) ends with '
+            'the same stamp.')
 URGENT = ('When you must ask, end the reply with "Needs you: yes". If the question blocks the work, put a line '
           '"Urgent: <the question in one sentence>" just before it.')
 DECISIONS = ('The user saved answers for this project in {path}. Reuse one only when it answers the same question; '
@@ -286,6 +290,7 @@ def rules(resolved, pid=None, agent='claude', prompt='', helper=False, tab_advis
     if level >= 4:
         lines.append(PRODUCT)
     lines.extend(_learning_rules(pid, agent, prompt, helper))
+    lines.append(VERIFIED)  # B189: every commit and deploy says how it was verified
     lines.append(SAFETY)
     if level >= 4:
         lines.append(URGENT)

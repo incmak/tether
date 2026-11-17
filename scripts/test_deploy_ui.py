@@ -27,7 +27,8 @@ class DeployUiTest(unittest.TestCase):
 
     def deploy(self):
         # These checks cover the install itself. The commit guard has its own tests below.
-        return deploy_ui.deploy(self.build, self.target, force=True, warn=lambda text: None)
+        return deploy_ui.deploy(self.build, self.target, force=True, warn=lambda text: None,
+                                verified='none (test)', log=Path(self.folder.name) / 'DEPLOYED.md')
 
     def test_preserves_old_chunks_and_publishes_entry_last(self):
         replace = deploy_ui.os.replace
@@ -46,7 +47,7 @@ class DeployUiTest(unittest.TestCase):
     def test_rejects_missing_assets_before_install(self):
         (self.build / 'assets/new.js').unlink()
         with self.assertRaises(ValueError):
-            deploy_ui.deploy(self.build, self.target)
+            deploy_ui.deploy(self.build, self.target, verified='none (test)', log=Path(self.folder.name) / 'DEPLOYED.md')
         self.assertEqual((self.target / 'index.html').read_text(), 'old entry')
 
     def test_failed_asset_install_keeps_old_entry(self):
@@ -56,8 +57,8 @@ class DeployUiTest(unittest.TestCase):
         self.assertEqual((self.target / 'index.html').read_text(), 'old entry')
 
 
-class DeployGuardTest(unittest.TestCase):
-    """B92: a build must contain the live commit, or the install would remove deployed work."""
+class GuardCase(unittest.TestCase):
+    """A real git repository, a stamped build and a live target."""
 
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -74,6 +75,7 @@ class DeployGuardTest(unittest.TestCase):
         (self.target / 'assets').mkdir(parents=True)
         (self.target / 'index.html').write_text('old entry')
         self.warnings = []
+        self.log = root / 'DEPLOYED.md'
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'user.email=t@example.invalid', '-c', 'user.name=t',
@@ -90,6 +92,8 @@ class DeployGuardTest(unittest.TestCase):
         (self.target / '.live-commit').write_text(json.dumps({'commit': commit, 'dirty': False}))
 
     def deploy(self, **options):
+        options.setdefault('verified', 'tests(scripts ok)')
+        options.setdefault('log', self.log)
         return deploy_ui.deploy(self.build, self.target, repo=self.repo, warn=self.warnings.append, **options)
 
     def record(self):
@@ -98,6 +102,11 @@ class DeployGuardTest(unittest.TestCase):
     def assert_untouched(self):
         self.assertEqual((self.target / 'index.html').read_text(), 'old entry')
         self.assertFalse((self.target / 'assets/new.js').exists())
+
+
+
+class DeployGuardTest(GuardCase):
+    """B92: a build must contain the live commit, or the install would remove deployed work."""
 
     def test_build_that_contains_live_commit_installs_and_records(self):
         self.set_live(self.base)
@@ -252,6 +261,97 @@ class DeployGuardTest(unittest.TestCase):
         self.stamp(self.base)
         with self.assertRaisesRegex(deploy_ui.Refused, 'did not finish'):
             self.deploy()
+
+
+class VerifiedStampTest(GuardCase):
+    """B189: every UI deploy says how it was verified, and its DEPLOYED.md line carries the stamp."""
+
+    def test_missing_or_malformed_stamp_is_refused_before_any_check_or_change(self):
+        self.set_live(self.base)
+        self.stamp(self.live)
+        for stamp in (None, '', '  ', 'tested it', 'tests', 'Verified:', 'none of it'):
+            for dry_run in (False, True):
+                with self.subTest(stamp=stamp, dry_run=dry_run):
+                    with self.assertRaisesRegex(ValueError, '--verified is missing'):
+                        self.deploy(verified=stamp, dry_run=dry_run, force=True)
+        self.assert_untouched()
+        self.assertFalse(self.log.exists())
+        self.assertEqual(self.record()['commit'], self.base)
+
+    def test_install_records_the_stamp_and_adds_one_deployed_line(self):
+        self.set_live(self.base)
+        self.stamp(self.live)
+        stamp = 'Verified:  tests(server 412 ok, ui 91/93)   screenshots(24) review(codex APPROVED)'
+        self.assertEqual(self.deploy(verified=stamp), 2)
+        clean = 'tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)'
+        self.assertEqual(self.record()['verified'], clean)
+        line, = self.log.read_text().splitlines()
+        self.assertRegex(line, r'^- \d{4}-\d{2}-\d{2} \d{2}:\d{2} \S+ · ')
+        self.assertTrue(line.endswith(f'{self.live[:7]} UI deploy: live feature · Verified: {clean}'), line)
+
+    def test_explicit_none_installs_and_is_listed_as_unverified(self):
+        self.stamp(self.live)
+        self.log.write_text('# Deploys\n- 2026-01-01 10:00 IST · old line')  # no final newline
+        self.assertEqual(self.deploy(verified='none (copy fix)'), 2)
+        self.assertEqual(self.record()['verified'], 'none (copy fix)')
+        lines = self.log.read_text().splitlines()
+        self.assertEqual(lines[:2], ['# Deploys', '- 2026-01-01 10:00 IST · old line'])
+        found = deploy_ui.verification.unverified_deploys(self.log, deploy_ui.datetime(2026, 1, 1).date())
+        self.assertEqual([kind for _, kind in found], ['missing', 'none'])
+        self.assertIn('none (copy fix)', found[1][0])
+
+    def test_dry_run_writes_no_line(self):
+        self.stamp(self.live)
+        self.assertEqual(self.deploy(dry_run=True), 0)
+        self.assertFalse(self.log.exists())
+
+    def test_commits_without_a_trailer_warn_but_do_not_refuse(self):
+        self.set_live(self.base)
+        stamped = self.commit('stamped work\n\nVerified: tests(server ok)')
+        bare = self.commit('bare work')
+        self.stamp(bare)
+        self.assertEqual(self.deploy(dry_run=True), 0)
+        warning, = [text for text in self.warnings if 'observe mode' in text]
+        self.assertIn(f'[missing] {bare[:7]} bare work', warning)
+        self.assertIn(f'[missing] {self.live[:7]} live feature', warning)
+        self.assertNotIn(stamped[:7], warning)
+        self.warnings.clear()
+        self.set_live(bare)
+        none = self.commit('docs only\n\nVerified: none (docs)')
+        self.stamp(none)
+        self.assertEqual(self.deploy(), 2)
+        warning, = [text for text in self.warnings if 'observe mode' in text]
+        self.assertIn(f'[none] {none[:7]} docs only', warning)
+
+    def test_fully_stamped_range_gives_no_warning(self):
+        self.set_live(self.live)
+        self.stamp(self.commit('fix\n\nVerified: review(codex APPROVED)'))
+        self.assertEqual(self.deploy(), 2)
+        self.assertFalse([text for text in self.warnings if 'observe mode' in text])
+
+    def test_subject_that_says_verified_still_gets_its_line(self):
+        self.set_live(self.live)
+        stamped = self.commit('Document Verified: trailer rules')
+        self.stamp(stamped)
+        self.assertEqual(self.deploy(), 2)
+        line, = self.log.read_text().splitlines()
+        self.assertIn(f'{stamped[:7]} UI deploy: Document Verified trailer rules · Verified: tests(scripts ok)', line)
+        self.assertEqual(deploy_ui.verification.status(line), 'verified')
+
+    def test_log_write_failure_after_install_warns_with_the_command(self):
+        self.stamp(self.live)
+        self.assertEqual(self.deploy(log=self.target / 'missing-folder' / 'DEPLOYED.md'), 2)
+        self.assertTrue(any('verification.py log --verified "tests(scripts ok)"' in text for text in self.warnings))
+        self.assertEqual(self.record()['commit'], self.live)
+
+    def test_cli_refuses_install_without_verified(self):
+        self.stamp(self.live)
+        argv = ['deploy-ui.py', str(self.build), str(self.target)]
+        with patch.object(deploy_ui.sys, 'argv', argv), patch.object(deploy_ui, 'REPO', self.repo), \
+                patch('sys.stderr'), self.assertRaises(SystemExit) as caught:
+            deploy_ui.main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assert_untouched()
 
 
 if __name__ == '__main__':

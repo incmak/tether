@@ -11,6 +11,9 @@ import sys
 import time
 
 
+VERIFIED = 'Verified: tests(server unittest ok) checks(ui tsc, eslint, build ok)'
+
+
 def run(args, cwd, *, capture=False, **kwargs):
     result = subprocess.run(args, cwd=cwd, text=True, capture_output=capture, **kwargs)
     if result.returncode:
@@ -101,7 +104,8 @@ def main():
         run(['/bin/bash', '-c', 'npx tsc -b && npx eslint . && npm run build'],
             worktree / 'ui', timeout=1200)
         run(['git', 'add', '--', *files], worktree)
-        run(['git', 'commit', '-m', f'Release {args.version}'], worktree)
+        # B189: the checks above ran in this worktree and stop the run on failure, so the stamp is earned here.
+        run(['git', 'commit', '-m', f'Release {args.version}\n\n{VERIFIED}'], worktree)
         commit = run(['git', 'rev-parse', 'HEAD'], worktree, capture=True)
         # This run's tag is the one at this run's commit. Until the push starts, a failure removes it.
         pending = None if args.no_push else commit

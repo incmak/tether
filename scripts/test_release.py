@@ -83,6 +83,9 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(self.release('0.0.2'), 0)
         self.assertEqual(git(self.origin, 'show', 'v0.0.2:VERSION'), '0.0.2')
         self.assertEqual(git(self.origin, 'rev-parse', 'main'), git(self.origin, 'rev-parse', 'v0.0.2^{commit}'))
+        # B189: the release commit carries the stamp that its own checks earned.
+        self.assertEqual(git(self.origin, 'log', '-1', '--format=%B', 'main').strip(),
+                         f'Release 0.0.2\n\n{release.VERIFIED}')
 
     def test_main_moves_during_the_run_then_the_next_run_works(self):
         self.hooks[('git', 'commit')] = self.move_main

@@ -48,6 +48,7 @@ from terminal_input import resume_command, resume_session, rename_agent
 from terminal_input import stash_quiet_draft, restore_check, clear_unsent, prompt_draft
 import model_picker
 import prompt_actions
+import notification_priority
 import push
 import shortcuts
 import prefs_sync
@@ -217,6 +218,11 @@ def review_alert(title, body, session, review=None):
     notify(payload, True)
 
 
+def review_turn_source(entry):
+    """'user' or 'background' for the worker's last turn. A missing transcript counts as 'user'."""
+    return notification_priority.turn_source(entry.get('agent'), notification_records(entry))
+
+
 def review_work_mark(entry):
     cwd = entry.get('cwd')
     if not cwd:
@@ -250,7 +256,8 @@ def monitor_notices():
             except Exception:  # one odd pane must never stop the monitor for everyone
                 continue
         review_links.observe(entries, shared_status, review_send, last_reply,
-                             alert=review_alert, work_mark=review_work_mark, review_reply=review_reply)
+                             alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
+                             turn_source=review_turn_source)
         try:
             attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()

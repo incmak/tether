@@ -14,10 +14,12 @@ from terminal_input import DraftError
 
 FILE = paths.CACHE / 'review-links.json'
 MAX_LINKS = 50
+# Reviews per task that may still find blocking problems. The last one goes to Mak as a "Needs you" ask, not as a fix.
 MAX_ROUNDS = 3
 GRACE = 30
 LOSS_TICKS = 30
 START_WAIT = 300
+AGENT_PROMPT_TTL = 600  # an agent prompt that started no turn in 10 minutes no longer blocks Mak's restart
 SEND_GAP = 6
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _lock = threading.Lock()
@@ -89,6 +91,20 @@ def remove(worker, reviewer=None):
         return True
 
 
+def agent_prompt(worker):
+    """Another agent sent this worker a prompt. Its next turn is not a new task from Mak, so it keeps the round count."""
+    with _lock:
+        links = _read()
+        marked = False
+        for link in links:
+            if isinstance(link, dict) and link.get('worker') == worker:
+                link['agent_prompt'] = time.time()
+                marked = True
+        if marked:
+            _write(links)
+        return marked
+
+
 def resume_stalled(worker, reviewer, request_id, action, *, last_reply=None, reviewer_entry=None):
     if not all(isinstance(pane, str) and re.fullmatch(r'%[0-9]+', pane)
                for pane in (worker, reviewer)) or not (
@@ -135,6 +151,11 @@ def _lost(link, reason):
     return None if link['lost_ticks'] >= LOSS_TICKS else link
 
 
+def _agent_prompt_fresh(link):
+    sent = link.get('agent_prompt')
+    return isinstance(sent, (int, float)) and not isinstance(sent, bool) and time.time() - sent < AGENT_PROMPT_TTL
+
+
 def _at_round_limit(link):
     return any(link.get(key, 0) >= MAX_ROUNDS for key in ('rounds', 'empty_rounds'))
 
@@ -159,7 +180,7 @@ def _send_worker(link, worker, text, state, send, clear, feedback_sent):
 
 
 def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sent, work_mark, review_reply,
-          stalled_replies):
+          stalled_replies, turn_source=None, escalations=None):
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
     if link['reviewer_thread'] is None:
@@ -186,6 +207,23 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     link.pop('lost_ticks', None)
     link.pop('lost_reason', None)
     state = status(worker)['state']
+    if state == 'Idle' and 'restart' in link:
+        start = link.pop('restart')
+        start = start if isinstance(start, dict) else {}
+        source = turn_source(worker) if turn_source is not None else 'user'
+        # A prompt from Mak starts a new task. A background event or another agent's prompt continues this one.
+        by_agent = start.get('agent', False) or _agent_prompt_fresh(link)
+        link.pop('agent_prompt', None)
+        if not by_agent and source == 'user':
+            for key in ('rounds', 'empty_rounds'):
+                left = link.get(key, 0) - start.get(key, 0)
+                if left > 0:
+                    link[key] = left
+                else:
+                    link.pop(key, None)
+            # The new task keeps only the failed reviews of its own turn. A limit reached in this turn alone stays.
+            if start.get('paused') or not _at_round_limit(link):
+                link.pop('paused', None)
     if state == 'Idle' and link.pop('worker_busy_send', False):
         return link
     feedback = _feedback_turns.get(link['worker'])
@@ -200,9 +238,13 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             # until Idle so later ticks of this same turn cannot reset its count.
             feedback['working'].add(link['reviewer'])
         else:
-            link.pop('rounds', None)
-            link.pop('empty_rounds', None)
-            link.pop('paused', None)
+            # Decide at the end of the turn: only then does the transcript show what started it. Keep the counts
+            # from the start, so feedback that lands during this turn still counts.
+            link.setdefault('restart', {key: link.get(key, 0) for key in ('rounds', 'empty_rounds', 'paused')})
+    if state == 'Working' and isinstance(link.get('restart'), dict) and _agent_prompt_fresh(link):
+        # Record the origin while the turn runs, so a turn longer than the TTL still counts as the agent's.
+        link['restart'] = {**link['restart'], 'agent': True}  # a new dict: the saved copy must see the change
+        link.pop('agent_prompt', None)
     if link.get('awaiting', False):
         reviewer_state = status(reviewer)['state']
         anchored = review_reply is not None and link.get('request_id')
@@ -246,6 +288,20 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 elif _at_round_limit(link):
                     link['paused'] = True
                     link['awaiting'] = False
+                elif link.get('empty_rounds' if link.get('empty_turn') else 'rounds', 0) + 1 >= MAX_ROUNDS:
+                    # The last allowed review still finds problems: Mak decides, not a further fix.
+                    text = (f"[Tether review] Stopped after {MAX_ROUNDS} review rounds: the reviewer tab "
+                            f"({link['reviewer']}) still finds blocking problems. Do not fix them in this turn. "
+                            f"Mak decides the next step.\n\nOpen findings:\n\n{_bounded_reply(reply, reviewer)}\n\n"
+                            'Reply with a short list of the open findings and what you tried, '
+                            'then end with "Needs you: yes".')
+                    if _send_worker(link, worker, text, state, send, clear, feedback_sent):
+                        key = 'empty_rounds' if link.pop('empty_turn', False) else 'rounds'
+                        link[key] = link.get(key, 0) + 1
+                        link['paused'] = True
+                        link['awaiting'] = False
+                        if escalations is not None:
+                            escalations[link['worker'], link['reviewer']] = reply
                 else:
                     text = (f"[Tether review] Feedback from the reviewer tab ({link['reviewer']}):\n\n"
                             f'{_bounded_reply(reply, reviewer)}\n\nFix what it raises, then stop and wait.')
@@ -314,7 +370,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     return link
 
 
-def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None):
+def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None, turn_source=None):
     """Callbacks run outside the store lock: send takes SEND_LOCK, while add already holds it."""
     try:
         if not any(isinstance(entry.get('id'), str) and entry['id'].startswith('%') for entry in entries):
@@ -337,12 +393,13 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             return (pane not in awaiting
                     and time.monotonic() - _last_sent.get(pane, float('-inf')) >= SEND_GAP)
         stalled_replies = {}
+        escalations = {}
         changes = []
         for link in original:
             try:
                 copy = dict(link)
                 updated = _step(copy, by_pane, status, send, last_reply, awaiting, clear, feedback_sent,
-                                work_mark, review_reply, stalled_replies)
+                                work_mark, review_reply, stalled_replies, turn_source, escalations)
             except Exception:  # a malformed link or one bad pane must not stop other reviews
                 continue
             if updated != link:
@@ -374,9 +431,17 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 title = 'Review link lost'
                 body = f'“{old["name"]}”: {reason}. Tether no longer reviews this tab.'
             elif updated.get('paused') and not old.get('paused'):
-                title = 'Review paused'
-                body = (f'“{old["name"]}” reached the round limit. '
-                        'Send a prompt in that tab to restart reviews.')
+                findings = escalations.get((old['worker'], old['reviewer']))
+                if findings is not None:
+                    preview = findings.strip().replace('\n', ' ')
+                    preview = preview[:300] + ('…' if len(preview) > 300 else '')
+                    title = 'Review needs you'
+                    body = (f'“{old["name"]}”: the reviewer still found blocking problems after {MAX_ROUNDS} rounds. '
+                            f'Answer in that tab to restart reviews. Open findings: “{preview}”')
+                else:
+                    title = 'Review paused'
+                    body = (f'“{old["name"]}” reached the round limit. '
+                            'Answer in that tab to restart reviews.')
             elif updated.get('stalled') and not old.get('stalled'):
                 print(f"review stalled: worker={old['worker']} reviewer={old['reviewer']} "
                       f"name={old['name']}", file=sys.stderr, flush=True)

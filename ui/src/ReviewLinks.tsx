@@ -49,7 +49,7 @@ function ReviewPop({ api, at, reviewing, reviewers, onClose, onOpen, onChanged, 
     return <li key={link.otherId} className="review-row">
       <button type="button" className="review-go" disabled={!link.other} onClick={() => link.other && onOpen(link.other)}>
         {link.other && <AgentIcon agent={link.other.agent} icon={link.other.pane_icon} size={14} />}
-        <span className="review-text"><span className="review-name" title={name}>{name}</span>{link.paused && <small>Feedback paused after 3 rounds. A new prompt restarts it.</small>}</span>
+        <span className="review-text"><span className="review-name" title={name}>{name}</span>{link.paused && <small>Paused after 3 review rounds with open findings. Your next prompt in the worker tab restarts it.</small>}</span>
         {state === 'Working' || needsYou(state ?? '') ? <span className={`state-dot ${state === 'Working' ? 'working' : 'approval'}`} aria-label={state === 'Working' ? 'Working' : 'Needs you'} /> : null}
       </button>
       <button type="button" className="review-stop" disabled={stopping === link.otherId} aria-label={`Stop review link with ${name}`} title="Stop this review" onClick={() => void stop(link)}><X size={14} /></button>

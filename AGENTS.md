@@ -43,7 +43,8 @@ Claude Code, Codex and Antigravity redraw their screens between versions. Code t
 - Contact the sessions that own conflicting changes. Agree on file or hunk ownership, consolidate compatible changes, and verify the result.
 - Resolve routine conflicts between sessions. Ask Mak only when the conflict requires a product decision or destructive action.
 - Preserve unrelated work. Build the UI from the selected commit in a clean checkout, then install the output atomically.
-- Install with `python3 scripts/deploy-ui.py BUILD_DIR ui/dist`. It preserves old chunks and publishes the entry page last.
+- Install with `python3 scripts/deploy-ui.py --verified STAMP BUILD_DIR ui/dist`. It preserves old chunks and publishes the entry page last.
+- Every commit and deploy says how it was verified. End each commit message with a stamp such as `Verified: tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)`, or `Verified: none (reason)`. Give the same stamp to `deploy-ui.py --verified`; it refuses an install without one and adds the `DEPLOYED.md` line. For a backend-only deploy, run `python3 scripts/verification.py log --verified STAMP --commit HASH "what changed"`. List unverified work with `python3 scripts/verification.py unverified`.
 - The build writes `.build-commit`; the install records it in `ui/dist/.live-commit`. The install refuses a build that does not contain the live commit, or one from uncommitted changes. To fix, rebase or merge `origin/main` and any deployed commits not yet pushed, then rebuild. Check first with `--dry-run`. Use `--force` only to remove deployed work on purpose.
 - Verify the served entry page and deployed behavior after installation.
 - The backend loads the shared working tree on restart. Coordinate pending server edits before a restart.

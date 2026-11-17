@@ -166,6 +166,8 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                     raise ValueError('That session has ended. Select another tab.')
                 result = helper_tabs.send_message(body, caller, entries, run, status, send, last_reply,
                                                   helper_tabs.SEND_LOCK)
+                # A prompt from another agent continues the worker's current review task (B189).
+                review_links.agent_prompt(result[1]['pane'])
             else:
                 handler.keep_sessions = True
                 result = 200, helper_tabs.poll(body, caller, entries, run, status, last_reply, timeline)

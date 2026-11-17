@@ -3,6 +3,8 @@
 
 B92: each build carries .build-commit (written by ui/vite.config.ts). The install records it as .live-commit in the
 target. A build whose commit does not contain the live commit would remove deployed work, so it is refused.
+B189: each install needs --verified STAMP ("tests(...) review(...)" or "none (reason)"). The stamp goes into the live
+record and a DEPLOYED.md line. Deployed commits without a "Verified:" trailer give a warning only (observe mode).
 """
 import argparse
 from contextlib import contextmanager
@@ -16,6 +18,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verification  # noqa: E402  (scripts/verification.py)
 
 STAMP = '.build-commit'
 RECORD = '.live-commit'
@@ -106,15 +111,39 @@ def write_record(target: Path, record: dict, name: str = RECORD):
 
 
 def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dry_run: bool = False,
-           warn=lambda text: print(f'Warning: {text}', file=sys.stderr)) -> int:
+           warn=lambda text: print(f'Warning: {text}', file=sys.stderr), *, verified: str | None = None,
+           log: Path | None = None) -> int:
+    """Install the build. `verified` is required (B189); `log` is the DEPLOYED.md to add a line to."""
+    try:
+        verified = verification.valid(verified)
+    except ValueError as error:
+        raise ValueError(f'--verified is missing or malformed. {error}') from None
     build, target = build.resolve(), target.resolve()
+    log = Path(log) if log else verification.log_path(repo)
     if dry_run and not target.is_dir():
-        return install(build, target, repo, force, dry_run, warn)
+        return install(build, target, repo, force, dry_run, warn, verified, log)
     with locked(target):
-        return install(build, target, repo, force, dry_run, warn)
+        return install(build, target, repo, force, dry_run, warn, verified, log)
 
 
-def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, warn) -> int:
+def observe_trailers(build: Path, target: Path, repo: Path, warn):
+    """Observe mode: name deployed commits without a "Verified:" trailer. Never refuses."""
+    try:
+        built = (read_json(build / STAMP, 'The build stamp') or {}).get('commit')
+        live = (read_json(target / RECORD, 'The live record') or {}).get('commit')
+    except Refused:
+        return
+    if not built or not live or built == live:
+        return
+    found = verification.unverified_commit_range(repo, live, built)
+    if found:
+        shown = '\n'.join(f'  [{kind}] {short} {subject[:100]}' for short, subject, kind in found[:5])
+        more = f'\n  and {len(found) - 5} more' if len(found) > 5 else ''
+        warn(f'{len(found)} deployed commit(s) have no "Verified:" trailer or say "none" (observe mode, not '
+             f'refused):\n{shown}{more}')
+
+
+def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, warn, verified: str, log: Path) -> int:
     entry = build / 'index.html'
     if build == target or not entry.is_file():
         raise ValueError('Use a separate build folder with index.html.')
@@ -128,6 +157,7 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
         if not force:
             raise
         warn(f'--force: installing anyway. {error}')
+    observe_trailers(build, target, repo, warn)
     if dry_run:
         return 0
     try:
@@ -158,9 +188,22 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
         (target / RECORD).unlink(missing_ok=True)
         warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
     else:
-        write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'),
+        write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'), 'verified': verified,
                               'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
     pending.unlink()
+    commit = (stamp or {}).get('commit')
+    try:
+        subject = git(repo, 'log', '-1', '--format=%s', commit).stdout.strip() if commit else ''
+    except Refused:
+        subject = ''
+    # A subject may itself say "Verified:" (a commit about this rule); only the stamp at the end may.
+    subject = subject.replace('Verified:', 'Verified')
+    text = f'UI deploy: {subject}' if subject else 'UI deploy (commit unknown)'
+    try:
+        verification.append(log, verification.line(text, verified, commit[:7] if commit else None))
+    except (OSError, ValueError) as error:  # the build is live now: report, never fail
+        warn(f'Installed, but the DEPLOYED.md line was not written ({log}: {error}). Add it with: '
+             f'scripts/verification.py log --verified "{verified}" "{text}"')
     return count
 
 
@@ -203,11 +246,14 @@ def record_live(commit: str, target: Path, repo: Path = REPO) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     usage='%(prog)s [--force] [--dry-run] BUILD TARGET\n'
+                                     usage='%(prog)s --verified STAMP [--force] [--dry-run] BUILD TARGET\n'
                                            '       %(prog)s --record-live COMMIT TARGET')
     parser.add_argument('paths', nargs='+', type=Path, metavar='BUILD TARGET')
     parser.add_argument('--force', action='store_true', help='install even when the guard refuses the build')
     parser.add_argument('--dry-run', action='store_true', help='run the checks only; install nothing')
+    parser.add_argument('--verified', metavar='STAMP',
+                        help='how this build was verified: "tests(server 412 ok) review(codex APPROVED)" or '
+                             '"none (reason)". Required to install.')
     parser.add_argument('--record-live', metavar='COMMIT',
                         help='record COMMIT as the live build in TARGET; install nothing')
     args = parser.parse_args()
@@ -217,7 +263,7 @@ def main():
         if args.record_live:
             print(f'Recorded {record_live(args.record_live, args.paths[0])} as the live commit.')
             return
-        count = deploy(*args.paths, force=args.force, dry_run=args.dry_run)
+        count = deploy(*args.paths, force=args.force, dry_run=args.dry_run, verified=args.verified)
     except Refused as error:
         parser.exit(1, f'Deployment refused: {error}\nUse --force only when you mean to remove that work.\n')
     except (OSError, ValueError) as error:

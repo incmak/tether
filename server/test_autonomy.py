@@ -109,6 +109,8 @@ class Rules(Base):
                                  f'Autonomy level {level} of 5 ({name}), set by the user for all projects.')
                 self.assertIn(autonomy.RULES[level], text)
                 self.assertIn(safety, text.splitlines())
+                self.assertIn(autonomy.VERIFIED, text.splitlines())
+                self.assertIn('"Verified: none (reason)"', autonomy.VERIFIED)
                 self.assertEqual('Needs you: yes' in text, level >= 4)
                 self.assertEqual('Urgent: <the question in one sentence>' in text, level >= 4)
                 self.assertNotIn('Before you ask the user, read', text)
@@ -657,7 +659,7 @@ class Learning(Base):
                 self.assertNotIn(avoid['id'], text, 'the lessons are not part of the standing rules')
                 self.assertEqual('Do this as well as your own memory.' in text, agent == 'claude')
                 needles = [autonomy.RULES[level], 'Learn from feedback.', 'This message may correct',
-                           'More lessons: ', autonomy.SAFETY, autonomy.LAST]
+                           'More lessons: ', autonomy.VERIFIED, autonomy.SAFETY, autonomy.LAST]
                 self.assertEqual([text.index(n) for n in needles], sorted(text.index(n) for n in needles))
         lines = autonomy.lesson_lines({}, PID, 'The checks fail and then the checks pass.')
         self.assertEqual(lines[0], autonomy.LESSON_RULES.format(cli=autonomy.HERE / 'agent_lessons_cli.py'))

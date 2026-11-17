@@ -19,6 +19,7 @@ import auth
 import delegate
 import helper_tabs as helpers
 import paths
+import review_links
 import server
 from terminal_input import DraftError
 
@@ -175,6 +176,17 @@ class HelperTests(unittest.TestCase):
         for message in ('x' * 20000, '😀' * 20000, ' hello\n\tworld '):
             self.assertEqual(self.request('send', message=message)[0], 200)
             self.assertEqual(self.send.call_args.args[1], message)
+
+    def test_agent_send_marks_the_worker_review_links_only_when_delivered(self):
+        # B189: a prompt from another agent must not restart a paused review of that worker.
+        with patch.object(review_links, 'agent_prompt') as mark:
+            self.assertEqual(self.request('send', message='')[0], 400)
+            self.reset_record(owner_thread=OTHER)
+            self.assertEqual(self.request('send')[0], 409)
+            mark.assert_not_called()
+            self.reset_record()
+            self.assertEqual(self.request('send')[0], 200)
+            mark.assert_called_once_with('%13')
 
     def test_send_checks_helper_availability_and_prompts(self):
         for agent in ('claude', 'codex'):

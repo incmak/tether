@@ -1,6 +1,7 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
 import io
 import json
+import time
 from pathlib import Path
 import re
 import subprocess
@@ -35,6 +36,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.alert = Mock()
         self.work_mark = None
         self.review_reply = None
+        self.turn_source = None
         self.reply = Mock(return_value='I fixed it.')
         self.add()
 
@@ -49,7 +51,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.states.update(states)
         review_links.observe(entries if entries is not None else [self.worker, self.reviewer],
                              self.status, self.send, self.reply, alert=self.alert, work_mark=self.work_mark,
-                             review_reply=self.review_reply)
+                             review_reply=self.review_reply, turn_source=self.turn_source)
 
     def test_idle_review_forwards_anchored_reply_before_unrelated_turn(self):
         self.review_reply = server.review_reply
@@ -1115,36 +1117,190 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.links()[0]['approved_before'], review_links._digest(self.reply(self.worker)))
                 self.assertEqual(self.links()[0].get('rounds', 0), 0)
 
-    def test_third_fix_pauses_without_a_fourth_review(self):
-        self.assertEqual(review_links.MAX_ROUNDS, 3)
-        for round_number in range(review_links.MAX_ROUNDS):
+    def fail_to_limit(self, findings='Still broken: the lock is not released.'):
+        """Run reviews until the limit. Every review still finds a blocking problem."""
+        for _ in range(review_links.MAX_ROUNDS):
             self.request_review()
-            self.finish_review()
-            self.assertEqual(self.links()[0]['rounds'], round_number + 1)
-            self.assertFalse(self.links()[0]['awaiting'])
-        self.request_review()  # the third feedback fix finishes
+            self.finish_review(findings)
+
+    def test_third_failed_review_asks_mak_with_the_findings_instead_of_a_third_fix(self):
+        self.assertEqual(review_links.MAX_ROUNDS, 3)
+        self.fail_to_limit()
         reviews = [call for call in self.send.call_args_list if call.args[0] == self.reviewer]
-        feedback = [call for call in self.send.call_args_list if call.args[0] == self.worker]
-        self.assertEqual(len(reviews), 3)
-        self.assertEqual(len(feedback), 3)
-        self.assertEqual(self.links()[0]['rounds'], review_links.MAX_ROUNDS)
-        self.assertFalse(self.links()[0]['seen_working'])
-        self.assertTrue(self.links()[0]['paused'])
-        self.assertEqual(review_links.paused(), {'%13': ['%12']})
-        self.observe()
+        to_worker = [call.args[1] for call in self.send.call_args_list if call.args[0] == self.worker]
+        self.assertEqual(len(reviews), review_links.MAX_ROUNDS)
+        self.assertEqual(len(to_worker), review_links.MAX_ROUNDS)
+        fixes = [text for text in to_worker if 'Fix what it raises' in text]
+        self.assertEqual(len(fixes), review_links.MAX_ROUNDS - 1)
+        ask = to_worker[-1]
+        self.assertNotIn('Fix what it raises', ask)
+        self.assertIn(f'Stopped after {review_links.MAX_ROUNDS} review rounds', ask)
+        self.assertIn('Still broken: the lock is not released.', ask)
+        self.assertIn('Do not fix them in this turn.', ask)
+        self.assertTrue(ask.rstrip().endswith('then end with "Needs you: yes".'))
+        link = self.links()[0]
+        self.assertTrue(link['paused'])
+        self.assertFalse(link['awaiting'])
+        self.assertEqual(link['rounds'], review_links.MAX_ROUNDS)
+        self.alert.assert_called_once()
+        title, body, session = self.alert.call_args.args
+        self.assertEqual((title, session), ('Review needs you', '%13'))
+        self.assertIn('Still broken: the lock is not released.', body)
+        self.assertIn(f'after {review_links.MAX_ROUNDS} rounds', body)
+        # The worker answers the ask (a turn caused by Tether, not a new task): no fourth review.
+        self.request_review()
         self.observe()
         self.assertEqual(self.send.call_count, 2 * review_links.MAX_ROUNDS)
+        self.assertTrue(self.links()[0]['paused'])
+        self.assertEqual(review_links.paused(), {'%13': ['%12']})
 
-        self.request_review()  # a user turn starts a new exchange
+    def test_an_approval_in_round_three_still_completes_the_review(self):
+        for _ in range(review_links.MAX_ROUNDS - 1):
+            self.request_review()
+            self.finish_review()
+        self.request_review()
+        self.finish_review('APPROVED')
+        self.assertIn('Approved by the reviewer tab', self.send.call_args.args[1])
+        self.assertNotIn('paused', self.links()[0])
+        self.alert.assert_not_called()
+
+    def test_a_prompt_from_mak_restarts_a_paused_review(self):
+        self.turn_source = Mock(return_value='user')
+        self.fail_to_limit()
+        self.request_review()  # the ask turn
+        count = self.send.call_count
+        self.request_review()  # Mak answers in the worker tab
         self.assertNotIn('rounds', self.links()[0])
         self.assertNotIn('paused', self.links()[0])
         self.assertEqual(review_links.paused(), {})
-        self.assertEqual(self.send.call_count, 2 * review_links.MAX_ROUNDS + 1)
+        self.assertEqual(self.send.call_count, count + 1)
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
         self.assertTrue(self.links()[0]['awaiting'])
+        self.turn_source.assert_called_with(self.worker)
+
+    def test_background_turns_do_not_restart_or_reset_rounds(self):
+        # A Monitor event, a finished background shell or a scheduled job is not a new task from Mak.
+        self.turn_source = Mock(return_value='background')
+        self.request_review()
+        self.finish_review()
+        self.request_review()  # fix 1, reviewed
+        self.finish_review()
+        self.assertEqual(self.links()[0]['rounds'], 2)
+        self.request_review()  # fix 2 (a feedback turn)
+        self.finish_review()  # third failed review: ask Mak
+        self.assertTrue(self.links()[0]['paused'])
+        self.request_review()  # the ask turn
+        count = self.send.call_count
+        for _ in range(3):
+            self.request_review()  # background turns
+        self.assertEqual(self.send.call_count, count)
+        self.assertTrue(self.links()[0]['paused'])
+        self.assertEqual(self.links()[0]['rounds'], review_links.MAX_ROUNDS)
+
+    def test_background_turn_below_the_limit_keeps_the_round_count(self):
+        self.turn_source = Mock(return_value='background')
+        self.request_review()
+        self.finish_review()
+        self.request_review()  # fix 1
+        self.finish_review('APPROVED')  # forwarded; resets the count
+        self.request_review()  # approval turn
+        self.request_review()  # a background turn: reviewed, counts from zero
         self.finish_review()
         self.assertEqual(self.links()[0]['rounds'], 1)
-        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.request_review()  # fix
+        self.request_review()  # background turn while rounds is 1
+        self.assertEqual(self.links()[0]['rounds'], 1)
+
+    def test_a_prompt_from_another_agent_does_not_restart_a_paused_review(self):
+        # An orchestrator tab that sends "continue" is not Mak: the review stays paused until Mak answers.
+        self.turn_source = Mock(return_value='user')
+        self.fail_to_limit()
+        self.request_review()  # the ask turn
+        count = self.send.call_count
+        review_links.agent_prompt('%13')
+        self.assertIsInstance(self.links()[0]['agent_prompt'], float)
+        self.request_review()
+        self.assertEqual(self.send.call_count, count)
+        self.assertTrue(self.links()[0]['paused'])
+        self.assertNotIn('agent_prompt', self.links()[0])
+        self.request_review()  # then Mak answers
+        self.assertNotIn('paused', self.links()[0])
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_agent_prompt_marks_only_links_of_that_worker(self):
+        self.add(worker='%20', reviewer='%21')
+        self.assertTrue(review_links.agent_prompt('%20'))
+        self.assertFalse(review_links.agent_prompt('%99'))
+        marks = {link['worker']: 'agent_prompt' in link for link in self.links()}
+        self.assertEqual(marks, {'%13': False, '%20': True})
+
+    def test_an_old_agent_prompt_does_not_block_maks_restart(self):
+        self.turn_source = Mock(return_value='user')
+        self.fail_to_limit()
+        self.request_review()  # the ask turn
+        review_links.agent_prompt('%13')
+        link, = self.links()
+        link['agent_prompt'] -= review_links.AGENT_PROMPT_TTL + 1
+        self.file.write_text(json.dumps([link]))
+        self.request_review()  # Mak answers much later
+        self.assertNotIn('paused', self.links()[0])
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_an_agent_turn_longer_than_the_ttl_still_does_not_restart(self):
+        self.turn_source = Mock(return_value='user')
+        self.fail_to_limit()
+        self.request_review()  # the ask turn
+        count = self.send.call_count
+        review_links.agent_prompt('%13')
+        self.observe(**{'%13': 'Working'})
+        later = time.time() + review_links.AGENT_PROMPT_TTL + 60
+        with patch.object(review_links.time, 'time', return_value=later):
+            self.observe(**{'%13': 'Working'})
+            self.observe(**{'%13': 'Idle'})
+        self.assertEqual(self.send.call_count, count)
+        self.assertTrue(self.links()[0]['paused'])
+        self.assertEqual(self.links()[0]['rounds'], review_links.MAX_ROUNDS)
+
+    def test_an_agent_prompt_during_a_running_turn_is_saved_on_its_snapshot(self):
+        self.turn_source = Mock(return_value='user')
+        self.fail_to_limit()
+        self.request_review()  # the ask turn
+        count = self.send.call_count
+        self.observe(**{'%13': 'Working'})  # the snapshot is saved before the agent prompt arrives
+        self.assertNotIn('agent', self.links()[0]['restart'])
+        review_links.agent_prompt('%13')
+        self.observe(**{'%13': 'Working'})
+        self.observe(**{'%13': 'Working'})
+        self.assertTrue(self.links()[0]['restart']['agent'])
+        later = time.time() + review_links.AGENT_PROMPT_TTL + 60
+        with patch.object(review_links.time, 'time', return_value=later):
+            self.observe(**{'%13': 'Idle'})
+        self.assertEqual(self.send.call_count, count)
+        self.assertTrue(self.links()[0]['paused'])
+
+    def test_limit_reached_during_maks_turn_counts_only_that_turn(self):
+        # Mak starts a new task at two failed rounds; the third failed review lands during that turn.
+        self.turn_source = Mock(return_value='user')
+        for agent in ('codex', 'claude'):
+            with self.subTest(agent=agent):
+                self.add()
+                self.worker['agent'] = agent
+                self.states.update({'%13': 'Idle', '%12': 'Idle'})
+                for _ in range(review_links.MAX_ROUNDS - 1):
+                    self.request_review()
+                    self.finish_review()
+                self.request_review()  # fix 2: review 3 requested
+                self.assertTrue(self.links()[0]['awaiting'])
+                self.observe(**{'%13': 'Working'})  # Mak's new prompt
+                self.finish_review()  # review 3 fails during that turn
+                if agent == 'claude':  # a busy Claude tab takes the ask at once, so the link is paused mid-turn
+                    self.assertTrue(self.links()[0]['paused'])
+                self.observe(**{'%13': 'Idle'})
+                self.observe()
+                link = self.links()[0]
+                self.assertEqual(link.get('rounds', 0), 1)
+                self.assertNotIn('paused', link)
+                self.assertEqual(review_links.paused(), {})
 
     def test_approval_before_limit_allows_feedback_on_new_work(self):
         for round_number in range(1, review_links.MAX_ROUNDS):
@@ -1220,6 +1376,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe(entries=entries, **{'%21': 'Idle'})
         self.assertTrue(self.links()[1]['paused'])
         self.observe(entries=entries, **{'%13': 'Working'})  # a new user turn
+        self.observe(entries=entries, **{'%13': 'Idle'})
         for link in self.links():
             self.assertNotIn('rounds', link)
             self.assertNotIn('paused', link)
@@ -1230,6 +1387,8 @@ class ReviewLinksTests(unittest.TestCase):
         link.update(rounds=3, paused=True)
         self.file.write_text(json.dumps([link]))
         self.observe(**{'%13': 'Working'})
+        self.assertEqual(self.links()[0]['rounds'], 3)  # decided when the turn ends
+        self.observe(**{'%13': 'Idle'})
         self.assertNotIn('rounds', self.links()[0])
         self.assertNotIn('paused', self.links()[0])
         self.assertTrue(self.links()[0]['awaiting'])
@@ -1250,12 +1409,12 @@ class ReviewLinksTests(unittest.TestCase):
         self.file.write_text(json.dumps([dict(link, rounds=3, paused=True) for link in self.links()]))
         entries = [self.worker, self.reviewer, reviewer]
         self.observe(entries=entries, **{'%13': 'Working'})
+        self.observe(entries=entries)
+        self.assertEqual([link['rounds'] for link in self.links()], [3, 3])  # decided when the turn ends
+        self.observe(entries=entries, **{'%13': 'Idle'})
         for link in self.links():
             self.assertNotIn('rounds', link)
             self.assertNotIn('paused', link)
-        self.file.write_text(json.dumps([dict(link, rounds=2) for link in self.links()]))
-        self.observe(entries=entries)
-        self.assertEqual([link['rounds'] for link in self.links()], [2, 2])
 
     def test_two_reviewers_never_reset_each_others_feedback_rounds(self):
         self.add(reviewer='%21')
@@ -1548,7 +1707,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.file.write_text(json.dumps([link]))
         self.observe()
         self.alert.assert_called_once_with('Review paused',
-            '“Fix the bug” reached the round limit. Send a prompt in that tab to restart reviews.', '%13')
+            '“Fix the bug” reached the round limit. Answer in that tab to restart reviews.', '%13')
         self.observe()
         self.assertTrue(review_links.remove('%13'))
         self.observe()
@@ -1653,14 +1812,16 @@ class ReviewLinksTests(unittest.TestCase):
             self.assertEqual(self.links()[0]['rounds'], 1)
             self.assertEqual(self.links()[0]['empty_rounds'], count)
             self.assertNotIn('empty_turn', self.links()[0])
-        self.request_review()
-        self.assertTrue(self.links()[0]['paused'])
+        self.assertTrue(self.links()[0]['paused'])  # the third empty review asked Mak
+        self.request_review()  # the ask turn: no review
         self.assertEqual(self.work_mark.call_count, 4)
-        self.alert.assert_called_once_with('Review paused',
-            '“Fix the bug” reached the round limit. Send a prompt in that tab to restart reviews.', '%13')
+        self.alert.assert_called_once()
+        self.assertEqual(self.alert.call_args.args[0], 'Review needs you')
         self.observe()
         self.assertEqual(self.alert.call_count, 1)
-        self.observe(**{'%13': 'Working'})  # new user prompt resets both limits
+        self.observe(**{'%13': 'Working'})  # a new prompt from Mak resets both limits when its turn ends
+        self.assertEqual(self.links()[0]['empty_rounds'], review_links.MAX_ROUNDS)
+        self.observe(**{'%13': 'Idle'})
         self.assertNotIn('rounds', self.links()[0])
         self.assertNotIn('empty_rounds', self.links()[0])
         self.assertEqual(self.links()[0]['work_mark'], 'same tree')
@@ -1783,7 +1944,7 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertEqual(observe.call_count, 2)
         observe.assert_called_with(entries, server.shared_status, server.review_send, server.last_reply,
                                    alert=server.review_alert, work_mark=server.review_work_mark,
-                                   review_reply=server.review_reply)
+                                   review_reply=server.review_reply, turn_source=server.review_turn_source)
 
     def test_session_discovery_exception_skips_watcher_and_loop_recovers(self):
         entries = [{'id': '%12'}]
@@ -1796,7 +1957,7 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertEqual(sessions.call_count, 2)
         observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
-                                        review_reply=server.review_reply)
+                                        review_reply=server.review_reply, turn_source=server.review_turn_source)
         self.assertEqual([call.args for call in clock.call_args_list], [(2,), (2,)])
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 
