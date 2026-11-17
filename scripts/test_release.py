@@ -140,6 +140,30 @@ class ReleaseTest(unittest.TestCase):
         self.assertIn('different v0.0.2', self.errors)
         self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), '')
 
+    def test_interrupt_after_the_push_arrived_keeps_the_published_tag(self):
+        def push_then_interrupt(args, cwd):
+            subprocess.run(args, cwd=cwd, check=True, capture_output=True)
+            raise KeyboardInterrupt
+        self.hooks[('git', 'push')] = push_then_interrupt
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+        self.assertEqual(git(self.repo, 'rev-parse', 'v0.0.2'), git(self.origin, 'rev-parse', 'v0.0.2'))
+        self.assertIn('the release is published', self.errors)
+
+    def test_interrupt_during_the_push_with_origin_silent_keeps_the_tag(self):
+        def interrupt(args, cwd):
+            raise KeyboardInterrupt
+        self.hooks[('git', 'push')] = interrupt
+        self.hooks[('git', 'ls-remote', 'origin', 'refs/tags/v0.0.2', 'refs/tags/v0.0.2^{}')] = self.refuse
+        self.assertEqual(self.release('0.0.2'), 1)
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+        self.assertIn('git ls-remote origin refs/tags/v0.0.2', self.errors)
+
+    def test_drop_tag_leaves_a_tag_at_another_commit(self):
+        git(self.repo, 'tag', '-a', 'v0.0.2', '-m', 'other')
+        self.assertEqual(release.drop_tag(self.repo, 'v0.0.2', '0' * 40), '')
+        self.assertEqual(git(self.repo, 'tag', '--list', 'v0.0.2'), 'v0.0.2')
+
     def test_tag_that_cannot_be_removed_is_reported(self):
         def lock_then_fail(args, cwd):
             (self.repo / '.git/refs/tags/v0.0.2.lock').write_text('')

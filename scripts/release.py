@@ -24,12 +24,29 @@ def drop_tag(root, tag, commit):
     def git(*args):
         return subprocess.run(['git', *args], cwd=root, text=True, capture_output=True)
     ref = f'refs/tags/{tag}'
-    if git('rev-parse', '--verify', '-q', f'{ref}^{{commit}}').stdout.strip() != commit:
+    held = git('rev-parse', '--verify', '-q', ref).stdout.strip()  # read once; check and delete this same object
+    if not held or git('rev-parse', '--verify', '-q', f'{held}^{{commit}}').stdout.strip() != commit:
         return ''  # no tag, or a tag that this run did not make
     # update-ref deletes only while the ref still holds this tag object.
-    if git('update-ref', '-d', ref, git('rev-parse', '--verify', '-q', ref).stdout.strip()).returncode:
+    if git('update-ref', '-d', ref, held).returncode:
         return f'; the local tag {tag} could not be removed; run: git tag -d {tag} before the next run'
     return ''
+
+
+def origin_state(root, tag, commit):
+    """After a push with no clear result: (True, '') when origin has this run's tag, (False, why) when it does not,
+    (None, what to do) when origin does not answer."""
+    try:
+        listed = run(['git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}'], root, capture=True, timeout=60)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        return None, (f'; origin did not answer, so the result of the push is unknown and the local tag stays. '
+                      f'Run: git ls-remote origin refs/tags/{tag}. If it prints nothing, run: git tag -d {tag}, '
+                      'then run the release again')
+    if not listed:
+        return False, '; origin did not change; if main moved, run again'
+    if commit in [line.split()[0] for line in listed.splitlines()]:
+        return True, ''
+    return False, f'; origin has a different {tag}; choose another version'
 
 
 def main():
@@ -40,7 +57,7 @@ def main():
     parser.add_argument('--keep', action='store_true', help='keep the release worktree')
     args = parser.parse_args()
     worktree = None
-    pending = None
+    pending = pushing = None
     try:
         if not re.fullmatch(r'\d+\.\d+\.\d+(-rc\.?\d+)?', args.version):
             raise RuntimeError('version must match X.Y.Z or X.Y.Z-rc.N')
@@ -86,28 +103,22 @@ def main():
         run(['git', 'add', '--', *files], worktree)
         run(['git', 'commit', '-m', f'Release {args.version}'], worktree)
         commit = run(['git', 'rev-parse', 'HEAD'], worktree, capture=True)
-        # This run's tag is the one at this run's commit. Until origin has it, a failure removes it.
+        # This run's tag is the one at this run's commit. Until the push starts, a failure removes it.
         pending = None if args.no_push else commit
         run(['git', 'tag', '-a', tag, '-m', f'Release {args.version}'], worktree)
         if not args.no_push:
+            pending, pushing = None, commit  # from here only origin can say whether the tag is published
             try:
                 # One atomic push: origin takes the commit and the tag, or neither.
                 run(['git', 'push', '--atomic', 'origin', 'HEAD:main', tag], worktree)
             except RuntimeError as error:
                 # A push can reach origin and still report a failure here, so read origin before the tag goes.
-                try:
-                    listed = run(['git', 'ls-remote', 'origin', f'refs/tags/{tag}', f'refs/tags/{tag}^{{}}'], root, capture=True)
-                except RuntimeError:
-                    pending = None
-                    raise RuntimeError(f'{error}; origin did not answer, so the result is unknown and the local tag stays. '
-                                       f'Run: git ls-remote origin refs/tags/{tag}. If it prints nothing, run: git tag -d {tag}, '
-                                       'then run the release again') from error
-                if not listed:
-                    raise RuntimeError(f'{error}; origin did not change; if main moved, run again') from error
-                if commit not in [line.split()[0] for line in listed.splitlines()]:
-                    raise RuntimeError(f'{error}; origin has a different {tag}; choose another version') from error
+                published, note = origin_state(root, tag, commit)
+                if not published:
+                    pending, pushing = (commit if published is False else None), None
+                    raise RuntimeError(f'{error}{note}') from error
                 print('The push reported a failure, but origin has the release commit and the tag.', flush=True)
-            pending = None
+            pushing = None
             if shutil.which('gh'):
                 origin = run(['git', 'remote', 'get-url', 'origin'], root, capture=True)
                 match = re.search(r'[:/]([^/:]+/[^/]+?)(?:\.git)?/?$', origin)
@@ -136,6 +147,12 @@ def main():
         return 0
     except (OSError, RuntimeError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         message = str(error).replace('\n', ' ') or 'interrupted'
+        if pushing:  # interrupted during the push
+            published, note = origin_state(root, tag, pushing)
+            if published:
+                message += f'; origin has the release commit and {tag}: the release is published, only the wait was cut short'
+            else:
+                pending, message = (pushing if published is False else None), message + note
         if pending:  # else the next run stops at 'tag already exists locally'
             message += drop_tag(root, tag, pending)
         location = f'; worktree kept: {worktree}' if worktree else ''
