@@ -65,26 +65,40 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
   const shown = rows.filter(row => !gone.includes(row.port))
   const busy = Object.values(states).some(row => row.state === 'stopping')
   const chosen = selected.filter(port => shown.some(row => row.port === port))
+  // The list generation: the person's Refresh or Try again starts a new one. A stop answer from an older generation
+  // describes programs that may have left: it only ends the Stopping state and reads the list again.
+  const generation = useRef(refreshed)
+  useEffect(() => { generation.current = refreshed }, [refreshed])
   const stop = ({ ports, force }: Ask) => {
     setAsk(null)
     setStates(old => ({ ...old, ...Object.fromEntries(ports.map(port => [port, { state: 'stopping' }])) }))
+    const started = generation.current
     const chunks: number[][] = []
     for (let at = 0; at < ports.length; at += MAX_STOP) chunks.push(ports.slice(at, at + MAX_STOP))
-    void Promise.allSettled(chunks.map(chunk => api<{ results: StopResult[] }>('dev-preview/stop', { ports: chunk, force }))).then(answers => {
+    // One request after another: the server runs one stop at a time and answers 429 (busy) to a second one.
+    void (async () => {
       const next: Record<number, RowState> = {}, ended: number[] = [], words: string[] = []
-      answers.forEach((answer, index) => {
-        if (answer.status === 'rejected') {
-          const text = errorText(answer.reason)
-          for (const port of chunks[index]) next[port] = { state: 'failed', text }
+      for (const chunk of chunks) {
+        let results: StopResult[]
+        try {
+          results = (await api<{ results: StopResult[] }>('dev-preview/stop', { ports: chunk, force })).results
+        } catch (failure) {
+          const text = errorText(failure)
+          for (const port of chunk) next[port] = { state: 'failed', text }
           words.push(`Not stopped: ${text}`)
-          return
+          continue
         }
-        for (const result of answer.value.results) {
-        if (result.state === 'stopped' || result.state === 'not-found') { ended.push(result.port); continue }
-        if (result.state === 'still-running') { next[result.port] = { state: 'still-running' }; words.push(`localhost:${result.port} is still running.`) }
-        else { next[result.port] = { state: 'refused', text: result.error || result.reason || 'Tether does not stop this program: it is not a dev server.' }; words.push(`localhost:${result.port} was not stopped.`) }
+        for (const result of results) {
+          if (result.state === 'stopped' || result.state === 'not-found') { ended.push(result.port); continue }
+          if (result.state === 'still-running') { next[result.port] = { state: 'still-running' }; words.push(`localhost:${result.port} is still running.`) }
+          else { next[result.port] = { state: 'refused', text: result.error || result.reason || 'Tether does not stop this program: it is not a dev server.' }; words.push(`localhost:${result.port} was not stopped.`) }
         }
-      })
+      }
+      if (generation.current !== started) {
+        setStates(old => Object.fromEntries(Object.entries(old).filter(([port]) => !ports.includes(Number(port)))))
+        if (ended.length) onChanged()
+        return
+      }
       if (ended.length) words.unshift(ended.length === 1 ? `Stopped localhost:${ended[0]}.` : `Stopped ${count(ended.length)}.`)
       setStates(old => { const kept = { ...old, ...next }; for (const port of ended) delete kept[port]; return kept })
       setGone(old => [...old, ...ended])
@@ -95,7 +109,7 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
       if (ended.length) onChanged()
       // The focused Stop button may leave with its row: keep focus in the list.
       requestAnimationFrame(() => { if (!document.activeElement || document.activeElement === document.body) document.getElementById(titleId)?.focus() })
-    })
+    })()
   }
   // A new list from the server is the truth: a port that stopped and runs again shows again.
   const [listed, setListed] = useState(rows)
@@ -137,8 +151,8 @@ export function DevServerList({ api, rows, manage, refreshed = 0, onPick, onChan
           </button>}
         {status && <p id={statusId} className="dev-row-status">{stopping && <Spinner />}<span>{status}{state?.text && state.state !== 'stopping' ? `: ${state.text}` : ''}</span></p>}
         {!selecting && <div className="dev-row-actions">
-          {state?.state === 'still-running' && <button type="button" className="danger dev-force" onClick={() => setAsk({ ports: [row.port], force: true })}>Force stop</button>}
-          {state?.state !== 'still-running' && <button type="button" className="icon-button dev-stop" aria-disabled={stopping || undefined} aria-label={`Stop ${name}`} title={`Stop ${name}`} onClick={() => { if (!stopping) setAsk({ ports: [row.port], force: false }) }}><Square size={16} aria-hidden="true" fill="currentColor" /></button>}
+          {state?.state === 'still-running' && <button type="button" className="danger dev-force" aria-disabled={busy || undefined} onClick={() => { if (!busy) setAsk({ ports: [row.port], force: true }) }}>Force stop</button>}
+          {state?.state !== 'still-running' && <button type="button" className="icon-button dev-stop" aria-disabled={busy || undefined} aria-label={`Stop ${name}`} title={`Stop ${name}`} onClick={() => { if (!busy) setAsk({ ports: [row.port], force: false }) }}><Square size={16} aria-hidden="true" fill="currentColor" /></button>}
         </div>}
       </li>
     })}</ul>

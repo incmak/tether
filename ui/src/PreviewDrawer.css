@@ -102,6 +102,6 @@
 .dev-stop-one { margin: 0 0 18px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .dev-stop-list { display: grid; gap: 6px; max-height: 40dvh; margin: 0 0 18px; padding: 0 0 0 20px; overflow-y: auto; line-height: 1.4; overflow-wrap: anywhere; }
 .dev-stop-list small { display: block; color: var(--muted); font-size: 12px; }
-.dev-stop[aria-disabled="true"] { opacity: .5; cursor: default; }
+.dev-stop[aria-disabled="true"], .dev-force[aria-disabled="true"] { opacity: .5; cursor: default; }
 .dev-manager-empty h3:focus { outline: none; }
 .dev-manager-empty code { white-space: nowrap; }
