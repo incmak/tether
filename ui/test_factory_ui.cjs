@@ -289,6 +289,18 @@ async function main() {
       }
       console.log(`shots: ${SHOTS}`)
     }
+    // An urgent ask does not open the Waiting on you deck over the Factory view; it opens when the view closes.
+    await page.setViewportSize({ width: 1280, height: 800 })
+    state.panes = [...panes, pane('%10', 'Asks now', { ask: { pane: '%10', thread: '%10', since: NOW / 1000 - 60, next: 0, kind: 'question', opened: false, snoozed_until: null, urgent: true } })]
+    await page.goto(`${ORIGIN}/chat/?go=factory`)
+    await station('build').waitFor()
+    await page.waitForTimeout(1500)
+    check('urgent ask: no deck over the Factory view', !(await page.locator('#deck-title').isVisible()))
+    await page.keyboard.press('Escape')
+    await page.locator('#deck-title').waitFor({ timeout: 10000 })
+    check('urgent ask: the deck opens after the view closes', true)
+    state.panes = panes
+
     // Ambient tour, on a fake clock: after 60 s with no input it shows the task that waits for you; a key stops it.
     await page.setViewportSize({ width: 1920, height: 1080 })
     await page.evaluate(() => localStorage.setItem('tether-factory-tour', 'true'))

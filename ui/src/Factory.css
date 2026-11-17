@@ -65,7 +65,8 @@
 .factory-none, .factory-parked, .factory-note { margin: 0; color: var(--muted); font-size: 0.9em; }
 .factory-parked { padding: 0 0.8em 0.8em; }
 
-.factory-flag { display: inline-flex; align-items: center; gap: 0.25em; padding: 0.1em 0.45em; border-radius: 999px; font-size: 0.85em; font-weight: 650; }
+.factory-flag { display: inline-flex; align-items: center; gap: 0.25em; padding: 0.1em 0.45em; border-radius: 999px; font-size: 0.85em; font-weight: 650; white-space: nowrap; }
+.factory-token .factory-flag { font-size: 0.75em; }
 .factory-flag.is-waits { background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); }
 .factory-flag.is-stuck { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
 

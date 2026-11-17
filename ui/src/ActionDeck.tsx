@@ -112,11 +112,12 @@ function ReplyBox({ name, busy, onSend }: { name: string; busy: boolean; onSend:
 }
 
 /** Opens the deck by itself once for each urgent ask it has not shown yet, also on page load. */
-export function useUrgentDeck(items: Waiting[], enabled: boolean) {
+/** held: a full-screen view (the Factory view) is open; new urgent asks wait and open the deck when it closes. */
+export function useUrgentDeck(items: Waiting[], enabled: boolean, held = false) {
   const [open, setOpen] = useState(false)
   const [seen, setSeen] = useState<string[]>([])
   const fresh = items.filter(item => item.ask.urgent).map(item => `${item.pane.id} ${item.ask.since}`).filter(key => !seen.includes(key))
-  if (fresh.length) { // adjust state while rendering (React's pattern for state derived from props)
+  if (fresh.length && !held) { // adjust state while rendering (React's pattern for state derived from props)
     setSeen([...seen, ...fresh])
     if (enabled) setOpen(true)
   }

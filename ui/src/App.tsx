@@ -393,7 +393,7 @@ function App() {
   const now = useNow()
   const waitSort = { order: prefs.waitingOrder ?? 'oldest', onOrder: (waitingOrder: WaitOrder) => update(() => ({ waitingOrder })) }
   const waiting = useMemo(() => prefs.attention ? waitingAsks(panes, now) : [], [prefs.attention, panes, now])
-  const [deck, setDeck] = useUrgentDeck(waiting, prefs.attention)
+  const [deck, setDeck] = useUrgentDeck(waiting, prefs.attention, factory)
   // The lessons review joins Waiting on you as one quiet row; it never opens by itself.
   const { data: lessonsReview, error: reviewError, refresh: refreshReview } = useLessonsReview(api, prefs.attention)
   const [reviewing, setReviewing] = useState(false)
