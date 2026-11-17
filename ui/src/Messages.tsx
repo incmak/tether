@@ -2,7 +2,7 @@ import { terminalText } from './terminalText'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share2, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Volume2, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
@@ -13,6 +13,7 @@ import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
 import { remarkTabs } from './tabLinks'
 import { canSpeak, speak, stopSpeaking, useSpeaking } from './speech'
+import { RateButtons } from './ReplyFeedback'
 import type { ToolSummary } from './api'
 
 
@@ -160,7 +161,7 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   const sent = role === 'user' && !kind ? sentContent(text, session, images, imageKey) : null
   if (sent?.shots.length) return <MessagePrimitive.Root className="user-message" data-msg-id={id}><SentContent {...sent} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root className={role === 'user' ? 'user-message' : 'assistant-message'} data-msg-id={id}>
-    {role === 'user' ? <MessagePrimitive.Parts /> : <><MessagePrimitive.Parts components={{ Text: Markdown }} />{actions && <MessageActions text={text} time={time} />}</>}
+    {role === 'user' ? <MessagePrimitive.Parts /> : <><MessagePrimitive.Parts components={{ Text: Markdown }} />{actions && <MessageActions id={id} text={text} time={time} />}</>}
   </MessagePrimitive.Root>
 }
 type Review = { feedback: boolean; tab: string; agent?: string; name?: string; reply: string; transcript?: string; last?: boolean }
@@ -272,21 +273,30 @@ function stamp(value?: string) {
   if (at.toDateString() === new Date().toDateString()) return clock
   return days < 6 ? `${at.toLocaleDateString(undefined, { weekday: 'short' })} ${clock}` : `${at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock}`
 }
-function MessageActions({ text, time }: { text: string; time?: string }) {
-  const canShare = typeof navigator.share === 'function'
+function MessageActions({ id, text, time }: { id?: string; text: string; time?: string }) {
   const when = stamp(time)
   return <div className="message-actions">
     <CopyButton text={text} label="Copy message" />
+    <ShareButton text={text} />
     <SpeakButton text={text} />
-    {canShare && <button type="button" className="icon-button" aria-label="Share message" title="Share message" onClick={() => navigator.share({ text }).catch(() => {})}><Share2 size={16} /></button>}
+    {id && <RateButtons id={id} text={text} />}
     {when && <time className="message-time" dateTime={time}>{when}</time>}
   </div>
+}
+// The phone's share sheet. Without one (most desktop browsers), copy the text so it can be pasted anywhere.
+function ShareButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false)
+  useEffect(() => { if (!done) return; const timer = setTimeout(() => setDone(false), 1500); return () => clearTimeout(timer) }, [done])
+  const native = typeof navigator.share === 'function'
+  const label = native ? 'Share message' : done ? 'Copied to share' : 'Share message (copies the text)'
+  return <button type="button" className="icon-button" aria-label={label} title={label}
+    onClick={() => native ? navigator.share({ text }).catch(() => {}) : copyText(text).then(() => setDone(true), () => {})}>{done ? <Check size={16} /> : <Share size={16} />}</button>
 }
 function SpeakButton({ text }: { text: string }) {
   // The text is the key, so the button also shows a reply that is read aloud by itself at the end of a turn.
   const reading = useSpeaking() === text
   if (!canSpeak) return null
-  return <button type="button" className="icon-button" aria-label={reading ? 'Stop reading' : 'Read aloud'} title={reading ? 'Stop reading' : 'Read aloud'} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Volume2 size={16} />}</button>
+  return <button type="button" className="icon-button" aria-label={reading ? 'Stop reading' : 'Read aloud'} title={reading ? 'Stop reading' : 'Read aloud'} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
 }
 function CodeHeader({ language, code }: { language: string | undefined; code: string }) {
   return <div className="code-header"><span>{language || 'code'}</span><CopyButton text={code} label="Copy code" className="code-copy" /></div>

@@ -5,7 +5,7 @@ import { history, loadHistory, remember } from './history'
 import { chatTitle } from './Sidebar'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { placeAttachLayer } from './attachLayer'
-import { ArrowUp, Blocks, Camera, CornerDownLeft, FolderOpen, Smartphone, ImagePlus, Mic, Paperclip, Plus, Square, X, AtSign, Slash } from 'lucide-react'
+import { ArrowUp, Blocks, Camera, ChevronRight, CornerDownLeft, FolderOpen, Smartphone, ImagePlus, Mic, Paperclip, Plus, Square, X, AtSign, Slash } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, Pane } from './api'
 import { takeShared, doneShared, releaseShared } from './shared'
@@ -122,6 +122,19 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
   const dictation = useDictation({ text: draft, setText: setDraft, chime, handsFree,
     onHandsFreeDone: () => form.current?.requestSubmit(), onFinished: () => textarea.current?.focus() })
   const { listening, transcribing, seconds, error: speechError, setError: setSpeechError, canRecord, toggle: toggleMic } = dictation
+  // A phone shows an idle, empty box as one pill row (+, the text field, the mic), as the Claude app does.
+  // A tap opens the full box with the model and mode pills. Focus that moves into a sheet the box opened keeps it open.
+  const [focused, setFocused] = useState(false)
+  // Close and Escape return focus to +, as a menu button does. Any other close (a tap outside, an action) can leave focus
+  // on <body>: a removed element fires no blur, so check focus after the sheet goes and collapse the idle box.
+  const attachButton = useRef<HTMLButtonElement>(null)
+  const closeMenu = () => { setMenu(false); attachButton.current?.focus({ preventScroll: true }) }
+  useEffect(() => {
+    if (menu) return
+    const frame = requestAnimationFrame(() => { if (!form.current?.contains(document.activeElement)) setFocused(false) })
+    return () => cancelAnimationFrame(frame)
+  }, [menu])
+  const compact = !focused && !menu && !draft && !files.length && !pastes.length && !listening && !transcribing && !uploading && pane.agent !== 'shell'
   // Upload files in order and return how many worked. onSaved runs after each good upload.
   // A second batch (another drop during an upload) waits for the first, so Send stays off until all files are in.
   const uploadQueue = useRef<Promise<unknown>>(Promise.resolve())
@@ -275,7 +288,8 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
   }
   return <div className="composer-area">{pane.agent === 'shell' && <div ref={wheelSideways} className="shell-key-strip" role="group" aria-label="Terminal keys" onMouseDown={keepFocus}>
     {([['Escape', 'esc', 'Send Escape to terminal'], ['Tab', 'tab', 'Insert tab'], ['C-c', 'ctrl+c', 'Stop command'], ['ArrowUp', '↑', 'Previous command'], ['ArrowDown', '↓', 'Next command'], ['ArrowLeft', '←', 'Move cursor left'], ['ArrowRight', '→', 'Move cursor right']] as const).map(([key, label, title]) => <button key={key} type="button" title={title} aria-label={title} disabled={disabled || sending || listening || transcribing} onClick={() => terminalKey(key)}>{label}</button>)}
-  </div>}<Suggestions ref={suggest} api={api} pane={pane} draft={draft} setDraft={setDraft} focus={() => textarea.current?.focus()} run={text => { setDraft(text); void submit(undefined, text, true) }} sendAnyway={() => void submit(undefined, undefined, true)} /><form className={shellMode ? 'composer shell-mode' : 'composer'} ref={form} onSubmit={submit} onMouseDown={keepFocus}>
+  </div>}<Suggestions ref={suggest} api={api} pane={pane} draft={draft} setDraft={setDraft} focus={() => textarea.current?.focus()} run={text => { setDraft(text); void submit(undefined, text, true) }} sendAnyway={() => void submit(undefined, undefined, true)} /><form className={`composer${shellMode ? ' shell-mode' : ''}${compact ? ' compact' : ''}`} ref={form} onSubmit={submit} onMouseDown={keepFocus}
+    onFocus={() => setFocused(true)} onBlur={event => { const next = event.relatedTarget as HTMLElement | null; if (!next || (!event.currentTarget.contains(next) && !next.closest('dialog'))) setFocused(false) }}>
     {files.length + pastes.length > 0 && <ul className="attachments" aria-label="Attached files and pasted text">{files.map((file, index) => <li key={file.path} className="chip">{file.url ? <button type="button" className="chip-view" aria-label={`View ${file.name}`} onClick={() => setViewing({ name: file.name, url: file.url! })}><img src={file.url} alt="" /><span>{file.name}</span></button> : <><Paperclip size={13} /><span>{file.name}</span></>}<button type="button" aria-label={`Remove ${file.name}`} onClick={() => setFiles(current => current.filter((_, at) => at !== index))}><X size={14} /></button></li>)}{pastes.map(paste => <PasteChip key={paste.id} paste={paste} open={openPaste === paste.id} onToggle={() => setOpenPaste(openPaste === paste.id ? null : paste.id)} onEdit={() => { setDraft(inlinePaste(draft, paste)); setPastes(current => current.filter(item => item.id !== paste.id)); setOpenPaste(null); textarea.current?.focus() }} onRemove={() => { setPastes(current => current.filter(item => item.id !== paste.id)); textarea.current?.focus() }} />)}</ul>}
     <ImageViewer image={viewing} close={() => setViewing(null)} items={files.flatMap(file => file.url ? [{ name: file.name, url: file.url }] : [])} onSelect={setViewing} />
     <div className="composer-input">{pane.agent === 'shell' && <span className="terminal-sigil" aria-hidden="true">$</span>}{shellMode && <span className="shell-prompt" title={pane.dir ? `Runs in ${pane.dir}` : undefined}><span className="shell-folder">{shortFolder(pane.dir)}</span><span aria-hidden="true">$</span></span>}
@@ -293,21 +307,24 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
       <input ref={picker} type="file" multiple accept={FILES_ACCEPT} hidden onChange={event => { const chosen = Array.from(event.target.files ?? []); event.target.value = ''; void attach(chosen) }} />
       <input ref={photos} type="file" multiple accept="image/*,video/*" hidden onChange={event => { const chosen = Array.from(event.target.files ?? []); event.target.value = ''; void attach(chosen) }} />
       <input ref={camera} type="file" accept="image/*" capture="environment" hidden onChange={event => { const chosen = Array.from(event.target.files ?? []); event.target.value = ''; void attach(chosen) }} />
-      <button type="button" className="icon-button attach" aria-label="Add photos and files" aria-expanded={menu} disabled={disabled || sending || !!uploading} onClick={() => setMenu(!menu)}><Plus size={21} /></button>
-      {menu && <div className="attach-layer" popover="manual" ref={layer}><div className="attach-backdrop" aria-hidden="true" onClick={() => setMenu(false)} /><div className="attach-menu" role="menu" aria-label="Add to message" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setMenu(false) } }}>
+      <button ref={attachButton} type="button" className="icon-button attach" aria-label="Add photos and files" aria-expanded={menu} disabled={disabled || sending || !!uploading} onClick={() => setMenu(!menu)}><Plus size={21} /></button>
+      {menu && <div className="attach-layer" popover="manual" ref={layer}><div className="attach-backdrop" aria-hidden="true" onClick={() => setMenu(false)} /><div className="attach-menu" role="menu" aria-label="Add to message" onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeMenu() } }}>
         <span className="attach-grip" aria-hidden="true" />
+        <div className="attach-head" role="none"><button role="menuitem" type="button" className="icon-button" aria-label="Close" onClick={closeMenu}><X size={22} /></button><h2 aria-hidden="true">Add to message</h2></div>
         <div className="attach-tiles">
-          <button role="menuitem" type="button" onClick={() => { setMenu(false); photos.current?.click() }}><span><ImagePlus size={24} /></span>Gallery</button>
           <button role="menuitem" type="button" onClick={() => { setMenu(false); camera.current?.click() }}><span><Camera size={24} /></span>Camera</button>
+          <button role="menuitem" type="button" onClick={() => { setMenu(false); photos.current?.click() }}><span><ImagePlus size={24} /></span>Photos</button>
           <button role="menuitem" type="button" onClick={() => void pickFiles()}><span><Paperclip size={24} /></span>Files</button>
         </div>
-        <button role="menuitem" type="button" onClick={() => void attachLatest()}><Smartphone size={18} />Latest screenshot</button>
-        {hasFolder && <button role="menuitem" type="button" onClick={() => void changeFolder()}><FolderOpen size={18} />Change screenshot folder</button>}
-        {pane.agent !== 'shell' && <>
-          <button role="menuitem" type="button" onClick={() => insertTrigger('@')}><AtSign size={18} />Mention a file</button>
-          <button role="menuitem" type="button" onClick={() => insertTrigger('/')}><Slash size={18} />Commands & skills</button>
-          <button role="menuitem" type="button" onClick={() => { setMenu(false); onTools() }}><Blocks size={18} />Plugins & MCP</button>
-        </>}
+        <div className="attach-group" role="group" aria-label="Screenshots">
+          <button role="menuitem" type="button" onClick={() => void attachLatest()}><span className="attach-well"><Smartphone size={18} /></span><span className="attach-label">Latest screenshot</span></button>
+          {hasFolder && <button role="menuitem" type="button" onClick={() => void changeFolder()}><span className="attach-well"><FolderOpen size={18} /></span><span className="attach-label">Change screenshot folder</span><ChevronRight className="attach-chevron" size={18} /></button>}
+        </div>
+        {pane.agent !== 'shell' && <div className="attach-group" role="group" aria-label="Context">
+          <button role="menuitem" type="button" onClick={() => insertTrigger('@')}><span className="attach-well"><AtSign size={18} /></span><span className="attach-label">Mention a file</span></button>
+          <button role="menuitem" type="button" onClick={() => insertTrigger('/')}><span className="attach-well"><Slash size={18} /></span><span className="attach-label">Commands & skills</span></button>
+          <button role="menuitem" type="button" onClick={() => { setMenu(false); onTools() }}><span className="attach-well"><Blocks size={18} /></span><span className="attach-label">Plugins & MCP</span><ChevronRight className="attach-chevron" size={18} /></button>
+        </div>}
       </div></div>}
     </div>}{!uploading && !listening && !transcribing && options}<span className="composer-status" aria-live="polite">{uploading || (listening ? `Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : transcribing ? 'Converting…' : pane.agent === 'shell' ? 'Terminal input' : shellMode ? 'Shell mode' : '')}</span>{!draft && !files.length && !pastes.length && pane.agent !== 'shell' && !listening && !transcribing && !uploading && <span className="composer-keys" aria-hidden="true"><span><kbd>↵</kbd> send</span><span><kbd>⇧↵</kbd> new line</span><span><kbd>/</kbd> commands</span><span><kbd>!</kbd> shell</span></span>}</div><div>
       {micOk && canRecord && (transcribing

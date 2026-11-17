@@ -234,6 +234,8 @@ async function main() {
       await audit(`${w}: keys menu fits`, '.keys-menu')
       await shot(`${w}-keys`)
       await page.keyboard.press('Escape')
+      // A phone shows the idle box as one row; focus opens the full box with the pills.
+      await page.locator('.composer textarea').first().focus()
       await page.getByRole('button', { name: 'Model and effort', exact: true }).click()
       await page.locator('.model-list').waitFor()
       await audit(`${w}: model picker fits`, '.model-sheet')
@@ -241,6 +243,7 @@ async function main() {
       await controls(`${w}: model options fit`, '.model-list')
       await shot(`${w}-models`)
       await page.keyboard.press('Escape')
+      await page.locator('.composer textarea').first().focus()
       const mode = page.getByRole('button', { name: /^Mode:/ }).first()
       await mode.click()
       await audit(`${w}: mode menu fits`, '.mode-menu')
@@ -269,7 +272,7 @@ async function main() {
       await page.waitForTimeout(220)
       await audit(`${w}: attach menu fits`, '.attach-menu')
       await shot(`${w}-attach`)
-      await page.locator('.attach-menu button').first().focus()
+      await page.locator('.attach-menu button:visible').first().focus()
       await page.keyboard.press('Escape')
       // Multi-selection uses the real tab controls. Scrolling the strip is intentional.
       const tabs = page.locator('.pane-tabs [role=tab]')
@@ -312,6 +315,8 @@ async function main() {
         await audit(`${w}: live ${kind} dock fits`, '.status-stack')
         await controls(`${w}: status controls keep separate hit targets`, '.status-stack')
         if (process.env.COARSE && h <= 500) check(`${w}: status resize target remains44px`, await page.locator('.status-grip').evaluate(el => el.clientHeight >= 44 && el.clientWidth >= 44))
+        // The idle phone row hides Send until the box has focus, as in the Claude app.
+        if (await page.locator('form.composer.compact').count()) await page.locator('.composer textarea').first().focus()
         check(`${w}: live ${kind} leaves Send reachable`, await page.locator('.send-button').first().evaluate(el => { const r = el.getBoundingClientRect(), tabs = document.querySelector('.phone-tabbar'), floor = tabs?.getBoundingClientRect().height ? tabs.getBoundingClientRect().top : innerHeight; return r.bottom <= floor + 1 && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)) }))
         const grip = page.locator('.status-grip')
         await grip.focus(); await page.keyboard.press('ArrowUp')

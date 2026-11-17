@@ -49,6 +49,7 @@ function fixtures(state) {
     'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
     'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
     usage: { claude: null, codex: null },
+    feedback: { ratings: {} },
     subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
   }
 }
@@ -305,6 +306,8 @@ async function main() {
           await page.getByRole('button', { name: 'Add photos and files', exact: true }).click()
           await page.waitForSelector('.attach-layer:popover-open .attach-menu')
         } else if (state === 'mode-menu') {
+          // A phone shows the idle box as one row; focus opens the full box with the pills.
+          await page.locator('.composer textarea').focus()
           await page.getByRole('button', { name: /^Mode:/ }).click()
           await page.waitForSelector('.mode-menu')
         } else if (state === 'jump') {
