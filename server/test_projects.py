@@ -88,7 +88,10 @@ class ProjectTests(unittest.TestCase):
         real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
-        self.assertLess(len(real), 3400)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15)
+        self.assertLess(len(real), 3620)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17)
+        self.assertIn('use Monitor', text)
+        self.assertLess(text.index('## Claims of absence'), text.index('## Watchers'))
+        self.assertLess(text.index('## Watchers'), text.index('## New tabs and reviewers'))
         self.assertIn('not evidence of absence', text)
         self.assertLess(text.index('## Naming tabs'), text.index('## Claims of absence'))
         self.assertLess(text.index('## Claims of absence'), text.index('## New tabs and reviewers'))

@@ -382,6 +382,8 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
     parts.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
                  'source code, official docs, or the real config. A failed search on guessed names, or a page that did not load, is not evidence of absence. '
                  'If you did not read the primary source, write "not checked", name what you did not read, and keep looking when the answer can change what the user does.\n')
+    parts.append('\n## Watchers\nTo watch for events (messages, CI, logs), use Monitor: a script prints one line per new event, no message bodies. '
+                 'Re-arm it when it expires. Use CronCreate only for work due at a set time, never to poll.\n')
     cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
     parts.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
                  'A separate task the user asks for here (not a step of yours) goes to a worker tab: a full spec, `--worktree` for code, then `wait`. '
