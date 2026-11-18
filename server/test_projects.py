@@ -88,7 +88,7 @@ class ProjectTests(unittest.TestCase):
         real = text.replace(str(paths.TETHER), '/srv/user/.tether')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
-        self.assertLess(len(real), 3770)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17), +145 reminders CLI (2026-11-18)
+        self.assertLess(len(real), 3824)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17), +145 reminders CLI, +54 backlog follows autonomy (B294) (2026-11-18)
         self.assertIn('use Monitor', text)
         self.assertLess(text.index('## Claims of absence'), text.index('## Watchers'))
         self.assertLess(text.index('## Watchers'), text.index('## New tabs and reviewers'))
@@ -127,6 +127,17 @@ class ProjectTests(unittest.TestCase):
         projects.set_name(PID, 'web')
         projects.mark_seen(PID)
         self.assertFalse(projects.bundle(PID).exists())
+
+    def test_backlog_guidance_defers_to_autonomy(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                text = projects.render(PID, agent)
+                backlog_section = text.split('\n## Backlog\n', 1)[1]
+                self.assertIn(
+                    '- Work on an item when the user asks, or when your autonomy level tells you to work the backlog. '
+                    'Run `start` first. When finished, run `done` with the commit, PR, or outcome.',
+                    backlog_section.splitlines(),
+                )
 
     def test_instructions_count_revisions_and_refuse_a_stale_save(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)

@@ -125,6 +125,12 @@ class Rules(Base):
             self.assertNotIn('sensible defaults', autonomy.RULES[level])
             self.assertNotIn('assumptions', autonomy.RULES[level])
 
+    def test_full_auto_selects_the_oldest_eligible_backlog_item(self):
+        rule = autonomy.RULES[5]
+        self.assertIn('skip items marked doing, items in the Inbox, and items that need a product, business or safety '
+                      'decision from the user.', rule)
+        self.assertIn('Take the oldest item that is left. If none is left, stop.', rule)
+
     def test_saved_answers_only_at_levels_three_to_five_for_the_selected_project(self):
         folder = paths.TETHER / 'projects' / PID
         folder.mkdir(parents=True)

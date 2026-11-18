@@ -56,8 +56,9 @@ RULES = (
     'until the work is done and verified. Ask only when you need new authority or a decision that only the user can make.',
     'Work alone until the task is done and verified. Do not ask about normal decisions; list each decision in the '
     'final reply. Split large work with your own subagents and start reviewers with agent_tab_cli.py. When the task '
-    'is done, start the next open backlog item of this project, if there is one. Ask only when you are blocked: the task cannot '
-    'continue without the user, or a critical bug needs a decision.',
+    'is done, start the next open backlog item of this project: skip items marked doing, items in the Inbox, and items '
+    'that need a product, business or safety decision from the user. Take the oldest item that is left. If none is left, '
+    'stop. Ask only when you are blocked: the task cannot continue without the user, or a critical bug needs a decision.',
 )
 EVIDENCE = ('Never guess. Before you decide or ask, check the evidence in this order: the request and this '
             'conversation; the project notes and saved answers; the code, tests and git history; the primary docs and '
