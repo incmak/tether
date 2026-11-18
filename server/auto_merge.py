@@ -587,12 +587,24 @@ def _shadow(checkout, gitdir, common):
     return shadow
 
 
+def _index_digest(gitdir):
+    """A hash of the live index (and the shared index files of a split index). A missing index is an error."""
+    digest = hashlib.sha256()
+    try:
+        for path in (gitdir / 'index', *sorted(gitdir.glob('sharedindex.*'))):
+            digest.update(os.fsencode(path.name) + b'\0' + path.read_bytes() + b'\0')
+    except FileNotFoundError as exc:
+        raise GitError('The worktree has no Git index.') from exc
+    return digest.digest()
+
+
 def _shadow_status(checkout, env, depth=0):
     if depth > SUBMODULE_DEPTH:
         return UNSUPPORTED
     gitdir = _git_dir(checkout, '--absolute-git-dir')
     common = _git_dir(checkout, '--git-common-dir')
     try:
+        before = _index_digest(gitdir)
         shadow = _shadow(checkout, gitdir, common)
         if shadow is None:
             return UNSUPPORTED
@@ -608,6 +620,18 @@ def _shadow_status(checkout, env, depth=0):
     if status.stderr:
         raise GitError('git status printed a warning, so the tree is not confirmed clean.')
     answer = DIRTY if status.stdout else ''
+    if not answer:
+        # The status used a copy of the index. A clean answer counts only when the live index did not change during
+        # the check and still equals HEAD (blob ids only: this comparison runs no filter).
+        try:
+            changed_index = _index_digest(gitdir) != before
+        except OSError as exc:
+            raise GitError(f'Could not read the Git index: {exc.strerror}') from exc
+        staged = _git(checkout, 'diff-index', '--cached', '--quiet', 'HEAD', check=False, env=env)
+        if staged.returncode not in (0, 1):
+            raise GitError('git diff-index could not compare the index with HEAD.')
+        if changed_index or staged.returncode:
+            answer = DIRTY
     _, links = _index_paths(checkout, env)
     for inner in _checked_out_submodules(checkout, links):
         result = _shadow_status(inner, env, depth + 1)

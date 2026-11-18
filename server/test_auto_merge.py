@@ -363,6 +363,63 @@ class Decision(Base):
         self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
         self.assertTrue(marker.exists())
 
+    def test_an_index_that_changes_during_the_check_is_never_clean(self):
+        """The status reads a copy of the index. The tree is dirty before and after, in a way the copy cannot see."""
+        head = self.change()
+        app = self.work / 'ui/src/App.tsx'
+        committed = app.read_bytes()
+        real = subprocess.run
+
+        def stage_then_restore():   # the reviewer's case: an edit is staged, then the file gets its HEAD bytes back
+            self.git(self.work, 'add', 'ui/src/App.tsx')
+            app.write_bytes(committed)
+
+        def add_then_delete():      # the same kind: a new file is staged, then deleted from the worktree
+            self.git(self.work, 'add', 'ui/src/New.tsx')
+            (self.work / 'ui/src/New.tsx').unlink()
+
+        cases = ((lambda: app.write_bytes(b'export const app = "edited"\n'), stage_then_restore),
+                 (lambda: self.write(self.work, 'ui/src/New.tsx', 'export const fresh = 1\n'), add_then_delete))
+        for prepare, during in cases:
+            with self.subTest(during=during.__name__):
+                prepare()
+                self.assertNotEqual(self.git(self.work, 'status', '--porcelain'), '')
+                done = []
+
+                def run(argv, **kwargs):
+                    if argv[0] == 'git' and 'status' in argv and not done:
+                        done.append(1)
+                        during()
+                    return real(argv, **kwargs)
+
+                with mock.patch.object(auto_merge, 'RUN', run):
+                    result = auto_merge._dirty(self.work)
+                self.assertEqual(done, [1])
+                self.assertNotEqual(self.git(self.work, 'status', '--porcelain'), '')
+                self.assertEqual(result, auto_merge.DIRTY)
+                decision, plan = auto_merge.evaluate(self.work, head)
+                self.assertIn('branch', self.failed(decision))
+                self.assertIsNone(plan)
+                self.git(self.work, 'reset', '-q', '--hard', head)
+                self.git(self.work, 'clean', '-fdq')
+        # A quiet tree is clean, and so is one whose index file is rewritten with the same content during the check.
+        self.assertEqual(auto_merge._dirty(self.work), '')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+        # An index that changes and changes back still counts as changed: the answer is "not clean", never clean.
+        done = []
+
+        def run(argv, **kwargs):
+            if argv[0] == 'git' and 'status' in argv and not done:
+                done.append(1)
+                app.write_bytes(b'export const app = "blip"\n')
+                self.git(self.work, 'add', 'ui/src/App.tsx')
+                self.git(self.work, 'reset', '-q', '--hard', head)
+            return real(argv, **kwargs)
+
+        with mock.patch.object(auto_merge, 'RUN', run):
+            self.assertEqual(auto_merge._dirty(self.work), auto_merge.DIRTY)
+        self.assertEqual(auto_merge._dirty(self.work), '')
+
     def test_the_clean_check_is_gits_own_answer(self):
         """The reviewer's cases: Tether must agree with `git status`, whatever the line-end rules are."""
         def agrees(head, expect_clean):
@@ -900,7 +957,7 @@ class Modes(Base):
                 command = argv[3:]
                 seen.append(command)
                 env = kwargs['env']
-                if command[0] == 'check-attr' or command[:2] == ['ls-files', '-s'] or command == ['config', '--null', '--list']:
+                if command[0] in ('check-attr', 'diff-index') or command[:2] == ['ls-files', '-s'] or command == ['config', '--null', '--list']:
                     # The clean check asks Git with the user's own config, and only these read-only commands.
                     self.assertEqual(env['GIT_CONFIG_GLOBAL'], global_config)
                     self.assertEqual(git_settings(env)[:1], [('core.fsmonitor', 'false')])
@@ -940,7 +997,7 @@ class Modes(Base):
         for value in active:
             self.git(self.repo, 'config', '--add', 'submodule.active', value)
         scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
-        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr'}
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr', 'diff-index'}
         cache = paths.CACHE / 'auto-merge-status'
         object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
         for folder in (self.work, self.work / 'server'):
