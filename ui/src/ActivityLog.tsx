@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Calendar, FolderOpen, Monitor, RotateCw, Search, Terminal, Undo2, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api } from './api'
@@ -88,52 +88,71 @@ function Row({ entry }: { entry: AuditEntry }) {
   </li>
 }
 
-/** Settings › Activity. The first page reloads every 20 s while it is open; Load more adds older pages under it. */
+/** Newest first, each id once. Ids start with the time in ms, so they sort by time. */
+function merged(...lists: AuditEntry[][]) {
+  const seen = new Set<string>()
+  return lists.flat().filter(entry => !seen.has(entry.id) && !!seen.add(entry.id)).sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+}
+
+/** Settings › Activity. The first page reloads every 20 s while it is open. After Load more, the sheet keeps one list:
+ * each reload and each older page merge into it, so no row that was on screen goes away. */
 export function ActivityLog({ api }: { api: Api }) {
   const [filters, setFilters] = useState<Filters>(NONE)
-  // Older pages from Load more. Each filter change drops them, so the list starts again at the newest entry.
-  const [older, setOlder] = useState<{ path: string; entries: AuditEntry[]; next: string | null } | null>(null)
+  // The list after Load more, for one query. A filter change drops it, so the list starts again at the newest entry.
+  const [loaded, setLoaded] = useState<{ path: string; entries: AuditEntry[]; next: string | null } | null>(null)
   const [text, setText] = useState('')
   // Typing waits 250 ms before it asks the server, so each key does not send a request.
-  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { setOlder(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
+  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { setLoaded(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
   const path = queryOf(filters)
-  const fetcher = useCallback((signal: AbortSignal) => api<AuditPage>(path, undefined, signal), [api, path])
+  const current = useRef(path)
+  useEffect(() => { current.current = path }, [path])
+  // Each page carries the query that asked for it: a page for the last filter must not show under this one.
+  const fetcher = useCallback((signal: AbortSignal) => api<AuditPage>(path, undefined, signal).then(page => ({ path, page })), [api, path])
   const { data, error, refresh } = usePolling(fetcher, 20000)
+  const live = data?.path === path ? data.page : undefined
   const [moreError, setMoreError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false)
   // The filter lists come from the first page; keep the last ones while a new filter loads.
   const [facets, setFacets] = useState<Facets | null>(null)
-  if (data?.facets && data.facets !== facets) setFacets(data.facets)
-  // A page that came back after the filter changed belongs to the old list.
-  const extra = older?.path === path ? older : null
-  const entries = useMemo(() => {
-    const seen = new Set<string>()
-    // Ids sort by time. The 20 s refresh can push the first page's last entry below the page edge; the Load more
-    // pages keep that snapshot, so a refresh never drops a row that was on screen.
-    return [...(data?.entries ?? []), ...(extra?.entries ?? [])].filter(entry => !seen.has(entry.id) && !!seen.add(entry.id))
-      .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
-  }, [data, extra])
-  const next = extra ? extra.next : data?.next ?? null
+  if (live?.facets && live.facets !== facets) setFacets(live.facets)
+  const list = loaded?.path === path ? loaded : null
+  // A reload after Load more: merge it in. If more than a page came in since the last reload, the new page does not
+  // reach the list (a gap), so start again at the first page and offer Load more again.
+  const [merges, setMerges] = useState<AuditPage | undefined>(undefined)
+  if (live !== merges) {
+    setMerges(live)
+    if (live && list) {
+      const known = new Set(list.entries.map(entry => entry.id))
+      setLoaded(live.next && !live.entries.some(entry => known.has(entry.id)) ? null : { ...list, entries: merged(live.entries, list.entries) })
+    }
+  }
+  const entries = useMemo(() => list ? list.entries : live?.entries ?? [], [list, live])
+  const next = list ? list.next : live?.next ?? null
   async function more() {
-    if (!next) return
+    if (!next || !live) return
+    const asked = path, start = list ?? { path, entries: live.entries, next }
     setLoadingMore(true); setMoreError('')
     try {
       const page = await api<AuditPage>(queryOf(filters, next))
-      setOlder({ path, entries: [...(data?.entries ?? []), ...(extra?.entries ?? []), ...page.entries], next: page.next })
+      if (current.current !== asked) return  // the filter changed while the page loaded
+      setLoaded(before => {
+        const base = before?.path === asked ? before : start
+        return { path: asked, entries: merged(base.entries, page.entries), next: page.next }
+      })
     } catch (failure) { setMoreError(errorText(failure)) }
     finally { setLoadingMore(false) }
   }
   const filtered = filters.text.trim() !== '' || filters.group !== ANY || filters.project !== ANY || filters.actor !== ANY || !!filters.from || !!filters.to
-  const set = (change: Partial<Filters>) => { setOlder(null); setFilters(current => ({ ...current, ...change })) }
-  const clear = () => { setOlder(null); setText(''); setFilters(NONE) }
+  const set = (change: Partial<Filters>) => { setLoaded(null); setFilters(current => ({ ...current, ...change })) }
+  const clear = () => { setLoaded(null); setText(''); setFilters(NONE) }
   const projects = facets?.projects ?? []
   const actors = facets?.actors ?? []
-  const days = data?.retention_days ?? 90
+  const days = live?.retention_days ?? data?.page.retention_days ?? 90
   const today = new Date(); const max = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
 
   let body
-  if (!data && error) body = <div className="audit-state" role="alert"><p className="error">Could not load the activity log. {error}</p><button type="button" className="secondary" onClick={() => void refresh()}><RotateCw size={15} aria-hidden="true" />Retry</button></div>
-  else if (!data) body = <SkeletonRows count={5} label="Loading the activity log" className="audit-skeleton" icon={false} />
+  if (!live && error) body = <div className="audit-state" role="alert"><p className="error">Could not load the activity log. {error}</p><button type="button" className="secondary" onClick={() => void refresh()}><RotateCw size={15} aria-hidden="true" />Retry</button></div>
+  else if (!live) body = <SkeletonRows count={5} label="Loading the activity log" className="audit-skeleton" icon={false} />
   else if (!entries.length && !filtered) body = <div className="audit-state audit-empty">
     <h4>Nothing recorded yet</h4>
     <p>Tether records who changes what: autonomy and Codex levels, reviewers, the advisor, learning and passkeys (with the old and the new value), tabs that start or close, reviews and their verdicts, backlog items, lessons, advisor questions and approvals. It never records messages, typed text or secrets.</p>
@@ -144,7 +163,7 @@ export function ActivityLog({ api }: { api: Api }) {
     <button type="button" className="secondary" onClick={clear}>Clear filters</button>
   </div>
   else body = <>
-    {data && error && <p className="error audit-stale" role="alert">Could not refresh. {error} <button type="button" className="link-button" onClick={() => void refresh()}>Retry</button></p>}
+    {error && <p className="error audit-stale" role="alert">Could not refresh. {error} <button type="button" className="link-button" onClick={() => void refresh()}>Retry</button></p>}
     <ol className="audit-days">{entries.reduce<AuditEntry[][]>((groups, entry) => {
       const last = groups[groups.length - 1]
       if (last && dayKey(last[0].at) === dayKey(entry.at)) last.push(entry); else groups.push([entry])
@@ -180,7 +199,7 @@ export function ActivityLog({ api }: { api: Api }) {
       </fieldset>
       {(filtered || text) && <button type="button" className="link-button audit-clear" onClick={clear}><X size={14} aria-hidden="true" />Clear filters</button>}
     </div>
-    <p className="visually-hidden" role="status">{data ? `${entries.length}${next ? '+' : ''} ${entries.length === 1 ? 'entry' : 'entries'}` : ''}</p>
+    <p className="visually-hidden" role="status">{live ? `${entries.length}${next ? '+' : ''} ${entries.length === 1 ? 'entry' : 'entries'}` : ''}</p>
     {body}
   </section>
 }

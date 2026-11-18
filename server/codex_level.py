@@ -105,7 +105,11 @@ def read_project(pid):
     return {'override': data['override'], 'level': data['level']}
 
 
+_WRITES = {}  # path → writes by this process: two quick writes can share an inode and a coarse file time
+
+
 def _write(path, text):
+    _WRITES[str(path)] = _WRITES.get(str(path), 0) + 1
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
@@ -455,14 +459,20 @@ def _record_setting(kind, label, old, new, *, pid=None, undo=False):
 STALE_UNDO = 'The level changed after this change. Undo would overwrite the newer value, so Tether did not change it.'
 
 
-def stale(body, current):
-    """Undo sends `expect`: the value its change set. True when another tab or device changed it since (B56 review)."""
-    return 'expect' in body and body['expect'] != current
+def revision(path):
+    """Changes on every write: _write replaces the file, so another process's write gives a new inode and time, and
+    this process also counts its own writes (the file time is coarse and a freed inode can come back at once)."""
+    try:
+        info = path.stat()
+    except OSError:
+        return f'none-{_WRITES.get(str(path), 0)}'
+    return f'{info.st_ino}-{info.st_mtime_ns}-{_WRITES.get(str(path), 0)}'
 
 
-def _check_expect(body, current):
-    if stale(body, current):
-        raise LevelError(409, STALE_UNDO)
+def stale_undo(body, path):
+    """Undo sends the revision its change made. True when any write came after it, even one that set the same value
+    again (1 → 2 → 1), so an old Undo never overwrites a newer change (B56 review)."""
+    return body.get('undo') is True and body.get('revision') != revision(path)
 
 
 def _run_value(run):
@@ -482,6 +492,7 @@ def post(handler):
         if not isinstance(undo, bool):
             raise LevelError(400, 'Undo must be true or false.')
         pid = body.get('project')
+        change = None
         with _SETTINGS_LOCK:
             if 'run' in body:
                 old_run = read_run()
@@ -490,20 +501,26 @@ def post(handler):
                                 undo=undo)
             elif pid is None:
                 old = read_global()
-                _check_expect(body, old)
+                if stale_undo(body, global_path()):
+                    raise LevelError(409, STALE_UNDO)
                 level = body.get('level')
                 set_global(level)
+                # The value this write replaced and its revision: the UI's Undo restores exactly this change.
+                change = {'old': old, 'new': level, 'revision': revision(global_path())}
                 _record_setting('setting.codex_level', 'Codex level', old, level, undo=undo)
             else:
                 current = resolve(pid)
                 previous = current['project'] or {'level': current['global'], 'override': False}
-                _check_expect(body, {'level': previous['level'], 'override': previous['override']})
+                if stale_undo(body, project_path(pid)):
+                    raise LevelError(409, STALE_UNDO)
                 level, override = body.get('level'), body.get('override')
                 set_project(pid, override, level)
+                change = {'old': {'level': previous['level'], 'override': previous['override']},
+                          'new': {'level': level, 'override': override}, 'revision': revision(project_path(pid))}
                 _record_setting('setting.codex_level', 'Codex level',
                                 _override_value(previous['level'], previous['override']),
                                 _override_value(level, override), pid=pid, undo=undo)
-        handler.respond(200, state(pid))
+        handler.respond(200, dict(state(pid), change=change) if change else state(pid))
     except LevelError as exc:
         handler.respond(exc.status, {'error': str(exc)})
     except (ValueError, UnicodeError):

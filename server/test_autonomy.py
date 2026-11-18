@@ -517,7 +517,7 @@ class Http(Base):
         projects.set_name(PID, 'Example Project')
         with audit.acting('ui'), mock.patch.object(approval, 'require') as require:
             for body, status in (({'level': 1, 'undo': 1}, 400),
-                                 ({'level': 1, 'undo': True}, 200),
+                                 ({'level': 1, 'undo': True, 'revision': codex_level.revision(autonomy.global_path())}, 200),
                                  ({'project': PID, 'override': True, 'level': 1}, 200)):
                 handler = Handler(body=body)
                 autonomy.post(handler)
@@ -532,22 +532,31 @@ class Http(Base):
         self.assertTrue(all(row['actor'] == {'source': 'ui'} for row in rows))
 
     def test_stale_undo_is_refused_before_approval(self):
-        # B56 review: another device changed the level after this change; Undo must not overwrite it.
+        # B56 review: another device wrote 4 → 3 → 4 after this change. The value matches, the revision does not.
         autonomy.set_global(4)
         autonomy.set_project(PID, True, 2)
         with audit.acting('ui'), mock.patch.object(approval, 'require') as require:
-            for body in ({'level': 5, 'undo': True, 'expect': 3},
-                         {'project': PID, 'override': True, 'level': 5, 'undo': True,
-                          'expect': {'level': 3, 'override': True}}):
+            def post(body):
                 handler = Handler(body=body)
                 autonomy.post(handler)
-                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}))
+                return handler
+            change = post({'level': 3}).body['change']
+            project = post({'project': PID, 'override': True, 'level': 1}).body['change']
+            self.assertEqual((change['old'], project['old']), (4, {'level': 2, 'override': True}))
+            for body in ({'level': 4}, {'level': 3}, {'project': PID, 'override': True, 'level': 2},
+                         {'project': PID, 'override': True, 'level': 1}):
+                self.assertEqual(post(body).status, 200)
+            require.reset_mock()
+            for body in ({'level': 4, 'undo': True, 'revision': change['revision']},
+                         {'project': PID, 'override': True, 'level': 2, 'undo': True, 'revision': project['revision']},
+                         {'level': 4, 'undo': True}):
+                handler = post(body)
+                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}), body)
             require.assert_not_called()
-            handler = Handler(body={'level': 1, 'undo': True, 'expect': 4})
-            autonomy.post(handler)
-            self.assertEqual(handler.status, 200, handler.body)
-        self.assertEqual((autonomy.read_global(), autonomy.read_project(PID)['level']), (1, 2))
-        self.assertEqual([row['summary'] for row in audit.query()['entries']], ['Undo: Autonomy level 4 → 1'])
+            fresh = post({'level': 1}).body['change']
+            self.assertEqual(post({'level': fresh['old'], 'undo': True, 'revision': fresh['revision']}).status, 200)
+        self.assertEqual((autonomy.read_global(), autonomy.read_project(PID)['level']), (3, 1))
+        self.assertEqual([row['summary'] for row in audit.query()['entries'] if row.get('undo')], ['Undo: Autonomy level 1 → 3'])
 
     def test_reviewers_audit_names_every_changed_tier(self):
         value = reviewers(critical={'agent': 'none'}, light={'agent': 'claude', 'model': 'haiku'})

@@ -340,35 +340,50 @@ class Http(Base):
     def test_level_audit_records_successful_change_and_undo(self):
         codex_level.set_global(3)
         with audit.acting('ui', device='Chrome on Mac'):
-            for body, status in (({'level': 1, 'undo': 'yes'}, 400),
-                                 ({'level': 1}, 200), ({'level': 1}, 200),
-                                 ({'level': 3, 'undo': True}, 200)):
-                handler = Handler(codex_level.PATH, body)
-                codex_level.post(handler)
+            for body, status in (({'level': 1, 'undo': 'yes'}, 400), ({'level': 1}, 200), ({'level': 1}, 200)):
+                handler = self.post(body)
                 self.assertEqual(handler.status, status, handler.body)
+            undo = self.post({'level': 3, 'undo': True, 'revision': handler.body['change']['revision']})
+            self.assertEqual(undo.status, 200, undo.body)
         rows = audit.query(kinds=['setting.codex_level'])['entries']
         self.assertCountEqual([(row['summary'], row['old'], row['new'], row.get('undo')) for row in rows],
                               [('Codex level 3 → 1', 3, 1, None), ('Undo: Codex level 1 → 3', 1, 3, True)])
         self.assertTrue(all(row['actor'] == {'source': 'ui', 'device': 'Chrome on Mac'} for row in rows))
 
-    def test_stale_undo_is_refused_and_not_recorded(self):
-        # B56 review: Undo of 3 → 1 after another tab set 4 must not overwrite the 4.
+    def post(self, body):
+        handler = Handler(codex_level.PATH, body)
+        codex_level.post(handler)
+        return handler
+
+    def test_undo_restores_the_value_the_server_replaced(self):
+        # The UI may show 3 while the server holds 4: the change and its Undo use the server's 4 (B56 review).
+        codex_level.set_global(3)
         codex_level.set_global(4)
+        with audit.acting('ui'):
+            change = self.post({'level': 1}).body['change']
+            self.assertEqual((change['old'], change['new']), (4, 1))
+            undo = self.post({'level': change['old'], 'undo': True, 'revision': change['revision']})
+        self.assertEqual(undo.status, 200, undo.body)
+        self.assertEqual(codex_level.read_global(), 4)
+
+    def test_stale_undo_is_refused_even_when_the_value_came_back(self):
+        # B56 review: another device wrote 1 → 2 → 1. The value matches, but the Undo is for an older change.
+        codex_level.set_global(3)
         codex_level.set_project(PID, True, 2)
         with audit.acting('ui'):
-            for body in ({'level': 3, 'undo': True, 'expect': 1},
-                         {'project': PID, 'override': True, 'level': 0, 'undo': True,
-                          'expect': {'level': 1, 'override': True}}):
-                handler = Handler(codex_level.PATH, body)
-                codex_level.post(handler)
-                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}))
-            handler = Handler(codex_level.PATH, {'project': PID, 'override': True, 'level': 0, 'undo': True,
-                                                 'expect': {'level': 2, 'override': True}})
-            codex_level.post(handler)
-            self.assertEqual(handler.status, 200, handler.body)
-        self.assertEqual((codex_level.read_global(), codex_level.read_project(PID)['level']), (4, 0))
-        self.assertEqual([row['summary'] for row in audit.query()['entries']],
-                         ['Undo: Codex level for project: 2 (override on) → 0 (override on)'])
+            change = self.post({'level': 1}).body['change']
+            project = self.post({'project': PID, 'override': True, 'level': 0}).body['change']
+            self.assertEqual(project['old'], {'level': 2, 'override': True})
+            for body in ({'level': 2}, {'level': 1}, {'project': PID, 'override': False, 'level': 0},
+                         {'project': PID, 'override': True, 'level': 0}):
+                self.assertEqual(self.post(body).status, 200)
+            for body in ({'level': 3, 'undo': True, 'revision': change['revision']},
+                         {'level': 3, 'undo': True},
+                         {'project': PID, 'override': True, 'level': 2, 'undo': True, 'revision': project['revision']}):
+                handler = self.post(body)
+                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}), body)
+        self.assertEqual((codex_level.read_global(), codex_level.read_project(PID)), (1, {'override': True, 'level': 0}))
+        self.assertFalse([row for row in audit.query()['entries'] if row.get('undo')])
 
     def test_level_audit_records_project_override_change_at_the_same_level(self):
         codex_level.set_project(PID, False, 2)

@@ -10,6 +10,7 @@ import { ProjectCodexLevel } from './CodexLevel'
 import { ProjectCommitGate } from './CommitGate'
 import { ProjectClaudeAdvisor } from './ClaudeAdvisor'
 import { ProjectAutonomy } from './Autonomy'
+import { LevelUndoProvider } from './LevelUndo'
 import type { Session } from './Sidebar'
 import { AdvisorDecision, AdvisorLog, useAdvisorLog } from './AdvisorLog'
 import type { AdvisorRow } from './AdvisorLog'
@@ -125,6 +126,7 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
   const pinName = pinPath?.split('/').pop()
 
   return <dialog {...modal} className="sheet settings-sheet project-sheet" aria-labelledby="project-title">
+    <LevelUndoProvider>
     <div className="sheet-heading">
       <h2 id="project-title">{note ? note.name : decision ? 'Advisor decision' : group ? 'Stack context' : 'Project'}</h2>
       <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>
@@ -209,5 +211,6 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
         {preview && project.preview && <pre className="project-preview" tabIndex={0} aria-label="What agents get">{project.preview}</pre>}
       </section>
     </>}
+    </LevelUndoProvider>
   </dialog>
 }

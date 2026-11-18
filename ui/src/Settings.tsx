@@ -12,6 +12,7 @@ import { GlobalCommitGate } from './CommitGate'
 import { GlobalClaudeAdvisor } from './ClaudeAdvisor'
 import { AutoMergeSettings } from './AutoMerge'
 import { GlobalAutonomy } from './Autonomy'
+import { LevelUndoProvider } from './LevelUndo'
 import { HelperSettings } from './Helpers'
 import { LearningSettings } from './Learning'
 import { CleanUpSettings, OpsSettings } from './Upkeep'
@@ -117,11 +118,13 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery(''); search.current?.focus() }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); event.stopPropagation(); search.current?.focus() }
   }}>
+    <LevelUndoProvider>
     <header className="preferences-header"><div><span className="preferences-eyebrow">Tether</span><h2 id="settings-title">Settings</h2></div><button type="button" className="icon-button" aria-label="Close settings" onClick={onClose}><X size={22} /></button></header>
     <div className="preferences-search"><Search size={18} aria-hidden="true" /><input ref={search} type="search" aria-label="Search settings" placeholder="Search settings…" value={query} autoComplete="off" onChange={event => setQuery(event.target.value)} />{query && <button type="button" className="icon-button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus() }}><X size={16} /></button>}<kbd aria-hidden="true">{keyLabel('⌘K')}</kbd></div>
     <div className="preferences-layout"><aside>{navigation}<p>Changes save automatically.<br />The folder and the app name use their Save buttons.</p></aside><div ref={body} className="preferences-content">
       {searching ? <><div className="preferences-content-heading"><span className="preferences-eyebrow">Search results</span><h3>{visible.length} {visible.length === 1 ? 'match' : 'matches'}</h3><p role="status">Results for “{query.trim()}”</p></div>{!visible.length && <div className="preferences-empty"><Search size={24} /><h4>No matching settings</h4><p>Try “folder”, “notifications”, “font” or “browser”.</p><button type="button" className="secondary" onClick={() => { setQuery(''); search.current?.focus() }}>Clear search</button></div>}</> : group ? <div className="preferences-content-heading"><button type="button" className="preferences-back" onClick={() => setSelected(null)}><ArrowLeft size={16} />All settings</button><h3>{group.title}</h3><p>{group.description}</p></div> : <div className="preferences-overview"><span className="preferences-eyebrow">Your workspace, your way</span><h3>Make Tether fit your work.</h3><p>Choose a category, or search for a setting.</p><div className="preferences-mobile-index">{navigation}</div><div className="preferences-quick"><h4>Quick access</h4>{[['Default folder', 'default folder'], ['Theme', 'theme'], ['Notifications', 'push notifications'], ['Activity log', 'activity log']].map(([label, query]) => <button type="button" key={label} onClick={() => quick(query)}>{label}<ArrowUpRight size={15} /></button>)}</div></div>}
       <div className="preferences-list">{visible.map((item, index) => <section key={item.id} className="preferences-entry" aria-label={item.title} data-setting={item.id}>{searching && (index === 0 || visible[index - 1].group !== item.group) && <button type="button" className="preferences-result-group" onClick={() => choose(item.group)}>{SETTINGS_GROUPS.find(group => group.id === item.group)!.title}<ChevronRight size={13} /></button>}{item.content}</section>)}</div>
     </div></div>
+    </LevelUndoProvider>
   </dialog>
 }

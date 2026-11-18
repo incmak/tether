@@ -1,15 +1,18 @@
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { X } from 'lucide-react'
 
 // The Undo toast after a Codex or autonomy level change (B56). It looks and times out like the page's undo toast
 // (Undo.tsx), but it stays while it offers Undo, and it renders inside the open sheet: the Settings sheet is a modal dialog, and the page toast sits
 // under it. Undo sends the old level again through the same route with {undo: true}, so a raise still asks for the
-// passkey (withApproval) and the activity log records the undo.
+// passkey (withApproval) and the activity log records the undo. One sheet shows one toast: LevelUndoProvider holds it, so
+// a new change replaces the last offer, and the toast stays when the setting that made it leaves the screen.
 const TOAST_MS = 8000
+type OfferFn = (text: string, undone: string, run: () => Promise<boolean>) => void
+const Shared = createContext<OfferFn | null>(null)
 interface Offer { text: string; undone?: string; run?: () => Promise<boolean>; at: number }
 
-export function useLevelUndo(): { offer: (text: string, undone: string, run: () => Promise<boolean>) => void; toast: ReactNode } {
+function useUndoToast(): { offer: OfferFn; toast: ReactNode } {
   const [shown, setShown] = useState<Offer | null>(null)
   const [held, setHeld] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -35,4 +38,17 @@ export function useLevelUndo(): { offer: (text: string, undone: string, run: () 
     </div>}
   </div>
   return { offer: (text, undone, run) => setShown({ text, undone, run, at: Date.now() }), toast }
+}
+
+/** One Undo toast for everything inside: wrap a sheet's content in it. */
+export function LevelUndoProvider({ children }: { children: ReactNode }) {
+  const { offer, toast } = useUndoToast()
+  return <Shared.Provider value={offer}>{children}{toast}</Shared.Provider>
+}
+
+/** The sheet's shared toast; a setting outside a provider gets its own. */
+export function useLevelUndo(): { offer: OfferFn; toast: ReactNode } {
+  const shared = useContext(Shared)
+  const own = useUndoToast()
+  return shared ? { offer: shared, toast: null } : own
 }

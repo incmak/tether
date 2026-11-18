@@ -52,6 +52,7 @@ function query(all, params) {
 }
 const levels = [0, 1, 2, 3, 4, 5].map(level => ({ level, name: `Level ${level}`, summary: `What level ${level} does.` }))
 const codex = global => ({ levels, global, level: global, source: 'global', project: null, runs: { today: 0, running: 0, panes: [] }, run: { model: 'gpt-6.2-sol', effort: 'high', fast: true }, models: [] })
+const autonomyState = global => ({ levels, global, level: global, source: 'global', project: null, decisions: [] })
 const pane = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Activity test', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null }
 const fixture = {
   undo: { entries: [], next_undo: null, next_redo: null, next_undo_label: null, next_redo_label: null },
@@ -71,11 +72,13 @@ async function main() {
   let browser, page, server, failed = 0
   const pageErrors = [], unexpected = new Set(), asks = [], posts = []
   let mode = 'rows'  // rows | empty | error | slow
-  let all = entries(), level = 3
+  let all = entries(), level = 3, rev = 0, autonomy = 4
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
     server = http.createServer(async (req, res) => {
+      // No keep-alive: Node closes an idle socket after 5 s, and route.fetch could reuse it at that moment (ECONNRESET).
+      res.setHeader('Connection', 'close')
       const url = new URL(req.url, 'http://127.0.0.1')
       const file = url.pathname === '/chat/' ? path.join(DIST, 'index.html') : path.resolve(DIST, '.' + decodeURIComponent(url.pathname.slice('/chat'.length)))
       if (!url.pathname.startsWith('/chat/') || url.pathname.endsWith('/sw.js') || !(file === path.join(DIST, 'index.html') || file.startsWith(DIST + path.sep))) { res.writeHead(404); res.end(); return }
@@ -113,14 +116,29 @@ async function main() {
           if (request.method() === 'POST') {
             const body = request.postDataJSON()
             posts.push({ body, client: request.headers()['x-tether-client'] })
-            // Like server/codex_level.py with server/audit.py: one record per change, "Undo: " for the toast's undo.
+            // Like server/codex_level.py: an Undo must send the revision of its change, or the server refuses it.
+            if (body.undo && body.revision !== `r${rev}`) return route.fulfill({ status: 409, json: { error: 'The level changed after this change. Undo would overwrite the newer value, so Tether did not change it.' } })
+            // With server/audit.py: one record per change, "Undo: " for the toast's undo.
+            const old = level
             if (typeof body.level === 'number' && body.level !== level) {
               const at = Date.now() / 1000
               all = [{ id: id(at, 900 + posts.length), at, kind: 'setting.codex_level', summary: `${body.undo ? 'Undo: ' : ''}Codex level ${level} → ${body.level}`, old: level, new: body.level, undo: body.undo || undefined, actor: ui }, ...all]
               level = body.level
             }
+            rev++
+            return route.fulfill({ json: { ...codex(level), change: { old, new: level, revision: `r${rev}` } } })
           }
           return route.fulfill({ json: codex(level) })
+        }
+        if (endpoint === 'autonomy') {
+          if (request.method() === 'POST') {
+            const body = request.postDataJSON()
+            posts.push({ body, client: request.headers()['x-tether-client'], endpoint })
+            const old = autonomy
+            autonomy = body.level
+            return route.fulfill({ json: { ...autonomyState(autonomy), change: { old, new: autonomy, revision: 'a1' } } })
+          }
+          return route.fulfill({ json: autonomyState(autonomy) })
         }
         if (request.method() !== 'GET') { unexpected.add(`POST ${endpoint}`); return route.fulfill({ status: 500, json: { error: 'no writes here' } }) }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -175,7 +193,7 @@ async function main() {
     for (const [width, height] of sizes) {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
-      all = entries(); level = 3; posts.length = 0
+      all = entries(); level = 3; autonomy = 4; posts.length = 0
 
       // Loading, then rows: newest first, the actor in words, old → new, the Undo mark.
       mode = 'slow'
@@ -226,8 +244,35 @@ async function main() {
       await page.waitForFunction(count => document.querySelectorAll('section.activity-log .audit-row').length === count, total + 3)
       const merged = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
       check(`${at} a refresh after Load more keeps every row once, newest first`, new Set(merged).size === total + 3 && merged[0] === 'Fresh tab 2', `${merged.length} ${merged[0]}`)
-      all = all.slice(3)
+      // Three refreshes in a row, each with new rows: every row stays, once.
+      for (let round = 1; round <= 3; round++) {
+        all = [{ id: id(Date.now() / 1000 + 10 + round, 820 + round), at: Date.now() / 1000 + 10 + round, kind: 'tab.start', summary: `Round ${['one', 'two', 'three'][round - 1]}`, actor: ui }, ...all]
+        await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+        await page.waitForFunction(count => document.querySelectorAll('section.activity-log .audit-row').length === count, total + 3 + round)
+      }
+      const rounds = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
+      check(`${at} three refreshes keep every row once`, new Set(rounds).size === total + 6 && rounds[0] === 'Round three', `${rounds.length} ${rounds[0]}`)
       check(`${at} the end says how long Tether keeps it`, await section.getByText('That is all. Tether keeps 90 days.').isVisible())
+      // More than a page of new rows in one refresh: the new first page does not reach the list, so the sheet starts
+      // again at the newest entry, with Load more, and no gap between the two.
+      const burst = Array.from({ length: 55 }, (_, n) => ({ id: id(Date.now() / 1000 + 100 + n, 1000 + n), at: Date.now() / 1000 + 100 + n, kind: 'tab.start', summary: `Burst ${n}`, actor: ui }))
+      all = [...burst.reverse(), ...all]
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+      await section.locator('.audit-row').first().filter({ hasText: 'Burst 54' }).waitFor()
+      const after = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
+      check(`${at} a refresh with a gap starts again at the newest page`, after.length === 50 && after[0] === 'Burst 54' && after[49] === 'Burst 5', `${after.length} ${after[0]} ${after[after.length - 1]}`)
+      check(`${at} after a gap, Load more is back`, await section.getByRole('button', { name: 'Load more' }).isVisible())
+      // A filter whose reply is slow: the old list and its Load more must not show under the new filter.
+      mode = 'slow'
+      await section.getByRole('searchbox', { name: 'Search the activity log' }).fill('Round two')
+      await page.waitForFunction(() => document.querySelector('section.activity-log .skeleton, section.activity-log [aria-busy="true"]') || !document.querySelector('section.activity-log .audit-row'))
+      check(`${at} while a filter loads, no old rows and no Load more`, await rows.count() === 0 && await section.getByRole('button', { name: 'Load more' }).count() === 0 && await section.locator('.audit-end').count() === 0)
+      mode = 'rows'
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
+      check(`${at} the slow filter shows only its match`, (await rows.nth(0).innerText()).includes('Round two'))
+      await section.getByRole('searchbox', { name: 'Search the activity log' }).fill('')
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
+      all = all.filter(entry => !/^(Fresh tab|Round|Burst) /.test(entry.summary))
 
       // Search: one request after typing stops, and it starts again at the newest entry.
       const before = asks.length
@@ -301,7 +346,7 @@ async function main() {
       await shot(`toast-${width}`, toast)
       await toast.getByRole('button', { name: 'Undo' }).click()
       await toast.getByText('Undid: Codex level 1 → 3').waitFor()
-      check(`${at} Undo sends the old level with undo: true and the level it undoes`, posts[1]?.body.level === 3 && posts[1].body.undo === true && posts[1].body.expect === 1 && posts[1].client === 'web', JSON.stringify(posts[1]))
+      check(`${at} Undo sends the old level with undo: true and the revision of its change`, posts[1]?.body.level === 3 && posts[1].body.undo === true && posts[1].body.revision === `r${rev - 1}` && posts[1].client === 'web', JSON.stringify(posts[1]))
       check(`${at} the level is back to 3`, await page.locator('input[name="codex-level-global"][value="3"]').isChecked())
       check(`${at} the done toast has no second Undo`, await toast.getByRole('button', { name: 'Undo' }).count() === 0)
       // The log shows both records, the undo marked.
@@ -309,6 +354,32 @@ async function main() {
       await section.locator('.audit-row').first().waitFor()
       const top = await rows.evaluateAll(els => els.slice(0, 2).map(el => el.innerText))
       check(`${at} the log shows the change and its undo`, /Undo: Codex level 1 → 3[\s\S]*Chrome on Mac/.test(top[0]) && /Codex level 3 → 1/.test(top[1]), top.join(' | '))
+
+      // The server holds 4 while this tab still shows 3: the toast and its Undo use the server's 4.
+      await open(width, 'codex level')
+      await page.locator('input[name="codex-level-global"][value="3"]').waitFor({ state: 'attached' })
+      level = 4; rev++
+      await page.locator('label', { has: page.locator('input[name="codex-level-global"][value="1"]') }).click()
+      await toast.getByText('Codex level 4 → 1').waitFor()
+      check(`${at} the toast names the value the server replaced`, (await toast.innerText()).includes('Codex level 4 → 1'))
+      // Another device writes 1 → 2 → 1. The value matches again, but the Undo is stale: the server refuses it.
+      level = 2; rev++; level = 1; rev++
+      const sent = posts.length
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await page.locator('dialog[open] section[aria-labelledby="settings-codex"] .error').waitFor()
+      check(`${at} a stale Undo sends the old revision and is refused`, posts[sent]?.body.level === 4 && posts[sent].body.revision === `r${rev - 2}` && level === 1, JSON.stringify(posts[sent]))
+      check(`${at} a refused Undo says why`, (await page.locator('dialog[open] section[aria-labelledby="settings-codex"] .error').innerText()).includes('The level changed after this change'))
+      check(`${at} a refused Undo leaves no toast`, await page.locator('dialog[open] .undo-toast').count() === 0)
+
+      // One sheet, one toast: an autonomy change, then a Codex change, leave only the Codex offer.
+      await open(width, 'level')
+      await page.locator('input[name="autonomy-global"][value="3"]').waitFor({ state: 'attached' })
+      await page.locator('label', { has: page.locator('input[name="autonomy-global"][value="3"]') }).click()
+      await page.locator('dialog[open] .undo-toast', { hasText: 'Autonomy level 4 → 3' }).waitFor()
+      await page.locator('label', { has: page.locator('input[name="codex-level-global"][value="2"]') }).click()
+      await page.locator('dialog[open] .undo-toast', { hasText: 'Codex level 1 → 2' }).waitFor()
+      check(`${at} a second change replaces the first offer: one toast`, await page.locator('dialog[open] .undo-toast').count() === 1)
+      level = 3; rev++
     }
     // WCAG 2.2.1: the toast that offers Undo has no time limit. A fake clock moves 60 s on; it runs last, so no other
     // step sees the fake clock. The "Undid" note has no action and still goes after 8 s.

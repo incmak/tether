@@ -4,6 +4,8 @@ import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
 import { useLevelUndo } from './LevelUndo'
+import { levelText, undoBody } from './levelChange'
+import type { LevelChange } from './levelChange'
 import { withApproval } from './approval'
 import { SavedAnswers } from './AutonomySetup'
 import { ProjectLessons } from './Learning'
@@ -57,8 +59,8 @@ export function useAutonomy(api: Api, project?: string) {
   async function save(body: Record<string, unknown>) {
     setPending(body); setError('')
     // Raising a level gives agents more power, so the server asks for a passkey approval; lowering it does not.
-    try { await withApproval<AutonomyState>(api, 'autonomy', 'level-raise', body); await refresh(); return true }
-    catch (failure) { setError(errorText(failure)); return false }
+    try { const saved = await withApproval<AutonomyState & { change?: LevelChange }>(api, 'autonomy', 'level-raise', body); await refresh(); return saved }
+    catch (failure) { setError(errorText(failure)); return null }
     finally { setPending(null) }
   }
   return { data, error: error || loadError, pending, save, refresh }
@@ -82,9 +84,8 @@ export function GlobalAutonomy({ api }: { api: Api }) {
   const value = typeof pending?.level === 'number' ? pending.level : data?.global
   const { offer, toast } = useLevelUndo()
   async function change(level: number) {
-    const old = data?.global
-    if (await save({ level }) && old !== undefined && old !== level)
-      offer(`Autonomy level ${old} → ${level}`, `Undid: autonomy level ${level} → ${old}`, () => save({ level: old, undo: true, expect: level }))
+    const change = (await save({ level }))?.change, body = undoBody(change)
+    if (change && body) offer(`Autonomy level ${levelText(change.old)} → ${level}`, `Undid: autonomy level ${level} → ${levelText(change.old)}`, async () => !!await save(body))
   }
   return <section className="settings-group" aria-labelledby="settings-autonomy"><h3 id="settings-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
@@ -104,9 +105,8 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
   const named = (n: number) => data?.levels[n] ? `${n} (${data.levels[n].name})` : `${n}`
   const { offer, toast } = useLevelUndo()
   async function change(next: number) {
-    const old = data?.project?.override ? data.project.level : undefined
-    if (await save({ project, override: true, level: next }) && old !== undefined && old !== next)
-      offer(`Project autonomy level ${old} → ${next}`, `Undid: project autonomy level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true, expect: { level: next, override: true } }))
+    const change = (await save({ project, override: true, level: next }))?.change, body = undoBody(change, project)
+    if (change && body) offer(`Project autonomy level ${levelText(change.old)} → ${next}`, `Undid: project autonomy level ${next} → ${levelText(change.old)}`, async () => !!await save(body))
   }
   return <><section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}

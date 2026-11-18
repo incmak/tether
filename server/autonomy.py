@@ -139,6 +139,7 @@ def read_project(pid):
 
 
 def _write(path, text):
+    codex_level._WRITES[str(path)] = codex_level._WRITES.get(str(path), 0) + 1  # for codex_level.revision (Undo)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
@@ -647,8 +648,8 @@ def _save_level(handler, body, payload, pid):
         project_path(pid)
     current = resolve(pid)
     previous = current['project'] or {'level': current['global'], 'override': False}
-    if codex_level.stale(body, current['global'] if pid is None else
-                         {'level': previous['level'], 'override': previous['override']}):
+    path = global_path() if pid is None else project_path(pid)
+    if codex_level.stale_undo(body, path):  # before the passkey ask: a stale Undo must not ask for one
         raise LevelError(409, codex_level.STALE_UNDO)
     effective = current['global'] if pid is not None and not override else level
     if effective > current['level']:
@@ -661,6 +662,11 @@ def _save_level(handler, body, payload, pid):
         new = codex_level._override_value(level, override)
         set_project(pid, override, level)
     codex_level._record_setting('setting.autonomy_level', 'Autonomy level', old, new, pid=pid, undo=undo)
+    # The value this write replaced and its revision: the UI's Undo restores exactly this change.
+    if pid is None:
+        return {'old': old, 'new': level, 'revision': codex_level.revision(path)}
+    return {'old': {'level': previous['level'], 'override': previous['override']},
+            'new': {'level': level, 'override': override}, 'revision': codex_level.revision(path)}
 
 
 def post(handler):
@@ -707,6 +713,7 @@ def post(handler):
             handler.respond(200, _lessons(handler, body, payload))
             return
         pid = body.get('project')
+        change = None
         if body.get('catalog') == 'recheck':
             model_catalog.recheck()
         else:
@@ -716,8 +723,8 @@ def post(handler):
                 elif 'reviewers' in body:
                     _save_reviewers(body['reviewers'])
                 else:
-                    _save_level(handler, body, payload, pid)
-        handler.respond(200, state(pid))
+                    change = _save_level(handler, body, payload, pid)
+        handler.respond(200, dict(state(pid), change=change) if change else state(pid))
     except approval.ApprovalError as exc:
         approval.error(handler, exc)
     except LevelError as exc:

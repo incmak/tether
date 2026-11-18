@@ -502,6 +502,23 @@ class BacklogAuditTests(unittest.TestCase):
         self.assertEqual(sorted((entry['kind'], entry['project']) for entry in entries),
                          [('backlog.done', 'Build'), ('backlog.done', 'Docs')])
 
+    def test_mixed_save_with_one_title_records_one_move_and_one_done(self):
+        # B56 review: in one save, move the Build item to Ops and mark the Docs item done. Each list order must give
+        # one move (Build → Ops) and one done (Docs), not two moves.
+        build, docs = '## Build\n- [ ] Same title\n', '## Docs\n- [ ] Same title\n'
+        for build_first in (True, False):
+            for ops_first in (True, False):
+                with self.subTest(build_first=build_first, ops_first=ops_first):
+                    for file in audit.folder().glob('*') if audit.folder().exists() else ():
+                        file.unlink()
+                    (backlog.folder() / 'BACKLOG.md').write_text(build + '\n' + docs if build_first else docs + '\n' + build)
+                    legacy = backlog.read()
+                    ops, done = '## Ops\n- [ ] Same title\n', '## Docs\n- [x] Same title\n'
+                    backlog.save((ops + '\n' + done if ops_first else done + '\n' + ops) + '\n## Build\n', legacy['version'])
+                    found = sorted((entry['kind'], entry['project'], entry.get('detail', {}).get('from_project'))
+                                   for entry in audit.query()['entries'])
+                    self.assertEqual(found, [('backlog.done', 'Docs', None), ('backlog.move', 'Ops', 'Build')])
+
     def test_start_a_legacy_item_tracks_its_assigned_id(self):
         (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
         self.assertEqual(backlog.start('typed', 'claude', project='Docs'), '- [ ] Typed by hand')
