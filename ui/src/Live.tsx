@@ -295,9 +295,11 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     /** Type the words into the pane, then watch it for the reply. */
     async deliver(pane: Pane, text: string) {
       const before = await live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=4`).catch(() => null)
-      await live.current.api('message', { session: pane.id, thread: before?.thread ?? pane.thread ?? null, message: text })
+      const sent = await live.current.api<{ delivery?: string }>('message', { session: pane.id, thread: before?.thread ?? pane.thread ?? null, message: text })
       watches.current.set(pane.id, { lastId: before ? lastReply(before)?.id ?? null : null, since: Date.now(), name: paneTitle(pane) })
       setWatching(watches.current.size)
+      // 'queued': the agent was busy, so the prompt waits in its input queue until the current step ends.
+      return sent?.delivery === 'queued' ? 'queued' as const : 'submitted' as const
     },
     async send(pane: Pane, text: string) {
       go('sending')
@@ -403,8 +405,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.target)
       if (!pane) return { error: `No chat called ${chat}.` }
       if (!String(prompt ?? '').trim()) return { error: 'The prompt is empty.' }
-      await flow.current.deliver(pane, String(prompt))
-      return { ok: true, chat: paneTitle(pane) }
+      const delivery = await flow.current.deliver(pane, String(prompt))
+      return { ok: true, chat: paneTitle(pane), delivery }
     },
     answer_approval: async ({ chat, decision }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
@@ -464,10 +466,10 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       if (!words || !found.length) return { error: `No open backlog item matches ${wanted}.` }
       if (found.length > 1) return { error: `Several items match: ${found.slice(0, 3).map(item => item.ref).join(', ')}. Ask which one.` }
       const item = found[0]
-      await flow.current.deliver(pane, itemPrompt(item, data.command))
+      const delivery = await flow.current.deliver(pane, itemPrompt(item, data.command))
       const who = [pane.agent, `pane ${pane.id}`, pane.thread && `chat ${pane.thread}`].filter(Boolean).join(' · ')
       await live.current.api(`${BACKLOG_PATH}-start`, { item: item.ref, who }).catch(() => null)
-      return { ok: true, item: item.ref, chat: paneTitle(pane) }
+      return { ok: true, item: item.ref, chat: paneTitle(pane), delivery }
     },
     reminder_add: async ({ reminders: asked }) => addReminders(live.current.api, asked),
     reminder_list: async () => listReminders(live.current.api),
