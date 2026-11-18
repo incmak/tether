@@ -1635,10 +1635,15 @@ class Credentials(Base):
         found = self.lookup(files, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0='!/srv/command')
         self.assertEqual(found, (('credential.helper', 'mine'),))
 
-    def test_a_name_without_a_value_is_true_for_the_path_setting_and_an_error_for_a_helper(self):
-        self.assertEqual(self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath\n'}), (('credential.usehttppath', 'true'),))
+    def test_a_credential_setting_requires_a_value(self):
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath\n'})
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential "https://github.com"]\n\tuseHttpPath\n'})
         with self.assertRaises(auto_merge.GitError):
             self.lookup({'.gitconfig': '[credential]\n\thelper\n'})
+        self.assertEqual(self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath = true\n'}),
+                         (('credential.usehttppath', 'true'),))
 
     def test_no_settings_and_a_broken_config_are_different(self):
         self.assertEqual(self.lookup({'.gitconfig': '[user]\n\tname = x\n'}), ())

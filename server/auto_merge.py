@@ -232,10 +232,8 @@ def _credential_helpers(root):
         if match is None:
             continue
         if not separator:
-            # A name without "=" is "true" for a yes/no setting. Git refuses it for the two text settings.
-            if match[1].lower() != 'usehttppath':
-                raise GitError(f'The global Git setting {key!r} has no value.')
-            value = 'true'
+            # Git credential fill requires a value even for useHttpPath.
+            raise GitError(f'The global Git setting {key!r} has no value.')
         found.append((key, value))
     return tuple(found)
 
