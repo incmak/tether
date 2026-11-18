@@ -31,7 +31,7 @@ const sampleProjects = [{ name: 'a-project-with-a-very-long-name-that-must-not-o
 let activity = { enabled: false, agents: false, zone: 'Asia/Kolkata', since: null, store: '~/.tether/activity', days: [], projects: [], publish: publishOff }
 
 async function main() {
-  let browser, page, server, failed = 0
+  let browser, context, page, server, failed = 0
   const posts = [], pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -49,10 +49,10 @@ async function main() {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
     const origin = `http://localhost:${server.address().port}`
     browser = await getBrowser()
-    const context = browser.contexts()[0]
-    if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
+    context = await browser.newContext({ serviceWorkers: 'block' })
     page = await context.newPage()
     page.setDefaultTimeout(10000)
+    await page.clock.install()
     page.on('pageerror', error => pageErrors.push(error.stack))
     // The refused publish folder answers 400 on purpose; the browser logs that response.
     page.on('console', message => { if (message.type() === 'error' && !message.text().includes('status of 400')) pageErrors.push(message.text()) })
@@ -130,10 +130,13 @@ async function main() {
       check(`${at} agent switch disabled until keep is on`, await agents.isDisabled())
       await page.getByText('Off. Nothing is counted.').waitFor()
       check(`${at} no page overflow (off)`, !(await overflow()))
-      await keep.click()
-      await page.waitForFunction(() => document.querySelector('[role="switch"]:checked') !== null)
+      await Promise.all([page.waitForResponse(response => {
+        const request = response.request()
+        return new URL(response.url()).pathname === '/mobile/api/prefs'
+          && request.method() === 'POST' && request.postDataJSON()?.changes?.activity === true
+      }), keep.click()])
+      check(`${at} keep switch on`, await keep.isChecked())
       check(`${at} agent switch enabled`, !(await agents.isDisabled()))
-      await page.waitForTimeout(500)
       check(`${at} pref saved`, posts.some(post => post.endpoint === 'prefs' && post.body.changes.activity === true), JSON.stringify(posts.map(post => post.endpoint)))
       // Clicks inside Settings name no tab, so they send no ping.
       await keep.focus()
@@ -143,6 +146,7 @@ async function main() {
       // Data: today's total, a 14-day table and top projects, with long names that must not overflow.
       await agents.click()
       activity = { ...activity, since: 1, days: sampleDays, projects: sampleProjects }
+      await page.clock.fastForward(15_000) // let the real polling hook read the next fixture
       await page.getByText('Today: 5 h 25 m').waitFor({ timeout: 20000 })
       check(`${at} today shown with agents`, await page.getByText('agents 10 h 50 m').isVisible())
       check(`${at} 14 day rows`, await page.locator('.activity-table').first().locator('tbody tr').count() === 14)
@@ -161,9 +165,14 @@ async function main() {
       await page.getByRole('button', { name: 'Save folder' }).click()
       await page.getByText('Saved. Tether publishes every 6 hours').waitFor()
       const now = page.getByRole('button', { name: 'Publish now' })
-      await now.click()
+      await Promise.all([page.waitForResponse(response => {
+        const request = response.request()
+        return new URL(response.url()).pathname === '/mobile/api/activity/publish'
+          && request.method() === 'POST' && request.postDataJSON()?.now === true
+      }), now.click()])
       check(`${at} publish now posted`, posts.some(post => post.endpoint === 'activity/publish' && post.body.now === true))
       activity = { ...activity, publish: { ...activity.publish, last: { at: 1, ok: false, error: 'git push failed: fatal: Authentication failed' } } }
+      await page.clock.fastForward(15_000)
       await page.getByRole('alert').filter({ hasText: 'Authentication failed' }).waitFor({ timeout: 20000 })
       check(`${at} publish error shown`, true)
       check(`${at} no page overflow (publish)`, !(await overflow()))
@@ -188,7 +197,7 @@ async function main() {
     failed++
     console.log(`FAIL ${error.stack}`)
   } finally {
-    await page?.close().catch(() => {})
+    await context?.close().catch(() => {})
     server?.close()
     await browser?.close?.().catch(() => {})
   }

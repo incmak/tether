@@ -6,7 +6,7 @@ const path = require('node:path')
 const { getBrowser } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = path.resolve(__dirname, '../.release-work/2026-11-16/responsive/files/shots', process.env.PHASE || 'after')
+const SHOTS = path.resolve(process.env.SHOTS || path.join(__dirname, '../.release-work/2026-11-16/responsive/files/shots', process.env.PHASE || 'after'))
 const FIXTURES = path.resolve(__dirname, 'responsive_files')
 const NOW = Math.floor(Date.now() / 1000)
 const pane = (id, session, name, label, extra) => ({ id, tmux_session: session, label, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
