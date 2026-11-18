@@ -3,6 +3,7 @@ import io
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import subprocess
@@ -57,7 +58,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.add()
 
     def add(self, **extra):
-        review_links.add(**dict({'worker': '%13', 'reviewer': '%12', 'reviewer_thread': THREAD, 'name': 'Fix the bug', 'agent': 'codex'}, **extra))
+        review_links.add(**dict({'worker': '%13', 'reviewer': '%12', 'reviewer_thread': THREAD, 'name': 'Fix the bug',
+                                'agent': 'codex', 'reset': True}, **extra))
 
     def links(self):
         return json.loads(self.file.read_text())
@@ -757,7 +759,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_store_fields_atomic_replace_and_bound(self):
         link, = self.links()
         self.assertEqual(set(link), {'worker', 'reviewer', 'reviewer_thread', 'name', 'agent',
-                                     'created', 'seen_working', 'worker_thread'})
+                                     'created', 'seen_working', 'worker_thread', 'cap_reset'})
         self.assertFalse(link['seen_working'])
         self.assertIsNone(link['worker_thread'])
         self.assertIsInstance(link['created'], float)
@@ -954,6 +956,34 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe()
                 self.assertTrue(self.links()[0]['awaiting'])
                 self.assertIn('Newest worker reply.', self.send.call_args.args[1])
+
+    def test_live_link_from_before_the_saved_cap_finishes_its_review_after_an_upgrade(self):
+        # The store shape of a link that was awaiting a review when the backend restarted with the saved cap.
+        for counts, reply, rounds in (({}, 'APPROVED', None), ({}, FINDINGS, 1),
+                                      ({'rounds': 4, 'limit': 5, 'grant_rounds': 3}, FINDINGS, 5)):
+            with self.subTest(counts=counts, reply=reply):
+                self.add_parent()
+                self.add()
+                self.send.reset_mock()
+                self.alert.reset_mock()
+                self.request_review()
+                link = self.links()[0]
+                self.assertTrue(link['awaiting'])
+                link.update(counts)
+                self.file.write_text(json.dumps([link]))
+                self.finish_review(reply)
+                link = self.links()[0]
+                self.assertEqual(len(self.links()), 1)
+                self.assertFalse(link['awaiting'])
+                self.assertEqual(link.get('rounds'), rounds)
+                self.assertEqual(self.send.call_args.args[0], self.worker)
+                if rounds == 5:  # the granted rounds are spent: Mak decides, not the parent
+                    self.assertTrue(link['paused'])
+                    self.assertNotIn('parent_stage', link)
+                    self.assert_mak_alert(rounds=5)
+                else:
+                    self.assertNotIn('paused', link)
+                    self.alert.assert_not_called()
 
     def request_review(self):
         self.observe(**{'%13': 'Working'})
@@ -1452,6 +1482,38 @@ class ReviewLinksTests(unittest.TestCase):
                     self.finish_review()
                     self.assertEqual(self.links()[0]['rounds'], 1)
 
+    def test_clipped_findings_summary_cannot_spend_a_granted_round(self):
+        hook = {'type': 'attachment', 'attachment': {'type': 'hook_blocking_error', 'hookName': 'Stop'}}
+        for agent, message, prefix in (('claude', claude, []), ('claude', claude, [hook]), ('codex', codex, [])):
+            with self.subTest(agent=agent, hook=bool(prefix)):
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                self.worker['agent'] = agent
+                parent = self.add_parent()
+                self.fail_to_limit()
+                self.turn_source = server.review_turn_source
+                self.observe(**{'%13': 'Working'})
+                review_links.agent_prompt('%13', parent['id'], parent['thread'])
+                self.send.reset_mock()
+                records = [*prefix, message('assistant', 'Open findings.')]
+                with patch.object(server, 'notification_records', return_value=records):
+                    self.observe(**{'%13': 'Idle'})
+                    self.send.assert_not_called()
+                    self.assertEqual(self.links()[0]['rounds'], 3)
+                    records[:] = [message('user', 'Fix the lock.'), message('assistant', 'Fixed.')]
+                    self.request_review()
+                    self.finish_review()
+                    self.assertEqual(self.links()[0]['rounds'], 4)
+                    records[:] = [message('user', 'Review feedback.'), message('assistant', 'Fixed.')]
+                    self.request_review()  # the turn that follows the review feedback
+                    self.finish_review()
+                    self.assertEqual(self.links()[0]['rounds'], 5)
+                    self.request_review()  # the turn that reports the remaining findings to Mak
+                    records[:] = [message('user', 'Mak starts another task.'), message('assistant', 'Done.')]
+                    self.request_review()
+                    self.finish_review()
+                    self.assertEqual(self.links()[0]['rounds'], 1)
+
     def test_parent_grant_cannot_come_from_another_pane_or_a_different_thread(self):
         self.add_parent()
         self.turn_source = Mock(return_value='user')
@@ -1466,6 +1528,215 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertIn('parent_stage', link)
                 self.assertNotIn('limit', link)
         self.alert.assert_not_called()
+
+    def test_parent_grant_while_unlinked_preserves_the_five_round_cap_on_relink(self):
+        for prior, remaining, reviewer in ((3, 2, '%12'), (4, 1, '%21')):
+            with self.subTest(prior=prior, reviewer=reviewer):
+                self.file.write_text('[]')
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                self.alert.reset_mock()
+                parent = self.add_parent()
+                self.fail_to_limit()
+                self.request_review()  # finish the summary
+                if prior == 4:
+                    link, = self.links()
+                    link['empty_rounds'] = 1
+                    self.file.write_text(json.dumps([link]))
+                self.assertTrue(review_links.remove('%13', '%12'))
+                self.assertEqual(review_links.reviewed_by(), {})
+                self.assertEqual(review_links.paused(), {})
+                for sender, thread, worker_thread in (('%15', parent['thread'], WORKER_THREAD),
+                                                       (parent['id'], THREAD, WORKER_THREAD),
+                                                       (parent['id'], parent['thread'], THREAD)):
+                    review_links.agent_prompt('%13', sender, thread, worker_thread=worker_thread)
+                    with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+                        self.add(worker_thread=WORKER_THREAD, reset=False)
+                review_links.agent_prompt('%13', parent['id'], parent['thread'], worker_thread=WORKER_THREAD)
+                if reviewer != '%12':
+                    self.entries.append(dict(self.reviewer, id=reviewer))
+                    self.states[reviewer] = 'Idle'
+                self.add(reviewer=reviewer, worker_thread=WORKER_THREAD, reset=False)
+                self.assertEqual(self.links()[0]['grant_rounds'], prior)
+                for _ in range(remaining):
+                    self.request_review()
+                    self.reply.return_value = FINDINGS
+                    self.observe(**{reviewer: 'Working'})
+                    self.observe(**{reviewer: 'Idle'})
+                self.assertIn('Stopped after 5 review rounds', self.send.call_args.args[1])
+                self.assert_mak_alert(5)
+                self.assertTrue(self.links()[0]['paused'])
+                self.assertEqual(self.links()[0].get('rounds', 0) + self.links()[0].get('empty_rounds', 0), 5)
+                self.assertTrue(review_links.remove('%13'))
+                with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+                    self.add(worker_thread=WORKER_THREAD, reset=False)
+
+    def test_paused_cap_survives_reviewer_close_and_expiry(self):
+        for reviewer in ('%12', '%21'):
+            for close in (False, True):
+                with self.subTest(reviewer=reviewer, close=close):
+                    self.file.write_text('[]')
+                    self.add()
+                    self.fail_to_limit()
+                    if close:
+                        review_links.close('%12')
+                    else:
+                        self.assertTrue(review_links.remove('%13'))
+                        review_links.close('%12')
+                    record, = self.links()
+                    later = record['saved_at'] + review_links.SAVED_CAP_TTL + 1
+                    with own_time(review_links, time=lambda: later):
+                        with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+                            self.add(reviewer=reviewer, worker_thread=WORKER_THREAD, reset=False)
+                        review_links.close('%13')
+                        self.add(reviewer=reviewer, worker_thread=WORKER_THREAD, reset=False)
+                    link, = self.links()
+                    self.assertNotIn('rounds', link)
+
+    def test_saved_counts_follow_the_worker_across_reviewers(self):
+        for counts in ((3, 1), (1, 3)):
+            with self.subTest(counts=counts):
+                self.file.write_text('[]')
+                self.add(worker_thread=WORKER_THREAD)
+                self.add(reviewer='%21', worker_thread=WORKER_THREAD)
+                first, second = self.links()
+                first.update(rounds=counts[0], limit=5, grant_rounds=3)
+                second.update(empty_rounds=counts[1])
+                self.file.write_text(json.dumps([first, second]))
+                review_links.remove('%13')
+                record, = self.links()
+                self.assertEqual((record['rounds'], record['empty_rounds']), counts)
+                self.assertEqual((record['limit'], record['grant_rounds']), (5, 3))
+                self.add(reviewer='%22', worker_thread=WORKER_THREAD, reset=False)
+                link, = self.links()
+                self.assertEqual((link['rounds'], link['empty_rounds']), counts)
+                self.assertTrue(review_links._at_round_limit(link, 'rounds'))
+
+    def test_saved_cap_budget_evicts_unpaused_records_first(self):
+        with patch.object(review_links, 'MAX_SAVED_CAPS', 2, create=True), \
+                own_time(review_links, time=iter(range(1000, 1100)).__next__):
+            for pane, rounds in (('%13', 3), ('%20', 1), ('%21', 2)):
+                self.add(worker=pane, worker_thread=WORKER_THREAD)
+                links = self.links()
+                links[-1].update(rounds=rounds, paused=rounds == 3)
+                self.file.write_text(json.dumps(links))
+                self.assertTrue(review_links.remove(pane))
+            self.assertEqual({link['worker'] for link in self.links()}, {'%13', '%21'})
+            with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+            later = max(link['saved_at'] for link in self.links()) + review_links.SAVED_CAP_TTL
+            with own_time(review_links, time=lambda: later):
+                self.add(worker='%21', worker_thread=WORKER_THREAD, reset=False)
+            self.assertNotIn('rounds', self.links()[-1])
+
+    def test_full_saved_cap_store_accepts_live_links_and_evicts_oldest_paused_cap(self):
+        self.file.write_text('[]')
+        with patch.object(review_links, 'MAX_SAVED_CAPS', 2), \
+                own_time(review_links, time=iter(range(1000, 1100)).__next__):
+            for pane in ('%20', '%21', '%22'):
+                self.add(worker=pane, worker_thread=WORKER_THREAD, reset=False)
+                links = self.links()
+                links[-1].update(rounds=3, paused=True)
+                self.file.write_text(json.dumps(links))
+                if pane == '%22':
+                    self.assertEqual(review_links.reviewed_by(), {'%22': ['%12']})
+                    self.assertEqual(len(self.links()), 3)
+                self.assertTrue(review_links.remove(pane))
+            self.assertEqual({link['worker'] for link in self.links()}, {'%21', '%22'})
+            for pane in ('%21', '%22'):
+                with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+                    self.add(worker=pane, worker_thread=WORKER_THREAD, reset=False)
+            self.add(worker='%20', worker_thread=WORKER_THREAD, reset=False)
+            self.assertEqual(review_links.reviewed_by(), {'%20': ['%12']})
+
+    def test_expired_saved_caps_cannot_raise_the_count_of_duplicate_rows(self):
+        for second_age in (0, review_links.SAVED_CAP_TTL + 1):
+            with self.subTest(second_age=second_age), own_time(review_links, time=lambda: 100_000):
+                rows = [dict(worker='%13', worker_thread=WORKER_THREAD,
+                             saved_at=99_999 - review_links.SAVED_CAP_TTL, rounds=4, limit=5, grant_rounds=3),
+                        dict(worker='%13', worker_thread=WORKER_THREAD,
+                             saved_at=100_000 - second_age, empty_rounds=1)]
+                self.file.write_text(json.dumps(rows))
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                link, = self.links()
+                self.assertNotIn('rounds', link)
+                self.assertEqual(link.get('empty_rounds', 0), 0 if second_age else 1)
+
+    def test_below_cap_relink_continues_from_the_saved_round_count(self):
+        for _ in range(2):
+            self.request_review()
+            self.finish_review()
+        self.assertTrue(review_links.remove('%13', '%12'))
+        self.add(worker_thread=WORKER_THREAD, reset=False)
+        self.assertEqual(self.links()[0]['rounds'], 2)
+        self.request_review()
+        self.finish_review(FINDINGS)
+        self.assert_mak_stop()
+
+    def test_stop_during_feedback_cannot_relink_before_the_count_is_saved(self):
+        for _ in range(2):
+            self.request_review()
+            self.finish_review()
+        self.request_review()
+        stopped = []
+
+        def stop_on_send(entry, *_):
+            if entry == self.worker:
+                stopped.append(review_links.remove('%13', '%12'))
+                with self.assertRaisesRegex(ValueError, 'Review feedback is being delivered'):
+                    self.add(worker_thread=WORKER_THREAD, reset=False)
+        self.send.side_effect = stop_on_send
+        self.finish_review()
+        self.assertEqual(stopped, [True])
+        record, = self.links()
+        self.assertEqual(record['rounds'], 3)
+        self.assertTrue(record['paused'])
+        self.assertEqual(review_links.reviewed_by(), {})
+        with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
+            self.add(worker_thread=WORKER_THREAD, reset=False)
+
+    def test_stop_during_final_feedback_alert_gives_browser_restart(self):
+        for starting_rounds, limit in ((2, 3), (4, 5)):
+            with self.subTest(limit=limit):
+                self.add(worker_thread=WORKER_THREAD)
+                self.alert.reset_mock()
+                self.request_review()
+                link, = self.links()
+                link.update(rounds=starting_rounds, limit=limit)
+                self.file.write_text(json.dumps([link]))
+                self.send.side_effect = lambda entry, *_: review_links.remove('%13') if entry == self.worker else None
+                self.finish_review()
+                self.alert.assert_called_once()
+                self.assertIn('Link the tabs again from Tether', self.alert.call_args.args[1])
+                self.assertNotIn('Answer in that tab', self.alert.call_args.args[1])
+
+    def test_browser_reset_during_feedback_keeps_the_cap_cleared(self):
+        for previous_rounds in (0, 1, 2):
+            with self.subTest(previous_rounds=previous_rounds):
+                self.file.write_text('[]')
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                self.alert.reset_mock()
+                self.request_review()
+                if previous_rounds:
+                    link, = self.links()
+                    link['rounds'] = previous_rounds
+                    self.file.write_text(json.dumps([link]))
+
+                def reset_on_feedback(entry, *_):
+                    if entry == self.worker:
+                        self.add(reviewer='%22', worker_thread=WORKER_THREAD, reset=True)
+
+                self.send.side_effect = reset_on_feedback
+                self.finish_review()
+                self.send.side_effect = None
+                old, new = self.links()
+                self.assertEqual((old['reviewer'], new['reviewer']), ('%12', '%22'))
+                self.assertFalse(old['awaiting'])  # the current tick still records delivery
+                for current in (old, new):
+                    self.assertNotIn('rounds', current)
+                    self.assertNotIn('paused', current)
+                review_links.check_cap('%13', WORKER_THREAD)
+                self.alert.assert_not_called()
 
     def test_mak_prompt_restarts_at_either_stage_with_the_original_limit(self):
         for grant in (False, True):
@@ -1629,6 +1900,43 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertTrue(self.links()[0]['paused'])
                 self.assertNotIn('parent_stage', self.links()[0])
 
+    def test_stopped_parent_stage_is_inert(self):
+        for parent_missing in (False, True):
+            with self.subTest(parent_missing=parent_missing):
+                self.file.write_text('[]')
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent()
+                self.states[parent['id']] = 'Working'
+                self.fail_to_limit()
+                self.assertFalse(self.links()[0]['parent_stage']['sent'])
+                review_links.remove('%13')
+                self.send.reset_mock()
+                self.alert.reset_mock()
+                if parent_missing:
+                    self.entries.remove(parent)
+                for _ in range(review_links.LOSS_TICKS + 1):
+                    self.observe(**{parent['id']: 'Idle'})
+                self.send.assert_not_called()
+                self.alert.assert_not_called()
+                self.assertFalse(review_links.in_parent_stage('%13', WORKER_THREAD))
+                record, = self.links()
+                self.assertFalse(record['parent_stage']['sent'])
+                self.assertNotIn('parent_missing', record)
+                review_links.agent_prompt('%13', parent['id'], parent['thread'], worker_thread=WORKER_THREAD)
+                self.assertNotIn('limit', self.links()[0])
+
+    def test_old_stopped_escalation_cannot_alert_for_a_new_conversation(self):
+        parent = self.add_parent()
+        self.fail_to_limit()
+        review_links.escalate('%13', parent['id'], parent['thread'])
+        review_links.remove('%13')
+        self.worker['thread'] = PARENT_THREAD
+        self.add(worker_thread=PARENT_THREAD, reset=False)
+        self.parent = None
+        self.fail_to_limit()
+        self.assert_mak_alert()
+
     def test_parent_missing_for_a_few_ticks_keeps_the_parent_stage(self):
         parent = self.add_parent()
         self.fail_to_limit()
@@ -1691,14 +1999,119 @@ class ReviewLinksTests(unittest.TestCase):
         child, own = self.links()
         own.update(rounds=5, paused=True, limit=5)
         self.file.write_text(json.dumps([child, own]))
+        self.states['%11'] = 'Working'
+        self.fail_to_limit()
+        self.assert_parent_notice(parent, state='Working')
+        self.turn_source = server.review_turn_source
+        self.send.reset_mock()
+        records = [BACKGROUND, ASSISTANT]
+        with patch.object(server, 'notification_records', return_value=records):
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+            self.assertTrue(self.links()[1]['paused'])
+            records[:] = [ASSISTANT]  # a large tool result pushed the notice out of the tail
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+            self.send.assert_not_called()
+            self.assertEqual((self.links()[1]['paused'], self.links()[1]['limit']), (True, 5))
+            records[:] = [claude('user', 'Mak starts another task.'), ASSISTANT]
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+        self.assertTrue(self.links()[1]['awaiting'])
+        self.assertNotIn('paused', self.links()[1])
+
+    def test_visible_mak_prompt_restarts_with_a_parent_notice_still_pending(self):
+        parent = self.add_parent()
+        reviewer = dict(id='%14', agent='claude', thread=THREAD, writable=True)
+        self.entries.append(reviewer)
+        self.states['%14'] = 'Idle'
+        review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
+                         name='Parent work', agent='codex')
+        child, own = self.links()
+        own.update(rounds=5, paused=True, limit=5, grant_rounds=3)
+        self.file.write_text(json.dumps([child, own]))
         self.fail_to_limit()
         self.assert_parent_notice(parent)
-        self.turn_source = Mock(return_value='user')  # a large tool result pushed the notice out of the tail
-        self.send.reset_mock()
-        self.observe(**{'%11': 'Working'})
-        self.observe(**{'%11': 'Idle'})
-        self.send.assert_not_called()
-        self.assertEqual((self.links()[1]['paused'], self.links()[1]['limit']), (True, 5))
+        self.turn_source = server.review_turn_source
+        records = [codex('user', 'Mak starts another task.'), codex('assistant', 'Done.')]
+        with patch.object(server, 'notification_records', return_value=records):
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+        own = self.links()[1]
+        self.assertTrue(own['awaiting'])
+        self.assertNotIn('limit', own)
+
+    def test_notice_finishes_between_ticks_and_does_not_mask_a_later_clipped_prompt(self):
+        for agent, message, short_mak in (('claude', claude, False), ('claude', claude, True),
+                                          ('codex', codex, False), ('codex', codex, True)):
+            with self.subTest(agent=agent, short_mak=short_mak):
+                self.file.write_text('[]')
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                self.states.update({'%13': 'Idle', '%12': 'Idle'})
+                parent = self.add_parent()
+                parent['agent'] = agent
+                self.entries.append(dict(id='%14', agent='codex', thread=THREAD, writable=True))
+                self.states['%14'] = 'Idle'
+                review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
+                                 name='Parent work', agent=agent)
+                child, own = self.links()
+                own.update(rounds=5, paused=True, limit=5)
+                self.file.write_text(json.dumps([child, own]))
+                with own_time(review_links, time=lambda: 1000):
+                    self.fail_to_limit()
+                notice = self.send.call_args.args[1]
+                self.turn_source = server.review_turn_source
+                records = [dict(message('user', 'Earlier Mak prompt.'), timestamp='1970-01-01T00:16:39Z'),
+                           dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:40.500Z')]
+                with patch.object(server, 'notification_records',
+                                  side_effect=lambda entry: records if entry is parent else []):
+                    self.observe()  # Mak's earlier prompt finished after Tether sent the notice
+                    self.assertIn('review_prompts', self.links()[1])
+                    records.extend([message('user', notice),
+                                    dict(message('assistant', 'Read.'), timestamp='1970-01-01T00:16:41Z')])
+                    if short_mak:
+                        records.extend([
+                            dict(message('user', 'Mak asks a short question.'), timestamp='1970-01-01T00:16:42Z'),
+                            dict(message('assistant', 'Answered.'), timestamp='1970-01-01T00:16:43Z'),
+                        ])
+                    self.observe()  # the notice and any short Mak turn ended without a Working tick
+                    self.assertTrue(self.links()[1]['paused'])
+                    records[:] = [dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:44Z')]
+                    self.observe(**{'%11': 'Working'})
+                    self.observe(**{'%11': 'Idle'})
+                own = self.links()[1]
+                self.assertNotIn('limit', own)
+                self.assertTrue(own['awaiting'])
+                self.assertNotIn('review_prompts', own)
+
+    def test_clipped_reply_from_before_notice_was_sent_cannot_consume_its_marker(self):
+        for agent, message in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                self.file.write_text('[]')
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent()
+                parent['agent'] = agent
+                self.entries.append(dict(id='%14', agent='codex', thread=THREAD, writable=True))
+                self.states['%14'] = 'Idle'
+                review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
+                                 name='Parent work', agent=agent)
+                self.observe(**{'%11': 'Working'})
+                self.states['%11'] = 'Idle'  # the old turn ended before the notice was sent
+                with own_time(review_links, time=lambda: 1000):
+                    self.fail_to_limit()
+                own = self.links()[1]
+                own.update(seen_working=True)
+                self.file.write_text(json.dumps([self.links()[0], own]))
+                self.turn_source = server.review_turn_source
+                for at, pending in ((999, True), (1001, False)):
+                    records = [dict(message('assistant', 'Reply.'), timestamp=datetime.fromtimestamp(
+                        at, timezone.utc).isoformat())]
+                    with patch.object(server, 'notification_records',
+                                      side_effect=lambda entry: records if entry is parent else []):
+                        self.observe()
+                    self.assertEqual(bool(self.links()[1].get('review_prompts')), pending)
 
     def test_escalate_during_the_tick_stops_the_pending_parent_notice(self):
         parent = self.add_parent()

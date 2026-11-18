@@ -23,11 +23,17 @@ from terminal_input import DraftError
 
 FILE = paths.CACHE / 'review-links.json'
 MAX_LINKS = 50
+MAX_SAVED_CAPS = 100
 MAX_ROUNDS = 3
 EXTRA_ROUNDS = 2
 # Counts that pause a review at MAX_ROUNDS: failed reviews, reviews of turns that changed nothing, and approvals
 # that did not match the commit the tab was at.
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
+CAP_FIELDS = (*COUNTS, 'limit', 'grant_rounds', 'paused', 'parent_stage', 'parent_missing',
+              'review_prompts', 'agent_prompt')
+CAP_RESET_FIELDS = (*CAP_FIELDS, 'escalate')
+SAVED_CAP_TTL = 24 * 60 * 60
+CAP_ERROR = 'This worker reached the review round cap. Mak or the parent must decide before linking a reviewer.'
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
 SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
@@ -41,6 +47,7 @@ UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 _lock = threading.Lock()
 _last_sent = {}
 _feedback_turns = {}
+_feedback_in_flight = {}
 
 
 def _read():
@@ -48,30 +55,98 @@ def _read():
         links = json.loads(FILE.read_text())
     except (FileNotFoundError, ValueError):
         return []
-    return links if isinstance(links, list) else []
+    if not isinstance(links, list):
+        return []
+    cutoff = time.time() - SAVED_CAP_TTL
+    records = []
+    for link in links:
+        if _saved(link):
+            if link['saved_at'] > cutoff or _at_round_limit(link):
+                _put_saved(records, link)
+        else:
+            records.append(link)
+    return records
 
 
 def _write(links):
+    saved = sorted((link for link in links if _saved(link)),
+                   key=lambda link: (bool(link.get('paused')), link['saved_at']))
+    evicted = {id(link) for link in saved[:max(0, len(saved) - MAX_SAVED_CAPS)]}
     FILE.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=FILE.parent,
                                          prefix=FILE.name + '.', delete=False) as stream:
             temporary = stream.name
-            json.dump(links, stream)
+            json.dump([link for link in links if id(link) not in evicted], stream)
         os.replace(temporary, FILE)
     finally:
         if temporary and os.path.exists(temporary):
             os.unlink(temporary)
 
 
-def add(*, worker, reviewer, reviewer_thread, name, agent, seen_working=False):
-    link = dict(worker=worker, reviewer=reviewer, reviewer_thread=reviewer_thread,
-                name=name, agent=agent, created=time.time(), seen_working=seen_working, worker_thread=None)
+def _saved(link):
+    return isinstance(link, dict) and isinstance(link.get('saved_at'), (int, float))
+
+
+def _conversation(link, worker, thread):
+    return (isinstance(link, dict) and link.get('worker') == worker
+            and (thread is None or link.get('worker_thread') in (None, thread)))
+
+
+def _cap_key(link):
+    return link.get('worker'), link.get('worker_thread')
+
+
+def _check_cap(links, worker, thread):
+    if any(_conversation(link, worker, thread) and _at_round_limit(link) for link in links):
+        raise ValueError(CAP_ERROR)
+    if any(pane == worker and (thread is None or bound in (None, thread))
+           for (pane, _, _), bound in _feedback_in_flight.items()):
+        raise ValueError('Review feedback is being delivered. Try linking again.')
+
+
+def check_cap(worker, thread):
     with _lock:
-        links = [item for item in _read() if isinstance(item, dict)
-                 and (item.get('worker'), item.get('reviewer')) != (worker, reviewer)]
-        _write((links + [link])[-MAX_LINKS:])
+        _check_cap(_read(), worker, thread)
+
+
+def add(*, worker, reviewer, reviewer_thread, name, agent, seen_working=False, worker_thread=None, reset=False):
+    link = dict(worker=worker, reviewer=reviewer, reviewer_thread=reviewer_thread,
+                name=name, agent=agent, created=time.time(), seen_working=seen_working, worker_thread=worker_thread)
+    with _lock:
+        links = _read()
+        if reset:
+            link['cap_reset'] = secrets.token_hex(8)
+        else:
+            _check_cap(links, worker, worker_thread)
+        active, saved = [], []
+        for item in links:
+            if not isinstance(item, dict):
+                continue
+            same_pair = item.get('worker') == worker and item.get('reviewer') == reviewer
+            same_thread = _conversation(item, worker, worker_thread)
+            if (same_thread and not reset and worker_thread is None and item.get('worker_thread') is not None
+                    and (same_pair or _saved(item) or any(item.get(key) for key in COUNTS))):
+                raise ValueError("Wait for the worker's conversation to load before linking this reviewer.")
+            if same_thread and not reset:
+                _merge_cap(link, item)
+            if _saved(item):
+                if not same_thread:
+                    saved.append(item)
+            elif not same_pair:
+                if reset and same_thread:
+                    item = {key: value for key, value in item.items() if key not in CAP_RESET_FIELDS}
+                    item['cap_reset'] = link['cap_reset']
+                active.append(item)
+            elif not same_thread:
+                _save_cap(saved, item)
+        if not reset and _at_round_limit(link):
+            raise ValueError(CAP_ERROR)
+        active.append(link)
+        for evicted in active[:-MAX_LINKS]:
+            _save_cap(saved, evicted)
+        _write(saved + active[-MAX_LINKS:])
 
 
 def reviewed_by():
@@ -85,8 +160,7 @@ def paused():
 def in_parent_stage(pane, thread=None):
     try:
         with _lock:
-            return any(isinstance(link, dict) and link.get('worker') == pane
-                       and (thread is None or link.get('worker_thread') in (None, thread))
+            return any(_conversation(link, pane, thread) and not _saved(link)
                        and isinstance(link.get('parent_stage'), dict) and 'escalate' not in link for link in _read())
     except OSError:
         return False
@@ -96,7 +170,7 @@ def _reviewers(*, paused_only=False):
     with _lock:
         result = {}
         for link in _read():
-            if isinstance(link, dict) and (not paused_only or link.get('paused', False)) and all(
+            if isinstance(link, dict) and not _saved(link) and (not paused_only or link.get('paused', False)) and all(
                     isinstance(link.get(key), str) and re.fullmatch(r'%[0-9]+', link[key])
                     for key in ('worker', 'reviewer')):
                 reviewers = result.setdefault(link['worker'], [])
@@ -111,45 +185,128 @@ def approved_commits():
     with _lock:
         result = {}
         for link in _read():
-            if isinstance(link, dict) and isinstance(link.get('approved_commit'), str) and all(
+            if isinstance(link, dict) and not _saved(link) and isinstance(link.get('approved_commit'), str) and all(
                     isinstance(link.get(key), str) for key in ('worker', 'reviewer')):
                 result.setdefault(link['worker'], {})[link['reviewer']] = {
                     'commit': link['approved_commit'], 'at': link.get('approved_at')}
         return result
 
 
+def _cap_state(link):
+    return {key: link[key] for key in CAP_FIELDS if key in link}
+
+
+def _merge_cap(target, source):
+    for key in COUNTS:
+        if key in source:
+            target[key] = max(target.get(key, 0), source[key])
+    if 'limit' in source and ('limit' not in target
+                              or source.get('grant_rounds', float('inf')) < target.get('grant_rounds', float('inf'))):
+        target['limit'] = source['limit']
+        if 'grant_rounds' in source:
+            target['grant_rounds'] = source['grant_rounds']
+    if 'limit' in target:
+        target.pop('parent_stage', None)
+        target.pop('parent_missing', None)
+    elif (stage := source.get('parent_stage')) and (
+            'parent_stage' not in target or stage.get('sent') and not target['parent_stage'].get('sent')):
+        target['parent_stage'] = stage
+        target.pop('parent_missing', None)
+        if 'parent_missing' in source:
+            target['parent_missing'] = source['parent_missing']
+    if (target.get('paused') or source.get('paused')) and ('grant_rounds' not in target or _at_round_limit(target)):
+        target['paused'] = True
+    else:
+        target.pop('paused', None)
+    if 'agent_prompt' in source:
+        target['agent_prompt'] = max(target.get('agent_prompt', 0), source['agent_prompt'])
+    if 'review_prompts' in source:
+        pending = list(target.get('review_prompts', []))
+        pending.extend(prompt for prompt in source['review_prompts'] if prompt not in pending)
+        target['review_prompts'] = sorted(pending, key=lambda prompt: 0 if isinstance(prompt, str) else prompt[1])
+
+
+def _saved_for(links, link):
+    return next((record for record in links if _saved(record) and _cap_key(record) == _cap_key(link)), None)
+
+
+def _put_saved(links, record):
+    current = _saved_for(links, record)
+    if current is None:
+        links.append(record)
+    else:
+        _merge_cap(current, record)
+        current['saved_at'] = max(current['saved_at'], record['saved_at'])
+
+
+def _save_cap(links, link):
+    key = _link_id(link)
+    thread = link.get('worker_thread') or _feedback_in_flight.get(key)
+    if thread and (any(link.get(key) for key in COUNTS) or key in _feedback_in_flight):
+        _put_saved(links, dict(worker=link['worker'], worker_thread=thread, saved_at=time.time(), **_cap_state(link)))
+
+
 def remove(worker, reviewer=None):
     with _lock:
         links = _read()
-        remaining = [link for link in links if not isinstance(link, dict)
-                     or link.get('worker') != worker
-                     or (reviewer is not None and link.get('reviewer') != reviewer)]
-        if len(remaining) == len(links):
-            return False
-        _write(remaining)
-        return True
+        remaining, stopped_links = [], []
+        stopped = False
+        for link in links:
+            if (_conversation(link, worker, None) and not _saved(link)
+                    and (reviewer is None or link.get('reviewer') == reviewer)):
+                stopped = True
+                stopped_links.append(link)
+            else:
+                remaining.append(link)
+        if stopped:
+            for link in stopped_links:
+                _save_cap(remaining, link)
+            _write(remaining)
+        return stopped
+
+
+def close(pane):
+    with _lock:
+        links = _read()
+        remaining = []
+        for link in links:
+            if isinstance(link, dict) and link.get('worker') == pane:
+                continue
+            if _saved(link):
+                _put_saved(remaining, link)
+            elif isinstance(link, dict) and link.get('reviewer') == pane:
+                _save_cap(remaining, link)
+            else:
+                remaining.append(link)
+        if remaining != links:
+            _write(remaining)
 
 
 def _from_parent(stage, pane, thread):
     # The watcher binds the stage to the parent's conversation before it sends the notice. Until then, nobody decides.
-    return stage is not None and pane == stage['pane'] and stage['thread'] is not None and (
-        thread is None or thread == stage['thread'])
+    return stage is not None and pane == stage['pane'] and thread is not None and thread == stage['thread']
 
 
-def agent_prompt(worker, sender=None, sender_thread=None):
+def agent_prompt(worker, sender=None, sender_thread=None, *, worker_thread=None):
     """Mark an agent turn and let the parent grant two more rounds once per task."""
     with _lock:
         links = _read()
         marked = False
         for link in links:
-            if isinstance(link, dict) and link.get('worker') == worker:
+            if _conversation(link, worker, worker_thread):
+                stage = link.get('parent_stage')
+                grant = 'limit' not in link and _from_parent(stage, sender, sender_thread)
+                if _saved(link) and not (grant and stage.get('sent')):
+                    continue
                 link['agent_prompt'] = time.time()
-                if 'limit' not in link and _from_parent(link.get('parent_stage'), sender, sender_thread):
+                if grant:
                     link['limit'] = MAX_ROUNDS + EXTRA_ROUNDS
                     link['grant_rounds'] = link.get('rounds', 0) + link.get('empty_rounds', 0)
                     link.pop('paused', None)
                     link.pop('parent_stage')
                     link.pop('parent_missing', None)
+                    if _saved(link):
+                        link['saved_at'] = time.time()
                 marked = True
         if marked:
             _write(links)
@@ -160,7 +317,7 @@ def escalate(worker, sender, sender_thread=None):
     with _lock:
         links = _read()
         waiting = [link for link in links if isinstance(link, dict) and link.get('worker') == worker
-                   and _from_parent(link.get('parent_stage'), sender, sender_thread)]
+                   and not _saved(link) and _from_parent(link.get('parent_stage'), sender, sender_thread)]
         if not waiting:
             raise ValueError('That tab has no review waiting on this tab.')
         for link in waiting:
@@ -176,6 +333,7 @@ def resume_stalled(worker, reviewer, request_id, action, *, last_reply=None, rev
     with _lock:
         links = _read()
         link = next((item for item in links if isinstance(item, dict)
+                     and not _saved(item)
                      and item.get('worker') == worker and item.get('reviewer') == reviewer
                      and item.get('stalled') == request_id), None)
         if link is None:
@@ -282,13 +440,24 @@ def _named_commit(reply):
 def _merge(old, updated, stored):
     """`stored` with the step's changes (old -> updated). Another writer (agent_prompt, a stalled-review action) may
     change a link while a step runs. The step's fields win: they record a message that was already sent, and a lost
-    record sends it again on the next tick. Keep a newer agent_prompt and a parent's decision to end its stage."""
+    record sends it again on the next tick. Keep a newer agent_prompt, parent decision, or browser cap reset."""
     missing = object()
     merged = dict(stored)
+    cap_reset = stored.get('cap_reset') != old.get('cap_reset')
     for key in set(old) | set(updated):
         if old.get(key, missing) == updated.get(key, missing):
             continue
+        if cap_reset and key in CAP_RESET_FIELDS:
+            continue
         if key == 'agent_prompt' and stored.get(key, missing) != old.get(key, missing):
+            continue
+        if key == 'review_prompts':
+            consumed = [prompt for prompt in old.get(key, []) if prompt not in updated.get(key, [])]
+            pending = [prompt for prompt in stored.get(key, []) if prompt not in consumed]
+            if pending:
+                merged[key] = pending
+            else:
+                merged.pop(key, None)
             continue
         if key in ('parent_stage', 'parent_missing') and 'parent_stage' in old and 'parent_stage' not in stored:
             continue
@@ -299,15 +468,26 @@ def _merge(old, updated, stored):
     return merged
 
 
+def _link_id(link):
+    return link.get('worker'), link.get('reviewer'), link.get('created')
+
+
 def _same(link, stored):
-    return isinstance(stored, dict) and all(stored.get(key) == link.get(key) for key in ('worker', 'reviewer', 'created'))
+    return isinstance(stored, dict) and _link_id(link) == _link_id(stored)
 
 
-def _linked(link):
+def _linked(link, in_flight=None):
     """The link is still in the store. A slow read may run between the step's start and a send; a link that was
     removed or replaced in that time must not send."""
     with _lock:
-        return any(_same(link, stored) for stored in _read())
+        if not any(_same(link, stored) and not _saved(stored) for stored in _read()):
+            return False
+        if in_flight is not None:
+            # Block a relink until the watcher has recorded feedback that may have reached the worker.
+            key = _link_id(link)
+            _feedback_in_flight[key] = link.get('worker_thread')
+            in_flight.add(key)
+        return True
 
 
 def _call(callback, entry):
@@ -367,10 +547,13 @@ def _send_message(entry, text, state, send, clear):
     return True
 
 
-def _send_worker(link, worker, text, state, send, clear, feedback_sent):
-    if not _linked(link) or not _send_message(worker, text, state, send, clear):
+def _send_worker(link, worker, text, state, send, clear, feedback_sent, in_flight, *, summary=False):
+    if not (_can_send(worker, state, clear) and _linked(link, in_flight)):
         return False
-    feedback_sent(link['worker'])
+    sent_at = time.time()
+    if not _send_message(worker, text, state, send, clear):
+        return False
+    feedback_sent(worker, sent_at if summary else None)
     if state == 'Working':
         link['worker_busy_send'] = True
         link['seen_working'] = True
@@ -378,6 +561,55 @@ def _send_worker(link, worker, text, state, send, clear, feedback_sent):
         feedback['pending'].discard(link['reviewer'])
         feedback['working'].add(link['reviewer'])
     return True
+
+
+def _mark_review_prompt(links, entry, source, sent_at):
+    thread = helper_tabs._thread(entry)
+    for link in links:
+        if (not _conversation(link, entry['id'], thread) or thread is None and link.get('worker_thread') is not None
+                or _saved(link) and source == 'review-notice'):
+            continue
+        link['review_prompts'] = [*link.get('review_prompts', ()), [source, sent_at]]
+
+
+def _prompt_kind(marker):
+    return marker if isinstance(marker, str) else marker[0]  # old stores have no send time
+
+
+def _idle_source(link, worker, turn_source):
+    source = turn_source(worker) if turn_source is not None else 'user'
+    source, started_at, finished_at = source if isinstance(source, tuple) else (source, None, None)
+    pending = link.get('review_prompts', [])
+    observed = 'restart' in link or link['seen_working']
+    fresh = finished_at is None or finished_at > link.get('review_turn_at', float('-inf'))
+    clipped = source in ('unknown', 'unknown-background')
+    # Use the prompt's time when visible. An earlier queued prompt can finish after a later send.
+    turn_at = started_at if started_at is not None else finished_at
+    if fresh and (observed or finished_at is not None or not clipped):
+        if source == 'user' and started_at is not None:
+            # A later user prompt can finish between ticks, after the marked turn already ran.
+            pending = [marker for marker in pending if isinstance(marker, str) or marker[1] >= started_at]
+        for index, marker in enumerate(pending):
+            if source != _prompt_kind(marker) and not (clipped and not link.get('worker_busy_send')):
+                continue
+            if (not isinstance(marker, str) and
+                    (turn_at is not None and turn_at < marker[1]
+                     or finished_at is not None and finished_at < marker[1])):
+                continue
+            source = _prompt_kind(marker)
+            pending = pending[:index] + pending[index + 1:]
+            break
+        if pending:
+            link['review_prompts'] = pending
+        else:
+            link.pop('review_prompts', None)
+    if not pending:
+        link.pop('review_turn_at', None)
+    elif finished_at is not None and fresh:
+        link['review_turn_at'] = finished_at
+    if source in ('unknown', 'unknown-background'):
+        return 'background' if source == 'unknown-background' else 'user'
+    return source
 
 
 PARENT_SUMMARY = (f'[Tether review] {MAX_ROUNDS} review rounds still found blocking problems. '
@@ -436,7 +668,7 @@ def _parent_stage(worker, entries, reply, parent):
 
 def _send_parent_notice(link, entries, status, send, clear):
     stage = link.get('parent_stage')
-    if stage is None or stage['sent']:
+    if _saved(link) or stage is None or stage['sent']:
         return
     entry = _parent_entry(stage, entries)
     if entry is None:
@@ -447,26 +679,27 @@ def _send_parent_notice(link, entries, status, send, clear):
     state = status(entry)['state']
     if not _can_send(entry, state, clear):
         return  # a busy parent gets the notice when it can take it
+    with _lock:
+        if not any(_same(link, current) and not _saved(current) and current.get('parent_stage') == stage
+                   for current in _read()):
+            return
+    sent_at = time.time()
     sent = _send_message(entry, text, state, send, clear)
     with _lock:
         links = _read()
-        for saved in links:
-            if (isinstance(saved, dict) and saved.get('worker') == worker
-                    and saved.get('reviewer') == link['reviewer'] and saved.get('created') == link.get('created')
-                    and saved.get('parent_stage') == stage):
+        for current in links:
+            same = (_cap_key(current) == _cap_key(link) and sent if _saved(current) else _same(link, current))
+            if same and current.get('parent_stage') == stage:
                 if sent:
-                    saved['parent_stage']['sent'] = True
+                    current['parent_stage']['sent'] = True
                 else:  # the terminal refused it: the watcher hands the review to Mak after LOSS_TICKS refusals
-                    saved['parent_stage']['failed'] = stage.get('failed', 0) + 1
+                    current['parent_stage']['failed'] = stage.get('failed', 0) + 1
         if sent:
-            for saved in links:
-                # A second guard next to prompt_source, for a transcript tail that no longer holds the notice.
-                if isinstance(saved, dict) and saved.get('worker') == entry['id']:
-                    saved['agent_prompt'] = time.time()
+            _mark_review_prompt(links, entry, 'review-notice', sent_at)
         _write(links)
 
 
-def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sent, work_mark, review_reply,
+def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sent, in_flight, work_mark, review_reply,
           stalled_replies, turn_source, escalations, level, parent, scope=None, commit=None, fresh=None):
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
@@ -495,15 +728,15 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     link.pop('lost_reason', None)
     state = status(worker)['state']
     source = None
-    if state == 'Idle' and ('restart' in link or link['seen_working']):
-        source = turn_source(worker) if turn_source is not None else 'user'
+    if state == 'Idle' and ('restart' in link or link['seen_working'] or link.get('review_prompts')):
+        source = _idle_source(link, worker, turn_source)
     summary = source == 'review-summary'
     if state == 'Idle' and 'restart' in link:
         start = link.pop('restart')
         start = start if isinstance(start, dict) else {}
         # A prompt from Mak starts a new task. A background event or another agent's prompt continues this one.
         by_agent = start.get('agent', False) or _agent_prompt_fresh(link)
-        if not summary:
+        if not (summary or source == 'review-notice' or source == 'background' and link.get('review_prompts')):
             link.pop('agent_prompt', None)
         if not by_agent and source == 'user':
             for key in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds'):
@@ -519,15 +752,17 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 link.pop('paused', None)
                 link.pop('unreadable', None)
     if state == 'Idle' and link.pop('worker_busy_send', False) and not summary:
+        if any(_prompt_kind(marker) == 'review-summary' for marker in link.get('review_prompts', ())):
+            link['seen_working'] = False
         return link
     feedback = _feedback_turns.get(link['worker'])
     if state == 'Idle' and feedback is not None:
         feedback['working'].discard(link['reviewer'])
         if not feedback['pending'] and not feedback['working']:
             _feedback_turns.pop(link['worker'], None)
-    if summary:
+    if source in ('review-summary', 'review-notice'):
         link['seen_working'] = False
-        if 'limit' in link and 'agent_prompt' in link and not _agent_prompt_fresh(link):
+        if summary and 'limit' in link and 'agent_prompt' in link and not _agent_prompt_fresh(link):
             link['agent_prompt'] = time.time()  # the queued grant could not start until this summary ended
     if state == 'Working' and not link['seen_working'] and link['worker'] not in awaiting:
         if feedback is not None and link['reviewer'] in feedback['pending'] | feedback['working']:
@@ -542,7 +777,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     if state == 'Working' and isinstance(link.get('restart'), dict) and _agent_prompt_fresh(link):
         # Record the origin while the turn runs, so a turn longer than the TTL still counts as the agent's.
         link['restart'] = {**link['restart'], 'agent': True}  # a new dict: the saved copy must see the change
-        if 'limit' not in link:  # a grant may be queued behind the summary (identified at Idle)
+        if 'limit' not in link and not link.get('review_prompts'):
             link.pop('agent_prompt', None)
     if link.get('awaiting', False):
         reviewer_state = status(reviewer)['state']
@@ -617,7 +852,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                             + ('It covered uncommitted changes, so no commit is approved yet: commit the work in this '
                                'turn, and Tether asks the reviewer to confirm that commit. ' if uncommitted else '')
                             + 'Do the next step your instructions give for an approved review, then stop.')
-                    if not _send_worker(link, worker, text, state, send, clear, feedback_sent):
+                    if not _send_worker(link, worker, text, state, send, clear, feedback_sent, in_flight):
                         pass  # not delivered: the same checks run again on the next tick
                     elif bound and _call(commit, worker) != bound:
                         # The commit moved between the read above and the delivery. The tab has the approval text
@@ -664,7 +899,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                                 f"Mak decides the next step.\n\nOpen findings:\n\n{findings}\n\n"
                                 'Reply with a short list of the open findings and what you tried, '
                                 'then end with "Needs you: yes".')
-                    if _send_worker(link, worker, text, state, send, clear, feedback_sent):
+                    if _send_worker(link, worker, text, state, send, clear, feedback_sent, in_flight,
+                                    summary=stage is not None):
                         link.pop('empty_turn', None)
                         link[count] = link.get(count, 0) + 1
                         link.pop('stale_rounds', None)  # findings end a run of approvals that did not match
@@ -673,13 +909,13 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                             if _parent_entry(stage, entries) is None:
                                 link['parent_missing'] = 1
                         elif not link.get('paused'):
-                            escalations[link['worker'], link['reviewer']] = (_findings_preview(reply), limit)
+                            escalations[_link_id(link)] = (_findings_preview(reply), limit)
                         link['paused'] = True
                         link['awaiting'] = False
                 else:
                     text = (f"[Tether review] Feedback from the reviewer tab ({link['reviewer']}):\n\n"
                             f'{_bounded_reply(reply, reviewer)}\n\nFix what it raises, then stop and wait.')
-                    if _send_worker(link, worker, text, state, send, clear, feedback_sent):
+                    if _send_worker(link, worker, text, state, send, clear, feedback_sent, in_flight):
                         key = 'empty_rounds' if link.pop('empty_turn', False) else 'rounds'
                         link[key] = link.get(key, 0) + 1
                         link.pop('stale_rounds', None)  # findings end a run of approvals that did not match
@@ -822,6 +1058,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
 def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None, turn_source=None,
             level=None, parent=None, scope=None, commit=None, fresh=None):
     """Callbacks run outside the store lock: send takes SEND_LOCK, while add already holds it."""
+    in_flight = set()
     try:
         if not any(isinstance(entry.get('id'), str) and entry['id'].startswith('%') for entry in entries):
             return
@@ -829,13 +1066,17 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             original = _read()
         by_pane = {entry['id']: entry for entry in entries}
         awaiting = {link['reviewer'] for link in original
-                    if isinstance(link, dict) and link.get('awaiting')
+                    if isinstance(link, dict) and not _saved(link) and link.get('awaiting')
                     and isinstance(link.get('reviewer'), str)}
-        def feedback_sent(pane):
+        summaries = []
+        def feedback_sent(worker, summary_at):
+            pane = worker['id']
+            if summary_at is not None:
+                summaries.append((worker, summary_at))
             # Each link consumes the next feedback-caused turn independently.
             _feedback_turns[pane] = {
                 'pending': {link['reviewer'] for link in original
-                            if isinstance(link, dict) and link.get('worker') == pane
+                            if isinstance(link, dict) and not _saved(link) and link.get('worker') == pane
                             and isinstance(link.get('reviewer'), str)},
                 'working': set(),
             }
@@ -846,6 +1087,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
         escalations = {}
         changes = []
         for link in original:
+            if _saved(link):
+                continue
             try:
                 copy = dict(link)
                 stage = copy.get('parent_stage')
@@ -863,10 +1106,10 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     copy.pop('parent_missing', None)
                     preview = copy.pop('escalate') if 'escalate' in copy else stage['notice']
                     copy.pop('parent_stage', None)
-                    escalations[copy['worker'], copy['reviewer']] = (preview, _round_limit(copy))
+                    escalations[_link_id(copy)] = (preview, _round_limit(copy))
                     updated = copy
                 else:
-                    updated = _step(copy, by_pane, status, send, last_reply, awaiting, clear, feedback_sent,
+                    updated = _step(copy, by_pane, status, send, last_reply, awaiting, clear, feedback_sent, in_flight,
                                     work_mark, review_reply, stalled_replies, turn_source, escalations, level, parent,
                                     scope, commit, fresh)
             except Exception:  # a malformed link or one bad pane must not stop other reviews
@@ -877,27 +1120,38 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     updated.pop('retries', None)
                 changes.append((link, updated, copy.get('lost_reason')))
         with _lock:
-            current = _read() if changes else original
+            current = _read() if changes or summaries else original
             applied = []
+            saved_delivery = False
             for old, updated, reason in changes:
                 if old in current:  # preserve any links added or replaced during a callback
                     index = current.index(old)
                     if updated is None:
                         current.pop(index)
+                        _save_cap(current, old)
                     else:
                         current[index] = updated
                     applied.append((old, updated, reason))
                 elif updated is not None:
                     # The same link (same pair and creation time) changed during a callback: keep both changes.
-                    same = [index for index, stored in enumerate(current) if _same(old, stored)]
+                    same = [index for index, stored in enumerate(current) if _same(old, stored) and not _saved(stored)]
                     if len(same) == 1:
                         stored = current[same[0]]
-                        if 'parent_stage' in old and 'parent_stage' not in stored:
-                            escalations.pop((old['worker'], old['reviewer']), None)
+                        if (stored.get('cap_reset') != old.get('cap_reset')
+                                or 'parent_stage' in old and 'parent_stage' not in stored):
+                            escalations.pop(_link_id(old), None)
                         merged = _merge(old, updated, stored)
                         current[same[0]] = merged
                         applied.append((old, merged, reason))
-            if applied:
+                    elif _link_id(old) in in_flight and (record := _saved_for(current, updated)) is not None:
+                        # The link was stopped during delivery. Keep the final count, without reviving the link.
+                        _merge_cap(record, updated)
+                        saved_delivery = True
+                        if _link_id(old) in escalations:
+                            applied.append((old, record, reason))
+            for worker, sent_at in summaries:
+                _mark_review_prompt(current, worker, 'review-summary', sent_at)
+            if applied or saved_delivery or summaries:
                 _write(current)
         for old, updated, reason in applied:
             title = body = None
@@ -907,11 +1161,13 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                       f"name={old['name']} reason={reason}", file=sys.stderr, flush=True)
                 title = 'Review link lost'
                 body = f'“{old["name"]}”: {reason}. Tether no longer reviews this tab.'
-            elif (escalation := escalations.get((old['worker'], old['reviewer']))) is not None:
+            elif (escalation := escalations.get(_link_id(old))) is not None:
                 preview, limit = escalation
                 title = 'Review needs you'
+                restart = ('Link the tabs again from Tether to restart reviews.' if _saved(updated)
+                           else 'Answer in that tab to restart reviews.')
                 body = (f'“{old["name"]}”: the reviewer still found blocking problems after {limit} rounds. '
-                        f'Answer in that tab to restart reviews. Open findings: “{preview}”')
+                        f'{restart} Open findings: “{preview}”')
             elif updated.get('paused') and not old.get('paused') and updated.get('unreadable'):
                 title = 'Review needs you'
                 body = (f'“{old["name"]}”: Tether cannot read the commit in the folder of that tab, so it cannot '
@@ -952,3 +1208,7 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 continue
     except Exception:  # disk and discovery errors must never stop the monitor
         return
+    finally:
+        with _lock:
+            for key in in_flight:
+                _feedback_in_flight.pop(key, None)

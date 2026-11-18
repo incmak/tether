@@ -160,7 +160,7 @@ class AgentTabsTests(unittest.TestCase):
         self.run.assert_not_called()
 
     def test_browser_and_agent_link_use_same_function_under_send_lock(self):
-        def link_pair(body, entries, last_reply):
+        def link_pair(body, entries, last_reply, *, reset=False):
             self.assertTrue(server.SEND_LOCK.locked())
             self.assertIs(entries, self.entries)
             self.assertIs(last_reply, self.reply)
@@ -170,6 +170,7 @@ class AgentTabsTests(unittest.TestCase):
                 self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}, path=path),
                                  (200, {'linked': True}))
             self.assertEqual(link.call_count, 2)
+            self.assertEqual([call.kwargs for call in link.call_args_list], [{'reset': True}, {}])
         self.run.assert_not_called()
 
     def test_browser_link_route_success_errors_auth_and_size(self):
@@ -362,6 +363,60 @@ class AgentTabsTests(unittest.TestCase):
         self.assertEqual(self.request({'action': 'stop', 'worker': '%12'}), (200, {'stopped': True}))
         self.assertEqual(self.request({'action': 'stop', 'worker': '%12'}), (200, {'stopped': False}))
         self.assertEqual(review_links.reviewed_by(), {})
+
+    def stop_review_at(self, rounds, **state):
+        self.link()
+        link, = json.loads(review_links.FILE.read_text())
+        link.update(worker_thread=THREAD, rounds=rounds, **state)
+        review_links.FILE.write_text(json.dumps([link]))
+        self.assertEqual(self.request({'action': 'stop', 'worker': '%12', 'session': '%13'}),
+                         (200, {'stopped': True}))
+        self.assertEqual(review_links.reviewed_by(), {})
+
+    def test_stopped_at_the_cap_cannot_link_either_reviewer_or_start_one(self):
+        self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
+        for reviewer in ('%13', '%14'):
+            with self.subTest(reviewer=reviewer):
+                status, reply = self.request({'action': 'link', 'worker': '%12', 'reviewer': reviewer})
+                self.assertEqual(status, 400)
+                self.assertIn('Mak or the parent', reply['error'])
+        status, reply = self.request({'action': 'start', 'review': 'new', 'message': ''})
+        self.assertEqual(status, 400)
+        self.assertIn('Mak or the parent', reply['error'])
+        self.run.assert_not_called()
+
+    def test_relink_below_the_cap_carries_rounds(self):
+        self.stop_review_at(1, empty_rounds=2)
+        self.entries[0]['thread'] = 'pending-123-1'
+        status, reply = self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'})
+        self.assertEqual(status, 400)
+        self.assertIn('conversation to load', reply['error'])
+        self.entries[0]['thread'] = THREAD
+        self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
+                         (200, {'linked': True}))
+        link, = json.loads(review_links.FILE.read_text())
+        self.assertEqual((link['rounds'], link['empty_rounds']), (1, 2))
+        self.assertNotIn('paused', link)
+
+    def test_browser_link_resets_a_saved_cap(self):
+        for reviewer in ('%13', '%14'):
+            with self.subTest(reviewer=reviewer):
+                self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
+                self.assertEqual(self.request({'worker': '%12', 'reviewer': reviewer}, path='/mobile/api/review-link'),
+                                 (200, {'linked': True}))
+                link, = json.loads(review_links.FILE.read_text())
+                self.assertFalse({'rounds', 'limit', 'grant_rounds', 'paused'} & link.keys())
+                self.assertTrue(review_links.remove('%12', reviewer))
+
+    def test_relink_in_a_new_worker_conversation_starts_fresh(self):
+        self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
+        self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
+        self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
+                         (200, {'linked': True}))
+        old, new = json.loads(review_links.FILE.read_text())
+        self.assertEqual((old['worker_thread'], old['rounds']), (THREAD, 5))
+        self.assertEqual(new['worker_thread'], self.entries[0]['thread'])
+        self.assertFalse({'rounds', 'limit', 'paused'} & new.keys())
 
     def test_reviewer_stop_removes_only_its_own_link_with_or_without_reviewer(self):
         for extra in ({}, {'reviewer': '%12'}):
