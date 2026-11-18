@@ -154,7 +154,7 @@ label.broadcast-row:hover { background: var(--hover); }
 .broadcast-send { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
 .via-button { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .broadcast-results { margin-top: 10px; }
-.broadcast .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .via-check { display: inline-flex; width: 16px; flex: none; color: var(--accent-ink); }
 .via-menu .action-label { white-space: normal; }
 .via-none { margin: 4px 8px 8px; }
@@ -965,11 +965,16 @@ button.live-chip:active { background: var(--line); }
 .reconnect-banner > span:not(.retry) { flex: 1; min-width: 0; }
 .reconnect-banner > .retry { flex: none; }
 .reconnect-banner button { flex: none; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; }
-.failed-message { opacity: 1; }
+.failed-message, .terminal-note { opacity: 1; }
 .failed-message > span { opacity: .75; }
 .failed-message small { color: var(--error); flex-wrap: wrap; }
 .failed-message .failed-reason { flex: 1 1 100%; text-align: right; }
-.failed-message .failed-action { width: auto; height: var(--control); margin: -8px 0; padding: 0 10px; gap: 4px; border-radius: var(--radius); color: var(--text); font-size: 12px; font-weight: 600; }
+:is(.failed-message, .terminal-note) .failed-action { width: auto; height: var(--control); padding: 0 10px; gap: 4px; border-radius: var(--radius); color: var(--text); font-size: 12px; font-weight: 600; }
+.failed-message .failed-action { margin: -8px 0; }
+.terminal-note small { color: color-mix(in srgb, var(--muted) 80%, var(--text)); flex-wrap: wrap; }
+.terminal-note small button { flex-shrink: 0; margin: 0; }
+.terminal-note-text { display: inline-flex; align-items: center; gap: 5px; }
+.terminal-note-text svg { flex: none; }
 
 /* Keep the whole review within a phone viewport, including a long CLI menu. */
 .plan-review { flex: 0 1 auto; min-height: 0; max-height: 65dvh; overflow: auto; overscroll-behavior: contain; }

@@ -179,13 +179,16 @@ const scrollByPane = new Map<string, { top: number; limit: number; bottom: boole
 const MODES: Record<string, string> = { default: 'Manual', accept: 'Accept edits', plan: 'Plan', auto: 'Auto' }
 const modeKey = (mode?: string | null) => (['accept', 'plan', 'auto', 'bypass'].find(key => (mode ?? '').toLowerCase().includes(key)) ?? 'default')
 // What the terminal is waiting for, as a drawer above the message box: the question, then each real option.
-interface Pending { id: number; text: string; key: string; seen: number; imagesSeen?: number; at: number; thread?: string | null; failed?: string; offline?: boolean; recoveredImageText?: boolean }
+interface Pending { id: number; text: string; key: string; seen: number; imagesSeen?: number; at: number; thread?: string | null; failed?: string; offline?: boolean; recoveredImageText?: boolean; terminal?: { lastId: string | null } }
 // Persist queued sends until delivery or 30 minutes, and keep recovered text until the user handles it.
 const PENDING_KEY = 'tether.pending'
-const keepPending = (item: Pending) => item.recoveredImageText || Date.now() - item.at < 1800000
+const PENDING_TTL = 1800000
+const SLASH_CHECK = 3000
+const BTW_TIMEOUT = 10000
+const keepPending = (item: Pending) => (!item.terminal && item.recoveredImageText) || Date.now() - item.at < PENDING_TTL
 function keepPendingOnLoad(item: Pending) {
   if (keepPending(item)) return true
-  if (typeof item.text !== 'string') return false
+  if (item.terminal || typeof item.text !== 'string') return false
   const { paths, rest } = uploadImageParts(item.text)
   return paths.length > 0 && !!rest
 }
@@ -200,6 +203,7 @@ function savePending() {
 }
 const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
 const slashCommand = (text: string) => /^\/[^\s/]+(?:\s|$)/.test(text.trim())
+const commandOf = (text: string) => text.trim().split(/\s+/, 1)[0]
 // Claude stores a shell command "!ls" as "! ls", and "!! ls" as "! ! ls". Compare with the "!" marks joined, so a run command leaves the queue.
 const sameCommand = (text: string) => text.replace(/^(?:!\s*)+/, '!')
 const matches = (messages: ChatMessage[], key: string, images = false) => messages.filter(item => {
@@ -705,35 +709,66 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const bang = activePane.agent === 'claude' ? data?.bang : undefined
   const bangKey = bang ? squash(bang.command).slice(0, 40) : ''
   const bangItem = bang ? pending.find(item => !item.failed && item.text.trim().startsWith('!') && squash(item.text.trim().slice(1)).slice(0, 40) === bangKey) : undefined
-  const queued = bangItem ? pending.filter(item => item !== bangItem) : pending
+  const notes = pending.filter(item => item.terminal)
+  const newestNote = notes[notes.length - 1]
+  const queued = pending.filter(item => !item.terminal && item !== bangItem)
   const notSent = queued.filter(item => item.failed).length
   const waiting = queued.length - notSent
   const queueLabel = [waiting ? `${waiting} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
-  const setPending = (update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next })
+  const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
+  const dataReceivedAt = useRef(0)
+  useEffect(() => { dataReceivedAt.current = data && data !== cachedAtOpen.current ? Date.now() : 0 }, [data])
+  const refreshedFor = useRef(new WeakSet<Pending>())
   const [recheck, setRecheck] = useState(0)
   useEffect(() => {
-    if (!data || (data.session && data.session !== pane.id)) return
-    // Claude writes no chat record for some slash commands (/usage opens a panel). Once the pane is not working, it ran them.
-    // Some run at once while Claude works and then show as a card: /btw (a side question), /mcp, /config, /permissions.
-    // /btw never waits in Claude's queue, so its bubble also leaves once its saved answer is in the chat, or after 10 s.
-    const opened = ['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')
-    const asked = (item: Pending) => /^\/btw\s/.test(item.text.trim()) && (Date.now() - item.at > 10000 || data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === squash(item.text.trim().slice(4))))
-    const ran = (item: Pending) => slashCommand(item.text) && !item.failed && Date.now() - item.at > 3000 && (data.state !== 'Working' || opened || asked(item))
-    const cached = data === cachedAtOpen.current
-    setPending(list => {
-      const left = list.flatMap(item => {
+    const now = Date.now()
+    let left: Pending[]
+    let needsRefresh = false
+    if (data && (!data.session || data.session === pane.id)) {
+      const cached = data === cachedAtOpen.current
+      const card = data.attention || data.approval || data.plan
+      const lastId = data.messages[data.messages.length - 1]?.id ?? null
+      left = pending.flatMap(item => {
         if (cached && !keepPending(item)) return keepPendingOnLoad(item) ? [item] : []
         const next = afterTranscript(item, data)
-        return next && keepPending(next) && !ran(next) ? [next] : []
+        if (!next || !keepPending(next)) return []
+        // A pane's first prompt starts a thread where there was none; that is a chat effect too.
+        const threadChanged = changedThread(item, data) || (item.thread === null && data.thread != null)
+        if (item.terminal) return card || threadChanged || lastId !== item.terminal.lastId ? [] : [item]
+        if (next.failed || !slashCommand(next.text) || now - next.at <= SLASH_CHECK) return [next]
+        // These cards open at once, even while the agent works: /btw, /mcp, /config, /permissions. The command ran.
+        if (['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')) return []
+        // /btw can finish even while the agent works, either with a saved side answer or after its timeout.
+        if (/^\/btw\s/.test(next.text.trim())) {
+          const question = squash(next.text.trim().slice(4))
+          const answered = question && data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === question)
+          return data.state !== 'Working' || answered || now - next.at > BTW_TIMEOUT ? [] : [next]
+        }
+        if (data.state === 'Working' || next !== item) return [next]
+        // Only a confirmed Idle pane says the command ran with no output. Other states (Unknown, Unavailable, Approval) leave quietly, as before.
+        // A card or a new thread shows its effect in the chat, so leave quietly too.
+        if (data.state !== 'Idle' || card || threadChanged) return []
+        if (dataReceivedAt.current >= item.at + SLASH_CHECK) return [{ ...item, terminal: { lastId } }]
+        // An idle stream can report the same version without delivering another data object. Ask for one fresh read.
+        if (!refreshedFor.current.has(item)) { refreshedFor.current.add(item); needsRefresh = true }
+        return [item]
       })
-      return left.length === list.length && left.every((item, index) => item === list[index]) ? list : left
-    })
-    // An idle pane sends no new data, so check a slash command again once its 3 s have passed.
-    const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + (/^\/btw\s/.test(item.text.trim()) && Date.now() - item.at > 3100 ? 10100 : 3100) - Date.now())
-    if (!slash.length) return
-    const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(100, Math.min(...slash)))
+    } else left = pending.filter(item => !item.terminal || keepPending(item))
+    const unchanged = left.length === pending.length && left.every((item, index) => item === pending[index])
+    setPending(list => list !== pending || unchanged ? list : left)
+    if (needsRefresh) void refresh()
+    // Recheck unresolved commands at their deadlines. Notes only need a timer for expiry.
+    const deadline = Math.min(...left.flatMap(item => {
+      if (item.terminal) return [item.at + PENDING_TTL]
+      if (item.failed || !slashCommand(item.text)) return []
+      const deadlines = [item.at + SLASH_CHECK + 1]
+      if (/^\/btw\s/.test(item.text.trim())) deadlines.push(item.at + BTW_TIMEOUT + 1)
+      return deadlines.filter(at => at > now)
+    }))
+    if (!Number.isFinite(deadline)) return
+    const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(0, deadline - Date.now()))
     return () => window.clearTimeout(timer)
-  }, [data, recheck, pending.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, pane.id, pending, recheck, refresh, setPending])
   useEffect(() => {
     if (!toast) return
     const timer = setTimeout(() => setToast(''), 6000)
@@ -839,6 +874,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const ownAnswer = !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
   async function send(text: string, retryOf?: Pending) {
     text = terminalText(text)
+    setPending(list => list.some(item => item.terminal) ? list.filter(item => !item.terminal) : list)
     // Claude shows these as a terminal panel that a phone sees only a slice of. Show Tether's own sheet instead, as T3 Code does.
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
     if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
@@ -856,7 +892,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const at = retryOf?.at ?? Date.now()
       const item = { ...retryOf, id: retryOf?.id ?? at, text, key, seen, imagesSeen: retryOf?.imagesSeen ?? images?.imageOnly,
         thread, at, failed: lost ? errorText(failure) : undefined, offline: lost && !(failure instanceof ApiError) }
-      setPending(list => retryOf ? list.map(other => other.id === retryOf.id ? item : other) : [...list, item])
+      setPending(list => {
+        const queued = list.filter(other => !other.terminal)
+        return retryOf ? queued.map(other => other.id === retryOf.id ? item : other) : [...queued, item]
+      })
     }
     if (accepted || lost) { sticky.current = true; setJump(false); hold.current = null; requestAnimationFrame(() => requestAnimationFrame(() => viewport.current?.scrollTo({ top: viewport.current.scrollHeight }))) }  // after the bubble renders
     return accepted || (lost && activePane.agent !== 'shell')
@@ -1129,6 +1168,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const tell = useCallback((text: string, thread: string) => tellRef.current(text, thread), [])
   const feedback = useReplyFeedback(api, activePane.agent === 'shell' ? null : data?.thread, writable ? tell : undefined)
   return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} {...fileDrop}>
+    <div className="visually-hidden" role="status">{newestNote ? `${commandOf(newestNote.text)} ran in the terminal. It left no chat output.` : ''}</div>
     {dropping !== null && <div className={dropping ? 'chat-drop refused' : 'chat-drop'} aria-hidden="true">{dropping ? <><Ban size={22} />{dropping}</> : <><Paperclip size={22} />Drop to attach to {chatTitle(pane, session)}</>}</div>}
     <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
@@ -1197,6 +1237,22 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
       : <div key={item.id} className="user-message pending-message"><SentContent {...sentContent(item.text, activePane.id)} /><small><Clock3 size={12} />{/^\/btw\s/.test(item.text.trim()) ? 'Asking…' : state === 'Working' ? 'Queued' : 'Sending…'}<button type="button" aria-label={activePane.agent === 'claude' ? 'Cancel this queued message' : 'Hide this queued message'} onClick={() => void unqueue(item.id)}><X size={12} /></button></small></div>)}</> },
+      { id: 'terminal-run', label: notes.length === 1 ? `${commandOf(notes[0].text)} ran in the terminal` : `${notes.length} commands ran in the terminal`, active: notes.length > 0, content: notes.map(item => {
+        const command = commandOf(item.text)
+        const dismiss = () => setPending(list => list.filter(other => other.id !== item.id))
+        return <div key={item.id} className="user-message pending-message terminal-note">
+          <SentContent {...sentContent(item.text, activePane.id)} />
+          <small>
+            <span className="terminal-note-text"><SquareTerminal size={12} aria-hidden="true" />Ran in the terminal. No chat output.</span>
+            <button type="button" className="failed-action" aria-label={`Open terminal to see ${command}`} onClick={() => {
+              dismiss()
+              setTerm(true)
+              requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+            }}><SquareTerminal size={13} aria-hidden="true" />Open terminal</button>
+            <button type="button" aria-label={`Dismiss note: ${command} ran in the terminal`} onClick={dismiss}><X size={12} aria-hidden="true" /></button>
+          </small>
+        </div>
+      }) },
       ...codexRunItems(codexRuns),
       { id: 'codex-trust', label: codexTrust.status?.state === 'untrusted' ? 'Codex read-only' : 'Folder trusted', active: codexTrust.status?.state === 'untrusted' || codexTrust.status?.state === 'restart' || codexTrust.justTrusted, content: <CodexTrustCard trust={codexTrust} running /> },
       ...agentBrowserItems(api, agentBrowser, activePane.id),
