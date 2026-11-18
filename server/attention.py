@@ -1,8 +1,9 @@
 """Attention mode: one "ask" per pane that waits on you, kept until you answer it, mark it handled or snooze it.
 
 An ask starts when a turn ends with "Needs you: yes", or when the pane shows an approval, a plan or a question
-(needs.summary). It clears when you send text to the pane, press Handled, the agent's next turn ends with
-"Needs you: no", the prompt leaves the screen, or the pane goes away. Opening the tab only marks it opened.
+(needs.summary). It clears when you send text to the pane, press Handled, or the next turn ends without
+"Needs you: yes". A prompt ask also clears when it leaves the screen. A reply ask follows its conversation
+when the conversation returns to a live pane. Opening the tab only marks it opened.
 Urgent asks get a three-minute grace period before an unopened ask can send a Teams ping.
 The state lives in one JSON file (paths.ATTENTION), written atomically, so asks survive a restart.
 """
@@ -24,6 +25,7 @@ from notification_priority import status_line
 PREFIX = '/mobile/api/attention'
 ACTIONS = ('handled', 'snooze', 'opened')
 SNOOZE = 24 * 3600
+RETENTION = 30 * 86400
 URGENT_GRACE = 180
 LIMIT = 160
 QUIET = 8  # seconds after you answer a prompt in which the same prompt, still on screen, does not start a new ask
@@ -71,8 +73,10 @@ def age_text(seconds):
 
 
 class Attention:
-    """The asks, by pane id. seen holds, per pane, the last reply read (so a restart does not raise it again) and the
-    prompt you last dismissed. checked (memory only) is the turn end each pane's reply was last read for."""
+    """Live asks and dismissed prompts belong to panes. Turns read and parked reply asks belong to conversations.
+
+    checked remembers the conversation and live turn-end marker for each pane read in this process.
+    """
 
     def __init__(self, path=None, clock=time.time, on_urgent=urgent_ping.send):
         self.path, self.clock = Path(path or paths.ATTENTION), clock
@@ -81,6 +85,7 @@ class Attention:
         self.checked, self.quiet = {}, {}
         data = self._load()
         self.asks, self.seen, self.digest = data['asks'], data['seen'], data['digest']
+        self.turns, self.parked = data['turns'], data['parked']
 
     def _load(self):
         try:
@@ -92,19 +97,37 @@ class Attention:
                 if isinstance(ask, dict) and PANE.match(str(pane)) and ask.get('kind') in ('reply', 'approval', 'plan', 'question')
                 and isinstance(ask.get('since'), (int, float))}
         seen = {pane: value for pane, value in (data.get('seen') or {}).items() if isinstance(value, dict)}
+        turns = {thread: value for thread, value in (data.get('turns') or {}).items()
+                 if isinstance(value, dict) and isinstance(value.get('turn'), (str, int))
+                 and isinstance(value.get('at'), (int, float))}
+        parked = {thread: ask for thread, ask in (data.get('parked') or {}).items()
+                  if isinstance(ask, dict) and ask.get('kind') == 'reply' and ask.get('thread') == thread
+                  and isinstance(ask.get('since'), (int, float)) and isinstance(ask.get('parked_at'), (int, float))}
         digest = data.get('digest') if isinstance(data.get('digest'), dict) else {}
         hour = digest.get('hour')
-        return {'asks': asks, 'seen': seen, 'digest': {'enabled': digest.get('enabled') is True,
-                                                       'hour': hour if isinstance(hour, int) and 0 <= hour <= 23 else 9,
-                                                       'sent': digest.get('sent') if isinstance(digest.get('sent'), str) else None}}
+        return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked,
+                'digest': {'enabled': digest.get('enabled') is True,
+                           'hour': hour if isinstance(hour, int) and 0 <= hour <= 23 else 9,
+                           'sent': digest.get('sent') if isinstance(digest.get('sent'), str) else None}}
 
-    def _save(self):
+    def _prune(self, now):
+        changed = False
+        for store, field in ((self.turns, 'at'), (self.parked, 'parked_at')):
+            expired = [thread for thread, value in store.items() if value[field] < now - RETENTION]
+            for thread in expired:
+                del store[thread]
+            changed = bool(expired) or changed
+        return changed
+
+    def _save(self, now):
         """Write to a temporary file in the same folder, then rename it over the old one."""
+        self._prune(now)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(prefix='.attention-', dir=self.path.parent)
         try:
             with os.fdopen(fd, 'w') as stream:
-                json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest}, stream)
+                json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest,
+                           'turns': self.turns, 'parked': self.parked}, stream)
             os.replace(temp, self.path)
         except OSError:
             try:
@@ -135,27 +158,38 @@ class Attention:
         with self.lock:
             return sum(1 for ask in self.asks.values() if ask.get('snoozed_until') and ask['snoozed_until'] > now)
 
-    def _start(self, pane, thread, kind, text, now, reply=None):
+    def _start(self, pane, thread, kind, text, now):
         self.asks[pane] = {'pane': pane, 'thread': thread, 'since': now, 'next': _clip(text), 'kind': kind,
-                           'opened': False, 'snoozed_until': None, 'reply': reply}
+                           'opened': False, 'snoozed_until': None}
 
     def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None):
-        """Start and clear asks from the live session list. status_of(entry): live_status. reply_of(entry): the last
-        assistant reply, read only when the turn has ended and finished_of(entry) changed since the last read."""
+        """Start and clear asks from the live session list. Read (reply, turn id) from reply_of(entry) once the
+        conversation is idle or stopped, then read again only when finished_of(entry) changes.
+        """
         now = self.clock()
         live = {}
         for entry in entries:
-            if entry.get('agent') in AGENTS and not entry.get('ambiguous'):
-                live[entry['id']] = None if entry.get('pending_conversation') else (entry.get('thread') or None)
-        changed = False
+            pane = entry['id']
+            if entry.get('agent') in AGENTS and PANE.fullmatch(pane) and not entry.get('ambiguous'):
+                live[pane] = None if entry.get('pending_conversation') else (entry.get('thread') or None)
         with self.lock:
+            changed = self._prune(now)
             for store in (self.asks, self.seen):
                 for pane in list(store):
                     thread = live.get(pane, False)
+                    value = store[pane]
+                    previous_thread = value.get('thread') or None
                     # The pane went away, or it now runs another conversation.
-                    if thread is False or (thread is not None and (store[pane].get('thread') or None) != thread):
-                        del store[pane]
-                        changed = True
+                    if thread is not False and (thread is None or thread == previous_thread):
+                        continue
+                    if store is self.asks and value['kind'] == 'reply' and previous_thread:
+                        self.parked[previous_thread] = dict(value, parked_at=now)
+                    if store is self.seen and thread is False and 'reply' in value:
+                        # An upgrade can see a bad scan before it has read the old pane's transcript.
+                        changed = value.pop('dismissed', None) is not None or changed
+                        continue
+                    del store[pane]
+                    changed = True
             for pane in list(self.checked):
                 if pane not in live:
                     del self.checked[pane]
@@ -172,6 +206,16 @@ class Attention:
             summary = needs.summary(status)
             with self.lock:
                 ask, seen = self.asks.get(pane), self.seen.setdefault(pane, {'thread': thread})
+                if not summary and ask and ask['kind'] != 'reply':
+                    del self.asks[pane]  # the prompt left the screen: it was answered, here or in the terminal
+                    ask = None
+                    changed = True
+                if not ask and thread in self.parked:
+                    ask = self.parked.pop(thread)
+                    ask.pop('parked_at')
+                    ask['pane'] = pane
+                    self.asks[pane] = ask
+                    changed = True
                 if summary:
                     if ask and ask['kind'] != 'reply' and (ask['next'] != summary['text'] or ask['kind'] != summary['kind']):
                         ask.update(kind=summary['kind'], next=summary['text'])
@@ -182,40 +226,54 @@ class Attention:
                     continue
                 if seen.pop('dismissed', None) is not None:
                     changed = True
-                if ask and ask['kind'] != 'reply':
-                    del self.asks[pane]  # the prompt left the screen: it was answered, here or in the terminal
-                    changed = True
             if status.get('state') not in ENDED:
                 continue
             marker = finished_of(entry)
-            if pane in self.checked and self.checked[pane] == marker:
+            checked = self.checked.get(pane)
+            if checked == (thread, marker):
                 continue
-            self.checked[pane] = marker
-            changed = self.note_reply(pane, thread, reply_of(entry), now) or changed
+            self.checked[pane] = (thread, marker)
+            reply, turn_id = reply_of(entry)
+            first_read = checked is None or checked[0] != thread
+            if turn_id is None and (first_read or marker is None):
+                continue
+            changed = self.note_reply(pane, thread, reply, turn_id, now, first_read=first_read) or changed
         if changed:
             with self.lock:
-                self._save()
+                self._save(now)
         self.due_pings(now)
         return changed
 
-    def note_reply(self, pane, thread, reply, now=None):
-        """A finished turn's reply. A reply already read changes nothing, so a restart does not raise it again."""
+    def note_reply(self, pane, thread, reply, turn_id, now=None, *, first_read=False):
+        """Apply a finished turn once per conversation, even if its pane changes."""
+        if not reply:
+            return False
         now = self.clock() if now is None else now
-        key = _digest(reply)
         with self.lock:
-            seen = self.seen.setdefault(pane, {'thread': thread})
-            if not reply or seen.get('reply') == key:
-                return False
-            seen.update(thread=thread, reply=key)
-            status, text = reply_ask(reply)
             ask = self.asks.get(pane)
+            if thread and turn_id is not None:
+                previous = self.turns.get(thread)
+                if previous and previous['turn'] == turn_id:
+                    return False
+                self.turns[thread] = {'turn': turn_id, 'at': now}
+                seen = self.seen.get(pane, {})
+                old_seen = seen.pop('reply', None) if seen.get('thread') == thread else None
+                old_ask = ask.pop('reply', None) if ask and ask.get('thread') == thread else None
+                legacy = old_seen or old_ask
+                if first_read and previous is None and legacy and legacy == _digest(reply):
+                    if ask and ask['kind'] == 'reply':
+                        ask['turn'] = turn_id
+                    return True
+                if ask and ask.get('turn') == turn_id:
+                    return True  # An open ask can outlast the stored turn's retention period.
+            status, text = reply_ask(reply)
             if status == 'yes':
                 urgent = urgent_text(reply)
-                is_new_urgent = urgent and (not ask or not ask.get('urgent') or ask.get('reply') != key)
+                is_new_urgent = urgent and (turn_id is None or not ask or not ask.get('urgent') or ask.get('turn') != turn_id)
                 if not ask:
-                    self._start(pane, thread, 'reply', urgent or text, now, key)
+                    self._start(pane, thread, 'reply', urgent or text, now)
                     ask = self.asks[pane]
-                ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, reply=key)
+                ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id)
                 if is_new_urgent:
                     ask.update(ping_due=now + URGENT_GRACE, pinged=False)
                 elif not urgent:
@@ -242,7 +300,7 @@ class Attention:
                 if sendable:
                     notifications.append(self.public(ask))
             if changed:
-                self._save()
+                self._save(now)
         for ask in notifications:
             try:
                 self.on_urgent(ask)
@@ -251,14 +309,15 @@ class Attention:
 
     def clear(self, pane, thread=None, save=True):
         """You answered the pane (any write that submits text to it). Returns True when an ask cleared."""
+        now = self.clock()
         with self.lock:
             ask = self.asks.get(pane)
-            self.quiet[pane] = self.clock() + QUIET
+            self.quiet[pane] = now + QUIET
             if not ask or (thread is not None and (ask.get('thread') or None) != (thread or None)):
                 return False
             self._forget(pane, ask)
             if save:
-                self._save()
+                self._save(now)
         return True
 
     def _forget(self, pane, ask):
@@ -270,6 +329,7 @@ class Attention:
     def act(self, pane, thread, action):
         """handled, snooze or opened, for the pane's ask in this conversation. Returns the ask after the change, None
         when the pane has no ask, or False when the ask belongs to another conversation (a stale page)."""
+        now = self.clock()
         with self.lock:
             ask = self.asks.get(pane)
             if not ask:
@@ -279,22 +339,23 @@ class Attention:
             if action == 'handled':
                 self._forget(pane, ask)
             elif action == 'snooze':
-                ask['snoozed_until'] = self.clock() + SNOOZE
+                ask['snoozed_until'] = now + SNOOZE
             elif action == 'opened':
                 if ask.get('opened'):
                     return self.public(ask)
                 ask['opened'] = True
             else:
                 raise ValueError('Unknown action.')
-            self._save()
+            self._save(now)
             return self.public(ask)
 
     def set_digest(self, enabled, hour):
         if not isinstance(enabled, bool) or not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
             raise ValueError('Choose on or off and an hour from 0 to 23.')
+        now = self.clock()
         with self.lock:
             self.digest.update(enabled=enabled, hour=hour)
-            self._save()
+            self._save(now)
             return self.digest_settings()
 
     def digest_settings(self):
@@ -306,9 +367,10 @@ class Attention:
         today = now.strftime('%Y-%m-%d')
         if not self.digest['enabled'] or now.hour < self.digest['hour'] or self.digest.get('sent') == today:
             return None
+        epoch = self.clock()
         with self.lock:
             self.digest['sent'] = today
-            self._save()
+            self._save(epoch)
         asks = self.waiting()
         review_count = 0
         try:

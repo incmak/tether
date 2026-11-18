@@ -350,7 +350,10 @@ def table(run=subprocess.run):
             except OSError:
                 continue
         return result
-    ps = run(['ps', '-eo', 'pid=,ppid=,comm='], capture_output=True, text=True, timeout=5)
+    command = ['ps', '-eo', 'pid=,ppid=,comm=']
+    ps = run(command, capture_output=True, text=True, timeout=5)
+    if ps.returncode:
+        raise subprocess.CalledProcessError(ps.returncode, command, output=ps.stdout)
     processes = {}
     for line in ps.stdout.splitlines():
         fields = line.strip().split(None, 2)

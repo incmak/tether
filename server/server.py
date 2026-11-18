@@ -388,7 +388,7 @@ def monitor_notices():
         except Exception as exc:  # auto-merge must never stop the monitor
             print(f'auto-merge observe failed: {exc!r}', file=sys.stderr)
         try:
-            attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
+            attention.STORE.observe(entries, shared_status, notification_reply_turn, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()
             if digest:
                 notify(digest, False)
@@ -1212,17 +1212,27 @@ def notification_context(entry):
 
 def notification_reply(entry, records=None):
     """Use the chat parsers to extract the last reply from the bounded tail."""
+    return notification_reply_turn(entry, records)[0]
+
+
+def notification_reply_turn(entry, records=None):
+    """Read the last reply and its record's stable turn id from one bounded tail.
+
+    A reply without a turn id cannot start an ask on the first read after startup.
+    It can start one after a later live turn end changes the finished marker.
+    """
     records = notification_records(entry) if records is None else records
     try:
-        latest_step, latest_text = None, ''
+        latest_step, latest_text, latest_turn = None, '', None
         for index, record in reversed(list(enumerate(records))):
             if entry['agent'] == 'antigravity':
                 message = antigravity_message(record, index, display_text)
                 if message and message['role'] == 'assistant':
                     step = record.get('step_index')
-                    step = step if isinstance(step, int) else index
-                    if latest_step is None or step > latest_step:
-                        latest_step, latest_text = step, message['text']
+                    turn = step if type(step) is int else None
+                    position = index if turn is None else turn
+                    if latest_step is None or position > latest_step:
+                        latest_step, latest_text, latest_turn = position, message['text'], turn
                 continue  # the chat orders by step; the newest version of a step wins
             state = codex_state()
             if entry['agent'] == 'claude':
@@ -1231,10 +1241,17 @@ def notification_reply(entry, records=None):
                 codex_consume(state, index, record)
             for message in reversed(state['messages']):
                 if message.get('role') == 'assistant' and not message.get('kind'):
-                    return message['text']
-        return latest_text
+                    turn = record.get('uuid' if entry['agent'] == 'claude' else 'timestamp')
+                    turn = turn if isinstance(turn, str) and turn else None
+                    if turn is not None and entry['agent'] == 'codex':
+                        payload = record.get('payload')
+                        payload_id = payload.get('id') if isinstance(payload, dict) else None
+                        if isinstance(payload_id, str) and payload_id:
+                            turn = f'{turn}/{payload_id}'
+                    return message['text'], turn
+        return latest_text, latest_turn
     except Exception:  # A missing, malformed or changing transcript must not break the poll loop.
-        return ''
+        return '', None
 
 
 def codex_footer(config, metrics):

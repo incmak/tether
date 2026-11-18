@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 import io
 import json
 import tempfile
@@ -26,17 +27,19 @@ APPROVAL = {'state': 'Approval', 'approval': {'text': 'Bash command\nRun the mig
 
 
 class World:
-    """Fake panes: status and last reply per pane, and a turn-end marker the observer compares."""
+    """Fake panes with transcripts and a separate live marker for each turn end."""
 
     def __init__(self, store):
-        self.store, self.status, self.reply, self.finished = store, {}, {}, {}
+        self.store, self.status, self.reply, self.turn_ids, self.finished = store, {}, {}, {}, {}
 
-    def turn(self, pane, reply, at):
+    def turn(self, pane, reply, at, *, turn_id=...):
         self.status[pane], self.reply[pane], self.finished[pane] = {'state': 'Idle'}, reply, at
+        self.turn_ids[pane] = f'{pane}:{at}' if turn_id is ... else turn_id
 
     def observe(self, *entries):
         return self.store.observe(entries, lambda e: self.status.get(e['id'], {'state': 'Working'}),
-                                  lambda e: self.reply.get(e['id']), lambda e: self.finished.get(e['id']))
+                                  lambda e: (self.reply.get(e['id']), self.turn_ids.get(e['id'])),
+                                  lambda e: self.finished.get(e['id']))
 
 
 class AttentionTest(unittest.TestCase):
@@ -89,12 +92,12 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(entry())
         self.on_urgent.assert_called_once_with(ask)
         self.world.observe(entry())
-        self.world.turn('%1', reply, 30)  # A re-read with a new turn marker still has the same reply key.
+        self.world.turn('%1', reply, 30, turn_id='%1:20')  # A different live marker can still point to the same turn.
         self.world.observe(entry())
         self.clock.now += attention.URGENT_GRACE
         self.world.observe(entry())
         self.on_urgent.assert_called_once()
-        self.world.turn('%1', 'New context.\n' + reply, 40)
+        self.world.turn('%1', reply, 40)
         self.world.observe(entry())
         self.clock.now += attention.URGENT_GRACE
         self.world.observe(entry())
@@ -333,8 +336,142 @@ class AttentionTest(unittest.TestCase):
         self.world.turn('%2', 'Next: b.\nNeeds you: yes', 10)
         self.world.observe(entry(), entry('%2', 't2'))
         self.assertEqual(len(self.store.waiting()), 2)
+        self.world.turn('%2', '', 10, turn_id=None)  # The new conversation has no reply yet.
         self.world.observe(entry('%2', 't3'))
         self.assertEqual(self.store.waiting(), [])
+
+    def test_bad_scan_and_restart_restore_open_ask_and_keep_handled_turn_quiet(self):
+        self.world.turn('%1', 'Urgent: Deploy?\nNeeds you: yes', 10)
+        self.world.turn('%2', 'Next: Pick a name.\nNeeds you: yes', 10)
+        self.world.observe(entry(), entry('%2', 't2'))
+        self.store.act('%1', 't1', 'opened')
+        opened = self.store.act('%1', 't1', 'snooze')
+        self.store.act('%2', 't2', 'handled')
+        self.clock.now += 60
+        self.world.observe(entry(agent='shell'), entry('%2', 't2', agent='shell'))
+        self.assertEqual(self.store.waiting(), [])
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.observe(entry(), entry('%2', 't2'))
+        self.assertEqual(self.world.store.ask('%1', 't1'), opened)
+        self.assertIsNone(self.world.store.ask('%2', 't2'))
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry(), entry('%2', 't2'))
+        self.on_urgent.assert_not_called()
+
+    def test_reboot_moves_open_ask_and_keeps_handled_turn_quiet_on_new_panes(self):
+        self.world.turn('%1', 'Urgent: Deploy?\nNeeds you: yes', 10, turn_id='deploy')
+        self.world.turn('%2', 'Next: Pick a name.\nNeeds you: yes', 10, turn_id='name')
+        self.world.observe(entry(), entry('%2', 't2'))
+        opened = self.store.ask('%1', 't1')
+        self.store.act('%2', 't2', 'handled')
+        self.clock.now += 60
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.observe(entry('saved', agent='codex'))  # Discovery falls back to the last chat when tmux is down.
+        self.assertEqual(self.world.store.waiting(), [])
+        self.world.turn('%8', 'Urgent: Deploy?\nNeeds you: yes', None, turn_id='deploy')
+        self.world.turn('%9', 'Next: Pick a name.\nNeeds you: yes', None, turn_id='name')
+        self.world.observe(entry('%8'), entry('%9', 't2'))
+        restored = dict(opened, pane='%8')
+        self.assertEqual(self.world.store.waiting(), [restored])
+        self.clock.now += attention.URGENT_GRACE - 60
+        self.world.observe(entry('%8'), entry('%9', 't2'))
+        self.on_urgent.assert_called_once_with(restored)
+
+    def test_conversation_change_parks_reply_but_discards_prompt(self):
+        self.world.turn('%1', 'Next: Deploy?\nNeeds you: yes', 10, turn_id='deploy')
+        self.world.status['%2'] = APPROVAL
+        self.world.observe(entry(), entry('%2', 't2'))
+        original = self.store.ask('%1', 't1')
+        self.world.status['%1'] = {'state': 'Working'}
+        self.world.observe(entry('%1', 'other'))
+        self.assertEqual(self.store.waiting(), [])
+        self.world.status['%2'] = {'state': 'Working'}
+        self.world.observe(entry(), entry('%2', 't2'))
+        self.assertEqual(self.store.waiting(), [original])
+
+    def test_same_words_in_a_new_turn_raise_a_new_ask_after_handled(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        self.world.turn('%1', reply, 10)
+        self.world.observe(entry())
+        self.store.act('%1', 't1', 'handled')
+        self.clock.now += 20
+        self.world.turn('%1', reply, 20)
+        self.world.observe(entry())
+        self.assertEqual([(ask['next'], ask['since']) for ask in self.store.waiting()], [('deploy?', self.clock.now)])
+
+    def test_cleared_reply_and_no_reply_stay_cleared_after_restart(self):
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 10)
+        self.world.turn('%2', 'Next: review?\nNeeds you: yes', 10)
+        panes = (entry(), entry('%2', 't2'))
+        self.world.observe(*panes)
+        self.store.clear('%1', 't1')
+        self.world.turn('%2', 'Reviewed.\nNeeds you: no', 20)
+        self.world.observe(*panes)
+        self.assertEqual(self.store.waiting(), [])
+        self.world.observe()
+        self.world.store = attention.Attention(self.path, self.clock)
+        self.world.observe(*panes)
+        self.assertEqual(self.world.store.waiting(), [])
+
+    def test_upgrade_adopts_old_digests_without_changing_asks(self):
+        reply = 'Urgent: Deploy?\nNeeds you: yes'
+        digest = hashlib.sha256(reply.encode()).hexdigest()[:24]
+        original = dict(pane='%1', thread='t1', since=self.clock.now - 500, next='Deploy?', kind='reply',
+                        opened=True, snoozed_until=None, urgent=True)
+        self.path.write_text(json.dumps({'version': 1, 'asks': {'%1': dict(original, reply=digest)},
+                                         'seen': {'%2': {'thread': 't2', 'reply': digest}}}))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        panes = (entry(), entry('%2', 't2'))
+        for pane in ('%1', '%2'):
+            self.world.turn(pane, reply, 10)
+        self.world.observe(*panes)
+        self.assertEqual(self.world.store.waiting(), [original])
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data['turns'], {'t1': {'turn': '%1:10', 'at': self.clock.now},
+                                         't2': {'turn': '%2:10', 'at': self.clock.now}})
+        self.world.turn('%2', reply, 20)
+        self.world.observe(*panes)
+        self.assertEqual(self.world.store.ask('%2', 't2')['since'], self.clock.now)
+        data = json.loads(self.path.read_text())
+        self.assertNotIn('reply', data['asks']['%2'])
+        self.assertNotIn('reply', data['seen'].get('%2', {}))
+
+    def test_missing_turn_id_requires_a_live_turn_end(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        self.world.turn('%1', reply, None, turn_id=None)
+        self.world.observe(entry())
+        self.assertEqual(self.store.waiting(), [])
+        self.world.turn('%1', reply, 10, turn_id=None)
+        self.world.observe(entry())
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
+        self.store.act('%1', 't1', 'handled')
+        self.world.turn('%1', reply, None, turn_id=None)
+        self.world.observe(entry())
+        self.assertEqual(self.store.waiting(), [])
+        self.world.turn('%1', reply, 10, turn_id=None)
+        self.world.store = attention.Attention(self.path, self.clock)
+        self.world.observe(entry())
+        self.assertEqual(self.world.store.waiting(), [])
+
+    def test_prunes_only_turns_and_parked_asks_older_than_thirty_days(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        for pane in ('%1', '%2'):
+            self.world.turn(pane, reply, 10)
+        self.world.observe(entry(), entry('%2', 't2'))
+        self.store.act('%2', 't2', 'handled')
+        self.world.observe()
+        self.clock.now += 30 * 86400
+        self.world.turn('%3', reply, 10)
+        self.world.observe(entry('%3', 't3'))
+        self.world.observe()
+        data = json.loads(self.path.read_text())
+        self.assertEqual(set(data['turns']), {'t1', 't2', 't3'})
+        self.assertEqual(set(data['parked']), {'t1', 't3'})
+        self.clock.now += 1
+        self.store.set_digest(True, 9)
+        data = json.loads(self.path.read_text())
+        self.assertEqual(set(data['turns']), {'t3'})
+        self.assertEqual(set(data['parked']), {'t3'})
 
     def test_snooze_hides_for_a_day_then_returns_with_its_first_since(self):
         self.world.turn('%1', 'Next: a.\nNeeds you: yes', 10)
@@ -451,11 +588,36 @@ class Handler:
         self.sent = (status, payload)
 
 
+class TranscriptTurnTest(unittest.TestCase):
+    fixtures = Path(__file__).parent / 'fixtures' / 'attention'
+
+    def test_reply_and_turn_id_come_from_one_transcript_read(self):
+        import server
+
+        for agent, turn_id in (
+                ('claude', '1f543b95-34b4-49c2-83ac-257609c6a380'),
+                ('codex', '2026-11-08T08:30:12.000Z/msg_example'),
+                ('antigravity', 3)):
+            with self.subTest(agent=agent), mock.patch.object(server, 'notification_records', wraps=server.notification_records) as read:
+                pane = entry(agent=agent, transcript=self.fixtures / f'{agent}.jsonl')
+                self.assertEqual(server.notification_reply_turn(pane), ('Next: Deploy?\nNeeds you: yes', turn_id))
+                read.assert_called_once_with(pane)
+
+    def test_codex_timestamp_without_payload_id_and_antigravity_step_zero(self):
+        import server
+
+        for agent, expected in (('codex', ('I will check.', '2026-11-08T08:30:11.000Z')),
+                                ('antigravity', ('Checking.', 0))):
+            with self.subTest(agent=agent):
+                pane = entry(agent=agent, transcript=self.fixtures / f'{agent}.jsonl')
+                self.assertEqual(server.notification_reply_turn(pane, server.notification_records(pane)[:1]), expected)
+
+
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.store = attention.Attention(Path(self.dir.name) / 'a.json', Clock())
-        self.store.note_reply('%1', 't1', 'Next: a.\nNeeds you: yes')
+        self.store.note_reply('%1', 't1', 'Next: a.\nNeeds you: yes', 'first')
         self.panes = {'%1': entry()}
 
     def tearDown(self):
@@ -477,7 +639,7 @@ class RouteTest(unittest.TestCase):
         self.assertFalse(attention.handles('/mobile/api/attention/other'))
 
     def test_ping_state_is_private_in_public_asks_and_api_responses(self):
-        self.store.note_reply('%1', 't1', 'Urgent: Choose now?\nNeeds you: yes')
+        self.store.note_reply('%1', 't1', 'Urgent: Choose now?\nNeeds you: yes', 'urgent')
         ask = self.store.asks['%1']
         private = {'ping_due', 'pinged'}
         self.assertTrue(private <= ask.keys())
@@ -588,13 +750,13 @@ class AnswerEndpointTest(unittest.TestCase):
             with mock.patch.object(self.server.attention, 'STORE', store), mock.patch.object(self.server.broadcast, 'deliver') as deliver:
                 for result, left in (('skipped', 1), ('failed', 1), ('sent', 0), ('sent_busy', 0)):
                     with self.subTest(result=result):
-                        store.note_reply('%1', 't1', f'Pick a plan for {result}.\nNeeds you: yes')
+                        store.note_reply('%1', 't1', f'Pick a plan for {result}.\nNeeds you: yes', result)
                         self.assertEqual(len(store.waiting()), 1)
                         deliver.return_value = {'results': [{'pane': '%1', 'name': 'work', 'result': result}]}
                         self.assertEqual(self.server.teams_answer('[Answer from Teams] B', item)['result'], result)
                         self.assertEqual(len(store.waiting()), left)
                 # An answer for an earlier conversation of the pane leaves the new conversation's ask alone.
-                store.note_reply('%1', 't2', 'Another one.\nNeeds you: yes')
+                store.note_reply('%1', 't2', 'Another one.\nNeeds you: yes', 'another')
                 store.asks['%1']['thread'] = 't2'
                 deliver.return_value = {'results': [{'pane': '%1', 'name': 'work', 'result': 'sent'}]}
                 self.server.teams_answer('[Answer from Teams] B', item)

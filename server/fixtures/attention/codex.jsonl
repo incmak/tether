@@ -1,0 +1,4 @@
+{"timestamp":"2026-11-08T08:30:11.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I will check."}]}}
+{"timestamp":"2026-11-08T08:30:12.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","id":"msg_example","content":[{"type":"output_text","text":"Next: Deploy?\nNeeds you: yes"}]}}
+{"timestamp":"2026-11-08T08:30:12.001Z","type":"event_msg","payload":{"type":"agent_message","message":"Next: Deploy?\nNeeds you: yes"}}
+{"timestamp":"2026-11-08T08:30:12.002Z","type":"event_msg","payload":{"type":"task_complete"}}
