@@ -2,10 +2,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-11/overlay-regression/shots')
+const SHOTS = shotsDir('overlay-regression')
 const floating = '.status-stack, .attach-menu, .mode-menu, .notice-stack, .jump-button, .composer, .live-chips, .prompt-suggestion, .agent-bubble, .agent-pop'
 const states = ['heads-open', 'heads-tasks', 'approval', 'queue', 'attach-sheet', 'mode-menu', 'jump', 'toast', 'quiet']
 const sizes = [[390, 844], [820, 1180], [1280, 900]]

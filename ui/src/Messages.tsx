@@ -7,14 +7,15 @@ import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Api, ChatMessage } from './api'
+import type { AdvisorCall, Api, ChatMessage, ToolSummary } from './api'
+import { AdvisorRow } from './AdvisorRow'
+import { stamp } from './messageTime'
 import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
 import { remarkTabs } from './tabLinks'
 import { canReadAloud, speak, stopSpeaking, useSpeaking } from './speech'
 import { RateButtons } from './ReplyFeedback'
-import type { ToolSummary } from './api'
 
 
 
@@ -104,12 +105,15 @@ function WatchGroup({ id, run, time, api, session }: { id: string; run: WatchRun
   return <details className="watch-row" data-msg-id={id}>
     <summary>{run.schedule ? <CalendarClock size={13} aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />}<span className="watch-what" title={what}>{what}</span>{when && <time dateTime={time}>{run.cycles > 1 ? `last ${when}` : when}</time>}<ChevronRight className="chevron" size={14} aria-hidden="true" /></summary>
     <div className="watch-members">{run.members.map(item => item.kind
-      ? <Message key={item.id} api={api} session={session} actions={false} id={item.id} role={item.role} kind={item.kind} title={item.title} text={item.text} count={item.count} time={item.time} tools={item.tools} />
+      ? <Message key={item.id} api={api} session={session} actions={false} id={item.id} role={item.role} kind={item.kind} title={item.title} text={item.text} count={item.count} time={item.time} tools={item.tools} advisor={item.advisor} />
       : <div key={item.id} className="watch-reply" data-msg-id={item.id}>{item.text.split(/\n\s*\n/).map((part, at) => <p key={at}><Linked text={part.trim()} /></p>)}<MessageActions text={item.text} time={item.time} /></div>)}</div>
   </details>
 }
-export function Message({ id, role, kind, title, text, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; count?: unknown; time?: string; tools?: ToolSummary[]; api: Api; session: string }) {
+export function Message({ id, role, kind, title, text, count, time, tools, api, session, actions = true, images, imageKey, live, runningShown, watch, advisor }: { watch?: WatchRun; live?: boolean; runningShown?: boolean; images?: number; imageKey?: string; actions?: boolean; id: string; role: string; kind?: unknown; title?: string; text: string; count?: unknown; time?: string; tools?: ToolSummary[]; advisor?: AdvisorCall; api: Api; session: string }) {
   if (kind === 'watch' && watch) return <WatchGroup id={id} run={watch} time={time} api={api} session={session} />
+  if (kind === 'advisor') return advisor
+    ? <AdvisorRow id={id} advisor={advisor} time={time} live={live} />
+    : <p className="notice-line" data-msg-id={id}><span>{text}</span></p>
   // A line Claude Code prints between turns: a hook that blocked it, a "while you were away" recap, a notice.
   if (kind === 'notice' && title) {
     const icon = title.endsWith('hook blocked') ? <ShieldAlert size={15} /> : title === 'While you were away' ? <Clock3 size={15} /> : title === 'Scheduled run' ? <CalendarClock size={15} /> : <Info size={15} />
@@ -264,15 +268,6 @@ export function CopyButton({ text, label, className = 'icon-button', wide = fals
     {done === 'ok' ? <Check size={16} /> : <Copy size={16} />}{className !== 'icon-button' && <span>{done === 'ok' ? 'Copied' : done === 'fail' ? 'Failed' : wide ? shown ?? label : 'Copy'}</span>}
   </button>
 }
-// Time of the reply, as the CLI shows it: "9:36 PM" today, "Fri 9:36 PM" this week, else the date.
-function stamp(value?: string) {
-  const at = value ? new Date(value) : null
-  if (!at || Number.isNaN(at.getTime())) return ''
-  const days = (Date.now() - at.getTime()) / 86400000
-  const clock = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-  if (at.toDateString() === new Date().toDateString()) return clock
-  return days < 6 ? `${at.toLocaleDateString(undefined, { weekday: 'short' })} ${clock}` : `${at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock}`
-}
 function MessageActions({ id, text, time }: { id?: string; text: string; time?: string }) {
   const when = stamp(time)
   return <div className="message-actions">
@@ -319,7 +314,7 @@ function QuoteBlock(props: React.ComponentProps<'blockquote'>) {
 export function Markdown() { return <MarkdownTextPrimitive remarkPlugins={[remarkGfm, remarkPaths, remarkTabs]} smooth={false} components={{ CodeHeader, code: InlineCode, a: Link, blockquote: QuoteBlock }} /> }
 export const convertMessage = (message: ChatMessage): ThreadMessageLike => ({
   id: message.id, role: message.role, content: message.text,
-  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,
+  metadata: { custom: { kind: message.kind, title: message.title, count: message.count, tools: message.tools, advisor: message.advisor, text: message.text, time: message.time, images: message.images, imageKey: message.image_key,
     watch: message.kind === 'watch' ? { members: message.members ?? [], watches: message.watches ?? [], cycles: message.cycles ?? 1, rearmed: !!message.rearmed, schedule: !!message.schedule, reported: !!message.reported, result: message.result } : undefined } },
 })
 

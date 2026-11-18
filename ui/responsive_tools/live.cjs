@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('../browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.resolve(__dirname, '../dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../../.release-work/2026-11-16/responsive/tools/shots')
+const SHOTS = shotsDir('responsive/tools')
 const sizes = [[320, 640], [390, 844], [740, 360], [768, 1024], [1024, 768], [1440, 900]]
 const now = Date.now()
 const iso = seconds => new Date(now - seconds * 1000).toISOString()

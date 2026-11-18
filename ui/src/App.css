@@ -698,6 +698,22 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 @media (pointer: coarse) { .watch-row > summary { min-height: 40px; } }
 @media (prefers-reduced-motion: reduce) { .watch-row > summary .chevron { transition: none; } }
 .compact-row pre { white-space: pre-wrap; max-height: 60dvh; font-family: inherit; font-size: 13px; line-height: 1.5; }
+.advisor-call > summary { width: 100%; gap: 5px; white-space: nowrap; }
+.advisor-call > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.advisor-call > summary > svg, .advisor-call > summary > time { flex: none; }
+.advisor-call > summary > time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+.advisor-call > summary:not(:has(time)) > .chevron { margin-left: auto; }
+.advisor-call .tool-error { margin-left: 0; }
+.advisor-call-what, .advisor-call-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.advisor-call-what { flex-shrink: 0; }
+.advisor-call { container-type: inline-size; }
+/* A narrow row puts the state and model on a line of their own, so a phone shows them in full. */
+@container (max-width: 440px) {
+  .advisor-call > summary { flex-wrap: wrap; row-gap: 0; }
+  .advisor-call-meta { order: 1; flex-basis: 100%; padding-left: 20px; font-size: 13px; }
+}
+.advisor-call-body { margin: 2px 0 8px 12px; padding-left: 15px; border-left: 1px solid var(--line); line-height: 1.5; overflow-wrap: anywhere; }
+.advisor-call-body p + p { margin-top: 6px; }
 
 /* After a swipe, the new pane slides in from the side it came from. */
 /* A side swipe drags the page (chat + footer) and the next-door page (.chat-peek, waiting just off screen) together. */

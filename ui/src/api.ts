@@ -125,11 +125,12 @@ export interface Ask { pane: string; thread: string | null; since: number; next:
 export interface ToolArtifact { url: string; path: string; title: string }
 export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
+export interface AdvisorCall { id: string; model?: string; status: 'pending' | 'answered' | 'error' | 'unknown'; error?: string; result_type?: string; started?: string; ended?: string }
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
-  kind?: 'actions' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
+  kind?: 'actions' | 'advisor' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
   quiet?: string
   watch?: string
   members?: ChatMessage[]
@@ -144,6 +145,7 @@ export interface ChatMessage {
   cron?: string
   title?: string
   tools?: ToolSummary[]
+  advisor?: AdvisorCall
   count?: string
   time: string
   images?: number  // Claude: images inside this user message. GET message-image serves them by image_key.
@@ -184,6 +186,15 @@ const cleanTool = (item: unknown): ToolSummary | null => {
   for (const key of bad) delete rest[key]
   return rest as unknown as ToolSummary
 }
+const cleanAdvisor = (item: unknown) => {
+  if (!isObject(item) || typeof item.id !== 'string' || !item.id
+    || typeof item.status !== 'string' || !['pending', 'answered', 'error', 'unknown'].includes(item.status)) return undefined
+  const bad = ['model', 'error', 'result_type', 'started', 'ended'].filter(key => item[key] !== undefined && typeof item[key] !== 'string')
+  if (!bad.length) return item
+  const rest = { ...item }
+  for (const key of bad) delete rest[key]
+  return rest
+}
 const isStringList = (item: unknown) => Array.isArray(item) && item.every(entry => typeof entry === 'string')
 /** The message itself when every field it has is the right type; a copy without the wrong fields when it has a role and
  *  text; else null. Bad tools drop out of the tool list, and bad members out of the member list. */
@@ -192,6 +203,8 @@ const cleanMessage = (item: unknown): ChatMessage | null => {
   let copy: Record<string, unknown> | null = null
   const set = (key: string, value: unknown) => { copy ??= { ...item }; if (value === undefined) delete copy[key]; else copy[key] = value }
   for (const [key, type] of Object.entries(MESSAGE_FIELDS)) if (item[key] !== undefined && typeof item[key] !== type) set(key, undefined)
+  const advisor = cleanAdvisor(item.advisor)
+  if (advisor !== item.advisor) set('advisor', advisor)
   if (item.tools !== undefined) {
     if (!Array.isArray(item.tools)) set('tools', undefined)
     else {

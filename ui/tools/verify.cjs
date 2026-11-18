@@ -24,10 +24,19 @@ const REDIRECTS = new Set([301, 302, 303, 307, 308])
 // shows. A shot counts only when the landmark is visible and exposed. ctx: { width, phone, pane, thread, url }.
 const SURFACES = {
   chat: {
-    about: 'The fixture chat: four messages and the composer',
+    about: 'The fixture chat and the composer',
     open: async () => {},
     landmark: '.app-shell .composer-area form.composer',
     ready: async page => { await page.locator('.chat-page').getByText('The mock conversation stays with this test.').first().waitFor() },
+  },
+  'chat-advisor': {
+    about: 'An expanded advisor answer and an advisor error',
+    open: async page => {
+      const rows = page.locator('.chat-page .advisor-call')
+      await rows.filter({ hasText: '1m 15s · Fable 5.2' }).locator('summary').press('Enter')
+      await rows.filter({ has: page.locator('.tool-error') }).scrollIntoViewIfNeeded()
+    },
+    landmark: '.chat-page .advisor-call[open] .advisor-call-body',
   },
   settings: {
     about: 'The Settings dialog',

@@ -53,7 +53,7 @@ export function toolHeadline(tools: ToolSummary[]) {
 
 const stamp = (value?: string | null) => { const time = value ? Date.parse(value) : NaN; return Number.isNaN(time) ? null : time }
 
-export function toolSeconds(tool: ToolSummary) {
+export function toolSeconds(tool: Pick<ToolSummary, 'started' | 'ended'>) {
   const started = stamp(tool.started), ended = stamp(tool.ended)
   return started === null || ended === null ? null : Math.max(0, (ended - started) / 1000)
 }

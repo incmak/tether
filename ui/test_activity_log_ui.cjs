@@ -4,10 +4,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-18/activity-log/shots')
+const SHOTS = shotsDir('activity-log')
 const sizes = [[320, 640], [1280, 900]]
 const now = Math.floor(Date.now() / 1000)
 const GROUP = { setting: 'settings', passkey: 'settings', tab: 'tabs', review: 'reviews', backlog: 'backlog', lesson: 'lessons', advisor: 'advisor', approval: 'approvals' }

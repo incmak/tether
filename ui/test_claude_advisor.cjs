@@ -4,10 +4,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-18/advisor-consent/shots')
+const SHOTS = shotsDir('advisor-consent')
 const FABLE = 'Claude consults Fable at the same points. On some plans, Fable calls bill to usage credits. On those plans, Claude Code leaves the Fable advisor off until you give a one-time consent with /model fable. /model fable also makes Fable the main model for new sessions; switch back with /model opus. Tether never accepts the consent for you.'
 const NO_FLAGS = { code: 'no-flags', text: 'DISABLE_TELEMETRY turns off the feature-flag fetch that the advisor needs, so Claude Code starts without it.' }
 const owner = { id: '%1', tmux_session: '$1', label: 'project:0.1', pane_name: 'Deploy fix', agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: 't1', approval: null, ask: null }

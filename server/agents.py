@@ -843,6 +843,50 @@ def scheduled_runs(state, index, record):
             runs[current]['result'] = text[:600]
 
 
+def claude_advisor_model(record, message):
+    usage = message.get('usage')
+    iterations = usage.get('iterations') if isinstance(usage, dict) else None
+    if isinstance(iterations, list):
+        for item in iterations:
+            if isinstance(item, dict) and item.get('type') == 'advisor_message':
+                model = item.get('model')
+                if isinstance(model, str) and model:
+                    return model
+    model = record.get('advisorModel')
+    return model if isinstance(model, str) else ''
+
+
+def claude_advisor_result(messages, part, ts):
+    identifier = part.get('tool_use_id')
+    if not isinstance(identifier, str) or not identifier:
+        return
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        advisor = message.get('advisor')
+        if message.get('kind') != 'advisor' or not advisor or advisor['id'] != identifier:
+            continue
+        content = part.get('content')
+        result_type = content.get('type') if isinstance(content, dict) else None
+        updated = {key: advisor[key] for key in ('id', 'model', 'started')}
+        updated['ended'] = ts
+        if result_type == 'advisor_redacted_result':
+            updated['status'] = 'answered'
+            text = 'answered'
+        elif result_type == 'advisor_tool_result_error':
+            updated['status'] = 'error'
+            error = content.get('error_code')
+            updated['error'] = error if isinstance(error, str) and re.fullmatch(r'[a-z0-9_]{1,80}', error) else 'unknown'
+            text = 'no answer'
+        else:
+            updated['status'] = 'unknown'
+            updated['result_type'] = (
+                result_type if isinstance(result_type, str) and re.fullmatch(r'[a-z0-9_]{1,80}', result_type) else 'unknown'
+            )
+            text = 'reply in an unknown form'
+        messages[index] = dict(message, advisor=updated, text=f'Asked the advisor · {text}')
+        break
+
+
 def claude_consume(messages, index, record, clean):
     """Fold one transcript record into the list of chat messages."""
     fire = scheduled_fire(record)
@@ -928,7 +972,7 @@ def claude_consume(messages, index, record, clean):
                                  'time': record.get('timestamp')})
             return
     text = content if isinstance(content, str) else '\n'.join(
-        item.get('text', '') for item in content if item.get('type') == 'text')
+        item.get('text', '') for item in content if isinstance(item, dict) and item.get('type') == 'text')
     text = clean(text)
     if role == 'user':
         text = tidy_user_text(text)
@@ -944,18 +988,32 @@ def claude_consume(messages, index, record, clean):
         messages.append(item)
     if role == 'user' and isinstance(content, list):
         for part in content:
-            if part.get('type') == 'tool_result':
+            if isinstance(part, dict) and part.get('type') == 'tool_result':
                 tool_details.mark_result(messages, part.get('tool_use_id'), part, time=record.get('timestamp'),
                                           details=record.get('toolUseResult'))
     if role == 'assistant' and isinstance(content, list):
+        ts = record.get('timestamp')
         for position, part in enumerate(content):
+            if not isinstance(part, dict):
+                continue
             if part.get('type') == 'tool_use':
-                item = activity.action(f'{index}.{position}', record.get('timestamp'),
+                item = activity.action(f'{index}.{position}', ts,
                                        activity.claude_tool_line(part.get('name', 'Tool'), part.get('input')))
                 item['tool'] = tool_details.summary(part)
-                if record.get('timestamp'):
-                    item['tool']['started'] = record['timestamp']
+                if ts:
+                    item['tool']['started'] = ts
                 messages.append(item)
+            elif part.get('type') == 'server_tool_use' and part.get('name') == 'advisor':
+                identifier = part.get('id')
+                if isinstance(identifier, str) and identifier:
+                    messages.append({
+                        'id': f'{index}.{position}', 'role': 'assistant', 'kind': 'advisor',
+                        'text': 'Asked the advisor', 'time': ts,
+                        'advisor': {'id': identifier, 'model': claude_advisor_model(record, message),
+                                    'status': 'pending', 'started': ts},
+                    })
+            elif part.get('type') == 'advisor_tool_result':
+                claude_advisor_result(messages, part, ts)
 
 
 def ask_questions(part):
@@ -996,6 +1054,8 @@ def claude_snapshot(entry, clean):
         if record.get('type') not in ('assistant', 'user') or not isinstance(content, list):
             return
         for part in content:
+            if not isinstance(part, dict):
+                continue
             if part.get('type') == 'tool_use' and part.get('name') == 'ExitPlanMode' and record['type'] == 'assistant':
                 text = (part.get('input') or {}).get('plan')
                 state['plan'] = {'id': part.get('id') or str(index), 'text': text} if isinstance(text, str) and text.strip() else None

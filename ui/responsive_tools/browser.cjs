@@ -3,10 +3,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('../browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('../browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, '../dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../../.release-work/2026-11-16/responsive/tools/shots')
+const SHOTS = shotsDir('responsive/tools')
 const NOW = Math.floor(Date.now() / 1000)
 const ask = (pane, ago, extra = {}) => ({ pane, thread: null, since: NOW - ago, next: `Next for ${pane}`, kind: 'reply', opened: false, snoozed_until: null, ...extra })
 const pane = (id, session, name, label, extra) => ({ id, tmux_session: session, label, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })

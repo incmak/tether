@@ -1292,7 +1292,7 @@ def last_reply(entry):
     try:
         for message in reversed(snapshot(entry)['messages']):
             text = message.get('text')
-            if message.get('role') == 'assistant' and isinstance(text, str) and text.strip():
+            if message.get('role') == 'assistant' and message.get('kind') != 'advisor' and isinstance(text, str) and text.strip():
                 return text
     except Exception:
         pass
@@ -1318,7 +1318,7 @@ def review_reply(entry, request_id):
                     if message.get('role') == 'user':
                         break
                     text = message.get('text')
-                    if message.get('role') == 'assistant' and isinstance(text, str) and text.strip():
+                    if message.get('role') == 'assistant' and message.get('kind') != 'advisor' and isinstance(text, str) and text.strip():
                         reply = text
                 return reply
     except Exception:

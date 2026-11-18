@@ -755,7 +755,14 @@ class Boot(unittest.TestCase):
         self.assertTrue(sessions[0]['dir'].startswith(str(root)))
         status, body = self.request(info, '/mobile/api/chat?session=' + info['pane'].replace('%', '%25'))
         self.assertEqual(status, 200, body)
-        self.assertEqual([message['role'] for message in json.loads(body)['messages']], ['user', 'assistant', 'user', 'assistant'])
+        messages = json.loads(body)['messages']
+        self.assertEqual([(message['role'], message.get('kind')) for message in messages], [
+            ('user', None), ('assistant', None), ('user', None), ('assistant', None),
+            ('assistant', 'advisor'), ('assistant', 'actions'), ('assistant', 'advisor'),
+        ])
+        self.assertEqual([message['advisor']['status'] for message in messages if message.get('kind') == 'advisor'],
+                         ['answered', 'error'])
+        self.assertNotIn(b'encrypted_content', body)
         self.assertIn(verify_server.CHAT_LINE.encode(), body)
         for title in (b'Write the release notes', b'Fix the flaky share test', b'Add backlog search', b'Draw the new icon set'):
             self.assertNotIn(title, body)

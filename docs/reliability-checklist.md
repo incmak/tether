@@ -79,3 +79,9 @@ diff is ignored.
 - Paths: ^server/(paths|unittest_environment|review_links)\.py$
 - Check: Run test_xplat_paths.TestStoreIsolation and the legacy store read and backup test in test_review_links. Each store path stays outside the account home. A read leaves the original file unchanged. The first write preserves the original bytes in a rollback copy.
 - Incident: B278, 2026-11-18, two test runs rewrote the live review store during migration
+
+## R12: UI tests never default to a dated release folder
+- Paths: ^ui/.*\.cjs$
+- Text: release-work/20
+- Check: The test gets its screenshot folder from `shotsDir()` in `ui/browser_test_helper.cjs`. Without `SHOTS` it writes to a scratch folder. Only `SHOTS` or an explicit flag such as `verify.cjs --shots` points a run at a dated `.release-work` folder.
+- Incident: B219, 2026-11-17, a run of test_responsive_chat_ui.cjs replaced the 2026-11-16 release screenshots
