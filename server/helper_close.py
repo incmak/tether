@@ -34,10 +34,7 @@ def close_pane(pane, run):
     auto_resume.forget_pane(pane, run=run)
     with groups.closing(pane, run):  # its auto stack goes when empty or root-only
         run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
-    review_links.remove(pane)  # links where the pane is the worker
-    for worker, reviewers in review_links.reviewed_by().items():
-        if pane in reviewers:
-            review_links.remove(worker, pane)  # and where it is the reviewer
+    review_links.close(pane)
 
 
 def _panes(run):

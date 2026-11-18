@@ -32,7 +32,7 @@ def review_pair(body):
     return worker, reviewer
 
 
-def link_pair(body, entries, last_reply):
+def link_pair(body, entries, last_reply, *, reset=False):
     worker, reviewer = body.get('worker'), body.get('reviewer')
     for pane in (worker, reviewer):
         if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
@@ -60,6 +60,7 @@ def link_pair(body, entries, last_reply):
     review_links.add(worker=worker, reviewer=reviewer,
                      reviewer_thread=thread if isinstance(thread, str) and UUID.fullmatch(thread) else None,
                      name=delegate.source_title(source), agent=source['agent'],
+                     worker_thread=helper_tabs._thread(source), reset=reset,
                      seen_working=bool(last_reply(source).strip()) and live_status(source)['state'] != 'Working')
     return {'linked': True}
 
@@ -167,7 +168,10 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                 result = helper_tabs.send_message(body, caller, entries, run, status, send, last_reply,
                                                   helper_tabs.SEND_LOCK)
                 # A prompt from another agent continues the worker's current review task (B189).
-                review_links.agent_prompt(result[1]['pane'], sender=caller['id'], sender_thread=caller.get('thread'))
+                pane = result[1]['pane']
+                worker = next((entry for entry in entries if entry['id'] == pane), {})
+                review_links.agent_prompt(pane, sender=caller['id'], sender_thread=caller.get('thread'),
+                                          worker_thread=helper_tabs._thread(worker) or '')
             else:
                 handler.keep_sessions = True
                 result = 200, helper_tabs.poll(body, caller, entries, run, status, last_reply, timeline)

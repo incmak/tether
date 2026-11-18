@@ -10,6 +10,7 @@ import unicodedata
 from uuid import uuid4
 
 import codex_provider
+import helper_close
 import helper_tabs
 import model_catalog
 import paths
@@ -95,6 +96,8 @@ def validate(body, entries, models=None):
                             or not isinstance(thread, str) or not UUID.fullmatch(thread)
                             or entry.get('pending_conversation') or not entry.get('transcript')):
         raise ValueError('A reviewer tab needs a Claude or Codex chat with a saved conversation. Send a first message, then try again.')
+    if review == 'new':
+        review_links.check_cap(pane, thread)
     if body.get('context') and (not supported or not isinstance(thread, str)
                                 or not UUID.fullmatch(thread) or entry.get('pending_conversation')):
         raise ValueError('Context needs a Claude or Codex chat with a saved conversation. Send a first message, then try again.')
@@ -233,6 +236,8 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
     name = (name if name else body['name'].strip() if 'name' in body else
             f'{role[0]}: {source_title(entry)}'[:40] if role else
             ('Review: ' + source_title(entry))[:60] if review == 'new' else task_name(body['message']))
+    if review == 'new':
+        review_links.check_cap(entry['id'], helper_tabs._thread(entry))
     pane = new_window_after(entry['id'], run, cwd=folder, group=group)
     options = [paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
                'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
@@ -258,17 +263,24 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
     path = write_prompt(prompt)
     command = launch_command(entry, agent, path, name, context=context, profile=profile, model=body.get('model'),
                              effort=body.get('effort'))
-    # The pty buffers input even while the new shell starts.
-    run([paths.TMUX, 'send-keys', '-t', pane, '-l', command], check=True, capture_output=True, timeout=5)
-    run([paths.TMUX, 'send-keys', '-t', pane, 'Enter'], check=True, capture_output=True, timeout=5)
-    if review == 'new':
-        review_links.add(worker=entry['id'], reviewer=pane, reviewer_thread=None,
-                         name=source_title(entry), agent=entry['agent'], seen_working=True)
-    elif review == 'source':
-        thread = entry.get('thread')
-        review_links.add(worker=pane, reviewer=entry['id'],
-                         reviewer_thread=thread if isinstance(thread, str) and UUID.fullmatch(thread) else None,
-                         name=name, agent=agent)
+    try:
+        # The pty buffers input even while the new shell starts.
+        run([paths.TMUX, 'send-keys', '-t', pane, '-l', command], check=True, capture_output=True, timeout=5)
+        run([paths.TMUX, 'send-keys', '-t', pane, 'Enter'], check=True, capture_output=True, timeout=5)
+        if review == 'new':
+            review_links.add(worker=entry['id'], reviewer=pane, reviewer_thread=None,
+                             name=source_title(entry), agent=entry['agent'], seen_working=True,
+                             worker_thread=helper_tabs._thread(entry))
+        elif review == 'source':
+            review_links.add(worker=pane, reviewer=entry['id'], reviewer_thread=helper_tabs._thread(entry),
+                             name=name, agent=agent)
+    except Exception as exc:
+        if review:
+            try:
+                helper_close.close_pane(pane, run)
+            except Exception as close_error:
+                raise RuntimeError(f'{exc} Tether could not close the new pane ({pane}): {close_error}') from close_error
+        raise
     return pane, name
 
 

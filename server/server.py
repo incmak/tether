@@ -248,9 +248,10 @@ def review_alert(title, body, session, review=None):
 
 
 def review_turn_source(entry):
-    """Identify a delivered review prompt or the usual turn source."""
+    """Return the source and transcript times of the latest turn for the review watcher."""
     return notification_priority.turn_source(entry.get('agent'), notification_records(entry),
-                                             identify=lambda text: review_links.prompt_source(continuations.unwrap(text)))
+                                             identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
+                                             distinguish_missing=True, with_time=True)
 
 
 def review_folder(entry):
@@ -2866,7 +2867,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/review-link':
                 with SEND_LOCK:
-                    result = agent_tabs.link_pair(body, sessions(), last_reply)
+                    result = agent_tabs.link_pair(body, sessions(), last_reply, reset=True)
                 self.respond(200, result)
                 return
             if self.path == '/mobile/api/review-stop':
@@ -3294,6 +3295,7 @@ class Handler(BaseHTTPRequestHandler):
                     with groups.closing(pane):  # its auto stack goes when empty or root-only
                         subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
                                        capture_output=True, timeout=5)
+                    review_links.close(pane)
                     undo.record_tab_close(closed)
                 self.respond(200, {'closed': pane})
                 return
@@ -3307,10 +3309,16 @@ class Handler(BaseHTTPRequestHandler):
                 if identifier not in active:
                     self.respond(404, {'error': 'That tmux session has already ended.'})
                     return
+                # A window linked to another session keeps its panes when this session closes.
+                panes = subprocess.run([paths.TMUX, 'list-panes', '-s', '-t', identifier + ':',
+                                       '-f', '#{==:#{window_linked_sessions},1}', '-F', '#{pane_id}'],
+                                       check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
                 saved = undo.capture_session_safe(identifier, entries=sessions)
                 auto_resume.forget_session(identifier, run=subprocess.run)
                 subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
                                capture_output=True, timeout=5)
+                for pane in panes:
+                    review_links.close(pane)
                 undo.record_session_close(saved)
             self.respond(200, {'closed': identifier})
         except (ValueError, UnicodeError):

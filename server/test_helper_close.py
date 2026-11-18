@@ -41,7 +41,7 @@ class CloserTests(unittest.TestCase):
         self.states = {}
         self.viewed = set()
         patches = [patch.object(helper_close.review_links, 'reviewed_by', side_effect=lambda: self.links),
-                   patch.object(helper_close.review_links, 'remove'),
+                   patch.object(helper_close.review_links, 'close'),
                    patch.object(helper_close.auto_resume, 'forget_pane')]
         for item in patches:
             item.start()
@@ -120,7 +120,7 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(self.sweep(tmux, after=helper_close.IDLE - 1), [])
         closed = self.sweep(tmux, after=helper_close.SWEEP)
         self.assertEqual(closed, [('%2', 'the review has been idle for 30 minutes')])
-        helper_close.review_links.remove.assert_any_call('%1', '%2')
+        helper_close.review_links.close.assert_called_once_with('%2')
 
     def test_non_helpers_and_discovery_misses_stay(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', 'not json'), '%3': ('advisor', record())})
@@ -213,8 +213,7 @@ class CloserTests(unittest.TestCase):
         tmux = Tmux({'%2': ('reviewer', record())})
         helper_close.close_pane('%2', tmux)
         self.assertEqual(tmux.killed, ['%2'])
-        calls = helper_close.review_links.remove.call_args_list
-        self.assertEqual([c.args for c in calls], [('%2',), ('%1', '%2')])
+        helper_close.review_links.close.assert_called_once_with('%2')
 
     def test_fresh_status_under_the_lock_sees_a_composer_prompt(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', record())})

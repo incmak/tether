@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import delegate
+import helper_close
 import paths
 import model_catalog
 import server
@@ -238,6 +239,7 @@ class LaunchTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.enterContext(patch.object(paths, 'CACHE', self.root))
+        self.enterContext(patch.object(delegate.review_links, 'FILE', self.root / 'review-links.json'))
 
     def test_names_use_first_line_and_cut_at_a_word_boundary(self):
         for message, expected in (
@@ -281,7 +283,50 @@ class LaunchTests(unittest.TestCase):
         prompt, = (self.root / 'delegate').glob('*.md')
         self.assertEqual(prompt.read_text(), delegate.reviewer_prompt(source, '', 'User: Recent task'))
         add.assert_called_once_with(worker='%12', reviewer='%13', reviewer_thread=None,
-                                    name='Source title', agent='claude', seen_working=True)
+                                    name='Source title', agent='claude', seen_working=True, worker_thread=THREAD)
+
+    def test_new_reviewer_checks_cap_again_at_launch(self):
+        source = entry()
+        request = body(review='new')
+        delegate.validate(request, [source])
+        with patch.dict(delegate.review_links._feedback_in_flight, {('%12', '%14', 1): THREAD}), \
+                patch.object(delegate, 'new_window_after', return_value='%13') as window:
+            with self.assertRaisesRegex(ValueError, 'Review feedback is being delivered'):
+                delegate.start(source, request, '/project', run=Mock())
+        window.assert_not_called()
+
+    def test_reviewer_link_refusal_after_pane_creation_closes_the_pane(self):
+        for review, error in (('new', ValueError('Review link refused.')),
+                              ('source', RuntimeError('Review store failed.'))):
+            with self.subTest(review=review), patch.object(delegate, 'new_window_after', return_value='%13'), \
+                    patch.object(delegate.review_links, 'add', side_effect=error), \
+                    patch.object(helper_close, 'close_pane') as close:
+                run = Mock()
+                with self.assertRaises(type(error)) as refused:
+                    delegate.start(entry(), body(review=review), '/project', run=run)
+                self.assertIs(refused.exception, error)
+                close.assert_called_once_with('%13', run)
+                self.assertEqual(run.call_args.args[0][1:], ['send-keys', '-t', '%13', 'Enter'])
+
+    def test_failed_review_launch_at_capacity_keeps_all_existing_links(self):
+        links = delegate.review_links
+        for worker, reviewer in (('%20', '%21'), ('%22', '%23')):
+            links.add(worker=worker, reviewer=reviewer, reviewer_thread=THREAD, name='Other work', agent='claude')
+        before = links.FILE.read_bytes()
+
+        for review, failed_key in (('new', '-l'), ('source', 'Enter')):
+            with self.subTest(review=review), patch.object(links, 'MAX_LINKS', 2), \
+                    patch.object(delegate, 'new_window_after', return_value='%13'), \
+                    patch.object(helper_close, 'close_pane', side_effect=lambda pane, run: links.close(pane)):
+                links.FILE.write_bytes(before)
+
+                def run(argv, **kwargs):
+                    if argv[1] == 'send-keys' and failed_key in argv:
+                        raise subprocess.CalledProcessError(1, argv)
+
+                with self.assertRaises(subprocess.CalledProcessError):
+                    delegate.start(entry(), body(review=review), '/project', run=run)
+                self.assertEqual(links.FILE.read_bytes(), before)
 
     def test_source_reviewer_with_pending_thread_stays_unpinned(self):
         for thread in (None, 'pending-123-1'):

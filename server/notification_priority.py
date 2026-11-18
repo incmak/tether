@@ -1,4 +1,5 @@
 """Pure notification classification from a bounded transcript and final reply."""
+from datetime import datetime
 import re
 import codex_messages
 
@@ -23,14 +24,29 @@ def claude_background(record, content):
                 re.match(r'^\s*<(?:system-reminder|hook-output|scheduled-task|cron-trigger|loop-prompt)\b', content))
 
 
-def turn_source(agent, records, *, identify=None):
-    """Find the delivered prompt before the latest assistant record; absent evidence means user-started.
+def _timestamp(record):
+    try:
+        stamp = datetime.fromisoformat(record['timestamp'].replace('Z', '+00:00'))
+        if stamp.tzinfo is not None:
+            return stamp.timestamp()
+    except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return None
+
+
+def turn_source(agent, records, *, identify=None, distinguish_missing=False, with_time=False):
+    """Find the delivered prompt before the latest assistant record.
 
     Tool results and debug copies are not prompts. Claude sidechains belong to another agent.
     Codex and Antigravity currently expose no reliable background-origin flag.
     """
-    def prompt_source(text, background=False):
-        return 'background' if background else (identify(text) if identify else None) or 'user'
+    finished_at = None
+
+    def result(source, record=None):
+        return (source, _timestamp(record) if record is not None else None, finished_at) if with_time else source
+
+    def prompt_source(record, text, background=False):
+        return result('background' if background else (identify(text) if identify else None) or 'user', record)
 
     if agent == 'antigravity':
         # Exports update old steps out of order. Keep each step's newest version.
@@ -44,13 +60,13 @@ def turn_source(agent, records, *, identify=None):
         kind = record.get('type')
         message = record.get('message') if isinstance(record.get('message'), dict) else {}
         payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+        is_assistant = False
         if agent == 'claude':
             if record.get('isSidechain'):
                 continue
             if kind == 'assistant' and not record.get('isMeta'):
-                assistant_seen = True
-                continue
-            if not assistant_seen:
+                is_assistant = True
+            elif not assistant_seen:
                 continue
             if kind == 'user':
                 if record.get('isAutoCompactSummary'):
@@ -59,7 +75,7 @@ def turn_source(agent, records, *, identify=None):
                 # Tool-result-only user records are continuations of the same turn.
                 if not content.strip():
                     continue
-                return prompt_source(content, claude_background(record, content))
+                return prompt_source(record, content, claude_background(record, content))
             if kind == 'attachment':
                 attachment = record.get('attachment') or {}
                 if not isinstance(attachment, dict):
@@ -68,34 +84,43 @@ def turn_source(agent, records, *, identify=None):
                     prompt = attachment.get('prompt')
                     if not isinstance(prompt, str) or not prompt.strip():
                         continue
-                    return prompt_source(prompt, claude_background(record, prompt))
+                    return prompt_source(record, prompt, claude_background(record, prompt))
                 if attachment.get('type') == 'hook_blocking_error' and identify is not None:
                     hook_blocked = True  # a blocked hook continues the same turn: find the prompt that started it
                     continue
                 if attachment.get('type') in ('hook_blocking_error', 'hook', 'scheduled_task', 'cron', 'loop', 'monitor_event'):
-                    return 'background'
+                    return result('background')
             if kind == 'system' and record.get('subtype') in ('hook', 'hook_response', 'scheduled_task', 'scheduled_wakeup', 'cron', 'loop', 'monitor_event'):
-                return 'background'
+                return result('background')
         elif agent == 'codex':
             if kind == 'response_item' and payload.get('type') == 'message':
                 if payload.get('role') == 'assistant':
-                    assistant_seen = True
+                    is_assistant = True
                 elif assistant_seen and payload.get('role') == 'user':
                     content = text_content(payload.get('content'))
                     if any(part.get('_user') for part in codex_messages.parts(payload)):
-                        return prompt_source(content)
+                        return prompt_source(record, content)
                     # AGENTS instructions are injected context, not a fresh prompt.
                     if content.lstrip().startswith('# AGENTS.md instructions'):
                         continue
-                    return prompt_source(content, codex_messages.background(payload))
+                    return prompt_source(record, content, codex_messages.background(payload))
             elif assistant_seen and kind == 'event_msg' and payload.get('type') == 'user_message':
-                return prompt_source(text_content(payload.get('message')))
+                return prompt_source(record, text_content(payload.get('message')))
+            elif with_time and not assistant_seen and finished_at is None and kind == 'event_msg' \
+                    and payload.get('type') == 'task_complete':
+                finished_at = _timestamp(record)
         elif agent == 'antigravity':
             if kind in ('AGENT_RESPONSE', 'PLANNER_RESPONSE'):
-                assistant_seen = True
+                is_assistant = True
             elif assistant_seen and kind == 'USER_INPUT':
-                return 'user'
-    return 'background' if hook_blocked else 'user'  # the prompt left the tail: keep the hook's answer
+                return result('user')
+        if is_assistant:
+            if with_time and not assistant_seen and finished_at is None:
+                finished_at = _timestamp(record)
+            assistant_seen = True
+    if distinguish_missing:
+        return result('unknown-background' if hook_blocked else 'unknown')
+    return result('background' if hook_blocked else 'user')
 
 
 def status_line(reply):
