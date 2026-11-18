@@ -1158,17 +1158,17 @@ def last_reply(entry):
 def review_reply(entry, request_id):
     """The last assistant text in the turn anchored by this review request.
 
-    The anchor is the request itself: the last message with this id that has the form Tether sends (a request for a
-    busy tab is in the transcript twice). A later message that only quotes the id (a follow-up question, pasted text)
-    is not the request, and its answer is not the review."""
+    The anchor is the request itself: the last message that holds the head of the request with this id, as Tether
+    sends it (review_links.request_pattern). A request for a busy tab is in the transcript twice, and a note may
+    come before it. A later message that only quotes the id or starts like a request (a follow-up question, pasted
+    text) is not the request, and its answer is not the review."""
     try:
         messages = snapshot(entry)['messages']
-        marker = f'Review id: {request_id}.'
+        request = review_links.request_pattern(request_id)
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
             text = message.get('text')
-            if message.get('role') == 'user' and isinstance(text, str) \
-                    and text.lstrip().startswith('[Tether review] The ') and marker in text:
+            if message.get('role') == 'user' and isinstance(text, str) and request.search(text):
                 reply = ''
                 for message in messages[index + 1:]:
                     if message.get('role') == 'user':

@@ -185,6 +185,33 @@ def _at_round_limit(link):
     return any(link.get(key, 0) >= MAX_ROUNDS for key in COUNTS)
 
 
+INTRO = ('Review its work: check the changes and the claims, then list what is wrong or missing. '
+         'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab.')
+
+
+def request_pattern(request_id):
+    """Matches the head of the review request with this id, as Tether sends it: the tab line, the fixed instructions
+    and the id. Text may come before it (a working-directory note), and spaces may differ. A message that only quotes
+    the id, or only starts like a request, does not match."""
+    words = r'\s+'.join(re.escape(word) for word in INTRO.split())
+    return re.compile(r'\[Tether review\]\s+The\s+\S+\s+tab\s+“.{0,300}?”\s+\(%[0-9]+\)\s+finished\s+a\s+turn\.\s+'
+                      + words + r'\s+Review\s+id:\s+' + re.escape(request_id) + r'\.', re.S)
+
+
+def _committed_since_approval(link, worker, scope):
+    """The last approval covered uncommitted work, and the tab has committed it since (a new commit, a clean tree).
+    That commit has no approval yet, so the turn that made it is reviewed."""
+    approved = link.pop('approved_dirty', None)
+    if not isinstance(approved, str):
+        return False
+    target = _call(scope, worker)
+    if not isinstance(target, dict) or not isinstance(target.get('commit'), str) \
+            or target['commit'] == approved or target.get('dirty', True):
+        return False
+    link['confirm_commit'] = approved
+    return True
+
+
 def _named_commit(reply):
     """The commit an approval names right after APPROVED, in lower case, or None. A hash later in the reply does not
     count: only the start says what the approval is for."""
@@ -381,19 +408,32 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 elif approved:
                     covers = '' if not bound else (
                         f" for commit {bound[:12]}" + ('' if link.get('review_clean') else ' and its uncommitted changes'))
+                    uncommitted = bool(bound) and not link.get('review_clean')
                     text = (f"[Tether review] Approved by the reviewer tab ({link['reviewer']}){covers}:\n\n"
-                            f'{_bounded_reply(reply, reviewer)}\n\nThe review is complete. Do the next step your instructions give '
-                            'for an approved review, then stop.')
-                    if _send_worker(link, worker, text, state, send, clear, feedback_sent):
-                        for key in (*COUNTS, 'paused', 'unreadable', 'stale_commit', 'approved_commit', 'approved_at'):
+                            f'{_bounded_reply(reply, reviewer)}\n\nThe review is complete. '
+                            + ('It covered uncommitted changes, so no commit is approved yet: commit the work in this '
+                               'turn, and Tether asks the reviewer to confirm that commit. ' if uncommitted else '')
+                            + 'Do the next step your instructions give for an approved review, then stop.')
+                    if not _send_worker(link, worker, text, state, send, clear, feedback_sent):
+                        pass  # not delivered: the same checks run again on the next tick
+                    elif bound and _call(commit, worker) != bound:
+                        # The commit moved between the read above and the delivery. The tab has the approval text
+                        # (it names the commit), but its current work is not reviewed: ask for a review of it.
+                        link['stale_commit'] = bound
+                        link['stale_rounds'] = link.get('stale_rounds', 0) + 1
+                        link['seen_working'] = True
+                        link['awaiting'] = False
+                    else:
+                        for key in (*COUNTS, 'paused', 'unreadable', 'stale_commit', 'approved_commit', 'approved_at',
+                                    'approved_dirty', 'confirm_commit'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
-                        # The tab must also be at the commit after the send: a turn that started during the
-                        # send gets the approval text (it names the commit), but it gives no proof.
-                        if bound and link.get('review_clean') and anchored and _call(commit, worker) == bound:
+                        if bound and link.get('review_clean') and anchored:
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
+                        if uncommitted:
+                            link['approved_dirty'] = bound
                         link['awaiting'] = False
                         link['approved_turn'] = True
                         link['approved_before'] = _digest(last_reply(worker))
@@ -434,11 +474,16 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
         if _digest(last_reply(worker)) != link.get('approved_before'):
             link.pop('approved_turn', None)
             link.pop('approved_before', None)
+            if _committed_since_approval(link, worker, scope):
+                link['seen_working'] = True  # the next tick asks for a review of the new commit
     elif link['seen_working'] and state == 'Idle':
         if link.pop('approved_turn', False):
             link.pop('approved_before', None)
-            link['seen_working'] = False
-            return link
+            # The turn that follows an approval is not reviewed, unless it committed work that was approved while
+            # it was uncommitted.
+            if not _committed_since_approval(link, worker, scope):
+                link['seen_working'] = False
+                return link
         if link.get('paused', False) or _at_round_limit(link):
             link['paused'] = True
             link['seen_working'] = False
@@ -478,10 +523,12 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                        if target.get('rules') else '')
                     + f"An approval counts only for this commit: start it with `APPROVED {target['commit'][:12]}`. "
                     + binding)
+                confirm = link.get('confirm_commit')
+                if isinstance(confirm, str):
+                    binding += (f'You approved this work as commit {confirm[:12]} plus uncommitted changes. The tab '
+                                'has committed since: check that this commit holds that work and nothing else. ')
             text = (f"[Tether review] The {agent} tab “{link['name']}” ({link['worker']}) finished a turn. "
-                    'Review its work: check the changes and the claims, then list what is wrong or missing. '
-                    'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. '
-                    f'Review id: {request_id}. {binding}'
+                    f'{INTRO} Review id: {request_id}. {binding}'
                     f"Its last reply:\n\n{last_reply(worker)[:1500]}\n\nTranscript: {worker.get('transcript', '')}")
             before = _digest(last_reply(reviewer))
             mark = work_mark(worker) if work_mark is not None else None
@@ -497,6 +544,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             link.pop('send_reply', None)
             link['request_id'] = request_id
             link.pop('stale_commit', None)
+            link.pop('confirm_commit', None)
             link.pop('scope_ticks', None)
             if target is not None:
                 link['review_commit'] = target['commit']

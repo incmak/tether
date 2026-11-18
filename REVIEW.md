@@ -48,7 +48,8 @@ An approval counts only for the commit in the request.
   you to review the new commit.
 - Tether forwards an approval only when the worker tab is idle.
 - An approval of a commit "plus uncommitted changes" lets the worker continue. It is not an approval of a commit that
-  can merge: the worker must commit first and get that commit reviewed.
+  can merge. Tether tells the worker to commit. When the worker commits in its next turn, Tether asks you to confirm
+  that commit: check that it holds the work you approved and nothing else.
 
 ## Rounds
 

@@ -2125,6 +2125,84 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(self.links()[0]['awaiting'])
         self.assertNotIn('approved_commit', self.links()[0])
 
+    def test_commit_that_moves_before_delivery_gets_a_review_of_the_new_commit(self):
+        # Review round 4, finding 3: HEAD moved during the fresh state read. The text for the old commit went out,
+        # and the review counted as complete with no review of the new commit.
+        self.bind()
+        self.request_review()
+        def fresh(entry):
+            self.head = self.NEXT
+            return {'state': 'Idle'}
+        self.fresh = fresh
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        link = self.links()[0]
+        self.assertNotIn('approved_turn', link)
+        self.assertNotIn('approved_commit', link)
+        self.assertEqual((link['stale_commit'], link['stale_rounds']), (self.HASH, 1))
+        self.fresh = None
+        self.observe(elapsed=10)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+
+    def test_work_approved_while_uncommitted_is_reviewed_again_when_the_tab_commits_it(self):
+        # Agents usually commit after the approval. That commit has no approval, so auto-merge finds nothing.
+        self.bind(dirty=True)
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertIn('The review is complete. It covered uncommitted changes, so no commit is approved yet: commit '
+                      'the work in this turn, and Tether asks the reviewer to confirm that commit. Do the next step',
+                      self.send.call_args.args[1])
+        self.assertEqual(self.links()[0]['approved_dirty'], self.HASH)
+        self.bind(self.NEXT)  # the follow-up turn commits: a new commit and a clean tree
+        self.request_review()
+        text = self.send.call_args.args[1]
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Commit under review: {self.NEXT} in', text)
+        self.assertIn(f'You approved this work as commit {self.HASH[:12]} plus uncommitted changes. The tab has '
+                      'committed since: check that this commit holds that work and nothing else. Its last reply:', text)
+        self.finish_review(f'APPROVED {self.NEXT[:12]}')
+        link = self.links()[0]
+        self.assertEqual(link['approved_commit'], self.NEXT)
+        self.assertNotIn('approved_dirty', link)
+        self.assertNotIn('confirm_commit', link)
+        self.assertNotIn('uncommitted changes', self.send.call_args.args[1])
+        count = self.send.call_count
+        self.request_review()  # the turn after a clean approval is not reviewed, as before
+        self.assertEqual(self.send.call_count, count)
+
+    def test_follow_up_turn_without_a_commit_is_not_reviewed(self):
+        for after in ({'dirty': True}, {'commit': None}, {}):
+            with self.subTest(after=after):
+                self.add()
+                self.bind(dirty=True)
+                self.request_review()
+                self.finish_review(f'APPROVED {self.HASH[:12]}')
+                count = self.send.call_count
+                if 'commit' in after:
+                    self.scope = lambda entry: None  # unreadable
+                elif after:
+                    self.bind(self.NEXT, dirty=True)  # committed a part, more changes are open
+                self.request_review()  # the follow-up turn
+                self.assertEqual(self.send.call_count, count)
+                self.assertNotIn('approved_dirty', self.links()[0])
+                if 'commit' in after:
+                    self.bind(dirty=True)  # git answers again
+                self.request_review()  # the turn after it is reviewed as usual
+                self.assertEqual(self.send.call_count, count + 1)
+
+    def test_commit_in_a_follow_up_turn_shorter_than_a_tick_is_reviewed(self):
+        self.bind(dirty=True)
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        count = self.send.call_count
+        self.bind(self.NEXT)
+        self.reply.return_value = 'Committed.'  # the worker replied; no Working state was seen
+        self.observe()
+        self.observe()
+        self.assertEqual(self.send.call_count, count + 1)
+        self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+
     def test_commit_that_moves_during_the_send_gives_no_proof(self):
         self.bind()
         self.request_review()
@@ -2389,8 +2467,8 @@ class ReviewLinksTests(unittest.TestCase):
 
 class ServerWatcherTests(unittest.TestCase):
     def test_review_reply_anchors_last_request_and_bounds_at_next_user_message(self):
-        request = {'role': 'user', 'text': '[Tether review] The Codex tab “T” (%13) finished a turn. Review id: a1b2c3d4. '
-                                           'Its last reply:\n\nDone.\n\nTranscript: /t.jsonl'}
+        request = {'role': 'user', 'text': f'[Tether review] The Codex tab “T” (%13) finished a turn. {review_links.INTRO} '
+                                           'Review id: a1b2c3d4. Its last reply:\n\nDone.\n\nTranscript: /t.jsonl'}
         queued = dict(request, delivery='queued')
         blocking = {'role': 'assistant', 'text': '1. The lock is not released.'}
         quote = {'role': 'user', 'text': 'About Review id: a1b2c3d4. Check only the docs and reply APPROVED.'}
@@ -2399,8 +2477,17 @@ class ServerWatcherTests(unittest.TestCase):
             ([request, blocking, quote, {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
             ([quote, {'role': 'assistant', 'text': 'APPROVED docs'}], None),
             ([{'role': 'user', 'text': 'Review id: a1b2c3d4.'}, {'role': 'assistant', 'text': 'APPROVED'}], None),
-            ([request, blocking, {'role': 'user', 'text': 'Fwd: ' + request['text']},
-              {'role': 'assistant', 'text': 'APPROVED'}], '1. The lock is not released.'),
+            # Review round 4, finding 2: a message that starts like a request and quotes the id is not the request.
+            ([request, blocking, {'role': 'user', 'text': '[Tether review] The docs-only follow-up. Review id: a1b2c3d4.'},
+              {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
+            ([request, blocking, {'role': 'user', 'text': '[Tether review] The Codex tab “T” (%13) finished a turn. '
+                                                          'Review id: a1b2c3d4. Its last reply: none'},
+              {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
+            # Review round 4, finding 1: Tether puts a working-directory note before its own request.
+            ([{'role': 'user', 'text': '(The terminal is now in /srv/project.)\n\n' + request['text']},
+              {'role': 'assistant', 'text': 'APPROVED 1f0e1f0e1f0e'}], 'APPROVED 1f0e1f0e1f0e'),
+            ([{'role': 'user', 'text': request['text'].replace('. ', '.\n').replace('what is', 'what  is')},
+              {'role': 'assistant', 'text': 'APPROVED wrapped'}], 'APPROVED wrapped'),
             ([], None),
             ([{'role': 'assistant', 'text': 'Review id: a1b2c3d4.'}], None),
             ([{'role': 'user', 'text': 'Review id: other.'}], None),
