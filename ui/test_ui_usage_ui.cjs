@@ -59,6 +59,7 @@ async function main() {
     if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
     page = await context.newPage()
     page.setDefaultTimeout(10000)
+    await page.clock.install()
     page.on('pageerror', error => pageErrors.push(error.stack))
     page.on('console', message => { if (message.type() === 'error') pageErrors.push(message.text()) })
     await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' })
@@ -95,18 +96,43 @@ async function main() {
     })
     await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
+      window.usagePosts = 0
+      const fetchPage = window.fetch
+      window.fetch = (input, init) => {
+        if (input === '/mobile/api/ui-usage' && init?.method === 'POST') window.usagePosts++
+        return fetchPage(input, init)
+      }
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, selected: '%1' }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
     const usage = () => posts.filter(post => post.endpoint === 'ui-usage').flatMap(post => post.body.events)
+    const waitForPost = (endpoint, match) => page.waitForResponse(response => {
+      const request = response.request()
+      return new URL(response.url()).pathname === '/mobile/api/' + endpoint && request.method() === 'POST'
+        && match(request.postDataJSON())
+    })
+    const flush = () => page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
+    const scanVisible = async (control, label) => {
+      const matches = event => event.k === 'seen' && event.r === 'Settings' && event.l === label
+      await control.scrollIntoViewIfNeeded()
+      if (usage().some(matches)) return
+      const sent = waitForPost('ui-usage', body => body.events.some(matches))
+      // Start an input scan at this scroll position with a key that has no Settings action.
+      await page.keyboard.press('Shift')
+      await page.clock.runFor(1800) // 800 ms input debounce and the 1000 ms idle deadline, in virtual time.
+      await flush()
+      await sent
+    }
     for (const [width, height] of sizes) {
       const at = `${width}px`
       prefs = { selected: '%1' }; version++
       posts.length = 0
       await page.setViewportSize({ width, height })
+      const generation = waitForPost('ui-usage', body => body.events.length === 0)
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
+      await generation
       const chat = page.locator('.chat-panel[data-pane="%1"]').first()
       await chat.waitFor()
       // Open Settings by clicks, then UI usage.
@@ -121,36 +147,37 @@ async function main() {
       check(`${at} lists render`, await section.getByText('Shell', { exact: true }).isVisible() && await section.locator('.ui-usage-deep').count() === 1 && await section.getByText('Export', { exact: true }).isVisible())
       check(`${at} no page overflow`, !(await overflow()))
       await page.getByRole('heading', { name: 'UI usage' }).scrollIntoViewIfNeeded()
+      await scanVisible(toggle, 'Log UI usage')
       await page.screenshot({ path: path.join(SHOTS, `report-${width}.png`) })
       await page.getByRole('heading', { name: 'Clicks to reach each view' }).scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(SHOTS, `report-views-${width}.png`) })
-      await page.waitForTimeout(900)
-      await page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
-      await page.waitForTimeout(200)
+      const clear = page.getByRole('button', { name: 'Clear the log' })
+      await scanVisible(clear, 'Clear the log')
       const events = usage()
       const clicks = events.filter(event => event.k === 'click')
       // Phone: Settings sits in the sessions drawer (a layer), one click from the page.
       check(`${at} logs the Settings click`, clicks.some(event => event.l === 'Settings' && (width < 800 ? event.d === 1 && event.n === 2 : event.d === 0 && event.n === 1)), JSON.stringify(clicks))
       check(`${at} logs the click in Settings at depth 1`, clicks.some(event => /About/.test(event.l) && event.d === 1 && event.n >= 2), JSON.stringify(clicks))
       check(`${at} logs Settings opening`, events.some(event => event.k === 'open' && event.l === 'Settings' && event.n >= 1), JSON.stringify(events.filter(event => event.k === 'open')))
-      check(`${at} logs seen controls`, events.filter(event => event.k === 'seen').length >= 3, JSON.stringify(events.filter(event => event.k !== 'click').map(event => [event.k, event.r, event.l, event.d])))
+      const seen = events.filter(event => event.k === 'seen' && event.r === 'Settings').map(event => event.l)
+      check(`${at} logs seen controls`, seen.includes('Log UI usage') && seen.includes('Clear the log'), JSON.stringify(seen))
       check(`${at} device`, events.every(event => event.w === (width < 800 ? 'phone' : 'wide')), JSON.stringify([...new Set(events.map(event => event.w))]))
       const text = JSON.stringify(events)
       check(`${at} no tab names or paths`, !/Fix login|Docs pass|\/srv\//.test(text), text.match(/.{40}(Fix login|Docs pass|\/srv\/).{40}/)?.[0])
       // Clear asks first.
-      await page.getByRole('button', { name: 'Clear the log' }).click()
+      await clear.click()
       await page.getByRole('button', { name: 'Remove' }).click()
       await page.getByText('The UI usage log is empty now.').waitFor()
       check(`${at} clear posts`, posts.some(post => post.endpoint === 'ui-usage/clear'))
       // Turning the switch off saves the pref and stops the log.
+      const saveOff = waitForPost('prefs', body => body.changes.uiUsage === false)
       await toggle.click()
-      await page.waitForTimeout(400)
-      check(`${at} pref saved`, posts.some(post => post.endpoint === 'prefs' && post.body.changes.uiUsage === false), JSON.stringify(posts.map(post => post.endpoint)))
-      const before = usage().length
+      check(`${at} pref saved`, (await saveOff).ok())
+      const before = await page.evaluate(() => window.usagePosts)
       await page.getByRole('button', { name: 'Clear the log' }).click()
-      await page.evaluate(() => window.dispatchEvent(new Event('pagehide')))
-      await page.waitForTimeout(200)
-      check(`${at} off logs nothing`, usage().length === before, String(usage().length - before))
+      await flush()
+      const after = await page.evaluate(() => window.usagePosts)
+      check(`${at} off logs nothing`, after === before, String(after - before))
       await page.keyboard.press('Escape')
     }
     check('no page errors', !pageErrors.length, pageErrors.join('\n'))
