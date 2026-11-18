@@ -55,6 +55,7 @@ const fixture = {
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
   'work/board': { revision: 1, projects: [], items: [], stages: [] },  // Home and the sidebar read the work board
+  reminders: { reminders: [], deleted: [], now }, feedback: { ratings: {} },
 }
 
 const setupFresh = () => ({
@@ -318,7 +319,7 @@ async function main() {
       const sheet = page.locator('dialog.helper-sheet')
       if (await search.count()) await search.fill('reviewers')
       await row('Critical tasks').waitFor()
-      if (await search.count()) await search.fill('advisor')
+      if (await search.count()) await search.fill('advisor reviewers')
       const advisorRow = row('Advisor').first()
       await advisorRow.waitFor()
       await advisorRow.scrollIntoViewIfNeeded()
