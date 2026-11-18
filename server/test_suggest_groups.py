@@ -40,11 +40,14 @@ class SuggestGroupsTests(unittest.TestCase):
         folder = Path(kwargs['cwd'])
         self.assertTrue(folder.is_dir())
         self.assertEqual(list(folder.iterdir()), [])
+        output = 'Project: 6 9'
         if '-o' in command:
             outfile = Path(command[command.index('-o') + 1])
             self.assertEqual(outfile.parent, folder)
-            outfile.write_text('Project: 6 9', encoding='utf-8')
-        return Mock(returncode=0, pid=12345, communicate=Mock(return_value=('Project: 6 9', None)))
+            outfile.write_text(output, encoding='utf-8')
+            output = None  # Codex writes the answer to the -o file.
+        self.process = Mock(returncode=0, pid=12345, communicate=Mock(return_value=(output, None)))
+        return self.process
 
     def test_no_main_agent_setting_skips_agents(self):
         for extra in ({}, {'agent': None}, {'agent': ''}, {'agent': 'unknown'}):
@@ -79,7 +82,9 @@ class SuggestGroupsTests(unittest.TestCase):
                 command = self.popen.call_args.args[0]
                 folder = self.popen.call_args.kwargs['cwd']
                 self.assertEqual(command, ['/bin/claude', '-p', '--model', 'haiku', '--tools', '',
-                                           '--setting-sources', '', '--strict-mcp-config',
+                                           '--setting-sources', '', '--settings', '{"disableAllHooks":true}',
+                                           '--disable-slash-commands', '--strict-mcp-config',
+                                           '--mcp-config', '{"mcpServers":{}}',
                                            '--no-session-persistence', '--system-prompt', suggest_groups.PROMPT])
                 self.assertEqual(self.popen.call_args.kwargs,
                                  dict(cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -95,32 +100,33 @@ class SuggestGroupsTests(unittest.TestCase):
         suggest_groups.suggest({'sessions': self.entries, 'agent': 'claude'})
         process.communicate.assert_called_once_with(input=suggest_groups.model_input(self.entries), timeout=45)
         self.assertEqual(suggest_groups.AGENT_TIMEOUT, 45)
-        self.assertNotIn(self.entries[0]['name'], self.popen.call_args.args[0])
+        self.assertNotIn(self.entries[0]['name'], ' '.join(self.popen.call_args.args[0]))
 
-    def test_codex_command_uses_devnull_and_reads_output_file(self):
+    def test_codex_command_is_isolated_and_reads_output_file(self):
         self.which.return_value = '/bin/codex'
-        # stdout must be ignored: Codex writes the answer to the -o file.
-        process = Mock(returncode=0, communicate=Mock(return_value=(None, None)))
-
-        def launch(command, **kwargs):
-            self.agent_process(command, **kwargs)
-            return process
-
-        self.popen.side_effect = launch
+        self.popen.side_effect = self.agent_process
         result = suggest_groups.suggest({'sessions': self.entries, 'agent': 'codex'})
         self.assertEqual(result, {'groups': [{'name': 'Project', 'sessions': ['$6', '$9']},
                                             {'name': 'Other', 'sessions': ['$12']}], 'source': 'codex'})
         self.which.assert_called_once_with('codex')
         self.popen.assert_called_once()
         folder = self.popen.call_args.kwargs['cwd']
-        self.assertEqual(self.popen.call_args.args[0],
-                         ['/bin/codex', 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
-                          '-c', 'model_reasoning_effort=low', '-o', str(Path(folder) / 'groups.txt'), '--',
-                          suggest_groups.PROMPT + '\n\n' + suggest_groups.model_input(self.entries)])
+        command = self.popen.call_args.args[0]
+        content = suggest_groups.model_input(self.entries)
+        for flag in ('--ignore-user-config', '--ignore-rules', 'model_provider="openai"'):
+            self.assertIn(flag, command)
+        disabled = [value for flag, value in zip(command, command[1:]) if flag == '--disable']
+        self.assertIn('hooks', disabled)
+        self.assertIn('shell_tool', disabled)
+        self.assertEqual(command[-11:],
+                         ['--skip-git-repo-check', '--ephemeral', '-s', 'read-only', '-c', 'model_provider="openai"',
+                          '-c', 'model_reasoning_effort=low', '-o', str(Path(folder) / 'groups.txt'), '-'])
+        self.assertNotIn(suggest_groups.PROMPT, ' '.join(command))
+        self.assertNotIn(content, ' '.join(command))
         self.assertEqual(self.popen.call_args.kwargs,
-                         dict(cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         dict(cwd=folder, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, text=True, start_new_session=True))
-        process.communicate.assert_called_once_with(input=None, timeout=45)
+        self.process.communicate.assert_called_once_with(input=suggest_groups.PROMPT + '\n\n' + content, timeout=45)
         self.assertFalse(Path(folder).exists())
         self.urlopen.assert_not_called()
 
@@ -136,13 +142,16 @@ class SuggestGroupsTests(unittest.TestCase):
     def test_codex_command_uses_luna_model_when_available(self):
         self.fast_model.return_value = 'gpt-6-luna'
         self.popen.side_effect = self.agent_process
-        suggest_groups.agent_output('codex', '/bin/codex', self.entries)
+        tabs = [session('%4', name='Planning', chats=['codex'])]
+        suggest_groups.agent_output('codex', '/bin/codex', tabs, suggest_groups.TABS_PROMPT)
         folder = self.popen.call_args.kwargs['cwd']
-        self.assertEqual(self.popen.call_args.args[0],
-                         ['/bin/codex', 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
-                          '-m', 'gpt-6-luna', '-c', 'model_reasoning_effort=low',
-                          '-o', str(Path(folder) / 'groups.txt'), '--',
-                          suggest_groups.PROMPT + '\n\n' + suggest_groups.model_input(self.entries)])
+        command = self.popen.call_args.args[0]
+        content = suggest_groups.model_input(tabs)
+        self.assertEqual(command[-7:], ['-m', 'gpt-6-luna', '-c', 'model_reasoning_effort=low',
+                                        '-o', str(Path(folder) / 'groups.txt'), '-'])
+        self.assertNotIn(suggest_groups.TABS_PROMPT, ' '.join(command))
+        self.assertNotIn(content, ' '.join(command))
+        self.process.communicate.assert_called_once_with(input=suggest_groups.TABS_PROMPT + '\n\n' + content, timeout=45)
         self.fast_model.assert_called_once_with()
         self.urlopen.assert_not_called()
 
