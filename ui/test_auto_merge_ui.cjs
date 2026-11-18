@@ -54,8 +54,10 @@ async function main() {
   let browser, page, server, failed = 0
   const pageErrors = [], unexpected = new Set()
   let mode = 'rows'  // rows | empty | error | slow
-  let state = full(), postFails = false
-  const posts = []
+  let state = full(), postFails = false, hasKey = true
+  const approved = body => !!body.approval?.challenge_id && !!body.approval?.credential?.response?.signature
+  const b64 = bytes => Buffer.from(bytes).toString('base64url')
+  const posts = [], passkeyAsks = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -91,13 +93,20 @@ async function main() {
             const body = request.postDataJSON()
             posts.push(body)
             if (postFails) return route.fulfill({ status: 500, json: { error: 'Could not save the auto-merge setting.' } })
-            if (body.mode) state = { ...state, mode: body.mode, since: now }
+            // Like the server: Enforce and Restore need a passkey approval; Off and Observe do not.
+            if ((body.mode === 'enforce' || body.restore) && !approved(body)) return route.fulfill({ status: 403, json: hasKey ? { error: 'Approve with your passkey.', approval: 'required' } : { error: 'Add a passkey in Settings › Setup first.', approval: 'no-passkey' } })
+            if (body.mode) state = { ...state, mode: body.mode, since: now, paused: false }
             if (body.restore) state = { ...state, trust: state.trust.map(repo => ({ ...repo, areas: repo.areas.map(item => repo.root === body.restore.root && item.name === body.restore.area ? { ...item, rung: 1, limit: 60 } : item) })) }
             return route.fulfill({ json: state })
           }
           if (mode === 'error') return route.fulfill({ status: 500, json: { error: 'Tether could not read the auto-merge state.' } })
           if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500))
           return route.fulfill({ json: mode === 'empty' ? { ...state, decisions: [], trust: [] } : state })
+        }
+        if (endpoint === 'passkeys' && request.method() === 'POST') {
+          const body = request.postDataJSON()
+          passkeyAsks.push(body)
+          return route.fulfill({ json: { challenge_id: 'challenge-1', publicKey: { challenge: b64(Buffer.alloc(32, 3)), rpId: 'localhost', userVerification: 'required', timeout: 60000, allowCredentials: [{ type: 'public-key', id: b64('cred-1') }] } } })
         }
         if (request.method() !== 'GET') { unexpected.add(`POST ${endpoint}`); return route.fulfill({ status: 500, json: { error: 'no writes here' } }) }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -109,6 +118,11 @@ async function main() {
     })
     await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
+      // A fake authenticator: the shared browser's CDP proxy refuses the WebAuthn domain. server/test_approval.py checks real signatures.
+      const buffer = text => new TextEncoder().encode(text).buffer
+      Object.defineProperty(navigator, 'credentials', { configurable: true, value: {
+        get: async () => ({ id: 'cred-1', rawId: buffer('cred-1'), type: 'public-key', response: { clientDataJSON: buffer('{"type":"webauthn.get"}'), authenticatorData: buffer('auth'), signature: buffer('sig'), userHandle: null } }),
+      } })
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light', voiceOff: true, voiceSound: false }))
@@ -147,14 +161,13 @@ async function main() {
         return { text: el.textContent.trim().slice(0, 24), ratio: Math.round((hi + 0.05) / (lo + 0.05) * 100) / 100 }
       })
     }, selector)
-    const TEXT = '.auto-merge-outcome, .auto-merge-what strong, .auto-merge-what small, .auto-merge-areas strong, .auto-merge-areas small, .auto-merge-checks span, .setting-note, .hint, .auto-merge-heading, .auto-merge-confirm p, .auto-merge-repo-name small, button'
-    // The mode control is the shared .segmented control; its own contrast is a separate backlog item.
+    const TEXT = '.auto-merge-outcome, .auto-merge-what strong, .auto-merge-what small, .auto-merge-areas strong, .auto-merge-areas small, .auto-merge-checks span, .setting-note, .hint, .auto-merge-heading, .auto-merge-confirm p, .auto-merge-repo-name small, .segmented span, button'
     const low = list => list.filter(item => item.ratio < 4.5).map(item => `${item.text} ${item.ratio}`).join('; ')
 
     for (const [width, height] of sizes) {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
-      state = full(); posts.length = 0; postFails = false
+      state = full(); posts.length = 0; passkeyAsks.length = 0; postFails = false; hasKey = true
 
       mode = 'slow'
       await open(width)
@@ -206,7 +219,7 @@ async function main() {
 
       // Enforce asks first. Cancel sends nothing.
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()
-      const confirm = section.getByRole('alertdialog', { name: 'Turn on Enforce?' })
+      const confirm = section.getByRole('group', { name: 'Turn on Enforce?' })
       await confirm.waitFor()
       check(`${at} Enforce asks before it saves`, posts.length === 0)
       check(`${at} the confirm text names the push, the undo and the deploy`, /never a forced push[\s\S]*git revert -m 1[\s\S]*A merge is not a deploy/.test(await confirm.innerText()))
@@ -219,17 +232,34 @@ async function main() {
       }
       await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
       await shot(`confirm-${width}`)
+      // The confirmation is an inline group, not a modal: Tab may leave it and it stays open; Escape and Cancel close it.
+      await page.keyboard.press('Tab')
+      check(`${at} the confirmation stays open when Tab leaves it`, await confirm.isVisible() && await page.evaluate(() => !document.activeElement?.closest('.auto-merge-confirm')))
+      await confirm.getByRole('button', { name: 'Turn on Enforce' }).focus()
+      await page.keyboard.press('Escape')
+      await confirm.waitFor({ state: 'detached' })
+      check(`${at} Escape cancels and Settings stays open`, posts.length === 0 && await section.isVisible() && await section.getByRole('radio', { name: 'Observe' }).isChecked())
+      await section.locator('.segmented label', { hasText: 'Enforce' }).click()
       await confirm.getByRole('button', { name: 'Cancel' }).click()
       check(`${at} Cancel keeps Observe and sends nothing`, posts.length === 0 && await section.getByRole('radio', { name: 'Observe' }).isChecked())
+      // Without a passkey nothing changes, and the message says what to do.
+      hasKey = false
+      await section.locator('.segmented label', { hasText: 'Enforce' }).click()
+      await confirm.getByRole('button', { name: 'Turn on Enforce' }).click()
+      await section.getByRole('alert').getByText('Add a passkey in Settings › Setup first.').waitFor()
+      check(`${at} no passkey: Observe stays`, state.mode === 'observe' && await section.getByRole('radio', { name: 'Observe' }).isChecked() && passkeyAsks.length === 0)
+      hasKey = true; posts.length = 0
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()
       await confirm.getByRole('button', { name: 'Turn on Enforce' }).click()
       await section.getByText('Tether merges a branch into the main branch when every check passes.').waitFor()
-      check(`${at} the confirm button saves Enforce`, JSON.stringify(posts) === '[{"mode":"enforce"}]' && await section.getByRole('radio', { name: 'Enforce' }).isChecked(), JSON.stringify(posts))
+      check(`${at} Enforce is saved only with a passkey approval`, posts.length === 2 && !approved(posts[0]) && approved(posts[1]) && posts[1].mode === 'enforce' && state.mode === 'enforce'
+        && await section.getByRole('radio', { name: 'Enforce' }).isChecked(), JSON.stringify(posts.map(post => [post.mode, !!post.approval])))
+      check(`${at} the passkey check is bound to this action`, passkeyAsks.length === 1 && passkeyAsks[0].action === 'auto-merge' && passkeyAsks[0].payload?.mode === 'enforce', JSON.stringify(passkeyAsks))
 
       // Off and Observe save at once. A failed save says so and keeps the old mode.
       await section.locator('.segmented label', { hasText: 'Off' }).click()
       await section.getByText('Tether does not check branches.').waitFor()
-      check(`${at} Off saves at once`, JSON.stringify(posts.at(-1)) === '{"mode":"off"}')
+      check(`${at} Off saves at once, with no passkey`, JSON.stringify(posts.at(-1)) === '{"mode":"off"}' && passkeyAsks.length === 1)
       postFails = true
       await section.locator('.segmented label', { hasText: 'Observe' }).click()
       await section.getByRole('alert').getByText('Could not save the auto-merge setting.').waitFor()
@@ -240,7 +270,15 @@ async function main() {
       const restore = section.getByRole('button', { name: 'Restore trust for Docs in project' })
       await restore.click()
       await restore.waitFor({ state: 'detached' })
-      check(`${at} Restore sends the repository and the area`, JSON.stringify(posts.at(-1)) === JSON.stringify({ restore: { root: ROOT, area: 'docs' } }), JSON.stringify(posts.at(-1)))
+      check(`${at} Restore sends the repository and the area, with a passkey approval`, JSON.stringify(posts.at(-1).restore) === JSON.stringify({ root: ROOT, area: 'docs' }) && approved(posts.at(-1)), JSON.stringify(posts.at(-1)))
+
+      // After a restart the server holds no grant: Enforce is paused and the page says so.
+      state = { ...state, mode: 'observe', paused: true }
+      await open(width)
+      await section.getByRole('status').getByText('Enforce is paused.').waitFor()
+      check(`${at} paused Enforce shows Observe`, await section.getByRole('radio', { name: 'Observe' }).isChecked())
+      await shot(`paused-${width}`)
+      state = { ...state, paused: false }
 
       // Empty: no repository with rules, no decisions.
       mode = 'empty'

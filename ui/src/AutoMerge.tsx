@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { agoSeconds } from './Sidebar'
 import { errorText } from './api'
+import { withApproval } from './approval'
 import type { Api } from './api'
 import { usePolling } from './hooks'
 
@@ -18,7 +19,7 @@ interface Decision {
 interface TrustArea { name: string; label: string; rung: number; limit: number; streak: number; need: number; top: boolean; merges: number; reverts: number }
 interface Trust { root: string; repo: string; target?: string; areas: TrustArea[]; error: string }
 export interface AutoMergeState {
-  mode: AutoMergeMode; since: number
+  mode: AutoMergeMode; since: number; paused?: boolean
   modes: { mode: AutoMergeMode; name: string; summary: string }[]
   decisions: Decision[]; trust: Trust[]; rungs: number[]; rules_file: string
 }
@@ -65,7 +66,8 @@ export function AutoMergeSettings({ api }: { api: Api }) {
   const [error, setError] = useState('')
   async function save(body: Record<string, unknown>, kind: AutoMergeMode | 'restore') {
     setPending(kind); setError(''); setAsking(false)
-    try { await api<AutoMergeState>('auto-merge', body); await refresh() }
+    // Enforce and Restore give Tether more power, so the server asks for a passkey. Off and Observe save at once.
+    try { await (kind === 'enforce' || kind === 'restore' ? withApproval<AutoMergeState>(api, 'auto-merge', 'auto-merge', body) : api<AutoMergeState>('auto-merge', body)); await refresh() }
     catch (failure) { setError(errorText(failure)) }
     finally { setPending(null) }
   }
@@ -82,9 +84,10 @@ export function AutoMergeSettings({ api }: { api: Api }) {
         </label>)}</div>
         {current && <p id="auto-merge-note" className="setting-note">{current.summary}</p>}
       </fieldset>
-      {asking && <div className="provider-warning auto-merge-confirm" role="alertdialog" aria-labelledby="auto-merge-confirm-title" aria-describedby="auto-merge-confirm-text">
+      {data.paused && !asking && <p className="provider-warning" role="status"><strong>Enforce is paused.</strong> Tether restarted, or the setting changed outside Settings. It only observes until you turn on Enforce again.</p>}
+      {asking && <div className="provider-warning auto-merge-confirm" role="group" aria-labelledby="auto-merge-confirm-title" aria-describedby="auto-merge-confirm-text" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation(); setAsking(false) } }}>
         <strong id="auto-merge-confirm-title">Turn on Enforce?</strong>
-        <p id="auto-merge-confirm-text">Tether then merges a worker branch into the main branch on origin without you, when every check passes. It pushes one merge commit, never a forced push. <code>git revert -m 1</code> undoes a merge. A merge is not a deploy. Approvals from before now do not merge.</p>
+        <p id="auto-merge-confirm-text">Tether then merges a worker branch into the main branch on origin without you, when every check passes. It pushes one merge commit, never a forced push. <code>git revert -m 1</code> undoes a merge. A merge is not a deploy. Approvals from before now do not merge. Tether asks for your passkey, and again after it restarts.</p>
         <div className="auto-merge-actions">
           <button type="button" className="secondary" onClick={() => setAsking(false)}>Cancel</button>
           <button type="button" className="primary" autoFocus onClick={() => void save({ mode: 'enforce' }, 'enforce')}>Turn on Enforce</button>

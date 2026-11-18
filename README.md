@@ -237,24 +237,25 @@ Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off
 
 ## Auto-merge
 
-Tether can merge a worker branch into the main branch on `origin` when a reviewer tab approved it and the change is low risk.
+Tether can merge a low-risk worker branch into `main` at the push URL for `origin` after a reviewer tab approves it.
 It starts in **Observe**: it records what it would merge in Settings › Agents › Auto-merge and merges nothing.
-Only you move it to **Enforce**, in Settings. **Off** stops the checks.
+Use your passkey in Settings to turn on **Enforce**. A server restart pauses Enforce and returns Tether to Observe
+until you approve Enforce again. **Off** stops the checks.
 
 A branch merges without you only when all of this holds:
 
-- The reviewer approved the exact commit at the head of the branch, and the worktree has no uncommitted changes.
+- The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
 - The head commit has a `Verified:` stamp with a `tests(...)` item.
-- The main branch has `docs/auto-merge.json`. Every changed file is a regular text file in one of its areas.
-- Each area is within its trust limit (changed lines in one merge).
+- `main` at the push URL has `docs/auto-merge.json`. Every changed file in the proposed merge is a regular text file
+  in the same area. The total of added and deleted lines fits the area's trust limit.
 - `scripts/checklist.py` finds no reliability checklist row for the diff.
-- The commit merges into the main branch with no conflict.
+- The trial merge has no conflict. Every path it changes matches the approved commit, including deletions.
 
 If one check fails, or Tether cannot tell, the branch waits for you.
 
-In Enforce, Tether makes one merge commit and pushes it with a normal push. It never forces a push and never changes a
-working tree. `git revert -m 1 <merge>` undoes a merge. A merge is not a deploy.
-It merges only approvals that arrive after you turned Enforce on, and none older than 24 hours.
+In Enforce, Tether makes one merge commit and pushes it to `refs/heads/main` with a normal push. It leaves working trees
+and local refs alone. `git revert -m 1 <merge>` undoes a merge. A merge does not deploy the code.
+At the push, the server must still hold the Enforce grant. The approval must come after the grant and be at most 24 hours old.
 
 `docs/auto-merge.json` names the areas. Tether reads it from the main branch, never from the worker branch:
 
@@ -264,11 +265,13 @@ It merges only approvals that arrive after you turned Enforce on, and none older
 
 In a path, `**` crosses folders; `*` and `?` stay inside one name. A repository without the file never auto-merges.
 
-Trust is per area. Each area starts at 60 changed lines. After 5 clean merges that Tether made, the limit widens to 150,
-then to 300. A revert on the main branch of a commit that touched the area narrows it by one step. At zero, you merge
-that area until you choose **Restore trust** in Settings. Commits that agents push themselves do not widen trust.
+Trust is per area. Each area starts at 60 changed lines. After 5 clean Tether merges in an area, the limit widens to 150,
+then to 300. Tether matches each merge on the first-parent history of `main` to the approved commit and the decision log.
+A revert on `main` narrows the limit by one step. The reduction stays after the revert leaves the history window.
+At zero, you merge that area until you approve **Restore trust** with your passkey in Settings.
 
 `python3 server/auto_merge.py check --cwd WORKTREE --approved SHA` prints each check for a branch. It never merges.
+Add `--no-fetch` to check against the last fetched `origin/main` without contacting the remote.
 
 ## Usage reports
 

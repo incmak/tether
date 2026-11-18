@@ -97,7 +97,7 @@
 .segmented input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
 .segmented span {
   display: flex; align-items: center; justify-content: center; min-height: calc(var(--control) - 4px); padding: 0 10px;
-  border-radius: var(--radius-sm); font-size: var(--control-text); color: var(--muted);
+  border-radius: var(--radius-sm); font-size: var(--control-text); color: color-mix(in srgb, var(--muted) 75%, var(--text));  /* 4.5:1 on the track */
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background-color .12s, color .12s;
 }
 .segmented label:hover input:not(:checked) + span { color: var(--text); }

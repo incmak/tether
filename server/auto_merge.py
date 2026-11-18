@@ -7,7 +7,7 @@ Tether merges a worker branch into the main branch on origin without the user on
   branch     the tab works in a linked worktree, on a branch, with no uncommitted changes
   rules      the main branch has docs/auto-merge.json, which names the areas that may auto-merge
   stamp      the head commit has a "Verified:" stamp with a tests(...) item
-  scope      every changed file is a regular text file in an area, and each area is within its trust limit
+  scope      every changed file is regular text, in one area and within its trust limit
   checklist  scripts/checklist.py on this server finds no reliability-checklist row for the diff
   merge      the commit merges into the main branch with no conflict
 
@@ -19,13 +19,15 @@ commit) and pushes it with a normal push, never a forced one. `git revert -m 1 <
 deploy.
 
 The trust ladder gives each area a limit on changed lines. The limit widens after clean merges that Tether made and
-shrinks on a revert. It is computed from the decision log and the history of the main branch.
+shrinks on a revert. Tether checks the history against the decision log and saves each area's level.
 
   auto_merge.py check [--cwd DIR] [--approved SHA]   print the decision for a branch. It never merges.
 """
 import argparse
+import difflib
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -38,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import approval  # noqa: E402
 import paths  # noqa: E402
 
 MODES = (
@@ -49,12 +52,16 @@ MODE_NAMES = tuple(key for key, _, _ in MODES)
 DEFAULT_MODE = 'observe'
 RULES_FILE = 'docs/auto-merge.json'
 REMOTE = 'origin'
+TARGET = 'main'
+TARGET_REF = f'refs/heads/{TARGET}'
+TRACKING_REF = f'refs/remotes/{REMOTE}/{TARGET}'
 SHA = re.compile(r'[0-9a-f]{40}')
 AREA_NAME = re.compile(r'[a-z][a-z0-9-]{0,23}')
 MAX_AREAS = 8
 MAX_PATTERNS = 40
 MAX_FILES = 300          # a larger diff waits for the user
 MODES_OK = ('100644', '100755')
+MAX_BLOB = 512 * 1024
 GIT_TIMEOUT = 15
 NET_TIMEOUT = 45
 HISTORY = 3000           # commits of the main branch the ladder reads
@@ -69,8 +76,10 @@ START_RUNG = 1
 CLEAN_MERGES = 5         # clean merges in an area that move it up one rung
 REVERT = re.compile(r'This reverts commit ([0-9a-f]{40})')
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _ladder_cache = {}
+_mode_lock = threading.Lock()
+_grant = None
 RUN = subprocess.run     # tests replace this to prove that observe mode never writes
 
 
@@ -81,6 +90,10 @@ class AutoMergeError(Exception):
 
 
 class GitError(Exception):
+    pass
+
+
+class NotAuthorized(GitError):
     pass
 
 
@@ -99,16 +112,25 @@ def trust_path():
 
 
 def read_setting():
-    """{'mode', 'since'}. A missing, unreadable or malformed file means observe. It never means enforce."""
+    """A missing or malformed file means observe. Only a grant in this process allows enforce."""
+    default = {'mode': DEFAULT_MODE, 'since': 0, 'paused': False}
     try:
         data = json.loads(mode_path().read_text(encoding='utf-8', errors='replace'))
-    except (OSError, ValueError):
-        return {'mode': DEFAULT_MODE, 'since': 0}
+    except (OSError, ValueError, RecursionError):
+        return default
     since = data.get('since') if isinstance(data, dict) else None
-    if not isinstance(data, dict) or data.get('mode') not in MODE_NAMES or isinstance(since, bool) \
-            or not isinstance(since, (int, float)) or since < 0:
-        return {'mode': DEFAULT_MODE, 'since': 0}
-    return {'mode': data['mode'], 'since': int(since)}
+    if not _number(since) or since < 0 or (isinstance(since, float) and not since.is_integer()):
+        return default
+    mode = data.get('mode')
+    if mode not in MODE_NAMES:
+        return default
+    if mode == 'enforce' and _grant != since:
+        return {**default, 'paused': True}
+    return {'mode': mode, 'since': int(since), 'paused': False}
+
+
+def _number(value):
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def read_mode():
@@ -127,28 +149,48 @@ def _write(path, text):
 
 def set_mode(mode):
     """Save the mode and when it began. Enforce merges only approvals that arrive after that time."""
+    global _grant
     if mode not in MODE_NAMES:
         raise AutoMergeError(400, 'Choose Off, Observe or Enforce.')
-    if read_setting()['mode'] != mode or not mode_path().exists():
-        _write(mode_path(), json.dumps({'mode': mode, 'since': int(time.time())}) + '\n')
+    with _mode_lock:
+        # Reviews record whole seconds. The current second may contain approvals from before this grant.
+        since = int(time.time()) + (mode == 'enforce')
+        if mode != 'enforce':
+            _grant = None
+        _write(mode_path(), json.dumps({'mode': mode, 'since': since}) + '\n')
+        if mode == 'enforce':
+            _grant = since
 
 
 # ---- git ----
 
-def _git(folder, *args, timeout=GIT_TIMEOUT, check=True, env=None):
+def _git(folder, *args, network=False, check=True, env=None, binary=False):
     """Run git with a clean environment. Raise GitError on a failure, a timeout or a missing git."""
     full = dict(os.environ)
-    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'):
         full.pop(key, None)
-    full.update(GIT_TERMINAL_PROMPT='0', LC_ALL='C', GIT_OPTIONAL_LOCKS='0')
+    full.update(GIT_TERMINAL_PROMPT='0', LC_ALL='C', GIT_OPTIONAL_LOCKS='0', GIT_NO_REPLACE_OBJECTS='1',
+                GIT_GRAFT_FILE=os.devnull)
+    if network:
+        # These options can expand the requested refspec even when Git takes a literal URL.
+        settings = {'fetch.prune': 'false', 'fetch.pruneTags': 'false', 'fetch.recurseSubmodules': 'false',
+                    'push.recurseSubmodules': 'no', 'push.followTags': 'false'}
+        full['GIT_CONFIG_COUNT'] = str(len(settings))
+        for index, (key, value) in enumerate(settings.items()):
+            full[f'GIT_CONFIG_KEY_{index}'] = key
+            full[f'GIT_CONFIG_VALUE_{index}'] = value
+    else:
+        full.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
     full.update(env or {})
+    decoding = {} if binary else {'encoding': 'utf-8', 'errors': 'surrogateescape'}
     try:
-        result = RUN(['git', '-C', str(folder), *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                     env=full, timeout=timeout)
+        result = RUN(['git', '-C', str(folder), *args], stdin=subprocess.DEVNULL, capture_output=True,
+                     env=full, timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f'git {args[0]} did not run: {type(exc).__name__}') from exc
     if check and result.returncode:
-        lines = (result.stderr or '').strip().splitlines()
+        stderr = os.fsdecode(result.stderr) if binary else result.stderr
+        lines = stderr.strip().splitlines()
         raise GitError(f'git {args[0]} failed: ' + (lines[-1][:200] if lines else f'exit {result.returncode}'))
     return result
 
@@ -165,14 +207,32 @@ def main_checkout(folder):
     return str(common.parent if common.name == '.git' else common)
 
 
-def target_branch(folder):
-    """The main branch on origin: origin's HEAD when git knows it, else main, else master."""
-    head = _git(folder, 'symbolic-ref', '--quiet', '--short', f'refs/remotes/{REMOTE}/HEAD', check=False)
-    names = [head.stdout.strip()[len(REMOTE) + 1:]] if head.returncode == 0 and head.stdout.strip().startswith(REMOTE + '/') else []
-    for name in (*names, 'main', 'master'):
-        if _git(folder, 'show-ref', '--verify', '--quiet', f'refs/remotes/{REMOTE}/{name}', check=False).returncode == 0:
-            return name
-    raise GitError(f'The repository has no {REMOTE}/main branch.')
+def _check_push_url(folder, url):
+    if not url or url.startswith(('-', '+')) or '\n' in url:
+        raise GitError(f'{REMOTE} does not have a usable push URL.')
+    alias = _git(folder, 'remote', 'get-url', '--push', url, check=False)
+    if alias.returncode != 2:
+        raise GitError(f'The push URL for {REMOTE} must name a repository directly.')
+    rewrites = _git(folder, 'config', '--null', '--get-regexp', r'^url\..*\.(insteadof|pushinsteadof)$', check=False)
+    if rewrites.returncode not in (0, 1):
+        raise GitError('Could not check Git URL rewrites.')
+    for item in rewrites.stdout.split('\0')[:-1]:
+        key, _, prefix = item.partition('\n')
+        if url.startswith(prefix) and key[4:].rsplit('.', 1)[0] != prefix:
+            raise GitError(f'Git would rewrite the push URL for {REMOTE} again.')
+
+
+def _fetch_target(folder):
+    url = _git(folder, 'remote', 'get-url', '--push', REMOTE).stdout.rstrip('\n')
+    _check_push_url(folder, url)
+    ref = _git(folder, 'ls-remote', url, TARGET_REF, network=True).stdout
+    match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
+    if match is None:
+        raise GitError(f'The push repository has no unique {TARGET} branch.')
+    sha = match[1]
+    _git(folder, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True)
+    _git(folder, 'cat-file', '-e', sha + '^{commit}')
+    return url, sha
 
 
 # ---- the rules file on the main branch ----
@@ -240,29 +300,57 @@ def area_of(rules, path):
 
 # ---- the diff ----
 
+def _tree(folder, revision):
+    """Read the entries from the tree itself, independent of Git's diff and attributes."""
+    raw = _git(folder, 'ls-tree', '-r', '-z', '--full-tree', revision, binary=True).stdout
+    entries = {}
+    for line in raw.split(b'\0')[:-1]:
+        meta, sep, path = line.partition(b'\t')
+        match = re.fullmatch(rb'([0-7]{6}) (blob|commit|tree) ([0-9a-f]{40})', meta)
+        if match is None or not sep or not path:
+            raise GitError('git ls-tree printed an entry Tether does not know.')
+        entries[os.fsdecode(path)] = tuple(part.decode('ascii') for part in match.groups())
+    if raw and not raw.endswith(b'\0'):
+        raise GitError('git ls-tree did not finish its last entry.')
+    return entries
+
+
+def _tree_diff(folder, base, head):
+    old, new = _tree(folder, base), _tree(folder, head)
+    return {path: (old.get(path), new.get(path)) for path in sorted(old.keys() | new.keys())
+            if old.get(path) != new.get(path)}
+
+
+def _regular(entry):
+    return entry is None or (entry[0] in MODES_OK and entry[1] == 'blob')
+
+
+def _blob(folder, entry):
+    if entry is None:
+        return b''
+    sha = entry[2]
+    size = _git(folder, 'cat-file', '-s', sha).stdout.strip()
+    if not size.isdecimal():
+        raise GitError('git did not report the size of a blob.')
+    if int(size) > MAX_BLOB:
+        return None
+    raw = _git(folder, 'cat-file', 'blob', sha, binary=True).stdout
+    return None if b'\0' in raw else raw
+
+
 def changed(folder, base, head):
-    """[{'path', 'old_mode', 'new_mode', 'lines'}] for base..head. A rename gives both sides. lines is None for a
-    binary file."""
-    raw = _git(folder, 'diff', '--raw', '-z', '--no-renames', '--no-abbrev', base, head).stdout.split('\0')
-    files = {}
-    index = 0
-    while index + 1 < len(raw):
-        meta, path = raw[index], raw[index + 1]
-        index += 2
-        parts = meta.split(' ')
-        if len(parts) != 5 or not meta.startswith(':'):
-            raise GitError('git diff printed a line Tether does not know.')
-        files[path] = {'path': path, 'old_mode': parts[0][1:], 'new_mode': parts[1], 'lines': None}
-    counts = _git(folder, 'diff', '--numstat', '-z', '--no-renames', base, head).stdout.split('\0')
-    for item in counts:
-        if not item:
-            continue
-        parts = item.split('\t', 2)
-        if len(parts) != 3 or parts[2] not in files:
-            raise GitError('git diff printed a count Tether does not know.')
-        if parts[0].isdigit() and parts[1].isdigit():
-            files[parts[2]]['lines'] = int(parts[0]) + int(parts[1])
-    return list(files.values())
+    """The changed paths and their line counts. A rename gives both sides."""
+    entries = _tree_diff(folder, base, head)
+    files = []
+    for path, (old, new) in entries.items():
+        lines = None
+        if len(entries) <= MAX_FILES and _regular(old) and _regular(new):
+            before, after = _blob(folder, old), _blob(folder, new)
+            if before is not None and after is not None:
+                diff = difflib.SequenceMatcher(None, before.splitlines(keepends=True), after.splitlines(keepends=True))
+                lines = sum(i2 - i1 + j2 - j1 for op, i1, i2, j1, j2 in diff.get_opcodes() if op != 'equal')
+        files.append({'path': path, 'old': old, 'new': new, 'lines': lines})
+    return files
 
 
 def classify(rules, files):
@@ -274,20 +362,27 @@ def classify(rules, files):
     if len(files) > MAX_FILES:
         return areas, [f'The diff changes {len(files)} files. The limit is {MAX_FILES}.']
     outside = []
+    touched = set()
     for item in files:
+        old, new = item['old'], item['new']
         area = area_of(rules, item['path'])
+        if area is not None:
+            touched.add(area)
         if area is None:
             outside.append(item['path'])
-        elif item['new_mode'] not in (*MODES_OK, '000000') or item['old_mode'] not in (*MODES_OK, '000000'):
+        elif not _regular(old) or not _regular(new):
             problems.append(f"{item['path']} is a link or a submodule, not a regular file.")
-        elif '000000' not in (item['old_mode'], item['new_mode']) and item['old_mode'] != item['new_mode']:
+        elif old and new and old[0] != new[0]:
             problems.append(f"{item['path']} changes its file mode.")
-        elif item['new_mode'] == '100755' and item['old_mode'] == '000000':
+        elif old is None and new[0] == '100755':
             problems.append(f"{item['path']} is a new executable file.")
         elif item['lines'] is None:
-            problems.append(f"{item['path']} is a binary file.")
+            problems.append(f"{item['path']} is binary or too large.")
         else:
             areas[area] = areas.get(area, 0) + item['lines']
+    if len(touched) > 1:
+        labels = sorted(area['label'] for area in rules if area['name'] in touched)
+        problems.insert(0, 'The diff touches more than one area: ' + ', '.join(labels) + '. A branch may change one area.')
     if outside:
         more = f' and {len(outside) - 3} more' if len(outside) > 3 else ''
         problems.insert(0, 'Files outside the auto-merge areas: ' + ', '.join(outside[:3]) + more + '.')
@@ -336,19 +431,27 @@ def merge_stamp(items, reviewer, head, verification=None):
 # ---- the reliability checklist (B209) ----
 
 def checklist_rows(folder, base, head):
-    """The checklist rows the diff hits, as texts. None when the checklist cannot answer: that counts as a hit."""
+    """The checklist rows that the commits base...head hit, as texts. [] only when the checklist says "clear".
+    None when it cannot answer (no script on this server, no checklist on the main branch, an error): that counts
+    as a hit. base is the tip of the main branch: scripts/checklist.py reads the checklist from there, never from
+    the worker branch."""
     script = HERE.parent / 'scripts' / 'checklist.py'
     if not script.is_file():
         return None
     try:
-        result = RUN([sys.executable, str(script), 'hits', '--repo', str(folder), '--json', f'{base}..{head}'],
+        result = RUN([sys.executable, str(script), '--repo', str(folder), '--base', base, '--head', head, '--json'],
                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GIT_TIMEOUT)
-        rows = json.loads(result.stdout) if result.returncode in (0, 1) else None
+        answer = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    if not isinstance(rows, list):
+    status = answer.get('status') if isinstance(answer, dict) else None
+    rows = answer.get('rows') if isinstance(answer, dict) else None
+    if status == 'clear' and result.returncode == 0 and rows == []:
+        return []
+    if status != 'hit' or result.returncode != 1 or not isinstance(rows, list) or not rows:
         return None
-    return [str(row.get('title') or row.get('id') or 'row')[:120] if isinstance(row, dict) else str(row)[:120] for row in rows]
+    return [' '.join(str(row.get(key) or '') for key in ('id', 'title')).strip()[:120] or 'row' if isinstance(row, dict)
+            else 'row' for row in rows]
 
 
 # ---- the decision log ----
@@ -400,12 +503,41 @@ def record(decision):
 
 # ---- the trust ladder (B214) ----
 
-def _resets():
+def _trust_data():
     try:
-        data = json.loads(trust_path().read_text(encoding='utf-8', errors='replace'))
-    except (OSError, ValueError):
+        data = json.loads(trust_path().read_text(encoding='utf-8'))
+    except (FileNotFoundError, ValueError, RecursionError):
         return {}
+    except OSError as exc:
+        raise GitError('Could not read the trust ladder.') from exc
     return data if isinstance(data, dict) else {}
+
+
+def _hash(value):
+    return isinstance(value, str) and SHA.fullmatch(value) is not None
+
+
+def _count(value):
+    return type(value) is int and value >= 0
+
+
+def _valid_level(level):
+    if not isinstance(level, dict) or set(level) != {'rung', 'streak', 'merges', 'reverts', 'last_revert'}:
+        return False
+    if not all(_count(level[key]) for key in ('rung', 'streak', 'merges', 'reverts')) or level['rung'] >= len(RUNGS):
+        return False
+    last = level['last_revert']
+    return last is None or (isinstance(last, dict) and _hash(last.get('commit')) and _count(last.get('at')))
+
+
+def _valid_trust(entry):
+    if not isinstance(entry, dict) or (entry.get('tip') is not None and not _hash(entry['tip'])):
+        return False
+    areas = entry.get('areas')
+    if not isinstance(areas, dict) or not all(_valid_level(level) for level in areas.values()):
+        return False
+    return all(isinstance(entry.get(key), list) and all(_hash(sha) for sha in entry[key])
+               for key in ('merges_seen', 'reverts_seen'))
 
 
 def _stat(path):
@@ -416,77 +548,129 @@ def _stat(path):
         return None
 
 
-def ladder(root, rules, target_sha):
-    """{area: {'rung', 'limit', 'streak', 'merges', 'reverts', 'last_revert'}} for one repository.
-
-    Every area starts at START_RUNG. In time order: a merge that Tether made and that is on the main branch adds one
-    to the area's count, and CLEAN_MERGES of them move the area up one rung. A revert on the main branch of a commit
-    that touched the area moves it down one rung and clears the count. At rung 0 only the user restores the area.
-    Commits that agents push with their own stamps never count: a stamp is a claim, not evidence."""
-    names = [area['name'] for area in rules]
-    key = (root, target_sha, tuple(names), tuple(tuple(p.pattern for p in area['paths']) for area in rules),
-           _stat(log_path()), _stat(trust_path()))
-    with _lock:
-        cached = _ladder_cache.get(root)
-        if cached and cached[0] == key:
-            return cached[1]
-    state = {name: {'rung': START_RUNG, 'streak': 0, 'merges': 0, 'reverts': 0, 'last_revert': None} for name in names}
-    log = _git(root, 'log', '--first-parent', f'-n{HISTORY}', '--format=%H%x1f%ct%x1f%B%x1e', target_sha).stdout
+def _history(root, tip):
+    log = _git(root, 'log', '--first-parent', f'-n{HISTORY}', '-z', '--no-notes', '--no-decorate',
+               '--format=%H%x00%ct%x00%P%x00%s%x00%B', tip).stdout
+    fields = log.split('\0')
+    if fields[-1] or (len(fields) - 1) % 5:
+        raise GitError('git printed an unreadable history.')
     commits = []
-    for item in log.split('\x1e'):
-        parts = item.strip('\n').split('\x1f')
-        if len(parts) == 3 and SHA.fullmatch(parts[0]) and parts[1].isdigit():
-            commits.append((parts[0], int(parts[1]), parts[2]))
-    on_main = {sha: when for sha, when, _ in commits}
-    added = _git(root, 'log', '--first-parent', '--diff-filter=A', '--format=%ct', target_sha, '--', RULES_FILE).stdout.split()
-    epoch = int(added[-1]) if added and added[-1].isdigit() else None
+    for index in range(0, len(fields) - 1, 5):
+        sha, when, parents, subject, body = fields[index:index + 5]
+        parents = parents.split()
+        if not _hash(sha) or not when.isdecimal() or not all(_hash(parent) for parent in parents):
+            raise GitError('git printed an unreadable commit.')
+        commits.append((sha, int(when), parents, subject, body))
+    return commits
+
+
+def _ancestor(root, before, after):
+    result = _git(root, 'merge-base', '--is-ancestor', before, after, check=False)
+    if result.returncode not in (0, 1):
+        raise GitError('git could not read the commit ancestry.')
+    return result.returncode == 0
+
+
+def _reverted_areas(root, rules, sha, reverted):
+    try:
+        message = _git(root, 'log', '-1', '--format=%B', reverted).stdout
+        if REVERT.search(message) or not _ancestor(root, reverted, sha):
+            return set()
+        paths = _tree_diff(root, reverted + '^1', reverted)
+    except GitError:
+        return {area['name'] for area in rules}
+    return {area_of(rules, path) for path in paths} - {None}
+
+
+def _apply_history(root, rules, target_sha, entry):
+    commits = _history(root, target_sha)
+    window = {sha for sha, *_ in commits}
+    merges_seen = set(entry['merges_seen']) & window
+    reverts_seen = set(entry['reverts_seen']) & window
+    logged = {(item['merge'], item['head']) for item in _records()
+              if item.get('root') == root and item['outcome'] == 'merged'
+              and _hash(item.get('merge')) and _hash(item.get('head'))}
+    added = _git(root, 'log', '--first-parent', '--full-history', '--diff-merges=first-parent', '--no-renames',
+                 '--diff-filter=A', '--no-patch', '--format=%H', target_sha, '--', RULES_FILE).stdout.split()
+    epoch = added[-1] if added else None
+
+    # Follow the first-parent order for commits that share a timestamp.
     events = []
-    for item in records():
-        merged = item.get('merge')
-        if item.get('root') == root and item.get('outcome') == 'merged' and merged in on_main \
-                and isinstance(item.get('areas'), dict):
-            events.append((on_main[merged], 0, 'merge', [name for name in item['areas'] if name in state], merged))
-    for sha, when, body in commits:
-        if epoch is None or when < epoch:
-            continue
-        for reverted in REVERT.findall(body):
-            try:
-                if _git(root, 'merge-base', '--is-ancestor', reverted, sha, check=False).returncode:
-                    continue
-                if REVERT.search(_git(root, 'log', '-1', '--format=%B', reverted).stdout):
-                    continue  # a revert of a revert puts the work back: it says nothing new about the area
-                touched = {area_of(rules, file['path']) for file in changed(root, reverted + '^1', reverted)} - {None}
-            except GitError:
-                touched = set(names)  # unknown: every area loses a rung
+    for sha, when, parents, subject, body in reversed(commits):
+        if sha not in merges_seen and len(parents) == 2 and (sha, parents[1]) in logged \
+                and '(Tether auto-merge)' in subject and f'Approved commit: {parents[1]}' in body.splitlines():
+            areas, problems = classify(rules, changed(root, parents[0], sha))
+            merges_seen.add(sha)
+            if not problems:
+                events.append((when, 'merge', sha, areas))
+        reverted = REVERT.findall(body)
+        if reverted and sha not in reverts_seen and epoch is not None and _ancestor(root, epoch, sha):
+            touched = set()
+            for commit in reverted:
+                touched.update(_reverted_areas(root, rules, sha, commit))
+            reverts_seen.add(sha)
             if touched:
-                events.append((when, 1, 'revert', sorted(touched), sha))
-    resets = _resets().get(root)
-    for name, times in (resets.items() if isinstance(resets, dict) else ()):
-        if name in state and isinstance(times, list):
-            events += [(when, 2, 'reset', [name], None) for when in times
-                       if isinstance(when, (int, float)) and not isinstance(when, bool)]
-    for when, _, kind, areas, sha in sorted(events, key=lambda event: event[:2]):
+                events.append((when, 'revert', sha, touched))
+
+    for when, kind, sha, areas in sorted(events, key=lambda event: event[0]):
         for name in areas:
-            area = state[name]
+            area = entry['areas'][name]
             if kind == 'merge':
                 area['merges'] += 1
                 area['streak'] += 1
                 if area['streak'] >= CLEAN_MERGES and 0 < area['rung'] < len(RUNGS) - 1:
                     area['rung'] += 1
                     area['streak'] = 0
-            elif kind == 'revert':
+            else:
                 area['rung'] = max(0, area['rung'] - 1)
                 area['streak'] = 0
                 area['reverts'] += 1
                 area['last_revert'] = {'commit': sha, 'at': when}
-            elif area['rung'] == 0:
-                area['rung'] = START_RUNG
-                area['streak'] = 0
-    for area in state.values():
-        area['limit'] = RUNGS[area['rung']]
+    entry.update(tip=target_sha, merges_seen=sorted(merges_seen), reverts_seen=sorted(reverts_seen))
+
+
+def _levels(entry, names):
+    return {name: {**entry['areas'][name], 'limit': RUNGS[entry['areas'][name]['rung']]} for name in names}
+
+
+def ladder(root, rules, target_sha, *, persist=True):
+    """Apply new first-parent events and save each area's trust, including reductions that age out."""
+    names = [area['name'] for area in rules]
+
+    def key():
+        return (target_sha, HISTORY, tuple(names), tuple(tuple(p.pattern for p in area['paths']) for area in rules),
+                _stat(log_path()), _stat(trust_path()))
+
     with _lock:
-        _ladder_cache[root] = (key, state)
-    return state
+        cached = _ladder_cache.get(root)
+        if cached and cached[0] == key():
+            return cached[1]
+        data = _trust_data()
+        stored = data.get(root)
+        entry = stored if _valid_trust(stored) else {'areas': {}, 'merges_seen': [], 'reverts_seen': []}
+        entry = {**entry, 'areas': {name: level.copy() for name, level in entry['areas'].items()}}
+        for name in names:
+            entry['areas'].setdefault(name, {'rung': START_RUNG, 'streak': 0, 'merges': 0, 'reverts': 0,
+                                            'last_revert': None})
+        tip = entry.get('tip')
+        # Settings and --no-fetch can see an older origin/main. They must not replay or prune that history.
+        stale = False
+        if tip and tip != target_sha:
+            stale = _ancestor(root, target_sha, tip)
+            if not stale and not _ancestor(root, tip, target_sha):
+                raise GitError('The main branch no longer contains the saved trust history.')
+        if not stale:
+            _apply_history(root, rules, target_sha, entry)
+            if persist and entry != stored:
+                data[root] = entry
+                try:
+                    _write(trust_path(), json.dumps(data) + '\n')
+                except OSError as exc:
+                    raise GitError('Could not save the trust ladder.') from exc
+        levels = _levels(entry, names)
+        if persist:
+            _ladder_cache[root] = key(), levels
+        return levels
 
 
 def restore(root, name):
@@ -496,25 +680,34 @@ def restore(root, name):
     try:
         if main_checkout(root) != root:
             raise AutoMergeError(400, 'Choose a repository.')
-        target = target_branch(root)
-        target_sha = _sha(root, f'refs/remotes/{REMOTE}/{target}')
+        _, target_sha = _fetch_target(root)
         rules = rules_at(root, target_sha)
-        levels = ladder(root, rules, target_sha) if rules else {}
+        with _lock:
+            levels = ladder(root, rules, target_sha) if rules else {}
+            if name not in levels or levels[name]['rung'] != 0:
+                raise AutoMergeError(409, 'Only an area at zero trust can be restored.')
+            data = _trust_data()
+            data[root]['areas'][name].update(rung=START_RUNG, streak=0)
+            _write(trust_path(), json.dumps(data) + '\n')
+            _ladder_cache.pop(root, None)
     except GitError as exc:
         raise AutoMergeError(400, str(exc)) from exc
-    if name not in levels or levels[name]['rung'] != 0:
-        raise AutoMergeError(409, 'Only an area at zero trust can be restored.')
-    with _lock:
-        data = _resets()
-        data.setdefault(root, {}).setdefault(name, []).append(int(time.time()))
-        data[root][name] = data[root][name][-50:]
-        _write(trust_path(), json.dumps(data) + '\n')
 
 
 # ---- the decision ----
 
+def _trial_merge(folder, target_sha, head):
+    trial = _git(folder, 'merge-tree', '--write-tree', '--no-messages', target_sha, head, check=False)
+    tree = trial.stdout.split('\n', 1)[0].strip()
+    if trial.returncode == 1:
+        raise GitError(f'The branch conflicts with {REMOTE}/{TARGET}. Rebase it, then ask for a new review.')
+    if trial.returncode or not _hash(tree):
+        raise GitError('git could not try the merge.')
+    return tree
+
+
 def evaluate(folder, approved, *, fetch=True):
-    """(decision, plan) for the branch checked out in `folder`. It writes nothing but the objects of a trial merge.
+    """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
     decision: the record for the log and the Settings page. plan: what merge() needs, or None when a check failed."""
     decision = {'at': int(time.time()), 'folder': str(folder), 'approved': approved if isinstance(approved, str) else None,
@@ -529,16 +722,9 @@ def evaluate(folder, approved, *, fetch=True):
         root = main_checkout(folder)
         head = _sha(folder, 'HEAD')
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
-        target = target_branch(folder)
-        decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{target}')
-        fetched = None
-        if fetch:
-            try:
-                _git(folder, 'fetch', '--no-tags', REMOTE, target, timeout=NET_TIMEOUT)
-            except GitError as exc:
-                fetched = str(exc)
-        target_sha = _sha(folder, f'refs/remotes/{REMOTE}/{target}')
-        if _git(folder, 'merge-base', '--is-ancestor', head, target_sha, check=False).returncode == 0:
+        decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
+        url, target_sha = _fetch_target(folder) if fetch else (None, _sha(folder, TRACKING_REF))
+        if _ancestor(folder, head, target_sha):
             decision['outcome'] = 'already'
             return decision, None
         base = _git(folder, 'merge-base', target_sha, head).stdout.strip()
@@ -547,9 +733,6 @@ def evaluate(folder, approved, *, fetch=True):
     except GitError as exc:
         check('git', False, str(exc))
         return decision, None
-    if fetched:
-        check('git', False, f'Could not fetch {REMOTE}: {fetched}')
-
     if not isinstance(approved, str) or not SHA.fullmatch(approved):
         check('approval', False, 'No reviewer approval is tied to a commit of this branch.')
     elif approved != head:
@@ -560,13 +743,13 @@ def evaluate(folder, approved, *, fetch=True):
     try:
         linked = _git(folder, 'rev-parse', '--path-format=absolute', '--git-dir').stdout.strip() != \
             _git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip()
-        dirty = _git(folder, 'status', '--porcelain', '--untracked-files=no').stdout.strip()
-        if not branch or branch == target:
+        dirty = _git(folder, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none').stdout
+        if not branch or branch == TARGET:
             check('branch', False, 'The tab is not on a worker branch.')
         elif not linked:
             check('branch', False, 'The tab works in the main checkout, not in a worktree of its own.')
         elif dirty:
-            check('branch', False, 'The worktree has uncommitted changes.')
+            check('branch', False, 'The worktree has uncommitted or untracked files.')
         else:
             check('branch', True, f'Worker branch {branch}, with no uncommitted changes.')
     except GitError as exc:
@@ -578,8 +761,8 @@ def evaluate(folder, approved, *, fetch=True):
     except GitError:
         pass
     check('rules', rules is not None,
-          f'The areas come from {RULES_FILE} on {REMOTE}/{target}.' if rules is not None
-          else f'{REMOTE}/{target} has no valid {RULES_FILE}, so no area may auto-merge.')
+          f'The areas come from {RULES_FILE} on {REMOTE}/{TARGET}.' if rules is not None
+          else f'{REMOTE}/{TARGET} has no valid {RULES_FILE}, so no area may auto-merge.')
 
     items = None
     subject = ''
@@ -597,12 +780,16 @@ def evaluate(folder, approved, *, fetch=True):
     else:
         check('stamp', True, f"The stamp names tests({items['tests']}). The review is the approval above.")
 
-    files = None
+    tree = files = merge_problem = None
     try:
-        files = changed(folder, base, head)
+        tree = _trial_merge(folder, target_sha, head)
+        files = changed(folder, target_sha, tree)
+        reviewed = _tree(folder, head)
+        if any(item['new'] != reviewed.get(item['path']) for item in files):
+            merge_problem = 'The main branch changed the same files. Rebase the branch, then ask for a new review.'
     except GitError as exc:
-        check('scope', False, str(exc))
-    if files is not None and rules is None:
+        merge_problem = str(exc)
+    if rules is None:
         check('scope', False, 'Without the rules file, every file is outside the auto-merge areas.')
     elif files is not None:
         areas, problems = classify(rules, files)
@@ -610,7 +797,7 @@ def evaluate(folder, approved, *, fetch=True):
         decision['files'] = len(files)
         labels = {area['name']: area['label'] for area in rules}
         try:
-            levels = ladder(root, rules, target_sha)
+            levels = ladder(root, rules, target_sha, persist=fetch)
             for name, lines in areas.items():
                 limit = levels[name]['limit']
                 if limit == 0:
@@ -625,7 +812,7 @@ def evaluate(folder, approved, *, fetch=True):
             check('scope', True, 'Every file is in an area within its trust limit: '
                   + ', '.join(f'{labels[name]} {lines} lines' for name, lines in areas.items()) + '.')
 
-    rows = checklist_rows(folder, base, head)
+    rows = checklist_rows(folder, target_sha, head)
     if rows is None:
         check('checklist', False, 'The reliability checklist gave no answer on this server, so the diff counts as a hit.')
     elif rows:
@@ -634,39 +821,39 @@ def evaluate(folder, approved, *, fetch=True):
     else:
         check('checklist', True, 'The diff hits no reliability checklist row.')
 
-    tree = None
-    try:
-        trial = _git(folder, 'merge-tree', '--write-tree', '--no-messages', target_sha, head, check=False)
-        first = trial.stdout.split('\n', 1)[0].strip()
-        if trial.returncode == 0 and SHA.fullmatch(first):
-            tree = first
-            check('merge', True, f'The commit merges into {REMOTE}/{target} with no conflict.')
-        elif trial.returncode == 1:
-            check('merge', False, f'The branch conflicts with {REMOTE}/{target}. Rebase it, then ask for a new review.')
-        else:
-            check('merge', False, 'git could not try the merge.')
-    except GitError as exc:
-        check('merge', False, str(exc))
+    check('merge', merge_problem is None, merge_problem or f'The commit merges into {REMOTE}/{TARGET} with no conflict.')
 
     if not all(item['ok'] for item in checks):
         return decision, None
     decision['outcome'] = 'pass'
-    return decision, {'folder': str(folder), 'root': root, 'head': head, 'branch': branch, 'target': target,
+    return decision, {'folder': str(folder), 'root': root, 'head': head, 'branch': branch, 'url': url,
                       'target_sha': target_sha, 'tree': tree, 'items': items, 'subject': subject,
-                      'paths': {item['path'] for item in files}, 'areas': decision['areas']}
+                      'areas': decision['areas']}
 
 
 # ---- the merge (enforce mode only) ----
 
-def merge(plan, reviewer):
+def _authorization_problem(setting, approved_at):
+    if setting['mode'] != 'enforce' or setting['paused']:
+        return 'Auto-merge left enforce mode before the push.'
+    if not _number(approved_at) or approved_at < setting['since']:
+        return 'The approval is older than enforce mode. Only a new approval can merge.'
+    if approved_at < time.time() - APPROVAL_HOURS * 3600:
+        return f'The approval is older than {APPROVAL_HOURS} hours. Only a new approval can merge.'
+    return None
+
+
+def merge(plan, reviewer, approved_at):
     """Make the merge commit and push it. Return its hash. Raise GitError when anything is in doubt.
 
     The push is a normal one: git refuses it when the main branch moved, and nothing is forced. No working tree and
     no local branch changes, so other sessions' uncommitted work in the main checkout is never touched."""
+    if plan['url'] is None:
+        raise GitError('Auto-merge needs the current main branch from the push repository.')
     folder = plan['folder']
     stamp = merge_stamp(plan['items'], reviewer, plan['head'])
     areas = ', '.join(f'{name} {lines} lines' for name, lines in plan['areas'].items())
-    message = (f"Merge branch '{plan['branch']}' into {plan['target']} (Tether auto-merge)\n\n"
+    message = (f"Merge branch '{plan['branch']}' into {TARGET} (Tether auto-merge)\n\n"
                f"{plan['subject']}\n\n"
                'Tether merged this branch without the user: every auto-merge check passed.\n'
                f"Approved commit: {plan['head']}\n"
@@ -681,12 +868,14 @@ def merge(plan, reviewer):
                 env=identity).stdout.strip()
     if not SHA.fullmatch(made):
         raise GitError('git made no merge commit.')
-    landed = {item['path'] for item in changed(folder, plan['target_sha'], made)}
-    if not landed or not landed <= plan['paths']:
-        raise GitError('The merge would change files that the reviewed diff does not.')
-    if read_mode() != 'enforce':
-        raise GitError('Auto-merge left enforce mode before the push.')
-    _git(folder, 'push', REMOTE, f"{made}:refs/heads/{plan['target']}", timeout=NET_TIMEOUT)
+    if _git(folder, 'rev-parse', '--verify', made + '^{tree}').stdout.strip() != plan['tree']:
+        raise GitError('The merge commit does not contain the planned tree.')
+    _check_push_url(folder, plan['url'])
+    with _mode_lock:
+        problem = _authorization_problem(read_setting(), approved_at)
+        if problem:
+            raise NotAuthorized(problem)
+        _git(folder, 'push', plan['url'], f'{made}:{TARGET_REF}', network=True)
     return made
 
 
@@ -710,29 +899,27 @@ def process(job, alert=None):
     decision.setdefault('head', job.get('commit'))
     decision.pop('folder', None)
     at = job.get('approved_at')
-    timed = isinstance(at, (int, float)) and not isinstance(at, bool)
     if plan is None:
         decision['outcome'] = 'wait'
     elif setting['mode'] != 'enforce':
         decision['outcome'] = 'would_merge'
-    elif not timed or at < setting['since']:
+    elif (problem := _authorization_problem(setting, at)) is not None:
         decision['outcome'] = 'would_merge'
-        decision['note'] = 'The approval is older than enforce mode. Only a new approval can merge.'
-    elif time.time() - at > APPROVAL_HOURS * 3600:
-        decision['outcome'] = 'would_merge'
-        decision['note'] = f'The approval is older than {APPROVAL_HOURS} hours. Only a new approval can merge.'
+        decision['note'] = problem
     else:
         with _merge_lock:
             try:
                 try:
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'))
+                    decision['merge'] = merge(plan, job.get('reviewer_agent'), at)
+                except NotAuthorized:
+                    raise
                 except GitError:
                     # The main branch may have moved between the fetch and the push. Decide again, once.
                     again, plan = evaluate(job['folder'], job.get('commit'))
                     if plan is None:
                         raise
-                    decision['checks'] = again['checks']
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'))
+                    decision.update(checks=again['checks'], areas=again['areas'], files=again['files'])
+                    decision['merge'] = merge(plan, job.get('reviewer_agent'), at)
                 decision['outcome'] = 'merged'
             except GitError as exc:
                 decision['outcome'] = 'failed'
@@ -774,7 +961,7 @@ def _work(alert):
 
 
 def observe(entries, approvals, folder_of, alert=None, start=True):
-    """Queue each approved commit once. approvals: review_links.approved_commits(). Git runs on another thread, so
+    """Queue each approval once. approvals: review_links.approved_commits(). Git runs on another thread, so
     the monitor never waits for it. Returns the jobs it queued."""
     global _thread
     if not approvals or read_mode() == 'off':
@@ -787,7 +974,11 @@ def observe(entries, approvals, folder_of, alert=None, start=True):
             continue
         for reviewer, approval in reviewers.items():
             commit = approval.get('commit') if isinstance(approval, dict) else None
-            if not isinstance(commit, str) or not SHA.fullmatch(commit) or (worker, reviewer, commit) in _seen:
+            if not _hash(commit):
+                continue
+            at = approval.get('at')
+            key = (worker, reviewer, commit, at if _number(at) else None)
+            if key in _seen:
                 continue
             try:
                 folder = folder_of(entry)
@@ -795,8 +986,8 @@ def observe(entries, approvals, folder_of, alert=None, start=True):
                 folder = None
             if not folder:
                 continue
-            _seen.add((worker, reviewer, commit))
-            jobs.append({'folder': folder, 'commit': commit, 'approved_at': approval.get('at'), 'worker': worker,
+            _seen.add(key)
+            jobs.append({'folder': folder, 'commit': commit, 'approved_at': at, 'worker': worker,
                          'name': str(entry.get('name') or '')[:80], 'reviewer': reviewer,
                          'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent')})
     if jobs and start:
@@ -823,14 +1014,13 @@ def _trust(root, known):
     """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
     try:
-        target = target_branch(root)
-        target_sha = _sha(root, f'refs/remotes/{REMOTE}/{target}')
-        entry['target'] = f'{REMOTE}/{target}'
+        target_sha = _sha(root, TRACKING_REF)
+        entry['target'] = f'{REMOTE}/{TARGET}'
         rules = rules_at(root, target_sha)
         if rules is None:
-            entry['error'] = f'{REMOTE}/{target} has no valid {RULES_FILE}. Nothing auto-merges in this repository.'
+            entry['error'] = f'{REMOTE}/{TARGET} has no valid {RULES_FILE}. Nothing auto-merges in this repository.'
             return entry if known else None
-        levels = ladder(root, rules, target_sha)
+        levels = ladder(root, rules, target_sha, persist=False)
     except GitError as exc:
         entry['error'] = str(exc)
         return entry if known else None
@@ -857,7 +1047,7 @@ def state(roots=()):
         entry = _trust(root, root in logged)
         if entry is not None:
             trust.append(entry)
-    return {'mode': setting['mode'], 'since': setting['since'],
+    return {**setting,
             'modes': [{'mode': key, 'name': name, 'summary': summary} for key, name, summary in MODES],
             'decisions': shown, 'trust': trust, 'rungs': list(RUNGS), 'rules_file': RULES_FILE}
 
@@ -873,17 +1063,22 @@ def post(handler, roots=()):
             # Agent tools sign in with the hook credential. The mode and the trust are the user's to change.
             raise AutoMergeError(403, 'Only the user changes auto-merge, in Settings.')
         size = int(handler.headers.get('Content-Length', '0') or 0)
-        if not 0 < size <= 4096:
+        if not 0 < size <= 16384:
             raise AutoMergeError(413, 'Invalid request.')
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise AutoMergeError(400, 'Invalid request.')
+        if 'restore' in body or body.get('mode') == 'enforce':
+            payload = {key: value for key, value in body.items() if key != 'approval'}
+            approval.require(handler, 'auto-merge', payload, body.get('approval'))
         if 'restore' in body:
             item = body['restore'] if isinstance(body['restore'], dict) else {}
             restore(item.get('root'), item.get('area'))
         else:
             set_mode(body.get('mode'))
         handler.respond(200, state(roots))
+    except approval.ApprovalError as exc:
+        approval.error(handler, exc)
     except AutoMergeError as exc:
         handler.respond(exc.status, {'error': str(exc)})
     except (ValueError, UnicodeError):
