@@ -70,17 +70,22 @@ class TmuxNameHookTests(unittest.TestCase):
         self.assertGreaterEqual(entry['pane_named_at'], before)
 
     def test_automatic_rename_never_overwrites_the_name(self):
-        tmux_names.install(run=self.run_tmux)
+        self.assertTrue(tmux_names.install(run=self.run_tmux))
         self.tether_names('logs')
-        self.tmux('set-option', '-w', '-t', self.pane, '-u', 'automatic-rename')  # Tether clears a name like this
-        self.assertTrue(self.wait_for(lambda: self.option('window_name') != 'logs'))  # tmux now shows the program
-        self.settle()
-        self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
-        # A new program that writes output (tmux checks the name on pane output): tmux renames again.
-        self.tmux('send-keys', '-t', self.pane, 'exec python3 -uc "import itertools, time; [print(1) or time.sleep(.2) for _ in itertools.count()]"', 'Enter')
-        self.assertTrue(self.wait_for(lambda: self.option('window_name') == 'python3', seconds=6))
-        self.settle()
-        self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
+        # Record the event after Tether's hook has handled it.
+        hook = self.tmux('set-hook', '-ag', 'window-renamed',
+                         "set-option -p -F @test_renamed '#{hook_window_name}'")
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        for name in ('shell', 'worker'):
+            with self.subTest(window_name=name):
+                # Setting automatic-rename on makes tmux recheck the active pane without pane output.
+                rename = self.tmux('set-option', '-w', '-t', self.pane, 'automatic-rename-format', name,
+                                   ';', 'set-option', '-w', '-t', self.pane, 'automatic-rename', 'on')
+                self.assertEqual(rename.returncode, 0, rename.stderr)
+                self.assertTrue(self.wait_for(lambda: self.option('@test_renamed') == name),
+                                f'window-renamed hook did not run for {name!r}')
+                self.assertEqual(self.option('window_name'), name)
+                self.assertEqual((self.option('@chat_name'), self.option('@chat_name_at')), ('logs', '123'))
 
     def test_tethers_own_rename_is_not_imported_again(self):
         tmux_names.install(run=self.run_tmux)
