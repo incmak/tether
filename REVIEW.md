@@ -35,14 +35,16 @@ Style preferences and optional improvements do not block. List them after the ve
 
 Tether reads the start of your reply.
 
-- Nothing blocks: start with `APPROVED` and the first 12 characters of the commit hash, for example
-  `APPROVED 1ac6f01d2b3c`. Then add notes, if any.
+- Nothing blocks: start with `APPROVED` and the full commit hash from the request, for example
+  `APPROVED 1ac6f01e6da30bbb12a48e40c96a878504621e11`. Then add notes, if any. A short hash can match two commits, so
+  Tether does not accept one.
 - Something blocks: do not write `APPROVED`. Give a numbered list. For each finding give the file and line, what is
   wrong, and how you know.
 
 An approval counts only for the commit in the request.
 
-- The hash must come right after `APPROVED`. Tether does not forward an approval with no hash or with another hash.
+- The full hash must come right after `APPROVED`. Tether does not forward an approval with no hash, a short hash or
+  another hash.
   It asks you again.
 - If the worker's folder is at another commit when your reply arrives, Tether does not forward the approval. It asks
   you to review the new commit.

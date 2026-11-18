@@ -28,6 +28,7 @@ COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
 SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
+FULL = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # a short hash can match two commits; only a full one names a commit
 GRACE = 30
 LOSS_TICKS = 30
 START_WAIT = 300
@@ -212,9 +213,14 @@ def _committed_since_approval(link, worker, scope):
         if link['confirm_ticks'] < VERIFY_TICKS:
             return None
         target = None
+    elif target.get('dirty') is None and target['commit'] != approved:
+        # A new commit, but the status is not readable: the tree may be clean. Ask again, as above.
+        link['confirm_ticks'] = link.get('confirm_ticks', 0) + 1
+        if link['confirm_ticks'] < VERIFY_TICKS:
+            return None
     link.pop('approved_dirty', None)
     link.pop('confirm_ticks', None)
-    if target is None or target['commit'] == approved or target.get('dirty', True):
+    if target is None or target['commit'] == approved or target.get('dirty') is not False:
         return False
     link['confirm_commit'] = approved
     return True
@@ -395,7 +401,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                     if not isinstance(live, dict) or live.get('state') != 'Idle':
                         return link
                 current = current if isinstance(current, str) else None
-                misnamed = bool(bound) and not (named and bound.startswith(named))
+                misnamed = bool(bound) and named != bound  # the full hash: a prefix can be ambiguous
                 # A named commit that cannot be compared is not verified, also when the request was not bound.
                 unverified = current is None and (bool(bound) and not misnamed or not bound and bool(named))
                 if unverified and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
@@ -405,8 +411,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 # stale: the commit that the approval is for, when the tab is not at it ('' = it names none).
                 stale = None
                 if bound and (current != bound or misnamed):
-                    stale = (named or '') if misnamed else bound
-                elif not bound and named and not (current and current.startswith(named)):
+                    stale = (named if named and FULL.fullmatch(named) else '') if misnamed else bound
+                elif not bound and named and not (current and current == named):
                     stale = named  # no binding (no readable commit at the request), but the reply names a commit
                 if stale is not None:
                     # Not an approval of the current work and not a finding either: ask for a review of the current
@@ -535,15 +541,17 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 f'Your approval of {stale[:12]} reached the tab after it had moved to another commit, so it does not '
                 'count for the current work. ' if stale and link.get('stale_delivered') else
                 f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
-                else 'Your approval was not forwarded: it did not name the commit right after APPROVED. ')
+                else 'Your approval was not forwarded: it did not name the full commit hash right after APPROVED. ')
             if target is not None:
                 folder = shlex.quote(str(target.get('folder') or ''))
                 binding = (
                     f"Commit under review: {target['commit']} in {folder}"
-                    + (' plus uncommitted changes' if target.get('dirty') else '') + '. '
+                    + (' plus uncommitted changes' if target.get('dirty') else
+                       '' if target.get('dirty') is False else ' (Tether could not read the status of its files)') + '. '
                     + (f'Read the review rules first: `git -C {folder} show origin/main:REVIEW.md`. '
                        if target.get('rules') else '')
-                    + f"An approval counts only for this commit: start it with `APPROVED {target['commit'][:12]}`. "
+                    + f"An approval counts only for this commit: start it with `APPROVED {target['commit']}` "
+                    '(the full hash). '
                     + binding)
                 confirm = link.get('confirm_commit')
                 if isinstance(confirm, str):
@@ -573,7 +581,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             link.pop('scope_ticks', None)
             if target is not None:
                 link['review_commit'] = target['commit']
-                link['review_clean'] = not target.get('dirty')
+                link['review_clean'] = target.get('dirty') is False
             else:
                 link.pop('review_commit', None)
                 link.pop('review_clean', None)
