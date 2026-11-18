@@ -187,7 +187,8 @@ class Attention:
     def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None):
         """Start and clear asks from the live session list. Read (reply, turn id) from reply_of(entry) once the
         conversation is idle or stopped. Retry empty reads, and after a successful read wait for a new
-        conversation or finished_of(entry) marker.
+        conversation or finished_of(entry) marker. The marker must change when the transcript changes, so a
+        record that was still being written when it was read is read again once it is complete.
         """
         now = self.clock()
         live = {}
@@ -261,12 +262,6 @@ class Attention:
             if not reply:
                 continue
             first_read = checked is None or checked[0] != thread
-            with self.lock:
-                known = turn_id is not None and turn_id in (self.turns.get(thread) or {}).get('history', ())
-            if known and not first_read:
-                # The turn end moved but the transcript still shows a turn already read: its newest record may not
-                # be complete yet. Read again on the next poll instead of consuming this marker.
-                continue
             self.checked[pane] = (thread, marker)
             if turn_id is None and (first_read or marker is None):
                 continue

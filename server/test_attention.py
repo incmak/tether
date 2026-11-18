@@ -437,28 +437,6 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(pane)
         self.assertEqual([ask['next'] for ask in self.world.store.waiting()], ['deploy?'])
 
-    def test_stale_read_retries_the_same_finished_marker(self):
-        pane = entry(agent='codex')
-        self.world.turn('%1', 'Done.\nNeeds you: no', 10, turn_id='A')
-        self.world.observe(pane)
-        self.world.turn('%1', 'Done.\nNeeds you: no', 20, turn_id='A')  # B's record is not complete yet
-        self.world.observe(pane)
-        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 20, turn_id='B')
-        self.world.observe(pane)
-        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
-
-    def test_older_turn_in_history_retries_the_same_finished_marker(self):
-        pane = entry(agent='codex')
-        self.world.turn('%1', 'Done.\nNeeds you: no', 10, turn_id='A')
-        self.world.observe(pane)
-        self.world.turn('%1', 'Done.\nNeeds you: no', 20, turn_id='B')
-        self.world.observe(pane)
-        self.world.turn('%1', 'Done.\nNeeds you: no', 30, turn_id='A')
-        self.world.observe(pane)
-        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 30, turn_id='C')
-        self.world.observe(pane)
-        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
-
     def test_turn_history_retains_the_latest_fifty_ids_across_restart(self):
         pane = entry(agent='antigravity')
         for step in range(51):
@@ -747,6 +725,35 @@ class TranscriptTurnTest(unittest.TestCase):
                 pane = entry(agent=agent, transcript=self.fixtures / f'{agent}.jsonl')
                 self.assertEqual(server.notification_reply_turn(pane), ('Next: Deploy?\nNeeds you: yes', turn_id))
                 read.assert_called_once_with(pane)
+
+    def test_partial_record_is_read_again_after_restart_and_pane_move(self):
+        import server
+
+        def record(stamp, text):
+            return json.dumps({'timestamp': stamp, 'type': 'response_item', 'payload': {
+                'type': 'message', 'role': 'assistant', 'phase': 'final_answer',
+                'content': [{'type': 'output_text', 'text': text}]}}) + '\n'
+
+        old = record('2026-11-08T08:30:12.000Z', 'Next: Deploy?\nNeeds you: yes')
+        new = record('2026-11-08T09:00:00.000Z', 'Next: Merge?\nNeeds you: yes')
+        for pane_id in ('%1', '%8'):
+            with self.subTest(pane=pane_id), tempfile.TemporaryDirectory() as folder:
+                path, transcript = Path(folder) / 'attention.json', Path(folder) / 'rollout.jsonl'
+                transcript.write_text(old)
+                store = attention.Attention(path, Clock())
+                pane = entry('%1', agent='codex', transcript=transcript)
+                status = lambda e: {'state': 'Idle'}
+                with mock.patch.object(server, 'timeline', return_value={'since': None, 'finished': None}):
+                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                    store.act('%1', 't1', 'handled')
+                    store = attention.Attention(path, Clock())  # restart
+                    pane = entry(pane_id, agent='codex', transcript=transcript)
+                    transcript.write_text(old + new[:40])  # the new record is still being written
+                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                    self.assertEqual(store.waiting(), [])
+                    transcript.write_text(old + new)
+                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                self.assertEqual([ask['next'] for ask in store.waiting()], ['Merge?'])
 
     def test_codex_timestamp_without_payload_id_and_antigravity_step_zero(self):
         import server
