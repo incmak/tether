@@ -208,6 +208,15 @@ async function main() {
     await page.clock.fastForward(30 * 60 * 1000)
     await chip.waitFor({ state: 'detached' })
     await cleared()
+    // A chat body with no transcript (an error body, an old server) must not crash the page or clear the queue.
+    for (const messages of [undefined, {}, '']) for (const text of ['/context', 'Normal prompt']) {
+      const label = `${text}, messages ${JSON.stringify(messages) ?? 'missing'}`
+      await open({ text, data: { messages } })
+      await queue.waitFor()
+      assert.equal(await page.getByText('Tether stopped').count(), 0, label)
+      assert.equal((await readPending())?.length, 1, label)
+    }
+    console.log('A chat body with no messages list (missing, an object, a string) keeps the queue, and the page keeps running')
     assert.deepEqual(errors, [], 'No uncaught browser exceptions')
     console.log('An unchanged idle stream needs one fresh read. A marked note expires at the 30-minute cap. No page errors')
   } finally {
