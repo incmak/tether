@@ -139,7 +139,3 @@
 
 /* Phone: the selection bar takes the tab bar's place. */
 .app-shell.phone-tabs:has(.sh-actionbar) .phone-tabbar { visibility: hidden; }
-
-/* Error actions keep a usable hit area alongside wrapped server messages. */
-.share .retry-button { min-height: 24px; }
-@media (pointer: coarse) { .share .retry-button { min-height: 44px; } }

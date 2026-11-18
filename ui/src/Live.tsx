@@ -6,6 +6,7 @@ import { agentNames, groupSessions, paneTitle } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
+import { replyPart } from './fridayReply'
 import { LiveVoice, sentences } from './liveVoice'
 import { useBackStep } from './backNav'
 import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } from './floatingWindow'
@@ -353,14 +354,16 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       await flow.current.answer(pane, approval, decision === 'approve' ? yesOption(approval) : noOption(approval))
       return { ok: true, chat: paneTitle(pane), decision: decision === 'approve' ? 'approve' : 'deny' }
     },
-    read_last_reply: async ({ chat }) => {
+    read_last_reply: async ({ chat, offset }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
       const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.target
       if (!pane) return { error: `No chat called ${chat}.` }
       const data = await live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=6`)
       const message = lastReply(data)
-      return { chat: paneTitle(pane), text: message ? shortText(message.text, 1500) : 'No reply yet.' }
+      if (!message) return { chat: paneTitle(pane), text: 'No reply yet.' }
+      const part = replyPart(speakable(message.text), typeof offset === 'number' ? offset : undefined)
+      return { chat: paneTitle(pane), ...part }
     },
     new_chat: async ({ name: wanted, agent: kind, prompt, project }) => {
       const made = await flow.current.create(String(wanted ?? ''), kind === 'codex' ? 'codex' : 'claude', String(prompt ?? ''), String(project ?? ''))

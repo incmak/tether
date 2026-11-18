@@ -13,7 +13,7 @@ import { UNDO_RUN_EVENT, setUndoNext } from './undoState'
  *  agent, or touch another session, ask first in a dialog that names the effect. */
 
 type Direction = 'undo' | 'redo'
-interface Done { status: 'done'; id: string; label: string; direction: Direction }
+interface Done { status: 'done'; id: string; label: string; direction: Direction; warnings?: string[] }
 interface Ask { status: 'confirm'; id: string; label: string; direction: Direction; effects: string[]; token: string; changed?: boolean }
 export interface UndoEntry {
   id: string; at: number; who: { by: 'user' | 'tether' | 'agent'; tab?: string }; label: string
@@ -122,7 +122,9 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
       if (result.status === 'confirm') { setAsk({ ...result, changed: confirmed !== undefined }); return }
       setAsk(null)
       const back: Direction = direction === 'undo' ? 'redo' : 'undo'
-      setToast({ text: `${direction === 'undo' ? 'Undid' : 'Redid'}: ${result.label}`, at: Date.now(),
+      // A step that ran with a leftover (an extra shell tab tmux did not close) says so in the toast.
+      const warned = result.warnings?.length ? `. ${result.warnings.join(' ')}` : ''
+      setToast({ text: `${direction === 'undo' ? 'Undid' : 'Redid'}: ${result.label}${warned}`, at: Date.now(),
         action: { label: back === 'redo' ? 'Redo' : 'Undo', run: () => void again.current(back, result.id) } })
       latest.current.onChanged()
       window.dispatchEvent(new Event(PREFS_PULL_EVENT))

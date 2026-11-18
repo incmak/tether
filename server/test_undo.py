@@ -603,7 +603,8 @@ class MergeTests(TmuxBase):
         self.assertIn('back to session `alpha`', asked['effects'][0])
         self.undo(confirmed=True)
         self.assertEqual(self.show(self.a2, '#{session_id}|#{@group}'), f'{self.a}|{group["id"]}')
-        self.redo(confirmed=True)
+        result = self.redo(confirmed=True)
+        self.assertNotIn('warnings', result)
         self.assertEqual(self.show(self.a2, '#{session_id}'), self.b)
 
     def test_broken_out_tab_goes_back(self):
@@ -614,6 +615,19 @@ class MergeTests(TmuxBase):
         self.assertNotEqual(self.show(self.a2, '#{session_id}'), self.a)
         self.undo(confirmed=True)
         self.assertEqual(self.show(self.a2, '#{session_id}'), self.a)
+
+    def test_redo_of_breakout_returns_its_warning(self):
+        run = self.run_tmux
+        noted = undo.record_merge('break', self.a2, None, run)
+        noted(tmux_merge.break_out(self.a2, run))
+        self.undo(confirmed=True)
+        warning = 'The pane moved, but its new session kept an extra shell tab.'
+        result = {'session': '$10', 'name': 'split', 'pane': self.a2, 'warning': warning}
+        with mock.patch.object(tmux_merge, 'break_out', return_value=result) as break_out:
+            redone = self.redo(confirmed=True)
+        break_out.assert_called_once_with(self.a2, run)
+        self.assertEqual(redone['status'], 'done')
+        self.assertEqual(redone['warnings'], [warning])
 
     def test_merged_sessions_are_listed_but_refuse(self):
         noted = undo.record_merge('session', self.b, self.a, self.run_tmux)

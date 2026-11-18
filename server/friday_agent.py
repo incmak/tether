@@ -47,6 +47,8 @@ SYSTEM_PROMPT = (
     'Speak about chats only from current state or tool results. Never invent a status, result, or file. '
     'If unsure, say you do not know or use the relevant tool. '
     'If the user asks what a chat said or replied, call read_last_reply. '
+    'If read_last_reply returns truncated, call it again with next_offset before answering about the missing part; '
+    'never say the reply cut off while truncated is true. '
     'Before send_to_chat, turn the user request into a clear, complete prompt for the coding agent. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
@@ -364,7 +366,10 @@ def tool_schemas():
          {'chat': string, 'prompt': string}, ['chat', 'prompt']),
         ('answer_approval', 'Approve or deny only with clear user consent for this request in this turn.',
          {'chat': string, 'decision': {'type': 'string', 'enum': ['approve', 'deny']}}, ['chat', 'decision']),
-        ('read_last_reply', 'Read the last assistant reply from a named chat.', {'chat': string}, ['chat']),
+        ('read_last_reply', 'Read the last assistant reply from a named chat. Long replies come in parts.',
+         {'chat': string, 'offset': {'type': 'integer',
+          'description': "Character offset from a previous result's next_offset, to read the rest of a long reply."}},
+         ['chat']),
         ('new_chat', 'Create a chat only when the user asks for a new chat or session. '
          'Created chats go to the tmux session "Friday chats", one tab each.',
          {'name': string, 'agent': {'type': 'string', 'enum': ['claude', 'codex']}, 'prompt': string,

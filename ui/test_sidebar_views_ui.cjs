@@ -95,12 +95,13 @@ async function main() {
     const SIDE = '.sidebar'
     // The urgent ask opens the answer deck by itself; close it to reach the sidebar.
     const closeDeck = async () => { if (await page.locator('dialog.action-deck[open]').count()) { await page.keyboard.press('Escape'); await page.locator('dialog.action-deck[open]').waitFor({ state: 'detached' }).catch(() => {}) } }
-    const open = async (id, width = 1280, height = 800, prefs = {}) => {
+    // keepDeck: leave a deck that opened by itself, so a test can see it.
+    const open = async (id, width = 1280, height = 800, prefs = {}, { keepDeck = false } = {}) => {
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/?session=${encodeURIComponent(id)}&prefs=${encodeURIComponent(JSON.stringify(prefs))}`, { waitUntil: 'load' })
       await page.locator('.chat-panel').first().waitFor()
       await page.waitForTimeout(300)
-      await closeDeck()
+      if (!keepDeck) await closeDeck()
     }
     const texts = selector => page.locator(selector).allTextContents()
     const pressed = name => page.locator(`${SIDE} .side-mode-switch button`, { hasText: name }).getAttribute('aria-pressed')
@@ -232,10 +233,64 @@ async function main() {
     await page.waitForTimeout(200)
     check('six rows with the sixth open: all show, no more button', (await texts(`${SIDE} .catchup-row`)).length === 6 && await page.locator(`${SIDE} .catchup-more`).count() === 0)
 
-    // An approval with no ask: the row opens the tab; the deck (which answers asks) is not offered.
+    // An approval with no ask (B134): the row opens the tab, and the deck shows it as a card that opens the tab.
     sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
+    for (const [width, height] of [[1280, 800], [320, 700]]) {
+      await open('%3', width, height, { sideMode: 'catchup', attention: true })
+      if (width === 320) { await page.locator('.mobile-menu').locator('visible=true').first().click(); await page.locator('.drawer .catchup').waitFor() }
+      const side = width === 320 ? '.drawer' : SIDE
+      check(`${width} px: a wait with no ask offers "Answer one by one"`, await page.locator(`${side} .catchup-row`, { hasText: 'BriskBot' }).count() === 1 && await page.locator(`${side} [aria-label="Answer one by one"]`).count() === 1)
+      await page.locator(`${side} [aria-label="Answer one by one"]`).click()
+      const deck = page.locator('dialog.action-deck[open]')
+      await deck.waitFor()
+      check(`${width} px: the deck card names the tab and the prompt`, (await deck.locator('.deck-tab').textContent()).includes('BriskBot') && (await deck.locator('.deck-question').textContent()) === 'A permission prompt waits in this tab. Open the tab to answer it.' && await deck.locator('.deck-hint').count() === 0 && (await deck.locator('.deck-meta').textContent()).includes('Needs approval'))
+      check(`${width} px: the card has Open tab and no Handled or reply box`, await deck.getByRole('button', { name: 'Open tab' }).count() === 1 && await deck.getByRole('button', { name: 'Handled' }).count() === 0 && await deck.locator('textarea').count() === 0)
+      check(`${width} px: the deck fits`, await deck.evaluate(box => box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth))
+      await page.screenshot({ path: path.join(SHOTS, `${width}-deck-state-only.png`), animations: 'disabled' })
+      await deck.getByRole('button', { name: 'Open tab' }).click()
+      await deck.waitFor({ state: 'detached' })
+      check(`${width} px: Open tab closes the deck and opens the tab`, await page.evaluate(() => location.hash + location.search).then(where => where.includes('%10') || where.includes('%2510')) || (await page.locator('[aria-current="page"]', { hasText: 'BriskBot' }).count()) > 0)
+    }
+
+    // Review fixes: an archived tab gets no card; an undated wait sorts first and shows no age; Escape gives focus back.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}),
+      pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 }),
+      pane('%11', '$2', 'Old helper', 'briskbot:0.2', { state: 'Approval', since: NOW - 30 }),
+      pane('%12', '$2', 'Undated', 'briskbot:0.3', { state: 'Approval', since: null })], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%11': { dir: '/srv/project', thread: 't11', name: 'Old helper' } } })
+    const deckRows = await page.locator(`${SIDE} .catchup-row`).count()
+    const opener = page.locator(`${SIDE} [aria-label="Answer one by one"]`)
+    await opener.focus()
+    await page.keyboard.press('Enter')
+    const stateDeck = page.locator('dialog.action-deck[open]')
+    await stateDeck.waitFor()
+    check('the deck has one card for each Catch up row, no archived tab', (await stateDeck.locator('.deck-count').textContent()) === `1 of ${deckRows}` && deckRows === 2, `${deckRows} rows, ${await stateDeck.locator('.deck-count').textContent()}`)
+    check('an undated wait comes first and shows no age', (await stateDeck.locator('.deck-tab').textContent()).includes('Undated') && !(await stateDeck.locator('.deck-meta').textContent()).includes('waited'))
+    await page.keyboard.press('Escape')
+    await stateDeck.waitFor({ state: 'detached' })
+    const refocused = await opener.evaluate(node => new Promise(done => { const end = Date.now() + 3000; const poll = () => document.activeElement === node ? done(true) : Date.now() > end ? done(false) : requestAnimationFrame(poll); poll() }))
+    check('Escape gives focus back to "Answer one by one"', refocused)
+
+    // An urgent ask in an archived tab does not open the deck by itself.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%13', '$2', 'Hidden urgent', 'briskbot:0.4', { state: 'Approval', since: NOW - 60, ask: ask('%13', 60, { kind: 'approval', urgent: true }) })], default_thread: 't3' }
+    // Control: the same urgent ask in a visible tab opens it, so the check below can see a deck that opened.
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true }, { keepDeck: true })
+    check('a visible urgent ask opens the deck by itself', await page.locator('dialog.action-deck[open]').count() === 1)
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%13': { dir: '/srv/project', thread: 't13', name: 'Hidden urgent' } } }, { keepDeck: true })
+    await page.locator(`${SIDE} .catchup`).waitFor()
+    check('an archived urgent ask does not open the deck', await page.locator('dialog.action-deck[open]').count() === 0)
+
+    // Handled ends the ask's card; when the tab still waits by its state, its state card shows next.
+    let handledAsk = false
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60, ask: ask('%10', 60, { kind: 'approval' }) })], default_thread: 't3' }
     await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })
-    check('a wait with no ask has no "Answer one by one"', await page.locator(`${SIDE} .catchup-row`, { hasText: 'BriskBot' }).count() === 1 && await page.locator(`${SIDE} [aria-label="Answer one by one"]`).count() === 0)
+    await page.locator(`${SIDE} [aria-label="Answer one by one"]`).click()
+    await stateDeck.waitFor()
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
+    await stateDeck.getByRole('button', { name: 'Handled' }).click()
+    handledAsk = await stateDeck.locator('.deck-question', { hasText: 'A permission prompt waits in this tab.' }).waitFor({ timeout: 5000 }).then(() => true, () => false)
+    check('after Handled, the state card of the same tab shows', handledAsk && await stateDeck.getByRole('button', { name: 'Handled' }).count() === 0)
+    await page.keyboard.press('Escape')
     sessions = busy
 
     // 7. Phone, 320 px: the drawer shows both views with no sideways scroll.
@@ -268,6 +323,25 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `side-modes-${width}.png`), clip: { x: 0, y: 0, width: Math.min(width + 80, 1280), height: 260 } })
     }
     sessions = busy
+
+    // A snooze that ends: Catch up and the deck read one clock, so both show the tab after the same tick (320 px).
+    // It runs last: the fake clock stays on this page.
+    await page.clock.install({ time: NOW * 1000 })
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%14', '$2', 'Snoozed tab', 'briskbot:0.5', { state: 'Approval', since: NOW - 60, ask: ask('%14', 60, { kind: 'approval', snoozed_until: NOW + 20 }) })], default_thread: 't3' }
+    await open('%3', 320, 700, { sideMode: 'catchup', attention: true })
+    // The snooze ends 20 s in; the app clock next ticks 30 s in. A drawer opened at 25 s must not read a newer clock
+    // than the deck: it shows no row until the tick, and then both show the tab.
+    await page.clock.runFor(25_000)
+    await page.locator('.mobile-menu').locator('visible=true').first().click()
+    await page.locator('.drawer .catchup').waitFor()
+    check('320 px: before the tick, Catch up shows no row and no deck for the snoozed tab', await page.locator('.drawer .catchup-row', { hasText: 'Snoozed tab' }).count() === 0 && await page.locator('.drawer [aria-label="Answer one by one"]').count() === 0)
+    await page.clock.runFor(10_000)  // the app clock ticks, past the snooze end
+    await page.locator('.drawer .catchup-row', { hasText: 'Snoozed tab' }).waitFor()
+    await page.locator('.drawer [aria-label="Answer one by one"]').click()
+    const snoozeDeck = page.locator('dialog.action-deck[open]')
+    await snoozeDeck.waitFor()
+    check('320 px: after the snooze ends, Catch up and the deck agree', (await snoozeDeck.locator('.deck-count').textContent()) === '1 of 1' && (await snoozeDeck.locator('.deck-tab').textContent()).includes('Snoozed tab'))
+    await page.keyboard.press('Escape')
 
     check('no page errors', pageErrors.length === 0, pageErrors.join('\n').slice(0, 800))
   } catch (error) {

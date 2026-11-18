@@ -390,6 +390,7 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .action-list button:hover { background: var(--hover); }
 .action-list button:disabled { opacity: .45; }
 .sheet-sub:not(:has(> svg)) { display: block; }
+.sheet-sub-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A sentence under a sheet title wraps; names and paths in .sheet-sub keep one line. */
 .sheet-sub.sheet-note { overflow: visible; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 [aria-labelledby="pane-title"] .action-list button small { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }

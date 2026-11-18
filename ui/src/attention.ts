@@ -1,8 +1,10 @@
 // Attention mode: the tabs whose ask waits on you (server/attention.py), oldest first.
 import { useEffect, useState } from 'react'
 import type { Api, Ask, Pane } from './api'
+import { needsYou } from './paneState'
 
-export interface Waiting { pane: Pane; ask: Ask }
+// state: the tab waits by its state only (an approval or a question with no ask); its ask is made up from the pane.
+export interface Waiting { pane: Pane; ask: Ask; state?: boolean }
 export type AskAction = 'handled' | 'snooze' | 'opened'
 export interface AskResult { ask: Ask | null; waiting: number }
 export interface Digest { enabled: boolean; hour: number }
@@ -17,6 +19,15 @@ export function waitingAsks(panes: Pane[], now: number): Waiting[] {
 }
 
 /** The pane's ask when it shows now, else null. */
+/** The deck's cards: the asks, then each tab that waits by its state only, as a card that opens the tab. */
+export function deckItems(panes: Pane[], now: number): Waiting[] {
+  const stateOnly = panes.filter(pane => !pane.ask && pane.agent !== 'shell' && needsYou(pane.state)).map(pane => ({
+    pane, state: true,
+    ask: { pane: pane.id, thread: pane.thread ?? null, since: pane.since ?? 0, next: '', kind: pane.state === 'Approval' ? 'approval' : 'question', opened: false, snoozed_until: null } as Ask,
+  }))
+  return [...waitingAsks(panes, now), ...stateOnly].sort((a, b) => a.ask.since - b.ask.since)
+}
+
 export const visibleAsk = (pane: Pane, now: number) => waitingAsks([pane], now)[0]?.ask ?? null
 
 export const askAction = (api: Api, pane: Pane, action: AskAction) =>

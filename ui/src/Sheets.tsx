@@ -328,7 +328,7 @@ export function ResumeChat({ api, chat, sessions, onClose, onOpened }: { api: Ap
   return <dialog {...modal} className="sheet" aria-labelledby="resume-title">
     <form onSubmit={resume}>
       <div className="sheet-heading"><h2 id="resume-title">Resume chat</h2><button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button></div>
-      <p className="sheet-sub"><AgentIcon agent={chat.agent} size={14} />{chat.title || 'Untitled chat'}</p>
+      <p className="sheet-sub"><AgentIcon agent={chat.agent} size={14} /><span className="sheet-sub-text">{chat.title || 'Untitled chat'}</span></p>
       <p className="hint">Runs <code>{chat.agent === 'codex' ? 'codex resume' : 'claude --resume'}</code> in {chat.dir ?? 'your home folder'}.</p>
       <label htmlFor="resume-place">Open in</label>
       <SelectMenu id="resume-place" className="sm-field resume-place" value={place} disabled={pending} onChange={setPlace} options={[{ value: '', label: 'New session' }, ...sessions.map(session => ({ value: session.id, label: `New tab in ${session.name}` }))]} />

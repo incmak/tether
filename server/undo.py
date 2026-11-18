@@ -1311,7 +1311,7 @@ class MergePane:
             moved = (tmux_merge.move_pane(a['pane'], a['to'], run) if a['kind'] == 'merge.pane'
                      else tmux_merge.break_out(a['pane'], run))
             a['to'] = moved['session']
-            return
+            return moved.get('warning')
         if _session_alive(a['frm'], run) is None:  # closed between the check and now
             raise Refused(f'Session {_q(a["frm_name"])} closed after this move, so the tab cannot go back.')
         restack = MergePane._stack_gone(a, run)
@@ -1484,10 +1484,13 @@ def _run(direction, entry_id, env, confirmed):
         return {'status': 'confirm', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
                 'effects': effects, 'token': token(entry, direction, effects)}
     done, at = 0, time.time()  # the time of this change, under the locks: undo_store orders and ends redo by it
+    warnings = []
     with undo_store.quiet():
         try:
             for action in _ordered(entry, direction):
-                KINDS[action['kind']].apply(action, direction, env)
+                warning = KINDS[action['kind']].apply(action, direction, env)
+                if warning:
+                    warnings.append(warning)
                 done += 1
         except Refused:
             if not done:
@@ -1517,5 +1520,8 @@ def _run(direction, entry_id, env, confirmed):
     if failed:
         raise Refused(f'Only part of “{entry["label"]}” could be {"undone" if direction == "undo" else "redone"}. '
                       'Check the tabs, then try again from History.')
-    return {'status': 'done', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
-            'state': 'undone' if direction == 'undo' else 'done'}
+    result = {'status': 'done', 'id': entry['id'], 'label': entry['label'], 'direction': direction,
+              'state': 'undone' if direction == 'undo' else 'done'}
+    if warnings:
+        result['warnings'] = warnings
+    return result
