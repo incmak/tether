@@ -120,7 +120,9 @@ async function main() {
    fixture.sessions.sessions[0]={...pane, pane_name:long}
    fixture.chat.agent='claude';fixture.sessions.sessions[0].agent='claude'
    await page.goto(`${origin}/chat/?session=%251`)
-   await page.getByRole('button',{name:/1 agent running\. Open the agent map/}).evaluate(el=>el.click())
+   // The compact phone composer hides the agent pill until the text box has focus.
+   if(width<=600)await page.locator('.composer textarea').click()
+   await page.getByRole('button',{name:/1 agent running\. Open the agent map/}).click()
    await shot(`agent-map-${width}`);await fit('dialog.agent-map',`${width} agent map fits`);await audit('dialog.agent-map',`${width} map controls fit`)
    detailMode='loading';await page.locator('.agent-tree > .agent-branch > .agent-children > li .agent-node').first().click();await page.locator('.skeleton.agent-body').waitFor();await shot(`agent-loading-${width}`);detailMode='ok'
    await page.locator('.agent-report').waitFor()
