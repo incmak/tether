@@ -485,6 +485,7 @@ class LaunchTests(unittest.TestCase):
             pane, name = delegate.start(entry(), body(review=True), '/project', run=run)
         self.assertEqual((pane, name), ('%13', 'Fix the bug'))
         calls = [call.args[0] for call in run.call_args_list]
+        self.assertFalse(any('@group_by' in argv for argv in calls))
         self.assertEqual(calls[2][1:], ['new-window', '-a', '-t', '@3', '-c', '/project', '-P', '-F', '#{pane_id}'])
         self.assertEqual(calls[3][1:], ['set-option', '-p', '-t', '%13', '@chat_name', name, ';',
                                      'set-option', '-p', '-t', '%13', '@chat_name_at', '123000', ';',
@@ -494,6 +495,37 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(calls[5][1:], ['send-keys', '-t', '%13', 'Enter'])
         self.assertEqual(len(calls), 6)
         add.assert_called_once_with(worker='%13', reviewer='%12', reviewer_thread=THREAD, name=name, agent='claude')
+
+    def test_user_placement_is_marked_before_launch(self):
+        source_group = 'g0123abcd'
+        for group, expected in ((None, source_group), ('g1234abcd', 'g1234abcd'), ('', '')):
+            with self.subTest(group=group):
+                run = self.placement_run(source_group)
+                delegate.start(entry(), body(), '/project', run=run, group=group, by_user=True)
+                calls = [call.args[0][1:] for call in run.call_args_list]
+                marker = ['set-option', '-p', '-t', '%13', '@group_by', 'user']
+                options = ['set-option', '-p', '-t', '%13', '@group', expected, ';', *marker] if expected else marker
+                self.assertEqual(calls[3], options)
+                first_send = next(i for i, args in enumerate(calls) if args[0] == 'send-keys')
+                self.assertGreater(first_send, 3)
+                self.assertFalse(any('@tether_helper' in args for args in calls))
+
+    def test_failed_user_placement_blocks_launch(self):
+        for group in ('g0123abcd', ''):
+            with self.subTest(group=group):
+                run = self.placement_run('', mark_status=1)
+                with self.assertRaisesRegex(RuntimeError, 'could not mark placement'):
+                    delegate.start(entry(), body(), '/project', run=run, group=group, by_user=True)
+                self.assertFalse(any('send-keys' in call.args[0] for call in run.call_args_list))
+
+    def placement_run(self, source_group, mark_status=0):
+        def result(argv, **kwargs):
+            output = (f'@3\t/source\t{source_group}\n' if '#{window_id}\t#{pane_current_path}\t#{@group}' in argv
+                      else 'latest\t120\t40\n' if argv[1] == 'display-message' else '%13\n')
+            status = mark_status if '@group_by' in argv else 0
+            return subprocess.CompletedProcess(argv, status, stdout=output,
+                                               stderr='could not mark placement' if status else '')
+        return Mock(side_effect=result)
 
     def test_start_uses_selected_codex_profile_and_does_not_register_without_review(self):
         run = Mock()
@@ -646,8 +678,9 @@ class EndpointTests(unittest.TestCase):
 
     def test_route_bypasses_default_choose_and_holds_send_lock(self):
         source = entry()
-        def start(config, request, folder, run, recent):
+        def start(config, request, folder, run, recent, *, by_user):
             self.assertTrue(server.SEND_LOCK.locked())
+            self.assertIs(by_user, True)
             self.assertIs(config, source)
             self.assertEqual(request, body())
             self.assertEqual(folder, str(paths.HOME))

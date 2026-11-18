@@ -1151,9 +1151,9 @@ class ReviewRound6Tests(Stacked, TmuxBase):
         starter = quick_tab.Starter(self.run_tmux)
         self.tmux('rename-session', '-t', self.a, quick_tab.DEFAULT_SESSION)
 
-        def start(anchor, body, folder, run, cwd, group):
+        def start(anchor, body, folder, run, cwd, group, *, by_user):
             pane = self.tmux('new-window', '-P', '-F', '#{pane_id}', '-t', self.a + ':', '-c', self.folder).stdout.strip()
-            groups.move(self.a, pane, group, run)
+            groups.move(self.a, pane, group, run, by_user=by_user)
             return pane, 'New'
         entries = [dict(e, label=f'{quick_tab.DEFAULT_SESSION}:1.0') if e['tmux_session'] == self.a else e
                    for e in self.entries()]

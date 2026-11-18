@@ -15,6 +15,7 @@ from antigravity import process_start, ROOT as AGY_ROOT, CACHE as AGY_CACHE, cap
 from quota_notices import capture as capture_quota_notices
 from codex_provider import PROFILE_NAME
 import detection_rules
+import groups
 import login_flow
 import paths
 import procinfo
@@ -91,9 +92,10 @@ def fork_name(entry, entries):
     return f'{base} {number}'
 
 
-def new_window_after(pane, run=subprocess.run, *, cwd=None, group=None):
+def new_window_after(pane, run=subprocess.run, *, cwd=None, group=None, by_user=False):
     """Open after the source window, preserving its directory and manual size. The new pane joins the source pane's
-    group (@group, groups.py), unless group is given: "" puts it in Unstacked, a group id in that group."""
+    group (@group, groups.py), unless group is given: "" puts it in Unstacked, a group id in that group.
+    by_user marks the placement before the caller sends a launch command."""
     source = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{window_id}\t#{pane_current_path}\t#{@group}'],
                  capture_output=True, text=True, timeout=5)
     fields = source.stdout.rstrip('\n').split('\t', 1)
@@ -119,8 +121,16 @@ def new_window_after(pane, run=subprocess.run, *, cwd=None, group=None):
     new_pane = result.stdout.strip()
     if not re.fullmatch(r'%[0-9]+', new_pane):
         raise RuntimeError('Pane creation could not be confirmed.')
-    if re.fullmatch(r'g[0-9a-f]{8}', label or ''):  # before any launch command is sent
-        run([paths.TMUX, 'set-option', '-p', '-t', new_pane, '@group', label], capture_output=True, text=True, timeout=5)
+    set_option = ['set-option', '-p', '-t', new_pane]
+    options = [*set_option, '@group', label] if re.fullmatch(r'g[0-9a-f]{8}', label or '') else []
+    if by_user:
+        if options:
+            options.append(';')
+        options.extend([*set_option, groups.BY, 'user'])
+    if options:  # before any launch command is sent
+        placed = run([paths.TMUX, *options], capture_output=True, text=True, timeout=5)
+        if by_user and placed.returncode:
+            raise RuntimeError(placed.stderr.strip() or 'Could not mark the new tab as user-placed.')
     if dimensions[0] == 'manual':
         run([paths.TMUX, 'resize-window', '-t', new_pane, '-x', dimensions[1], '-y', dimensions[2]],
             check=True, capture_output=True, text=True, timeout=5)

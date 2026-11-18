@@ -3018,7 +3018,7 @@ class Handler(BaseHTTPRequestHandler):
                             place['group'] = stack['id'] if stack else body['group']
                         pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
                                                     run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
-                                                    **place)
+                                                    by_user=True, **place)
                     except Exception:
                         if stack:
                             try:
