@@ -437,6 +437,28 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(pane)
         self.assertEqual([ask['next'] for ask in self.world.store.waiting()], ['deploy?'])
 
+    def test_stale_read_retries_the_same_finished_marker(self):
+        pane = entry(agent='codex')
+        self.world.turn('%1', 'Done.\nNeeds you: no', 10, turn_id='A')
+        self.world.observe(pane)
+        self.world.turn('%1', 'Done.\nNeeds you: no', 20, turn_id='A')  # B's record is not complete yet
+        self.world.observe(pane)
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 20, turn_id='B')
+        self.world.observe(pane)
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
+
+    def test_older_turn_in_history_retries_the_same_finished_marker(self):
+        pane = entry(agent='codex')
+        self.world.turn('%1', 'Done.\nNeeds you: no', 10, turn_id='A')
+        self.world.observe(pane)
+        self.world.turn('%1', 'Done.\nNeeds you: no', 20, turn_id='B')
+        self.world.observe(pane)
+        self.world.turn('%1', 'Done.\nNeeds you: no', 30, turn_id='A')
+        self.world.observe(pane)
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 30, turn_id='C')
+        self.world.observe(pane)
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
+
     def test_turn_history_retains_the_latest_fifty_ids_across_restart(self):
         pane = entry(agent='antigravity')
         for step in range(51):

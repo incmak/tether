@@ -260,8 +260,14 @@ class Attention:
             reply, turn_id = reply_of(entry)
             if not reply:
                 continue
-            self.checked[pane] = (thread, marker)
             first_read = checked is None or checked[0] != thread
+            with self.lock:
+                known = turn_id is not None and turn_id in (self.turns.get(thread) or {}).get('history', ())
+            if known and not first_read:
+                # The turn end moved but the transcript still shows a turn already read: its newest record may not
+                # be complete yet. Read again on the next poll instead of consuming this marker.
+                continue
+            self.checked[pane] = (thread, marker)
             if turn_id is None and (first_read or marker is None):
                 continue
             changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
