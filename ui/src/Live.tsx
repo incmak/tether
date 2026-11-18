@@ -136,10 +136,11 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       setReply(step.hero.reply)
     },
     said(text: string) { lines.current.keep(heard(hero.current, text)) },
-    reply(next: Spoken) { lines.current.keep(answered(hero.current, next)) },
+    reply(next: Spoken, fresh = false) { lines.current.keep(answered(hero.current, next, fresh)) },
   })
   const showSaid = (text: string) => lines.current.said(text)
-  const showReply = (next: Spoken) => lines.current.reply(next)
+  /** A whole line Friday or a chat says: always a new reply. */
+  const showReply = (next: Spoken) => lines.current.reply(next, true)
   const [muted, setMuted] = useState(false)
   const [awake, setAwake] = useState(false)
   const [problem, setProblem] = useState('')
@@ -177,9 +178,11 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     const box = words.current
     if (!box) return
     const top = box.scrollTop
-    const up = top < lastTop.current - 1
-    lastTop.current = top
     const bottom = box.scrollHeight - top - box.clientHeight < 32
+    // Any drop counts, so a slow scroll of 1 px steps stops following too. A layout clamp
+    // (the box grows) also lowers scrollTop, but it lands at the bottom, which is handled first.
+    const up = top < lastTop.current
+    lastTop.current = top
     // A smooth jump to the latest line passes through "not at the bottom": keep following until it lands.
     if (jumping.current) { if (bottom) jumping.current = false; return }
     if (bottom) { following.current = true; setBehind(false); return }
@@ -194,6 +197,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     if (!box) return
     following.current = true
     jumping.current = true
+    // The button goes away on use: keep keyboard focus in the conversation, not on the page body.
+    if (document.activeElement instanceof HTMLElement && document.activeElement.classList.contains('live-latest')) box.focus({ preventScroll: true })
     setBehind(false)
     const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     box.scrollTo({ top: box.scrollHeight, behavior: still ? 'auto' : 'smooth' })
@@ -524,7 +529,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           else go(turn)
         },
         onUserText: (text, final) => { if (final) { lines.current.said(text); setProblem('') } },
-        onBotText: text => lines.current.reply({ who: ASSISTANT, text }),
+        onBotText: (text, fresh) => lines.current.reply({ who: ASSISTANT, text }, fresh),
         onMetrics: metrics => console.debug('Friday turn', metrics),
         onVoice: kind => { if (!gone) setVoiceKind(kind) },
         onClosed: reason => {

@@ -28,6 +28,15 @@ assert.equal(other.keep.length, 2)
 assert.deepEqual(other.hero, { said: '', reply: { who: 'Review', text: 'Done.' } })
 const restart = plain(m.answered(step.hero, { who: 'Friday', text: 'Sorry, again.' }))
 assert.equal(restart.keep.length, 2)
+// A fresh reply that starts with the old words is a new entry, not growth (review of d5c7001).
+const done = { said: 'Run it', reply: { who: 'Friday', text: 'Done.' } }
+const second = plain(m.answered(done, { who: 'Friday', text: 'Done. The tests passed.' }, true))
+assert.deepEqual(second.keep.map(line => line.text), ['Run it', 'Done.'])
+assert.deepEqual(second.hero.reply.text, 'Done. The tests passed.')
+// The same words again stay one reply, even when marked fresh: a stream can report a sentence twice.
+assert.equal(plain(m.answered(done, { who: 'Friday', text: 'Done.' }, true)).keep.length, 0)
+// Without fresh, a longer version of the same reply still grows in place.
+assert.equal(plain(m.answered(done, { who: 'Friday', text: 'Done. The tests passed.' })).keep.length, 0)
 // Blank lines are not kept.
 assert.deepEqual(plain(m.heard({ said: '  ', reply: { who: 'Friday', text: 'Yes.' } }, 'x').keep),
   [{ who: 'Friday', text: 'Yes.', you: false }])

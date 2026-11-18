@@ -16,10 +16,13 @@ export function heard(hero: Hero, text: string) {
   return { hero: { said: text, reply: { ...hero.reply, text: '' } }, keep: exchange(hero) }
 }
 
-/** A reply grows while it streams. A different reply moves the last exchange up first. */
-export function answered(hero: Hero, next: Spoken) {
+/** A reply grows while it streams. A different reply moves the last exchange up first.
+ *  fresh: next starts a new reply (a new turn or a full announcement), so a shared prefix is not growth.
+ *  The same words again are the same reply: a stream can report one sentence twice. */
+export function answered(hero: Hero, next: Spoken, fresh = false) {
   const old = hero.reply
-  const grows = !old.text || (next.who === old.who && next.text.startsWith(old.text))
+  const same = next.who === old.who
+  const grows = !old.text || (same && next.text === old.text) || (!fresh && same && next.text.startsWith(old.text))
   return grows ? { hero: { ...hero, reply: next }, keep: [] }
     : { hero: { said: '', reply: next }, keep: exchange(hero) }
 }

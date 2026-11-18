@@ -73,16 +73,18 @@
 .live-words { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 30em; min-height: 0; margin-top: -4px; padding-top: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--live-hair) transparent; -webkit-mask-image: linear-gradient(to bottom, transparent, black 8px); mask-image: linear-gradient(to bottom, transparent, black 8px); }
 .live-words p { margin: 0; }
 /* Earlier in the call: small, quiet lines above the newest exchange. Scroll up to read them. */
-.live-words[tabindex] { -webkit-mask-image: linear-gradient(to bottom, transparent, black 28px); mask-image: linear-gradient(to bottom, transparent, black 28px); padding-top: 20px; }
-.live-words:focus-visible { outline: 2px solid var(--live-you); outline-offset: 2px; border-radius: 12px; }
+.live-words[tabindex] { -webkit-mask-image: linear-gradient(to bottom, transparent, black 16px); mask-image: linear-gradient(to bottom, transparent, black 16px); padding-top: 16px; }
+/* Keyboard focus: no fade, and the ring inside the box, so the mask and the overflow cannot clip it. */
+.live-words:focus-visible { -webkit-mask-image: none; mask-image: none; outline: 2px solid var(--live-you); outline-offset: -2px; border-radius: 12px; }
 .live-now { display: flex; flex-direction: column; gap: 10px; }
 .live-past { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0 0 6px; list-style: none; text-align: left; }
-.live-past li { max-width: 88%; font-size: 15px; line-height: 1.42; text-wrap: pretty; overflow-wrap: anywhere; color: color-mix(in oklab, var(--text) 82%, transparent); }
-.live-past li[data-you="true"] { align-self: flex-end; text-align: right; color: var(--muted); }
-.live-past .live-who { margin-bottom: 2px; font-size: 12px; text-align: inherit; }
+.live-past li { max-width: 88%; font-size: 15px; line-height: 1.42; text-wrap: pretty; overflow-wrap: anywhere; color: var(--text); }
+/* Over the warm glow --muted falls under 4.5:1, so quieter lines mix toward --text instead. */
+.live-past li[data-you="true"] { align-self: flex-end; text-align: right; color: color-mix(in oklab, var(--text) 65%, var(--muted)); }
+.live-past .live-who { margin-bottom: 2px; font-size: 12px; text-align: inherit; color: color-mix(in oklab, var(--text) 45%, var(--muted)); }
 /* Lines ease back as they scroll out of the top, so the newest words stay in front. */
 @supports (animation-timeline: view()) {
-  .live-past li { animation: live-recede linear both; animation-timeline: view(); animation-range: exit 0% exit 100%; }
+  .live-past li { animation: live-recede linear both; animation-timeline: view(); animation-range: exit 40% exit 100%; }
 }
 @keyframes live-recede { to { opacity: .2; transform: translateY(-6px) scale(.97); } }
 .live .live-latest { position: absolute; z-index: 2; bottom: 4px; left: 50%; translate: -50% 0; display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--g-solid, var(--surface)); color: var(--text); font-size: 13px; cursor: pointer;
