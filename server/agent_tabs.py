@@ -86,6 +86,8 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise RuntimeError("Tether cannot confirm that helper's conversation right now. Try again in a moment.")
     if owner:
         helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
+    elif review_links.linked_worker_threads(pane, caller['id']) - {None, helper_tabs.verified_thread(target)}:
+        raise helper_tabs.Stale('That tab changed conversations since your review started.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
     closed = undo.capture_safe(pane, run, entries)

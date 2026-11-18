@@ -195,6 +195,22 @@ class CloseHelperTabTest(unittest.TestCase):
                                                          self.run, lambda entry: {'state': 'Idle'}),
                              {'closed': '%13'})
 
+    def test_linked_reviewer_cannot_close_a_helper_that_changed_conversations(self):
+        reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
+        for bound, closes in ((HELPER, False), (None, True), (OTHER, True)):
+            with self.subTest(bound=bound), \
+                    patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%14']}), \
+                    patch.object(server.review_links, 'linked_worker_threads', return_value={bound}):
+                entries = [self.owner, dict(self.helper, thread=OTHER, codex_binding='title'), reviewer]
+                if closes:
+                    self.assertEqual(server.agent_tabs.close_tab({'pane': '%13'}, reviewer, entries, self.run,
+                                                                 lambda entry: {'state': 'Idle'}), {'closed': '%13'})
+                else:
+                    with self.assertRaises(server.helper_tabs.Stale):
+                        server.agent_tabs.close_tab({'pane': '%13'}, reviewer, entries, self.run,
+                                                    lambda entry: {'state': 'Idle'})
+                    self.assert_pane_untouched()
+
     def test_close_binds_and_closes_an_unbound_verified_helper(self):
         self.record = dict(self.record, helper_thread=None)
         self.run.options['%13'] = json.dumps(self.record)

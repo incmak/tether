@@ -425,6 +425,13 @@ def reviewed_by():
     return _reviewers()
 
 
+def linked_worker_threads(worker, reviewer):
+    """The worker conversations this reviewer's links are bound to (None: not bound yet)."""
+    with _lock:
+        return {row.get('worker_thread') for row in _read()
+                if _is_link(row) and row['worker'] == worker and row['reviewer'] == reviewer}
+
+
 def paused():
     return _reviewers(paused_only=True)
 
