@@ -59,8 +59,9 @@ export function useAutonomy(api: Api, project?: string) {
   async function save(body: Record<string, unknown>) {
     setPending(body); setError('')
     // Raising a level gives agents more power, so the server asks for a passkey approval; lowering it does not.
-    try { const saved = await withApproval<AutonomyState & { change?: LevelChange }>(api, 'autonomy', 'level-raise', body); await refresh(); return saved }
-    catch (failure) { setError(errorText(failure)); return null }
+    // Gives the reply, or the reason the write failed: an Undo shows that reason in its toast.
+    try { const saved = await withApproval<AutonomyState & { change?: LevelChange }>(api, 'autonomy', 'level-raise', body); await refresh(); return { saved } }
+    catch (failure) { const error = errorText(failure); setError(error); return { error } }
     finally { setPending(null) }
   }
   return { data, error: error || loadError, pending, save, refresh }
@@ -82,16 +83,16 @@ function LevelList({ name, levels, value, disabled, onChange }: { name: string; 
 export function GlobalAutonomy({ api }: { api: Api }) {
   const { data, error, pending, save } = useAutonomy(api)
   const value = typeof pending?.level === 'number' ? pending.level : data?.global
-  const { offer, toast } = useLevelUndo()
+  const { offer, busy, toast } = useLevelUndo()
   async function change(level: number) {
-    const change = (await save({ level }))?.change, body = undoBody(change)
-    if (change && body) offer(`Autonomy level ${levelText(change.old)} → ${level}`, `Undid: autonomy level ${level} → ${levelText(change.old)}`, async () => !!await save(body))
+    const change = (await save({ level })).saved?.change, body = undoBody(change)
+    if (change && body) offer(`Autonomy level ${levelText(change.old)} → ${level}`, `Undid: autonomy level ${level} → ${levelText(change.old)}`, async () => (await save(body)).error ?? null)
   }
   return <section className="settings-group" aria-labelledby="settings-autonomy"><h3 id="settings-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
     {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading autonomy level"><NoteBone lines={3} /><LevelBones /></SettingSkeleton> : <>
       <p className="setting-note">How often agents stop to ask you. Agents get the rules with each prompt. At every level they ask before they delete data, force-push, spend money or release.</p>
-      <LevelList name="autonomy-global" levels={data.levels} value={value ?? 2} disabled={!!pending} onChange={level => void change(level)} />
+      <LevelList name="autonomy-global" levels={data.levels} value={value ?? 2} disabled={!!pending || busy} onChange={level => void change(level)} />
     </>}
     {toast}
   </section>
@@ -103,17 +104,17 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
   const override = typeof pending?.override === 'boolean' ? pending.override : !!data?.project?.override
   const level = typeof pending?.level === 'number' ? pending.level : data?.project?.level ?? data?.global ?? 2
   const named = (n: number) => data?.levels[n] ? `${n} (${data.levels[n].name})` : `${n}`
-  const { offer, toast } = useLevelUndo()
+  const { offer, busy, toast } = useLevelUndo()
   async function change(next: number) {
-    const change = (await save({ project, override: true, level: next }))?.change, body = undoBody(change, project)
-    if (change && body) offer(`Project autonomy level ${levelText(change.old)} → ${next}`, `Undid: project autonomy level ${next} → ${levelText(change.old)}`, async () => !!await save(body))
+    const change = (await save({ project, override: true, level: next })).saved?.change, body = undoBody(change, project)
+    if (change && body) offer(`Project autonomy level ${levelText(change.old)} → ${next}`, `Undid: project autonomy level ${next} → ${levelText(change.old)}`, async () => (await save(body)).error ?? null)
   }
   return <><section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
     {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading autonomy level"><SwitchBone /><LevelBones /></SettingSkeleton> : <>
       <label className="switch-row"><span><strong>Use a project level</strong><small>{override ? `Agents here use level ${named(level)}, not the global level ${named(data.global)}.` : `Agents here use the global level ${named(data.global)}.`}</small></span>
-        <input type="checkbox" role="switch" checked={override} disabled={!!pending} onChange={event => void save({ project, override: event.target.checked, level })} /></label>
-      <LevelList name="autonomy-project" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void change(next)} />
+        <input type="checkbox" role="switch" checked={override} disabled={!!pending || busy} onChange={event => void save({ project, override: event.target.checked, level })} /></label>
+      <LevelList name="autonomy-project" levels={data.levels} value={level} disabled={!!pending || busy || !override} onChange={next => void change(next)} />
     </>}
     {toast}
   </section>

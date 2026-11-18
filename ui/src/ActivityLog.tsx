@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Bot, Calendar, FolderOpen, Monitor, RotateCw, Search, Terminal, Undo2, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api } from './api'
@@ -18,6 +18,10 @@ export interface AuditEntry {
 }
 interface Facets { kinds: { id: string; group: string; count: number }[]; projects: string[]; actors: string[] }
 interface AuditPage { entries: AuditEntry[]; next: string | null; facets?: Facets; retention_days?: number }
+/** One answer to the first-page request: the page, or why it failed (`failed`). */
+interface Answer { path: string; page?: AuditPage; failed: string }
+/** A Load more request: the query and the cursor it continues, and why it failed ('' while it runs). */
+interface More { path: string; cursor: string; failed: string }
 
 const AUDIT_GROUPS: [string, string][] = [['settings', 'Settings'], ['tabs', 'Tabs'], ['reviews', 'Reviews'], ['backlog', 'Backlog'], ['lessons', 'Lessons'], ['advisor', 'Advisor'], ['approvals', 'Approvals']]
 const GROUP_OF: Record<string, string> = { setting: 'settings', passkey: 'settings', tab: 'tabs', review: 'reviews', backlog: 'backlog', lesson: 'lessons', advisor: 'advisor', approval: 'approvals' }
@@ -101,17 +105,22 @@ export function ActivityLog({ api }: { api: Api }) {
   // The list after Load more, for one query. A filter change drops it, so the list starts again at the newest entry.
   const [loaded, setLoaded] = useState<{ path: string; entries: AuditEntry[]; next: string | null } | null>(null)
   const [text, setText] = useState('')
+  // The Load more request that runs or failed. It belongs to one list (query) and one cursor.
+  const [more, setMore] = useState<More | null>(null)
   // Typing waits 250 ms before it asks the server, so each key does not send a request.
-  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { setLoaded(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
+  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { setLoaded(null); setMore(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
   const path = queryOf(filters)
-  const current = useRef(path)
-  useEffect(() => { current.current = path }, [path])
-  // Each page carries the query that asked for it: a page for the last filter must not show under this one.
-  const fetcher = useCallback((signal: AbortSignal) => api<AuditPage>(path, undefined, signal).then(page => ({ path, page })), [api, path])
-  const { data, error, refresh } = usePolling(fetcher, 20000)
-  const live = data?.path === path ? data.page : undefined
-  const [moreError, setMoreError] = useState('')
-  const [loadingMore, setLoadingMore] = useState(false)
+  // Each answer carries the query that asked for it, and a failure is an answer too: a page or an error for the last
+  // filter must not show under this one.
+  const fetcher = useCallback((signal: AbortSignal) => api<AuditPage>(path, undefined, signal).then(
+    (page): Answer => ({ path, page, failed: '' }),
+    (failure: unknown): Answer => { if (signal.aborted) throw failure; return { path, failed: errorText(failure) || 'The server did not answer.' } }), [api, path])
+  const { data, refresh } = usePolling(fetcher, 20000)
+  // The last page that loaded. A failed reload keeps it on screen, under the error.
+  const [kept, setKept] = useState<{ path: string; page: AuditPage } | null>(null)
+  if (data?.page && data.page !== kept?.page) setKept({ path: data.path, page: data.page })
+  const live = kept?.path === path ? kept.page : undefined
+  const error = data?.path === path ? data.failed : ''
   // The filter lists come from the first page; keep the last ones while a new filter loads.
   const [facets, setFacets] = useState<Facets | null>(null)
   if (live?.facets && live.facets !== facets) setFacets(live.facets)
@@ -128,26 +137,31 @@ export function ActivityLog({ api }: { api: Api }) {
   }
   const entries = useMemo(() => list ? list.entries : live?.entries ?? [], [list, live])
   const next = list ? list.next : live?.next ?? null
-  async function more() {
-    if (!next || !live) return
-    const asked = path, start = list ?? { path, entries: live.entries, next }
-    setLoadingMore(true); setMoreError('')
+  // Show only the request for the list and the cursor on screen: after a filter change or a reset it is old.
+  const asking = more && more.path === path && more.cursor === next ? more : null
+  async function loadMore() {
+    if (!next || !live || (asking && !asking.failed)) return
+    const asked: More = { path, cursor: next, failed: '' }
+    // From now on, reloads merge into this list, so its cursor stays the one this request continues.
+    if (!list) setLoaded({ path, entries: live.entries, next })
+    setMore(asked)
     try {
       const page = await api<AuditPage>(queryOf(filters, next))
-      if (current.current !== asked) return  // the filter changed while the page loaded
-      setLoaded(before => {
-        const base = before?.path === asked ? before : start
-        return { path: asked, entries: merged(base.entries, page.entries), next: page.next }
-      })
-    } catch (failure) { setMoreError(errorText(failure)) }
-    finally { setLoadingMore(false) }
+      // Add the page only to the list it continues. A filter change or a reset dropped that list: then drop the page.
+      setLoaded(before => before && before.path === asked.path && before.next === asked.cursor
+        ? { path: asked.path, entries: merged(before.entries, page.entries), next: page.next } : before)
+      setMore(current => current === asked ? null : current)
+    } catch (failure) {
+      const failed = errorText(failure) || 'The server did not answer.'
+      setMore(current => current === asked ? { ...asked, failed } : current)
+    }
   }
   const filtered = filters.text.trim() !== '' || filters.group !== ANY || filters.project !== ANY || filters.actor !== ANY || !!filters.from || !!filters.to
-  const set = (change: Partial<Filters>) => { setLoaded(null); setFilters(current => ({ ...current, ...change })) }
-  const clear = () => { setLoaded(null); setText(''); setFilters(NONE) }
+  const set = (change: Partial<Filters>) => { setLoaded(null); setMore(null); setFilters(current => ({ ...current, ...change })) }
+  const clear = () => { setLoaded(null); setMore(null); setText(''); setFilters(NONE) }
   const projects = facets?.projects ?? []
   const actors = facets?.actors ?? []
-  const days = live?.retention_days ?? data?.page.retention_days ?? 90
+  const days = live?.retention_days ?? kept?.page.retention_days ?? 90
   const today = new Date(); const max = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
 
   let body
@@ -172,8 +186,8 @@ export function ActivityLog({ api }: { api: Api }) {
       <h4>{dayHeading(group[0].at)}</h4>
       <ul className="audit-list">{group.map(entry => <Row key={entry.id} entry={entry} />)}</ul>
     </li>)}</ol>
-    {moreError && <p className="error" role="alert">{moreError}</p>}
-    {next ? <button type="button" className="secondary audit-more" disabled={loadingMore} onClick={() => void more()}>{loadingMore ? 'Loading…' : moreError ? 'Try again' : 'Load more'}</button>
+    {asking?.failed && <p className="error" role="alert">Could not load more. {asking.failed}</p>}
+    {next ? <button type="button" className="secondary audit-more" disabled={!!asking && !asking.failed} onClick={() => void loadMore()}>{asking ? asking.failed ? 'Try again' : 'Loading…' : 'Load more'}</button>
       : <p className="setting-note audit-end">{filtered ? 'End of the matching activity.' : `That is all. Tether keeps ${days} days.`}</p>}
   </>
 

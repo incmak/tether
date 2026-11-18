@@ -66,13 +66,41 @@ const fixture = {
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, 'push/config': { enabled: false },
+  // The Project sheet (Project.tsx) for the project Undo check.
+  'projects/project': { id: 'a1b2c3d4e5f6', name: 'web', revision: 1, budget: 10000, budget_min: 1000, budget_max: 10000, usable_budget_max: 9000,
+    instructions: '', pins: [], notes: [], preview: 'Built-in guidance.\n', chars: 0, fixed_chars: 19, folder: '/srv/projects/a1b2c3d4e5f6', session_name: 'web' },
+  'projects/advisor-log': { entries: [], keep: 200 },
+  'claude-advisor': { models: [{ model: 'off', name: 'Off', summary: 'Tether adds no advisor.' }], global: 'off', model: 'off', source: 'global', project: { override: false, model: 'off' }, user_setting: null, problems: {} },
+  'commit-gate': { modes: [{ mode: 'observe', name: 'Observe', summary: 'Report commits that would be blocked.' }], global: 'observe', mode: 'observe', source: 'global', project: { override: false, mode: 'observe' }, stats: { days: 7, commits: 0, passed: 0, would_block: 0, blocked: 0, let_through: 0, unknown: 0, stamped: 0, unstamped: 0, false_blocks: 0, rate: null }, max_blocks: 3 },
 }
 
 async function main() {
-  let browser, page, server, failed = 0
+  let browser, page, server, failed = 0, finished = false
   const pageErrors = [], unexpected = new Set(), asks = [], posts = []
-  let mode = 'rows'  // rows | empty | error | slow
-  let all = entries(), level = 3, rev = 0, autonomy = 4
+  let mode = 'rows'  // rows | empty | error
+  let all = entries(), level = 3, rev = 0, autonomy = 4, projectCodex = { override: false, level: 3 }
+  // A request the test holds: `seen` resolves when it arrives, and it is answered only on `release()`, or with
+  // release({ status, json }) instead. The test waits on these events, never on a timer.
+  const gates = []
+  const hold = match => {
+    let arrived, open
+    const seen = new Promise(resolve => { arrived = resolve }), opened = new Promise(resolve => { open = resolve })
+    gates.push({ match, arrived, opened })
+    // A request that never comes fails the run after 10 s, like a Playwright wait; it does not hang it.
+    const late = new Promise((resolve, reject) => { setTimeout(() => reject(new Error('A held request did not come within 10 s')), 10000).unref() })
+    return { seen: Promise.race([seen, late]), release: reply => open(reply || null) }
+  }
+  const gated = async (request, url) => {
+    const at = gates.findIndex(gate => gate.match(request, url))
+    if (at < 0) return null
+    const [gate] = gates.splice(at, 1)
+    gate.arrived()
+    return gate.opened
+  }
+  const isAudit = (url, test = () => true) => url.pathname.endsWith('/api/audit') && test(url.searchParams)
+  const isUndo = (name, request) => request.method() === 'POST' && request.url().includes(`/api/${name}`) && !!request.postDataJSON()?.undo
+  // Lets the page finish the answer it just got: two frames after the request ended.
+  const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -108,17 +136,26 @@ async function main() {
         if (endpoint === 'audit') {
           if (request.method() !== 'GET') { unexpected.add(`${request.method()} audit`); return route.fulfill({ status: 405, json: { error: 'read only' } }) }
           asks.push(url.searchParams)
+          const reply = await gated(request, url)
+          if (reply) return route.fulfill(reply)
           if (mode === 'error') return route.fulfill({ status: 500, json: { error: 'Tether could not read the audit log.' } })
-          if (mode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500))
           return route.fulfill({ json: query(mode === 'empty' ? [] : all, url.searchParams) })
         }
         if (endpoint === 'codex-level') {
           if (request.method() === 'POST') {
             const body = request.postDataJSON()
             posts.push({ body, client: request.headers()['x-tether-client'] })
+            const reply = await gated(request, url)
+            if (reply) return route.fulfill(reply)
             // Like server/codex_level.py: an Undo must send the revision of its change, or the server refuses it.
             if (body.undo && body.revision !== `r${rev}`) return route.fulfill({ status: 409, json: { error: 'The level changed after this change. Undo would overwrite the newer value, so Tether did not change it.' } })
             // With server/audit.py: one record per change, "Undo: " for the toast's undo.
+            if (body.project) {
+              const old = { ...projectCodex }
+              projectCodex = { override: body.override, level: body.level }
+              rev++
+              return route.fulfill({ json: { ...codex(level), source: projectCodex.override ? 'project' : 'global', project: projectCodex, change: { old, new: { ...projectCodex }, revision: `r${rev}` } } })
+            }
             const old = level
             if (typeof body.level === 'number' && body.level !== level) {
               const at = Date.now() / 1000
@@ -128,12 +165,14 @@ async function main() {
             rev++
             return route.fulfill({ json: { ...codex(level), change: { old, new: level, revision: `r${rev}` } } })
           }
-          return route.fulfill({ json: codex(level) })
+          return route.fulfill({ json: url.searchParams.get('project') ? { ...codex(level), project: projectCodex } : codex(level) })
         }
         if (endpoint === 'autonomy') {
           if (request.method() === 'POST') {
             const body = request.postDataJSON()
             posts.push({ body, client: request.headers()['x-tether-client'], endpoint })
+            const reply = await gated(request, url)
+            if (reply) return route.fulfill(reply)
             const old = autonomy
             autonomy = body.level
             return route.fulfill({ json: { ...autonomyState(autonomy), change: { old, new: autonomy, revision: 'a1' } } })
@@ -196,11 +235,11 @@ async function main() {
       all = entries(); level = 3; autonomy = 4; posts.length = 0
 
       // Loading, then rows: newest first, the actor in words, old → new, the Undo mark.
-      mode = 'slow'
+      const initial = hold((request, url) => isAudit(url))
       await open(width)
-      await section.waitFor()
+      await initial.seen
       check(`${at} loading skeleton announces itself`, (await section.getByText('Loading the activity log').count()) > 0)
-      mode = 'rows'
+      initial.release()
       await section.locator('.audit-row').first().waitFor()
       const rows = section.locator('.audit-row')
       check(`${at} first page has 50 rows`, await rows.count() === 50, String(await rows.count()))
@@ -262,17 +301,69 @@ async function main() {
       const after = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
       check(`${at} a refresh with a gap starts again at the newest page`, after.length === 50 && after[0] === 'Burst 54' && after[49] === 'Burst 5', `${after.length} ${after[0]} ${after[after.length - 1]}`)
       check(`${at} after a gap, Load more is back`, await section.getByRole('button', { name: 'Load more' }).isVisible())
+      // B56 review 3: a Load more still on its way when a refresh resets the list adds nothing. Twice: from the first
+      // page, and from a list that already has two pages.
+      const search = section.getByRole('searchbox', { name: 'Search the activity log' })
+      const loadMore = section.locator('.audit-more')
+      const summaries = () => rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
+      const refreshNow = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+      for (const pages of [1, 2]) {
+        if (pages === 2) {
+          await loadMore.click()
+          await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 100)
+        }
+        const held = hold((request, url) => isAudit(url, params => !!params.get('before')))
+        await loadMore.click()
+        await held.seen
+        const stamp = Date.now() / 1000 + 300 + pages * 100
+        all = [...Array.from({ length: 55 }, (_, n) => ({ id: id(stamp + n, 3000 + pages * 100 + n), at: stamp + n, kind: 'tab.start', summary: `Gap ${pages}-${n}`, actor: ui })).reverse(), ...all]
+        await refreshNow()
+        await rows.first().filter({ hasText: `Gap ${pages}-54` }).waitFor()
+        const ended = page.waitForEvent('requestfinished', request => request.url().includes('before='))
+        held.release()
+        await ended; await settle()
+        const kept = await summaries()
+        check(`${at} a Load more from ${pages} page(s) that ends after a reset adds nothing`, kept.length === 50 && kept[0] === `Gap ${pages}-54` && kept[49] === `Gap ${pages}-5`, `${kept.length} ${kept[0]} ${kept[kept.length - 1]}`)
+        check(`${at} after that, Load more works (${pages})`, await loadMore.innerText() === 'Load more' && await loadMore.isEnabled())
+      }
+      // A failed Load more shows its error only under its own list. (a) It fails, then the filter changes.
+      const failure = { status: 500, json: { error: 'Tether could not read the older page.' } }
+      const moreAlert = section.getByRole('alert').filter({ hasText: 'Tether could not read the older page.' })
+      let heldPage = hold((request, url) => isAudit(url, params => !!params.get('before')))
+      await loadMore.click()
+      await heldPage.seen
+      heldPage.release(failure)
+      await moreAlert.waitFor()
+      check(`${at} a failed Load more says why and offers Try again`, (await moreAlert.innerText()).includes('Could not load more. Tether could not read the older page.') && await loadMore.innerText() === 'Try again')
+      await search.fill('Round two')
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
+      check(`${at} the Load more error does not follow to the next filter`, await moreAlert.count() === 0)
+      // (b) The filter changes while the page is on its way, then the page fails.
+      await search.fill('')
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
+      heldPage = hold((request, url) => isAudit(url, params => !!params.get('before')))
+      await loadMore.click()
+      await heldPage.seen
+      await search.fill('Round two')
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
+      const failedLate = page.waitForEvent('requestfinished', request => request.url().includes('before='))
+      heldPage.release(failure)
+      await failedLate; await settle()
+      check(`${at} a page that fails after a filter change shows no error`, await moreAlert.count() === 0)
+      await search.fill('')
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
       // A filter whose reply is slow: the old list and its Load more must not show under the new filter.
-      mode = 'slow'
+      const slow = hold((request, url) => isAudit(url, params => params.get('q') === 'Round two'))
       await section.getByRole('searchbox', { name: 'Search the activity log' }).fill('Round two')
+      await slow.seen
       await page.waitForFunction(() => document.querySelector('section.activity-log .skeleton, section.activity-log [aria-busy="true"]') || !document.querySelector('section.activity-log .audit-row'))
       check(`${at} while a filter loads, no old rows and no Load more`, await rows.count() === 0 && await section.getByRole('button', { name: 'Load more' }).count() === 0 && await section.locator('.audit-end').count() === 0)
-      mode = 'rows'
+      slow.release()
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
       check(`${at} the slow filter shows only its match`, (await rows.nth(0).innerText()).includes('Round two'))
       await section.getByRole('searchbox', { name: 'Search the activity log' }).fill('')
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
-      all = all.filter(entry => !/^(Fresh tab|Round|Burst) /.test(entry.summary))
+      all = all.filter(entry => !/^(Fresh tab|Round|Burst|Gap) /.test(entry.summary))
 
       // Search: one request after typing stops, and it starts again at the newest entry.
       const before = asks.length
@@ -324,6 +415,17 @@ async function main() {
       await section.getByRole('button', { name: 'Retry' }).click()
       await section.locator('.audit-row').first().waitFor()
       check(`${at} Retry loads the rows`, await rows.count() === 50)
+      // A failed refresh keeps the rows under an error; the next filter must not show that error while it loads.
+      mode = 'error'
+      await refreshNow()
+      await section.getByRole('alert').filter({ hasText: 'Could not refresh' }).waitFor()
+      const nextFilter = hold((request, url) => isAudit(url, params => params.get('q') === 'autonomy'))
+      await search.fill('autonomy')
+      await nextFilter.seen
+      check(`${at} a refresh error does not show under the next filter`, await section.getByRole('alert').count() === 0)
+      mode = 'rows'
+      nextFilter.release()
+      await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
 
       // The Undo toast after a Codex level change, inside the open Settings sheet. Undo sends the old level with undo: true.
       await open(width, 'codex level')
@@ -369,7 +471,9 @@ async function main() {
       await page.locator('dialog[open] section[aria-labelledby="settings-codex"] .error').waitFor()
       check(`${at} a stale Undo sends the old revision and is refused`, posts[sent]?.body.level === 4 && posts[sent].body.revision === `r${rev - 2}` && level === 1, JSON.stringify(posts[sent]))
       check(`${at} a refused Undo says why`, (await page.locator('dialog[open] section[aria-labelledby="settings-codex"] .error').innerText()).includes('The level changed after this change'))
-      check(`${at} a refused Undo leaves no toast`, await page.locator('dialog[open] .undo-toast').count() === 0)
+      check(`${at} a refused Undo says why in its toast`, (await toast.getByRole('alert').innerText()).includes('Could not undo. The level changed after this change') && await toast.getByRole('button', { name: 'Undo' }).count() === 0)
+      await shot(`toast-failed-${width}`, toast)
+      await toast.getByRole('button', { name: 'Dismiss' }).click()
 
       // One sheet, one toast: an autonomy change, then a Codex change, leave only the Codex offer.
       await open(width, 'level')
@@ -379,6 +483,95 @@ async function main() {
       await page.locator('label', { has: page.locator('input[name="codex-level-global"][value="2"]') }).click()
       await page.locator('dialog[open] .undo-toast', { hasText: 'Codex level 1 → 2' }).waitFor()
       check(`${at} a second change replaces the first offer: one toast`, await page.locator('dialog[open] .undo-toast').count() === 1)
+      level = 3; rev++
+
+      // B56 review 3: while an Undo is on its way, the level controls wait, so no newer change can cross it.
+      const codexInput = value => page.locator(`input[name="codex-level-global"][value="${value}"]`)
+      const codexPick = value => page.locator('label', { has: codexInput(value) }).click()
+      await open(width, 'level')
+      await page.locator('input[name="codex-level-global"][value="3"]:checked').waitFor({ state: 'attached' })
+      await codexPick(1)
+      await toast.getByText('Codex level 3 → 1').waitFor()
+      let heldUndo = hold(request => isUndo('codex-level', request))
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await heldUndo.seen
+      check(`${at} while an Undo runs, the Codex and autonomy levels wait`, await codexInput(2).isDisabled() && await page.locator('input[name="autonomy-global"][value="2"]').isDisabled())
+      check(`${at} the running Undo says so`, await toast.getByRole('button', { name: 'Undoing…' }).isDisabled())
+      heldUndo.release()
+      await toast.getByText('Undid: Codex level 1 → 3').waitFor()
+      check(`${at} after the Undo, the levels work again`, await codexInput(2).isEnabled() && await page.locator('input[name="autonomy-global"][value="2"]').isEnabled())
+      // Dismissed while its Undo runs: the answer does not bring the toast back.
+      await codexPick(1)
+      await toast.getByText('Codex level 3 → 1').waitFor()
+      heldUndo = hold(request => isUndo('codex-level', request))
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await heldUndo.seen
+      await toast.getByRole('button', { name: 'Dismiss' }).click()
+      const undoEnded = page.waitForEvent('requestfinished', request => isUndo('codex-level', request))
+      heldUndo.release()
+      await undoEnded; await settle()
+      check(`${at} an Undo dismissed while it runs shows no toast after`, await page.locator('dialog[open] .undo-toast').count() === 0 && level === 3)
+      // The setting left the screen (search moved to the log). A refused Undo still says why; a good one still says Undid.
+      await codexPick(1)
+      await toast.getByText('Codex level 3 → 1').waitFor()
+      await page.getByPlaceholder(/Search settings/).fill('activity log')
+      await section.locator('.audit-row').first().waitFor()
+      level = 2; rev++  // another device
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await toast.getByRole('alert').waitFor()
+      check(`${at} away from the setting, a refused Undo says why`, (await toast.getByRole('alert').innerText()).includes('Could not undo. The level changed after this change') && await page.locator('dialog[open] section[aria-labelledby="settings-codex"]').count() === 0)
+      await toast.getByRole('button', { name: 'Dismiss' }).click()
+      await page.getByPlaceholder(/Search settings/).fill('level')
+      await page.locator('input[name="codex-level-global"][value="2"]:checked').waitFor({ state: 'attached' })
+      await codexPick(1)
+      await toast.getByText('Codex level 2 → 1').waitFor()
+      await page.getByPlaceholder(/Search settings/).fill('activity log')
+      await section.locator('.audit-row').first().waitFor()
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await toast.getByText('Undid: Codex level 1 → 2').waitFor()
+      check(`${at} away from the setting, a good Undo says Undid`, level === 2)
+      // An autonomy Undo that the server refuses for another reason: the toast says that reason.
+      await page.getByPlaceholder(/Search settings/).fill('level')
+      await page.locator('input[name="autonomy-global"][value="3"]:checked').waitFor({ state: 'attached' })
+      await page.locator('label', { has: page.locator('input[name="autonomy-global"][value="2"]') }).click()
+      await toast.getByText('Autonomy level 3 → 2').waitFor()
+      heldUndo = hold(request => isUndo('autonomy', request))
+      await toast.getByRole('button', { name: 'Undo' }).click()
+      await heldUndo.seen
+      heldUndo.release({ status: 500, json: { error: 'Tether could not save the autonomy level.' } })
+      await toast.getByRole('alert').waitFor()
+      check(`${at} a failed autonomy Undo says why in its toast`, (await toast.getByRole('alert').innerText()).includes('Could not undo. Tether could not save the autonomy level.'))
+      await toast.getByRole('button', { name: 'Dismiss' }).click()
+
+      // The Project sheet: a project Codex level from "global" offers Undo back to global (override off).
+      projectCodex = { override: false, level: 3 }
+      await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+      await page.getByRole('button', { name: /^Session, .* and keys$/ }).first().click()
+      await page.getByRole('button', { name: 'Session options' }).click()
+      await page.getByRole('button', { name: 'Project…' }).click()
+      const sheet = page.locator('dialog.project-sheet')
+      await sheet.locator('section[aria-labelledby="project-codex"] input[role="switch"]').waitFor()
+      const projectSwitch = sheet.locator('section[aria-labelledby="project-codex"] input[role="switch"]')
+      const projectPick = value => sheet.locator('label', { has: page.locator(`input[name="codex-level-project"][value="${value}"]`) }).click()
+      const projectToast = sheet.locator('.undo-toast')
+      // Twice: the server still had the project on "global" (another device turned it off), and a plain project level.
+      for (const [server, from, pick, old] of [[false, 'global', 1, { override: false, level: 3 }], [true, '3', 2, { override: true, level: 3 }]]) {
+        await projectSwitch.check()
+        await page.waitForFunction(() => !document.querySelector('dialog.project-sheet input[name="codex-level-project"][value="1"]')?.matches(':disabled'))
+        projectCodex = { override: server, level: 3 }
+        await projectPick(pick)
+        await projectToast.getByText(`Project Codex level ${from} → ${pick}`).waitFor()
+        check(`${at} the project toast is in the Project sheet and on screen (${from})`, await projectToast.evaluate(el => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!el.closest('dialog.project-sheet') && !!hit && el.contains(hit) }))
+        if (!server) await shot(`project-toast-${width}`, projectToast)
+        await projectToast.getByRole('button', { name: 'Undo' }).click()
+        await projectToast.getByText(`Undid: project Codex level ${pick} → ${from}`).waitFor()
+        const projectUndo = posts[posts.length - 1].body
+        check(`${at} the project Undo sends back ${from}`, projectUndo.project === 'a1b2c3d4e5f6' && projectUndo.override === old.override && projectUndo.level === old.level && projectUndo.undo === true && projectUndo.revision === `r${rev - 1}`
+          && projectCodex.override === old.override && projectCodex.level === old.level, JSON.stringify(projectUndo))
+        await projectToast.getByRole('button', { name: 'Dismiss' }).click()
+        if (server) await projectSwitch.uncheck()
+        await page.waitForFunction(() => document.querySelector('dialog.project-sheet input[name="codex-level-project"][value="1"]')?.matches(':disabled'))
+      }
       level = 3; rev++
     }
     // WCAG 2.2.1: the toast that offers Undo has no time limit. A fake clock moves 60 s on; it runs last, so no other
@@ -397,7 +590,10 @@ async function main() {
     check('the Undid note goes after 8 s', true)
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
     check('no writes or requests outside the fixtures', !unexpected.size, [...unexpected].join(', '))
+    finished = true
   } finally {
+    if (pageErrors.length) console.log(`page errors: ${pageErrors.join('; ')}`)
+    if (page && (!finished || failed)) await page.screenshot({ path: path.join(SHOTS, 'last-failure.png') }).catch(() => {})
     if (page) await page.close().catch(() => {})
     if (browser && !process.env.TETHER_CDP_URL) await browser.close().catch(() => {})
     if (server) server.close()
