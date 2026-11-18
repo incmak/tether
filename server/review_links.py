@@ -53,6 +53,8 @@ START_WAIT = 300
 AGENT_PROMPT_TTL = 600  # an agent prompt that started no turn in 10 minutes no longer blocks Mak's restart
 SEND_GAP = 6
 TRANSCRIPT_TAIL_BYTES = 256 * 1024
+PENDING_IDLE_TICKS = 150  # about five minutes of Idle polls with an incomplete reply
+REPLY_PENDING = object()  # the request reached the transcript and its turn has yet to end
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _lock = threading.Lock()
 _last_sent = {}
@@ -117,7 +119,7 @@ def _sanitize(row):
     row = dict(row)
     for fields, check in (
         ((*COUNTS, 'limit', 'grant_rounds', 'parent_missing', 'confirm_ticks', 'lost_ticks', 'idle_ticks',
-          'scope_ticks', 'verify_ticks'), lambda value: type(value) is int and value >= 0),
+          'pending_idle_ticks', 'scope_ticks', 'verify_ticks'), lambda value: type(value) is int and value >= 0),
         (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
          lambda value: type(value) in (int, float)),
         (('unreadable', 'pending_reset', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
@@ -656,13 +658,10 @@ INTRO = ('Review its work: check the changes and the claims, then list what is w
          'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab.')
 
 
-def request_pattern(request_id):
-    """Matches the head of the review request with this id, as Tether sends it: the tab line, the fixed instructions
-    and the id. Text may come before it (a working-directory note), and spaces may differ. A message that only quotes
-    the id, or only starts like a request, does not match."""
-    words = r'\s+'.join(re.escape(word) for word in INTRO.split())
-    return re.compile(r'\[Tether review\]\s+The\s+\S+\s+tab\s+“.{0,300}?”\s+\(%[0-9]+\)\s+finished\s+a\s+turn\.\s+'
-                      + words + r'\s+Review\s+id:\s+' + re.escape(request_id) + r'\.', re.S)
+# Match the request's tab line, fixed instructions and id. Allow a folder note and wrapped whitespace.
+REQUEST_PATTERN = re.compile(
+    r'\[Tether review\]\s+The\s+\S+\s+tab\s+“.{0,300}?”\s+\(%[0-9]+\)\s+finished\s+a\s+turn\.\s+'
+    + r'\s+'.join(re.escape(word) for word in INTRO.split()) + r'\s+Review\s+id:\s+([0-9a-f]{8})\.', re.S)
 
 
 def _committed_since_approval(link, worker, scope):
@@ -1196,16 +1195,23 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         reviewer_state = status(reviewer)['state']
         anchored = review_reply is not None and link.get('request_id')
         reply = review_reply(reviewer, link['request_id']) if anchored and reviewer_state == 'Idle' else None
+        pending = reply is REPLY_PENDING
         if reviewer_state == 'Working':
             link['reviewer_seen_working'] = True
-        elif reviewer_state == 'Idle' and link.pop('reviewer_busy_send', False) and not anchored:
+            link.pop('pending_idle_ticks', None)
+        elif reviewer_state == 'Idle' and not pending and link.pop('reviewer_busy_send', False) and not anchored:
             return link
         elif reviewer_state == 'Idle' and (
-                anchored and not reply or not anchored and not link.get('reviewer_seen_working', False)
+                pending or anchored and not reply or not anchored and not link.get('reviewer_seen_working', False)
                 and _digest(last_reply(reviewer)) == link.get('reviewer_before')):
-            # No turn seen yet. A turn shorter than one tick still changes the last reply; none for 30 ticks: give up.
-            link['idle_ticks'] = link.get('idle_ticks', 0) + 1
-            if link['idle_ticks'] >= 30:
+            if pending:
+                # The transcript has the request. Give its turn longer to finish or show Working again.
+                link.pop('idle_ticks', None)
+                counter, limit = 'pending_idle_ticks', PENDING_IDLE_TICKS
+            else:
+                counter, limit = 'idle_ticks', 30
+            link[counter] = link.get(counter, 0) + 1
+            if link[counter] >= limit:
                 if anchored:
                     link['stalled'] = link['request_id']
                     latest = last_reply(reviewer)
@@ -1344,7 +1350,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     mentioned = MENTIONED_COMMIT.search(reply)
                     reply_effect['verdict'] = approved, named or (mentioned[1].lower() if mentioned else None)
         if not link['awaiting']:
-            for key in ('wait_ticks', 'idle_ticks', 'reviewer_before', 'reviewer_seen_working',
+            for key in ('wait_ticks', 'idle_ticks', 'pending_idle_ticks', 'reviewer_before', 'reviewer_seen_working',
                         'retries', 'request_id', 'send_reply', 'verify_ticks'):
                 link.pop(key, None)
         return link
@@ -1465,6 +1471,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         if delivered:
             link.pop('stalled', None)
             link.pop('stalled_reply', None)
+            link.pop('pending_idle_ticks', None)
             link.pop('send_reply', None)
             link['request_id'] = request_id
             link.pop('stale_commit', None)

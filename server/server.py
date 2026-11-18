@@ -1319,39 +1319,90 @@ def snapshot(config=None):
 
 
 def last_reply(entry):
-    """The most recent assistant text for a review request; missing history is harmless."""
+    """The most recent assistant prose for review prompts and stalled review recovery."""
     try:
         for message in reversed(snapshot(entry)['messages']):
             text = message.get('text')
-            if message.get('role') == 'assistant' and message.get('kind') != 'advisor' and isinstance(text, str) and text.strip():
+            if (message.get('role') == 'assistant' and not message.get('kind')
+                    and message.get('phase') != 'commentary' and isinstance(text, str) and text.strip()):
                 return text
     except Exception:
         pass
     return ''
 
 
-def review_reply(entry, request_id):
-    """The last assistant text in the turn anchored by this review request.
+def _end_review_turn(state, text=''):
+    current = state.pop('current', None)
+    if current is not None:
+        state['replies'][current] = text
+    state['draft'] = ''
 
-    The anchor is the request itself: the last message that holds the head of the request with this id, as Tether
-    sends it (review_links.request_pattern). A request for a busy tab is in the transcript twice, and a note may
-    come before it. A later message that only quotes the id or starts like a request (a follow-up question, pasted
-    text) is not the request, and its answer is not the review."""
+
+def _review_record(state, index, record, agent):
+    """Read prompts and final text from native records. Chat rows also contain activity and compact summaries."""
+    messages = []
+    if agent == 'claude':
+        if any(record.get(flag) for flag in ('isSidechain', 'isMeta', 'isCompactSummary', 'isAutoCompactSummary')):
+            return
+        kind = record.get('type')
+        if kind == 'system' and record.get('subtype') == 'turn_duration':
+            # A model's end_turn can still be followed by a blocking Stop hook.
+            _end_review_turn(state, state['draft'])
+            return
+        if kind == 'attachment' and (record.get('attachment') or {}).get('type') == 'hook_blocking_error':
+            state['draft'] = ''
+            return
+        if kind == 'assistant':
+            if ('current' not in state or (record.get('message') or {}).get('stop_reason')
+                    not in ('end_turn', 'stop_sequence')):
+                return
+        elif not agents.person_prompt(record):
+            return
+        claude_consume(messages, index, record, display_text)
+    else:
+        payload = record.get('payload') or {}
+        kind = payload.get('type')
+        if record.get('type') == 'event_msg':
+            if payload.get('root_turn_id', payload.get('turn_id')) == payload.get('turn_id'):
+                if kind == 'task_complete':
+                    _end_review_turn(state, state['draft'])
+                elif kind in ('task_started', 'turn_aborted'):
+                    _end_review_turn(state)
+            return
+        if record.get('type') != 'response_item' or kind != 'message':
+            return
+        if payload.get('role') == 'assistant' and (
+                'current' not in state or payload.get('phase') not in (None, 'final_answer')):
+            return
+        codex_consume({'messages': messages}, index, record)
+
+    for message in messages:
+        if message.get('kind'):
+            continue
+        text = message['text']
+        if message['role'] == 'user':
+            _end_review_turn(state)
+            if request := review_links.REQUEST_PATTERN.search(text):
+                # A queued request may occur twice. The last delivery with the same id owns the reply.
+                current = state['current'] = request[1]
+                replies = state['replies']
+                replies.pop(current, None)
+                replies[current] = review_links.REPLY_PENDING
+                if len(replies) > review_links.MAX_LINKS:
+                    replies.pop(next(iter(replies)))
+        elif 'current' in state and text.strip():
+            state['draft'] = text
+
+
+def review_reply(entry, request_id):
+    """Return this request's completed verdict, or distinguish a pending turn from missing or empty history."""
     try:
-        messages = snapshot(entry)['messages']
-        request = review_links.request_pattern(request_id)
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            text = message.get('text')
-            if message.get('role') == 'user' and isinstance(text, str) and request.search(text):
-                reply = ''
-                for message in messages[index + 1:]:
-                    if message.get('role') == 'user':
-                        break
-                    text = message.get('text')
-                    if message.get('role') == 'assistant' and message.get('kind') != 'advisor' and isinstance(text, str) and text.strip():
-                        reply = text
-                return reply
+        agent = entry.get('agent')
+        if agent in ('claude', 'codex') and not entry.get('ambiguous'):
+            state = history.read(entry['transcript'], lambda: {'replies': {}, 'draft': ''},
+                                 lambda state, index, record: _review_record(state, index, record, agent),
+                                 trim=False, namespace=('review', agent))
+            return state['replies'].get(request_id)
     except Exception:
         pass
     return None

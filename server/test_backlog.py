@@ -339,6 +339,7 @@ class BacklogTests(unittest.TestCase):
         self.assertNotIn('BACKLOG.md', text)
 
     def test_a_tab_sees_its_open_items_and_the_preview_does_not(self):
+        projects.set_budget('a1b2c3d4e5f6', projects.BUDGET_MAX, 0)  # checkout paths count toward the prompt budget
         backlog.save('- [ ] Mine\n\n## tether\n' + ''.join(f'- [ ] Item {at}\n' for at in range(6)) + '\n## other\n- [ ] Secret\n', backlog.read()['version'])
         text = projects.render('a1b2c3d4e5f6', backlog_project='tether')
         self.assertIn('### Open backlog items (7)\n- B1 Mine\n- B2 Item 0\n', text)

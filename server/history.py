@@ -38,21 +38,22 @@ def keep_tail(state):
         state['dropped'] += excess
 
 
-def read(path, fresh, consume, trim=None):
+def read(path, fresh, consume, trim=None, *, namespace=None):
     """Bring the cached state for `path` up to date and return it.
 
     `fresh()` builds an empty state; `consume(state, index, record)` folds one decoded record in, where `index`
     is the record's zero-based line number; `trim(state)` bounds its size after each read. The returned state is
-    shared: callers must copy before changing it.
+    shared: callers must copy before changing it. Use a namespace to keep a second parser's state for the same file.
     """
     path = str(path)
+    key = path if namespace is None else (path, namespace)
     trim = keep_tail if trim is None else trim  # looked up now, so it can be replaced; pass False to disable
     try:
         info = os.stat(path)
     except (OSError, TypeError):
         return fresh()
     with _lock_for(path):
-        cached = _states.get(path)
+        cached = _states.get(key)
         if cached and (cached['inode'] != info.st_ino or info.st_size < cached['offset']):
             cached = None  # replaced or truncated: start over
         if cached is None:
@@ -90,8 +91,8 @@ def read(path, fresh, consume, trim=None):
             if trim:
                 trim(cached['state'])
         with _registry_lock:
-            _states.pop(path, None)
-            _states[path] = cached  # most recently used goes last
+            _states.pop(key, None)
+            _states[key] = cached  # most recently used goes last
             while len(_states) > MAX_FILES:
                 oldest = next(iter(_states))
                 _states.pop(oldest)

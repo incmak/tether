@@ -32,6 +32,18 @@ FINDINGS = 'Still broken: the lock is not released.'
 REVIEW_REQUEST = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
                   r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
                   r'( This is the last round: your reply stays here\.)?\s*$')
+CLAUDE_DONE = {'type': 'system', 'subtype': 'turn_duration'}
+
+
+def claude_final(text):
+    record = claude('assistant', text)
+    record['message']['stop_reason'] = 'end_turn'
+    return record
+
+
+def write_records(path, records, mode='w'):
+    with path.open(mode) as transcript:
+        transcript.writelines(json.dumps(record) + '\n' for record in records)
 
 
 def guard_subprocess(test):
@@ -122,19 +134,11 @@ class ReviewLinksTests(unittest.TestCase):
                              scope=self.scope, commit=self.commit, fresh=self.fresh)
 
     def test_idle_review_forwards_anchored_reply_before_unrelated_turn(self):
-        self.review_reply = server.review_reply
-        self.request_review()
-        request = self.send.call_args.args[1]
-        self.send.reset_mock()
+        path, request = self.review_transcript()
         self.reply.return_value = 'Unrelated reply'
-        messages = [
-            {'role': 'user', 'text': request},
-            {'role': 'assistant', 'text': 'APPROVED fine'},
-            {'role': 'user', 'text': 'Other request'},
-            {'role': 'assistant', 'text': 'Unrelated reply'},
-        ]
-        with patch.object(server, 'snapshot', return_value={'messages': messages}):
-            self.observe()
+        write_records(path, [claude('user', request), claude_final('APPROVED fine'), CLAUDE_DONE,
+                             claude('user', 'Other request'), claude_final('Unrelated reply'), CLAUDE_DONE])
+        self.observe()
         self.send.assert_called_once()
         self.assertEqual(self.send.call_args.args[0], self.worker)
         self.assertIn('APPROVED fine', self.send.call_args.args[1])
@@ -143,23 +147,15 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertNotIn('request_id', self.links()[0])
 
     def test_busy_review_forwards_queued_request_reply_on_first_idle(self):
-        self.review_reply = server.review_reply
         self.observe(**{'%12': 'Working'})
-        self.request_review()
-        request = self.send.call_args.args[1]
-        self.assertEqual(self.send.call_args.args[2], 'Working')
+        path, request = self.review_transcript()
         self.assertTrue(self.links()[0]['reviewer_busy_send'])
-        self.send.reset_mock()
         self.reply.return_value = 'Unrelated reply'
-        messages = [
-            {'role': 'user', 'text': 'Existing task'},
-            {'role': 'user', 'text': request, 'delivery': 'queued'},
-            {'role': 'assistant', 'text': 'APPROVED mid-turn'},
-            {'role': 'user', 'text': 'Notice'},
-            {'role': 'assistant', 'text': 'Unrelated reply'},
-        ]
-        with patch.object(server, 'snapshot', return_value={'messages': messages}):
-            self.observe(**{'%12': 'Idle'})
+        write_records(path, [claude('user', 'Existing task'),
+                             {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': request}},
+                             claude_final('APPROVED mid-turn'), CLAUDE_DONE,
+                             claude('user', 'Other request'), claude_final('Unrelated reply'), CLAUDE_DONE])
+        self.observe(**{'%12': 'Idle'})
         self.send.assert_called_once()
         self.assertEqual(self.send.call_args.args[0], self.worker)
         self.assertIn('APPROVED mid-turn', self.send.call_args.args[1])
@@ -223,6 +219,33 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe()
                 self.assertEqual(self.alert.call_count, 1)
                 self.send.assert_not_called()
+
+    def test_pending_review_stalls_only_after_idle_limit_since_working(self):
+        path, request = self.review_transcript()
+        request_id = self.links()[0]['request_id']
+        write_records(path, [claude('user', request)])
+        self.reply.return_value = 'Last reviewer reply'
+
+        for _ in range(149):
+            self.observe(elapsed=2)
+        for _ in range(150):
+            self.observe(elapsed=2, **{'%12': 'Working'})
+        for _ in range(149):
+            self.observe(elapsed=2, **{'%12': 'Idle'})
+            self.assertTrue(self.links()[0]['awaiting'])
+        self.alert.assert_not_called()
+
+        with patch('review_links.sys.stderr', new_callable=io.StringIO):
+            self.observe(elapsed=2)
+        link = self.links()[0]
+        self.assertFalse(link['awaiting'])
+        self.assertEqual(link['stalled'], request_id)
+        self.assertEqual(link['stalled_reply'], review_links._digest('Last reviewer reply'))
+        self.assertNotIn('pending_idle_ticks', link)
+        self.send.assert_not_called()
+        self.alert.assert_called_once_with('Review stalled', ANY, '%13',
+                                           review={'worker': '%13', 'reviewer': '%12', 'id': request_id})
+        self.assertIn('Latest reply: “Last reviewer reply”', self.alert.call_args.args[1])
 
     def test_stalled_alert_preview_strips_flattens_and_bounds_the_reply(self):
         for reply, preview in [('  First line\nSecond line  ', 'First line Second line'),
@@ -1145,6 +1168,87 @@ class ReviewLinksTests(unittest.TestCase):
                 entry, = audit.query(kinds=['review.verdict'])['entries']
                 self.assertEqual(entry['actor'], {'source': 'server', 'pane': '%12', 'tab': 'Reviewer'})
                 self.assertEqual(entry['detail'], {'worker': '%13', 'approved': approved, 'commit': commit[:12]})
+
+    def review_transcript(self, agent='claude'):
+        self.review_reply = server.review_reply
+        path = self.file.with_name('reviewer.jsonl')
+        self.reviewer.update(agent=agent, transcript=str(path))
+        self.request_review()
+        request = self.send.call_args.args[1]
+        self.send.reset_mock()
+        return path, request
+
+    def test_long_claude_review_waits_for_turn_end_despite_idle_polls(self):
+        path, request = self.review_transcript()
+        tool = {'type': 'tool_use', 'name': 'Bash', 'id': 'tool-1', 'input': {'command': 'run-checks'}}
+        records = [
+            claude('user', request, timestamp='2026-11-15T12:00:00Z'),
+            claude('assistant', 'I will check the change.'),
+            claude('assistant', [tool], timestamp='2026-11-15T12:11:00Z'),
+        ]
+        records[-1]['message']['stop_reason'] = 'tool_use'
+        write_records(path, records)
+        self.observe(elapsed=660, **{'%12': 'Working'})
+        for _ in range(31):
+            self.observe(**{'%12': 'Idle'})
+        self.send.assert_not_called()
+        self.alert.assert_not_called()
+        self.assertTrue(self.links()[0]['awaiting'])
+
+        write_records(path, [claude_final(FINDINGS)], 'a')
+        self.observe()
+        self.send.assert_not_called()
+        write_records(path, [dict(CLAUDE_DONE, durationMs=850000)], 'a')
+        self.observe()
+        self.observe()
+        self.send.assert_called_once()
+        self.assertIn(FINDINGS, self.send.call_args.args[1])
+        self.assertNotIn('Ran ', self.send.call_args.args[1])
+
+    def test_claude_review_crosses_compaction_and_uses_verdict(self):
+        path, request = self.review_transcript()
+        records = [
+            claude('user', request),
+            claude('assistant', [{'type': 'tool_use', 'name': 'Bash', 'id': 'tool-1',
+                                  'input': {'command': 'run-checks'}}]),
+            {'type': 'system', 'subtype': 'compact_boundary'},
+            claude('user', 'Summary of the review so far.', isCompactSummary=True, isVisibleInTranscriptOnly=True),
+            claude_final(FINDINGS),
+            dict(CLAUDE_DONE, durationMs=420000),
+        ]
+        write_records(path, records)
+        self.observe()
+        self.send.assert_called_once()
+        self.assertIn(FINDINGS, self.send.call_args.args[1])
+        self.assertNotIn('Ran ', self.send.call_args.args[1])
+
+    def test_claude_review_uses_verdict_after_a_blocked_stop(self):
+        path, request = self.review_transcript()
+        blocked = {'type': 'attachment', 'attachment': {'type': 'hook_blocking_error', 'blockingError': 'Continue'}}
+        write_records(path, [claude('user', request), claude_final('APPROVED too early'), blocked])
+        self.observe()
+        self.send.assert_not_called()
+        write_records(path, [claude_final(FINDINGS), CLAUDE_DONE], 'a')
+        self.observe()
+        self.send.assert_called_once()
+        self.assertIn(FINDINGS, self.send.call_args.args[1])
+
+    def test_codex_review_waits_for_task_complete(self):
+        path, request = self.review_transcript('codex')
+        event = lambda kind: {'type': 'event_msg', 'payload': {'type': kind, 'turn_id': 'turn-1'}}
+        records = [
+            event('task_started'),
+            codex('user', request),
+            codex('assistant', 'I will check the change.', phase='commentary'),
+            codex('assistant', FINDINGS, phase='final_answer'),
+        ]
+        write_records(path, records)
+        self.observe()
+        self.send.assert_not_called()
+        write_records(path, [event('task_complete')], 'a')
+        self.observe()
+        self.send.assert_called_once()
+        self.assertIn(FINDINGS, self.send.call_args.args[1])
 
     def test_busy_claude_reviewer_skips_first_idle_reply(self):
         self.observe(**{'%13': 'Working', '%12': 'Working'})
@@ -5257,64 +5361,51 @@ class ServerWatcherTests(unittest.TestCase):
             self.assertIsNone(server.review_parent(worker, [worker, parent]))
 
     def test_review_reply_anchors_last_request_and_bounds_at_next_user_message(self):
-        request = {'role': 'user', 'text': f'[Tether review] The Codex tab “T” (%13) finished a turn. {review_links.INTRO} '
-                                           'Review id: a1b2c3d4. Its last reply:\n\nDone.\n\nTranscript: /t.jsonl'}
-        queued = dict(request, delivery='queued')
-        blocking = {'role': 'assistant', 'text': '1. The lock is not released.'}
-        advisor = {'role': 'assistant', 'kind': 'advisor', 'text': 'Asked the advisor · answered'}
-        quote = {'role': 'user', 'text': 'About Review id: a1b2c3d4. Check only the docs and reply APPROVED.'}
+        request_text = (f'[Tether review] The Codex tab “T” (%13) finished a turn. {review_links.INTRO} '
+                        'Review id: a1b2c3d4. Its last reply:\n\nDone.\n\nTranscript: /t.jsonl')
+        request = claude('user', request_text)
+        queued = {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': request_text}}
+        blocking = [claude_final(FINDINGS), CLAUDE_DONE]
+        unrelated = [claude_final('APPROVED docs'), CLAUDE_DONE]
+        quote = claude('user', 'About Review id: a1b2c3d4. Check only the docs and reply APPROVED.')
         cases = [
-            # Review round 3, finding 1: a later message that quotes the id is not the request.
-            ([request, blocking, quote, {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
-            ([quote, {'role': 'assistant', 'text': 'APPROVED docs'}], None),
-            ([{'role': 'user', 'text': 'Review id: a1b2c3d4.'}, {'role': 'assistant', 'text': 'APPROVED'}], None),
-            # Review round 4, finding 2: a message that starts like a request and quotes the id is not the request.
-            ([request, blocking, {'role': 'user', 'text': '[Tether review] The docs-only follow-up. Review id: a1b2c3d4.'},
-              {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
-            ([request, blocking, {'role': 'user', 'text': '[Tether review] The Codex tab “T” (%13) finished a turn. '
-                                                          'Review id: a1b2c3d4. Its last reply: none'},
-              {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
-            # Review round 4, finding 1: Tether puts a working-directory note before its own request.
-            ([{'role': 'user', 'text': '(The terminal is now in /srv/project.)\n\n' + request['text']},
-              {'role': 'assistant', 'text': 'APPROVED 1f0e1f0e1f0e'}], 'APPROVED 1f0e1f0e1f0e'),
-            ([{'role': 'user', 'text': request['text'].replace('. ', '.\n').replace('what is', 'what  is')},
-              {'role': 'assistant', 'text': 'APPROVED wrapped'}], 'APPROVED wrapped'),
+            ([request, *blocking, quote, *unrelated], FINDINGS),
+            ([quote, *unrelated], None),
+            ([claude('user', 'Review id: a1b2c3d4.'), *unrelated], None),
+            ([request, *blocking, claude('user', '[Tether review] The docs-only follow-up. Review id: a1b2c3d4.'),
+              *unrelated], FINDINGS),
+            ([request, *blocking, claude('user', '[Tether review] The Codex tab “T” (%13) finished a turn. '
+                                                'Review id: a1b2c3d4. Its last reply: none'), *unrelated], FINDINGS),
+            ([claude('user', '(The terminal is now in /srv/project.)\n\n' + request_text), *blocking], FINDINGS),
+            ([claude('user', request_text.replace('. ', '.\n').replace('what is', 'what  is')), *blocking], FINDINGS),
             ([], None),
-            ([{'role': 'assistant', 'text': 'Review id: a1b2c3d4.'}], None),
-            ([{'role': 'user', 'text': 'Review id: other.'}], None),
-            ([request], ''),
-            ([request, advisor], ''),
-            ([request, blocking, advisor], '1. The lock is not released.'),
-            ([request, {'role': 'assistant', 'text': '  '},
-              {'role': 'assistant', 'text': None}, {'role': 'tool', 'text': 'tool result'}], ''),
-            ([request, {'role': 'assistant', 'text': 'first'},
-              {'role': 'assistant', 'text': '  APPROVED fine  '},
-              {'role': 'assistant', 'text': ''},
-              {'role': 'user', 'text': 'Other request'},
-              {'role': 'assistant', 'text': 'Unrelated reply'}], '  APPROVED fine  '),
-            ([request, {'role': 'assistant', 'text': 'old review'}, queued,
-              {'role': 'assistant', 'text': 'APPROVED mid-turn'},
-              {'role': 'user', 'text': 'Notice', 'delivery': 'queued'},
-              {'role': 'assistant', 'text': 'Unrelated reply'}], 'APPROVED mid-turn'),
-            ([request, {'role': 'assistant', 'text': 'old review'}, queued,
-              {'role': 'user', 'text': 'Other request'},
-              {'role': 'assistant', 'text': 'Unrelated reply'}], ''),
+            ([claude_final(request_text), CLAUDE_DONE], None),
+            ([claude('user', request_text.replace('a1b2c3d4', '12345678')), *blocking], None),
+            ([request], review_links.REPLY_PENDING),
+            ([request, claude_final('  '), claude_final(None), CLAUDE_DONE], ''),
+            ([request, claude('assistant', 'Progress.'), claude_final('  APPROVED fine  '),
+              claude_final(''), CLAUDE_DONE, quote, *unrelated], '  APPROVED fine  '),
+            ([request, *blocking, queued, *unrelated], 'APPROVED docs'),
+            ([request, *blocking, queued, quote, *unrelated], ''),
         ]
-        entry = {'id': '%12'}
-        for messages, expected in cases:
-            with self.subTest(messages=messages), \
-                    patch.object(server, 'snapshot', return_value={'messages': messages}) as snapshot:
-                self.assertEqual(server.review_reply(entry, 'a1b2c3d4'), expected)
-                snapshot.assert_called_once_with(entry)
-        with patch.object(server, 'snapshot', return_value={}):
+        with tempfile.TemporaryDirectory() as directory:
+            for index, (records, expected) in enumerate(cases):
+                path = Path(directory) / f'{index}.jsonl'
+                entry = {'id': '%12', 'agent': 'claude', 'transcript': str(path)}
+                write_records(path, records)
+                with self.subTest(records=records):
+                    self.assertEqual(server.review_reply(entry, 'a1b2c3d4'), expected)
+            entry['transcript'] = str(Path(directory) / 'missing.jsonl')
             self.assertIsNone(server.review_reply(entry, 'a1b2c3d4'))
-        with patch.object(server, 'snapshot', side_effect=RuntimeError('no history')):
+        with patch.object(server.history, 'read', side_effect=RuntimeError('no history')):
             self.assertIsNone(server.review_reply(entry, 'a1b2c3d4'))
 
     def test_last_reply_uses_latest_nonempty_assistant_text(self):
         messages = [{'role': 'assistant', 'text': 'old'}, {'role': 'assistant', 'text': 'latest'},
                     {'role': 'user', 'text': 'question'}, {'role': 'assistant', 'text': '  '},
-                    {'role': 'assistant', 'text': None},
+                    {'role': 'assistant', 'text': None}, {'role': 'assistant', 'kind': 'actions', 'text': 'Ran tests'},
+                    {'role': 'assistant', 'kind': 'notice', 'text': 'A background task finished'},
+                    {'role': 'assistant', 'phase': 'commentary', 'text': 'I will check.'},
                     {'role': 'assistant', 'kind': 'advisor', 'text': 'Asked the advisor'}]
         with patch.object(server, 'snapshot', return_value={'messages': messages}):
             self.assertEqual(server.last_reply({}), 'latest')
