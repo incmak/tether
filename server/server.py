@@ -2101,8 +2101,10 @@ class Handler(BaseHTTPRequestHandler):
                         tool = live['tool']
                         result['running'] = {'title': tool['title'], 'command': tool['command'],
                                              'elapsed': claude_hooks.elapsed(tool['started'], now)}
-                    if state['busy'] and (live is None or working):
-                        started = state.get('busy_since')
+                    # The rollout's task_started is the turn start: a mid-turn prompt resets the hook's clock.
+                    # Before the rollout writes it, the live hook's start is the best value.
+                    if (state['busy'] and live is None) or working:
+                        started = state.get('busy_since') if state['busy'] else None
                         if started is None and working:
                             started = live['started']
                         if isinstance(started, (int, float)) and started <= now:

@@ -249,10 +249,14 @@ class CodexHooksTests(unittest.TestCase):
             stream.write(self.rollout('task_complete', now))
         self.assertIsNone(self.footer(now).get('spinner'))
 
-    def test_footer_stays_idle_when_only_the_hook_is_busy(self):
+    def test_footer_uses_hook_start_before_the_rollout_starts_the_turn(self):
+        # The hook fires before Codex writes task_started; the last finished turn's start must not leak in.
+        self.transcript.write_text(self.rollout('task_started', 20) + self.rollout('task_complete', 30))
         self.feed('UserPromptSubmit')
         self.assertTrue(self.live()['busy'])
-        self.assertIsNone(self.footer().get('spinner'))
+        self.assertEqual(self.footer()['spinner'], {'verb': 'Working…', 'detail': '1m 10s'})
+        self.permission(150)
+        self.assertIsNone(self.footer()['spinner'])
 
     def test_footer_rejects_a_future_rollout_start(self):
         self.transcript.write_text(self.rollout('task_started', 180))
