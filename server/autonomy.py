@@ -369,15 +369,34 @@ def set_reviewers(reviewers):
     _write(reviewers_path(), json.dumps(reviewers) + '\n')
 
 
+REVIEWER_HEADING = 'Choose a reviewer by the risk of the task:'
+REVIEWER_CHOICES = (
+    'Critical: security, auth, payments, data loss, migrations, deploys, public releases, concurrency, or a '
+    'change of more than about 300 lines. Start a reviewer tab from the other agent (Claude reviews Codex work, '
+    'Codex reviews Claude work) with the strongest model and high effort.',
+    'Normal: features and bug fixes. Start a reviewer tab from the other agent with its default model and '
+    'medium effort.',
+    'Light: docs, copy, styles and small fixes. Do not start a reviewer tab. Review the change yourself.',
+)
+
+
+def codex_standing_rules(resolved, codex_resolved):
+    """Launch-time rules that fit in Codex's rebuilt developer context after compaction."""
+    level = resolved['level']
+    codex = codex_resolved['level']
+    return '\n'.join([
+        f'Autonomy level {level} ({LEVELS[level][0]}). Codex level {codex} ({codex_level.LEVELS[codex][0]}).',
+        SAFETY,
+        VERIFIED,
+        ' '.join((REVIEWER_HEADING, *REVIEWER_CHOICES)),
+        'Tether may send newer rules in this chat; the newest rules win.',
+    ])
+
+
 def reviewer_rules(reviewers):
     lines = [
-        'Choose a reviewer by the risk of the task:',
-        '- Critical: security, auth, payments, data loss, migrations, deploys, public releases, concurrency, or a '
-        'change of more than about 300 lines. Start a reviewer tab from the other agent (Claude reviews Codex work, '
-        'Codex reviews Claude work) with the strongest model and high effort.',
-        '- Normal: features and bug fixes. Start a reviewer tab from the other agent with its default model and '
-        'medium effort.',
-        '- Light: docs, copy, styles and small fixes. Do not start a reviewer tab. Review the change yourself.',
+        REVIEWER_HEADING,
+        *(f'- {choice}' for choice in REVIEWER_CHOICES),
         f'Start a reviewer with `python3 {HERE / "agent_tab_cli.py"} start --reviews-me --agent AGENT '
         '[--model MODEL] [--effort EFFORT]`.',
     ]
