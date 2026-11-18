@@ -12,6 +12,7 @@ import { GlobalClaudeAdvisor } from './ClaudeAdvisor'
 import { GlobalAutonomy } from './Autonomy'
 import { HelperSettings } from './Helpers'
 import { LearningSettings } from './Learning'
+import { CleanUpSettings, OpsSettings } from './Upkeep'
 import { AutonomySetup } from './AutonomySetup'
 import { AgentBrowserSettings } from './AgentBrowser'
 import { Choice, Notifications, SessionSettings, SystemSettings } from './SettingsControls'
@@ -75,6 +76,8 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('autonomy', 'agents', 'Autonomy level', 'automation autopilot full auto ask questions check-in guided trusted level urgent', <Field scope="This server"><GlobalAutonomy api={api} /></Field>),
     item('advisor', 'agents', 'Advisor and reviewers', 'advisor reviewers review reviewer second opinion consult never guess decide critical normal light latest model effort claude codex fable opus gpt', <Field scope="This server"><HelperSettings api={api} /></Field>),
     item('learning', 'agents', 'Learning from feedback', 'learn learning lessons feedback self-learning reward punishment correct mistake memory remember improve', <Field scope="This server"><LearningSettings api={api} /></Field>),
+    item('cleanup', 'agents', 'Clean up lessons and notes', 'clean cleanup prune stale old lessons notes remove delete undo weekly tidy', <Field scope="This server"><CleanUpSettings api={api} /></Field>),
+    item('ops-report', 'agents', 'Daily ops report', 'ops operations postmortem daily report verified stamps reverts paused reviews lesson candidates proposed haiku tokens schedule', <Field scope="This server"><OpsSettings api={api} /></Field>),
     item('claude-advisor', 'agents', 'Claude Code advisor', 'advisor tool advisormodel opus fable consult stronger model second opinion credits', <Field scope="This server"><GlobalClaudeAdvisor api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),

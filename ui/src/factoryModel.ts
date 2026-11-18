@@ -21,12 +21,17 @@ export const PHASE_NAMES: Record<Phase, string> = { inbox: 'Inbox', spec: 'Spec'
 export interface FactoryTool { name: string; title: string; at?: string | number | null; error?: boolean; done?: boolean }
 export interface Deploy { at: number; timed: boolean; commit: string | null; text: string; refs: string[] }
 export interface Commit { hash: string; at: number; subject: string; refs: string[]; repo: string }
-export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[] }
+/** One finding of the 30-minute worktree sweep (server/sweep.py): the tab's branch is behind main, its checks fail, or the tab is idle. */
+export type SweepKind = 'behind' | 'checks' | 'idle'
+export interface SweepLine { pane: string; name: string; branch: string; kind: SweepKind; text: string }
+export interface Sweep { at: number; every: number; lines: SweepLine[] }
+export const SWEEP_NAMES: Record<SweepKind, string> = { behind: 'Behind main', checks: 'Checks fail', idle: 'Idle worktree' }
+export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[]; sweep?: Sweep }
 
 export type Role = 'main' | 'worker' | 'reviewer' | 'advisor'
 /** working: the agent runs a turn. prompt: a permission, question or plan on screen waits for Mak. waits: the turn ended with a question for Mak. idle: nothing. */
 export type AgentState = 'working' | 'prompt' | 'waits' | 'idle'
-export interface Agent { pane: Pane; name: string; role: Role; state: AgentState; step: string; tools: FactoryTool[]; last: number }
+export interface Agent { pane: Pane; name: string; role: Role; state: AgentState; step: string; tools: FactoryTool[]; last: number; sweep: SweepLine[] }
 export interface Task {
   id: string
   ref?: string
@@ -41,6 +46,7 @@ export interface Task {
   last: number           // ms of the last activity we know of, 0 when unknown
   deploys: Deploy[]
   commits: Commit[]
+  sweep: SweepLine[]     // the sweep findings of the task's tabs
 }
 export interface Floor { tasks: Task[]; parked: number }
 
@@ -126,7 +132,7 @@ export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor 
   const lastOf = (pane: Pane) => Math.max(toolMs(toolsOf(pane)), toMs(pane.finished ?? 0), pane.state === 'Working' ? now : 0)
   const reviewerOf = new Map<string, string>()   // reviewer pane -> the pane it reviews
   for (const pane of agents) for (const reviewer of [...(pane.reviewers ?? []), ...(pane.reviewers_paused ?? [])]) if (!reviewerOf.has(reviewer)) reviewerOf.set(reviewer, pane.id)
-  const agent = (pane: Pane, role: Role): Agent => ({ pane, name: paneName(pane), role, state: agentState(pane), step: stepOf(pane, toolsOf(pane)), tools: toolsOf(pane), last: lastOf(pane) })
+  const agent = (pane: Pane, role: Role): Agent => ({ pane, name: paneName(pane), role, state: agentState(pane), step: stepOf(pane, toolsOf(pane)), tools: toolsOf(pane), last: lastOf(pane), sweep: (data?.sweep?.lines ?? []).filter(line => line.pane === pane.id) })
 
   // Backlog items, with the project heading each sits under.
   const items: { item: Item; project: string }[] = []
@@ -209,12 +215,12 @@ function phaseOfLinked(linked: Agent[]): { phase: Phase; why: string } {
   return { phase: 'build', why: `guessed: ${lead.name} is open, no step read${lead.pane.agent === 'antigravity' ? ' (Tether reads no Antigravity steps)' : ''}` }
 }
 
-function finish(task: Omit<Task, 'waits' | 'stuck'>, now: number): Task {
+function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Task {
   const waits = task.agents.some(entry => entry.state === 'prompt' || entry.state === 'waits')
   const moving = task.agents.some(entry => entry.state === 'working')
   const open = task.phase !== 'inbox' && task.phase !== 'done'
   const stuck = open && !moving && !waits && !!task.last && now - task.last > STUCK_MS
-  return { ...task, waits, stuck }
+  return { ...task, waits, stuck, sweep: task.agents.flatMap(entry => entry.sweep) }
 }
 
 const toolMs = (tools: FactoryTool[]) => Math.max(0, ...tools.map(tool => toMs(tool.at)))

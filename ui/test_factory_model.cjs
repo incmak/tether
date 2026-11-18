@@ -140,6 +140,22 @@ const byId = (result, id) => result.tasks.find(task => task.id === id)
   assert.deepEqual(Object.keys(m.recordHistory({ B2: [{ phase: 'done', at: 0 }] }, [], 6 * 24 * 3600000).history), ['B2'])
 }
 
+// The worktree sweep (B210): each finding goes to its tab's agent and task; a tab with none has an empty list.
+{
+  const lines = [
+    { pane: '%2', name: 'Factory View', branch: 'factory-view', kind: 'behind', text: '4 commits behind main. Rebase by hand.' },
+    { pane: '%2', name: 'Factory View', branch: 'factory-view', kind: 'idle', text: 'Idle for 3 h.' },
+    { pane: '%9', name: 'Closed', branch: 'x', kind: 'checks', text: '1 check fails on abc1234: test.' },
+  ]
+  const result = floor([pane('%1', { pane_name: 'Automation' }), pane('%2', { pane_name: 'Factory View', state: 'Working' })], {}, { sweep: { at: NOW / 1000, every: 1800, lines } })
+  const task = result.tasks.find(entry => entry.agents.some(agent => agent.pane.id === '%2'))
+  assert.deepEqual(task.sweep.map(line => line.kind), ['behind', 'idle'])
+  assert.deepEqual(task.agents.find(agent => agent.pane.id === '%2').sweep.length, 2)
+  assert.ok(result.tasks.filter(entry => entry !== task).every(entry => entry.sweep.length === 0))
+  assert.ok(floor([pane('%2')]).tasks.every(entry => entry.sweep.length === 0))   // an older server sends no sweep
+  assert.deepEqual(Object.keys(m.SWEEP_NAMES), ['behind', 'checks', 'idle'])
+}
+
 // Spatial focus: arrows go to the nearest item in that direction; nothing beyond the edge.
 {
   const box = (x, y) => ({ x, y, width: 100, height: 40 })

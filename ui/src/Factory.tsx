@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { ArrowLeft, ExternalLink, Hand, Hourglass, Tv, X } from 'lucide-react'
+import { ArrowLeft, ExternalLink, GitBranch, Hand, Hourglass, Tv, X } from 'lucide-react'
 import type { Api, Footer, GroupInfo, Pane } from './api'
 import { parseBacklog } from './backlogItems'
 import type { Row } from './backlogItems'
 import { BACKLOG_PATH } from './backlogNews'
 import { useBackStep } from './backNav'
 import { formatElapsed } from './paneState'
-import { PHASES, PHASE_NAMES, STATE_NAMES, attentionOrder, buildFloor, clock, groupsOf, nearest, phaseSince, recordHistory, toMs } from './factoryModel'
-import type { Agent, Direction, FactoryData, History, Phase, Task } from './factoryModel'
+import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, nearest, phaseSince, recordHistory, toMs } from './factoryModel'
+import type { Agent, Direction, FactoryData, History, Phase, Sweep, SweepKind, SweepLine, Task } from './factoryModel'
 import './Factory.css'
 
 /* The Factory view: every agent tab and backlog item as work moving through phases, on one canvas with four zoom
@@ -271,6 +271,7 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
       {factory.error ? 'The server does not answer.' : 'The data is late.'} Shown data is from {when(factory.at)}{age >= 60000 ? `, ${formatElapsed(age / 1000)} old` : ''}.
     </p>}
     {backlog.error && backlog.data && <p className="factory-stale" role="status">The backlog does not load. Items are from {when(backlog.at)}.</p>}
+    {!depth && floor && factory.data?.sweep && <SweepStrip sweep={factory.data.sweep} />}
     {touring && <p className="factory-touring" role="status">Tour: tasks that need you, one by one. Press any key to stop.</p>}
     <div ref={body} className={`factory-body level-${depth}`}>{content}</div>
     <p className="visually-hidden" aria-live="polite">{announce}</p>
@@ -284,7 +285,24 @@ function Flags({ task, now }: { task: Task; now: number }) {
   return <>
     {task.waits && <span className="factory-flag is-waits"><Hand aria-hidden="true" />Waits for you</span>}
     {task.stuck && <span className="factory-flag is-stuck"><Hourglass aria-hidden="true" />Stuck {ago(task.last, now)}</span>}
+    {([...new Set(task.sweep.map(line => line.kind))] as SweepKind[]).map(kind => <span key={kind} className="factory-flag is-sweep"><GitBranch aria-hidden="true" />{SWEEP_NAMES[kind]}</span>)}
   </>
+}
+
+/** The findings of the worktree sweep, one line each. Read-only: Tether never rebases a branch. */
+const SweepRows = ({ lines, names }: { lines: SweepLine[]; names?: boolean }) => <ul className="factory-list">{lines.map(line => <li key={line.pane + line.kind}>
+  <b>{names ? `${line.name}: ` : ''}{SWEEP_NAMES[line.kind]}</b> {line.text} {line.branch && <span>{line.branch}</span>}
+</li>)}</ul>
+
+/** The floor's sweep strip: when the sweep last ran and every finding. Closed by default, so the floor stays calm. */
+function SweepStrip({ sweep }: { sweep: Sweep }) {
+  const count = sweep.lines.length
+  if (!sweep.at) return null
+  return <details className="factory-sweep">
+    <summary><GitBranch aria-hidden="true" /><b>Worktree sweep</b> {count ? `${count} ${count === 1 ? 'finding' : 'findings'}` : 'no findings'} <span>checked {when(sweep.at * 1000)}, every {Math.round(sweep.every / 60)} min</span></summary>
+    {count ? <SweepRows lines={sweep.lines} names /> : <p className="factory-none">No worktree tab is behind main, has failing checks or is idle for over 2 hours.</p>}
+    <p className="factory-note">Tether only reports. It does not rebase or change a branch.</p>
+  </details>
 }
 
 /** A mark per agent: filled = working, ring = idle, square = waits for you. Shape, not only colour. */
@@ -362,6 +380,10 @@ function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: 
         </button>
       </li>)}</ul> : <p className="factory-none">No tab works on this item.</p>}
     </section>
+    {task.sweep.length > 0 && <section aria-labelledby="factory-sweep"><h3 id="factory-sweep">Worktree sweep</h3>
+      <SweepRows lines={task.sweep} names={task.agents.length > 1} />
+      <p className="factory-note">Tether only reports. It does not rebase or change a branch.</p>
+    </section>}
     <section aria-labelledby="factory-history"><h3 id="factory-history">Phase history</h3>
       <ol className="factory-timeline">{history.map((entry, index) => <li key={index}><b>{PHASE_NAMES[entry.phase]}</b> from {when(entry.at)}</li>)}</ol>
       <p className="factory-note">This screen keeps the history itself. It starts {history.length ? '' : 'now, '}from the first time a screen saw the task{opened ? ` (this one opened ${clock(opened)})` : ''}.</p>

@@ -57,6 +57,11 @@ const factoryData = (moved = false) => ({
     '%8': [tool('Edit', 'RELEASES.md', 190)],
   },
   deployed: [{ at: Math.round(NOW / 1000 - 2 * 3600), timed: true, commit: '5d59421', text: '5d59421 B188 new Claude tabs no longer stop', refs: ['B188'] }],
+  sweep: { at: Math.round(NOW / 1000 - 12 * 60), every: 1800, lines: [
+    { pane: '%4', name: 'B71 Part 2', branch: 'b71-part2', kind: 'behind', text: '6 commits behind main. Rebase by hand.' },
+    { pane: '%4', name: 'B71 Part 2', branch: 'b71-part2', kind: 'checks', text: '2 checks fail on 4c1e9a0: test, lint.' },
+    { pane: '%8', name: 'Release notes', branch: 'release-notes-with-a-long-branch-name-that-must-wrap', kind: 'idle', text: 'Idle for 3 h.' },
+  ] },
   commits: [
     { hash: '5d59421', at: Math.round(NOW / 1000 - 2.2 * 3600), subject: 'Launch: pass project folders as additionalDirectories (B188)', refs: ['B188'], repo: 'tether' },
     { hash: '4c1e9a0', at: Math.round(NOW / 1000 - 40 * 60), subject: 'Tasks: one list for agent tasks and backlog (B71)', refs: ['B71'], repo: 'tether' },
@@ -317,6 +322,35 @@ async function main() {
     await page.keyboard.press('Shift')
     await page.locator('.factory-touring').waitFor({ state: 'detached' })
     check('any key stops the tour', true)
+    // The worktree sweep (B210): a strip on the floor, flags on the task, the lines in the task.
+    await page.clock.runFor(1000)
+    await page.keyboard.press('Shift')
+    for (const [width, height] of [[1280, 800], [320, 640]]) {
+      await page.setViewportSize({ width, height })
+      await page.goto(`${ORIGIN}/chat/?go=factory`)
+      await station('build').waitFor()
+      const strip = page.locator('details.factory-sweep')
+      check(`${width}: the sweep strip names the count and is closed`, /Worktree sweep\s+3 findings/.test(await strip.locator('summary').innerText()) && !(await strip.getAttribute('open') !== null), await strip.locator('summary').innerText())
+      await strip.locator('summary').focus()
+      await page.keyboard.press('Enter')
+      check(`${width}: Enter opens the strip with one line per finding`, await strip.locator('.factory-list li').count() === 3)
+      check(`${width}: a line names the tab, the finding and the branch`, (await strip.locator('.factory-list li').first().innerText()).replace(/\s+/g, ' ').includes('B71 Part 2: Behind main 6 commits behind main. Rebase by hand. b71-part2'))
+      check(`${width}: the strip says Tether does not rebase`, (await strip.innerText()).includes('It does not rebase or change a branch.'))
+      check(`${width}: no sideways scroll with the strip open`, !(await overflow()))
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `sweep-floor-${width}.png`) })
+      const token = page.locator('.factory-token', { hasText: 'B71' }).first()
+      check(`${width}: the task token carries both sweep flags`, JSON.stringify(await token.locator('.factory-flag.is-sweep').allInnerTexts()) === '["Behind main","Checks fail"]', JSON.stringify(await token.locator('.factory-flag.is-sweep').allInnerTexts()))
+      await token.click()
+      await page.locator('#factory-sweep').waitFor()
+      check(`${width}: the task lists its sweep lines`, await page.locator('.factory-task section[aria-labelledby="factory-sweep"] li').count() === 2)
+      check(`${width}: no sideways scroll in the task`, !(await overflow()))
+      if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `sweep-task-${width}.png`) })
+    }
+    state.factory = 'empty'
+    await page.goto(`${ORIGIN}/chat/?go=factory`)
+    await page.locator('.factory-floor, .factory-problem').first().waitFor()
+    check('a server with no sweep data shows no strip', await page.locator('details.factory-sweep').count() === 0)
+    state.factory = 'ok'
     check('no page errors', !pageErrors.length, pageErrors.join('\n'))
   } catch (error) {
     failed++

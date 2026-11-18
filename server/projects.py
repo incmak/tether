@@ -291,6 +291,10 @@ def write_note(pid, name, text):
     return {'name': name}
 
 
+def trash_name(name):
+    return f'{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}-{name}'
+
+
 def delete_note(pid, name):
     """Move the note to notes/.trash/. Nothing is deleted for good."""
     path = _note(pid, name)
@@ -298,8 +302,9 @@ def delete_note(pid, name):
         raise ProjectError(404, 'That note is gone.')
     trash = path.parent / '.trash'
     trash.mkdir(mode=0o700, exist_ok=True)
-    os.replace(path, trash / f'{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}-{name}')
-    return {'name': name}
+    kept = trash_name(name)
+    os.replace(path, trash / kept)
+    return {'name': name, 'trash': kept}
 
 
 def mark_seen(pid):
