@@ -270,6 +270,18 @@ class SweepTests(Case):
             self.assertTrue(sweeper.observe(*args, wait=True))
         self.assertEqual(len(sweep.public()['lines']), 1)
 
+    def test_the_period_counts_from_the_start_of_a_sweep(self):
+        clock = [self.now]
+        sweeper = self.sweeper(lambda: clock[0], [])
+
+        def slow(*args, **kwargs):
+            clock[0] += 600  # the sweep takes ten minutes
+            return {'lines': [], 'read': set(), 'cursor': ''}
+        with mock.patch.object(sweep, 'scan', slow):
+            self.assertTrue(sweeper.observe([], None, None, wait=True))
+            clock[0] = self.now + sweep.PERIOD + 1
+            self.assertTrue(sweeper.observe([], None, None, wait=True))
+
     def test_notice_caps_the_lines(self):
         lines = [{'name': f'Tab {index}', 'text': 'Idle for 3 h.'} for index in range(5)]
         payload = sweep.notice(lines)

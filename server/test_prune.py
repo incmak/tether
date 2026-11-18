@@ -321,6 +321,25 @@ class ActionTests(Case):
         self.assertEqual((notes / 'old.md').read_text(), text)
         self.assertIs(real, prune._move_note)
 
+    def test_a_file_in_the_trash_keeps_its_record_whatever_took_its_place(self):
+        notes = projects.bundle(PID) / 'notes'
+        text = (notes / 'old.md').read_text()
+        mark = prune.state(self.now)['notes'][0]['mark']
+
+        def move(pid, name, kept_as, mark):  # stopped after the rename, and a new note took the name
+            (notes / '.trash').mkdir(exist_ok=True)
+            os.replace(notes / name, notes / '.trash' / kept_as)
+            (notes / name).write_text('a new note')
+            raise KeyboardInterrupt()
+        with mock.patch.object(prune, '_move_note', move):
+            with self.assertRaises(KeyboardInterrupt):
+                prune.remove('note', PID, 'old.md', mark, self.now)
+        removed = prune.state(self.now)['removed']
+        self.assertEqual(len(removed), 1)
+        (notes / 'old.md').rename(notes / 'new.md')
+        prune.restore(removed[0]['token'], self.now)
+        self.assertEqual((notes / 'old.md').read_text(), text)
+
     def test_a_dispute_added_after_the_list_loaded_stops_the_old_button(self):
         mark = next(row['mark'] for row in prune.state(self.now)['lessons'] if row['id'] == self.lesson_id)
         lessons.dispute(PID, self.lesson_id, '%7', 'The docs say the opposite.')

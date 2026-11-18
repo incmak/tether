@@ -257,8 +257,9 @@ class Sweeper:
                 if self.clock() - self.last < self.period:
                     self.tried = 0  # the sweep before the restart is still fresh: the next one is due from it
                     return
+            started = self.clock()  # the period counts from the start: a slow sweep does not stretch it
             self.sweep(entries, folder_of, status, run)
-            self.last = self.clock()
+            self.last = started
         except Exception as exc:  # noqa: BLE001 - the sweep must never take the monitor down
             print(f'worktree sweep failed: {exc!r}', flush=True)
         finally:

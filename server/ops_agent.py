@@ -16,7 +16,8 @@ What one run does, for each open session that has a project folder and work from
    it (lesson_candidates.py). A day with no problem gets the note and no tab, so it costs nothing.
 
 A repository belongs to one project a day: the session with the most agent tabs in it. At most TABS tabs start a day.
-State: paths.CACHE/ops-agent.json. Setting: paths.CONFIG/ops-agent.json.
+State: paths.CACHE/ops-agent.json (the run list; safe to lose). Setting: paths.CONFIG/ops-agent.json.
+Launch records: <project folder>/notes/postmortems/.<day>.tab.
 """
 import json
 import os
@@ -39,7 +40,7 @@ EFFORT = 'low'
 MODEL_LABEL = 'Claude Haiku, low effort'
 TABS = 3
 RUNS = 30            # run records kept
-LAUNCH_DAYS = 60     # days of launch records kept (state 'launched'), apart from the run records
+LAUNCH_DAYS = 60     # launch records kept per project (files beside the notes)
 LIST = 30            # rows of one kind in a note
 EVENTS_SIZE = 512 * 1024
 GIT_TIMEOUT = 20
@@ -93,8 +94,8 @@ def set_enabled(value):
 
 def load(strict=False):
     """The state. A missing file is an empty state. strict: a file that is there but cannot be read or is not valid
-    raises (OSError, ValueError), so nothing that depends on the launch records runs on a guess."""
-    empty = {'version': 1, 'last_day': '', 'request': False, 'runs': [], 'launched': {}}
+    raises (OSError, ValueError): the scheduler does not run on a guess."""
+    empty = {'version': 1, 'last_day': '', 'request': False, 'runs': []}
     try:
         data = json.loads(state_path().read_text(encoding='utf-8'))
     except FileNotFoundError:
@@ -108,11 +109,7 @@ def load(strict=False):
         if strict:
             raise ValueError(f'The ops report state file is invalid: {state_path()}. Fix or remove it.')
         return empty
-    launched = data.get('launched') if isinstance(data.get('launched'), dict) else {}
-    launched = {day: [pid for pid in pids if isinstance(pid, str)] for day, pids in launched.items()
-                if isinstance(day, str) and DAY.fullmatch(day) and isinstance(pids, list)}
-    return {'version': 1, 'last_day': data['last_day'], 'request': data.get('request') is True, 'runs': data['runs'],
-            'launched': launched}
+    return {'version': 1, 'last_day': data['last_day'], 'request': data.get('request') is True, 'runs': data['runs']}
 
 
 def _change(work):
@@ -124,29 +121,44 @@ def _change(work):
         return data
 
 
+def _marker(pid, day):
+    """The launch record of one project and day: an empty file beside the postmortem note. It is in the project
+    folder, not in the cache: clearing the cache or losing the state file must not allow a second tab."""
+    note = note_path(pid, day)
+    return note.with_name(f'.{day}.tab')
+
+
+def launched(day):
+    """The projects that have a launch record for a day."""
+    root = projects.root()
+    return [folder.name for folder in sorted(root.iterdir()) if projects.ID.fullmatch(folder.name)
+            and (folder / 'notes' / 'postmortems' / f'.{day}.tab').is_file()] if root.is_dir() else []
+
+
 def reserve(day, pid):
     """Record that a project gets its ops tab for a day, before the tab starts. '' when it may start; else the
-    reason. One tab per project and day, TABS per day, across every run of that day: the record is in the state
-    file, apart from the run list, so "Run now" and a restart cannot start more."""
-    result = []
-
-    def work(data):
-        taken = data['launched'].setdefault(day, [])
-        if pid in taken:
-            result.append('This project already got its ops tab for that day.')
-        elif len(taken) >= TABS:
-            result.append(f'Tether starts at most {TABS} ops tabs for a day.')
-        else:
-            taken.append(pid)
-        for old in sorted(data['launched'])[:-LAUNCH_DAYS]:
-            del data['launched'][old]
-    _change(work)
-    return result[0] if result else ''
+    reason. One tab per project and day, TABS per day, across every run of that day. The record is made with an
+    exclusive create, so two runs cannot both get it."""
+    with _LOCK:
+        marker = _marker(pid, day)
+        if marker.exists():
+            return 'This project already got its ops tab for that day.'
+        if len(launched(day)) >= TABS:
+            return f'Tether starts at most {TABS} ops tabs for a day.'
+        marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        except FileExistsError:
+            return 'This project already got its ops tab for that day.'
+        for old in sorted(marker.parent.glob('.*.tab'))[:-LAUNCH_DAYS]:  # Tether's own records, oldest first
+            old.unlink(missing_ok=True)
+        return ''
 
 
 def release(day, pid):
     """Give a reservation back. Only for a launch that failed before Tether asked tmux for the tab."""
-    _change(lambda data: data['launched'].get(day, []).remove(pid) if pid in data['launched'].get(day, []) else None)
+    with _LOCK:
+        _marker(pid, day).unlink(missing_ok=True)
 
 
 def request():
@@ -459,6 +471,7 @@ class Ops:
 
     def __init__(self, clock=datetime.now):
         self.clock = clock
+        self.gate = threading.Lock()
         self.busy = False     # the worker looks or runs
         self.running = False  # a run is in progress (what Settings shows)
         self.next = 0.0
@@ -471,7 +484,7 @@ class Ops:
     def observe(self, entries, folder_of, run=subprocess.run, lock=None, sessions=None, wait=False):
         """Look every 5 seconds whether a run is due, in a worker thread: the monitor thread reads no file.
         Returns True when it started the worker. wait=True waits for it."""
-        with _LOCK:
+        with self.gate:  # its own lock: a state write in progress never makes the monitor wait
             if self.busy or time.monotonic() < self.next:
                 return False
             self.next = time.monotonic() + 5

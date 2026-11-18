@@ -202,22 +202,30 @@ class RunTests(Case):
                          ('quiet', 'This project already got its ops tab for that day.', 1))
         self.assertEqual(note.read_text(), text)
         note.write_text(text.replace(ops_agent.PLACEHOLDER, '- The ops tab wrote this.'))
-        ops_agent.state_path().unlink()  # even with the state file lost, a finished note is never replaced
+        ops_agent.state_path().unlink(missing_ok=True)  # even with the state file lost, a finished note is never replaced
         last = ops_agent.run_day(*args, start=start)
         self.assertEqual((last[0]['status'], len(started)), ('quiet', 1))
         self.assertIn('exists already', last[0]['why'])
         self.assertIn('- The ops tab wrote this.', note.read_text())
 
-    def test_the_launch_record_outlives_the_run_list(self):
+    def test_the_launch_record_outlives_the_cache_and_the_run_list(self):
+        import shutil
         self.commit('No stamp at all', at(11))
         started, start = self.start()
         args = (DAY, self.entries(), lambda entry: str(self.repo), self.run_tmux())
         ops_agent.run_day(*args, start=start)
+        self.assertEqual(ops_agent.launched(DAY), [PID])
         ops_agent._change(lambda data: data['runs'].extend({'day': 'x', 'status': 'quiet'} for _ in range(3 * ops_agent.RUNS)))
-        self.assertEqual(ops_agent.load()['launched'], {DAY: [PID]})
+        self.assertEqual((ops_agent.run_day(*args, start=start)[0]['status'], len(started)), ('quiet', 1))
+        shutil.rmtree(paths.CACHE)  # the cache is cleared while the first tab still works
+        self.assertEqual((ops_agent.run_day(*args, start=start)[0]['status'], len(started)), ('quiet', 1))
+        paths.CACHE.mkdir()
+        ops_agent.state_path().write_text('{"version": 1, "last_day": "", "runs": [], "launched": {"2026-11-17": 5}}')
         self.assertEqual((ops_agent.run_day(*args, start=start)[0]['status'], len(started)), ('quiet', 1))
 
     def test_a_day_gets_three_tabs_across_every_run(self):
+        for pid in 'abdef':
+            projects.bundle(pid * 12).mkdir(parents=True)
         self.assertEqual([ops_agent.reserve(DAY, pid * 12) for pid in 'abe'], ['', '', ''])
         self.assertIn('at most 3', ops_agent.reserve(DAY, 'd' * 12))
         self.assertIn('already got', ops_agent.reserve(DAY, 'a' * 12))
@@ -231,7 +239,19 @@ class RunTests(Case):
         self.assertEqual(ops_agent.reserve(DAY, 'f' * 12), '')
         for index in range(ops_agent.LAUNCH_DAYS + 5):
             ops_agent.reserve(f'2027-{1 + index // 28:02d}-{1 + index % 28:02d}', 'a' * 12)
-        self.assertEqual(len(ops_agent.load()['launched']), ops_agent.LAUNCH_DAYS)
+        folder = projects.bundle('a' * 12) / 'notes' / 'postmortems'
+        self.assertEqual(len(list(folder.glob('.*.tab'))), ops_agent.LAUNCH_DAYS)
+        self.assertEqual(projects.notes('a' * 12), [])  # the records are not notes
+
+    def test_a_launch_record_never_follows_a_link(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        notes = projects.bundle(PID) / 'notes'
+        notes.mkdir()
+        (notes / 'postmortems').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'is a link'):
+            ops_agent.reserve(DAY, PID)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_a_second_run_starts_the_tab_that_the_first_could_not_ask_for(self):
         self.commit('No stamp at all', at(11))
@@ -375,33 +395,27 @@ class ScheduleTests(Case):
         self.assertGreater(ops.next, time.monotonic() + 200)  # not asked again on every tick
         self.assertEqual(self.observe(ops), (True, [DAY]))
 
-    def test_a_state_file_that_cannot_be_read_starts_no_tab(self):
-        self.commit('No stamp at all', at(11))
-        args = (DAY, self.entries(), lambda entry: str(self.repo), self.run_tmux())
-        started = []
-
-        def start(anchor, body, folder, run=None, group=None):
-            started.append(body['name'])
-            return '%9', body['name']
-        self.assertEqual(ops_agent.run_day(*args, start=start)[0]['status'], 'started')
-        real = Path.read_text
-
-        def read(path, *a, **k):  # the launch records cannot be read, writes still work
-            if path == ops_agent.state_path():
-                raise PermissionError('no read')
-            return real(path, *a, **k)
-        with mock.patch.object(Path, 'read_text', read):
-            again = ops_agent.run_day(*args, start=start)
-            self.assertEqual(ops_agent.state()['runs'], [])  # Settings still opens
-        self.assertEqual((again[0]['status'], len(started)), ('failed', 1))
-        ops_agent.state_path().write_text('{"version": 1}')  # there, but not valid: also no guess
-        self.assertEqual((ops_agent.run_day(*args, start=start)[0]['status'], len(started)), ('failed', 1))
+    def test_a_state_file_in_trouble_stops_the_scheduler_not_settings(self):
+        ops_agent.set_enabled(True)
+        ops_agent.state_path().parent.mkdir(parents=True, exist_ok=True)
+        ops_agent.state_path().write_text('{"version": 1}')  # there, but not valid
+        self.assertEqual(ops_agent.state()['runs'], [])  # Settings still opens
         with self.assertRaisesRegex(ValueError, 'invalid'):
             ops_agent.request()
-        ops_agent.set_enabled(True)
         ops, _ = self.ops(datetime(2026, 11, 18, 9, 0))
         with mock.patch('builtins.print'):
             self.assertEqual(self.observe(ops), (False, []))
+        self.assertEqual(ops_agent.state_path().read_text(), '{"version": 1}')  # never replaced by a guess
+
+    def test_the_monitor_call_does_not_wait_for_a_state_write(self):
+        ops, _ = self.ops(datetime(2026, 11, 18, 9, 0))
+        ops.next = 0.0
+        done = []
+        caller = ops_agent.threading.Thread(target=lambda: done.append(ops.observe([], None)))
+        with ops_agent._LOCK, mock.patch.object(ops_agent.threading, 'Thread') as thread:  # a state write holds _LOCK
+            caller.start()
+            caller.join(5)
+        self.assertEqual((done, thread.call_count), ([True], 1))
 
     def test_state_lists_runs_newest_first_and_reads_a_note(self):
         note = ops_agent.note_path(PID, DAY)

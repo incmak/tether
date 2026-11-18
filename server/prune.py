@@ -326,10 +326,10 @@ def remove(kind, pid, name, mark, now=None):
                 _save(data)  # the record stays: it is the way back for the note
                 raise
             except BaseException:
-                # The record goes only when the note is in its place (the move never happened, or the note went
-                # back). When it is not there, the record is its way back from the trash.
+                # The record goes only when the trash does not hold the file (the move never happened, or the note
+                # went back). While the trash holds it, the record is its way back, whatever sits at its old place.
                 try:
-                    held = not (projects.bundle(pid) / 'notes' / name).is_file()
+                    held = os.path.lexists(projects.bundle(pid) / 'notes' / '.trash' / record['file'])
                 except Exception:  # noqa: BLE001
                     held = True
                 if held:
