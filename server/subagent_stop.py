@@ -5,12 +5,12 @@ Agents run inside the Claude process, so they stop through /tasks. That path rea
 refuses whenever the screen does not match what it expects; it never guesses a row."""
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import time
 
 from model_picker import press, visible
+import paths
 import subagents
 import task_process
 import terminal_input
@@ -262,7 +262,7 @@ def stop_selected(entry, target, run, sleep, clock=time.time, pressed=None):
 
 # The newest Claude Code version whose /tasks screens the stop tests and a live run were checked on.
 CHECKED_TASKS_UI = '2.1.325'
-SESSIONS = Path.home() / '.claude' / 'sessions'
+SESSIONS = paths.CLAUDE / 'sessions'
 
 
 def claude_version(entry):

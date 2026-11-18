@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import reliability_checklist as checklist
 import review_scope
+from unittest_environment import isolate
 
 ROOT = Path(__file__).resolve().parent.parent
 ROWS = '''# Checklist
@@ -128,6 +129,7 @@ class HitTests(unittest.TestCase):
 
 class RepositoryTests(unittest.TestCase):
     def setUp(self):
+        isolate()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

@@ -244,7 +244,9 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                     raise ValueError('That review link is not on this tab.')
             result = 200, {'stopped': review_links.remove(worker, reviewer)}
         elif action == 'escalate':
-            review_links.escalate(body.get('pane'), caller['id'], caller.get('thread'))
+            worker = next((entry for entry in entries if entry['id'] == body.get('pane')), {})
+            review_links.escalate(body.get('pane'), caller['id'], caller.get('thread'),
+                                  worker_thread=helper_tabs._thread(worker) or '')
             result = 200, {'escalated': True}
         elif action == 'close':
             result = 200, close_tab(body, caller, entries, run, status, sessions, lock)

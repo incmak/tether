@@ -289,7 +289,7 @@ class LaunchTests(unittest.TestCase):
         source = entry()
         request = body(review='new')
         delegate.validate(request, [source])
-        with patch.dict(delegate.review_links._feedback_in_flight, {('%12', '%14', 1): THREAD}), \
+        with patch.dict(delegate.review_links._feedback_in_flight, {('%12', THREAD): object()}), \
                 patch.object(delegate, 'new_window_after', return_value='%13') as window:
             with self.assertRaisesRegex(ValueError, 'Review feedback is being delivered'):
                 delegate.start(source, request, '/project', run=Mock())

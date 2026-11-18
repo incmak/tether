@@ -85,7 +85,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('@chat_icon', text)  # agents learn to set their tab icon
         # Count the notes and code paths at a typical install length, not the test or CI folder length.
         code = str(Path(projects.__file__).resolve().parent.parent)
-        real = text.replace(str(projects.bundle(PID)), f'/srv/user/.tether/projects/{PID}')
+        real = text.replace(str(paths.TETHER), '/srv/user/.tether')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
         self.assertLess(len(real), 3770)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17), +145 reminders CLI (2026-11-18)

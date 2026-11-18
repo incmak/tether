@@ -132,7 +132,7 @@ class AgentTabsTests(unittest.TestCase):
                         self.assertEqual(agent_tabs.link_pair({'worker': '%12', 'reviewer': '%13'},
                                                               entries, self.reply), {'linked': True})
                         self.assertEqual(review_links.reviewed_by(), {'%12': ['%13']})
-                        link, = json.loads((self.root / 'links.json').read_text())
+                        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
                         self.assertEqual((link['name'], link['agent'], link['reviewer_thread'], link['seen_working']),
                                          (expected, 'codex', THREAD if thread == THREAD else None, seen))
                         self.reply.assert_called_with(entries[0])
@@ -366,7 +366,7 @@ class AgentTabsTests(unittest.TestCase):
 
     def stop_review_at(self, rounds, **state):
         self.link()
-        link, = json.loads(review_links.FILE.read_text())
+        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
         link.update(worker_thread=THREAD, rounds=rounds, **state)
         review_links.FILE.write_text(json.dumps([link]))
         self.assertEqual(self.request({'action': 'stop', 'worker': '%12', 'session': '%13'}),
@@ -394,9 +394,28 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = THREAD
         self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
                          (200, {'linked': True}))
-        link, = json.loads(review_links.FILE.read_text())
-        self.assertEqual((link['rounds'], link['empty_rounds']), (1, 2))
-        self.assertNotIn('paused', link)
+        link, cap = json.loads(review_links.FILE.read_text())
+        self.assertEqual(cap['counts'], {review_links._reviewer_key(link): {'rounds': 1, 'empty_rounds': 2}})
+        self.assertNotIn('paused', cap)
+        self.assertFalse({'rounds', 'empty_rounds', 'paused'} & link.keys())
+
+    def test_unreadable_pause_survives_stop_and_either_agent_relink(self):
+        for start in (False, True):
+            with self.subTest(start=start):
+                review_links.FILE.write_text('[]')
+                self.stop_review_at(0, paused=True, unreadable=True)
+                if start:
+                    with patch.object(delegate, 'new_window_after', return_value='%15'), \
+                            patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt'):
+                        status, result = self.request({'action': 'start', 'review': 'new', 'message': '',
+                                                       'agent': 'claude'})
+                    self.assertEqual(status, 201, result)
+                    reviewer = '%15'
+                else:
+                    status, result = self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'})
+                    self.assertEqual(status, 200, result)
+                    reviewer = '%13'
+                self.assertEqual(review_links.paused(), {'%12': [reviewer]})
 
     def test_browser_link_resets_a_saved_cap(self):
         for reviewer in ('%13', '%14'):
@@ -404,8 +423,9 @@ class AgentTabsTests(unittest.TestCase):
                 self.stop_review_at(5, paused=True, limit=5, grant_rounds=3)
                 self.assertEqual(self.request({'worker': '%12', 'reviewer': reviewer}, path='/mobile/api/review-link'),
                                  (200, {'linked': True}))
-                link, = json.loads(review_links.FILE.read_text())
-                self.assertFalse({'rounds', 'limit', 'grant_rounds', 'paused'} & link.keys())
+                link, cap = json.loads(review_links.FILE.read_text())
+                for row in (link, cap):
+                    self.assertFalse({'counts', 'limit', 'grant_rounds', 'paused'} & row.keys())
                 self.assertTrue(review_links.remove('%12', reviewer))
 
     def test_relink_in_a_new_worker_conversation_starts_fresh(self):
@@ -413,10 +433,12 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
         self.assertEqual(self.request({'action': 'link', 'worker': '%12', 'reviewer': '%13'}),
                          (200, {'linked': True}))
-        old, new = json.loads(review_links.FILE.read_text())
-        self.assertEqual((old['worker_thread'], old['rounds']), (THREAD, 5))
+        link, new, old = json.loads(review_links.FILE.read_text())
+        self.assertEqual(old['worker_thread'], THREAD)
+        self.assertEqual(list(old['counts'].values()), [{'rounds': 5}])
         self.assertEqual(new['worker_thread'], self.entries[0]['thread'])
-        self.assertFalse({'rounds', 'limit', 'paused'} & new.keys())
+        self.assertEqual(new['worker_thread'], link['worker_thread'])
+        self.assertFalse({'counts', 'limit', 'paused'} & new.keys())
 
     def test_reviewer_stop_removes_only_its_own_link_with_or_without_reviewer(self):
         for extra in ({}, {'reviewer': '%12'}):
@@ -438,8 +460,8 @@ class AgentTabsTests(unittest.TestCase):
 
     def test_only_parent_can_escalate_its_workers_waiting_review(self):
         self.link(worker='%13', reviewer='%14')
-        link, = json.loads(review_links.FILE.read_text())
-        link.update(paused=True, rounds=3, parent_stage=dict(pane='%12', thread=THREAD, notice='Fix it.', sent=True))
+        link, = (row for row in json.loads(review_links.FILE.read_text()) if 'reviewer' in row)
+        link.update(worker_thread=THREAD, paused=True, rounds=3, parent_stage=dict(pane='%12', thread=THREAD, notice='Fix it.', sent=True))
         review_links.FILE.write_text(json.dumps([link]))
         payload = {'action': 'escalate', 'pane': '%13'}
         error = (400, {'error': 'That tab has no review waiting on this tab.'})
@@ -447,12 +469,26 @@ class AgentTabsTests(unittest.TestCase):
         self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
         self.assertEqual(self.request(payload), error)
         self.assertEqual(json.loads(review_links.FILE.read_text()), [link])
+        stored_link, cap = review_links._read()
+        self.assertEqual(cap['parent_stage'], link['parent_stage'])
         self.entries[0]['thread'] = THREAD
         self.assertEqual(self.request(payload), (200, {'escalated': True}))
-        link.pop('parent_stage')
-        self.assertEqual(json.loads(review_links.FILE.read_text()), [dict(link, escalate='Fix it.')])
+        cap.pop('parent_stage')
+        self.assertEqual(json.loads(review_links.FILE.read_text()), [stored_link, dict(cap, escalate='Fix it.')])
         self.assertEqual(self.request(payload), error)
         self.run.assert_not_called()
+
+    def test_parent_can_escalate_a_stopped_review_only_in_the_workers_current_thread(self):
+        self.entries[2]['thread'] = THREAD
+        other_thread = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
+        caps = [dict(worker='%14', worker_thread=thread, saved_at=1, rounds=3, paused=True,
+                     parent_stage=dict(pane='%12', thread=THREAD, notice=thread, sent=True))
+                for thread in (THREAD, other_thread)]
+        review_links.FILE.write_text(json.dumps(caps))
+        self.assertEqual(self.request({'action': 'escalate', 'pane': '%14'}), (200, {'escalated': True}))
+        current, other = json.loads(review_links.FILE.read_text())
+        self.assertEqual(current['escalate'], THREAD)
+        self.assertEqual(other['parent_stage'], caps[1]['parent_stage'])
 
     def test_list_reports_both_sides_with_names_in_store_order(self):
         self.link()
