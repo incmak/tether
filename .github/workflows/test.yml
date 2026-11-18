@@ -76,6 +76,15 @@ jobs:
             fi
             sleep 30
           done
+      - name: Real Chromium smoke test
+        # Release checks rely on this run, so the server's own Chromium launch must run here, not skip.
+        shell: bash
+        run: |
+          chrome=$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-*/headless_shell | sort | tail -1)
+          test -x "$chrome"
+          cd server
+          MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest 2>&1 | tee ../smoke.log
+          grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
       - name: Browser UI tests
         run: cd ui && node run_ui_tests.cjs --browser
       - name: Upload browser test screenshots

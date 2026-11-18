@@ -76,6 +76,7 @@ Run `python3 scripts/release.py X.Y.Z` from any checkout.
 - The script fetches `origin/main` and pins its commit. A passing GitHub `tests` run for that commit lets it skip the local checks.
 - Use `--check` to check the version, tag, commit, and CI state without changing the repository or waiting for CI.
 - If CI is still running, the script checks again every 15 seconds. Use `--ci-wait SECONDS` to change the 600-second limit.
+- CI runs the same checks, including the real Chromium smoke test in the `browser` job.
 - If CI fails or is missing, fix main or use `--local-checks`. That option runs the full local tests and UI checks, including the build.
 - The script makes a clean worktree and bumps the version. It preserves your checkout and its uncommitted work.
 - It commits the version changes, creates an annotated tag, and pushes `main` and the tag together.
