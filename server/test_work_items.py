@@ -291,15 +291,19 @@ class Api(unittest.TestCase):
         work_items._CACHE.clear()
         work_items.save_project(dict(PROJECT), 0, create=True)
         work_items.new('shop', 'Login fails', 'agent')
-        self.asked = work_items.ask('T-001', 'Fix it?', ['Build', 'Hold'], pane='%5', chat='chat-1')
+        with mock.patch('time.time', return_value=1000):
+            self.asked = work_items.ask('T-001', 'Fix it?', ['Build', 'Hold'], pane='%5', chat='chat-1')
         self.entry = {'id': '%5', 'thread': 'chat-1', 'writable': True}
+        self.entries = [self.entry]
+        self.started = None
         self.state = 'Working'
         self.sends = []
 
     def post(self, name, body):
         handler = Handler(work_api.PREFIX + name, body)
-        work_api.post(handler, sessions=lambda: [self.entry], status=lambda entry: {'state': self.state},
-                      send=lambda entry, text, state: self.sends.append((entry['id'], text)))
+        with mock.patch.object(work_api, 'tmux_started', return_value=self.started):
+            work_api.post(handler, sessions=lambda: self.entries, status=lambda entry: {'state': self.state},
+                          send=lambda entry, text, state: self.sends.append((entry['id'], text)))
         return handler.sent
 
     def answer(self, **extra):
@@ -352,6 +356,41 @@ class Api(unittest.TestCase):
         self.assertIn('Mak answered T-001 on the work board: Build', self.sends[0][1])
         self.assertEqual(payload['item']['stage'], 'ready')
         self.assertEqual(payload['item']['history'][-1]['text'], 'Sent to tab %5')
+
+    def test_answer_follows_the_asking_chat_after_a_restart(self):
+        self.started = 2000
+        self.entries = [{**self.entry, 'thread': 'chat-2'}, {**self.entry, 'id': '%15'}]
+        status, payload = self.answer(choice='Hold')
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['sent'])
+        self.assertEqual([pane for pane, _ in self.sends], ['%15'])
+        self.assertIn('on the work board: Hold', self.sends[0][1])
+        self.assertEqual(payload['item']['history'][-1]['text'], 'Sent to tab %15')
+
+    def test_a_reused_pane_gets_nothing_if_the_asking_chat_did_not_return(self):
+        self.started = 2000
+        self.entry['thread'] = 'chat-2'
+        status, payload = self.answer(choice=None, text='Use the other option.')
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['sent'])
+        self.assertEqual(self.sends, [])
+        self.assertEqual(payload['item']['history'][-2]['text'], 'You replied: Use the other option.')
+
+    def test_the_relinked_asking_pane_still_needs_a_clear_prompt(self):
+        self.started = 2000
+        self.entry['id'] = '%15'
+        self.state = 'Input needed'
+        status, payload = self.answer()
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['sent'])
+        self.assertIn('Tab %15 waits on a prompt', payload['why'])
+        self.assertEqual(self.sends, [])
+
+    def test_an_ask_made_after_tmux_started_keeps_its_pane(self):
+        self.started = 900
+        self.entries.append({**self.entry, 'id': '%15'})
+        self.assertTrue(self.answer()[1]['sent'])
+        self.assertEqual([pane for pane, _ in self.sends], ['%5'])
 
     def test_answer_is_kept_when_the_pane_runs_another_chat(self):
         self.entry['thread'] = 'chat-2'

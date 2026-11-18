@@ -608,10 +608,13 @@ def live_tabs(items, entries, started):
 
 
 def _relink(link, item, entries, started):
+    """Resolve a link. A discovery callback runs only for a link that may predate tmux."""
     at = link.get('at')
     # tmux gives its start time in whole seconds, so a link from that second may be older than tmux: check it too.
-    if not isinstance(at, (int, float)) or at >= started + 1:
+    if not started or not isinstance(at, (int, float)) or at >= started + 1:
         return link
+    if callable(entries):
+        entries = entries()
     return {**link, 'pane': _find_tab(link, item, entries)}
 
 

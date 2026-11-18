@@ -20,7 +20,9 @@ import subprocess
 import time
 from pathlib import Path
 
+import agents
 import paths
+import work_api
 import work_items
 from projects import _read, _write
 
@@ -437,9 +439,19 @@ def _tmux(*args):
     return shown.stdout.rstrip('\n') if shown.returncode == 0 else None
 
 
+def _triage_link(item):
+    return next((tab for tab in reversed(item.get('tabs') or []) if tab.get('role') == 'triage'), {})
+
+
 def triage_pane(item):
-    tabs = [t for t in item.get('tabs') or [] if t.get('role') == 'triage']
-    return tabs[-1]['pane'] if tabs else ''
+    """Find the pane for the latest triage link."""
+    link = _triage_link(item)
+    if not link:
+        return ''
+    try:
+        return work_items._relink(link, item, lambda: agents.discover({}, subprocess.run), work_api.tmux_started())['pane']
+    except (OSError, subprocess.SubprocessError):
+        return ''
 
 
 def show_status(item, status, here=''):
@@ -476,7 +488,7 @@ def show_status(item, status, here=''):
 
 def link_window(item, session):
     """At import: link the one window named after the item in the triage session as its triage tab."""
-    if triage_pane(item):
+    if _triage_link(item).get('pane'):
         return ''
     shown = _tmux('list-windows', '-t', session, '-F', '#{window_name}\t#{pane_id}')
     if not shown:
