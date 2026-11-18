@@ -4,15 +4,23 @@ import { errorText } from './api'
 import { agentName, bare, closest, named, needsMore, rank, unknownCommand } from './commandMatch'
 import type { Api, Catalog, CatalogItem, Pane } from './api'
 
-// One catalog per pane for a minute: skills and plugins rarely change while you type.
-const catalogs = new Map<string, { at: number; data: Promise<Catalog> }>()
+// Keep the last successful catalog while one request per pane refreshes it.
+const catalogs = new Map<string, { at: number; value?: Catalog; pending?: Promise<Catalog> }>()
 export function loadCatalog(api: Api, pane: string) {
-  const cached = catalogs.get(pane)
-  if (cached && Date.now() - cached.at < 60000) return cached.data
-  const data = api<Catalog>(`catalog?session=${encodeURIComponent(pane)}`)
-  data.catch(() => catalogs.delete(pane))
-  catalogs.set(pane, { at: Date.now(), data })
-  return data
+  const cached = catalogs.get(pane) ?? { at: 0 }
+  if (cached.pending) return cached.pending
+  if (cached.value && Date.now() - cached.at < 10_000) return Promise.resolve(cached.value)
+  cached.pending = api<Catalog>(`catalog?session=${encodeURIComponent(pane)}`).then(value => {
+    cached.value = value
+    cached.at = Date.now()
+    return value
+  }, failure => {
+    if (cached.value) return cached.value
+    catalogs.delete(pane)
+    throw failure
+  }).finally(() => { cached.pending = undefined })
+  catalogs.set(pane, cached)
+  return cached.pending
 }
 
 // What the end of the draft asks for: "/com" at the start, "$sk" at the start for Codex, or "@src/ap" anywhere.
@@ -31,8 +39,10 @@ export interface SuggestHandle { key: (event: React.KeyboardEvent) => boolean; c
 interface Props { api: Api; pane: Pane; draft: string; setDraft: (text: string) => void; focus: () => void; run: (text: string) => void; sendAnyway: () => void }
 
 export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions({ api, pane, draft, setDraft, focus, run, sendAnyway }, ref) {
-  const [catalog, setCatalog] = useState<Catalog | null>(null)
-  const [catalogError, setCatalogError] = useState('')
+  const [catalogState, setCatalogState] = useState<{ pane: string; data?: Catalog; error?: string }>()
+  const currentCatalog = catalogState?.pane === pane.id ? catalogState : undefined
+  const catalog = currentCatalog?.data
+  const catalogError = currentCatalog?.error
   const [files, setFiles] = useState<{ query: string; list: string[] } | null>(null)
   const [dismissed, setDismissed] = useState('')
   const [active, setActive] = useState(0)
@@ -40,14 +50,17 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
   const list = useRef<HTMLDivElement>(null)
   const found = pane.agent === 'shell' ? null : trigger(draft, pane.agent)
   const wantsCommands = found?.kind === 'command'
-  useEffect(() => { setCatalog(null); setCatalogError('') }, [pane.id])
-  // Load when the pane opens, and again on the next "/" if that failed.
+  // Preload for command checks. Check freshness when the command list opens.
   useEffect(() => {
-    if (pane.agent === 'shell' || catalog) return
+    if (pane.agent === 'shell') return
     let live = true
-    loadCatalog(api, pane.id).then(data => { if (live) { setCatalog(data); setCatalogError('') } }, failure => { if (live) setCatalogError(errorText(failure)) })
+    const cached = catalogs.get(pane.id)
+    const show = (data: Catalog) => { if (live) setCatalogState({ pane: pane.id, data }) }
+    if (cached?.value) void Promise.resolve(cached.value).then(show)
+    const request = wantsCommands || !cached?.value ? loadCatalog(api, pane.id) : cached.pending
+    request?.then(show, failure => { if (live) setCatalogState({ pane: pane.id, error: errorText(failure) }) })
     return () => { live = false }
-  }, [api, pane.id, pane.agent, catalog, wantsCommands])
+  }, [api, pane.id, pane.agent, wantsCommands])
   const fileQuery = found?.kind === 'file' ? found.query : null
   useEffect(() => {
     if (fileQuery === null) return
@@ -84,6 +97,7 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
   const key = typo ? `typo:${draft}` : found ? `${found.kind}:${draft}` : ''
   const status = !typo && found?.kind === 'command' && !catalog ? (catalogError ? `Could not load commands: ${catalogError}` : 'Loading commands…') : ''
   const open = (!!typo || !!found) && (items.length > 0 || !!status) && dismissed !== key
+  const selected = Math.min(active, items.length - 1)
   // Enter on the exact name runs it, as in the agent's own menu, unless it needs an argument. Tab only fills the box.
   const pick = (index: number, enter = false) => {
     const choice = items[index]
@@ -99,8 +113,8 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
   useImperativeHandle(ref, () => ({
     key(event) {
       if (!open || !items.length) return false
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { setActive(current => (current + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length); return true }
-      if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) { pick(active, event.key === 'Enter'); return true }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { setActive((selected + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length); return true }
+      if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) { pick(selected, event.key === 'Enter'); return true }
       if (event.key === 'Escape') { setDismissed(key); return true }
       return false
     },
@@ -111,13 +125,13 @@ export const Suggestions = forwardRef<SuggestHandle, Props>(function Suggestions
     },
   }))
   // Arrow keys move the highlight; keep it in view, below the sticky heading.
-  useEffect(() => { list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [active, open])
+  useEffect(() => { list.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [selected, open])
   if (!open) return null
   const kind = typo ? 'typo' : found?.kind
   return <div ref={list} className="suggest" role="listbox" aria-label={kind === 'file' ? 'Files' : kind === 'typo' ? 'Unknown command' : 'Commands and skills'}>
     <div className={kind === 'typo' ? 'suggest-head warn' : 'suggest-head'}>{kind === 'file' ? <><AtSign size={13} />Files in {pane.dir}</> : kind === 'typo' ? <><CircleHelp size={13} />/{typo![1]} is not a {agentName[pane.agent]} command. Did you mean:</> : <><Slash size={13} />Commands and skills</>}</div>
     {status && <p className="suggest-status">{status}</p>}
-    {items.map((item, index) => <button key={item.label} type="button" role="option" aria-selected={index === active} className={index === active ? 'active' : ''}
+    {items.map((item, index) => <button key={item.label} type="button" role="option" aria-selected={index === selected} className={index === selected ? 'active' : ''}
       onPointerDown={event => event.preventDefault()} onClick={() => pick(index)}>
       {item.icon}<span><strong>{item.label}{item.hint && <code className="suggest-hint">{item.hint}</code>}</strong>{item.detail && <small>{item.detail}</small>}</span>
     </button>)}

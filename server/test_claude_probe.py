@@ -1,4 +1,8 @@
+import os
+from pathlib import Path
 import sys
+import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -48,6 +52,84 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(replies, {'initialize': {'ok': 'initialize'}, 'get_usage': {'ok': 'get_usage'}})
         with self.assertRaises(RuntimeError):
             claude_probe.ask(None, [{'subtype': 'initialize'}], 10, command=[sys.executable, '-c', 'pass'])
+
+
+class CommandCacheTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.claude = root / 'config'
+        self.project = root / 'project'
+        self.cwd = self.project / 'nested'
+        self.cwd.mkdir(parents=True)
+        (self.project / '.git').mkdir()
+        self.enterContext(mock.patch.object(claude_probe.paths, 'CLAUDE', self.claude))
+        self.enterContext(mock.patch.object(claude_probe, '_init', {}))
+        self.ask = self.enterContext(mock.patch.object(claude_probe, 'ask', return_value={'initialize': INIT}))
+
+    def test_new_skill_refreshes_and_waits_for_an_in_flight_probe(self):
+        skills = self.claude / 'skills'
+        skills.mkdir(parents=True)
+        first = claude_probe.commands(self.cwd)
+        (skills / 'new-skill').mkdir()
+        release = threading.Event()
+
+        def refresh(*_args):
+            if not release.wait(5):
+                raise RuntimeError('test did not release the probe')
+            return {'initialize': {'commands': [{'name': 'new-skill'}]}}
+
+        self.ask.side_effect = refresh
+        try:
+            self.assertIsNone(claude_probe.commands(self.cwd, wait=0))
+            thread = claude_probe._init[self.cwd]['thread']
+            join = thread.join
+
+            def release_and_join(timeout):
+                release.set()
+                join(timeout)
+
+            with mock.patch.object(thread, 'join', side_effect=release_and_join) as wait:
+                fresh = claude_probe.commands(self.cwd)
+                wait.assert_called_once()
+        finally:
+            release.set()
+        self.assertNotEqual(fresh, first)
+        self.assertEqual([item['name'] for item in fresh['commands']], ['new-skill'])
+        self.assertEqual(self.ask.call_count, 2)
+
+    def test_unchanged_skill_reuses_the_probe_within_ttl(self):
+        (self.claude / 'skills' / 'existing').mkdir(parents=True)
+        first = claude_probe.commands(self.cwd)
+        self.assertIsNotNone(first)
+        self.assertIs(claude_probe.commands(self.cwd), first)
+        self.ask.assert_called_once()
+
+    def test_edit_in_project_ancestor_refreshes_without_a_directory_change(self):
+        skill = self.project / '.claude' / 'skills' / 'example' / 'SKILL.md'
+        skill.parent.mkdir(parents=True)
+        skill.write_text('Before')
+        stamp = skill.stat().st_mtime_ns
+        claude_probe.commands(self.cwd)
+        skill.write_text('After')
+        os.utime(skill, ns=(stamp, stamp + 1_000_000_000))
+        self.ask.return_value = {'initialize': {'commands': [{'name': 'example', 'description': 'After'}]}}
+        fresh = claude_probe.commands(self.cwd)
+        self.assertEqual(fresh['commands'][0]['description'], 'After')
+        self.assertEqual(self.ask.call_count, 2)
+
+    def test_enabled_plugin_command_edit_refreshes(self):
+        command = self.claude / 'plugins' / 'cache' / 'market' / 'example' / '1' / 'commands' / 'review.md'
+        command.parent.mkdir(parents=True)
+        (self.claude / 'settings.json').write_text('{"enabledPlugins": {"example@market": true}}')
+        command.write_text('Before')
+        stamp = command.stat().st_mtime_ns
+        claude_probe.commands(self.cwd)
+        command.write_text('After')
+        os.utime(command, ns=(stamp, stamp + 1_000_000_000))
+        self.ask.return_value = {'initialize': {'commands': [{'name': 'example:review', 'description': 'After'}]}}
+        fresh = claude_probe.commands(self.cwd)
+        self.assertEqual(fresh['commands'][0]['description'], 'After')
+        self.assertEqual(self.ask.call_count, 2)
 
 
 class MergeTests(unittest.TestCase):
