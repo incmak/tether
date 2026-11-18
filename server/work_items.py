@@ -567,12 +567,17 @@ def board():
     return {'revision': reg['revision'], 'projects': reg['projects'], 'items': items, 'stages': list(STAGES)}
 
 
-def _base(name):
-    """A tab name without its status: triage tabs are named "<title> · <status>" (work_triage.LABEL), and the status
-    changes. Only a known status at the end goes: a title may contain " · " too."""
+def _same_tab(live, link, title):
+    """A live tab name names the linked tab: the same full name, or the item's title with or without a triage status
+    (work_triage names the tab "<title> · <status>", work_triage.LABEL, and the status changes). A title may contain
+    " · " itself, so the title decides where the status starts, not the last separator."""
     import work_triage  # it imports this module
-    head, _, tail = (name or '').strip().rpartition(' · ')
-    return head.strip() if head and tail in set(work_triage.LABEL.values()) else (name or '').strip()
+    live = (live or '').strip()
+    if not live:
+        return False
+    if live == (link.get('name') or '').strip():
+        return True
+    return live == title or live.startswith(title + ' · ') and live[len(title) + 3:] in set(work_triage.LABEL.values())
 
 
 def live_tabs(items, entries, started):
@@ -601,25 +606,19 @@ def live_tabs(items, entries, started):
 
 def _relink(link, item, entries, started):
     at = link.get('at')
+    # tmux gives its start time in whole seconds, so a link from that second may be older than tmux: check it too.
     if not isinstance(at, (int, float)) or at >= started + 1:
         return link
-    pane = _find_tab(link, item, entries)
-    # tmux gives its start time in whole seconds: a link from that second may be newer than tmux. It keeps its pane
-    # when nothing else matches, while that pane does not run another conversation.
-    if not pane and at >= started:
-        chat = link.get('chat')
-        kept = [e for e in entries if e['id'] == link.get('pane') and not (chat and e.get('thread') not in (None, '', chat))]
-        pane = link.get('pane', '') if kept else ''
-    return {**link, 'pane': pane}
+    return {**link, 'pane': _find_tab(link, item, entries)}
 
 
 def _find_tab(tab, item, entries):
     chat = tab.get('chat')
     hits = {e['id'] for e in entries if chat and e.get('thread') == chat}
     if not hits:
-        base, session = _base(tab.get('name')) or item['title'], tab.get('session')
+        session = tab.get('session')
         hits = {e['id'] for e in entries if session and (e.get('label') or '').split(':')[0] == session
-                and base and _base(e.get('full_pane_name')) == base and not (chat and e.get('thread'))}
+                and _same_tab(e.get('full_pane_name'), tab, item['title']) and not (chat and e.get('thread'))}
     return next(iter(hits)) if len(hits) == 1 else ''
 
 

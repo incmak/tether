@@ -455,11 +455,13 @@ class LiveTabs(unittest.TestCase):
         entries = [self.live('%7', 'renamed', thread='chat-9'), {**self.live('%7', 'renamed', thread='chat-9'), 'label': 'Linked'}]
         self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%7'])
 
-    def test_a_link_from_the_second_tmux_started_is_checked_but_kept_when_nothing_matches(self):
+    def test_a_link_from_the_second_tmux_started_must_find_its_tab_again(self):
         entries = [self.live('%195', 'exhibits-carry-over')]
         self.assertEqual(self.panes(self.item(self.tab('%300', 2000.5)), entries), ['%195'])
         entries.append(self.live('%5', 'new tab'))
-        self.assertEqual(self.panes(self.item(self.tab('%5', 2000.5, name='new tab')), entries), ['%5'])
+        self.assertEqual(self.panes({**self.item(self.tab('%5', 2000.5, name='new tab')), 'title': 'other'}, entries), ['%5'])
+        entries = [self.live('%12', 'unrelated', thread='chat-other')]  # no chat stored, another tab has the id now
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone')), entries), [''])
         entries = [self.live('%12', 'another tab', thread='chat-other')]  # its id now runs another conversation
         self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone', chat='chat-9')), entries), [''])
         self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone')), []), [''])  # no such pane now
@@ -471,6 +473,11 @@ class LiveTabs(unittest.TestCase):
                                            self.live('%8', 'Invoice · Canada · fixed, review')]), ['%8'])
         plain = {**self.item(self.tab('%300', 1000, name='Invoice')), 'title': 'Invoice'}
         self.assertEqual(self.panes(plain, [self.live('%7', 'Invoice · UK')]), [''])
+        literal = {**self.item(self.tab('%300', 1000, name='Invoice · ticket')), 'title': 'Invoice · ticket'}
+        self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · fixed, review')]), [''])
+        self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · ticket · fixed, review')]), ['%7'])
+        other = self.item(self.tab('%300', 1000, name='Card tap fix', session='Dev'))
+        self.assertEqual(self.panes(other, [self.live('%9', 'Card tap fix', session='Dev')]), ['%9'])
 
     def test_the_tab_that_asked_follows_its_conversation(self):
         item = {**self.item(), 'ask': {'id': 'a1', 'q': 'Go?', 'pane': '%300', 'chat': 'chat-9', 'at': 1000}}
