@@ -1,12 +1,14 @@
 """Pure rules run on system Python. Optional API tests skip without Pipecat."""
 import copy
 import asyncio
+from datetime import datetime, timezone
 import importlib.util
 import json
 import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from zoneinfo import ZoneInfo
 from own_time import own_time
 
 try:
@@ -296,11 +298,23 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(result=result):
                 self.assertIsNone(friday.action_ack('send_to_chat', {}, result))
 
+    def test_reminder_ack_reports_confirmed_reminders(self):
+        saved = [{'text': 'Check usage', 'when': 'Tue 24 Nov 10:00'}]
+        self.assertEqual(friday.action_ack('reminder_add', {}, {'ok': True, 'set': saved}),
+                         'Set 1 reminder for Tue 24 Nov 10:00.')
+        self.assertEqual(friday.action_ack('reminder_add', {}, {'ok': True, 'set': saved * 3, 'failed': []}),
+                         'Set 3 reminders.')
+        for result in ({'ok': True, 'set': saved, 'failed': [{'text': 'Check alerts'}]},
+                       {'ok': False, 'set': []}, {'ok': True, 'set': []}):
+            with self.subTest(result=result):
+                self.assertIsNone(friday.action_ack('reminder_add', {}, result))
+
     def test_event_tools(self):
-        for name in ('send_to_chat', 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'backlog_send'):
+        for name in ('send_to_chat', 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'backlog_send',
+                     'reminder_add'):
             with self.subTest(name=name):
                 self.assertIsNotNone(friday.check_tool(name, {}, 'event', 'yes', set()))
-        for name in ('read_last_reply', 'list_chats', 'open_panel', 'backlog_list'):
+        for name in ('read_last_reply', 'list_chats', 'open_panel', 'backlog_list', 'reminder_list'):
             self.assertIsNone(friday.check_tool(name, {}, 'event', 'yes', set()))
 
     def test_backlog_send_needs_a_send_word_or_a_confirmed_readback(self):
@@ -311,6 +325,26 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIsNotNone(friday.check_tool('backlog_send', args, 'speech', 'send it', {'backlog_send'}))
         self.assertIsNone(friday.check_tool('backlog_add', {'text': 'x'}, 'speech', 'add x to the backlog', set()))
         self.assertIsNotNone(friday.check_tool('backlog_add', {'text': 'x'}, 'tool', 'add x', set()))
+
+    def test_reminder_add_needs_spoken_intent_and_one_to_five_valid_items(self):
+        item = {'text': 'Check usage', 'when': 'in 2h'}
+        args = {'reminders': [item]}
+        self.assertEqual(friday.check_tool('reminder_add', args, 'speech', 'Check usage', set()),
+                         'The user did not ask for a reminder.')
+        self.assertIsNone(friday.check_tool('reminder_add', args, 'speech', 'Remember to check usage', set()))
+        self.assertIsNone(friday.check_tool('reminder_add', {'reminders': [item] * 5}, 'speech',
+                                           'Set these reminders', set()))
+        self.assertIsNotNone(friday.check_tool('reminder_add', args, 'event', 'Remind me', set()))
+        self.assertIsNotNone(friday.check_tool('reminder_add', args, 'speech', 'Remind me', {'reminder_add'}))
+        for items in (None, item, [], [item] * 6, [None], [{}], [{'text': '', 'when': 'in 2h'}],
+                      [{'text': 'Check usage', 'when': ' '}], [{'text': 'Check usage', 'when': 2}]):
+            with self.subTest(items=items):
+                self.assertIsNotNone(friday.check_tool('reminder_add', {'reminders': items}, 'speech',
+                                                       'Remind me', set()))
+        self.assertIsNotNone(friday.check_tool('backlog_add', {'text': 'Check usage'}, 'speech',
+                                               'Remind me to check usage', set()))
+        self.assertIsNone(friday.check_tool('backlog_add', {'text': 'Check usage'}, 'speech',
+                                            'Add this to the backlog', set()))
 
     def test_one_action_per_speech_turn(self):
         for name, args in [('send_to_chat', {'prompt': 'Fix the login bug'}),
@@ -364,6 +398,59 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', no, set(), readback), refusal)
         for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Send to another chat?'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'yes', set(), readback), refusal)
+
+    def test_send_consent_matches_pending_tool_chat_and_turn(self):
+        args = {'chat': 'Automation tether . Can we have…', 'prompt': 'Review the full context.'}
+        proposal = friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 4)
+        readback = 'Shall I send a request to the automation tether chat to review the full context?'
+
+        def check(text='Yes, please do.', pending=proposal, turn=5, **changes):
+            return friday.check_tool('send_to_chat', dict(args, **changes), 'speech', text,
+                                     set(), readback, pending, turn)
+
+        self.assertIsNone(check())
+        self.assertIsNone(check(turn=6))
+        self.assertIsNone(check('Yes, please do. And for the factory floor, check the alerts.',
+                                prompt='Review the full context and check the factory floor alerts.'))
+        self.assertIsNotNone(check("No, don't send it."))
+        self.assertIsNotNone(check('Yes, but no.'))
+        self.assertIsNotNone(check(chat='Different chat'))
+        self.assertIsNotNone(check(pending=None))
+        self.assertIsNotNone(check(turn=7))
+        self.assertIsNotNone(friday.check_tool('backlog_send', dict(args, item='B12'), 'speech',
+                                              'yes', set(), readback, proposal, 5))
+        self.assertIsNotNone(friday.check_tool('send_to_chat', dict(args, chat='Another chat'),
+            'speech', 'yes', set(), friday.send_readback(proposal), proposal, 5))
+        # A "no" declines only the pending send; other tools in the same turn still work.
+        self.assertIsNone(friday.check_tool('switch_chat', {'chat': 'Deploy'}, 'speech',
+                                            'No, switch to deploy.', set(), readback, proposal, 5))
+
+    def test_send_readback_shortens_chat_and_prompt(self):
+        cases = (
+            ('send_to_chat', 'Docs . Investigate the notes…', 'Check the notes.',
+             'Send to Docs: Check the notes. Yes or no?'),
+            ('send_to_chat', 'Docs…', 'a' * 150 + ' anotherlongword',
+             'Send to Docs: ' + 'a' * 150 + '…. Yes or no?'),
+            ('send_to_chat', 'X' * 60, 'a' * 161,
+             'Send to ' + 'X' * 40 + ': ' + 'a' * 159 + '…. Yes or no?'),
+            ('backlog_send', 'API… Follow up', 'B12', 'Send B12 to API. Yes or no?'),
+        )
+        for tool, chat, payload, readback in cases:
+            with self.subTest(tool=tool, chat=chat):
+                self.assertEqual(friday.send_readback(friday.SendProposal(tool, chat, payload, 1)), readback)
+
+    def test_false_success(self):
+        for text in ('I have sent that.', 'Switched to Docs.', 'Done!'):
+            self.assertTrue(friday.false_success(text), text)
+        for text in ('It was not sent.', "It wasn't sent.", 'It wasn’t approved.',
+                     'Shall I send it?', 'Was it sent?', 'The sender is ready.'):
+            self.assertFalse(friday.false_success(text), text)
+
+    def test_stray_text(self):
+        for text in ('層', '사', 'あ', 'ｱ', 'ก', 'ش'):
+            self.assertTrue(friday.stray_text(text), text)
+        for text in ('OK 層', 'B318', '層7', 'é 層', 'Ａ層', '', '...'):
+            self.assertFalse(friday.stray_text(text), text)
 
     def test_error_detail_is_bounded_and_redacted_before_truncation(self):
         exc = SimpleNamespace(body={'message': 'Invalid role\nBEARER abc ya29.token actual-key ' + 'x' * 400},
@@ -475,6 +562,24 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertIs(result, messages)
                 self.assertIsNone(sent)
 
+    def test_state_time_follows_reminder_zone_and_leaves_history_intact(self):
+        now = datetime(2026, 11, 18, 19, 1, tzinfo=timezone.utc).timestamp()
+        user = {'role': 'user', 'content': 'Remind me on 24 November.'}
+        messages, _ = friday.add_state(friday.llm_prefix()['messages'] + [user], {'target': 'Docs'}, ['Note'], None)
+        original = copy.deepcopy(messages)
+        for zone, expected in (('Asia/Kolkata', 'Thu 19 Nov 2026 00:31 IST'),
+                               ('America/Los_Angeles', 'Wed 18 Nov 2026 11:01 PST')):
+            with self.subTest(zone=zone), patch.object(friday.reminders, 'ZONE', ZoneInfo(zone)), \
+                    own_time(friday, time=lambda: now):
+                result = friday.with_state_time(messages)
+                state = json.loads(result[-2]['content'][len(friday.STATE_PREFIX):])
+                self.assertEqual(state, {'now': expected, 'state': {'target': 'Docs'}, 'notes': ['Note']})
+                self.assertIs(result[-1], user)
+                self.assertEqual(messages, original)
+                without_state = friday.with_state_time([messages[0], user])
+                self.assertEqual(json.loads(without_state[-2]['content'][len(friday.STATE_PREFIX):]),
+                                 {'now': expected})
+
     def test_trim_keeps_complete_tool_turns(self):
         messages = friday.llm_prefix()['messages']
         for i in range(16):
@@ -535,7 +640,7 @@ class FridayRulesTests(unittest.TestCase):
         schemas = friday.tool_schemas()
         tools = {t['function']['name']: t['function']['parameters'] for t in schemas}
         self.assertEqual(set(tools), {'list_chats', 'send_to_chat', 'answer_approval', 'read_last_reply', 'new_chat', 'switch_chat', 'open_panel',
-                                      'backlog_list', 'backlog_add', 'backlog_send'})
+                                      'backlog_list', 'backlog_add', 'backlog_send', 'reminder_add', 'reminder_list'})
         self.assertIn('backlog', tools['open_panel']['properties']['panel']['enum'])
         self.assertEqual(tools['backlog_send']['required'], ['item', 'chat'])
         self.assertEqual(tools['list_chats']['required'], [])
@@ -546,6 +651,13 @@ class FridayRulesTests(unittest.TestCase):
         self.assertEqual(tools['new_chat']['properties']['agent']['enum'], ['claude', 'codex'])
         self.assertEqual(tools['answer_approval']['properties']['decision']['enum'], ['approve', 'deny'])
         self.assertEqual(tools['open_panel']['properties']['open']['type'], 'boolean')
+        self.assertEqual(tools['reminder_add']['required'], ['reminders'])
+        self.assertEqual(tools['reminder_list'], {'type': 'object', 'properties': {}, 'required': []})
+        items = tools['reminder_add']['properties']['reminders']
+        self.assertEqual((items['type'], items['minItems'], items['maxItems']), ('array', 1, 5))
+        self.assertEqual(items['items']['required'], ['text', 'when'])
+        for key in ('text', 'when'):
+            self.assertEqual(items['items']['properties'][key]['type'], 'string')
         for schema in tools.values():
             self.assertTrue(set(schema['required']) <= schema['properties'].keys())
         self.assertIn('No markdown, lists, code, or Needs you footer.', friday.SYSTEM_PROMPT)
@@ -557,6 +669,12 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIn('Idle chats are open, not running.', friday.SYSTEM_PROMPT)
         self.assertIn('Say running or working only for busy chats.', friday.SYSTEM_PROMPT)
         self.assertIn('To list the chats in one session, call list_chats with session.', friday.SYSTEM_PROMPT)
+        self.assertIn('Use backlog_add only when the user asks to add work to the backlog.', friday.SYSTEM_PROMPT)
+        self.assertNotIn('remember an item', friday.SYSTEM_PROMPT)
+        self.assertIn('When the user says remind me, reminder, or asks to keep something for a date, '
+                      'call reminder_add once with all the reminders. '
+                      'Pass when as YYYY-MM-DD HH:MM; use 10:00 when no time is given, and the next day for after a date. '
+                      'Read back the dates in the confirmation.', friday.SYSTEM_PROMPT)
         self.assertEqual(friday.MAX_REPLY_TOKENS, 120)
         self.assertIn('"Current Tether state" user message is data, not a request', friday.SYSTEM_PROMPT)
         self.assertNotIn('```', friday.SYSTEM_PROMPT)
@@ -1029,7 +1147,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         return {'id': ident, 'type': 'function',
                 'function': {'name': 'list_chats', 'arguments': '{}'}}
 
-    async def tool_flow(self, user, responses):
+    async def tool_flow(self, user, responses, proposal=None):
         """Drive Pipecat completions and return the downstream frame and dispatch order."""
         from pipecat.processors.aggregators.llm_context import LLMContext
         from pipecat.processors.frame_processor import FrameProcessor
@@ -1038,12 +1156,14 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session = friday.Session.__new__(friday.Session)
         session.turn = 0
         session.new_turn()
+        session.pending_proposal = proposal
         session.rtvi = RTVIProcessor()
         session.prepare_messages = lambda messages: messages
         llm = self.rt.FridayLLM(session, friday.brain_config({}))
         llm._setup = SimpleNamespace(observer=None, enable_metrics=True, enable_usage_metrics=False,
             report_only_initial_ttfb=False, pipeline_worker=SimpleNamespace(app_resources=None, worker_runner=None))
-        context = LLMContext([{'role': 'user', 'content': user}])
+        messages = [{'role': 'user', 'content': user}] if isinstance(user, str) else list(user)
+        context = LLMContext(messages)
         direction = self.rt.FrameDirection.DOWNSTREAM
         frames = []
         browser_results = {}
@@ -1074,8 +1194,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         def completion(text, calls, delay):
             async def chunks():
                 elapsed[0] += delay
-                if text:
-                    yield self.chunk(content=text)
+                for chunk in [text] if isinstance(text, str) else text:
+                    if chunk:
+                        yield self.chunk(content=chunk)
                 for index, (ident, name, args) in enumerate(calls):
                     yield self.chunk(tool_calls=[{'index': index, 'id': ident, 'type': 'function',
                         'function': {'name': name, 'arguments': json.dumps(args)}}])
@@ -1152,10 +1273,153 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_llm_ttft_ignores_blocked_tool_run(self):
         session, frames = await self.tool_flow('Can you fix docs?', [
-            ('', 2.75, [('send_to_chat', {'prompt': 'Fix docs'}, {'ok': True})]),
+            ('', 2.75, [('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True})]),
             ('Shall I send it?', 1.375, [])])
         self.assertNotIn(('dispatch', 'send_to_chat'), frames)
         self.assertEqual((session.llm_ttft, session.llm_calls), (1.375, 2))
+
+    async def test_blocked_send_speaks_one_confirmation_without_an_llm_followup(self):
+        args = {'chat': 'Automation tether . Can we have…', 'prompt': 'Review the full context.'}
+        with patch('sys.stderr'):
+            session, frames = await self.tool_flow('Can you get a review?', [
+                ('', 1, [('send_to_chat', args, {'ok': True})])])
+        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+        speech, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+        self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+        self.assertIs(result.properties.run_llm, False)
+        self.assertEqual(result.result, {'error': 'Not sent yet. Friday asked the user to confirm.'})
+        self.assertEqual(speech.text, 'Send to Automation tether: Review the full context. Yes or no?')
+        self.assertTrue(speech.append_to_context)
+        self.assertLess(frames.index(result), frames.index(speech))
+        self.assertEqual(session.pending_proposal,
+                         friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 1))
+        self.assertEqual(session.llm_calls, 1)
+
+    async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
+        cases = (
+            ('Send this', ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})),
+            (friday.EVENT_PREFIX + 'The build failed.', ('backlog_add', {'text': 'Fix docs'}, {'ok': True})),
+        )
+        for user, action in cases:
+            with self.subTest(action=action[0]), patch('sys.stderr') as stderr:
+                _, frames = await self.tool_flow(user, [
+                    ('', 1, [action]), (['I have s', 'ent that.'], 1, [])])
+                self.assertNotIn('I have s', [f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through.'])
+                self.assertIn('Friday corrected false success', ''.join(c.args[0] for c in stderr.write.call_args_list))
+        _, frames = await self.tool_flow(cases[0][0], [
+            ('', 1, [cases[0][1]]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                         ['The prompt was sent', ' to neither chat, not even Docs.'])
+
+    async def test_stray_text_is_dropped_with_fallback_only_for_an_empty_reply(self):
+        cases = (
+            (['層'], [], [], ['Sorry, I lost my words. Say that again?']),
+            (['', 'あ', 'OK 層', ' B318'], [], ['OK 層', ' B318'], []),
+            (['ش'], [('list_chats', {}, {'chats': []})], [], ['Checking the chats.']),
+        )
+        for chunks, calls, text, speech in cases:
+            with self.subTest(chunks=chunks), patch('sys.stderr') as stderr:
+                _, frames = await self.tool_flow('Check it', [(chunks, 1, calls)])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], text)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], speech)
+                log = ''.join(c.args[0] for c in stderr.write.call_args_list)
+                self.assertEqual(log, 'Friday dropped stray text: 1 chars\n')
+
+    async def test_joined_speech_confirms_pending_send_and_success_clears_it(self):
+        proposal = friday.SendProposal('send_to_chat', 'Automation tether . Can we have…', 'Review the context.', 0)
+        messages = [
+            {'role': 'user', 'content': 'Earlier speech with no.'},
+            {'role': 'assistant', 'content': 'Shall I send that to the automation tether chat?'},
+            {'role': 'user', 'content': 'Yes, please do.'},
+            {'role': 'user', 'content': friday.EVENT_PREFIX + 'No.'},
+            {'role': 'user', 'content': friday.STATE_PREFIX + 'No.'},
+            {'role': 'user', 'content': 'And for the factory floor, check the alerts.'},
+        ]
+        args = {'chat': proposal.chat, 'prompt': 'Review the context and check the factory floor alerts.'}
+        session, frames = await self.tool_flow(messages, [
+            ('', 1, [('send_to_chat', args, {'ok': True})])], proposal)
+        self.assertIn(('dispatch', 'send_to_chat'), frames)
+        self.assertIsNone(session.pending_proposal)
+
+    async def test_declined_pending_proposal_clears_it_and_blocks_only_the_send(self):
+        proposal = friday.SendProposal('backlog_send', 'Docs', 'B12', 0)
+        with patch('sys.stderr'):
+            session, frames = await self.tool_flow("No, don't send it.", [('', 1, [
+                ('backlog_send', {'chat': 'Docs', 'item': 'B12'}, {'ok': True}),
+                ('backlog_list', {}, {'items': []}),
+            ]), ('Okay.', 1, [])], proposal)
+        self.assertIsNone(session.pending_proposal)
+        # The declined send does not run; a read tool in the same turn still does.
+        self.assertNotIn(('dispatch', 'backlog_send'), frames)
+        self.assertIn(('dispatch', 'backlog_list'), frames)
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], ['Okay.'])
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], ['Checking the backlog.'])
+
+    async def test_joined_reminder_request_uses_one_batch_and_never_adds_backlog_work(self):
+        messages = [
+            {'role': 'user', 'content': 'Delete on 24 November and remind me at that time.'},
+            {'role': 'user', 'content': "And for AWS MFA I'll do that after 24 November and for savings plan "
+                                        "we'll decide it after 15 December."},
+            {'role': 'user', 'content': 'So keep those all in reminders.'},
+        ]
+        items = [{'text': 'Delete', 'when': '2026-11-24 10:00'},
+                 {'text': 'Set up AWS MFA', 'when': '2026-11-25 10:00'},
+                 {'text': 'Decide on savings plan', 'when': '2026-12-16 10:00'}]
+        reminder = ('reminder_add', {'reminders': items}, {'ok': True, 'set': items})
+        backlog = ('backlog_add', {'text': 'Set up AWS MFA'}, {'ok': True})
+        _, frames = await self.tool_flow(messages, [('', 1, [reminder])])
+        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+        self.assertIs(result.properties.run_llm, False)
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], ['Set 3 reminders.'])
+        with patch('sys.stderr'):
+            _, frames = await self.tool_flow(messages, [('', 1, [backlog, reminder, reminder])])
+        self.assertEqual([f for f in frames if isinstance(f, tuple)], [('dispatch', 'reminder_add')])
+
+    async def test_reminder_partial_failure_gets_llm_followup_and_listing_has_filler(self):
+        item = {'text': 'Check usage', 'when': 'in 2h'}
+        reminder = ('reminder_add', {'reminders': [item, {'text': 'Second', 'when': 'later'}]},
+                    {'ok': True, 'set': [item], 'failed': [{'text': 'Second', 'error': 'Pick a time.'}]})
+        _, frames = await self.tool_flow('Remind me about both', [
+            ('', 1, [reminder]), ('I added the first reminder. I need a time for the second.', 1, [])])
+        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+        self.assertIsNone(result.properties)
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                         ['I added the first reminder. I need a time for the second.'])
+        self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+        _, frames = await self.tool_flow('What are my reminders?', [
+            ('', 1, [('reminder_list', {}, {'reminders': []})])])
+        self.assertIn(('dispatch', 'reminder_list'), frames)
+        filler, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+        self.assertEqual(filler.text, 'Checking your reminders.')
+        self.assertFalse(filler.append_to_context)
+
+    async def test_llm_request_refreshes_clock_on_tool_followup(self):
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
+        state = {'role': 'user', 'content': friday.STATE_PREFIX + '{"state":null,"notes":[]}'}
+        messages = friday.llm_prefix()['messages'] + [state, {'role': 'user', 'content': 'Remind me tomorrow'}]
+        context = LLMContext(messages)
+        epoch = datetime(2026, 11, 18, 18, 29, tzinfo=timezone.utc).timestamp()
+        create = AsyncMock()
+        try:
+            with patch.object(llm._client.chat.completions, 'create', create), \
+                    patch.object(friday.reminders, 'ZONE', ZoneInfo('Asia/Kolkata')):
+                for now, expected in ((epoch, 'Wed 18 Nov 2026 23:59 IST'),
+                                      (epoch + 60, 'Thu 19 Nov 2026 00:00 IST')):
+                    with own_time(friday, time=lambda: now):
+                        await llm.get_chat_completions(context)
+                    request_messages = create.await_args.kwargs['messages']
+                    self.assertEqual(json.loads(request_messages[1]['content'][len(friday.STATE_PREFIX):]),
+                                     {'state': None, 'notes': [], 'now': expected})
+                    self.assertEqual(context.get_messages()[1], state)
+                    if now == epoch:
+                        context.add_message({'role': 'assistant', 'tool_calls': [self.tool_call('lookup')]})
+                        context.add_message({'role': 'tool', 'tool_call_id': 'lookup', 'content': '{}'})
+        finally:
+            await llm._client.close()
 
     async def test_metrics_log_keeps_first_audio_and_counts_later_runs(self):
         session = friday.Session.__new__(friday.Session)
@@ -1376,7 +1640,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         self.assertNotIn('ya29', log)
                         self.assertNotIn('private request', log)
                         self.assertNotIn('private headers', log)
-                        self.assertIn('roles=user,assistant(tool_calls),tool', log)
+                        self.assertIn('roles=user,user,assistant(tool_calls),tool', log)
                         if isinstance(error, BadRequestError):
                             self.assertIn('Friday LLM error: 400 ', log)
                             self.assertIn('Invalid role [REDACTED] [REDACTED]', log)
@@ -1592,7 +1856,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                      result_callback=result)
             await service.handle_browser_tool(params)
             rtvi.handle_function_call.assert_awaited_once_with(params)
-            messages.extend([{'role': 'tool', 'content': '{}'},
+            messages.extend([{'role': 'assistant', 'tool_calls': [self.tool_call('call-1')]},
+                             {'role': 'tool', 'tool_call_id': 'call-1', 'content': '{}'},
                              {'role': 'developer', 'content': 'The deferred tool result is ready.'}])
             self.assertIs(service.prepare_run(messages), run)
             self.assertEqual(service.run_source, 'tool')

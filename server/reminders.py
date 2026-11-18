@@ -31,7 +31,10 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import paths
+try:
+    from . import paths
+except ImportError:
+    import paths
 
 PREFIX = '/mobile/api/reminders'
 ACTIONS = ('add', 'edit', 'done', 'reopen', 'snooze', 'delete', 'restore')
@@ -428,10 +431,11 @@ def payload(reminder, silent=False, now=None):
             'reminder': reminder['id'], 'occ': reminder['occ']}
 
 
-# Times the CLI understands: "2026-11-19 10:00", "2026-11-19T10:00+05:30", "10:00" (next), "tomorrow 10:00",
+# Times the CLI understands: "2026-11-19 10:00", "2026-11-19" (10:00), "2026-11-19T10:00+05:30", "10:00" (next), "tomorrow 10:00",
 # "tomorrow", "in 90m", "in 2h", "in 1d". A time without an offset is in ZONE.
 RELATIVE = re.compile(r'in\s+(\d{1,5})\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)', re.I)
 CLOCK = re.compile(r'(\d{1,2}):(\d{2})')
+DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
 
 
 def parse_when(text, now=None):
@@ -455,6 +459,8 @@ def parse_when(text, now=None):
             at = base.replace(hour=int(clock[1]), minute=int(clock[2]), second=0, microsecond=0)
             return (at if at.timestamp() > now else at + timedelta(days=1)).timestamp()
         at = datetime.fromisoformat(text.replace(' ', 'T', 1) if 'T' not in text else text)
+        if DATE.fullmatch(text):
+            at = at.replace(hour=10)
         return (at if at.tzinfo is not None else at.replace(tzinfo=ZONE)).timestamp()
     except (ValueError, OverflowError, OSError):
         raise ReminderError(f'Cannot read the time "{text}". Use "2026-11-19 10:00", "tomorrow 10:00" or "in 2h".') from None
@@ -475,11 +481,16 @@ def get(handler):
 
 
 def serve(handler, body):
-    """POST /mobile/api/reminders/add {text, due, link?}, /{edit,done,reopen,snooze,delete,restore} {id, ...}."""
+    """POST /mobile/api/reminders/add {text, due or when, link?}, or /{action} {id, ...}."""
     action = handler.path.split('?', 1)[0][len(PREFIX) + 1:]
     try:
         if action == 'add':
-            result = add(body.get('text'), body.get('due'), 'you', body.get('link'))
+            now = time.time()
+            due = body.get('due')
+            when = body.get('when')
+            if 'due' not in body and isinstance(when, str):
+                due = parse_when(when, now)
+            result = add(body.get('text'), due, 'you', body.get('link'), now=now)
         elif action == 'restore':
             result = restore(body.get('id'))
         elif action in ACTIONS:
