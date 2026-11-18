@@ -250,6 +250,11 @@ def _word(command, start, bodies):
                 # A dollar sign starts an expansion only before a name, a digit or one of these characters.
                 expands = char == '$' and re.match(r'[A-Za-z0-9_{(!#?*@$-]', command[index + 1:index + 2] or ' ')
                 plain = plain and char != '`' and not expands
+            elif (not quote and char == '~' and index == start and 'HOME=' not in command
+                  and command[index + 1:index + 2] in ('', '/', ' ', '\t', '\n', ';', '&', '|', ')')):
+                parts.append(os.path.expanduser('~'))  # the home folder, as the shell writes it for ~ and ~/x
+                index += 1
+                continue
             elif not quote:
                 plain = plain and char not in SHELL_SPECIAL and char.isprintable() and not (char == '=' and not parts)
                 if char == '@' and HEREDOC_FOUND.match(command, index):
@@ -571,21 +576,34 @@ def evaluate(command, cwd=None):
         return None
     # `alone`: only plain `cd` commands ran before. Then no earlier command can have written a message file.
     verdicts, where, alone = [], None, True
-    for preceding, words, stdin, redirects_plain, redirected in segments:
-        if preceding not in FOLDER_SEPARATORS or not words:
-            folder = None
+    # A cd is followed only when it runs for certain, in the shell itself, to a folder the gate can name:
+    # - not when the command has a background `&` (bash can put a whole && list in the background);
+    # - not when the command sets HOME (the gate's ~ would be the old one);
+    # - not after `x &&` unless x is a cd too (`test -f a && cd b; git commit` can skip the cd);
+    # - not after || or in a pipe (`cd a || cd b`, `cd a | x`).
+    steady = not any(segment[0] == '&' for segment in segments) and 'HOME=' not in command
+    chained = True  # every command so far was a followed cd
+    for number, (preceding, words, stdin, redirects_plain, redirected) in enumerate(segments):
         if not words:
+            chained = False
             continue
         first = words[0]
         uncertain = uncertain or (first.bare and first.text in KEYWORDS)
         all_plain = redirects_plain and all(word.plain for word in words)
         if first.text == 'cd' and len(words) == 2 and all_plain and not redirected:
+            # Only a cd moves the shell. It is followed when it runs for certain and in the shell itself: not after
+            # || or in a pipe or in the background (`cd a || cd b`, `cd a | x`, `cd a &`).
+            following = segments[number + 1][0] if number + 1 < len(segments) else None
             target = words[1]
-            if folder is not None and not linked and not target.fill and target.text and not target.text.startswith('-'):
+            if (folder is not None and not linked and steady and following in FOLDER_SEPARATORS
+                    and (preceding in (None, ';', '\n') or (preceding == '&&' and chained))
+                    and not target.fill and target.text and not target.text.startswith('-')):
                 folder, linked = _cd(folder, target.text)
             else:
                 folder = None
+            chained = chained and folder is not None
             continue
+        chained = False
         while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
             words = words[1:]
         uncertain = uncertain or _shell_launcher(words)
@@ -603,7 +621,8 @@ def evaluate(command, cwd=None):
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
         # A simple command cannot move the shell, except these. Any command can write a message file.
-        if first.text in ('cd', 'pushd', 'popd'):  # a cd form the gate does not follow
+        moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
+        if first.text in moving or (first.text == 'command' and len(words) > 1 and words[1].text in moving):
             folder = None
         alone = False
     if not verdicts:

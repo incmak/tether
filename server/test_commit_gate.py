@@ -188,10 +188,13 @@ class Evaluate(unittest.TestCase):
                 Path(folder, name).write_text(message)
             with mock.patch.dict(os.environ, {'HOME': folder}), \
                     mock.patch.object(commit_gate, '_read_message_file', wraps=commit_gate._read_message_file) as read:
-                for name in ('msg[12]', 'msg?.txt', '~/msg.txt'):
+                for name in ('msg[12]', 'msg?.txt', '~other/msg.txt', '~+/msg.txt'):
                     with self.subTest(name=name):
                         self.assertEqual(self.verdict(f'git commit -F {name}', folder), ('unknown', 'shell'))
                 read.assert_not_called()
+                # A plain ~/ is the home folder, for the shell and for the gate.
+                self.assertEqual(self.verdict('git commit -F ~/msg.txt', folder), ('missing', 'no-line'))
+                self.assertEqual(self.verdict('git commit -F ~/msg1.txt', folder), ('pass', ''))
             self.assertEqual(self.verdict("git commit -F 'msg[12]'", folder), ('missing', 'no-line'))
 
     def test_messages_with_a_valid_line_pass(self):
@@ -343,11 +346,12 @@ class Evaluate(unittest.TestCase):
                                  str(self.cwd / 'sub'))
         for prefix in ('false || cd sub;', 'cd sub ||\n', 'cd sub |\n', 'cd sub |& ', 'cd sub &\n',
                        'cd -P sub && ', 'cd -P; ', 'cd "$HERE"; ', 'cd; ',
-                       'cd sub >/dev/null; ', '>/dev/null; ', 'pushd sub; ', 'popd; '):
+                       'cd sub >/dev/null; ', 'pushd sub; ', 'popd; ', 'cd sub || exit 1; ', 'true | cd sub; '):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))['folder'])
         # An ordinary command before the commit does not move the shell: the usual `git add . && git commit` form.
-        for prefix in ('git add . && ', 'npm test; ', 'git add -A\n'):
+        for prefix in ('git add . && ', 'npm test; ', 'git add -A\n', '>/dev/null; ', 'git status --short | head -5; ',
+                       'git diff --cached --stat | tail -2 && ', 'npm test || true; ', 'sleep 1 & ', 'set -e\n'):
             with self.subTest(prefix=prefix):
                 found = commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))
                 self.assertEqual((found['verdict'], found['folder']), ('missing', str(self.cwd)))
@@ -549,6 +553,38 @@ class Check(Base):
                             session=f'escaped-cd-{number}')
             self.assertEqual(json.loads(data[1])['hookSpecificOutput']['permissionDecision'], 'deny', target)
             self.assertEqual(self.rows()[-1]['folder'], str(work))
+
+    def test_cd_to_the_home_folder_is_followed(self):
+        with mock.patch.dict(os.environ, {'HOME': str(self.root)}):
+            for command in ('cd ~/repo && git add -A && git commit -m x', 'cd ~ && cd repo; git commit -m x'):
+                found = commit_gate.evaluate(command, '/')
+                self.assertEqual((found['verdict'], found['folder']), ('missing', str(self.repo)), command)
+            for command in ('cd ~nobody/repo && git commit -m x', 'cd "~/repo" && git commit -m x'):
+                self.assertIsNone(commit_gate.evaluate(command, '/')['folder'], command)
+
+    def test_a_cd_that_may_not_run_is_not_followed(self):
+        other = self.root / 'other'
+        other.mkdir()
+        for prefix in ('git diff --cached --stat | grep -q . && cd ../other; ', 'test -f x && cd ../other; ',
+                       'cd ../other && printf ready > status.log & ', 'source ./goto-other.sh; ', '. ./goto.sh\n',
+                       'export HOME=/alternate; cd ~/repo && ', 'HOME=/alternate\ncd ~ && ', 'eval "$GO"; '):
+            with self.subTest(prefix=prefix):
+                self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.repo))['folder'])
+        for command in ('export HOME=/alternate; git -C ~/repo commit -m Title', 'builtin cd ../other; git commit -m Title',
+                        'command cd ../other && git commit -m Title'):
+            with self.subTest(command=command):
+                self.assertIsNone(commit_gate.evaluate(command, str(self.repo))['folder'])
+        # With a new HOME the gate does not read ~/file either.
+        self.assertEqual(commit_gate.evaluate('HOME=/alternate git commit -F ~/msg.txt', str(self.repo))['verdict'], 'unknown')
+        # A chain of plain cd commands is followed.
+        found = commit_gate.evaluate('cd .. && cd other && git add -A && git commit -m Title', str(self.repo))
+        self.assertEqual(found['folder'], str(other))
+
+    def test_enforce_blocks_after_an_earlier_pipe(self):
+        commit_gate.set_global('enforce')
+        _, out = self.pre('git status --short | head -5; git add -A && git commit -m "No stamp"', session='piped')
+        self.assertEqual(json.loads(out)['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(self.rows()[-1]['folder'], str(self.repo))
 
     def test_cd_into_a_linked_repository_is_followed(self):
         commit_gate.set_global('enforce')
