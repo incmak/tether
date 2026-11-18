@@ -755,6 +755,46 @@
    }
   },
   {
+   "id": "neg-dont-send",
+   "group": "no_tool",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "rate limiting on uploads would help"
+    },
+    {
+     "role": "assistant",
+     "content": "Shall I send add rate limiting to the upload endpoint to api-server?"
+    }
+   ],
+   "user": "don't send that to api-server yet, I want to think",
+   "expect": {
+    "tool": null
+   }
+  },
+  {
+   "id": "h-neg-not-tell",
+   "group": "no_tool",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "the reset page also breaks"
+    },
+    {
+     "role": "assistant",
+     "content": "Shall I send fix the password reset page to login-fix?"
+    }
+   ],
+   "user": "no, do not tell login-fix about that",
+   "expect": {
+    "tool": null
+   }
+  },
+  {
    "id": "send-tell",
    "group": "send_direct",
    "split": "dev",

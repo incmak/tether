@@ -45,6 +45,8 @@ def _score(trace, expect, expected_tools):
     name, args = (action['name'], action['args']) if action else (None, {})
     if trace['blocked']:
         yield 'blocked'
+    if len(trace['actions']) > 1:
+        yield 'extra_action'
     if name not in expected_tools:
         yield 'wrong_tool'
     if any(key not in args or not re.search(pattern, str(args[key]))
@@ -53,7 +55,8 @@ def _score(trace, expect, expected_tools):
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
     if 'readback_chat' in expect and friday.check_tool(
-            'send_to_chat', {'chat': expect['readback_chat'], 'prompt': 'x'}, 'speech', 'yes', set(), reply):
+            'send_to_chat', {'chat': expect['readback_chat'], 'prompt': '\u0000readback-probe\u0000'},
+            'speech', 'yes', set(), reply):
         yield 'readback'
     if action is None and not expect.get('claim_ok') and CLAIM.search(reply):
         yield 'claimed_action'
@@ -104,11 +107,15 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 result = {'error': reason}
             else:
                 used.add(name)
-                if name not in LOOKUPS or name in expected_tools:
+                if trace['action'] is None and (name not in LOOKUPS or name in expected_tools):
                     trace['action'] = {'name': name, 'args': args}
-                    return
+                if name not in LOOKUPS:
+                    trace['actions'].append({'name': name, 'args': args})
+                    continue
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
+        if trace['action'] is not None:
+            return
 
 
 def run_case(case, fixture, complete, runs=1, brain=None):
@@ -120,7 +127,7 @@ def run_case(case, fixture, complete, runs=1, brain=None):
     fails, samples = Counter(), []
     passed = prompt_tokens = llm_calls = 0
     for _ in range(runs):
-        trace = {'steps': 0, 'reply': '', 'action': None, 'blocked': [], 'prompt_tokens': 0}
+        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [], 'prompt_tokens': 0}
         try:
             _run_once(case, fixture, complete, brain, expected_tools, trace)
         except LiveError as exc:
@@ -248,6 +255,9 @@ def _post_completion(url, payload, token):
 
 
 def live_brain():
+    kind = os.environ.get('TETHER_FRIDAY_BRAIN', 'local')
+    if kind != 'gemini':
+        raise LiveError('Live eval needs TETHER_FRIDAY_BRAIN=gemini')
     try:
         import google.auth
         from google.auth.transport.requests import Request as AuthRequest
@@ -258,6 +268,8 @@ def live_brain():
         brain = friday.brain_config(os.environ, project)
     except ValueError as exc:
         raise LiveError(str(exc)) from None
+    if not brain.base_url.startswith('https://aiplatform.googleapis.com/'):
+        raise LiveError('Live eval needs a Vertex AI endpoint')
     lock = Lock()
 
     def complete(payload):

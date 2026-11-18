@@ -134,6 +134,12 @@ if 'reminder_add' in TOOLS:
          history=say("remind me to call the bank tomorrow and to renew the domain",
                      "Do you want those as reminders or as backlog items?"))
 
+# ---- Negated send words (review finding) ----
+case("neg-dont-send", "no_tool", "dev", "don't send that to api-server yet, I want to think",
+     {"tool": None}, history=say("rate limiting on uploads would help", "Shall I send add rate limiting to the upload endpoint to api-server?"))
+case("h-neg-not-tell", "no_tool", "holdout", "no, do not tell login-fix about that",
+     {"tool": None}, history=say("the reset page also breaks", "Shall I send fix the password reset page to login-fix?"))
+
 # ---- Hand-written: dev ----
 D, H = "dev", "holdout"
 case("send-tell", "send_direct", D, "tell api server to add a health check endpoint",

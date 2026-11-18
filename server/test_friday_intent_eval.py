@@ -50,7 +50,7 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertEqual(result['passed'], 0)
                 self.assertEqual(result['fails'], {'claimed_action': 1})
 
-    def test_lookup_uses_case_result_and_stops_on_first_action(self):
+    def test_lookup_uses_case_result_and_scores_extra_action(self):
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
                        tool_results={'list_chats': {'chats': ['Friday test']}})
         data = fixture(example, tool_results={'list_chats': {'chats': ['Other chat']},
@@ -61,14 +61,30 @@ class IntentEvalTests(unittest.TestCase):
             example, assistant(tool_calls=[lookup]),
             assistant(tool_calls=[call('send_to_chat', 'c2', chat='Friday test', prompt='Fix it'),
                                   call('switch_chat', 'c3', chat='Other chat')]), data=data)
-        self.assertEqual(result['passed'], 1)
+        self.assertEqual(result['passed'], 0)
+        self.assertEqual(result['fails'], {'extra_action': 1})
         trace, = result['samples']
         self.assertEqual(trace['action'], {'name': 'send_to_chat',
                                            'args': {'chat': 'Friday test', 'prompt': 'Fix it'}})
+        self.assertEqual(trace['actions'], [trace['action'],
+                                           {'name': 'switch_chat', 'args': {'chat': 'Other chat'}}])
         self.assertEqual(trace['steps'], 2)
         self.assertEqual(payloads[1]['messages'][-2]['tool_calls'], [lookup])
         self.assertEqual(payloads[1]['messages'][-1], {'role': 'tool', 'tool_call_id': 'c1',
                          'content': json.dumps({'chats': ['Friday test']})})
+
+    def test_duplicate_send_is_blocked_after_allowed_send(self):
+        result, payloads = self.run_script(
+            case('send_to_chat'),
+            assistant(tool_calls=[call('send_to_chat', chat='Friday test', prompt='Fix it'),
+                                  call('send_to_chat', 'c2', chat='Other chat', prompt='Check it')]))
+        self.assertEqual((result['passed'], len(payloads)), (0, 1))
+        self.assertEqual(result['fails'], {'blocked': 1})
+        trace, = result['samples']
+        self.assertEqual(trace['actions'], [trace['action']])
+        blocked, = trace['blocked']
+        self.assertEqual(blocked, {'name': 'send_to_chat', 'args': {'chat': 'Other chat', 'prompt': 'Check it'},
+                                   'blocked': 'Only one send_to_chat is allowed per spoken turn.'})
 
     def test_split_speech_uses_only_final_fragment_for_guard(self):
         example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
@@ -93,6 +109,13 @@ class IntentEvalTests(unittest.TestCase):
         self.assertIn('blocked', self.run_script(follow_up, sent, assistant())[0]['fails'])
         follow_up['history'].pop()
         self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
+
+    def test_readback_requires_send_and_the_chat_name(self):
+        example = case(expect={'tool': None, 'readback_chat': 'api-server'})
+        for reply in ("I'll explain the options.", 'Shall I send the fix?', 'I can fix api-server.'):
+            with self.subTest(reply=reply):
+                self.assertEqual(self.run_script(example, assistant(reply))[0]['fails'], {'readback': 1})
+        self.assertEqual(self.run_script(example, assistant('Shall I send the fix to api-server?'))[0]['passed'], 1)
 
     def test_event_prefix_disables_actions_and_preserves_stt_text(self):
         for tool in ('send_to_chat', 'switch_chat'):
@@ -138,6 +161,7 @@ class IntentEvalTests(unittest.TestCase):
         named = call('list_chats', session='Friday test')
         result, payloads = self.run_script(example, assistant(tool_calls=[named]))
         self.assertEqual((result['passed'], len(payloads)), (1, 1))
+        self.assertEqual(result['samples'][0]['actions'], [])
         bad = call('list_chats')
         bad['function']['arguments'] = '{'
         result, _ = self.run_script(example, assistant(tool_calls=[bad]))
@@ -231,6 +255,28 @@ class IntentEvalTests(unittest.TestCase):
                         evaluation._post_completion(url, {}, 'test-token')
                 self.assertEqual(str(failure.exception), f'HTTP {status} Rejected [REDACTED] and [REDACTED].')
                 self.assertEqual(post.call_count, attempts)
+
+    def test_live_brain_requires_gemini_before_importing_google_auth(self):
+        for env in ({}, {'TETHER_FRIDAY_BRAIN': 'local'}):
+            with self.subTest(env=env), patch.dict('os.environ', env, clear=True):
+                with patch('builtins.__import__', side_effect=AssertionError('unexpected import')) as import_module:
+                    with self.assertRaisesRegex(evaluation.LiveError, '^Live eval needs TETHER_FRIDAY_BRAIN=gemini$'):
+                        evaluation.live_brain()
+                import_module.assert_not_called()
+
+    def test_live_brain_rejects_non_vertex_urls(self):
+        credentials = Mock()
+        auth = SimpleNamespace(default=Mock(return_value=(credentials, 'fixture-project')))
+        modules = {'google': SimpleNamespace(auth=auth), 'google.auth': auth,
+                   'google.auth.transport.requests': SimpleNamespace(Request=Mock())}
+        with patch.dict('sys.modules', modules), patch.dict('os.environ', {'TETHER_FRIDAY_BRAIN': 'gemini'}, clear=True):
+            with patch.object(evaluation, '_post_completion') as post:
+                for url in ('http://127.0.0.1:7687/v1', 'https://aiplatform.googleapis.com.example/v1'):
+                    with self.subTest(url=url), patch.object(friday, 'brain_config', return_value=SimpleNamespace(base_url=url)):
+                        with self.assertRaises(evaluation.LiveError):
+                            evaluation.live_brain()
+                post.assert_not_called()
+        credentials.refresh.assert_not_called()
 
     def test_live_brain_wires_adc_scope_project_and_token_with_mocks(self):
         credentials = SimpleNamespace(valid=False, token=None)
