@@ -237,14 +237,15 @@ Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off
 
 ## Auto-merge
 
-Tether can merge a low-risk worker branch into `main` at the push URL for `origin` after a reviewer tab approves it.
-It starts in **Observe**: it records what it would merge in Settings › Agents › Auto-merge and merges nothing.
-Use your passkey in Settings to turn on **Enforce**. A server restart pauses Enforce and returns Tether to Observe
-until you approve Enforce again. **Off** stops the checks.
+Auto-merge checks a low-risk worker branch against `main` at the push URL for `origin` after a reviewer tab approves it.
+The available modes are **Observe** and **Off**. Tether starts in Observe and records what it would merge in
+Settings › Agents › Auto-merge. Off stops the checks. The Enforce engine is built and tested. It will become
+available when auto-merge has its own identity, so agents on the same OS account cannot change its trust or approve it.
 
-A branch merges without you only when all of this holds:
+A branch passes the checks when all of this holds:
 
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
+  Tether compares raw file bytes to the index. Files that need a clean filter, such as autocrlf or LFS, can read as dirty.
 - The head commit has a `Verified:` stamp with a `tests(...)` item.
 - `main` at the push URL has `docs/auto-merge.json`. The branch diff and the proposed merge each stay within one
   area and change only regular text files. The branch diff's added and deleted lines fit the area's trust limit.
@@ -253,13 +254,19 @@ A branch merges without you only when all of this holds:
 
 If one check fails, or Tether cannot tell, the branch waits for you.
 
-In Enforce, Tether makes one merge commit and pushes it to `refs/heads/main` with a normal push. It leaves working trees
-and local refs alone. `git revert -m 1 <merge>` undoes a merge. A merge does not deploy the code.
-At the push, the server must still hold the Enforce grant. The approval must come after the grant and be at most 24 hours old.
-Tether checks the worker branch, its head commit, the clean worktree and the current approval again before the push.
-Git reads the push URL from the repository's local config. Tether uses one Git configuration for discovery and push,
-with system and global config disabled. Network commands still use your global credential helpers. The repository's
-pre-push hook still runs.
+In Enforce, Tether will make one merge commit and push it to `refs/heads/main` with a lease-guarded fast-forward.
+The merge commit's first parent must be the checked `main` commit. The push will succeed only if the remote
+`main` still points to that commit. Working trees and local refs will stay untouched. Use `git revert -m 1 <merge>`
+to undo a merge. Deployment remains a separate action.
+
+You will use your passkey in Settings to turn on Enforce. A server restart will pause Enforce and return Tether to
+Observe until you approve Enforce again. At the push, the server will need to hold the Enforce grant. The approval
+must come after the grant and be at most 24 hours old. Tether will check the worker branch, its head commit, the
+clean worktree and the current approval again before the push.
+
+Tether reads the push URL from the repository's local config. It uses a private bare scratch repository for Git
+object commands. Trial merges use empty-tree Git attributes. Network commands still use your global credential
+helpers. Enforce will skip the worker repository's pre-push hook because agents can write to its folder.
 
 `docs/auto-merge.json` names the areas. Tether reads it from the main branch, never from the worker branch:
 
@@ -279,10 +286,9 @@ Settings reads trust from the push repository's `main` and can reuse that tip fo
 `python3 server/auto_merge.py check --cwd WORKTREE --approved SHA` checks a branch against the push repository's
 `main`. It never merges.
 
-These checks guard against mistakes: a stale approval, a change outside the areas, a wrong repository. Tether and its
-agents run under one OS account, so an agent can already push to `main` with your Git credentials and can change
-Tether's own files. The passkey protects the switch in Tether, not the repository. To make auto-merge the only way
-to `main`, give it a separate identity and block direct pushes on the Git host.
+These checks guard against mistakes such as a stale approval, a change outside the areas, or a wrong repository.
+Agents on this OS account can still use your Git credentials to push directly to `main`. To require auto-merge for
+updates to `main`, give it a separate identity and block direct pushes on the Git host.
 
 ## Usage reports
 

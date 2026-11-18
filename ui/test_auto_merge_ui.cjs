@@ -32,7 +32,7 @@ const decisions = [
 const modes = [['off', 'Off', 'Tether does not check branches.'], ['observe', 'Observe', 'Tether records what it would merge. It merges nothing.'],
   ['enforce', 'Enforce', 'Tether merges a branch into the main branch when every check passes.']].map(([mode, name, summary]) => ({ mode, name, summary }))
 const area = (name, label, extra) => ({ name, label, rung: 1, limit: 60, streak: 2, need: 5, top: false, merges: 2, reverts: 0, last_revert: null, ...extra })
-const full = () => ({ mode: 'observe', since: 0, modes, decisions, rungs: [0, 60, 150, 300], rules_file: 'docs/auto-merge.json',
+const full = () => ({ mode: 'observe', since: 0, enforce_available: true, modes, decisions, rungs: [0, 60, 150, 300], rules_file: 'docs/auto-merge.json',
   trust: [{ root: ROOT, repo: 'project', target: 'origin/main', error: '', areas: [area('tests', 'Tests', { rung: 3, limit: 300, top: true, streak: 1, merges: 11 }), area('ui', 'UI', {}), area('docs', 'Docs', { rung: 0, limit: 0, streak: 0, merges: 1, reverts: 1 })] },
     { root: '/srv/other', repo: 'other', areas: [], error: 'origin/main has no valid docs/auto-merge.json. Nothing auto-merges in this repository.' }] })
 const pane = { id: '%1', tmux_session: '$1', label: 'project:0.0', pane_name: 'Auto-merge test', agent: 'claude', dir: ROOT, state: 'Idle', writable: true, thread: 't1', approval: null }
@@ -180,6 +180,7 @@ async function main() {
       check(`${at} the mode note says it merges nothing`, (await section.locator('#auto-merge-note').innerText()).includes('It merges nothing.'))
 
       check(`${at} the limit of the protection is stated`, await section.getByText('so the passkey protects this switch, not the repository.', { exact: false }).isVisible())
+      check(`${at} with Enforce available, all three modes show`, await section.getByRole('radio').count() === 3)
       // Trust by area: the limit, the count to the next step, the top step and zero trust.
       const areas = await section.locator('.auto-merge-areas > li').allInnerTexts()
       check(`${at} three areas`, areas.length === 3, String(areas.length))
@@ -288,6 +289,24 @@ async function main() {
       check(`${at} paused Enforce shows Observe`, await section.getByRole('radio', { name: 'Observe' }).isChecked())
       await shot(`paused-${width}`)
       state = { ...state, paused: false }
+
+      // Today's server: Enforce is not available. The choice is absent and the page says why.
+      state = { ...full(), enforce_available: false, modes: modes.filter(item => item.mode !== 'enforce') }
+      await open(width)
+      await section.locator('.auto-merge-decision').first().waitFor()
+      const names = await section.locator('.segmented label').allInnerTexts()
+      check(`${at} without Enforce, only Off and Observe show`, names.join(',') === 'Off,Observe', names.join(','))
+      check(`${at} the page says why Enforce is absent`, (await section.locator('#auto-merge-limit').innerText()).includes('Auto-merge needs its own identity first. Until then Tether only observes.'))
+      check(`${at} no page overflow (no Enforce)`, !(await overflow()))
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(theme => { document.documentElement.dataset.theme = theme }, theme)
+        const found = await contrast('#auto-merge-limit, .segmented span')
+        check(`${at} ${theme} contrast without Enforce at least 4.5:1`, found.length === 3 && !low(found), low(found) || `${found.length} texts`)
+      }
+      await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+      await page.evaluate(() => document.querySelector('#settings-auto-merge')?.scrollIntoView())
+      await page.screenshot({ path: path.join(SHOTS, `observe-only-${width}.png`) })
+      state = full()
 
       // Empty: no repository with rules, no decisions.
       mode = 'empty'

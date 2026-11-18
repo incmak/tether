@@ -19,7 +19,7 @@ interface Decision {
 interface TrustArea { name: string; label: string; rung: number; limit: number; streak: number; need: number; top: boolean; merges: number; reverts: number }
 interface Trust { root: string; repo: string; target?: string; areas: TrustArea[]; error: string }
 export interface AutoMergeState {
-  mode: AutoMergeMode; since: number; paused?: boolean
+  mode: AutoMergeMode; since: number; paused?: boolean; enforce_available?: boolean
   modes: { mode: AutoMergeMode; name: string; summary: string }[]
   decisions: Decision[]; trust: Trust[]; rungs: number[]; rules_file: string
 }
@@ -99,7 +99,9 @@ export function AutoMergeSettings({ api }: { api: Api }) {
         </div>
       </div>}
       <p className="setting-note">A branch merges without you only when all of this holds: the reviewer approved the exact commit, its stamp names tests, every changed file is in a trusted area and within the area’s limit, no reliability checklist row is hit, and the commit merges with no conflict. If one check fails, the branch waits for you.</p>
-      <p className="setting-note">These checks guard against mistakes. Agents run under your account on this machine and can already push to the main branch themselves, so the passkey protects this switch, not the repository.</p>
+      {data.enforce_available
+        ? <p className="setting-note">These checks guard against mistakes. Agents run under your account on this machine and can already push to the main branch themselves, so the passkey protects this switch, not the repository.</p>
+        : <p className="setting-note" id="auto-merge-limit">Enforce, where Tether makes the merge itself, is built but not available yet. Agents run under your account on this machine and could change the trust below or approve the switch. Auto-merge needs its own identity first. Until then Tether only observes.</p>}
 
       <h4 className="auto-merge-heading" ref={trust} tabIndex={-1}>Trust by area</h4>
       {data.trust.length === 0 ? <p className="hint">No open repository has a <code>{data.rules_file}</code> on its main branch, so nothing can auto-merge yet.</p>

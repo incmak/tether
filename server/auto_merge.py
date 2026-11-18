@@ -14,9 +14,9 @@ Tether merges a worker branch into the main branch on origin without the user on
 Each unknown fails closed: a git error, a timeout, a missing file or a missing approval means "wait for the user".
 
 Modes (paths.CONFIG/auto-merge): "off", "observe" (the default, and what a missing or bad file means) and "enforce".
-Observe records the decision and merges nothing. Enforce makes one merge commit (parents: the main branch, the approved
-commit) and pushes it with a normal push, never a forced one. `git revert -m 1 <merge>` undoes it. A merge is not a
-deploy.
+Observe records the decision and merges nothing. When available, Enforce will make one merge commit (parents: the main
+branch, the approved commit) and push it with a lease-guarded fast-forward. `git revert -m 1 <merge>` undoes it.
+A merge is not a deploy.
 
 The trust ladder gives each area a limit on changed lines. The limit widens after clean merges that Tether made and
 shrinks on a revert. Tether checks the history against the decision log and saves each area's level.
@@ -25,11 +25,14 @@ shrinks on a revert. Tether checks the history against the decision log and save
 """
 import argparse
 import difflib
+import hashlib
 import importlib.util
 import json
 import math
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -50,11 +53,16 @@ MODES = (
 )
 MODE_NAMES = tuple(key for key, _, _ in MODES)
 DEFAULT_MODE = 'observe'
+# Agents on this OS account can write the trust and passkey files. Enforce needs its own identity.
+ENFORCE_AVAILABLE = False
+ENFORCE_UNAVAILABLE = ('Enforce is not available yet. Auto-merge needs its own identity first, so that agents on '
+                       'this account cannot change its trust or approve it.')
 RULES_FILE = 'docs/auto-merge.json'
 REMOTE = 'origin'
 TARGET = 'main'
 TARGET_REF = f'refs/heads/{TARGET}'
 SHA = re.compile(r'[0-9a-f]{40}')
+EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 AREA_NAME = re.compile(r'[a-z][a-z0-9-]{0,23}')
 MAX_AREAS = 8
 MAX_PATTERNS = 40
@@ -125,8 +133,11 @@ def read_setting():
     mode = data.get('mode')
     if mode not in MODE_NAMES:
         return default
-    if mode == 'enforce' and _grant != since:
-        return {**default, 'paused': True}
+    if mode == 'enforce':
+        if not ENFORCE_AVAILABLE:
+            return default
+        if _grant != since:
+            return {**default, 'paused': True}
     return {'mode': mode, 'since': int(since), 'paused': False}
 
 
@@ -142,7 +153,7 @@ def _write(path, text):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
-        temp.write_text(text, encoding='utf-8')
+        temp.write_text(text, encoding='utf-8', errors='surrogateescape')
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
@@ -153,6 +164,8 @@ def set_mode(mode):
     global _grant
     if mode not in MODE_NAMES:
         raise AutoMergeError(400, 'Choose Off, Observe or Enforce.')
+    if mode == 'enforce' and not ENFORCE_AVAILABLE:
+        raise AutoMergeError(409, ENFORCE_UNAVAILABLE)
     with _mode_lock:
         # Reviews record whole seconds. The current second may contain approvals from before this grant.
         since = int(time.time()) + (mode == 'enforce')
@@ -206,7 +219,8 @@ def _git(folder, *args, network=False, check=True, env=None, binary=False):
     decoding = {} if binary else {'encoding': 'utf-8', 'errors': 'surrogateescape'}
     try:
         result = RUN(['git', '-C', str(folder), *args], stdin=subprocess.DEVNULL, capture_output=True,
-                     env=_git_env() if env is None else env, timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
+                     env={**_git_env(), 'GIT_NO_LAZY_FETCH': '1'} if env is None else env,
+                     timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f'git {args[0]} did not run: {type(exc).__name__}') from exc
     if check and result.returncode:
@@ -216,30 +230,113 @@ def _git(folder, *args, network=False, check=True, env=None, binary=False):
     return result
 
 
-def _sha(folder, revision):
-    text = _git(folder, 'rev-parse', '--verify', '--quiet', revision + '^{commit}').stdout.strip()
+def _object_git(scratch, *args, network=False, check=True, identity=None, binary=False):
+    env = _git_env(_credential_helpers() if network else ())
+    for key in ('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE'):
+        env.pop(key, None)
+    # A push URL may select a built-in transport, but not an arbitrary remote helper.
+    env.update(GIT_ATTR_SOURCE=EMPTY_TREE, GIT_NO_LAZY_FETCH='1',
+               GIT_ALLOW_PROTOCOL='file:git:http:https:ssh')
+    env.update(identity or {})
+    return _git(scratch, *args, network=network, check=check, env=env, binary=binary)
+
+
+def _commit_sha(result, revision):
+    text = result.stdout.strip()
     if not SHA.fullmatch(text):
         raise GitError(f'{revision} is not a commit.')
     return text
 
 
+def _sha(scratch, revision):
+    return _commit_sha(_object_git(scratch, 'rev-parse', '--verify', '--quiet', revision + '^{commit}'), revision)
+
+
+def _head(folder):
+    return _commit_sha(_git(folder, 'rev-parse', '--verify', 'HEAD'), 'HEAD')
+
+
+def _git_dir(folder, option):
+    output = _git(folder, 'rev-parse', '--path-format=absolute', option).stdout
+    path = output.removesuffix('\n')
+    if not output.endswith('\n') or '\n' in path or '\r' in path or not Path(path).is_absolute():
+        raise GitError('Git did not report one absolute repository path.')
+    return Path(path)
+
+
 def main_checkout(folder):
-    common = Path(_git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip())
+    common = _git_dir(folder, '--git-common-dir')
     return str(common.parent if common.name == '.git' else common)
+
+
+def _worker_checkout(folder):
+    git_dir = _git_dir(folder, '--git-dir')
+    if git_dir == _git_dir(folder, '--git-common-dir'):
+        return None
+    # A linked worktree's gitdir points back to the .git file at the top of the worktree.
+    try:
+        marker = git_dir / os.fsdecode((git_dir / 'gitdir').read_bytes()).removesuffix('\n')
+        checkout = marker.parent.resolve()
+        if marker.name == '.git' and Path(folder).resolve().is_relative_to(checkout):
+            return checkout
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise GitError('Could not read the linked worktree path.') from exc
+    raise GitError('Git did not report the linked worktree path.')
+
+
+def _scratch(root):
+    """Prepare the private bare repository before using any objects from it."""
+    objects = _git_dir(root, '--git-common-dir') / 'objects'
+    scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(root)).hexdigest()[:16] + '.git')
+    config = scratch / 'config'
+    # Check the init settings directly. Asking Git to read an unchecked config could follow includes.
+    core = (rb'\[core\]\n\trepositoryformatversion = 0\n\tfilemode = (true|false)\n\tbare = true\n'
+            rb'(?:\t(?:ignorecase|precomposeunicode) = (?:true|false)\n)*')
+    with _lock:
+        try:
+            scratch.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directories = (scratch / 'objects', scratch / 'objects/info', scratch / 'info', scratch / 'hooks')
+            if scratch.is_symlink():
+                scratch.unlink()
+            elif scratch.exists() and (not config.is_file() or config.is_symlink()
+                                       or not re.fullmatch(core, config.read_bytes())
+                                       or any(path.is_symlink() for path in directories)):
+                shutil.rmtree(scratch)
+            if not scratch.exists():
+                scratch.mkdir(mode=0o700)
+                _object_git(scratch, 'init', '--bare', '--template=')
+                _target_cache.pop(root, None)
+            scratch.chmod(0o700)
+            attributes = scratch / 'info/attributes'
+            (scratch / 'info').mkdir(exist_ok=True)
+            attributes.unlink(missing_ok=True)
+            (scratch / 'hooks').mkdir(exist_ok=True)
+            for hook in (scratch / 'hooks').iterdir():
+                if not hook.name.endswith('.sample'):
+                    if hook.is_dir() and not hook.is_symlink():
+                        shutil.rmtree(hook)
+                    else:
+                        hook.unlink()
+            _write(scratch / 'objects/info/alternates', str(objects) + '\n')
+        except (OSError, UnicodeError) as exc:
+            raise GitError('Could not prepare the auto-merge scratch repository.') from exc
+    return scratch
 
 
 def _check_push_url(folder, url):
     if not url or url.startswith(('-', '+')) or '\n' in url:
         raise GitError(f'{REMOTE} does not have a usable push URL.')
-    alias = _git(folder, 'remote', 'get-url', '--push', url, check=False)
-    if alias.returncode != 2:
-        raise GitError(f'The push URL for {REMOTE} must name a repository directly.')
-    rewrites = _git(folder, 'config', '--null', '--get-regexp', r'^url\..*\.(insteadof|pushinsteadof)$', check=False)
-    if rewrites.returncode not in (0, 1):
+    config = _git(folder, 'config', '--null', '--get-regexp',
+                  r'^(remote\..*|url\..*\.(insteadof|pushinsteadof))$', check=False)
+    if config.returncode not in (0, 1):
         raise GitError('Could not check Git URL rewrites.')
-    for item in rewrites.stdout.split('\0')[:-1]:
+    for item in config.stdout.split('\0')[:-1]:
         key, _, prefix = item.partition('\n')
-        if url.startswith(prefix) and key[4:].rsplit('.', 1)[0] != prefix:
+        section, name = key.split('.', 1)
+        name = name.rpartition('.')[0]
+        if section == 'remote' and name == url:
+            raise GitError(f'The push URL for {REMOTE} must name a repository directly.')
+        if section == 'url' and url.startswith(prefix) and name != prefix:
             raise GitError(f'Git would rewrite the push URL for {REMOTE} again.')
 
 
@@ -256,18 +353,20 @@ def _push_url(root):
     raise GitError(f'{REMOTE} must have exactly one push URL.')
 
 
-def _fetch_target(root):
+def _fetch_target(root, scratch):
     try:
         url = _push_url(root)
         _check_push_url(root, url)
-        ref = _git(root, 'ls-remote', url, TARGET_REF, network=True, env=_git_env(_credential_helpers())).stdout
+        # Git treats a colon before the first slash as a transport or an SSH host.
+        if not re.match(r'^[^/]*:', url):
+            url = str(Path(root) / url)
+        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
         match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
         if match is None:
             raise GitError(f'The push repository has no unique {TARGET} branch.')
         sha = match[1]
-        _git(root, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True,
-             env=_git_env(_credential_helpers()))
-        _git(root, 'cat-file', '-e', sha + '^{commit}')
+        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True)
+        _object_git(scratch, 'cat-file', '-e', sha + '^{commit}')
     except GitError:
         _target_cache.pop(root, None)
         raise
@@ -322,7 +421,7 @@ def parse_rules(text):
 
 def rules_at(folder, revision):
     """The areas from the rules file at a commit of the main branch. Never from the worker branch."""
-    shown = _git(folder, 'show', f'{revision}:{RULES_FILE}', check=False)
+    shown = _object_git(folder, 'show', f'{revision}:{RULES_FILE}', check=False)
     if shown.returncode:
         return None
     try:
@@ -342,7 +441,7 @@ def area_of(rules, path):
 
 def _tree(folder, revision):
     """Read the entries from the tree itself, independent of Git's diff and attributes."""
-    raw = _git(folder, 'ls-tree', '-r', '-z', '--full-tree', revision, binary=True).stdout
+    raw = _object_git(folder, 'ls-tree', '-r', '-z', '--full-tree', revision, binary=True).stdout
     entries = {}
     for line in raw.split(b'\0')[:-1]:
         meta, sep, path = line.partition(b'\t')
@@ -353,6 +452,49 @@ def _tree(folder, revision):
     if raw and not raw.endswith(b'\0'):
         raise GitError('git ls-tree did not finish its last entry.')
     return entries
+
+
+def _dirty(folder, scratch, head):
+    """Compare the index and raw worktree bytes to HEAD without running filters.
+
+    Files that need a clean filter, such as autocrlf or LFS, read as dirty when their raw bytes differ.
+    """
+    raw = _git(folder, 'ls-files', '-s', '-z', '--sparse', binary=True).stdout
+    if raw and not raw.endswith(b'\0'):
+        raise GitError('git ls-files did not finish its last index entry.')
+    index = {}
+    for line in raw.split(b'\0')[:-1]:
+        meta, sep, path = line.partition(b'\t')
+        match = re.fullmatch(rb'(100644|100755|120000) ([0-9a-f]{40}) 0', meta)
+        if not match or not sep or not path or any(part in (b'', b'.', b'..') for part in path.split(b'/')):
+            return True
+        index[os.fsdecode(path)] = (match[1].decode('ascii'), 'blob', match[2].decode('ascii'))
+    if index != _tree(scratch, head):
+        return True
+    for name, (mode, _, sha) in index.items():
+        path = folder / name
+        try:
+            if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')):
+                return True
+            kind = path.lstat().st_mode
+            if mode == '120000' and stat.S_ISLNK(kind):
+                data = os.readlink(os.fsencode(path))
+                blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
+            elif mode in MODES_OK and stat.S_ISREG(kind):
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, 'rb') as stream:
+                    found = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(found.st_mode) or bool(found.st_mode & stat.S_IXUSR) != (mode == '100755'):
+                        return True
+                    blob = hashlib.sha1(b'blob %d\0' % found.st_size)
+                    hashlib.file_digest(stream, lambda: blob)
+            else:
+                return True
+        except OSError:
+            return True
+        if blob.hexdigest() != sha:
+            return True
+    return bool(_git(folder, 'ls-files', '--others', '--exclude-standard', '-z', '--sparse', binary=True).stdout)
 
 
 def _tree_diff(folder, base, head):
@@ -369,12 +511,12 @@ def _blob(folder, entry):
     if entry is None:
         return b''
     sha = entry[2]
-    size = _git(folder, 'cat-file', '-s', sha).stdout.strip()
+    size = _object_git(folder, 'cat-file', '-s', sha).stdout.strip()
     if not size.isdecimal():
         raise GitError('git did not report the size of a blob.')
     if int(size) > MAX_BLOB:
         return None
-    raw = _git(folder, 'cat-file', 'blob', sha, binary=True).stdout
+    raw = _object_git(folder, 'cat-file', 'blob', sha, binary=True).stdout
     return None if b'\0' in raw else raw
 
 
@@ -589,9 +731,9 @@ def _stat(path):
         return None
 
 
-def _history(root, tip):
-    log = _git(root, 'log', '--first-parent', f'-n{HISTORY}', '-z', '--no-notes', '--no-decorate',
-               '--format=%H%x00%ct%x00%P%x00%s%x00%B', tip).stdout
+def _history(scratch, tip):
+    log = _object_git(scratch, 'log', '--first-parent', f'-n{HISTORY}', '-z', '--no-notes', '--no-decorate',
+                      '--format=%H%x00%ct%x00%P%x00%s%x00%B', tip).stdout
     fields = log.split('\0')
     if fields[-1] or (len(fields) - 1) % 5:
         raise GitError('git printed an unreadable history.')
@@ -605,32 +747,32 @@ def _history(root, tip):
     return commits
 
 
-def _ancestor(root, before, after):
-    result = _git(root, 'merge-base', '--is-ancestor', before, after, check=False)
+def _ancestor(scratch, before, after):
+    result = _object_git(scratch, 'merge-base', '--is-ancestor', before, after, check=False)
     if result.returncode not in (0, 1):
         raise GitError('git could not read the commit ancestry.')
     return result.returncode == 0
 
 
-def _reverted_areas(root, rules, sha, reverted):
+def _reverted_areas(scratch, rules, sha, reverted):
     try:
-        message = _git(root, 'log', '-1', '--format=%B', reverted).stdout
-        if REVERT.search(message) or not _ancestor(root, reverted, sha):
+        message = _object_git(scratch, 'log', '-1', '--format=%B', reverted).stdout
+        if REVERT.search(message) or not _ancestor(scratch, reverted, sha):
             return set()
-        paths = _tree_diff(root, reverted + '^1', reverted)
+        paths = _tree_diff(scratch, reverted + '^1', reverted)
     except GitError:
         return {area['name'] for area in rules}
     return {area_of(rules, path) for path in paths} - {None}
 
 
-def _history_events(root, rules, target_sha):
-    commits = _history(root, target_sha)
+def _history_events(root, scratch, rules, target_sha):
+    commits = _history(scratch, target_sha)
     window = {sha for sha, *_ in commits}
     logged = {(item['merge'], item['head']) for item in _records()
               if item.get('root') == root and item['outcome'] == 'merged'
               and _hash(item.get('merge')) and _hash(item.get('head'))}
-    added = _git(root, 'log', '--first-parent', '--full-history', '--diff-merges=first-parent', '--no-renames',
-                 '--diff-filter=A', '--no-patch', '--format=%H', target_sha, '--', RULES_FILE).stdout.split()
+    added = _object_git(scratch, 'log', '--first-parent', '--full-history', '--diff-merges=first-parent', '--no-renames',
+                       '--diff-filter=A', '--no-patch', '--format=%H', target_sha, '--', RULES_FILE).stdout.split()
     epoch = added[-1] if added else None
 
     # Follow the first-parent order for commits that share a timestamp.
@@ -638,13 +780,13 @@ def _history_events(root, rules, target_sha):
     for sha, when, parents, subject, body in reversed(commits):
         if len(parents) == 2 and (sha, parents[1]) in logged \
                 and '(Tether auto-merge)' in subject and f'Approved commit: {parents[1]}' in body.splitlines():
-            areas, problems = classify(rules, changed(root, parents[0], sha))
+            areas, problems = classify(rules, changed(scratch, parents[0], sha))
             events.append((when, 'merge', sha, () if problems else areas))
         reverted = REVERT.findall(body)
-        if reverted and epoch is not None and _ancestor(root, epoch, sha):
+        if reverted and epoch is not None and _ancestor(scratch, epoch, sha):
             touched = set()
             for commit in reverted:
-                touched.update(_reverted_areas(root, rules, sha, commit))
+                touched.update(_reverted_areas(scratch, rules, sha, commit))
             events.append((when, 'revert', sha, touched))
     return window, sorted(events, key=lambda event: event[0])
 
@@ -663,21 +805,21 @@ def _apply_event(level, kind, sha, when):
         level['last_revert'] = {'commit': sha, 'at': when}
 
 
-def _restored_at(root, target_sha, saved, names):
+def _restored_at(scratch, target_sha, saved, names):
     restored = {}
     if isinstance(saved, dict):
         for name in names:
             sha = saved.get(name)
             if _hash(sha):
                 try:
-                    if _sha(root, sha) == sha and _ancestor(root, sha, target_sha):
+                    if _sha(scratch, sha) == sha and _ancestor(scratch, sha, target_sha):
                         restored[name] = sha
                 except GitError:
                     pass  # A saved hash can name a commit Git does not have.
     return restored
 
 
-def ladder(root, rules, target_sha):
+def ladder(root, scratch, rules, target_sha):
     """Keep saved reductions, with trust capped by a replay of the current first-parent history."""
     names = [area['name'] for area in rules]
 
@@ -701,17 +843,17 @@ def ladder(root, rules, target_sha):
         # A concurrent fetch may have saved a newer tip. Do not prune or replace its saved reductions.
         stale = False
         if tip and tip != target_sha:
-            stale = _ancestor(root, target_sha, tip)
-            if not stale and not _ancestor(root, tip, target_sha):
+            stale = _ancestor(scratch, target_sha, tip)
+            if not stale and not _ancestor(scratch, tip, target_sha):
                 raise GitError('The main branch no longer contains the saved trust history.')
-        window, events = _history_events(root, rules, target_sha)
+        window, events = _history_events(root, scratch, rules, target_sha)
         seen = {kind: set(entry[f'{kind}s_seen']) & window for kind in ('merge', 'revert')}
-        restored = _restored_at(root, target_sha, entry.get('restored'), names)
+        restored = _restored_at(scratch, target_sha, entry.get('restored'), names)
         for when, kind, sha, areas in events:
             for name in areas:
                 if not stale and sha not in seen[kind]:
                     _apply_event(entry['areas'][name], kind, sha, when)
-                if name not in restored or not _ancestor(root, sha, restored[name]):
+                if name not in restored or not _ancestor(scratch, sha, restored[name]):
                     _apply_event(replayed[name], kind, sha, when)
             seen[kind].add(sha)
         if not stale:
@@ -737,10 +879,11 @@ def restore(root, name):
     try:
         if main_checkout(root) != root:
             raise AutoMergeError(400, 'Choose a repository.')
-        _, target_sha = _fetch_target(root)
-        rules = rules_at(root, target_sha)
+        scratch = _scratch(root)
+        _, target_sha = _fetch_target(root, scratch)
+        rules = rules_at(scratch, target_sha)
         with _lock:
-            levels = ladder(root, rules, target_sha) if rules else {}
+            levels = ladder(root, scratch, rules, target_sha) if rules else {}
             if name not in levels or levels[name]['rung'] != 0:
                 raise AutoMergeError(409, 'Only an area at zero trust can be restored.')
             data = _trust_data()
@@ -756,8 +899,8 @@ def restore(root, name):
 
 # ---- the decision ----
 
-def _trial_merge(folder, target_sha, head):
-    trial = _git(folder, 'merge-tree', '--write-tree', '--no-messages', target_sha, head, check=False)
+def _trial_merge(scratch, target_sha, head):
+    trial = _object_git(scratch, 'merge-tree', '--write-tree', '--no-messages', target_sha, head, check=False)
     tree = trial.stdout.split('\n', 1)[0].strip()
     if trial.returncode == 1:
         raise GitError(f'The branch conflicts with {REMOTE}/{TARGET}. Rebase it, then ask for a new review.')
@@ -780,14 +923,15 @@ def evaluate(folder, approved):
 
     try:
         root = main_checkout(folder)
-        head = _sha(folder, 'HEAD')
+        head = _head(folder)
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
         decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
-        url, target_sha = _fetch_target(root)
-        if _ancestor(folder, head, target_sha):
+        scratch = _scratch(root)
+        url, target_sha = _fetch_target(root, scratch)
+        if _ancestor(scratch, head, target_sha):
             decision['outcome'] = 'already'
             return decision, None
-        base = _git(folder, 'merge-base', target_sha, head).stdout.strip()
+        base = _object_git(scratch, 'merge-base', target_sha, head).stdout.strip()
         if not SHA.fullmatch(base):
             raise GitError('The branch shares no history with the main branch.')
     except GitError as exc:
@@ -801,14 +945,11 @@ def evaluate(folder, approved):
         check('approval', True, f'The reviewer approved commit {head[:12]}.')
 
     try:
-        linked = _git(folder, 'rev-parse', '--path-format=absolute', '--git-dir').stdout.strip() != \
-            _git(folder, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip()
-        dirty = _git(folder, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none').stdout
         if not branch or branch == TARGET:
             check('branch', False, 'The tab is not on a worker branch.')
-        elif not linked:
+        elif (checkout := _worker_checkout(folder)) is None:
             check('branch', False, 'The tab works in the main checkout, not in a worktree of its own.')
-        elif dirty:
+        elif _dirty(checkout, scratch, head):
             check('branch', False, 'The worktree has uncommitted or untracked files.')
         else:
             check('branch', True, f'Worker branch {branch}, with no uncommitted changes.')
@@ -817,7 +958,7 @@ def evaluate(folder, approved):
 
     rules = None
     try:
-        rules = rules_at(folder, target_sha)
+        rules = rules_at(scratch, target_sha)
     except GitError:
         pass
     check('rules', rules is not None,
@@ -827,7 +968,7 @@ def evaluate(folder, approved):
     items = None
     subject = ''
     try:
-        message = _git(folder, 'log', '-1', '--format=%B', head).stdout
+        message = _object_git(scratch, 'log', '-1', '--format=%B', head).stdout
         subject = message.strip().splitlines()[0][:200] if message.strip() else ''
         items = stamp_items(message)
     except GitError:
@@ -842,9 +983,9 @@ def evaluate(folder, approved):
 
     tree = files = merge_problem = None
     try:
-        tree = _trial_merge(folder, target_sha, head)
-        files = changed(folder, target_sha, tree)
-        reviewed = _tree(folder, head)
+        tree = _trial_merge(scratch, target_sha, head)
+        files = changed(scratch, target_sha, tree)
+        reviewed = _tree(scratch, head)
         if any(item['new'] != reviewed.get(item['path']) for item in files):
             merge_problem = 'The main branch changed the same files. Rebase the branch, then ask for a new review.'
     except GitError as exc:
@@ -854,7 +995,7 @@ def evaluate(folder, approved):
     else:
         branch_files = []
         try:
-            branch_files = changed(folder, base, head)
+            branch_files = changed(scratch, base, head)
             areas, problems = classify(rules, branch_files)
             if files is not None:
                 _, merge_problems = classify(rules, files)
@@ -867,7 +1008,7 @@ def evaluate(folder, approved):
         decision['files'] = len(branch_files)
         labels = {area['name']: area['label'] for area in rules}
         try:
-            levels = ladder(root, rules, target_sha)
+            levels = ladder(root, scratch, rules, target_sha)
             for name, lines in areas.items():
                 limit = levels[name]['limit']
                 if limit == 0:
@@ -882,7 +1023,7 @@ def evaluate(folder, approved):
             check('scope', True, 'Every file is in an area within its trust limit: '
                   + ', '.join(f'{labels[name]} {lines} lines' for name, lines in areas.items()) + '.')
 
-    rows = checklist_rows(folder, target_sha, head)
+    rows = checklist_rows(scratch, target_sha, head)
     if rows is None:
         check('checklist', False, 'The reliability checklist gave no answer on this server, so the diff counts as a hit.')
     elif rows:
@@ -913,12 +1054,30 @@ def _authorization_problem(setting, approved_at):
     return None
 
 
+def _lease_guarded_fast_forward(scratch, url, checked, made):
+    """Push only if the remote still has the checked first parent and the update advances it."""
+    if not _hash(checked) or not _hash(made):
+        raise GitError('The lease-guarded fast-forward needs two commit hashes.')
+    if not _ancestor(scratch, checked, made):
+        raise GitError('The lease-guarded fast-forward does not descend from the checked main commit.')
+    if _sha(scratch, made + '^1') != checked:
+        raise GitError('The lease-guarded fast-forward does not have the checked main commit as its first parent.')
+    try:
+        _object_git(scratch, 'push', f'--force-with-lease={TARGET}:{checked}', url, f'{made}:{TARGET_REF}', network=True)
+    except GitError as exc:
+        raise GitError(f'The lease-guarded fast-forward failed: {exc}') from exc
+
+
 def merge(plan, reviewer, job):
     """Make the merge commit and push it. Return its hash. Raise GitError when anything is in doubt.
 
-    The push is a normal one: git refuses it when the main branch moved, and nothing is forced. No working tree and
-    no local branch changes, so other sessions' uncommitted work in the main checkout is never touched."""
+    The lease-guarded fast-forward refuses a change to main since the checks ran. Working trees and local refs stay
+    untouched."""
+    if not ENFORCE_AVAILABLE:
+        raise NotAuthorized(ENFORCE_UNAVAILABLE)
     folder = plan['folder']
+    root = plan['root']
+    scratch = _scratch(root)
     stamp = merge_stamp(plan['items'], reviewer, plan['head'])
     areas = ', '.join(f'{name} {lines} lines' for name, lines in plan['areas'].items())
     message = (f"Merge branch '{plan['branch']}' into {TARGET} (Tether auto-merge)\n\n"
@@ -928,31 +1087,36 @@ def merge(plan, reviewer, job):
                f'Areas: {areas}\n'
                'Undo: git revert -m 1 <this commit>\n\n'
                f'Verified: {stamp}\n')
-    identity = _git_env()
-    if _git(folder, 'config', 'user.name', check=False).returncode or _git(folder, 'config', 'user.email', check=False).returncode:
-        identity.update(GIT_AUTHOR_NAME='Tether auto-merge', GIT_AUTHOR_EMAIL='tether@localhost',
-                        GIT_COMMITTER_NAME='Tether auto-merge', GIT_COMMITTER_EMAIL='tether@localhost')
-    made = _git(folder, 'commit-tree', plan['tree'], '-p', plan['target_sha'], '-p', plan['head'], '-m', message,
-                env=identity).stdout.strip()
+    name, email = [_git(folder, 'config', '--local', '--null', '--get-all', key, check=False).stdout.split('\0')[-2:-1]
+                   for key in ('user.name', 'user.email')]
+    identity = {}
+    for who in ('AUTHOR', 'COMMITTER'):
+        for field, values, default in (('NAME', name, 'Tether auto-merge'), ('EMAIL', email, 'tether@localhost')):
+            key = f'GIT_{who}_{field}'
+            identity[key] = os.environ.get(key, values[0]) if name and email else default
+    made = _object_git(scratch, 'commit-tree', plan['tree'], '-p', plan['target_sha'], '-p', plan['head'], '-m', message,
+                       identity=identity).stdout.strip()
     if not SHA.fullmatch(made):
         raise GitError('git made no merge commit.')
-    if _git(folder, 'rev-parse', '--verify', made + '^{tree}').stdout.strip() != plan['tree']:
+    if _object_git(scratch, 'rev-parse', '--verify', made + '^{tree}').stdout.strip() != plan['tree']:
         raise GitError('The merge commit does not contain the planned tree.')
-    root = plan['root']
     _check_push_url(root, plan['url'])
-    env = _git_env(_credential_helpers())
     with _mode_lock:
         problem = _authorization_problem(read_setting(), job.get('approved_at'))
         if problem:
             raise NotAuthorized(problem)
         try:
-            head = _sha(folder, 'HEAD')
+            head = _head(folder)
             branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
-            dirty = _git(folder, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none').stdout
+            checkout = _worker_checkout(folder)
         except GitError as exc:
             raise NotAuthorized(str(exc)) from exc
-        if head != plan['head'] or branch != plan['branch']:
+        if checkout is None or head != plan['head'] or branch != plan['branch']:
             raise NotAuthorized('The worker branch changed before the push.')
+        try:
+            dirty = _dirty(checkout, scratch, head)
+        except GitError as exc:
+            raise NotAuthorized(str(exc)) from exc
         if dirty:
             raise NotAuthorized('The worktree has uncommitted or untracked files.')
         current = job.get('current')
@@ -963,7 +1127,7 @@ def merge(plan, reviewer, job):
             raise NotAuthorized('Could not read the current reviewer approval.') from exc
         if not matches:
             raise NotAuthorized('The reviewer approval changed or is no longer available.')
-        _git(root, 'push', plan['url'], f'{made}:{TARGET_REF}', network=True, env=env)
+        _lease_guarded_fast_forward(scratch, plan['url'], plan['target_sha'], made)
     return made
 
 
@@ -989,7 +1153,7 @@ def process(job, alert=None):
     at = job.get('approved_at')
     if plan is None:
         decision['outcome'] = 'wait'
-    elif setting['mode'] != 'enforce':
+    elif not ENFORCE_AVAILABLE or setting['mode'] != 'enforce':
         decision['outcome'] = 'would_merge'
     elif (problem := _authorization_problem(setting, at)) is not None:
         decision['outcome'] = 'would_merge'
@@ -1102,14 +1266,15 @@ def _trust(root, known):
     """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
     try:
+        scratch = _scratch(root)
         cached = _target_cache.get(root)
-        _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root)
+        _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root, scratch)
         entry['target'] = f'{REMOTE}/{TARGET}'
-        rules = rules_at(root, target_sha)
+        rules = rules_at(scratch, target_sha)
         if rules is None:
             entry['error'] = f'{REMOTE}/{TARGET} has no valid {RULES_FILE}. Nothing auto-merges in this repository.'
             return entry if known else None
-        levels = ladder(root, rules, target_sha)
+        levels = ladder(root, scratch, rules, target_sha)
     except GitError as exc:
         entry['error'] = str(exc)
         return entry
@@ -1136,8 +1301,9 @@ def state(roots=()):
         entry = _trust(root, root in logged)
         if entry is not None:
             trust.append(entry)
-    return {**setting,
-            'modes': [{'mode': key, 'name': name, 'summary': summary} for key, name, summary in MODES],
+    return {**setting, 'enforce_available': ENFORCE_AVAILABLE,
+            'modes': [{'mode': key, 'name': name, 'summary': summary} for key, name, summary in MODES
+                      if ENFORCE_AVAILABLE or key != 'enforce'],
             'decisions': shown, 'trust': trust, 'rungs': list(RUNGS), 'rules_file': RULES_FILE}
 
 
@@ -1157,6 +1323,8 @@ def post(handler, roots=()):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise AutoMergeError(400, 'Invalid request.')
+        if body.get('mode') == 'enforce' and not ENFORCE_AVAILABLE:
+            raise AutoMergeError(409, ENFORCE_UNAVAILABLE)
         if 'restore' in body or body.get('mode') == 'enforce':
             payload = {key: value for key, value in body.items() if key != 'approval'}
             approval.require(handler, 'auto-merge', payload, body.get('approval'))

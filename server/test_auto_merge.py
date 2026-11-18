@@ -1,8 +1,10 @@
 """Auto-merge decisions and the trust ladder, on disposable git repositories. Nothing here touches tmux or a real remote."""
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -42,6 +44,8 @@ class Handler:
 class Base(unittest.TestCase):
     """origin.git (bare), project (the main checkout, on main) and project-wt/work (a worker worktree on `work`)."""
 
+    enforce_available = True
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -55,6 +59,8 @@ class Base(unittest.TestCase):
         for name, value in (('CONFIG', self.root / 'config'), ('CACHE', self.root / 'cache')):
             self.enterContext(mock.patch.object(paths, name, value))
         self.enterContext(mock.patch.object(auto_merge, '_grant', None))
+        if self.enforce_available:
+            self.enterContext(mock.patch.object(auto_merge, 'ENFORCE_AVAILABLE', True))
         auto_merge._ladder_cache.clear()
         auto_merge._target_cache.clear()
         auto_merge._seen.clear()
@@ -126,6 +132,51 @@ class Decision(Base):
         self.assertEqual(decision['areas'], {'tests': 1})
         self.assertIsNotNone(plan)
 
+    def test_clean_check_compares_the_index_and_raw_worktree_files(self):
+        self.write(self.work, '.gitignore', 'ignored*\n')
+        os.symlink('App.tsx', self.work / 'ui/src/link')
+        head = self.change()
+        scratch = auto_merge._scratch(self.repo)
+        app = self.work / 'ui/src/App.tsx'
+        link = app.with_name('link')
+        self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+        for name in ('ignored.txt', 'ignored-dir/file'):
+            self.write(self.work, name, 'ignored\n')
+            self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+        cases = (
+            ('staged', lambda: (self.write(self.work, 'ui/src/App.tsx', 'staged\n'),
+                                self.git(self.work, 'add', 'ui/src/App.tsx'))),
+            ('staged deletion', lambda: self.git(self.work, 'rm', '-q', 'ui/src/App.tsx')),
+            ('modified', lambda: app.write_text('modified\n')),
+            ('modified link', lambda: (link.unlink(), link.symlink_to('Other.tsx'))),
+            ('mode flip', lambda: app.chmod(0o755)),
+            ('second mode flip', lambda: (self.work / 'server/server.py').chmod(0o755)),
+            ('deleted', app.unlink),
+            ('deleted link', link.unlink),
+            ('untracked', lambda: self.write(self.work, 'untracked.txt', 'new\n')),
+            ('untracked in another folder', lambda: self.write(self.work, 'server/untracked.txt', 'new\n')),
+            ('special file', lambda: (app.unlink(), os.mkfifo(app))),
+            ('regular file replaced by link', lambda: (app.unlink(), app.symlink_to('link'))),
+        )
+        for label, change in cases:
+            with self.subTest(label=label):
+                change()
+                self.assertTrue(auto_merge._dirty(self.work, scratch, head))
+                decision, plan = auto_merge.evaluate(app.parent, head)
+                self.assertIn('branch', self.failed(decision))
+                self.assertIsNone(plan)
+                self.git(self.work, 'reset', '--hard', head)
+                self.git(self.work, 'clean', '-fd')
+        self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+
+    def test_nested_worker_folder_uses_the_whole_worktree(self):
+        for name in ('ui/src/App.tsx', 'ui/index.html'):
+            with self.subTest(name=name):
+                head = self.change(name)
+                decision, plan = auto_merge.evaluate(self.work / 'server', head)
+                self.assertEqual(self.failed(decision), [])
+                self.assertIsNotNone(plan)
+
     def test_mixed_areas_wait(self):
         for ui, tests in (('ui/src/App.tsx', 'server/test_new.py'), ('ui/index.html', 'ui/test_new.cjs')):
             self.git(self.work, 'reset', '-q', '--hard', 'main')
@@ -192,7 +243,7 @@ class Decision(Base):
 
     def test_scope_fails_if_either_diff_cannot_be_read(self):
         head = self.change()
-        tree = auto_merge._trial_merge(self.work, self.origin_main(), head)
+        tree = auto_merge._trial_merge(auto_merge._scratch(self.repo), self.origin_main(), head)
         real = auto_merge.changed
         for unreadable, failed_checks in ((head, ['scope']), (tree, ['scope', 'merge'])):
             with self.subTest(failed_checks=failed_checks):
@@ -360,7 +411,7 @@ class Decision(Base):
             self.git(self.work, 'update-index', '--add', '--cacheinfo', f'160000,{base},{path}')
             self.git(self.work, 'commit', '-m', 'Gitlink', '-m', STAMP)
             decision = auto_merge.evaluate(self.work, self.git(self.work, 'rev-parse', 'HEAD'))[0]
-            self.assertEqual(self.failed(decision), ['scope'])
+            self.assertEqual(self.failed(decision), ['branch', 'scope'])
             self.assertIn(f'{path} is a link or a submodule', decision['checks'][-3]['text'])
 
     def test_late_nul_and_large_text_blobs_wait(self):
@@ -546,6 +597,122 @@ class Modes(Base):
                           'stash', 'branch'} & {command[0] for command in seen}, seen)
         self.assertEqual([item['outcome'] for item in auto_merge.records()], ['would_merge'])
 
+    def test_observe_runs_only_the_metadata_allowlist_in_the_worker_repository(self):
+        head = self.change()
+        scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files'}
+        object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
+        for folder in (self.work, self.work / 'server'):
+            with self.subTest(folder=folder), mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+                self.assertEqual(auto_merge.process({**self.job(head), 'folder': str(folder)})['outcome'], 'would_merge')
+                seen = set()
+                for call in run.call_args_list:
+                    argv = call.args[0]
+                    if argv[:2] != ['git', '-C']:
+                        self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-all', 'credential.helper'])
+                        continue
+                    directory, command = Path(argv[2]), argv[3]
+                    if directory in (self.work, folder, self.repo):
+                        self.assertIn(command, local_commands, argv)
+                        self.assertNotIn('GIT_ATTR_SOURCE', call.kwargs['env'])
+                    else:
+                        self.assertEqual(directory, scratch, argv)
+                        self.assertEqual(call.kwargs['env']['GIT_ATTR_SOURCE'], auto_merge.EMPTY_TREE)
+                        seen.add(command)
+                self.assertTrue(object_commands <= seen)
+        self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
+        self.assertEqual((scratch / 'objects/info/alternates').read_bytes(),
+                         os.fsencode(self.repo / '.git/objects') + b'\n')
+
+    def test_scratch_rewrites_alternates_and_removes_attributes_and_hooks(self):
+        head = self.change()
+        scratch = auto_merge._scratch(self.repo)
+        sample = scratch / 'hooks/pre-push.sample'
+        sample.write_text('sample\n')
+        for name in ('pre-push', 'post-merge'):
+            with self.subTest(name=name):
+                (scratch / 'objects/info/alternates').write_text('/wrong/objects\n')
+                attributes = scratch / 'info/attributes'
+                attributes.write_text('* merge=evil\n')
+                hook = scratch / 'hooks' / name
+                hook.write_text('unexpected hook\n')
+                self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
+                self.assertFalse(attributes.exists())
+                self.assertFalse(hook.exists())
+                self.assertTrue(sample.is_file())
+                self.assertEqual((scratch / 'objects/info/alternates').read_bytes(),
+                                 os.fsencode(self.repo / '.git/objects') + b'\n')
+
+    def test_scratch_recreates_any_config_other_than_the_bare_init_config(self):
+        head = self.change()
+        scratch = auto_merge._scratch(self.repo)
+        config = scratch / 'config'
+        initial = config.read_bytes()
+        for extra in (b'[merge "evil"]\n\tdriver = false\n', b'\thooksPath = /wrong/hooks\n'):
+            with self.subTest(extra=extra):
+                config.write_bytes(initial + extra)
+                stale = scratch / 'stale-file'
+                stale.touch()
+                self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
+                self.assertEqual(config.read_bytes(), initial)
+                self.assertFalse(stale.exists())
+
+    def test_scratch_rejects_a_multiline_alternates_path(self):
+        for name in ('repo\nwith newline', 'repo\rwith carriage return'):
+            with self.subTest(name=name):
+                repo = self.root / name
+                self.git(self.root, 'init', '-b', 'main', str(repo))
+                with self.assertRaisesRegex(auto_merge.GitError, 'one absolute repository path'):
+                    auto_merge._scratch(repo)
+
+    def assert_merge_driver_is_ignored(self, tracked):
+        name = 'ui/src/App.tsx'
+        self.write(self.repo, name, 'first\nkeep\nlast\n')
+        self.commit(self.repo, 'Add three lines')
+        self.git(self.work, 'reset', '--hard', 'main')
+        self.write(self.repo, name, 'shared\nkeep\nlast\n')
+        self.commit(self.repo, 'Main edits the first line')
+        self.git(self.repo, 'push', 'origin', 'main')
+        if tracked:
+            self.write(self.work, 'ui/src/.gitattributes', '* merge=evil\n')
+        head = self.change(name, 'shared\nkeep\nworker\n')
+        baseline, plan = auto_merge.evaluate(self.work, head)
+        self.assertIsNotNone(plan, baseline)
+        called = self.root / 'merge-driver-called'
+        if not tracked:
+            self.write(self.repo, '.git/info/attributes', '* merge=evil\n')
+        self.git(self.repo, 'config', 'merge.evil.driver', f'touch "{called}"; false')
+        self.assertEqual((result := auto_merge.process(self.job(head)))['outcome'], 'would_merge', result)
+        self.assertEqual(result['checks'], baseline['checks'])
+        self.assertFalse(called.exists())
+        self.enforce()
+        self.assertEqual((result := auto_merge.process(self.job(head)))['outcome'], 'merged', result)
+        self.assertEqual(result['checks'], baseline['checks'])
+        self.assertFalse(called.exists())
+
+    def test_info_attributes_cannot_run_a_local_merge_driver(self):
+        self.assert_merge_driver_is_ignored(tracked=False)
+
+    def test_worker_tree_attributes_cannot_run_a_local_merge_driver(self):
+        self.assert_merge_driver_is_ignored(tracked=True)
+
+    def test_observe_runs_no_clean_filter_or_textconv(self):
+        for name in ('App.tsx', 'Other.tsx'):
+            with self.subTest(name=name):
+                head = self.change(f'ui/src/{name}', f'// {name}\n')
+                called = self.root / 'git-helper-called'
+                command = f'touch "{called}"; cat'
+                attributes = self.repo / '.git/info/attributes'
+                attributes.write_text(f'{name} filter=evil diff=evil\n')
+                self.git(self.repo, 'config', 'filter.evil.clean', command)
+                self.git(self.repo, 'config', 'diff.evil.textconv', command)
+                path = self.work / 'ui/src' / name
+                status = path.stat()
+                os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns - 2_000_000_000))
+                self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
+                self.assertFalse(called.exists())
+                attributes.unlink()
+
     def test_observe_disables_configured_fsmonitor_hooks(self):
         head = self.change()
         called = self.root / 'fsmonitor-called'
@@ -559,7 +726,7 @@ class Modes(Base):
                 self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
                 self.assertFalse(called.exists())
 
-    def test_push_ignores_global_url_rewrites_and_runs_the_repository_hook(self):
+    def test_push_ignores_global_url_rewrites_and_the_repository_hook(self):
         other = self.root / 'other.git'
         self.git(self.root, 'clone', '--bare', str(self.origin), str(other))
         before = self.origin_main()
@@ -579,7 +746,7 @@ class Modes(Base):
                 self.assertEqual(result['outcome'], 'merged', result)
                 self.assertEqual(self.origin_main(), result['merge'])
                 self.assertEqual(self.git(other, 'rev-parse', 'main'), before)
-                self.assertEqual(called.read_text().splitlines(), ['called'] * count)
+                self.assertFalse(called.exists())
 
     def test_configured_refspecs_do_not_move_local_refs_in_either_mode(self):
         self.git(self.repo, 'branch', 'victim')
@@ -721,7 +888,77 @@ class Modes(Base):
         self.assertEqual(alerts[0][0], 'Auto-merge failed')
         self.assertTrue(pushes)
         for args in pushes:
-            self.assertFalse([item for item in args if item.startswith(('-', '+'))], args)
+            flags = [item for item in args if item.startswith('-')]
+            self.assertEqual(len(flags), 1, args)
+            self.assertRegex(flags[0], r'^--force-with-lease=main:[0-9a-f]{40}$')
+            self.assertFalse(any(item.startswith('+') for item in args), args)
+
+    def test_lease_refuses_a_changed_behind_or_deleted_main(self):
+        self.enforce()
+        behind = self.origin_main()
+        head = self.change()
+        tree = self.git(self.origin, 'rev-parse', 'main^{tree}')
+        checked = self.git(self.origin, 'commit-tree', tree, '-p', behind, '-m', 'Checked main')
+        self.git(self.origin, 'update-ref', 'refs/heads/main', checked)
+        newer = self.git(self.origin, 'commit-tree', tree, '-p', checked, '-m', 'Newer main')
+        unrelated = self.git(self.origin, 'commit-tree', tree, '-m', 'Unrelated main')
+        scratch = auto_merge._scratch(self.repo)
+        for remote in (unrelated, newer, behind, None):
+            with self.subTest(remote=remote):
+                decision, plan = auto_merge.evaluate(self.work, head)
+                self.assertIsNotNone(plan, decision)
+                self.assertEqual(plan['target_sha'], checked)
+                if remote is None:
+                    self.git(self.origin, 'update-ref', '-d', 'refs/heads/main')
+                else:
+                    self.git(self.origin, 'update-ref', 'refs/heads/main', remote)
+                with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run, \
+                        self.assertRaisesRegex(auto_merge.GitError, 'lease-guarded fast-forward failed'):
+                    auto_merge.merge(plan, 'codex', self.job(head))
+                pushes = [call.args[0] for call in run.call_args_list if call.args[0][3] == 'push']
+                self.assertEqual(len(pushes), 1)
+                self.assertEqual(pushes[0][:6], ['git', '-C', str(scratch), 'push',
+                                                 f'--force-with-lease=main:{checked}', str(self.origin)])
+                self.assertEqual(self.git(self.origin, 'for-each-ref', '--format=%(objectname)', 'refs/heads/main'),
+                                 remote or '')
+                self.git(self.origin, 'update-ref', 'refs/heads/main', checked)
+
+    def test_lease_never_calls_push_for_an_unchecked_first_parent(self):
+        self.enforce()
+        head = self.change()
+        checked = self.origin_main()
+        _, plan = auto_merge.evaluate(self.work, head)
+        unrelated = self.git(self.repo, 'commit-tree', 'HEAD^{tree}', '-m', 'Unrelated commit')
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv[3])
+            if argv[3] == 'commit-tree':
+                # Give merge() the originally planned commit despite the altered plan.
+                argv = [*argv[:6], checked, *argv[7:]]
+            return subprocess.run(argv, **kwargs)
+
+        with mock.patch.object(auto_merge, 'RUN', run):
+            for altered, message in ((unrelated, 'does not descend'), (head, 'as its first parent')):
+                with self.subTest(altered=altered), self.assertRaisesRegex(auto_merge.GitError, message):
+                    auto_merge.merge({**plan, 'target_sha': altered}, 'codex', self.job(head))
+        self.assertNotIn('push', seen)
+        self.assertEqual(self.origin_main(), checked)
+
+    def test_lease_happy_path_uses_exact_push_argv(self):
+        self.enforce()
+        scratch = auto_merge._scratch(self.repo)
+        for number in (2, 3):
+            with self.subTest(number=number):
+                head = self.change(text=f'export const app = {number}\n')
+                checked = self.origin_main()
+                with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+                    decision = auto_merge.process(self.job(head))
+                self.assertEqual(decision['outcome'], 'merged', decision)
+                pushes = [call.args[0] for call in run.call_args_list if call.args[0][3] == 'push']
+                self.assertEqual(pushes, [['git', '-C', str(scratch), 'push', f'--force-with-lease=main:{checked}',
+                                          str(self.origin), f"{decision['merge']}:refs/heads/main"]])
+                self.assertEqual(self.origin_main(), decision['merge'])
 
     def test_leaving_enforce_before_the_push_stops_the_merge(self):
         self.enforce()
@@ -856,8 +1093,10 @@ class Modes(Base):
 
 class Ladder(Base):
     def levels(self):
-        _, target = auto_merge._fetch_target(str(self.repo))
-        return auto_merge.ladder(str(self.repo), auto_merge.rules_at(self.repo, target), target)
+        root = str(self.repo)
+        scratch = auto_merge._scratch(root)
+        _, target = auto_merge._fetch_target(root, scratch)
+        return auto_merge.ladder(root, scratch, auto_merge.rules_at(scratch, target), target)
 
     def merge_one(self, number, name='ui/src/App.tsx'):
         self.git(self.work, 'fetch', '-q', 'origin')
@@ -878,6 +1117,28 @@ class Ladder(Base):
         levels = self.levels()
         self.assertEqual({name: (area['rung'], area['limit']) for name, area in levels.items()},
                          {'tests': (1, auto_merge.RUNGS[1]), 'ui': (1, auto_merge.RUNGS[1])})
+
+    def test_trust_reads_remotely_created_reverts_from_scratch_only(self):
+        base = self.origin_main()
+        for number in (2, 3):
+            with self.subTest(number=number):
+                changed = self.change(text=f'export const app = {number}\n')
+                self.git(self.work, 'push', 'origin', f'{changed}:refs/heads/main')
+                reverted = self.git(self.origin, 'commit-tree', f'{base}^{{tree}}', '-p', changed, '-m',
+                                    f'Revert {number}\n\nThis reverts commit {changed}.')
+                self.git(self.origin, 'update-ref', 'refs/heads/main', reverted)
+                self.git(self.work, 'reset', '--hard', changed)
+                head = self.change('ui/src/Another.tsx')
+                result = auto_merge.process(self.job(head))
+                self.assertEqual(self.failed(result), ['scope'])
+                self.assertIn('trust is at zero', result['checks'][-3]['text'])
+                scratch = auto_merge._scratch(self.repo)
+                self.assertEqual(self.git(scratch, 'cat-file', '-t', reverted), 'commit')
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.git(self.repo, 'cat-file', '-t', reverted)
+                self.git(self.work, 'fetch', 'origin', 'main')
+                self.git(self.work, 'reset', '--hard', reverted)
+                base = reverted
 
     def test_a_diff_over_the_limit_waits_and_a_diff_at_the_limit_passes(self):
         limit = auto_merge.RUNGS[auto_merge.START_RUNG]
@@ -1145,6 +1406,7 @@ class Http(Base):
 
     def test_settings_fetches_the_push_target_then_reuses_it_for_five_minutes(self):
         root = str(self.repo)
+        scratch = auto_merge._scratch(root)
         with mock.patch.object(auto_merge, '_fetch_target', wraps=auto_merge._fetch_target) as fetch, \
                 mock.patch.object(auto_merge.time, 'monotonic', return_value=100) as now:
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'UI')
@@ -1155,7 +1417,7 @@ class Http(Base):
             self.git(self.repo, 'push', 'origin', 'main')
             now.return_value = 399
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'UI')
-            fetch.assert_called_once_with(root)
+            fetch.assert_called_once_with(root, scratch)
             now.return_value = 400
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Browser')
             self.assertEqual(fetch.call_count, 2)
@@ -1168,7 +1430,7 @@ class Http(Base):
             self.assertEqual(self.failed(decision), [])
             self.assertEqual(plan['target_sha'], self.origin_main())
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Frontend')
-            self.assertEqual(fetch.call_args_list, [mock.call(root)] * 3)
+            self.assertEqual(fetch.call_args_list, [mock.call(root, scratch)] * 3)
 
     def test_settings_shows_target_errors_with_or_without_decisions(self):
         root = str(self.repo)
@@ -1235,6 +1497,50 @@ class Http(Base):
                 auto_merge.post(handler)
                 self.assertEqual((handler.status, handler.body['mode']), (200, mode))
             require.assert_not_called()
+
+
+class EnforceUnavailable(Base):
+    enforce_available = False
+    explanation = ('Enforce is not available yet. Auto-merge needs its own identity first, so that agents on '
+                   'this account cannot change its trust or approve it.')
+
+    def test_enforce_is_hidden_and_refused_before_passkey_validation(self):
+        self.assertIs(auto_merge.ENFORCE_AVAILABLE, False)
+        for mode in ('off', 'observe'):
+            with self.subTest(mode=mode):
+                auto_merge.set_mode(mode)
+                setting = auto_merge.mode_path().read_bytes()
+                with self.assertRaises(auto_merge.AutoMergeError) as error:
+                    auto_merge.set_mode('enforce')
+                self.assertEqual(error.exception.status, 409)
+                self.assertEqual(str(error.exception), self.explanation)
+                self.assertEqual(auto_merge.mode_path().read_bytes(), setting)
+                handler = Handler({'mode': 'enforce', 'approval': {'id': mode}})
+                with mock.patch.object(auto_merge.approval, 'require') as require:
+                    auto_merge.post(handler)
+                require.assert_not_called()
+                self.assertEqual((handler.status, handler.body), (409, {'error': self.explanation}))
+                state = auto_merge.state()
+                self.assertEqual(state['mode'], mode)
+                self.assertIs(state['enforce_available'], False)
+                self.assertEqual([item['mode'] for item in state['modes']], ['off', 'observe'])
+
+    def test_enforce_file_never_reaches_merge_even_with_a_matching_grant(self):
+        head = self.change()
+        before = self.origin_main()
+        path = auto_merge.mode_path()
+        path.parent.mkdir()
+        for grant in (None, 1):
+            with self.subTest(grant=grant):
+                path.write_text(json.dumps({'mode': 'enforce', 'since': 1}))
+                with mock.patch.object(auto_merge, '_grant', grant), \
+                        mock.patch.object(auto_merge, 'merge', wraps=auto_merge.merge) as merge, \
+                        mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+                    self.assertEqual(auto_merge.read_setting(), {'mode': 'observe', 'since': 0, 'paused': False})
+                    self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
+                merge.assert_not_called()
+                self.assertFalse({'commit-tree', 'push'} & {call.args[0][3] for call in run.call_args_list})
+                self.assertEqual(self.origin_main(), before)
 
 
 class Checklist(unittest.TestCase):
