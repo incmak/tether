@@ -2799,25 +2799,6 @@ class ServerWatcherTests(unittest.TestCase):
             found = review_scope.scope('/project')
         self.assertEqual((found['commit'], found['dirty']), ('1f0e' * 10, None))
 
-    def test_scope_with_an_unreadable_folder_in_a_real_repository_is_not_clean(self):
-        import review_scope
-        with tempfile.TemporaryDirectory() as folder:
-            def git(*args):
-                return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-                                       '-c', 'commit.gpgsign=false', *args], cwd=folder, capture_output=True, check=True)
-            git('init', '-b', 'main')
-            (Path(folder) / 'work.txt').write_text('one\n')
-            git('add', '.')
-            git('commit', '-m', 'One')
-            self.assertIs(review_scope.scope(folder)['dirty'], False)
-            hidden = Path(folder) / 'hidden'
-            hidden.mkdir()
-            (hidden / 'new.txt').write_text('x\n')
-            hidden.chmod(0)
-            self.addCleanup(hidden.chmod, 0o700)
-            if os.access(hidden, os.R_OK):
-                self.skipTest('this user can read every folder')
-            self.assertIsNone(review_scope.scope(folder)['dirty'])
         for call in run.call_args_list:
             self.assertEqual(call.kwargs['cwd'], '/project')
             self.assertEqual(call.kwargs['timeout'], 5)
@@ -2840,6 +2821,30 @@ class ServerWatcherTests(unittest.TestCase):
         with patch.object(review_scope.subprocess, 'run',
                           return_value=subprocess.CompletedProcess([], 0, b'1f0e1f0e\n')):
             self.assertIsNone(review_scope.head('/project'))  # a short hash is not a commit id
+
+
+    def test_scope_with_an_unreadable_folder_in_a_real_repository_is_not_clean(self):
+        import review_scope
+        with tempfile.TemporaryDirectory() as folder:
+            def git(*args):
+                return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                                       '-c', 'commit.gpgsign=false', *args], cwd=folder, capture_output=True, check=True)
+            git('init', '-b', 'main')
+            (Path(folder) / 'work.txt').write_text('one\n')
+            git('add', '.')
+            git('commit', '-m', 'One')
+            self.assertIs(review_scope.scope(folder)['dirty'], False)
+            hidden = Path(folder) / 'hidden'
+            hidden.mkdir()
+            (hidden / 'new.txt').write_text('x\n')
+            hidden.chmod(0)
+            try:
+                if os.access(hidden, os.R_OK):
+                    self.skipTest('this user can read every folder')
+                self.assertIsNone(review_scope.scope(folder)['dirty'])
+            finally:
+                hidden.chmod(0o700)  # before the temporary folder is removed
+            self.assertIs(review_scope.scope(folder)['dirty'], True)
 
     def test_scope_counts_untracked_files_as_dirty_when_the_repository_hides_them(self):
         import review_scope
