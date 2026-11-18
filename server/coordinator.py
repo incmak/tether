@@ -16,7 +16,6 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import threading
 import time
 import unicodedata
 
@@ -41,7 +40,7 @@ GAP = 30            # least time between two sends to one coordinator
 RETRY = 60          # after a failed send
 MAX_EVENTS = 20
 KNOWN = ('Idle', 'Working', 'Approval', 'Input needed')   # other states (Unknown, Unavailable) may change back
-SEND_LOCK = threading.Lock()
+CLAIM_FIRST = 'This tab is not the coordinator. Run claim first, when the user asked this tab to coordinate.'
 
 
 def cli():
@@ -128,7 +127,8 @@ def row(entry, status, last_reply, finished=None):
     if entry.get('role') or entry.get('helper'):
         out['helper'] = entry.get('role') or entry.get('helper')
     if isinstance(finished, (int, float)):
-        out['finished_seconds_ago'] = max(0, int(time.monotonic() - finished))
+        # server.track records finished in wall-clock time.
+        out['finished_seconds_ago'] = max(0, int(time.time() - finished))
     return out
 
 
@@ -144,38 +144,71 @@ def _target(body, caller, entries):
     return target
 
 
-def act(body, caller, entries, *, run, status, send, last_reply, timeline):
+def _same_chat(entry, session, transcript):
+    return entry is not None and (entry.get('tmux_session'), entry.get('transcript')) == (session, transcript)
+
+
+def _change_mark(body, caller, entries, run):
+    """Change the mark using fresh entries while the caller holds the lock."""
+    action = body['action']
+    found = marks(entries)
+    pane = caller['id']
+    mine = found.get(pane)
+    if action != 'claim':
+        if mine is None:
+            raise ValueError(CLAIM_FIRST)
+        if action == 'release':
+            _set(run, pane, None)
+            return {'released': pane}
+        mode = _mode(body, None)
+        _set(run, pane, mode)
+        return {'events': mode}
+
+    mode = _mode(body, mine[1] if mine else 'all')
+    if mine is None and (caller.get('role') or caller.get('helper')):
+        raise ValueError('A reviewer or advisor tab cannot be the coordinator.')
+    other = next((entry for entry in entries if entry['id'] != pane and entry['id'] in found
+                  and entry.get('tmux_session') == caller.get('tmux_session')), None)
+    if other is not None:
+        if body.get('take') is not True:
+            raise ValueError(f'The tab `{name_of(other)}` ({other["id"]}) is the coordinator of this session. '
+                             'Run release there, or claim --take when the user asked for the change.')
+        _set(run, other['id'], None)
+    _set(run, pane, mode)
+    return {'coordinator': pane, 'events': mode, 'rules': rules()}
+
+
+def _send_state(target, status):
+    if not target.get('writable'):
+        raise RuntimeError('Messaging is unavailable for that tab.')
+    state = status(target).get('state')
+    if state in ('Unavailable', 'Unknown'):
+        raise RuntimeError('Messaging is unavailable for that tab.')
+    if state in ('Approval', 'Input needed'):
+        raise RuntimeError('That tab waits on a prompt. Ask the user to answer it in that tab.')
+    return state
+
+
+def act(body, caller, entries, *, fresh, lock, run, status, fresh_status, send, last_reply, timeline):
     """One coordinator command from the tab `caller`. Returns (HTTP status, reply)."""
     action = body.get('action')
     if caller.get('agent') not in AGENTS:
         raise ValueError('Only a Claude or Codex tab can be the coordinator.')
-    found = marks(entries)
-    mine = found.get(caller['id'])
-    if action == 'claim':
-        mode = _mode(body, mine[1] if mine else 'all')
-        if mine is None and (caller.get('role') or caller.get('helper')):
-            raise ValueError('A reviewer or advisor tab cannot be the coordinator.')
-        live = {entry['id']: entry for entry in entries}
-        other = next((pane for pane, (session, _) in found.items()
-                      if pane != caller['id'] and session == caller.get('tmux_session')), None)
-        if other is not None and body.get('take') is not True:
-            raise ValueError(f'The tab `{name_of(live[other])}` ({other}) is the coordinator of this session. '
-                             'Run release there, or claim --take when the user asked for the change.')
-        if other is not None:
-            _set(run, other, None)
-        _set(run, caller['id'], mode)
-        return 200, {'coordinator': caller['id'], 'events': mode, 'rules': rules(),
-                     'tabs': [row(entry, status, last_reply, timeline(entry['id']).get('finished'))
-                              for entry in _peers(caller, entries)]}
+    pane, session, chat = caller['id'], caller.get('tmux_session'), caller.get('transcript')
+    if action in ('claim', 'release', 'events'):
+        with lock:
+            entries = fresh()
+            current = next((entry for entry in entries if entry['id'] == pane), None)
+            if not _same_chat(current, session, chat) or current.get('agent') not in AGENTS:
+                raise RuntimeError('This tab moved or started a new chat.')
+            reply = _change_mark(body, current, entries, run)
+        if action == 'claim':
+            reply['tabs'] = [row(entry, status, last_reply, timeline(entry['id']).get('finished'))
+                             for entry in _peers(current, entries)]
+        return 200, reply
+    mine = marks(entries).get(pane)
     if mine is None:
-        raise ValueError('This tab is not the coordinator. Run claim first, when the user asked this tab to coordinate.')
-    if action == 'release':
-        _set(run, caller['id'], None)
-        return 200, {'released': caller['id']}
-    if action == 'events':
-        mode = _mode(body, None)
-        _set(run, caller['id'], mode)
-        return 200, {'events': mode}
+        raise ValueError(CLAIM_FIRST)
     if action == 'tabs':
         return 200, {'events': mine[1],
                      'tabs': [row(entry, status, last_reply, timeline(entry['id']).get('finished'))
@@ -192,20 +225,23 @@ def act(body, caller, entries, *, run, status, send, last_reply, timeline):
             raise ValueError('Enter a message with 1 to 20000 characters.')
         if any(unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in message):
             raise ValueError('The message contains terminal control characters.')
-        if not target.get('writable'):
-            raise RuntimeError('Messaging is unavailable for that tab.')
-        state = status(target).get('state')
-        if state in ('Unavailable', 'Unknown'):
-            raise RuntimeError('Messaging is unavailable for that tab.')
-        if state in ('Approval', 'Input needed'):
-            raise RuntimeError('That tab waits on a prompt. Ask the user to answer it in that tab.')
-        with SEND_LOCK:
+        _send_state(target, status)
+        target_pane, target_chat = target['id'], target.get('transcript')
+        with lock:
+            entries = fresh()
+            live = {entry['id']: entry for entry in entries}
+            if not _same_chat(live.get(pane), session, chat) or pane not in marks(entries):
+                raise RuntimeError('This tab moved, started a new chat or is no longer the coordinator.')
+            target = live.get(target_pane)
+            if not _same_chat(target, session, target_chat) or target.get('agent') not in AGENTS:
+                raise ValueError('That tab moved or started a new chat. Run tabs again.')
+            state = _send_state(target, fresh_status)
             delivery = send(target, message, state)
         return 200, {'sent': True, 'pane': target['id'], 'name': name_of(target), 'delivery': delivery}
     raise ValueError('Unknown action.')
 
 
-def serve(handler, body, *, sessions, run, status, send, last_reply, timeline):
+def serve(handler, body, *, sessions, fresh, lock, run, status, fresh_status, send, last_reply, timeline):
     credential = handler.headers.get('X-Tether-Hook', '')
     if (not auth.is_loopback(handler.client_address[0]) or not credential
             or not hmac.compare_digest(credential.encode(), auth.session_value().encode())):
@@ -215,8 +251,8 @@ def serve(handler, body, *, sessions, run, status, send, last_reply, timeline):
     caller = next((entry for entry in entries if entry['id'] == body.get('session')), None)
     if caller is None:
         raise ValueError('That session has ended. Select another tab.')
-    handler.respond(*act(body, caller, entries, run=run, status=status, send=send, last_reply=last_reply,
-                         timeline=timeline))
+    handler.respond(*act(body, caller, entries, fresh=fresh, lock=lock, run=run, status=status,
+                         fresh_status=fresh_status, send=send, last_reply=last_reply, timeline=timeline))
 
 
 def message(events, mode):
@@ -229,6 +265,48 @@ def message(events, mode):
         text = f': {event["text"]}' if event['text'] else ''
         lines.append(f'- `{event["name"]}` ({event["pane"]}) {words[event["kind"]]}{text}')
     return '\n'.join(lines)
+
+
+def _reply_fingerprint(reply):
+    return hashlib.sha256(reply.encode('utf-8', errors='surrogatepass')).hexdigest()
+
+
+def deliver(pane, queue, events, *, lock, fresh, fresh_status, last_reply, submit_locked):
+    """Return sent and held events, [] for a stale queue, or None to retry."""
+    if not lock.acquire(timeout=2):
+        return None
+    try:
+        entries = fresh()
+        by_pane = {entry['id']: entry for entry in entries}
+        found = marks(entries)
+        coordinator = by_pane.get(pane)
+        if (pane not in found or not _same_chat(coordinator, queue['session'], queue['chat'])
+                or not coordinator.get('writable')):
+            return []
+        mode = found[pane][1]
+        live, held = [], []
+        for event in events:
+            tab = by_pane.get(event['pane'])
+            if (not wanted(event, mode) or not _same_chat(tab, event['session'], event['chat'])
+                    or tab['id'] in found or tab.get('role') or tab.get('helper')):
+                continue
+            info = fresh_status(tab)
+            state = info.get('state')
+            if state not in KNOWN:
+                held.append(event)
+            elif event['kind'] == 'needs':
+                if prompt_identity(info) == event['token']:
+                    live.append(event)
+            elif state == 'Idle' and _reply_fingerprint(last_reply(tab)) == event['fingerprint']:
+                live.append(event)
+        if live:
+            if fresh_status(coordinator).get('state') != 'Idle':
+                return None
+            # terminal_submit refuses a draft in the input.
+            submit_locked(message(live, mode), coordinator)
+        return live, held
+    finally:
+        lock.release()
 
 
 class Feed:
@@ -269,11 +347,12 @@ class Feed:
             record['worked'] = None
             reply = last_reply(entry)
             asks, _ = attention.reply_ask(reply) if reply.strip() else (None, '')
-            return {'kind': 'asks' if asks == 'yes' else 'done', 'text': push.reply_summary(reply, SUMMARY), 'token': None}
+            return {'kind': 'asks' if asks == 'yes' else 'done', 'text': push.reply_summary(reply, SUMMARY),
+                    'fingerprint': _reply_fingerprint(reply)}
         waits = needs.summary(info)
         return {'kind': 'needs', 'text': f'{waits["kind"]}: {waits["text"]}' if waits else '', 'token': token}
 
-    def observe(self, entries, status, send, last_reply):
+    def observe(self, entries, status, deliver, last_reply):
         now = self.clock()
         found = marks(entries)
         by_pane = {entry['id']: entry for entry in entries}
@@ -287,15 +366,22 @@ class Feed:
         if not coordinators:
             self.seen.clear()
             return
-        statuses = {}
+        queued = {event['pane'] for queue in self.queues.values() for event in queue['events']}
         for entry in entries:
             target = coordinators.get(entry.get('tmux_session'))
-            if (target is None or entry['id'] in found or entry.get('agent') not in AGENTS
-                    or not entry.get('owner_pid') or not entry.get('writable')
-                    or entry.get('role') or entry.get('helper')):
+            pane = entry['id']
+            eligible = (target is not None and pane not in found and entry.get('agent') in AGENTS
+                        and entry.get('owner_pid') and entry.get('writable')
+                        and not (entry.get('role') or entry.get('helper')))
+            if not eligible and pane not in queued:
                 continue    # reviewers and advisors report to the tab they help
             try:
-                info = statuses[entry['id']] = status(entry)
+                info = status(entry)
+                if pane in queued and info.get('state') == 'Working':
+                    for queue in self.queues.values():
+                        queue['events'] = [old for old in queue['events'] if old['pane'] != pane]
+                if not eligible:
+                    continue
                 event = self._event(entry, info, last_reply, now)
             except Exception:  # one odd pane must not stop the feed
                 continue
@@ -311,48 +397,36 @@ class Feed:
                                         session=entry.get('tmux_session'), chat=entry.get('transcript')))
             del queue['events'][:-MAX_EVENTS]
         for pane, queue in list(self.queues.items()):
-            self._flush(pane, by_pane[pane], found[pane][1], queue, by_pane, statuses, status, send, now)
+            self._flush(pane, by_pane[pane], queue, status, deliver, now)
 
-    def _flush(self, pane, coordinator, mode, queue, by_pane, statuses, status, send, now):
-        """Every check runs again at delivery: the report setting, the session and chat of both tabs, and the state and
-        prompt of each tab. A check made when the update was queued may be out of date by now."""
-        if queue['session'] != coordinator.get('tmux_session') or queue['chat'] != coordinator.get('transcript'):
+    def _flush(self, pane, coordinator, queue, status, deliver, now):
+        """Wait for the send window before checking the live panes."""
+        if not _same_chat(coordinator, queue['session'], queue['chat']):
             del self.queues[pane]   # the coordinator moved to another session or started a new chat
             return
-        events = queue['events'] = [event for event in queue['events'] if wanted(event, mode)]
+        events = queue['events']
         if not events or now - events[-1]['at'] < JOIN and now - events[0]['at'] < 4 * JOIN:
             return
         if queue['sent_at'] is not None and now - queue['sent_at'] < GAP:
             return
         if queue['retry_at'] is not None and now < queue['retry_at']:
             return
-        live, held = [], []
-        for event in events:
-            entry = by_pane.get(event['pane'])
-            if (entry is None or entry.get('tmux_session') != event['session'] or entry.get('transcript') != event['chat']
-                    or entry['id'] in marks([entry]) or entry.get('role') or entry.get('helper')):
-                continue    # the tab closed, moved, started a new chat or took another role
-            info = statuses.get(event['pane'])
-            state = (info or {}).get('state')
-            if state not in KNOWN:
-                held.append(event)  # not sure of this tab now: keep the update and look again on the next tick
-                continue
-            if event['kind'] == 'needs':
-                if prompt_identity(info) == event['token']:
-                    live.append(event)
-            elif state == 'Idle':
-                live.append(event)
-        queue['events'] = live + held
-        if not live:
-            return
         try:
-            # The cached state skips a busy coordinator cheaply; send reads it again under the send lock.
-            sent = status(coordinator).get('state') == 'Idle' and send(coordinator, message(live, mode))
+            if status(coordinator).get('state') != 'Idle':
+                return
+            result = deliver(pane, queue, events)
         except Exception:  # a draft in the input, a prompt on screen, a closed pane: try again later
             queue['retry_at'] = now + RETRY
             return
+        if result is None:
+            return
+        if result == []:
+            del self.queues[pane]
+            return
+        sent, held = result
+        queue['events'] = held
         if sent:
-            queue.update(events=held, sent_at=now, retry_at=None)
+            queue.update(sent_at=now, retry_at=None)
 
 
 def prompt_identity(info):

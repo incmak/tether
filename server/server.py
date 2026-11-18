@@ -1,6 +1,7 @@
 """Mobile transcript and message bridge to one existing Codex CLI thread."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 import gzip
 import html
 import hashlib
@@ -268,7 +269,9 @@ def monitor_notices():
         except Exception as exc:  # Attention mode must never stop the monitor
             print(f'attention observe failed: {exc!r}', file=sys.stderr)
         try:
-            coordinator.FEED.observe(entries, shared_status, coordinator_send, last_reply)
+            deliver = partial(coordinator.deliver, lock=SEND_LOCK, fresh=fresh_sessions, fresh_status=fresh_status,
+                              last_reply=last_reply, submit_locked=submit_locked)
+            coordinator.FEED.observe(entries, shared_status, deliver, last_reply)
         except Exception as exc:  # the coordinator feed must never stop the monitor
             print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
         try:
@@ -423,11 +426,15 @@ def quick_groups():
         return {}
 
 
+def fresh_sessions():
+    return discover(settings(), subprocess.run)
+
+
 def sessions():
     """Discovery shells out (ps, tmux, sqlite); every open page and the monitor ask every 2s, so share one result for a second."""
     with SESSIONS_LOCK:
         if time.monotonic() - SESSIONS_CACHE[0] > 1:
-            SESSIONS_CACHE[1] = discover(settings(), subprocess.run)
+            SESSIONS_CACHE[1] = fresh_sessions()
             window_size.apply(subprocess.run, entries=SESSIONS_CACHE[1])
             SESSIONS_CACHE[0] = time.monotonic()
         return SESSIONS_CACHE[1]
@@ -1185,23 +1192,9 @@ def submit_locked(message, config):
         continuations.sent(config, marker)
 
 
-def coordinator_send(config, message):
-    """The coordinator feed's send. Under the send lock it reads the state again and sends only to an idle tab. It never
-    moves a draft: a draft in the input makes terminal_submit refuse. False = not idle now, try again later."""
-    if not config.get('writable', True) or not SEND_LOCK.acquire(timeout=2):
-        return False
-    try:
-        if fresh_status(config).get('state') != 'Idle':
-            return False
-        submit_locked(message, config)
-        return True
-    finally:
-        SEND_LOCK.release()
-
-
-def send_text(config, message, state=None):
+def send_text(config, message, state=None, *, held=False):
     """The chat composer's guarded send to one pane. Returns 'queued' when the agent was working (it takes typed input
-    while busy; Tether keeps no queue of its own), else 'submitted'. state: a status the caller just read."""
+    while busy; Tether keeps no queue of its own), else 'submitted'. held: the caller already holds SEND_LOCK."""
     state = state or live_status(config)['state']
     if config['agent'] == 'codex' and re.match(r'/ls(\s|$)', message.strip()):
         message = '!' + message.strip()[1:]   # Codex has no /ls; "!ls" runs it in the shell
@@ -1209,7 +1202,10 @@ def send_text(config, message, state=None):
                    and re.match(r'^/[a-z][a-z0-9_-]*(?:\s|$)', message.strip(), re.I) and message.strip() != '/model')
     before = capture(config) if wants_reply else ''
     note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
-    submit(note + message.strip(), config)
+    if held:
+        submit_locked(note + message.strip(), config)
+    else:
+        submit(note + message.strip(), config)
     if wants_reply:  # Codex answers its slash commands on the terminal only
         threading.Thread(target=terminal_replies.record, args=(config, before, capture), daemon=True).start()
     return 'queued' if state == 'Working' else 'submitted'
@@ -2463,8 +2459,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond({'unsupported': 503, 'busy': 429}.get(exc.code, 400), {'error': str(exc), 'code': exc.code})
                 return
             if self.path == coordinator.PATH:
-                coordinator.serve(self, body, sessions=sessions, run=subprocess.run, status=shared_status,
-                                  send=send_text, last_reply=last_reply, timeline=timeline)
+                coordinator.serve(self, body, sessions=sessions, fresh=fresh_sessions, lock=SEND_LOCK,
+                                  run=subprocess.run, status=shared_status, fresh_status=fresh_status,
+                                  send=partial(send_text, held=True), last_reply=last_reply, timeline=timeline)
                 return
             if self.path == '/mobile/api/preview':
                 try:

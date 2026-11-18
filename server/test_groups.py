@@ -136,6 +136,8 @@ class RenderTests(Bundles):
         text = projects.render(PID, 'codex', self.home, group={'pid': self.GPID, 'name': 'Big'})
         self.assertLessEqual(len(text), projects.BUDGET_MIN)
         self.assertIn('Session rule.', text)
+        self.assertIn('## Stack: Big', text)
+        self.assertNotIn('### Stack instructions', text)
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
