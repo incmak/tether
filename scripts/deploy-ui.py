@@ -5,6 +5,7 @@ B92: each build carries .build-commit (written by ui/vite.config.ts). The instal
 target. A build whose commit does not contain the live commit would remove deployed work, so it is refused.
 B189: each install needs --verified STAMP ("tests(...) review(...)" or "none (reason)"). The stamp goes into the live
 record and a DEPLOYED.md line. Deployed commits without a "Verified:" trailer give a warning only (observe mode).
+B207: --shots DIR records screenshot proof. Missing or invalid proof gives a warning only.
 """
 import argparse
 from contextlib import contextmanager
@@ -35,7 +36,10 @@ class Refused(ValueError):
 
 def git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True)
+        return subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True, errors='replace',
+                              timeout=30, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+    except subprocess.TimeoutExpired:
+        raise Refused(f'git {args[0]} timed out') from None
     except OSError as error:
         raise Refused(f'git did not start: {error}') from None
 
@@ -112,8 +116,8 @@ def write_record(target: Path, record: dict, name: str = RECORD):
 
 def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dry_run: bool = False,
            warn=lambda text: print(f'Warning: {text}', file=sys.stderr), *, verified: str | None = None,
-           log: Path | None = None) -> int:
-    """Install the build. `verified` is required (B189); `log` is the DEPLOYED.md to add a line to."""
+           log: Path | None = None, shots: Path | None = None) -> int:
+    """Install the build and log its verification stamp and any screenshots."""
     try:
         verified = verification.valid(verified)
     except ValueError as error:
@@ -121,19 +125,27 @@ def deploy(build: Path, target: Path, repo: Path = REPO, force: bool = False, dr
     build, target = build.resolve(), target.resolve()
     log = Path(log) if log else verification.log_path(repo)
     if dry_run and not target.is_dir():
-        return install(build, target, repo, force, dry_run, warn, verified, log)
+        return install(build, target, repo, force, dry_run, warn, verified, log, shots)
     with locked(target):
-        return install(build, target, repo, force, dry_run, warn, verified, log)
+        return install(build, target, repo, force, dry_run, warn, verified, log, shots)
 
 
-def observe_trailers(build: Path, target: Path, repo: Path, warn):
-    """Observe mode: name deployed commits without a "Verified:" trailer. Never refuses."""
+def observe_deploy(build: Path, target: Path, repo: Path, warn, has_shots: bool):
+    """Warn about missing verification trailers and screenshot proof."""
+    try:
+        live = (read_json(target / RECORD, 'The live record') or {}).get('commit')
+    except (OSError, Refused):
+        return
+    if not live:
+        if not has_shots:
+            warn('This deploy names no screenshots folder and there is no live record to compare with. '
+                 'Add --shots DIR (observe mode, not refused).')
+        return
     try:
         built = (read_json(build / STAMP, 'The build stamp') or {}).get('commit')
-        live = (read_json(target / RECORD, 'The live record') or {}).get('commit')
-    except Refused:
+    except (OSError, Refused):
         return
-    if not built or not live or built == live:
+    if not built or built == live:
         return
     found = verification.unverified_commit_range(repo, live, built)
     if found:
@@ -141,9 +153,20 @@ def observe_trailers(build: Path, target: Path, repo: Path, warn):
         more = f'\n  and {len(found) - 5} more' if len(found) > 5 else ''
         warn(f'{len(found)} deployed commit(s) have no "Verified:" trailer or say "none" (observe mode, not '
              f'refused):\n{shown}{more}')
+    if not has_shots:
+        # The same files for which a review asks for screenshots (server/review_scope.py UI_PATH).
+        paths = verification.git(repo, 'diff', '--name-only', '-z', '--no-ext-diff', live, built, '--',
+                                 'ui/src', 'ui/public', 'ui/index.html', 'ui/vite.config.ts', 'ui/package.json',
+                                 'ui/package-lock.json', 'server/ui_manifest.json',
+                                 'server/index.html', 'server/app.js')
+        if paths:
+            count = paths.count('\0')
+            warn(f'This deploy changes {count} UI file(s) and names no screenshots folder. '
+                 'Add --shots DIR (observe mode, not refused).')
 
 
-def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, warn, verified: str, log: Path) -> int:
+def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, warn, verified: str, log: Path,
+            shots: Path | None) -> int:
     entry = build / 'index.html'
     if build == target or not entry.is_file():
         raise ValueError('Use a separate build folder with index.html.')
@@ -157,7 +180,10 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
         if not force:
             raise
         warn(f'--force: installing anyway. {error}')
-    observe_trailers(build, target, repo, warn)
+    # After the guard, and the same with --dry-run: an invalid folder is reported and counts as no proof.
+    shown, count = verification.observe_shots(shots, repo, warn)
+    proof = {'shots': shown, 'shots_count': count} if shown is not None else {}
+    observe_deploy(build, target, repo, warn, bool(proof))
     if dry_run:
         return 0
     try:
@@ -188,7 +214,7 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
         (target / RECORD).unlink(missing_ok=True)
         warn(f'The live commit is unknown, so {RECORD} was removed. The guard starts again with the next stamped build.')
     else:
-        write_record(target, {**stamp, 'entry': assets[0].removeprefix('/chat/'), 'verified': verified,
+        write_record(target, {**stamp, **proof, 'entry': assets[0].removeprefix('/chat/'), 'verified': verified,
                               'deployed': datetime.now(timezone.utc).isoformat(timespec='seconds')})
     pending.unlink()
     commit = (stamp or {}).get('commit')
@@ -200,7 +226,8 @@ def install(build: Path, target: Path, repo: Path, force: bool, dry_run: bool, w
     subject = subject.replace('Verified:', 'Verified')
     text = f'UI deploy: {subject}' if subject else 'UI deploy (commit unknown)'
     try:
-        verification.append(log, verification.line(text, verified, commit[:7] if commit else None))
+        verification.append(log, verification.line(text, verified, commit[:7] if commit else None,
+                                                   shots=proof.get('shots')))
     except (OSError, ValueError) as error:  # the build is live now: report, never fail
         warn(f'Installed, but the DEPLOYED.md line was not written ({log}: {error}). Add it with: '
              f'scripts/verification.py log --verified "{verified}" "{text}"')
@@ -246,11 +273,14 @@ def record_live(commit: str, target: Path, repo: Path = REPO) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     usage='%(prog)s --verified STAMP [--force] [--dry-run] BUILD TARGET\n'
+                                     usage='%(prog)s --verified STAMP [--shots DIR] [--force] [--dry-run] '
+                                           'BUILD TARGET\n'
                                            '       %(prog)s --record-live COMMIT TARGET')
     parser.add_argument('paths', nargs='+', type=Path, metavar='BUILD TARGET')
     parser.add_argument('--force', action='store_true', help='install even when the guard refuses the build')
     parser.add_argument('--dry-run', action='store_true', help='run the checks only; install nothing')
+    parser.add_argument('--shots', metavar='DIR', type=Path,
+                        help='folder with the before and after screenshots (invalid folders give a warning)')
     parser.add_argument('--verified', metavar='STAMP',
                         help='how this build was verified: "tests(server 412 ok) review(codex APPROVED)" or '
                              '"none (reason)". Required to install.')
@@ -263,7 +293,7 @@ def main():
         if args.record_live:
             print(f'Recorded {record_live(args.record_live, args.paths[0])} as the live commit.')
             return
-        count = deploy(*args.paths, force=args.force, dry_run=args.dry_run, verified=args.verified)
+        count = deploy(*args.paths, force=args.force, dry_run=args.dry_run, verified=args.verified, shots=args.shots)
     except Refused as error:
         parser.exit(1, f'Deployment refused: {error}\nUse --force only when you mean to remove that work.\n')
     except (OSError, ValueError) as error:

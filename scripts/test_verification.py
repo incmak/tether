@@ -52,6 +52,16 @@ class StampTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             verification.line('x', 'ok', now=now)
 
+    def test_line_with_shots_keeps_the_stamp_last(self):
+        now = datetime(2026, 11, 18, 5, 30, tzinfo=timezone.utc)
+        line = verification.line('UI deploy', 'tests(ui ok)', 'abc1234', now, shots='proof/b207')
+        self.assertEqual(line, '- 2026-11-18 05:30 UTC · abc1234 UI deploy · Shots: proof/b207 '
+                               '· Verified: tests(ui ok)')
+        self.assertEqual(verification.status(line), 'verified')
+        for invalid in ('Verified: proof', 'two · parts', 'two\nlines', 'ending\r'):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, '--shots'):
+                verification.line('UI deploy', 'none', shots=invalid)
+
 
 class FileTest(unittest.TestCase):
     def setUp(self):
@@ -87,6 +97,35 @@ class FileTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'TETHER_DEPLOYED'):
                 verification.log_path(self.root)
 
+    def test_shots_folder_requires_a_directory_with_images(self):
+        with self.assertRaisesRegex(ValueError, 'does not exist'):
+            verification.shots_folder(self.root / 'missing', self.root)
+        (self.root / 'notes.md').touch()
+        with self.assertRaisesRegex(ValueError, 'no images'):
+            verification.shots_folder(self.root, self.root)
+        with self.assertRaisesRegex(ValueError, 'not a folder'):
+            verification.shots_folder(self.root / 'notes.md', self.root)
+        loop = self.root / 'loop'
+        loop.symlink_to(loop)
+        with self.assertRaisesRegex(ValueError, 'Screenshots folder'):
+            verification.shots_folder(loop, self.root)
+
+    def test_shots_folder_counts_images_and_rewrites_paths(self):
+        proof = self.root / 'proof'
+        after = proof / 'after'
+        after.mkdir(parents=True)
+        for name in ('one.PNG', 'two.jpg', 'three.jpeg', 'four.webp', 'five.gif', 'notes.txt'):
+            (after / name).touch()
+        (after / 'folder.png').mkdir()
+        shown, count, warnings = verification.shots_folder(proof, self.root)
+        self.assertEqual((shown, count), ('proof', 5))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('temporary', warnings[0])
+        with patch.object(Path, 'home', return_value=self.root):
+            self.assertEqual(verification.shots_folder(proof, self.root / 'other')[0], '~/proof')
+        with patch.object(Path, 'home', return_value=self.root / 'other'):
+            self.assertEqual(verification.shots_folder(proof, self.root / 'other')[0], str(proof.resolve()))
+
 
 class GitTest(unittest.TestCase):
     def setUp(self):
@@ -102,7 +141,7 @@ class GitTest(unittest.TestCase):
 
     def git(self, folder, *args):
         return subprocess.run(['git', '-C', str(folder), *args], check=True, capture_output=True, text=True,
-                              env={**os.environ, **GIT_ENV}).stdout.strip()
+                              timeout=5, env={**os.environ, **GIT_ENV, 'GIT_OPTIONAL_LOCKS': '0'}).stdout.strip()
 
     def commit(self, message):
         self.git(self.repo, 'commit', '-q', '--allow-empty', '-m', message)
@@ -147,6 +186,37 @@ class GitTest(unittest.TestCase):
                 verification.main(argv)
             self.assertEqual(caught.exception.code, 2)
         self.assertEqual(len(log.read_text().splitlines()), 1)
+
+    def test_cli_log_with_shots_records_the_folder_and_warns_on_stderr(self):
+        proof = self.repo / 'proof'
+        proof.mkdir()
+        (proof / 'after.png').touch()
+        log = self.root / 'DEPLOYED.md'
+        with patch.dict(os.environ, {'TETHER_DEPLOYED': str(log)}), \
+                patch.object(verification, 'HERE', self.repo), patch('sys.stdout'), \
+                patch('sys.stderr', new=io.StringIO()) as err:
+            verification.main(['log', '--verified', 'tests(ok)', '--shots', str(proof), 'UI deploy'])
+        self.assertIn('Screenshots folder proof is temporary', err.getvalue())
+        self.assertTrue(log.read_text().endswith('UI deploy · Shots: proof · Verified: tests(ok)\n'))
+
+    def test_cli_log_with_invalid_shots_warns_on_stderr_and_writes_the_line(self):
+        empty = self.root / 'empty'
+        empty.mkdir()
+        unsafe = self.root / 'proof · after'
+        unsafe.mkdir()
+        (unsafe / 'after.png').touch()
+        log = self.root / 'DEPLOYED.md'
+        with patch.dict(os.environ, {'TETHER_DEPLOYED': str(log)}), patch('sys.stdout'):
+            for path, reason in ((self.root / 'missing', 'Screenshots folder does not exist or is not a folder'),
+                                 (empty, 'Screenshots folder has no images'),
+                                 (unsafe, 'Give --shots a folder name')):
+                with self.subTest(path=path), patch('sys.stderr', new=io.StringIO()) as err:
+                    verification.main(['log', '--verified', 'tests(ok)', '--shots', str(path), 'UI deploy'])
+                    self.assertIn(f'Warning: --shots: {reason}', err.getvalue())
+                    self.assertIn('The deploy line gets no Shots field (observe mode, not refused).', err.getvalue())
+        lines = log.read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(line.endswith('UI deploy · Verified: tests(ok)') for line in lines))
 
 
 if __name__ == '__main__':

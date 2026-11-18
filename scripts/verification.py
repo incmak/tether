@@ -7,7 +7,7 @@ A stamp is one line:
 Each item is kind(detail). "none" is allowed, so unverified work stays visible and can be listed.
 
 Commands:
-  log --verified STAMP [--commit C] TEXT   add a DEPLOYED.md line (deploy-ui.py adds UI deploys itself)
+  log --verified STAMP [--commit C] [--shots DIR] TEXT   add a DEPLOYED.md line
   unverified [--days N]                    list deploys and commits with "Verified: none" or no stamp
   check STAMP                              exit 0 when STAMP is valid
 """
@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 ITEM = r'[a-z][a-z-]*\([^()\n]+\)'
 STAMP = re.compile(rf'none(?: \([^()\n]+\))?|{ITEM}(?: +{ITEM})*')
@@ -51,7 +52,8 @@ def status(text):
 
 def git(folder, *args):
     try:
-        result = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(['git', '-C', str(folder), *args], capture_output=True, text=True, errors='replace',
+                                timeout=30, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None
@@ -73,7 +75,58 @@ def log_path(folder=HERE):
     return root / 'DEPLOYED.md'
 
 
-def line(text, stamp, commit=None, now=None):
+def _shots_field(shots):
+    if shots is None:
+        return ''
+    if 'Verified:' in shots or ' · ' in shots or shots.splitlines() != [shots]:
+        raise ValueError('Give --shots a folder name without "Verified:", separators or line breaks.')
+    return f' · Shots: {shots}'
+
+
+def shots_folder(path, root=None):
+    """Return the display path, image count and warnings for a screenshots folder."""
+    try:
+        folder = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f'Screenshots folder could not be resolved: {path} ({error})') from None
+    if not folder.is_dir():
+        raise ValueError(f'Screenshots folder does not exist or is not a folder: {folder}')
+    extensions = {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
+    count = sum(file.is_file() and file.suffix.lower() in extensions for file in folder.rglob('*'))
+    if not count:
+        raise ValueError(f'Screenshots folder has no images: {folder}')
+    root = Path(root).resolve() if root is not None else main_checkout(HERE)
+    home = Path.home().resolve()
+    if root is not None and folder.is_relative_to(root):
+        shown = str(folder.relative_to(root))
+    elif folder.is_relative_to(home):
+        shown = str(Path('~') / folder.relative_to(home))
+    else:
+        shown = str(folder)
+    _shots_field(shown)  # Reject a folder label that cannot go in the deploy log.
+    temporary = (tempfile.gettempdir(), '/tmp', '/private/tmp', '/var/tmp')
+    warnings = []
+    if any(folder.is_relative_to(Path(parent).resolve()) for parent in temporary):
+        warnings.append(f'Screenshots folder {shown} is temporary. A restart can remove the proof.')
+    return shown, count, warnings
+
+
+def observe_shots(path, folder, warn):
+    """Return the display path and image count, or warn and omit invalid proof."""
+    if path is None:
+        return None, 0
+    try:
+        shown, count, warnings = shots_folder(path, main_checkout(folder))
+    except (OSError, ValueError) as error:
+        reason = str(error).removesuffix('.')
+        warn(f'--shots: {reason}. The deploy line gets no Shots field (observe mode, not refused).')
+        return None, 0
+    for warning in warnings:
+        warn(warning)
+    return shown, count
+
+
+def line(text, stamp, commit=None, now=None, shots=None):
     now = now or datetime.now().astimezone()
     text = re.sub(r'\s+', ' ', str(text or '')).strip()
     if not text:
@@ -81,7 +134,7 @@ def line(text, stamp, commit=None, now=None):
     if FOUND.search(text):
         raise ValueError('Give the stamp with --verified, not in the text.')
     head = now.strftime('%Y-%m-%d %H:%M ') + (now.strftime('%Z') or 'UTC')
-    return f'- {head} · ' + (f'{commit} ' if commit else '') + f'{text} · Verified: {valid(stamp)}'
+    return f'- {head} · ' + (f'{commit} ' if commit else '') + f'{text}{_shots_field(shots)} · Verified: {valid(stamp)}'
 
 
 def append(path, text):
@@ -145,6 +198,8 @@ def main(argv=None):
     log = commands.add_parser('log', help='add a DEPLOYED.md line with its stamp')
     log.add_argument('--verified', required=True, help='kind(detail) items, or "none (reason)"')
     log.add_argument('--commit', help='the deployed commit (short hash)')
+    log.add_argument('--shots', metavar='DIR',
+                     help='folder with the before and after screenshots (invalid folders give a warning)')
     log.add_argument('text')
     listing = commands.add_parser('unverified', help='list deploys and commits marked none or with no stamp')
     listing.add_argument('--days', type=int, default=7)
@@ -159,7 +214,8 @@ def main(argv=None):
             commit = args.commit
             if commit is not None and not re.fullmatch(r'[0-9a-f]{7,40}', commit):
                 raise ValueError('Give --commit as a hex commit hash.')
-            text = line(args.text, args.verified, commit and commit[:7])
+            shots, _ = observe_shots(args.shots, HERE, lambda text: print(f'Warning: {text}', file=sys.stderr))
+            text = line(args.text, args.verified, commit and commit[:7], shots=shots)
             path = log_path(HERE)
             append(path, text)
             print(f'Added to {path}:\n{text}')

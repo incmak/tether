@@ -1,6 +1,8 @@
 """Regression checks for preserving open-tab assets during an internal UI deploy."""
+from functools import partial
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -79,7 +81,8 @@ class GuardCase(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'user.email=t@example.invalid', '-c', 'user.name=t',
-                               *args], check=True, capture_output=True, text=True).stdout.strip()
+                               *args], check=True, capture_output=True, text=True, timeout=5,
+                              env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}).stdout.strip()
 
     def commit(self, message):
         self.git('commit', '-q', '--allow-empty', '-m', message)
@@ -352,6 +355,140 @@ class VerifiedStampTest(GuardCase):
             deploy_ui.main()
         self.assertEqual(caught.exception.code, 1)
         self.assert_untouched()
+
+
+class ScreenshotProofTest(GuardCase):
+    NO_LIVE_WARNING = ('This deploy names no screenshots folder and there is no live record to compare with. '
+                       'Add --shots DIR (observe mode, not refused).')
+
+    def setUp(self):
+        super().setUp()
+        self.set_live(self.live)
+        files = ('ui/src/App.tsx', 'ui/public/new logo.webp', 'ui/tests/cards.ts', 'docs/guide.md', 'server/app.js')
+        for name in files:
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('changed\n')
+        self.git('add', '.')
+        self.stamp(self.commit('UI changes\n\nVerified: tests(ui ok)'))
+
+    def cli(self, *options):
+        argv = ['deploy-ui.py', '--verified', 'tests(ui ok)', *options, str(self.build), str(self.target)]
+        deploy = partial(deploy_ui.deploy, repo=self.repo, log=self.log, warn=self.warnings.append)
+        with patch.object(deploy_ui.sys, 'argv', argv), patch.object(deploy_ui, 'deploy', deploy), patch('sys.stdout'):
+            deploy_ui.main()
+
+    def test_cli_records_screenshot_folder_and_count_in_the_record_and_log(self):
+        proof = self.repo / 'proof'
+        proof.mkdir()
+        (proof / 'before.png').touch()
+        (proof / 'after.jpg').touch()
+        self.cli('--shots', str(proof))
+        self.assertEqual((self.record()['shots'], self.record()['shots_count']), ('proof', 2))
+        self.assertIn('UI deploy: UI changes · Shots: proof · Verified: tests(ui ok)\n', self.log.read_text())
+        self.assertEqual(self.warnings, ['Screenshots folder proof is temporary. A restart can remove the proof.'])
+
+    def test_ui_changes_without_shots_warn_but_install(self):
+        self.assertEqual(self.deploy(), 2)
+        # App.tsx, the logo and the legacy server/app.js; the test file and the guide are not UI changes.
+        self.assertEqual(self.warnings, ['This deploy changes 3 UI file(s) and names no screenshots folder. '
+                                         'Add --shots DIR (observe mode, not refused).'])
+        self.assertNotIn('shots', self.record())
+        self.assertNotIn('Shots:', self.log.read_text())
+
+    def test_build_config_change_alone_warns_like_the_review_request(self):
+        # Review round 2, finding 4: the review asks for screenshots for ui/vite.config.ts; the deploy was silent.
+        # Round 3, finding 2: the lock file alone changes what `npm ci` builds.
+        for name in ('ui/vite.config.ts', 'ui/package.json', 'ui/package-lock.json', 'server/ui_manifest.json'):
+            with self.subTest(name=name):
+                self.set_live(self.git('rev-parse', 'HEAD'))
+                (self.repo / name).write_text(f'changed {name}\n')
+                self.git('add', '.')
+                self.stamp(self.commit(f'Change {name}\n\nVerified: tests(ui ok)'))
+                self.warnings.clear()
+                self.assertEqual(self.deploy(dry_run=True), 0)
+                self.assertEqual(self.warnings, ['This deploy changes 1 UI file(s) and names no screenshots folder. '
+                                                 'Add --shots DIR (observe mode, not refused).'])
+
+    def test_unreadable_ui_diff_has_no_shots_warning(self):
+        self.assertEqual(self.deploy(dry_run=True), 0)
+        self.assertTrue(any('names no screenshots folder' in warning for warning in self.warnings))
+        self.warnings.clear()
+        git = deploy_ui.verification.git
+
+        def unreadable_diff(repo, *args):
+            return None if args[0] == 'diff' else git(repo, *args)
+
+        with patch.object(deploy_ui.verification, 'git', side_effect=unreadable_diff):
+            self.assertEqual(self.deploy(dry_run=True), 0)
+        self.assertFalse(self.warnings)
+
+    def test_first_deploy_without_screenshots_warns(self):
+        (self.target / '.live-commit').unlink()
+        self.assertEqual(self.deploy(), 2)
+        self.assertIn(self.NO_LIVE_WARNING, self.warnings)
+
+    def test_first_deploy_with_missing_screenshots_folder_warns_and_installs(self):
+        (self.target / '.live-commit').unlink()
+        missing = self.repo / 'missing'
+        self.cli('--shots', str(missing))
+        self.assertIn(f'--shots: Screenshots folder does not exist or is not a folder: {missing.resolve()}. '
+                      'The deploy line gets no Shots field (observe mode, not refused).', self.warnings)
+        self.assertIn(self.NO_LIVE_WARNING, self.warnings)
+        self.assertEqual((self.target / 'index.html').read_text(), (self.build / 'index.html').read_text())
+        self.assertNotIn('shots', self.record())
+        self.assertIn('UI deploy: UI changes · Verified: tests(ui ok)\n', self.log.read_text())
+
+    def test_deploy_with_empty_screenshots_folder_warns_and_installs(self):
+        empty = self.repo / 'empty'
+        empty.mkdir()
+        self.assertEqual(self.deploy(shots=empty), 2)
+        self.assertTrue(self.warnings[0].startswith('--shots: Screenshots folder has no images:'))
+        self.assertIn('names no screenshots folder', self.warnings[1])
+        self.assertNotIn('shots', self.record())
+        self.assertNotIn('Shots:', self.log.read_text())
+
+    def test_screenshots_folder_cannot_bypass_guard(self):
+        self.stamp(self.base)
+        proof = self.repo / 'proof'
+        proof.mkdir()
+        (proof / 'after.png').touch()
+        with patch.object(deploy_ui.verification, 'shots_folder', wraps=deploy_ui.verification.shots_folder) as scan:
+            with self.assertRaisesRegex(deploy_ui.Refused, 'drops live commits'):
+                self.deploy(shots=proof)
+            scan.assert_not_called()
+        self.assert_untouched()
+        self.assertEqual(self.record()['commit'], self.live)
+        self.assertFalse(self.log.exists())
+        self.assertFalse(self.warnings)
+
+    def test_dry_run_reports_an_invalid_screenshots_folder_and_the_missing_proof(self):
+        # Review round 2, finding 4: --dry-run with a folder that does not exist gave no warning at all.
+        self.assertEqual(self.deploy(dry_run=True, shots=self.repo / 'missing'), 0)
+        self.assertEqual(len(self.warnings), 2)
+        self.assertTrue(self.warnings[0].startswith('--shots: Screenshots folder does not exist or is not a folder:'))
+        self.assertTrue(self.warnings[1].startswith('This deploy changes 3 UI file(s) and names no screenshots folder.'))
+        self.assert_untouched()
+        self.assertFalse(self.log.exists())
+
+    def test_dry_run_with_valid_screenshots_gives_no_proof_warning(self):
+        proof = self.repo / 'proof'
+        proof.mkdir()
+        (proof / 'after.png').touch()
+        self.assertEqual(self.deploy(dry_run=True, shots=proof), 0)
+        self.assertFalse(any('names no screenshots folder' in warning or warning.startswith('--shots:')
+                             for warning in self.warnings))
+        self.assert_untouched()
+
+    def test_force_bypasses_guard_even_when_screenshots_path_is_a_file(self):
+        self.stamp(self.base)
+        proof = self.repo / 'proof.png'
+        proof.touch()
+        self.assertEqual(self.deploy(force=True, shots=proof), 2)
+        self.assertTrue(self.warnings[0].startswith('--force: installing anyway. The build drops live commits.'))
+        self.assertTrue(self.warnings[1].startswith('--shots: Screenshots folder does not exist or is not a folder:'))
+        self.assertEqual(self.record()['commit'], self.base)
+        self.assertNotIn('Shots:', self.log.read_text())
 
 
 if __name__ == '__main__':

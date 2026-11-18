@@ -239,8 +239,29 @@ def review_folder(entry):
     return agent_folder(entry)
 
 
+REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
+REVIEW_SCOPE_AGE = 60
+
+
 def review_scope_of(entry):
-    return review_scope.scope(review_folder(entry))
+    """The review scope of a worker. A request that cannot be delivered (a draft in the reviewer's composer) is tried
+    again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
+    (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
+    seconds."""
+    folder = review_folder(entry)
+    mark = review_scope.fingerprint(folder)
+    key, now = (folder, mark), time.monotonic()
+    cached = REVIEW_SCOPES.get(entry.get('id'))
+    if mark is not None and cached is not None and cached[0] == key and now - cached[1] < REVIEW_SCOPE_AGE:
+        return dict(cached[2])
+    found = review_scope.scope(folder)
+    for pane in [pane for pane, item in REVIEW_SCOPES.items() if now - item[1] >= REVIEW_SCOPE_AGE]:
+        del REVIEW_SCOPES[pane]
+    if mark is not None and found is not None:
+        REVIEW_SCOPES[entry.get('id')] = (key, now, dict(found))
+    else:
+        REVIEW_SCOPES.pop(entry.get('id'), None)
+    return found
 
 
 def review_commit(entry):

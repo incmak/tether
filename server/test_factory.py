@@ -42,6 +42,11 @@ class DeployedTests(unittest.TestCase):
         self.assertIsNone(factory.parse_deployed_line('  - Done: 30af7fe deploy guard'))
         self.assertIsNone(factory.parse_deployed_line('- 2026-13-40 bad date'))
 
+    def test_reads_the_deploy_date_and_commit_with_shots(self):
+        item = factory.parse_deployed_line('- 2026-11-18 05:30 UTC · abc1234 UI deploy · Shots: proof · Verified: none')
+        self.assertEqual(item['at'], int(datetime(2026, 11, 18, 5, 30, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(item['commit'], 'abc1234')
+
     def test_keeps_only_recent_lines_newest_first_and_a_missing_file_gives_none(self):
         with tempfile.TemporaryDirectory() as folder:
             log = Path(folder) / 'DEPLOYED.md'

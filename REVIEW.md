@@ -31,6 +31,18 @@ Do not change files in the worker's folder. Do not commit, push or deploy.
 
 Style preferences and optional improvements do not block. List them after the verdict as notes.
 
+## Reliability checklist
+
+The request lists the checklist rows that the diff hits. Confirm each check in your reply.
+A row that you cannot confirm blocks approval.
+If the request says `not checked`, run `python3 scripts/checklist.py --repo WORKER_FOLDER` yourself.
+
+## Screenshots for UI changes
+
+For each changed screen, ask for before and after screenshots at 320 px and 1280 px.
+The worker's reply must name the folder that holds the screenshots.
+Missing screenshots block approval. Open the screenshots and check them against the worker's claims.
+
 ## Your reply
 
 Tether reads the start of your reply.

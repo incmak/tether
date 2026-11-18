@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 
 import paths
 from terminal_input import DraftError
@@ -302,6 +303,38 @@ def _call(callback, entry):
         return callback(entry)
     except Exception:
         return None
+
+
+def _request_text(value):
+    # A field cannot start a new line or mimic the delimiter that the UI uses to find the worker's reply.
+    value = value.replace('\r\n', '\n').removesuffix('\n')
+    return value.replace('\n', ' ').replace('Its last reply:', r'Its last reply\:')
+
+
+def _checklist_binding(result, folder):
+    if not isinstance(result, dict):
+        return ''
+    if result.get('status') == 'unchecked':
+        reason = result.get('reason')
+        if isinstance(reason, str) and reason.strip():
+            return f'Reliability checklist: not checked ({_request_text(reason)[:200]}). '
+        return ''
+    rows = result.get('rows')
+    if result.get('status') != 'hit' or not isinstance(rows, list) or not rows:
+        return ''
+    fields = ('id', 'title', 'check', 'incident')
+    if not all(isinstance(row, dict) and all(isinstance(row.get(key), str) and row[key].strip() for key in fields)
+               for row in rows):
+        return ''
+    lines = [f'\nReliability checklist: this diff hits {len(rows)} row(s) of '
+             'origin/main:docs/reliability-checklist.md. Confirm each check in your reply:']
+    for row in rows[:8]:
+        row_id, title, check, incident = (row[key] for key in fields)
+        line = _request_text(f'- {row_id} {title}: {check} (Incident: {incident})')
+        lines.append(line if len(line) <= 400 else f'{line[:399]}…')
+    if len(rows) > 8:
+        lines.append(f'- and {len(rows) - 8} more: run python3 scripts/checklist.py --repo {folder}')
+    return '\n'.join(lines) + '\n'
 
 
 def _can_send(entry, state, clear):
@@ -663,7 +696,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
                 else 'Your approval was not forwarded: it did not name the full commit hash right after APPROVED. ')
             if target is not None:
-                folder = shlex.quote(str(target.get('folder') or ''))
+                folder = shlex.quote(_request_text(str(target.get('folder') or '')))
                 binding = (
                     f"Commit under review: {target['commit']} in {folder}"
                     + (' plus uncommitted changes' if target.get('dirty') else
@@ -672,11 +705,28 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                        if target.get('rules') else '')
                     + f"An approval counts only for this commit: start it with `APPROVED {target['commit']}` "
                     '(the full hash). '
-                    + binding)
+                    + binding
+                    + _checklist_binding(target.get('checklist'), folder))
                 confirm = link.get('confirm_commit')
                 if isinstance(confirm, str):
                     binding += (f'You approved this work as commit {confirm[:12]} plus uncommitted changes. The tab '
                                 'has committed since: check that this commit holds that work and nothing else. ')
+                ui = target.get('ui')
+                if ui is None and 'ui' in target:
+                    binding += ('Tether could not list the changed UI files. Check the diff for UI changes yourself; '
+                                'a UI change needs before and after screenshots at 320 px and 1280 px. ')
+                elif isinstance(ui, list) and ui and all(isinstance(path, str) for path in ui):
+                    separator = '\n' if binding.endswith('\n') else ' '
+                    binding += (
+                        f'This diff changes the UI ({len(ui)} file(s), for example {_request_text(ui[0])}). '
+                        'Do not approve without before and after screenshots at 320 px and 1280 px for each changed '
+                        "screen: the worker's reply must name the folder that holds them. Open the screenshots and "
+                        f'check them against the claims.{separator}')
+            # File names and checklist rows come from the repository. No control, format (direction marks, zero
+            # width), surrogate, private or unassigned character and no line separator may reach the terminal.
+            binding = ''.join(
+                '?' if c != '\n' and (unicodedata.category(c)[0] == 'C' or unicodedata.category(c) in ('Zl', 'Zp'))
+                else c for c in binding)
             text = (f"[Tether review] The {agent} tab “{link['name']}” ({link['worker']}) finished a turn. "
                     f'{INTRO} Review id: {request_id}. {binding}'
                     f"Its last reply:\n\n{last_reply(worker)[:1500]}\n\nTranscript: {worker.get('transcript', '')}")

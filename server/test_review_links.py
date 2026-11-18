@@ -11,7 +11,9 @@ import unittest
 from unittest.mock import ANY, Mock, patch
 
 import review_links
+import review_scope
 import server
+import terminal_input
 from own_time import own_time
 from terminal_input import DraftError
 
@@ -20,6 +22,10 @@ THREAD = '0f8fad5b-d9cb-469f-a165-70867728950e'
 WORKER_THREAD = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
 PARENT_THREAD = 'b9f98ea7-fffc-42fe-b94e-8d231cf3b019'
 FINDINGS = 'Still broken: the lock is not released.'
+# The UI card (ui/src/Messages.tsx REVIEW_REQUEST) reads the request with this regex.
+REVIEW_REQUEST = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
+                  r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
+                  r'( This is the last round: your reply stays here\.)?\s*$')
 
 
 class ReviewLinksTests(unittest.TestCase):
@@ -2265,10 +2271,11 @@ class ReviewLinksTests(unittest.TestCase):
     HASH = '1f0e' * 10
     NEXT = '2a9d' * 10
 
-    def bind(self, commit=None, *, dirty=False, rules=True):
+    def bind(self, commit=None, *, dirty=False, rules=True, **scope_fields):
         """The worker's folder is at `commit`. The request and the approval check read it from here."""
         self.head = commit or self.HASH
-        self.scope = lambda entry: {'commit': self.head, 'dirty': dirty, 'folder': '/work/my tree', 'rules': rules}
+        self.scope = lambda entry: {'commit': self.head, 'dirty': dirty, 'folder': '/work/my tree', 'rules': rules,
+                                    **scope_fields}
         self.commit = lambda entry: self.head
         # As in the server: the reviewer's reply is read at the transcript anchor of the request.
         self.anchored_reply = None
@@ -2285,12 +2292,94 @@ class ReviewLinksTests(unittest.TestCase):
                       'Its last reply:\n\nI fixed it.', text)
         self.assertEqual(self.links()[0]['review_commit'], self.HASH)
         self.assertTrue(self.links()[0]['review_clean'])
-        # The UI card (ui/src/Messages.tsx REVIEW_REQUEST) still reads the request.
-        pattern = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
-                   r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
-                   r'( This is the last round: your reply stays here\.)?\s*$')
-        self.assertEqual(re.match(pattern, text).groups()[:5],
+        self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
                          ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+
+    def test_request_lists_checklist_rows_and_still_matches_the_review_card(self):
+        self.bind(checklist={'status': 'hit', 'rows': [
+            {'id': 'R3', 'title': 'Launch tabs', 'check': 'Start a tab.\r\nCheck the prompt.', 'incident': 'B188'},
+            {'id': 'R4', 'title': 'Check Its last reply', 'check': 'Keep it in the card.', 'incident': 'B205'},
+        ]}, ui=['ui/index.html'])
+        self.request_review()
+        text = self.send.call_args.args[1]
+        self.assertIn('Reliability checklist: this diff hits 2 row(s) of origin/main:docs/reliability-checklist.md. '
+                      'Confirm each check in your reply:\n'
+                      '- R3 Launch tabs: Start a tab. Check the prompt. (Incident: B188)\n', text)
+        self.assertIn('- R4 Check Its last reply\\: Keep it in the card. (Incident: B205)\n'
+                      'This diff changes the UI (1 file(s), for example ui/index.html). ', text)
+        self.assertIn('check them against the claims.\nIts last reply:', text)
+        self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+
+    def test_request_explains_unknown_ui_paths_and_omits_empty_or_missing_lists(self):
+        sentence = ('Tether could not list the changed UI files. Check the diff for UI changes yourself; '
+                    'a UI change needs before and after screenshots at 320 px and 1280 px. ')
+        for fields in ({'ui': None}, {'ui': []}, {}):
+            with self.subTest(fields=fields):
+                self.add()
+                self.bind(**fields)
+                self.request_review()
+                text = self.send.call_args.args[1]
+                expected = sentence if fields == {'ui': None} else ''
+                self.assertIn(f'`APPROVED {self.HASH}` (the full hash). {expected}Its last reply:', text)
+
+    def test_request_replaces_binding_controls_and_passes_the_terminal_guard(self):
+        # The second and third sets: review round 2, finding 5 (direction marks and other format characters).
+        for characters in ('\x1b\x00\x7f\u202e', '\t\x85\u2028\u2029\u2066\u2069', '\u200f\u200e\u061c',
+                           '\u200b\ufeff\u2060\ue000'):
+            with self.subTest(characters=repr(characters)):
+                self.add()
+                self.bind(folder=f'/work/tree{characters}', ui=[f'ui/src/App{characters}.tsx'],
+                          checklist={'status': 'hit', 'rows': [
+                              dict(id='R1', title=f'Safe{characters} title', check='Check', incident='B1'),
+                          ]})
+                self.request_review()
+                text = self.send.call_args.args[1]
+                replaced = '?' * len(characters)
+                self.assertIn(f"'/work/tree{replaced}'", text)
+                self.assertIn(f'Safe{replaced} title', text)
+                self.assertIn(f'ui/src/App{replaced}.tsx', text)
+                self.assertTrue(all(character not in text for character in characters))
+                self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
+                                 ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                run = Mock(side_effect=RuntimeError('Reached mocked tmux'))
+                with self.assertRaisesRegex(RuntimeError, 'Reached mocked tmux'):
+                    terminal_input.submit(self.reviewer, text, run=run)
+
+    def test_request_caps_checklist_rows_and_line_length(self):
+        rows = [dict(id=f'R{i}', title='Title', check='x' * 400, incident='B10') for i in range(1, 11)]
+        self.bind(checklist={'status': 'hit', 'rows': rows})
+        self.request_review()
+        text = self.send.call_args.args[1]
+        self.assertIn('hits 10 row(s)', text)
+        lines = [line for line in text.splitlines() if line.startswith('- R')]
+        self.assertEqual([line.split()[1] for line in lines], [f'R{i}' for i in range(1, 9)])
+        self.assertTrue(all(len(line) == 400 and line.endswith('…') for line in lines))
+        self.assertIn("- and 2 more: run python3 scripts/checklist.py --repo '/work/my tree'\nIts last reply:", text)
+
+    def test_request_explains_an_unchecked_checklist_before_it_asks_for_screenshots(self):
+        reason = 'x' * 250
+        self.bind(checklist={'status': 'unchecked', 'reason': 'timed out\n' + reason},
+                  ui=['server/app.js', 'ui/src/Composer.tsx'])
+        self.request_review()
+        self.assertIn(f'Reliability checklist: not checked (timed out {reason[:190]}). '
+                      'This diff changes the UI (2 file(s), for example server/app.js). '
+                      'Do not approve without before and after screenshots at 320 px and 1280 px for each changed '
+                      "screen: the worker's reply must name the folder that holds them. Open the screenshots and "
+                      'check them against the claims. Its last reply:', self.send.call_args.args[1])
+
+    def test_request_omits_clear_absent_and_malformed_checklist_results(self):
+        results = ({'status': 'clear'}, {'status': 'absent'}, 'hit', {'status': []},
+                   {'status': 'hit', 'rows': [{}]}, {'status': 'unchecked', 'reason': 42},
+                   {'status': 'hit', 'rows': [dict(id='R1', title=' ', check='Check', incident='B1')]})
+        for result in results:
+            with self.subTest(result=result):
+                self.add()
+                self.bind(checklist=result, ui=[])
+                self.send.reset_mock()
+                self.request_review()
+                self.send.assert_called_once()
+                self.assertIn(f'`APPROVED {self.HASH}` (the full hash). Its last reply:', self.send.call_args.args[1])
 
     def test_request_says_uncommitted_changes_and_omits_rules_the_repository_does_not_have(self):
         self.bind(dirty=True, rules=False)
@@ -3173,14 +3262,13 @@ class ServerWatcherTests(unittest.TestCase):
             self.assertIsNone(server.review_work_mark({'cwd': '/project'}))
 
     def test_scope_reads_head_dirty_state_and_rules_in_a_real_repository(self):
-        import review_scope
         with tempfile.TemporaryDirectory() as root:
-            origin, folder = Path(root) / 'origin.git', Path(root) / 'work'
+            folder = Path(root) / 'work'
             def git(*args, cwd=folder):
+                env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
                 return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
                                        '-c', 'commit.gpgsign=false', *args], cwd=cwd, capture_output=True, check=True,
-                                      text=True).stdout.strip()
-            git('init', '--bare', '-b', 'main', str(origin), cwd=root)
+                                      text=True, timeout=5, env=env).stdout.strip()
             git('init', '-b', 'main', str(folder), cwd=root)
             self.assertIsNone(review_scope.scope(folder))  # no commit yet
             (folder / 'work.txt').write_text('one\n')
@@ -3188,20 +3276,33 @@ class ServerWatcherTests(unittest.TestCase):
             git('commit', '-m', 'One')
             first = git('rev-parse', 'HEAD')
             self.assertEqual(review_scope.scope(folder),
-                             {'commit': first, 'dirty': False, 'folder': str(folder), 'rules': False})
+                             {'commit': first, 'dirty': False, 'folder': str(folder), 'rules': False, 'ui': [],
+                              'checklist': {'status': 'absent', 'rows': [], 'paths': [],
+                                            'reason': 'origin/main is not a readable commit'}})
             (folder / 'REVIEW.md').write_text('rules\n')
             self.assertTrue(review_scope.scope(folder)['dirty'])  # an untracked file
             git('add', '.')
             git('commit', '-m', 'Rules')
             self.assertFalse(review_scope.scope(folder)['rules'])  # on the branch only: main does not have it yet
-            git('remote', 'add', 'origin', str(origin))
-            git('push', '-q', 'origin', 'main')
             second = git('rev-parse', 'HEAD')
+            git('update-ref', 'refs/remotes/origin/main', second)
             self.assertEqual(review_scope.scope(folder),
-                             {'commit': second, 'dirty': False, 'folder': str(folder), 'rules': True})
+                             {'commit': second, 'dirty': False, 'folder': str(folder), 'rules': True, 'ui': [],
+                              'checklist': {'status': 'absent', 'rows': [], 'paths': [], 'base': second,
+                                            'reason': 'origin/main has no docs/reliability-checklist.md'}})
             self.assertEqual(review_scope.head(folder), second)
             (folder / 'work.txt').write_text('two\n')
-            self.assertEqual(review_scope.scope(folder)['dirty'], True)
+            changed_ui = ['server/app.js', 'server/index.html', 'ui/index.html', 'ui/package.json',
+                          'ui/public/logo.png', 'ui/src/App.tsx', 'ui/vite.config.ts']
+            for name in changed_ui + ['ui/test_cards.js', 'ui/tests/cards.js', 'docs/guide.md', 'server/app.json']:
+                file = folder / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('new\n')
+            target = review_scope.scope(folder)
+            self.assertTrue(target['dirty'])
+            self.assertEqual(target['checklist']['status'], 'absent')
+            self.assertIn('ui/tests/cards.js', target['checklist']['paths'])
+            self.assertEqual(target['ui'], changed_ui)
             self.assertEqual(server.review_commit({'cwd': str(folder)}), second)
             self.assertEqual(server.review_scope_of({'cwd': str(folder)})['commit'], second)
         with tempfile.TemporaryDirectory() as folder:
@@ -3211,16 +3312,29 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertIsNone(server.review_scope_of({}))
 
     def test_scope_uses_bounded_read_only_git_commands_and_handles_errors(self):
-        import review_scope
         done = subprocess.CompletedProcess([], 0, (('1f0e' * 10) + '\n').encode())
         status = subprocess.CompletedProcess([], 0, ('# branch.oid ' + '1f0e' * 10 + '\n# branch.head main\n').encode())
-        with patch.object(review_scope.subprocess, 'run', return_value=status) as run:
+        missing = subprocess.CompletedProcess([], 1, b'')
+        root = subprocess.CompletedProcess([], 0, b'/project\n')
+        none = subprocess.CompletedProcess([], 0, b'')
+        results = [status, done, missing, root, missing, none, none, none, none]
+        with patch.object(review_scope.subprocess, 'run', side_effect=results) as run:
             self.assertEqual(review_scope.scope('/project'),
-                             {'commit': '1f0e' * 10, 'dirty': False, 'folder': '/project', 'rules': True})
+                             {'commit': '1f0e' * 10, 'dirty': False, 'folder': '/project', 'rules': True, 'ui': [],
+                              'checklist': {'status': 'absent', 'rows': [], 'paths': [],
+                                            'reason': 'origin/main is not a readable commit'}})
         # Review round 6, finding 2: one command gives the commit and the status, so they are from the same moment.
         self.assertEqual([call.args[0] for call in run.call_args_list],
             [['git', 'status', '--porcelain=v2', '--branch', '--untracked-files=normal'],
-             ['git', 'cat-file', '-e', 'origin/main:REVIEW.md']])
+             ['git', 'cat-file', '-e', 'origin/main:REVIEW.md'],
+             ['git', 'rev-parse', '--verify', '--quiet', 'origin/main'],
+             ['git', 'rev-parse', '--show-toplevel'],
+             ['git', 'rev-parse', '--verify', '--quiet', 'origin/main'],
+             ['git', 'diff', '--name-only', '-z', '--no-renames', '--no-relative', 'HEAD', '--', *review_scope.UI_SPECS],
+             ['git', 'diff', '--cached', '--name-only', '-z', '--no-renames', '--no-relative', 'HEAD', '--',
+              *review_scope.UI_SPECS],
+             ['git', 'ls-files', '--others', '--exclude-standard', '-z', '--', *review_scope.UI_SPECS],
+             ['git', 'ls-files', '-z', '--', *review_scope.UI_SPECS]])
         changed = subprocess.CompletedProcess([], 0, status.stdout + b'1 .M N... 100644 100644 100644 a b work.txt\n')
         with patch.object(review_scope.subprocess, 'run', return_value=changed):
             self.assertIs(review_scope.scope('/project')['dirty'], True)
@@ -3296,6 +3410,258 @@ class ServerWatcherTests(unittest.TestCase):
             self.assertFalse(review_scope.scope(folder)['dirty'])
             (Path(folder) / 'untracked.txt').write_text('new\n')
             self.assertTrue(review_scope.scope(folder)['dirty'])
+
+    def test_checklist_reads_base_rows_in_a_real_repository_and_bounds_the_checker(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = Path(root)
+
+            def git(*args):
+                subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=Test', '-c', 'commit.gpgsign=false',
+                                *args], cwd=root, check=True, capture_output=True, timeout=5,
+                               env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+
+            git('init', '-q')
+            rules = folder / 'docs' / 'reliability-checklist.md'
+            rules.parent.mkdir()
+            rules.write_text('## R1: Work file\n- Paths: `^work\\.txt$`\n- Check: Open the file.\n- Incident: B1\n')
+            git('add', '.')
+            git('commit', '-qm', 'Base')
+            with patch.object(review_scope.subprocess, 'run', wraps=subprocess.run) as run:
+                self.assertEqual(review_scope.checklist(folder)['status'], 'absent')
+                run.assert_called_once()
+            git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+            (folder / 'other.txt').write_text('different file\n')
+            clear = review_scope.checklist(folder)
+            self.assertEqual((clear['status'], clear['rows'], clear['paths']), ('clear', [], ['other.txt']))
+            (folder / 'work.txt').write_text('changed work\n')
+            rules.write_text('# Branch removes the rules\n')
+            hit = review_scope.checklist(folder)
+            self.assertEqual(hit['status'], 'hit')
+            self.assertEqual([(row['id'], row['files']) for row in hit['rows']], [('R1', ['work.txt'])])
+
+            real_run = subprocess.run
+
+            def time_out_checker(command, **options):
+                if command[0] == 'git':
+                    return real_run(command, **options)
+                self.assertEqual(command, [review_scope.sys.executable, str(review_scope.CHECKER),
+                                           '--json', '--repo', root])
+                self.assertEqual(options['timeout'], 15)
+                self.assertEqual(options['env']['GIT_OPTIONAL_LOCKS'], '0')
+                self.assertTrue(options['capture_output'])
+                raise subprocess.TimeoutExpired(command, 15)
+
+            with patch.object(review_scope.subprocess, 'run', side_effect=time_out_checker):
+                self.assertEqual(review_scope.checklist(folder),
+                                 {'status': 'unchecked', 'rows': [], 'paths': [], 'reason': 'checker timed out'})
+
+    def test_checklist_marks_bad_subprocess_results_unchecked(self):
+        results = (subprocess.CompletedProcess([], 0, b''), subprocess.CompletedProcess([], 1, b'[]'),
+                   subprocess.CompletedProcess([], 2, b'{"status":"unknown"}'),
+                   subprocess.CompletedProcess([], 3, b'{"status":"clear"}'), OSError('unavailable'))
+        base = subprocess.CompletedProcess([], 0, b'1f0e' * 10 + b'\n')
+        with patch.object(review_scope, 'git_result', return_value=base):
+            for result in results:
+                with self.subTest(result=result), patch.object(review_scope.subprocess, 'run', side_effect=[result]):
+                    actual = review_scope.checklist('/project')
+                    self.assertEqual((actual['status'], actual['rows'], actual['paths']), ('unchecked', [], []))
+                    self.assertTrue(actual['reason'])
+
+    def test_failed_base_ref_lookup_is_unchecked_and_ui_paths_are_unknown(self):
+        failures = (subprocess.TimeoutExpired('git', 5), subprocess.CompletedProcess([], 128, b''))
+        root = subprocess.CompletedProcess([], 0, b'/project\n')
+        for failure in failures:
+            with self.subTest(failure=failure):
+                with patch.object(review_scope.subprocess, 'run', side_effect=[failure]):
+                    result = review_scope.checklist('/project')
+                self.assertEqual(result['status'], 'unchecked')
+                self.assertIn('origin/main', result['reason'])
+                with patch.object(review_scope.subprocess, 'run', side_effect=[root, failure]):
+                    self.assertIsNone(review_scope.ui_paths('/project'))
+
+    def test_ui_paths_are_unknown_when_either_file_listing_fails(self):
+        root = subprocess.CompletedProcess([], 0, b'/project\n')
+        base = subprocess.CompletedProcess([], 0, b'1f0e' * 10 + b'\n')
+        diff = subprocess.CompletedProcess([], 0, b'ui/index.html\x00')
+        fail = subprocess.CompletedProcess([], 128, b'')
+        for results in ([root, base, base, fail], [root, base, base, diff, subprocess.TimeoutExpired('git', 5)]):
+            with self.subTest(results=results):
+                with patch.object(review_scope.subprocess, 'run', side_effect=results):
+                    self.assertIsNone(review_scope.ui_paths('/project'))
+
+    def test_scope_is_computed_once_per_work_state_while_a_request_is_retried(self):
+        # Each failed delivery repeats the request step, and the scope with it. The checklist subprocess and the
+        # UI listing must not run on each monitor tick.
+        entry = {'id': '%13', 'cwd': '/project'}
+        marks = ['m1']
+        found = {'commit': 'c' * 40, 'dirty': False, 'folder': '/project', 'rules': False,
+                 'checklist': {'status': 'clear', 'rows': [], 'paths': []}, 'ui': []}
+        with patch.object(server, 'REVIEW_SCOPES', {}), \
+                patch.object(server, 'agent_folder', return_value='/project'), \
+                patch.object(server.review_scope, 'fingerprint', side_effect=lambda folder: marks[0]) as mark, \
+                patch.object(server.review_scope, 'scope', side_effect=lambda folder: dict(found)) as scope, \
+                patch.object(server.time, 'monotonic', return_value=1000.0) as clock:
+            for _ in range(50):
+                self.assertEqual(server.review_scope_of(entry), found)
+            self.assertEqual(scope.call_count, 1)
+            mark.assert_called_with('/project')
+            server.review_scope_of(entry)['commit'] = 'changed by the caller'
+            self.assertEqual(server.review_scope_of(entry)['commit'], 'c' * 40)
+            marks[0] = 'm2'  # a commit or an edit
+            server.review_scope_of(entry)
+            self.assertEqual(scope.call_count, 2)
+            clock.return_value += server.REVIEW_SCOPE_AGE  # origin/main may have moved
+            server.review_scope_of(entry)
+            self.assertEqual(scope.call_count, 3)
+            marks[0] = None  # git cannot read the work: nothing is reused
+            server.review_scope_of(entry)
+            server.review_scope_of(entry)
+            self.assertEqual(scope.call_count, 5)
+            self.assertNotIn('%13', server.REVIEW_SCOPES)
+            marks[0] = 'm3'
+            scope.side_effect = lambda folder: None  # no readable commit: not cached
+            self.assertIsNone(server.review_scope_of(entry))
+            self.assertIsNone(server.review_scope_of(entry))
+            self.assertEqual(scope.call_count, 7)
+
+    def make_repository(self, root, *, origin=True, files=(('server/app.py', 'x = 1\n'),)):
+        folder = Path(root) / 'work'
+        def git(*args):
+            return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                                   '-c', 'commit.gpgsign=false', *args], cwd=folder if folder.exists() else root,
+                                  capture_output=True, check=True, text=True).stdout.strip()
+        git('init', '-q', '-b', 'main', str(folder))
+        for name, text in files:
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text)
+        git('add', '-A')
+        git('commit', '-q', '-m', 'Start')
+        if origin:
+            git('init', '-q', '--bare', '-b', 'main', str(Path(root) / 'origin.git'))
+            git('remote', 'add', 'origin', str(Path(root) / 'origin.git'))
+            git('push', '-q', 'origin', 'main')
+        return folder, git
+
+    def test_fingerprint_changes_with_everything_a_scope_reads(self):
+        # Review round 2, finding 1: the cache key missed an edit of an untracked file and a new file in an
+        # untracked folder, so a retried request went out with an old checklist result and UI list.
+        with tempfile.TemporaryDirectory() as root:
+            folder, git = self.make_repository(root)
+            seen = [review_scope.fingerprint(folder)]
+            self.assertIsInstance(seen[0], str)
+            self.assertEqual(review_scope.fingerprint(folder), seen[0])  # nothing changed
+            self.assertEqual(review_scope.fingerprint(folder / 'server'), seen[0])  # a subfolder is the same work
+            def changed(step):
+                found = review_scope.fingerprint(folder)
+                self.assertNotIn(found, seen, step)
+                seen.append(found)
+            (folder / 'tools').mkdir()
+            (folder / 'tools/stop.sh').write_text('echo stop\n')
+            changed('new untracked file')
+            (folder / 'tools/stop.sh').write_text('tmux kill-server\n')
+            changed('untracked file edited')
+            # Review round 3, finding 1: same size, modification time put back (cp -p, touch -r).
+            before = os.stat(folder / 'tools/stop.sh')
+            time.sleep(0.02)
+            (folder / 'tools/stop.sh').write_text('tmux kill-SERVER\n')
+            os.utime(folder / 'tools/stop.sh', ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertEqual(os.stat(folder / 'tools/stop.sh').st_mtime_ns, before.st_mtime_ns)
+            changed('same size and modification time')
+            (folder / 'ui/src').mkdir(parents=True)
+            (folder / 'ui/src/a.tsx').write_text('a\n')
+            changed('untracked folder')
+            (folder / 'ui/src/new.tsx').write_text('b\n')
+            changed('new file in an untracked folder')
+            (folder / 'server/app.py').write_text('x = 2\n')
+            changed('tracked edit')
+            git('add', 'server/app.py')
+            changed('staged')
+            (folder / 'server/app.py').write_text('x = 1\n')
+            changed('working copy differs from the index')
+            git('commit', '-q', '-m', 'Next')
+            changed('commit')
+            git('push', '-q', 'origin', 'main')
+            changed('origin/main moved')
+        with tempfile.TemporaryDirectory() as plain:
+            self.assertIsNone(review_scope.fingerprint(plain))
+        self.assertIsNone(review_scope.fingerprint(None))
+        with patch.object(review_scope.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 5)):
+            self.assertIsNone(review_scope.fingerprint('/project'))
+
+    def test_cached_scope_is_not_reused_after_an_untracked_edit_in_a_real_repository(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, _ = self.make_repository(root, files=(('docs/reliability-checklist.md',
+                '## R1: Stop\n- Paths: `\\.sh$`\n- Text: `kill-server`\n- Check: c\n- Incident: i\n'),))
+            (folder / 'stop.sh').write_text('echo stop\n')
+            (folder / 'ui').mkdir()
+            (folder / 'ui/notes.txt').write_text('n\n')
+            entry = {'id': '%13', 'cwd': str(folder)}
+            with patch.object(server, 'REVIEW_SCOPES', {}), patch.object(server, 'agent_folder', return_value=str(folder)):
+                first = server.review_scope_of(entry)
+                self.assertEqual((first['checklist']['status'], first['ui']), ('clear', []))
+                (folder / 'stop.sh').write_text('tmux kill-server\n')
+                (folder / 'ui/src').mkdir()
+                (folder / 'ui/src/new.tsx').write_text('x\n')
+                second = server.review_scope_of(entry)
+                self.assertEqual(second['checklist']['status'], 'hit')
+                self.assertEqual(second['ui'], ['ui/src/new.tsx'])
+
+    def test_ui_paths_without_a_base_ref_lists_what_git_can_see_or_says_unknown(self):
+        # Review round 2, finding 3: no origin/main gave [] before the untracked files were listed.
+        with tempfile.TemporaryDirectory() as root:
+            folder, git = self.make_repository(root, origin=False)
+            self.assertEqual(review_scope.ui_paths(folder), [])  # no UI files in this repository: nothing to ask
+            (folder / 'ui/src').mkdir(parents=True)
+            (folder / 'ui/src/new.tsx').write_text('x\n')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/src/new.tsx'])
+            git('add', '-A')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/src/new.tsx'])  # staged
+            git('commit', '-q', '-m', 'UI')
+            # Committed, and no base to compare with: a UI repository with an unknown diff.
+            self.assertIsNone(review_scope.ui_paths(folder))
+            (folder / 'ui/src/new.tsx').write_text('y\n')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/src/new.tsx'])
+
+    def test_ui_paths_with_a_base_ref_include_staged_changes(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, git = self.make_repository(root, files=(('ui/src/a.tsx', 'a\n'), ('ui/test_a.cjs', 't\n')))
+            self.assertEqual(review_scope.ui_paths(folder), [])
+            (folder / 'ui/src/a.tsx').write_text('staged\n')
+            (folder / 'ui/test_a.cjs').write_text('changed test\n')
+            git('add', '-A')
+            (folder / 'ui/src/a.tsx').write_text('a\n')  # the working copy is back; the next commit still changes it
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/src/a.tsx'])
+            # Review round 3, finding 2: a lock file change alone changes the shipped UI.
+            git('commit', '-q', '-m', 'UI')
+            git('checkout', '-q', '--', '.')  # the working copy equals the commit again
+            git('push', '-q', 'origin', 'HEAD:main')
+            self.assertEqual(review_scope.ui_paths(folder), [])
+            (folder / 'ui/package-lock.json').write_text('{}\n')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/package-lock.json'])
+            git('add', '-A')
+            git('commit', '-q', '-m', 'Lock')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/package-lock.json'])
+            # Review round 4, finding 1: the commit holds the UI change; a staged revert must not hide it.
+            git('rm', '-q', '-f', 'ui/package-lock.json')
+            self.assertEqual(review_scope.ui_paths(folder), ['ui/package-lock.json'])
+            git('reset', '-q', '--hard')
+            # Review round 4, finding 3: the React layouts import the server's manifest.
+            (folder / 'server').mkdir(exist_ok=True)
+            (folder / 'server/ui_manifest.json').write_text('{}\n')
+            self.assertEqual(review_scope.ui_paths(folder), ['server/ui_manifest.json', 'ui/package-lock.json'])
+
+    def test_fingerprint_changes_for_a_tracked_edit_when_git_converts_the_text(self):
+        # Review round 4, finding 2: with a textconv driver the diff, and so the digest, stayed the same.
+        with tempfile.TemporaryDirectory() as root:
+            folder, git = self.make_repository(root, files=(('ui/src/App.tsx', 'one\n'), ('.gitattributes', '*.tsx diff=same\n')))
+            git('config', 'diff.same.textconv', 'echo same #')
+            first = review_scope.fingerprint(folder)
+            (folder / 'ui/src/App.tsx').write_text('const page = lazy(() => import("./Page"))\n')
+            second = review_scope.fingerprint(folder)
+            self.assertNotEqual(first, second)
+            git('add', '-A')
+            (folder / 'ui/src/App.tsx').write_text('one\n')
+            self.assertNotIn(review_scope.fingerprint(folder), (first, second))  # staged text differs
 
 
 if __name__ == '__main__':
