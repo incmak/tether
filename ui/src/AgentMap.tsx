@@ -10,13 +10,11 @@ import { RetryButton } from './Retry'
 import { ToolRow } from './ToolGroup'
 import './AgentMap.css'
 
-// Claude Code subagents of one pane's session: a pill in the composer bar opens a map (the main agent and what it
-// spawned); a tap on an agent shows its prompt, its tool calls, its report and its transcript. Data comes from the
-// subagent transcripts beside the session transcript, read by the server.
+// Subagents of one pane's conversation. The map links to their prompt, tool calls, report and transcript.
 export type AgentState = 'running' | 'finished' | 'failed' | 'stopped'
-export interface SubAgent { id: string; description: string; type: string; model: string | null; effort: string | null; background: boolean; state: AgentState; started: string | null; ended: string | null; seconds: number | null; tokens: number | null; tools: number; depth: number; parent: string | null; summary: string | null }
+export interface SubAgent { id: string; description: string; type: string; model: string | null; effort: string | null; background: boolean; state: AgentState; started: string | null; ended: string | null; seconds: number | null; tokens: number | null; tools: number; depth: number; parent: string | null; summary: string | null; can_stop?: boolean }
 export interface BgTask { id: string; kind: 'shell' | 'monitor'; description: string | null; command: string | null; state: AgentState; started: string | null; ended: string | null; seconds: number | null; parent: string | null; summary: string | null }
-export interface SubAgents { main: { model: string | null; context: number | null; title: string | null }; agents: SubAgent[]; tasks?: BgTask[] }
+export interface SubAgents { main: { model: string | null; context: number | null; title: string | null }; agents: SubAgent[]; tasks?: BgTask[]; thread?: string | null }
 interface TaskDetail extends BgTask { output: string; output_cut?: boolean }
 type Step = { kind: 'text'; text: string } | ({ kind: 'tool' } & ToolSummary)
 interface AgentDetail extends SubAgent { prompt: string; steps: Step[]; steps_cut?: boolean; report: string | null }
@@ -35,14 +33,14 @@ export const tokenText = (tokens: number | null) => tokens == null ? '' : tokens
 const facts = (...parts: (string | false | null | undefined)[]) => parts.filter(Boolean).join(' · ')
 
 // Running agents poll every 4 s; an idle list every 15 s. The pill hides while a session has no subagents.
-export function useSubAgents(api: Api, session: string, enabled: boolean) {
+export function useSubAgents(api: Api, session: string, ownerThread: string | null, enabled: boolean) {
   const [fast, setFast] = useState(false)
   const fetcher = useCallback((signal: AbortSignal) => enabled
-    ? api<SubAgents>(`subagents?session=${encodeURIComponent(session)}`, undefined, signal).then(value => ({ ...value, session }))
-    : Promise.resolve({ main: { model: null, context: null, title: null }, agents: [], tasks: [], session }), [api, session, enabled])
-  const { data, error, refresh } = usePolling<SubAgents & { session: string }>(fetcher, fast ? 4000 : 15000)
-  // A pane switch keeps the old list until the new one loads; never show another pane's agents.
-  const list = enabled && data?.session === session ? data : undefined
+    ? api<SubAgents>(`subagents?session=${encodeURIComponent(session)}`, undefined, signal).then(value => ({ ...value, session, ownerThread }))
+    : Promise.resolve({ main: { model: null, context: null, title: null }, agents: [], tasks: [], session, ownerThread }), [api, session, ownerThread, enabled])
+  const { data, error, refresh } = usePolling<SubAgents & { session: string; ownerThread: string | null }>(fetcher, fast ? 4000 : 15000)
+  const list = enabled && data?.session === session && data.ownerThread === ownerThread
+    && (data.thread === undefined || data.thread === ownerThread) ? data : undefined
   const running = (list?.agents.filter(agent => agent.state === 'running').length ?? 0) + (list?.tasks?.filter(task => task.state === 'running').length ?? 0)
   // The poll interval follows the newest list (state adjusted during render, not in an effect).
   if (fast !== running > 0) setFast(running > 0)
@@ -209,7 +207,7 @@ function AgentView({ api, session, agent, parent, onBack, onClose }: { api: Api;
       </div>}
     <div className="agent-actions">
       <button type="button" className="secondary" disabled={!detail} onClick={() => setTranscript(true)}>Open transcript</button>
-      {live && <button type="button" className="secondary agent-stop" disabled={stopping} onClick={() => void stop()}>{stopping ? 'Stopping…' : 'Stop agent'}</button>}
+      {live && shown.can_stop !== false && <button type="button" className="secondary agent-stop" disabled={stopping} onClick={() => void stop()}>{stopping ? 'Stopping…' : 'Stop agent'}</button>}
       {stopError && <p role="alert">{stopError}</p>}
     </div>
   </>

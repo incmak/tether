@@ -1,17 +1,21 @@
-"""Read Claude agents and background tasks for the selected process."""
-from collections import OrderedDict, deque
+"""Read subagents and background tasks for the selected conversation."""
+from collections import OrderedDict, defaultdict, deque
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from html import unescape
 from pathlib import Path
 import re
+import sqlite3
 import tempfile
 import threading
 import time
 
 from antigravity import process_start
+from agents import codex_database
 import procinfo
 import paths
 import task_process
@@ -693,11 +697,209 @@ def _listing(config, *, limit=True, include_finished=False):
     return result
 
 
+_CODEX_CALLS = ('function_call', 'custom_tool_call')
+_CODEX_OUTPUTS = ('function_call_output', 'custom_tool_call_output')
+_CODEX_STEPS = 400
+
+
+def _codex_index(config):
+    thread, transcript = config.get('thread'), config.get('transcript')
+    if config.get('pending_conversation') or not _uuid(thread) or not transcript:
+        return None, {}
+    children = defaultdict(list)
+    try:
+        with closing(codex_database()) as db:
+            parent = db.execute('SELECT model FROM threads WHERE id=? AND rollout_path=?',
+                                (thread, str(transcript))).fetchone()
+            if parent is None:
+                return None, {}
+            rows = db.execute('''
+                WITH RECURSIVE tree(id) AS (
+                    VALUES (?)
+                    UNION
+                    SELECT e.child_thread_id FROM thread_spawn_edges e JOIN tree ON e.parent_thread_id=tree.id
+                )
+                SELECT e.parent_thread_id, t.id, t.rollout_path, t.model, t.reasoning_effort, t.tokens_used, e.status
+                FROM tree JOIN thread_spawn_edges e ON e.child_thread_id=tree.id JOIN threads t ON t.id=tree.id
+                WHERE tree.id != ?
+            ''', (thread, thread))
+            for parent_id, *row in rows:
+                children[parent_id].append(row)
+    except sqlite3.Error:
+        return None, {}
+    return parent[0], children
+
+
+def _codex_text(payload, kind):
+    content = payload.get('content')
+    if not isinstance(content, list):
+        return ''
+    return '\n'.join(item['text'] for item in content if isinstance(item, dict)
+                     and item.get('type') == kind and isinstance(item.get('text'), str))
+
+
+def _codex_records(stream):
+    for line in stream:
+        # Leave a split write for the next poll.
+        if not line.endswith(b'\n'):
+            break
+        for record in _records([line]):
+            payload = record.get('payload')
+            if isinstance(payload, dict):
+                yield record, payload
+
+
+def _codex_scan(path, previous=None):
+    with path.open('rb') as stream:
+        header_line = stream.readline()
+        fingerprint = sha256(header_line).digest()
+        if (previous is not None and os.fstat(stream.fileno()).st_size > previous[0][1]
+                and previous[1]['_header'] == fingerprint):
+            data = dict(previous[1])
+            stream.seek(data['_next_offset'])
+        else:
+            header = next(_records([header_line]), {})
+            meta = header.get('payload')
+            if header.get('type') != 'session_meta' or not isinstance(meta, dict):
+                raise ValueError(_UNAVAILABLE)
+            source = meta.get('source')
+            subagent = source.get('subagent') if isinstance(source, dict) else None
+            spawn = subagent.get('thread_spawn') if isinstance(subagent, dict) else None
+            if not isinstance(spawn, dict) or not _uuid(spawn.get('parent_thread_id')):
+                raise ValueError(_UNAVAILABLE)
+            # A fork's rollout starts with copied parent records, including turn and tool events.
+            ordinal = meta.get('subagent_history_start_ordinal', 1)
+            if type(ordinal) is not int or ordinal < 1:
+                raise ValueError(_UNAVAILABLE)
+            for _ in range(ordinal - 1):
+                if not stream.readline().endswith(b'\n'):
+                    raise ValueError(_UNAVAILABLE)
+            data = dict(id=meta.get('id'), spawn=spawn, started=header.get('timestamp'),
+                        turn=None, turn_started=None, ended=None, state=None, tools=0,
+                        prompt='', report=None, steps=[], steps_cut=False,
+                        _header=fingerprint, _history_end=stream.tell())
+        data['_next_offset'] = stream.tell()
+        steps = deque(dict(step) for step in data['steps'])
+        calls = {step['id']: step for step in steps if step['kind'] == 'tool'}
+        agent_path = data['spawn'].get('agent_path')
+        parent_path = agent_path.rpartition('/')[0] if isinstance(agent_path, str) else None
+        for record, payload in _codex_records(stream):
+            data['_next_offset'] = stream.tell()
+            kind = payload.get('type')
+            if record['type'] == 'event_msg':
+                turn = payload.get('turn_id')
+                if kind == 'task_started' and isinstance(turn, str) and turn:
+                    data.update(turn=turn, turn_started=record.get('timestamp'), state='running', ended=None, report=None)
+                elif data['state'] == 'running' and turn == data['turn'] and kind in ('task_complete', 'turn_aborted'):
+                    report = payload.get('last_agent_message')
+                    data.update(state='finished' if kind == 'task_complete' else 'stopped', ended=record.get('timestamp'),
+                                report=tool_details.bounded(report)[0] if isinstance(report, str) else data['report'])
+            if record['type'] != 'response_item':
+                continue
+            step = None
+            call = payload.get('call_id')
+            if kind in _CODEX_CALLS and isinstance(call, str) and call:
+                step = dict(tool_details.summary(payload), kind='tool')
+                calls[call] = step
+                data['tools'] += 1
+            elif kind in _CODEX_OUTPUTS and isinstance(call, str) and call in calls:
+                calls[call].update(status='complete', is_error=tool_details.failed(payload))
+            elif kind == 'agent_message' and not data['prompt'] and parent_path and (
+                    payload.get('author') == parent_path and payload.get('recipient') == agent_path):
+                data['prompt'] = tool_details.bounded(_codex_text(payload, 'input_text'))[0]
+            elif kind == 'message' and payload.get('role') == 'assistant':
+                if content := _codex_text(payload, 'output_text'):
+                    if payload.get('phase') == 'final_answer':
+                        data['report'] = tool_details.bounded(content)[0]
+                    else:
+                        step = {'kind': 'text', 'text': tool_details.bounded(content, max_bytes=4000)[0]}
+            if step is not None:
+                steps.append(step)
+                if len(steps) > _CODEX_STEPS:
+                    old = steps.popleft()
+                    if old['kind'] == 'tool' and calls.get(old['id']) is old:
+                        del calls[old['id']]
+                    data['steps_cut'] = True
+        data['steps'] = list(steps)
+        return data
+
+
+def _codex_workers(config):
+    model, children = _codex_index(config)
+    thread = config.get('thread')
+    files = {}
+    parents = deque([thread]) if children else deque()
+    home = paths.CODEX.resolve()
+    roots = (home / 'sessions', home / 'archived_sessions')
+    while parents:
+        parent = parents.popleft()
+        for identifier, path, worker_model, effort, tokens, status in children.get(parent, ()):
+            if not _uuid(identifier) or identifier in files or not isinstance(path, str) or not path:
+                continue
+            try:
+                path = Path(path).resolve(strict=True)
+                if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
+                    continue
+                data, _ = _cached(path, _codex_scan, incremental=True, namespace='codex-worker')
+            except (OSError, ValueError, RuntimeError):
+                continue
+            if data['id'] != identifier or data['spawn']['parent_thread_id'] != parent:
+                continue
+            files[identifier] = (path, data, worker_model, effort, tokens, status, parent if parent != thread else None)
+            parents.append(identifier)
+    return model, files
+
+
+def _codex_entry(worker, now, since):
+    _, data, model, effort, tokens, edge, parent = worker
+    spawn = data['spawn']
+    started = _stamp(data['started'])
+    turn_started = _stamp(data['turn_started']) or started
+    state, ended = data['state'], data['ended']
+    if state in (None, 'running'):
+        if edge == 'open' and since is not None and turn_started is not None and turn_started >= since - 5:
+            state = 'running'
+        else:
+            state, ended = 'stopped', data['turn_started'] or data['started']
+    end = now if state == 'running' else _stamp(ended)
+    name = spawn.get('agent_path')
+    return {'id': data['id'], 'description': (name.rsplit('/', 1)[-1] if isinstance(name, str) else '')
+            or spawn.get('agent_nickname') or data['id'], 'type': spawn.get('agent_role') or 'worker',
+            'model': model, 'effort': effort, 'background': False, 'state': state, 'started': data['started'],
+            'ended': ended, 'seconds': max(0, int(end - started)) if end is not None and started is not None else None,
+            'tokens': tokens, 'tools': data['tools'], 'depth': spawn.get('depth', 1), 'parent': parent,
+            'summary': None, 'can_stop': False}
+
+
+def _codex_worker(config, agent_id):
+    if not _uuid(agent_id):
+        raise ValueError(_UNAVAILABLE)
+    _, files = _codex_workers(config)
+    if agent_id not in files:
+        raise ValueError(_UNAVAILABLE)
+    return files[agent_id]
+
+
 def listing(config):
-    return _listing(config)
+    if config.get('agent') != 'codex':
+        return _listing(config)
+    model, files = _codex_workers(config)
+    now, since = time.time(), _owner_since(config) if files else None
+    entries = [_codex_entry(worker, now, since) for worker in files.values()]
+    entries.sort(key=lambda entry: _stamp(entry['started']) or 0)
+    result = {'main': {'model': model, 'context': None, 'title': None}, 'agents': entries[-40:], 'tasks': []}
+    if config.get('thread') is not None:
+        result['thread'] = config['thread']
+    return result
 
 
 def detail(config, agent_id):
+    if config.get('agent') == 'codex':
+        worker = _codex_worker(config, agent_id)
+        entry = _codex_entry(worker, time.time(), _owner_since(config))
+        data = worker[1]
+        return dict(entry, prompt=data['prompt'], steps=data['steps'], steps_cut=data['steps_cut'],
+                    report=data['report'] if entry['state'] == 'finished' else None)
     try:
         _path(config, agent_id)
         entry = next((entry for entry in _listing(config, limit=False)['agents'] if entry['id'] == agent_id), None)
@@ -715,6 +917,30 @@ def detail(config, agent_id):
 
 
 def tool(config, agent_id, call_id):
+    if config.get('agent') == 'codex':
+        path, data, *_ = _codex_worker(config, agent_id)
+        if not call_id:
+            raise ValueError('Choose a tool call.')
+        call, result = None, None
+        try:
+            with path.open('rb') as stream:
+                if sha256(stream.readline()).digest() != data['_header']:
+                    raise ValueError(_UNAVAILABLE)
+                stream.seek(data['_history_end'])
+                for record, payload in _codex_records(stream):
+                    if record['type'] != 'response_item' or payload.get('call_id') != call_id:
+                        continue
+                    if payload.get('type') in _CODEX_CALLS:
+                        call = payload
+                    elif payload.get('type') in _CODEX_OUTPUTS:
+                        result = payload
+                    if call is not None and result is not None:
+                        break
+        except OSError as exc:
+            raise ValueError(_UNAVAILABLE) from exc
+        if call is None:
+            raise ValueError('Tool call is no longer available.')
+        return dict(tool_details.build(call, result), images=0)
     _path(config, agent_id)
     if not any(item['id'] == agent_id for item in _listing(config, limit=False)['agents']):
         raise ValueError(_UNAVAILABLE)

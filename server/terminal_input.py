@@ -23,6 +23,7 @@ import prompt_actions
 import choice_state
 import claude_hooks
 import permissions_dialog
+import uploads
 
 LAUNCHERS = {'codex': 'codex',
              'claude': 'claude',
@@ -1534,20 +1535,43 @@ def submit(entry, message, run=subprocess.run):
     leave_scrollback(entry, run)
     verify(entry, run)
     empty_prompt(entry, run)
+    parts = [message]
+    codex_drafts = ()
+    if entry['agent'] == 'codex':
+        # Codex can consume a whole paste as an image. Give each upload its own paste and keep the prose separate.
+        image = rf'(?<!\S)({re.escape(str(uploads.ROOT))}/[A-Za-z0-9._-]+\.(?i:png|jpe?g|gif|webp))(?=\s|$)'
+        separated = re.split(image, message)
+        if len(separated) > 1:
+            parts = [part for part in separated if part]
+            visible = ''.join(f'[Image #{index // 2 + 1}]' if index % 2 else part for index, part in enumerate(separated))
+            codex_drafts = (' '.join(message.split()), ' '.join(visible.split()))
     buffer = 'tmux-mobile-' + uuid.uuid4().hex
     try:
-        run([paths.TMUX, 'load-buffer', '-b', buffer, '-'], input=message.encode(), check=True, capture_output=True, timeout=5)
-        verify(entry, run)
-        empty_prompt(entry, run)
-        run([paths.TMUX, 'paste-buffer', '-p', '-d', '-b', buffer, '-t', entry['id']], check=True, capture_output=True, timeout=5)
+        for index, part in enumerate(parts):
+            run([paths.TMUX, 'load-buffer', '-b', buffer, '-'], input=part.encode(), check=True, capture_output=True, timeout=5)
+            verify(entry, run)
+            if not index:
+                empty_prompt(entry, run)
+            elif approval(capture(entry, run)):
+                raise RuntimeError('An approval appeared during delivery. Check Termius before retrying.')
+            run([paths.TMUX, 'paste-buffer', '-p', '-d', '-b', buffer, '-t', entry['id']], check=True, capture_output=True, timeout=5)
         verify(entry, run)
         if approval(capture(entry, run)):
             raise RuntimeError('An approval appeared during delivery. Check Termius before retrying.')
         # The agent can swallow an Enter that arrives right behind a bracketed paste, leaving the
         # message sitting in the input box; confirm the box emptied and press Enter again if not.
         sent = ''.join(message.split())
-        for _ in range(4):
+        for attempt in range(4):
             time.sleep(.2)
+            if attempt and codex_drafts:
+                # The terminal may have accepted Enter after the previous capture. Recheck the pane and draft
+                # while excluding any unrelated prompt that has since appeared.
+                verify(entry, run)
+                current = prompt_draft(entry, run)
+                if not any(current):
+                    return
+                if ' '.join(' '.join(current).split()) not in codex_drafts:
+                    raise DraftError('The agent input changed during delivery. Check the terminal before retrying.')
             run([paths.TMUX, 'send-keys', '-t', entry['id'], 'Enter'], check=True, capture_output=True, timeout=5)
             time.sleep(.3)
             try:
@@ -1564,7 +1588,7 @@ def submit(entry, message, run=subprocess.run):
             # Agents mark picker rows (/model ...) like the input line. A mismatch means a menu opened, except for
             # Claude paste placeholders: the box was empty before our paste, so these still hold our unsent message.
             draft_text = ' '.join(draft)
-            if ((entry.get('_review') or '\n' not in message.strip())
+            if (not codex_drafts and (entry.get('_review') or '\n' not in message.strip())
                     and not ''.join(draft_text.split()).startswith(sent[:30])
                     and not (entry['agent'] == 'claude' and CLAUDE_PASTE_PLACEHOLDER.match(draft_text))):
                 return

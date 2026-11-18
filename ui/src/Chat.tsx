@@ -28,7 +28,7 @@ import type { Session } from './Sidebar'
 import { ModelSheet, MuteItem, Tools, Usage } from './Sheets'
 import { AgentMap, AgentPill, useSubAgents } from './AgentMap'
 import { ImageViewer } from './ImageViewer'
-import { SentContent, sentContent, imagesOnly } from './SentImages'
+import { SentContent, sentContent, imagesOnly, uploadImageParts } from './SentImages'
 import type { Media } from './ImageViewer'
 import { FilePane, MediaOpener, TabOpener, saveFile } from './MediaLink'
 import type { Kind } from './MediaLink'
@@ -179,13 +179,20 @@ const scrollByPane = new Map<string, { top: number; limit: number; bottom: boole
 const MODES: Record<string, string> = { default: 'Manual', accept: 'Accept edits', plan: 'Plan', auto: 'Auto' }
 const modeKey = (mode?: string | null) => (['accept', 'plan', 'auto', 'bypass'].find(key => (mode ?? '').toLowerCase().includes(key)) ?? 'default')
 // What the terminal is waiting for, as a drawer above the message box: the question, then each real option.
-interface Pending { id: number; text: string; key: string; seen: number; at: number; thread?: string | null; failed?: string; offline?: boolean }  // failed: why the send failed; offline: no answer from the server at all
-// Queued bubbles survive a reload: Claude already holds the message, so the bubble should stay until it shows in the chat (30 minutes at most).
+interface Pending { id: number; text: string; key: string; seen: number; imagesSeen?: number; at: number; thread?: string | null; failed?: string; offline?: boolean; recoveredImageText?: boolean }
+// Persist queued sends until delivery or 30 minutes, and keep recovered text until the user handles it.
 const PENDING_KEY = 'tether.pending'
+const keepPending = (item: Pending) => item.recoveredImageText || Date.now() - item.at < 1800000
+function keepPendingOnLoad(item: Pending) {
+  if (keepPending(item)) return true
+  if (typeof item.text !== 'string') return false
+  const { paths, rest } = uploadImageParts(item.text)
+  return paths.length > 0 && !!rest
+}
 const pendingByPane = new Map<string, Pending[]>((() => {
   try {
     const saved = JSON.parse(localStorage.getItem(PENDING_KEY) || '{}') as Record<string, Pending[]>
-    return Object.entries(saved).map(([pane, list]) => [pane, list.filter(item => Date.now() - item.at < 1800000)] as [string, Pending[]]).filter(([, list]) => list.length)
+    return Object.entries(saved).map(([pane, list]) => [pane, list.filter(keepPendingOnLoad)] as [string, Pending[]]).filter(([, list]) => list.length)
   } catch { return [] }
 })())
 function savePending() {
@@ -201,6 +208,37 @@ const matches = (messages: ChatMessage[], key: string, images = false) => messag
   const shell = shellCommand(item.text)
   return sameCommand(squash(shell ? `!${shell.command}` : item.text)).includes(sameCommand(key))
 }).length
+
+function codexSendEvidence(data: ChatData | undefined, text: string) {
+  if (data?.agent !== 'codex') return
+  const { paths, rest } = uploadImageParts(text)
+  if (!paths.length) return
+  const files = JSON.stringify(paths.sort()), words = squash(rest)
+  let complete = 0, imageOnly = 0
+  for (const message of data.messages) {
+    if (message.role !== 'user' || message.kind) continue
+    const received = uploadImageParts(message.text)
+    if (JSON.stringify(received.paths.sort()) !== files) continue
+    if (squash(received.rest) === words) complete++
+    else if (!received.rest) imageOnly++
+  }
+  return { complete, imageOnly, rest }
+}
+
+const changedThread = (item: Pending, data: ChatData) => item.thread != null && item.thread !== data.thread
+
+function afterTranscript(item: Pending, data: ChatData): Pending | null {
+  const images = codexSendEvidence(data, item.text)
+  if ((images || item.recoveredImageText) && changedThread(item, data)) return item
+  // /clear and a pane's first prompt begin a new transcript, so its old count cannot apply there.
+  const seen = item.thread !== undefined && item.thread !== (data.thread ?? null) ? 0 : item.seen
+  if ((images?.complete ?? matches(data.messages, item.key, imagesOnly(item.text))) > seen) return null
+  if (!images || images.imageOnly <= (item.imagesSeen ?? 0) || (data.state === 'Working' && keepPending(item))) return item
+  // Older Codex versions could take an image from a combined paste and drop the prose.
+  const key = squash(images.rest).slice(0, 80)
+  return { ...item, text: images.rest, key, seen: matches(data.messages, key), thread: data.thread,
+    failed: 'Image delivered, but the message text was not sent.', offline: false, recoveredImageText: true }
+}
 // Panes shown as a live terminal; kept for the visit so switching panes and back keeps the mode.
 const terminalPanes = new Set<string>()
 
@@ -668,20 +706,28 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const bangKey = bang ? squash(bang.command).slice(0, 40) : ''
   const bangItem = bang ? pending.find(item => !item.failed && item.text.trim().startsWith('!') && squash(item.text.trim().slice(1)).slice(0, 40) === bangKey) : undefined
   const queued = bangItem ? pending.filter(item => item !== bangItem) : pending
+  const notSent = queued.filter(item => item.failed).length
+  const waiting = queued.length - notSent
+  const queueLabel = [waiting ? `${waiting} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
   const setPending = (update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next })
   const [recheck, setRecheck] = useState(0)
   useEffect(() => {
-    if (!data) return
+    if (!data || (data.session && data.session !== pane.id)) return
     // Claude writes no chat record for some slash commands (/usage opens a panel). Once the pane is not working, it ran them.
     // Some run at once while Claude works and then show as a card: /btw (a side question), /mcp, /config, /permissions.
     // /btw never waits in Claude's queue, so its bubble also leaves once its saved answer is in the chat, or after 10 s.
     const opened = ['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')
     const asked = (item: Pending) => /^\/btw\s/.test(item.text.trim()) && (Date.now() - item.at > 10000 || data.messages.some(message => message.kind === 'side' && squash(message.title ?? '') === squash(item.text.trim().slice(4))))
     const ran = (item: Pending) => slashCommand(item.text) && !item.failed && Date.now() - item.at > 3000 && (data.state !== 'Working' || opened || asked(item))
-    // /clear (and a new chat) starts a new transcript: the count taken in the old one does not apply there.
-    const seen = (item: Pending) => item.thread !== undefined && item.thread !== (data.thread ?? null) ? 0 : item.seen
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reconcile persisted queued sends with the received transcript before scheduling the slash-command recheck.
-    setPending(list => { const left = list.filter(item => matches(data.messages, item.key, imagesOnly(item.text)) <= seen(item) && Date.now() - item.at < 1800000 && !ran(item)); return left.length === list.length ? list : left })
+    const cached = data === cachedAtOpen.current
+    setPending(list => {
+      const left = list.flatMap(item => {
+        if (cached && !keepPending(item)) return keepPendingOnLoad(item) ? [item] : []
+        const next = afterTranscript(item, data)
+        return next && keepPending(next) && !ran(next) ? [next] : []
+      })
+      return left.length === list.length && left.every((item, index) => item === list[index]) ? list : left
+    })
     // An idle pane sends no new data, so check a slash command again once its 3 s have passed.
     const slash = pending.filter(item => slashCommand(item.text) && !item.failed).map(item => item.at + (/^\/btw\s/.test(item.text.trim()) && Date.now() - item.at > 3100 ? 10100 : 3100) - Date.now())
     if (!slash.length) return
@@ -796,15 +842,19 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
     if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
     const key = squash(text).slice(0, 80)
-    const seen = retryOf?.seen ?? matches(messages, key, imagesOnly(text))
-    const accepted = await write('message', { session: pane.id, thread: data?.thread ?? null, message: text, ...(activePane.agent === 'shell' ? { mode: 'shell' } : {}) })
+    const images = codexSendEvidence(data, text)
+    const seen = retryOf?.seen ?? images?.complete ?? matches(messages, key, imagesOnly(text))
+    const thread = retryOf?.thread ?? data?.thread ?? null
+    const accepted = await write('message', { session: pane.id, thread, message: text, ...(activePane.agent === 'shell' ? { mode: 'shell' } : {}) })
     const failure = lastFailure.current
     // No answer from the server (offline, timeout, server down): keep the message as a "Not sent" bubble with Retry, and clear the box.
     const lost = !accepted && !!failure && (!(failure instanceof ApiError) || (failure.status >= 500 && !failure.draft))
     if (lost) setSendError('')
     if ((accepted || lost) && activePane.agent !== 'shell' && key) {
       // eslint-disable-next-line react-hooks/purity -- The runtime invokes this send handler on message submission; these timestamps follow the awaited write, never render.
-      const item = { id: retryOf?.id ?? Date.now(), text, key, seen, thread: retryOf?.thread ?? data?.thread ?? null, at: retryOf?.at ?? Date.now(), ...(lost ? { failed: errorText(failure), offline: !(failure instanceof ApiError) } : {}) }
+      const at = retryOf?.at ?? Date.now()
+      const item = { ...retryOf, id: retryOf?.id ?? at, text, key, seen, imagesSeen: retryOf?.imagesSeen ?? images?.imageOnly,
+        thread, at, failed: lost ? errorText(failure) : undefined, offline: lost && !(failure instanceof ApiError) }
       setPending(list => retryOf ? list.map(other => other.id === retryOf.id ? item : other) : [...list, item])
     }
     if (accepted || lost) { sticky.current = true; setJump(false); hold.current = null; requestAnimationFrame(() => requestAnimationFrame(() => viewport.current?.scrollTo({ top: viewport.current.scrollHeight }))) }  // after the bubble renders
@@ -817,8 +867,15 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     setRetrying(item.id)
     try {
       const fresh = await api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`).catch(() => null)
-      if (fresh && Array.isArray(fresh.messages) && matches(fresh.messages as ChatMessage[], item.key) > item.seen) {
-        setPending(list => list.filter(other => other.id !== item.id)); void refresh(); return
+      if (!fresh || !Array.isArray(fresh.messages)) {
+        setToast('Could not check delivery. Reconnect and try again.'); return
+      }
+      if (fresh.session !== pane.id || changedThread(item, fresh)) {
+        setToast('The thread changed. Use Edit to recover this message.'); void refresh(); return
+      }
+      const next = afterTranscript(item, fresh)
+      if (next !== item) {
+        setPending(list => list.flatMap(other => other.id !== item.id ? [other] : next ? [next] : [])); void refresh(); return
       }
       await send(item.text, item)
     } finally { setRetrying(null) }
@@ -849,8 +906,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [claudeFooter, setFooter] = useState<{ key: string; value: Footer }>(() => ({ key: footerId, value: footerCache.get(footerId) ?? {} }))
   const footer = activePane.agent === 'codex' ? data?.footer ?? {} : claudeFooter.key === footerId ? claudeFooter.value : footerCache.get(footerId) ?? {}
   const [usageSheet, setUsageSheet] = useState(false)
-  const [agentMap, setAgentMap] = useState(false)
-  const subAgents = useSubAgents(api, activePane.id, activePane.agent === 'claude')
+  const agentThread = data?.thread ?? activePane.thread ?? null
+  const [agentMapThread, setAgentMapThread] = useState<string | null>()
+  if (agentMapThread !== undefined && agentMapThread !== agentThread) setAgentMapThread(undefined)
+  const subAgents = useSubAgents(api, activePane.id, agentThread, activePane.agent === 'claude' || activePane.agent === 'codex')
   const [planSheet, setPlanSheet] = useState(false)
   const [modelSheet, setModelSheet] = useState(false)
   const [continueSheet, setContinueSheet] = useState(false)
@@ -1130,7 +1189,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
-      { id: 'queue', label: `${queued.length} queued${queued.some(item => item.failed) ? ' · Not sent' : ''}`, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
+      { id: 'queue', label: queueLabel, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
         <button type="button" className="failed-action" disabled={retrying !== null || !writable} onClick={() => void retry(item)}><RotateCcw size={13} />{retrying === item.id ? 'Sending…' : 'Retry'}</button>
         <button type="button" className="failed-action" onClick={() => editFailed(item)}><Pencil size={13} />Edit</button>
         <button type="button" aria-label="Delete this unsent message" onClick={() => setPending(list => list.filter(other => other.id !== item.id))}><X size={12} /></button></small></div>
@@ -1175,13 +1234,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       onLive={show => { setInfo(false); setLiveSheet(show) }} onTools={activePane.agent !== 'shell' ? () => { setInfo(false); setTools(true) } : undefined}
       onBacklog={query => { setInfo(false); window.dispatchEvent(new CustomEvent('tether:open-backlog', { detail: { query } })) }} onRenamed={onUpdate} />}
     {usageSheet && <Usage footer={footer} onClose={() => setUsageSheet(false)} />}
-    {agentMap && <AgentMap api={api} session={activePane.id} list={subAgents.data} onClose={() => setAgentMap(false)} />}
+    {agentMapThread === agentThread && <AgentMap api={api} session={activePane.id} list={subAgents.data} onClose={() => setAgentMapThread(undefined)} />}
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {continueSheet && <ContinueWith api={api} pane={activePane} thread={data?.thread ?? null} idle={state === 'Idle' || state === 'Stopped'} onClose={() => setContinueSheet(false)} onCreated={id => { setContinueSheet(false); onContinued(id) }} />}
     {modelSheet && <ModelSheet onContinue={() => { setModelSheet(false); setContinueSheet(true) }} api={api} pane={activePane} thread={data?.thread ?? null} currentLabel={model} currentEffort={footer.effort} advisor={footer.advisor} onClose={() => setModelSheet(false)} onDone={message => { setModelSheet(false); setToast(message); readFooter.current() }} />}
     <Composer onTerminalEscape={() => void sendKey('Escape')} options={activePane.agent === 'shell' ? undefined : <span className="composer-pills">
       <button type="button" className="pill" aria-label={advisorAlert ? `Model and effort. Advisor ${footer.advisor?.name} is not attached` : 'Model and effort'} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>{advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}<span className="pill-text">{model || 'Model'}</span>{footer.effort && <span className="pill-effort">· {footer.effort}</span>}<ChevronDown size={13} /></button>
-      <AgentPill list={subAgents.data} onOpen={() => setAgentMap(true)} />
+      <AgentPill list={subAgents.data} onOpen={() => setAgentMapThread(agentThread)} />
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>
         {modeMenu && <div className="attach-menu mode-menu" role="menu">{Object.entries(MODES).map(([key, label]) => <button key={key} role="menuitemradio" aria-checked={key === currentMode} type="button" onClick={() => void chooseMode(key)}>{label}{key === currentMode && <Check size={16} />}</button>)}</div>}</span>}

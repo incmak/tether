@@ -17,6 +17,60 @@ def frame(name, suffix='txt'):
     return (FIXTURES / f'claude_permissions_{name}.{suffix}').read_text()
 
 
+class CodexImageSubmitTests(unittest.TestCase):
+    root = Path('/fixture/.cache/mobile-tmux/uploads')
+    images = [str(root / '8a1502c4-image.png'), str(root / '12345678-second.jpg')]
+    entry = {'id': '%45', 'agent': 'codex'}
+
+    def setUp(self):
+        self.enterContext(patch('uploads.ROOT', self.root))
+        self.enterContext(patch.object(terminal, 'leave_scrollback'))
+        self.enterContext(patch.object(terminal, 'verify'))
+        self.enterContext(patch.object(terminal, 'empty_prompt'))
+        self.enterContext(patch.object(terminal, 'capture', return_value=''))
+        self.enterContext(patch.object(terminal.time, 'sleep'))
+        self.draft = self.enterContext(patch.object(terminal, 'prompt_draft', return_value=[]))
+
+    def test_pastes_images_and_text_separately_before_one_enter(self):
+        images = self.images
+        prompt = 'What is the progress?\nTell me what is still queued.'
+        events = []
+
+        def run(command, **options):
+            if command[1] == 'load-buffer':
+                events.append(('load', options['input'].decode()))
+            elif command[1] == 'paste-buffer':
+                events.append(('paste', command[command.index('-t') + 1]))
+            elif command[1] == 'send-keys':
+                events.append(('key', command[-1]))
+
+        terminal.submit(self.entry, ' '.join([*images, prompt]), run)
+
+        self.assertEqual(events, [('load', images[0]), ('paste', '%45'),
+                                  ('load', ' '), ('paste', '%45'),
+                                  ('load', images[1]), ('paste', '%45'),
+                                  ('load', ' ' + prompt), ('paste', '%45'), ('key', 'Enter')])
+
+    def test_sends_second_enter_if_the_same_attachment_draft_remains(self):
+        visible = ['[Image #1]  What is the progress?']
+        self.draft.side_effect = [visible, visible, []]
+        run = Mock()
+
+        terminal.submit(self.entry, f'{self.images[0]} What is the progress?', run)
+
+        self.assertEqual([call.args[0][-1] for call in run.call_args_list if call.args[0][1] == 'send-keys'],
+                         ['Enter', 'Enter'])
+
+    def test_does_not_send_enter_again_if_the_attachment_draft_changed(self):
+        self.draft.side_effect = [['[Image #1]  What is the progress?'], ['[Image #1] Other question.']]
+        run = Mock()
+
+        with self.assertRaises(terminal.DraftError):
+            terminal.submit(self.entry, f'{self.images[0]} What is the progress?', run)
+
+        self.assertEqual([call.args[0][-1] for call in run.call_args_list if call.args[0][1] == 'send-keys'], ['Enter'])
+
+
 class NumberedDraftTests(unittest.TestCase):
     entry = {'id': '%1', 'agent': 'claude'}
 

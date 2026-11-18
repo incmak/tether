@@ -28,7 +28,7 @@ const tasks = [
 const taskOutput = id => ({ ...tasks.find(item => item.id === id), output: Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join('\n'), output_cut: true })
 const tools = [{ kind: 'tool', id: 't1', name: 'Bash', title: 'ls server', is_error: false, status: 'complete' },
   { kind: 'tool', id: 't2', name: 'Read', title: 'server/subagents.py', is_error: true, status: 'complete' }]
-const detail = id => ({ ...agents.find(item => item.id === id), prompt: 'Find the three best remote browser products.\n\nReport prices.',
+const detail = id => ({ ...fixture.subagents.agents.find(item => item.id === id), prompt: 'Find the three best remote browser products.\n\nReport prices.',
   steps: [{ kind: 'text', text: 'Starting with the server folder.' }, ...tools], report: id === 'a1' ? 'Three products fit. Browserbase is the cheapest at the volume you need.' : null })
 const messages = Array.from({ length: 12 }, (_, i) => ({ id: `m${i}`, role: i % 2 ? 'assistant' : 'user', text: `Message ${i + 1}.`, time: '2026-11-11T08:00:00Z' }))
 const pane = { id: '%1', tmux_session: '$1', label: 'Agent map test', agent: 'claude', dir: '/srv/project', state: 'Working', writable: true, thread: 'map-thread', approval: null }
@@ -102,6 +102,40 @@ async function main() {
       const r = el.getBoundingClientRect(), top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
       return top && (el === top || el.contains(top))
     }), selector)
+    const claudeChat = fixture.chat
+    const claudeSubagents = fixture.subagents
+    fixture.sessions.sessions = [{ ...pane, agent: 'codex' }]
+    fixture.chat = { ...claudeChat, agent: 'codex' }
+    fixture.subagents = {
+      thread: pane.thread,
+      main: { model: 'gpt-6.2-sol', context: null, title: 'Fix the worker map' },
+      agents: [
+        agent('codex-running', 'Verify Codex worker status', 'running', { model: 'gpt-6.2-sol', can_stop: false }),
+        agent('codex-finished', 'Capture the Codex transcript', 'finished', { model: 'gpt-6.2-sol' }),
+      ],
+      tasks: [],
+    }
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+    await page.getByRole('button', { name: /1 agent running\. Open the agent map/ }).click({ timeout: 4500 })
+    const codexMap = page.locator('dialog.agent-map')
+    await codexMap.waitFor()
+    check('Codex agent map shows a running worker', await codexMap.locator('.agent-node', { hasText: 'Verify Codex worker status' }).getByText('Running', { exact: true }).isVisible())
+    check('Codex agent map shows a completed worker', await codexMap.locator('.agent-node', { hasText: 'Capture the Codex transcript' }).getByText('Done', { exact: true }).isVisible())
+    await page.screenshot({ path: path.join(SHOTS, 'codex-map.png') })
+    await codexMap.getByRole('button', { name: /Verify Codex worker status/ }).click()
+    await codexMap.getByRole('button', { name: 'Open transcript' }).waitFor()
+    check('Codex worker detail is read-only', await codexMap.getByRole('button', { name: 'Stop agent' }).count() === 0)
+    const newThread = 'map-next-thread'
+    fixture.sessions.sessions = [{ ...pane, agent: 'codex', thread: newThread }]
+    fixture.chat = { ...fixture.chat, thread: newThread }
+    fixture.subagents = { ...fixture.subagents, thread: newThread, agents: [] }
+    await codexMap.waitFor({ state: 'hidden', timeout: 12000 })
+    check('Changing conversations closes the previous Codex worker detail', await codexMap.count() === 0)
+    await page.getByRole('button', { name: /Open the agent map/ }).waitFor({ state: 'hidden' })
+    fixture.sessions.sessions = [pane]
+    fixture.chat = claudeChat
+    fixture.subagents = claudeSubagents
     for (const [width, height] of sizes) {
       const at = `${width}px`
       await page.setViewportSize({ width, height })

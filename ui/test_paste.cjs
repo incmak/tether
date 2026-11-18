@@ -97,7 +97,7 @@ function findSend(node) {
 }
 findSend(chat)
 const retryContext = { terminalText: terminal.terminalText, activePane: { agent: 'codex' }, pane: { id: '%fixture' }, data: { thread: 'fixture' },
-  ownAnswer: false, squash: text => text, matches: () => 0, messages: [], lastFailure: { current: null },
+  ownAnswer: false, squash: text => text, codexSendEvidence: () => undefined, matches: () => 0, messages: [], lastFailure: { current: null },
   write: async (path, body) => { retryContext.submission = { path, body }; return false },
 }
 runInNewContext(ts.transpileModule(send + '\nglobalThis.send = send', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, retryContext)

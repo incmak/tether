@@ -8,9 +8,14 @@ type Shot = { name: string; url: string }
 const UPLOAD = /(^|\s)(\S*\/mobile-tmux\/uploads\/[A-Za-z0-9._-]+\.(?:png|jpe?g|gif|webp))(?=\s|$)/gi
 
 export function imagesOnly(text: string): boolean {
-  let found = false
-  const rest = text.replace(UPLOAD, () => { found = true; return '' })
-  return found && !rest.trim()
+  const { paths, rest } = uploadImageParts(text)
+  return paths.length > 0 && !rest
+}
+
+export function uploadImageParts(text: string) {
+  const paths: string[] = []
+  const rest = text.replace(UPLOAD, (_, before: string, path: string) => { paths.push(path); return before })
+  return { paths, rest: rest.trim() }
 }
 
 export function sentContent(text: string, session: string, images = 0, imageKey?: string): { shots: Shot[]; rest: string } {
