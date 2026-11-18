@@ -2144,6 +2144,79 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe(elapsed=10)
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
         self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+        # Review round 5, finding 1: the approval did reach the tab; the request must not say it was not forwarded.
+        self.assertIn(f'Your approval of {self.HASH[:12]} reached the tab after it had moved to another commit, so it '
+                      'does not count for the current work. Its last reply:', self.send.call_args.args[1])
+        self.assertNotIn('was not forwarded', self.send.call_args.args[1])
+        self.assertNotIn('stale_delivered', self.links()[0])
+
+    def test_unbound_approval_that_names_a_commit_needs_a_readable_commit(self):
+        # Review round 5, finding 2: the request was not bound and git cannot read HEAD at the reply.
+        self.scope = lambda entry: None
+        self.commit = Mock(return_value=None)
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        for _ in range(review_links.VERIFY_TICKS):
+            self.observe()
+        self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))  # never the worker
+        self.assertIn(f'Your approval of {self.HASH[:12]} was not forwarded', self.send.call_args.args[1])
+        self.add()
+        self.send.reset_mock()
+        self.request_review()
+        self.finish_review('APPROVED')  # names no commit: forwarded as before
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+
+    def test_tree_that_became_dirty_during_the_review_gives_no_proof(self):
+        # Review round 5, finding 3: clean at the request, edited during the review, HEAD in place.
+        self.bind()
+        self.request_review()
+        self.scope = lambda entry: {'commit': self.HASH, 'dirty': True, 'folder': '/work/my tree', 'rules': True}
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertNotIn('approved_commit', self.links()[0])
+        for unknown in (lambda entry: None, lambda entry: {'commit': self.HASH}, Mock(side_effect=OSError('git'))):
+            with self.subTest(scope=unknown):
+                self.add()
+                self.bind()
+                self.request_review()
+                self.scope = unknown  # a status that cannot be read is not clean
+                self.finish_review(f'APPROVED {self.HASH[:12]}')
+                self.assertNotIn('approved_commit', self.links()[0])
+
+    def test_one_failed_read_does_not_lose_the_confirmation_of_the_commit(self):
+        # Review round 5, finding 4.
+        for short_turn in (False, True):
+            with self.subTest(short_turn=short_turn):
+                self.add()
+                self.bind(dirty=True)
+                self.request_review()
+                self.finish_review(f'APPROVED {self.HASH[:12]}')
+                count = self.send.call_count
+                self.bind(self.NEXT)
+                working, fails = self.scope, [True]
+                self.scope = lambda entry: None if fails and fails.pop() else working(entry)
+                if short_turn:
+                    self.reply.return_value = 'Committed.'
+                    self.observe()
+                else:
+                    self.request_review()
+                self.assertEqual(self.send.call_count, count)  # the first read failed
+                self.assertEqual(self.links()[0]['approved_dirty'], self.HASH)
+                self.observe()
+                self.observe()
+                self.assertEqual(self.send.call_count, count + 1)
+                self.assertIn(f'You approved this work as commit {self.HASH[:12]} plus', self.send.call_args.args[1])
+
+    def test_link_removed_during_the_scope_read_sends_no_request(self):
+        # Review round 5, finding 5.
+        def scope(entry):
+            review_links.remove('%13', '%12')
+            return {'commit': self.HASH, 'dirty': False, 'folder': '/work', 'rules': False}
+        self.scope = scope
+        self.request_review()
+        self.observe()
+        self.send.assert_not_called()
+        self.assertEqual(self.links(), [])
 
     def test_work_approved_while_uncommitted_is_reviewed_again_when_the_tab_commits_it(self):
         # Agents usually commit after the approval. That commit has no approval, so auto-merge finds nothing.
@@ -2184,8 +2257,12 @@ class ReviewLinksTests(unittest.TestCase):
                 elif after:
                     self.bind(self.NEXT, dirty=True)  # committed a part, more changes are open
                 self.request_review()  # the follow-up turn
+                if 'commit' in after:
+                    for _ in range(review_links.VERIFY_TICKS):  # git stays unreadable: Tether stops asking
+                        self.observe()
                 self.assertEqual(self.send.call_count, count)
                 self.assertNotIn('approved_dirty', self.links()[0])
+                self.assertNotIn('confirm_ticks', self.links()[0])
                 if 'commit' in after:
                     self.bind(dirty=True)  # git answers again
                 self.request_review()  # the turn after it is reviewed as usual

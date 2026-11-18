@@ -200,13 +200,21 @@ def request_pattern(request_id):
 
 def _committed_since_approval(link, worker, scope):
     """The last approval covered uncommitted work, and the tab has committed it since (a new commit, a clean tree).
-    That commit has no approval yet, so the turn that made it is reviewed."""
-    approved = link.pop('approved_dirty', None)
+    That commit has no approval yet, so the turn that made it is reviewed. True, False, or None: not readable yet."""
+    approved = link.get('approved_dirty')
     if not isinstance(approved, str):
+        link.pop('approved_dirty', None)
         return False
     target = _call(scope, worker)
-    if not isinstance(target, dict) or not isinstance(target.get('commit'), str) \
-            or target['commit'] == approved or target.get('dirty', True):
+    if not isinstance(target, dict) or not isinstance(target.get('commit'), str):
+        # Not readable now. One failed read must not lose the confirmation: None = ask again on the next tick.
+        link['confirm_ticks'] = link.get('confirm_ticks', 0) + 1
+        if link['confirm_ticks'] < VERIFY_TICKS:
+            return None
+        target = None
+    link.pop('approved_dirty', None)
+    link.pop('confirm_ticks', None)
+    if target is None or target['commit'] == approved or target.get('dirty', True):
         return False
     link['confirm_commit'] = approved
     return True
@@ -388,7 +396,9 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                         return link
                 current = current if isinstance(current, str) else None
                 misnamed = bool(bound) and not (named and bound.startswith(named))
-                if bound and not misnamed and current is None and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
+                # A named commit that cannot be compared is not verified, also when the request was not bound.
+                unverified = current is None and (bool(bound) and not misnamed or not bound and bool(named))
+                if unverified and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
                     # The worker's commit is unreadable now (a slow git, a folder that moved). Ask again next tick.
                     link['verify_ticks'] = link.get('verify_ticks', 0) + 1
                     return link
@@ -396,7 +406,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 stale = None
                 if bound and (current != bound or misnamed):
                     stale = (named or '') if misnamed else bound
-                elif not bound and named and current and not current.startswith(named):
+                elif not bound and named and not (current and current.startswith(named)):
                     stale = named  # no binding (no readable commit at the request), but the reply names a commit
                 if stale is not None:
                     # Not an approval of the current work and not a finding either: ask for a review of the current
@@ -420,16 +430,19 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                         # The commit moved between the read above and the delivery. The tab has the approval text
                         # (it names the commit), but its current work is not reviewed: ask for a review of it.
                         link['stale_commit'] = bound
+                        link['stale_delivered'] = True
                         link['stale_rounds'] = link.get('stale_rounds', 0) + 1
                         link['seen_working'] = True
                         link['awaiting'] = False
                     else:
                         for key in (*COUNTS, 'paused', 'unreadable', 'stale_commit', 'approved_commit', 'approved_at',
-                                    'approved_dirty', 'confirm_commit'):
+                                    'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
-                        if bound and link.get('review_clean') and anchored:
+                        # The tree must also be clean now: it can change during the review with HEAD in place.
+                        now = _call(scope, worker) if bound and link.get('review_clean') and anchored else None
+                        if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
                         if uncommitted:
@@ -472,16 +485,23 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             link['seen_working'] = True
     elif state == 'Idle' and link.get('approved_turn') and not link['seen_working']:
         if _digest(last_reply(worker)) != link.get('approved_before'):
+            committed = _committed_since_approval(link, worker, scope)
+            if committed is None:
+                return link
             link.pop('approved_turn', None)
             link.pop('approved_before', None)
-            if _committed_since_approval(link, worker, scope):
+            if committed:
                 link['seen_working'] = True  # the next tick asks for a review of the new commit
     elif link['seen_working'] and state == 'Idle':
-        if link.pop('approved_turn', False):
-            link.pop('approved_before', None)
+        if link.get('approved_turn', False):
             # The turn that follows an approval is not reviewed, unless it committed work that was approved while
             # it was uncommitted.
-            if not _committed_since_approval(link, worker, scope):
+            committed = _committed_since_approval(link, worker, scope)
+            if committed is None:
+                return link
+            link.pop('approved_turn', None)
+            link.pop('approved_before', None)
+            if not committed:
                 link['seen_working'] = False
                 return link
         if link.get('paused', False) or _at_round_limit(link):
@@ -512,6 +532,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 return link
             stale = link.get('stale_commit')
             binding = '' if not isinstance(stale, str) else (
+                f'Your approval of {stale[:12]} reached the tab after it had moved to another commit, so it does not '
+                'count for the current work. ' if stale and link.get('stale_delivered') else
                 f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
                 else 'Your approval was not forwarded: it did not name the commit right after APPROVED. ')
             if target is not None:
@@ -532,6 +554,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                     f"Its last reply:\n\n{last_reply(worker)[:1500]}\n\nTranscript: {worker.get('transcript', '')}")
             before = _digest(last_reply(reviewer))
             mark = work_mark(worker) if work_mark is not None else None
+            if not _linked(link):
+                return link  # stopped or replaced during the reads above: no request for a link that is gone
             try:
                 send(reviewer, text, reviewer_state)
                 _last_sent[link['reviewer']] = time.monotonic()
@@ -544,6 +568,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             link.pop('send_reply', None)
             link['request_id'] = request_id
             link.pop('stale_commit', None)
+            link.pop('stale_delivered', None)
             link.pop('confirm_commit', None)
             link.pop('scope_ticks', None)
             if target is not None:
