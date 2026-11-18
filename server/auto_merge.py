@@ -60,6 +60,7 @@ NET_TIMEOUT = 45
 HISTORY = 3000           # commits of the main branch the ladder reads
 LOG_KEEP = 2000          # decision records kept
 SHOWN = 30               # decision records the Settings page gets
+APPROVAL_HOURS = 24      # an older approval no longer merges: the branch needs a new review
 
 # The trust ladder. A rung is the most changed lines (added + deleted) one merge may have in an area. The top rung
 # stays at the size where the reviewer rules call a change critical (about 300 lines).
@@ -704,14 +705,22 @@ def process(job, alert=None):
     if decision['outcome'] == 'already':
         return None
     decision.update(mode=setting['mode'], worker=job.get('worker'), name=job.get('name'), reviewer=job.get('reviewer'))
+    # A folder that git could not read has no repository and no head: the log then names the folder and the approval.
+    decision.setdefault('root', decision.pop('folder'))
+    decision.setdefault('head', job.get('commit'))
     decision.pop('folder', None)
+    at = job.get('approved_at')
+    timed = isinstance(at, (int, float)) and not isinstance(at, bool)
     if plan is None:
         decision['outcome'] = 'wait'
     elif setting['mode'] != 'enforce':
         decision['outcome'] = 'would_merge'
-    elif not isinstance(job.get('approved_at'), (int, float)) or job['approved_at'] < setting['since']:
+    elif not timed or at < setting['since']:
         decision['outcome'] = 'would_merge'
         decision['note'] = 'The approval is older than enforce mode. Only a new approval can merge.'
+    elif time.time() - at > APPROVAL_HOURS * 3600:
+        decision['outcome'] = 'would_merge'
+        decision['note'] = f'The approval is older than {APPROVAL_HOURS} hours. Only a new approval can merge.'
     else:
         with _merge_lock:
             try:

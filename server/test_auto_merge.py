@@ -82,7 +82,8 @@ class Base(unittest.TestCase):
     def failed(self, decision):
         return [item['key'] for item in decision['checks'] if not item['ok']]
 
-    def job(self, head, at=2 ** 40):
+    def job(self, head, at='now'):
+        at = int(auto_merge.time.time()) + 5 if at == 'now' else at
         return {'folder': str(self.work), 'commit': head, 'approved_at': at,
                 'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex'}
 
@@ -335,9 +336,29 @@ class Modes(Base):
         decision = auto_merge.process(self.job(head, at=since - 10))
         self.assertEqual(decision['outcome'], 'would_merge')
         self.assertIn('older than enforce', decision['note'])
-        for bad in (None, 'now'):
+        for bad in (None, 'soon', True):
             self.assertEqual(auto_merge.process(self.job(head, at=bad))['outcome'], 'would_merge')
         self.assertEqual(self.origin_main(), before)
+
+    def test_an_approval_older_than_a_day_does_not_merge(self):
+        head = self.change()
+        auto_merge.mode_path().parent.mkdir(parents=True, exist_ok=True)
+        auto_merge.mode_path().write_text(json.dumps({'mode': 'enforce', 'since': 1}))
+        before = self.origin_main()
+        old = int(auto_merge.time.time()) - auto_merge.APPROVAL_HOURS * 3600 - 60
+        decision = auto_merge.process(self.job(head, at=old))
+        self.assertEqual(decision['outcome'], 'would_merge')
+        self.assertIn('24 hours', decision['note'])
+        self.assertEqual(self.origin_main(), before)
+        self.assertEqual(auto_merge.process(self.job(head, at=old + 3600))['outcome'], 'merged')
+
+    def test_a_folder_git_cannot_read_is_logged_by_folder_and_approval(self):
+        decision = auto_merge.process({**self.job('a' * 40), 'folder': str(self.root)})
+        self.assertEqual((decision['outcome'], decision['root'], decision['head']), ('wait', str(self.root), 'a' * 40))
+        other = self.root / 'elsewhere'
+        other.mkdir()
+        auto_merge.process({**self.job('a' * 40), 'folder': str(other)})
+        self.assertEqual(len(auto_merge.records()), 2)
 
     def test_a_refused_push_is_a_failure_and_nothing_is_forced(self):
         self.enforce()

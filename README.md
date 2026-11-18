@@ -254,6 +254,7 @@ If one check fails, or Tether cannot tell, the branch waits for you.
 
 In Enforce, Tether makes one merge commit and pushes it with a normal push. It never forces a push and never changes a
 working tree. `git revert -m 1 <merge>` undoes a merge. A merge is not a deploy.
+It merges only approvals that arrive after you turned Enforce on, and none older than 24 hours.
 
 `docs/auto-merge.json` names the areas. Tether reads it from the main branch, never from the worker branch:
 
