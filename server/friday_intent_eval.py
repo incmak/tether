@@ -28,7 +28,7 @@ CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
 
 
-ASK = r"(?i)\b(?:shall|should|do you want|would you like|want me to|ok(?:ay)? to|can I)\b[^?]*\bsend\b[^?]*\bto (?:the )?"
+ASK = r"(?:^|[.!?]\s+|[\"'])(?:Shall|Should|Can|May) I send [^?]*?\bto (?:the )?"
 STRAY = re.compile('[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]')  # CJK or full-width text in an English voice reply.
 
 
@@ -42,8 +42,8 @@ def signed(messages):
 
 
 def _asks_send_to(reply, chat):
-    """True when one question proposes sending to chat: ask word, then send, then 'to <chat>', then '?'."""
-    return bool(re.search(ASK + re.escape(chat) + r'(?![\w-])(?![^?]*\binstead\b)[^?]*\?', reply))
+    """True when a question in the canonical form "Shall I send <task> to <chat>?" names chat as its one target."""
+    return bool(re.search(ASK + re.escape(chat) + r'(?: chat)?(?: now)?\?', reply))
 
 
 def _score(trace, expect, expected_tools):

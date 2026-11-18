@@ -122,7 +122,9 @@ class IntentEvalTests(unittest.TestCase):
                       "I won't send anything to api-server.", 'I can send that to api-server.',
                       "I won't send anything to api-server. Do you want a summary?",
                       'Should I send it to docs-site instead of api-server?',
-                      'Should I send it to api-server-old?'):
+                      'Should I send it to api-server-old?', 'Should I not send it to api-server?',
+                      'Shall I send this to api-server or docs-site?',
+                      'I can send that to api-server. Is that your chat?'):
             with self.subTest(reply=reply):
                 self.assertEqual(self.run_script(example, assistant(reply))[0]['fails'], {'readback': 1})
         self.assertEqual(self.run_script(example, assistant('Shall I send the fix to api-server?'))[0]['passed'], 1)
