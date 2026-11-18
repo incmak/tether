@@ -89,3 +89,15 @@ same(lone[0].tools.map(item => item.id), ['t1'], 'a lone null tool drops out')
 same(lone[0].members.map(item => item.id), ['r1'], 'a lone null member drops out')
 same([...preview.artifactsOf(lone).keys()], [artifact.url])
 console.log('A lone null or a hole drops out of messages, tools and members')
+
+const advisor = { id: 'a', role: 'assistant', kind: 'advisor', text: 'Asked the advisor', advisor: { id: 'call', status: 'pending' } }
+const advisorMessages = [reply, advisor]
+assert.equal(chatMessages({ messages: advisorMessages }), advisorMessages)
+assert.equal(lastReply({ messages: advisorMessages }), reply, 'an advisor call is not a reply')
+for (const invalid of [null, [], { id: 'call', status: 'unsupported' }]) {
+  const [item] = chatMessages({ messages: [{ ...advisor, advisor: invalid }] })
+  assert.equal(item.advisor, undefined, 'a malformed advisor falls back to its notice text')
+}
+const [badAdvisorFields] = chatMessages({ messages: [{ ...advisor, advisor: { ...advisor.advisor, model: {}, ended: null } }] })
+same(badAdvisorFields.advisor, advisor.advisor)
+console.log('Advisor metadata keeps its identity when valid and drops malformed fields')

@@ -14,7 +14,7 @@ import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
 import { ApiError, canFork, chatMessages, cleanChat, creditsLabel, cronsLabel, cronSummary, errorText, goalStatusLabel } from './api'
-import type { Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
+import type { AdvisorCall, Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
 import { usePolling } from './hooks'
 import { useBackStep } from './backNav'
 import type { Anchor } from './hooks'
@@ -113,12 +113,13 @@ function turnEndsOf(messages: ChatMessage[], working: boolean) {
   }
   return ends
 }
-// The tool group the agent is still adding to: the newest one in a running turn. A notice after it does not end it.
-function liveGroupOf(messages: ChatMessage[], working: boolean) {
+// A tool group or advisor call is live while it is the newest work in a running turn. Skip notices.
+function liveWorkOf(messages: ChatMessage[], working: boolean) {
   if (!working) return null
   for (let at = messages.length - 1; at >= 0; at--) {
-    if (messages[at].kind === 'notice') continue
-    return messages[at].kind === 'actions' ? messages[at].id : null
+    const { kind, id } = messages[at]
+    if (kind === 'notice') continue
+    return kind === 'actions' || kind === 'advisor' ? id : null
   }
   return null
 }
@@ -150,6 +151,7 @@ function saveDock(id: string, page: HTMLElement | null) {
 const ChatPeek = memo(function ChatPeek({ id, data, api, side, peekRef }: { id: string; data: ChatData | undefined; api: Api; side: 1 | -1; peekRef: React.RefObject<HTMLDivElement | null> }) {
   const messages = useMemo(() => chatMessages(data), [data])
   const ends = useMemo(() => turnEndsOf(messages, data?.state === 'Working'), [messages, data?.state])
+  const liveWork = useMemo(() => liveWorkOf(messages, data?.state === 'Working'), [messages, data?.state])
   const folded = useMemo(() => foldWatchCycles(messages), [messages])
   const runtime = useExternalStoreRuntime({ messages: folded, convertMessage, isRunning: data?.state === 'Working', onNew: async () => {} })
   // Messages render a moment after the data; keep the place the real chat will open at while the content grows.
@@ -167,7 +169,7 @@ const ChatPeek = memo(function ChatPeek({ id, data, api, side, peekRef }: { id: 
     return () => observer.disconnect()
   }, [id, messages])
   return <div className="chat-peek" ref={peekRef} aria-hidden="true" inert style={{ transform: `translateX(${side * 100}%)` }}><div className="thread"><div className="chat-scroll" ref={scroller}><div className="messages">
-    <AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={id} actions={ends.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages></AssistantRuntimeProvider>
+    <AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={id} actions={ends.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} live={message.metadata.custom.kind === 'advisor' && message.id === liveWork} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages></AssistantRuntimeProvider>
   </div></div></div><div className="chat-peek-dock" ref={dock} /></div>
 })
 // Where each pane was scrolled, so switching panes and coming back lands at the same place.
@@ -1132,7 +1134,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   }
   // Copy, read aloud and share belong to a finished reply: only the last text of each turn gets them, and not while the agent still works.
   const turnEnds = useMemo(() => turnEndsOf(messages, state === 'Working'), [messages, state])
-  const liveGroup = useMemo(() => liveGroupOf(messages, state === 'Working'), [messages, state])
+  const liveWork = useMemo(() => liveWorkOf(messages, state === 'Working'), [messages, state])
   const folded = useMemo(() => foldWatchCycles(messages), [messages])
   const runtime = useExternalStoreRuntime({ messages: folded, convertMessage, isRunning: state === 'Working', onNew: async message => { await send(message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')) } })
   // When this phone first saw the pane working. Claude prints its own timer in the spinner detail.
@@ -1218,7 +1220,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
           <button type="button" onClick={() => startWith('/')}><Blocks size={16} />Commands & skills</button>
         </div>}</div>}
 
-      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} live={message.id === liveGroup} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
+      {activePane.agent === 'shell' ? <ShellOutput key={activePane.id} folder={activePane.dir} text={messages.map(message => message.text).join('\n')} /> : <ThreadPrimitive.Messages>{({ message }) => <Message api={api} session={activePane.id} live={message.id === liveWork} runningShown={!!footer.running} actions={turnEnds.has(message.id)} tools={message.metadata.custom.tools as ToolSummary[] | undefined} advisor={message.metadata.custom.advisor as AdvisorCall | undefined} id={message.id} role={message.role} kind={message.metadata.custom.kind} title={message.metadata.custom.title ? String(message.metadata.custom.title) : undefined} count={message.metadata.custom.count} text={String(message.metadata.custom.text ?? '')} time={String(message.metadata.custom.time ?? '')} images={message.metadata.custom.images as number | undefined} imageKey={message.metadata.custom.imageKey as string | undefined} watch={message.metadata.custom.watch as WatchRun | undefined} />}</ThreadPrimitive.Messages>}
       {bang && <><div className="user-message"><span>{bangItem?.text ?? `!${bang.command}`}</span></div>
         <div className="assistant-message bang-run" role="status"><small><Terminal size={12} />Running{bang.seconds != null ? ` · ${bang.seconds}s` : ''}<button type="button" className="bang-stop" aria-label="Stop this command" disabled={!writable || acting} onClick={() => void sendKey('C-c')}><X size={13} />Stop</button></small><pre>{bang.output ? <Linked text={bang.output} /> : 'No output yet'}</pre></div></>}
       {state === 'Working' && preview && <div className="assistant-message reply-preview"><small>typing</small><div>{preview}</div></div>}

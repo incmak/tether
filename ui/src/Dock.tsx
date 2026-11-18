@@ -325,7 +325,7 @@ export function SearchSheet({ api, pane, shell, onClose, onPick }: { api: Api; p
     {result && <p className="search-count" role="status">{result.total === 0 ? 'No messages found.' : `${result.total} ${result.total === 1 ? 'message' : 'messages'}${result.total > result.matches.length ? `, newest ${result.matches.length} shown` : ''}`}</p>}
     {result && !!result.matches.length && <ul className="search-results">{result.matches.map(match => <li key={match.id}>
       <button type="button" disabled={match.from_end > result.max_limit} onClick={() => onPick(match, result.max_limit)}>
-        <small>{match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
+        <small>{match.kind === 'advisor' ? 'Advisor' : match.kind === 'actions' ? 'Tools' : match.role === 'user' ? 'You' : 'Agent'}{match.time ? ` · ${since(Date.parse(match.time) / 1000)}` : ''}{match.from_end > result.max_limit ? ' · too far back to open' : ''}</small>
         <span>{marked(match.snippet)}</span>
       </button></li>)}</ul>}
   </dialog>

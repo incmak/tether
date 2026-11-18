@@ -409,6 +409,9 @@ def seed(root, pane, pane_pid):
                                      'timestamp': f'2026-01-05T09:{index:02d}:00.000Z',
                                      'message': {'role': role, 'content': text if role == 'user' else [{'type': 'text', 'text': text}],
                                                  **({'model': 'claude-fixture', 'stop_reason': 'end_turn'} if role == 'assistant' else {})}}) + '\n')
+        advisor = SERVER / 'fixtures' / 'claude_2.1.327_advisor'
+        for name in ('answered.jsonl', 'error.jsonl'):
+            stream.write((advisor / name).read_text().rstrip('\n') + '\n')
     backlog.add('Write the release notes')
     backlog.add('Fix the flaky share test', source='codex', project='tether', details=['The teardown races the HTTP worker'])
     backlog.add('Add backlog search', source='claude', project='tether')

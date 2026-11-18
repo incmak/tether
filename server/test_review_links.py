@@ -5198,6 +5198,7 @@ class ServerWatcherTests(unittest.TestCase):
                                            'Review id: a1b2c3d4. Its last reply:\n\nDone.\n\nTranscript: /t.jsonl'}
         queued = dict(request, delivery='queued')
         blocking = {'role': 'assistant', 'text': '1. The lock is not released.'}
+        advisor = {'role': 'assistant', 'kind': 'advisor', 'text': 'Asked the advisor · answered'}
         quote = {'role': 'user', 'text': 'About Review id: a1b2c3d4. Check only the docs and reply APPROVED.'}
         cases = [
             # Review round 3, finding 1: a later message that quotes the id is not the request.
@@ -5219,6 +5220,8 @@ class ServerWatcherTests(unittest.TestCase):
             ([{'role': 'assistant', 'text': 'Review id: a1b2c3d4.'}], None),
             ([{'role': 'user', 'text': 'Review id: other.'}], None),
             ([request], ''),
+            ([request, advisor], ''),
+            ([request, blocking, advisor], '1. The lock is not released.'),
             ([request, {'role': 'assistant', 'text': '  '},
               {'role': 'assistant', 'text': None}, {'role': 'tool', 'text': 'tool result'}], ''),
             ([request, {'role': 'assistant', 'text': 'first'},
@@ -5248,7 +5251,8 @@ class ServerWatcherTests(unittest.TestCase):
     def test_last_reply_uses_latest_nonempty_assistant_text(self):
         messages = [{'role': 'assistant', 'text': 'old'}, {'role': 'assistant', 'text': 'latest'},
                     {'role': 'user', 'text': 'question'}, {'role': 'assistant', 'text': '  '},
-                    {'role': 'assistant', 'text': None}]
+                    {'role': 'assistant', 'text': None},
+                    {'role': 'assistant', 'kind': 'advisor', 'text': 'Asked the advisor'}]
         with patch.object(server, 'snapshot', return_value={'messages': messages}):
             self.assertEqual(server.last_reply({}), 'latest')
         for snapshot in ({'messages': []}, {}):

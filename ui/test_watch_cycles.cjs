@@ -125,4 +125,15 @@ assert.equal(mixed[1].schedule, true)
 // A watch cycle still accepts only Monitor re-arms.
 assert.equal(foldWatchCycles([quiet('q'), work('w')]).length, 2)
 
+const advisor = { id: 'advisor', role: 'assistant', kind: 'advisor', text: 'Asked the advisor', time: 'advisor',
+  advisor: { id: 'call', status: 'answered' } }
+const scheduledAdvisor = foldWatchCycles([fire('s1'), advisor, reply('a', 'Finished.')])[0]
+assert.equal(scheduledAdvisor.members[1], advisor, 'a scheduled run keeps its answered call as a member')
+assert.equal(scheduledAdvisor.result, 'Finished.', 'the call is not the scheduled reply')
+assert.equal(foldWatchCycles([quiet('q'), advisor])[1], advisor, 'the call stays visible outside a quiet watch')
+for (const status of ['error', 'pending', 'unknown']) {
+  const incomplete = { ...advisor, advisor: { id: 'call', status } }
+  assert.equal(foldWatchCycles([fire('s1'), incomplete])[1], incomplete, 'a call without an answer stays visible')
+}
+
 console.log('watch cycles: quiet runs and scheduled runs fold; boundaries, labels, identity, and input purity pass')
