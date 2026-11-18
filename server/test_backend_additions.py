@@ -176,7 +176,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(self.request('/mobile/api/split', {
                 'session': '%12', 'direction': 'right', 'cwd': '~/projects/project',
             }), (201, {'pane': '%13'}))
-        new_window.assert_called_once_with('%12', self.run, cwd=str(self.project.resolve()), group=None)
+        new_window.assert_called_once_with('%12', self.run, cwd=str(self.project.resolve()), group=None, by_user=True)
 
     def test_tmux_session_passes_explicit_cwd(self):
         with patch.object(server, 'create_session', return_value='%13') as create:
@@ -223,6 +223,7 @@ class BackendTests(unittest.TestCase):
                 [paths.TMUX, 'display-message', '-p', '-t', '%12', '#{window_id}\t#{pane_current_path}\t#{@group}'],
                 [paths.TMUX, 'display-message', '-p', '-t', '@7', '#{window-size}\t#{window_width}\t#{window_height}'],
                 [paths.TMUX, 'new-window', '-a', '-t', '@7', '-c', '/a folder', '-P', '-F', '#{pane_id}'],
+                [paths.TMUX, 'set-option', '-p', '-t', '%13', '@group_by', 'user'],
                 [paths.TMUX, 'resize-window', '-t', '%13', '-x', '160', '-y', '48'],
             ])
         self.verify.assert_not_called()

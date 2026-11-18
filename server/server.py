@@ -2923,7 +2923,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(exc.status, {'error': str(exc)})
                         return
                 with SEND_LOCK:
-                    new_pane = new_window_after(pane, subprocess.run, group=group,
+                    new_pane = new_window_after(pane, subprocess.run, group=group, by_user=True,
                                                 **({'cwd': cwd} if cwd is not None else {}))
                 self.respond(201, {'pane': new_pane})
                 return

@@ -95,7 +95,7 @@ def fork_name(entry, entries):
 def new_window_after(pane, run=subprocess.run, *, cwd=None, group=None, by_user=False):
     """Open after the source window, preserving its directory and manual size. The new pane joins the source pane's
     group (@group, groups.py), unless group is given: "" puts it in Unstacked, a group id in that group.
-    by_user marks the placement before the caller sends a launch command."""
+    by_user marks the placement before launch and tries to remove the new pane if marking fails."""
     source = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{window_id}\t#{pane_current_path}\t#{@group}'],
                  capture_output=True, text=True, timeout=5)
     fields = source.stdout.rstrip('\n').split('\t', 1)
@@ -128,9 +128,17 @@ def new_window_after(pane, run=subprocess.run, *, cwd=None, group=None, by_user=
             options.append(';')
         options.extend([*set_option, groups.BY, 'user'])
     if options:  # before any launch command is sent
-        placed = run([paths.TMUX, *options], capture_output=True, text=True, timeout=5)
-        if by_user and placed.returncode:
-            raise RuntimeError(placed.stderr.strip() or 'Could not mark the new tab as user-placed.')
+        try:
+            placed = run([paths.TMUX, *options], capture_output=True, text=True, timeout=5)
+            if by_user and placed.returncode:
+                raise RuntimeError(placed.stderr.strip() or 'Could not mark the new tab as user-placed.')
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            if by_user:
+                try:
+                    run([paths.TMUX, 'kill-pane', '-t', new_pane], capture_output=True, text=True, timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass  # Report the marking failure even if cleanup also fails.
+            raise
     if dimensions[0] == 'manual':
         run([paths.TMUX, 'resize-window', '-t', new_pane, '-x', dimensions[1], '-y', dimensions[2]],
             check=True, capture_output=True, text=True, timeout=5)

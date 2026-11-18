@@ -1003,17 +1003,18 @@ class CliAndServerTests(unittest.TestCase):
         self.assertTrue(groups_api.WRITES <= server.TMUX_WRITES)
         self.assertIn('/mobile/api/groups/move', server.TMUX_WRITES)
 
-    def test_split_checks_the_group_and_passes_it_on(self):
+    def test_split_checks_the_group_and_marks_each_placement_as_user_placed(self):
         with mock.patch.object(server, 'choose'), \
                 mock.patch.object(server, 'new_window_after', return_value='%9') as opened, \
                 mock.patch.object(server.groups, 'find_in_session_of', side_effect=[{}, groups.GroupError(404, groups.GONE_GROUP)]):
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': 'gaaaaaaaa'}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': 'gaaaaaaaa'})
+            opened.assert_called_once_with('%1', server.subprocess.run, group='gaaaaaaaa', by_user=True)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': 'gbbbbbbbb'})[0], 404)
+            self.assertEqual(opened.call_count, 1)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right', 'group': ''}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': ''})
+            opened.assert_called_with('%1', server.subprocess.run, group='', by_user=True)
             self.assertEqual(self.request('/mobile/api/split', {'session': '%1', 'direction': 'right'}), (201, {'pane': '%9'}))
-            self.assertEqual(opened.call_args.kwargs, {'group': None})
+            opened.assert_called_with('%1', server.subprocess.run, group=None, by_user=True)
 
     def test_sessions_response_has_groups_and_the_pane_group(self):
         found = {'$1': [{'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''}]}

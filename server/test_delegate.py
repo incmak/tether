@@ -510,13 +510,35 @@ class LaunchTests(unittest.TestCase):
                 self.assertGreater(first_send, 3)
                 self.assertFalse(any('@tether_helper' in args for args in calls))
 
-    def test_failed_user_placement_blocks_launch(self):
+    def test_failed_user_placement_removes_the_new_pane_without_launching(self):
         for group in ('g0123abcd', ''):
             with self.subTest(group=group):
                 run = self.placement_run('', mark_status=1)
                 with self.assertRaisesRegex(RuntimeError, 'could not mark placement'):
                     delegate.start(entry(), body(), '/project', run=run, group=group, by_user=True)
-                self.assertFalse(any('send-keys' in call.args[0] for call in run.call_args_list))
+                calls = [call.args[0][1:] for call in run.call_args_list]
+                self.assertEqual(calls[-1], ['kill-pane', '-t', '%13'])
+                self.assertFalse(any(args[0] == 'send-keys' for args in calls))
+
+    def test_marking_timeout_preserves_the_error_if_cleanup_times_out(self):
+        run = self.placement_run('')
+        result = run.side_effect
+        mark_error = subprocess.TimeoutExpired('set-option', 5)
+
+        def time_out(argv, **kwargs):
+            if '@group_by' in argv:
+                raise mark_error
+            if argv[1] == 'kill-pane':
+                raise subprocess.TimeoutExpired('kill-pane', 5)
+            return result(argv, **kwargs)
+
+        run.side_effect = time_out
+        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            delegate.start(entry(), body(), '/project', run=run, by_user=True)
+        self.assertIs(caught.exception, mark_error)
+        calls = [call.args[0][1:] for call in run.call_args_list]
+        self.assertEqual(calls[-1], ['kill-pane', '-t', '%13'])
+        self.assertFalse(any(args[0] == 'send-keys' for args in calls))
 
     def placement_run(self, source_group, mark_status=0):
         def result(argv, **kwargs):
