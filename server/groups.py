@@ -8,7 +8,8 @@ out, and dissolves it when only its main session ("root") is left: the root goes
 never renames or removes a user stack. A stack with neither key was made before makers were recorded (2026-11-15);
 Tether leaves it alone too.
 The pane option @group holds a group id. A pane with no @group, or with an id that is not in @groups, is in Unstacked.
-The pane option @group_by is "user" after the user moved the tab by hand (groups_api.py). Auto stacks never move such a tab.
+The pane option @group_by is "user" when the user moves a tab by hand (groups_api.py) or opens it with Delegate or
+Quick create. Auto stacks never move a user-placed tab.
 A group's context is a projects.py bundle, made on first use. Removing a group archives the bundle; nothing is deleted.
 This module is the store and its rules. groups_api.py is the HTTP part."""
 import contextlib
