@@ -113,6 +113,7 @@ class Rules(Base):
                 self.assertIn('"Verified: none (reason)"', autonomy.VERIFIED)
                 self.assertEqual('Needs you: yes' in text, level >= 4)
                 self.assertEqual('Urgent: <the question in one sentence>' in text, level >= 4)
+                self.assertEqual('not urgent' in text, level >= 4)
                 self.assertNotIn('Before you ask the user, read', text)
                 self.assertEqual(text.splitlines()[-1], 'Do not change the level. The user sets it in Tether.')
 

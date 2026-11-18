@@ -111,17 +111,30 @@ function WaitingSheet({ items, sessions, selected, sort, onOpen, onDeck, onClose
   </dialog>
 }
 
-/** Under the last reply of a tab that waits on you. Showing them marks the ask opened. onDone gets the confirmation. */
+/** Under the last reply of a tab that waits on you. A visible, focused page marks the ask opened (it cancels the Teams ping). onDone gets the confirmation. */
 export function AskChips({ api, pane, ask, onDone, onUpdate }: { api: Api; pane: Pane; ask: Ask; onDone: (text: string) => void; onUpdate: () => void }) {
   const now = useNow()
   const [busy, setBusy] = useState(false)
   const marked = useRef('')
   useEffect(() => {
-    const key = `${pane.id} ${pane.thread} ${ask.since}`
-    if (ask.opened || marked.current === key) return
-    marked.current = key
-    askAction(api, pane, 'opened').catch(() => { marked.current = '' })
-  }, [api, pane, ask.opened, ask.since])
+    if (ask.opened) {
+      marked.current = ''
+      return
+    }
+    const key = JSON.stringify([pane.id, pane.thread, ask.since, ask.next, ask.urgent])
+    const markOpened = () => {
+      if (document.visibilityState !== 'visible' || !document.hasFocus() || marked.current === key) return
+      marked.current = key
+      askAction(api, pane, 'opened').catch(() => { if (marked.current === key) marked.current = '' })
+    }
+    document.addEventListener('visibilitychange', markOpened)
+    window.addEventListener('focus', markOpened)
+    markOpened()
+    return () => {
+      document.removeEventListener('visibilitychange', markOpened)
+      window.removeEventListener('focus', markOpened)
+    }
+  }, [api, pane, ask.opened, ask.since, ask.next, ask.urgent])
   const act = async (action: AskAction) => {
     setBusy(true)
     try {

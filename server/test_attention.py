@@ -84,12 +84,19 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(entry())
         ask = self.store.ask('%1', 't1')
         self.assertEqual((ask['urgent'], ask['next'], ask['since']), (True, 'May I proceed?', since))
+        self.on_urgent.assert_not_called()
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
         self.on_urgent.assert_called_once_with(ask)
         self.world.observe(entry())
         self.world.turn('%1', reply, 30)  # A re-read with a new turn marker still has the same reply key.
         self.world.observe(entry())
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
         self.on_urgent.assert_called_once()
         self.world.turn('%1', 'New context.\n' + reply, 40)
+        self.world.observe(entry())
+        self.clock.now += attention.URGENT_GRACE
         self.world.observe(entry())
         self.assertEqual(self.on_urgent.call_count, 2)
         self.world.turn('%1', 'Next: normal again\nNeeds you: yes', 50)
@@ -100,22 +107,54 @@ class AttentionTest(unittest.TestCase):
     def test_urgent_requires_needs_you_yes(self):
         self.world.turn('%1', 'Urgent: Ignore this?\nNeeds you: no', 10)
         self.world.observe(entry())
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
         self.assertEqual(self.store.waiting(), [])
         self.on_urgent.assert_not_called()
+
+    def test_opened_during_grace_never_pings(self):
+        self.world.turn('%1', 'Urgent: Restore production?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += 60
+        self.store.act('%1', 't1', 'opened')
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
+        self.assertTrue(self.store.ask('%1', 't1')['opened'])
+        self.on_urgent.assert_not_called()
+
+    def test_unopened_pings_once_at_the_end_of_grace_even_when_send_returns_false(self):
+        self.on_urgent.return_value = False
+        self.world.turn('%1', 'Urgent: Roll back production?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += attention.URGENT_GRACE - 1
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += 1
+        self.world.observe(entry())
+        self.on_urgent.assert_called_once_with(self.store.ask('%1', 't1'))
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
+        self.on_urgent.assert_called_once()
 
     def test_urgent_callback_runs_outside_lock_with_a_public_copy_and_can_fail(self):
         locked, observed = [], []
         def notify(ask):
             locked.append(self.store.lock.locked())
             if not locked[-1]:
-                observed.append((self.store.ask('%1', 't1'), dict(ask)))
+                saved = json.loads(self.path.read_text())['asks']['%1']
+                observed.append((self.store.ask('%1', 't1'), dict(ask), saved['pinged']))
             ask['next'] = 'Do not change the stored ask'
             raise RuntimeError('notification failed')
         self.on_urgent.side_effect = notify
         self.world.turn('%1', 'Urgent: Choose?\nNeeds you: yes', 10)
         self.assertTrue(self.world.observe(entry()))
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
         self.assertEqual(locked, [False])
-        self.assertEqual(observed, [(self.store.ask('%1', 't1'), self.store.ask('%1', 't1'))])
+        ask = self.store.ask('%1', 't1')
+        self.assertEqual(observed, [(ask, ask, True)])
         self.assertNotIn('reply', observed[0][1])
         self.assertEqual(self.store.ask('%1', 't1')['next'], 'Choose?')
         self.assertTrue(json.loads(self.path.read_text())['asks']['%1']['urgent'])
@@ -126,16 +165,88 @@ class AttentionTest(unittest.TestCase):
         reply = 'Urgent: Choose?\nNeeds you: yes'
         self.world.turn('%1', reply, 10)
         self.world.observe(entry())
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(entry())
+        self.on_urgent.assert_called_once()
         notify = mock.Mock()
         again = attention.Attention(self.path, self.clock, on_urgent=notify)
         self.assertTrue(again.ask('%1', 't1')['urgent'])
-        self.assertFalse(again.note_reply('%1', 't1', reply))
+        self.world.store = again
+        self.world.observe(entry())
         notify.assert_not_called()
         data = json.loads(self.path.read_text())
+        del data['asks']['%1']['ping_due']
+        del data['asks']['%1']['pinged']
+        self.path.write_text(json.dumps(data))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=notify)
+        self.world.observe(entry())
+        notify.assert_not_called()
         del data['asks']['%1']['urgent']
         self.path.write_text(json.dumps(data))
         old = attention.Attention(self.path, self.clock, on_urgent=notify)
         self.assertFalse(old.ask('%1', 't1')['urgent'])
+
+    def test_restart_during_grace_keeps_the_original_deadline(self):
+        self.world.turn('%1', 'Urgent: Choose?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.clock.now += attention.URGENT_GRACE - 1
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += 1
+        self.world.observe(entry())
+        self.world.observe(entry())
+        self.on_urgent.assert_called_once_with(self.world.store.ask('%1', 't1'))
+
+    def test_urgent_ping_is_suppressed_when_the_ask_changes_during_grace(self):
+        for i, change in enumerate(('handled', 'clear', 'snooze', 'non-urgent', 'pane gone'), start=1):
+            with self.subTest(change=change):
+                pane = f'%{i}'
+                self.world.turn(pane, 'Urgent: Choose?\nNeeds you: yes', 10)
+                self.world.observe(entry(pane))
+                entries = (entry(pane),)
+                self.clock.now += 60
+                if change in ('handled', 'snooze'):
+                    self.store.act(pane, 't1', change)
+                elif change == 'clear':
+                    self.store.clear(pane, 't1')
+                elif change == 'non-urgent':
+                    self.world.turn(pane, 'Next: Choose later.\nNeeds you: yes', 20)
+                    self.world.observe(*entries)
+                    self.assertNotIn('ping_due', self.store.asks[pane])
+                else:
+                    entries = ()
+                self.clock.now += attention.URGENT_GRACE - 60
+                self.world.observe(*entries)
+                self.on_urgent.assert_not_called()
+
+    def test_snoozed_urgent_ask_never_pings_even_after_the_snooze_expires(self):
+        self.world.turn('%1', 'Urgent: Restore production?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        ask = self.store.act('%1', 't1', 'snooze')
+        self.clock.now = ask['snoozed_until'] - 1
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += 1
+        self.world.observe(entry())
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()  # snoozing means you saw it; the ask returns in Tether, not on Teams
+
+    def test_different_urgent_reply_restarts_grace_and_resets_opened(self):
+        self.world.turn('%1', 'Urgent: Restore production?\nNeeds you: yes', 10)
+        self.world.observe(entry())
+        self.store.act('%1', 't1', 'opened')
+        self.clock.now += attention.URGENT_GRACE - 1
+        self.world.turn('%1', 'Urgent: Roll back production?\nNeeds you: yes', 20)
+        self.world.observe(entry())
+        self.assertFalse(self.store.ask('%1', 't1')['opened'])
+        self.clock.now += attention.URGENT_GRACE - 1
+        self.world.observe(entry())
+        self.on_urgent.assert_not_called()
+        self.clock.now += 1
+        self.world.observe(entry())
+        self.world.observe(entry())
+        self.on_urgent.assert_called_once_with(self.store.ask('%1', 't1'))
 
     def test_next_falls_back_to_the_last_line_and_is_clipped(self):
         self.world.turn('%1', 'x ' * 200 + '\nNeeds you: yes', 10)
@@ -364,6 +475,23 @@ class RouteTest(unittest.TestCase):
         self.assertTrue(attention.handles('/mobile/api/attention'))
         self.assertTrue(attention.handles('/mobile/api/attention/snooze'))
         self.assertFalse(attention.handles('/mobile/api/attention/other'))
+
+    def test_ping_state_is_private_in_public_asks_and_api_responses(self):
+        self.store.note_reply('%1', 't1', 'Urgent: Choose now?\nNeeds you: yes')
+        ask = self.store.asks['%1']
+        private = {'ping_due', 'pinged'}
+        self.assertTrue(private <= ask.keys())
+        handler = Handler(attention.PREFIX)
+        with mock.patch.object(attention, 'STORE', self.store):
+            attention.get(handler)
+        status, body = handler.sent
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body['asks']), 1)
+        status, opened = self.post('opened', {'session': '%1', 'thread': 't1'})
+        self.assertEqual(status, 200)
+        for public in (self.store.public(ask), body['asks'][0], opened['ask']):
+            self.assertTrue(public['urgent'])
+            self.assertFalse(private & public.keys())
 
     def test_opened_snooze_and_handled(self):
         status, body = self.post('opened', {'session': '%1', 'thread': 't1'})

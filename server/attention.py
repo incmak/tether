@@ -3,6 +3,7 @@
 An ask starts when a turn ends with "Needs you: yes", or when the pane shows an approval, a plan or a question
 (needs.summary). It clears when you send text to the pane, press Handled, the agent's next turn ends with
 "Needs you: no", the prompt leaves the screen, or the pane goes away. Opening the tab only marks it opened.
+Urgent asks get a three-minute grace period before an unopened ask can send a Teams ping.
 The state lives in one JSON file (paths.ATTENTION), written atomically, so asks survive a restart.
 """
 from datetime import datetime
@@ -23,6 +24,7 @@ from notification_priority import status_line
 PREFIX = '/mobile/api/attention'
 ACTIONS = ('handled', 'snooze', 'opened')
 SNOOZE = 24 * 3600
+URGENT_GRACE = 180
 LIMIT = 160
 QUIET = 8  # seconds after you answer a prompt in which the same prompt, still on screen, does not start a new ask
 AGENTS = ('claude', 'codex', 'antigravity')
@@ -193,13 +195,13 @@ class Attention:
         if changed:
             with self.lock:
                 self._save()
+        self.due_pings(now)
         return changed
 
     def note_reply(self, pane, thread, reply, now=None):
         """A finished turn's reply. A reply already read changes nothing, so a restart does not raise it again."""
         now = self.clock() if now is None else now
         key = _digest(reply)
-        notify = None
         with self.lock:
             seen = self.seen.setdefault(pane, {'thread': thread})
             if not reply or seen.get('reply') == key:
@@ -210,21 +212,42 @@ class Attention:
             if status == 'yes':
                 urgent = urgent_text(reply)
                 is_new_urgent = urgent and (not ask or not ask.get('urgent') or ask.get('reply') != key)
-                if ask:
-                    ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, reply=key)
-                else:
+                if not ask:
                     self._start(pane, thread, 'reply', urgent or text, now, key)
-                    self.asks[pane]['urgent'] = bool(urgent)
+                    ask = self.asks[pane]
+                ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, reply=key)
                 if is_new_urgent:
-                    notify = self.public(self.asks[pane])
+                    ask.update(ping_due=now + URGENT_GRACE, pinged=False)
+                elif not urgent:
+                    ask.pop('ping_due', None)
             elif ask and ask['kind'] == 'reply':
                 del self.asks[pane]  # a new turn without "Needs you: yes": you answered it, here or in the terminal
-        if notify is not None:
+        return True
+
+    def due_pings(self, now=None):
+        """Send due urgent pings once, after recording the attempts on disk."""
+        now = self.clock() if now is None else now
+        notifications = []
+        changed = False
+        with self.lock:
+            for ask in self.asks.values():
+                due = ask.get('ping_due')
+                if due is None or due > now or ask.get('pinged'):
+                    continue
+                # Opened (seen in Tether) or snoozed during the grace: you already know, so no ping.
+                snoozed = (ask.get('snoozed_until') or 0) > now
+                sendable = ask.get('urgent') is True and ask.get('opened') is False and not snoozed
+                ask['pinged'] = True
+                changed = True
+                if sendable:
+                    notifications.append(self.public(ask))
+            if changed:
+                self._save()
+        for ask in notifications:
             try:
-                self.on_urgent(dict(notify))
+                self.on_urgent(ask)
             except Exception:  # A notification must never stop observation.
                 pass
-        return True
 
     def clear(self, pane, thread=None, save=True):
         """You answered the pane (any write that submits text to it). Returns True when an ask cleared."""

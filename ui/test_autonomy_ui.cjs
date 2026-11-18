@@ -174,6 +174,42 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false }))
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
+    // Start the chat as a background page without relying on the browser window's focus.
+    await page.addInitScript(() => {
+      if (!new URLSearchParams(location.search).has('hidden-ask')) return
+      let visibility = 'hidden'
+      let focused = false
+      Object.defineProperty(document, 'visibilityState', { get: () => visibility })
+      document.hasFocus = () => focused
+      const fetch = window.fetch.bind(window)
+      window.__openedVisibility = []
+      window.fetch = (url, options) => {
+        if (new URL(url, location.href).pathname.endsWith('/attention/opened')) window.__openedVisibility.push(visibility)
+        return fetch(url, options)
+      }
+      window.__askVisibility = state => {
+        visibility = state
+        document.dispatchEvent(new Event('visibilitychange'))
+      }
+      window.__askFocus = state => {
+        focused = state
+        window.dispatchEvent(new Event('focus'))
+      }
+    })
+    for (const [width, height] of [[320, 640], [1280, 900]]) {
+      await page.setViewportSize({ width, height })
+      await page.goto(`${origin}/chat/?session=%252&hidden-ask=1`)
+      await page.getByRole('group', { name: 'This tab waits on you' }).waitFor({ state: 'attached' })
+      const opened = await page.evaluate(() => {
+        window.__askVisibility('hidden')
+        window.__askVisibility('visible')  // visible without focus: a desk left open, not seen
+        const unfocused = window.__openedVisibility.length
+        window.__askFocus(true)
+        window.__askVisibility('visible')
+        return unfocused === 0 ? window.__openedVisibility : ['opened without focus']
+      })
+      check(`${width}px AskChips posts opened once and only when visible and focused`, JSON.stringify(opened) === '["visible"]', JSON.stringify(opened))
+    }
     for (const [width, height] of sizes) {
       const at = `${width}px`
       autonomy = { ...autonomy, global: 2, level: 2, reviewers: { critical: auto, normal: auto, light: auto }, advisor: advisorDefault() }
