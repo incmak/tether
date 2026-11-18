@@ -2108,6 +2108,33 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe()
         self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
 
+    def test_turn_that_starts_during_the_commit_read_holds_the_approval(self):
+        # Review round 3, finding 2: idle at the first check, working when the commit read returns.
+        self.worker['agent'] = 'claude'
+        self.bind()
+        self.request_review()
+        live = {'state': 'Idle'}
+        def read_commit(entry):
+            live['state'] = 'Working'  # the user sends a prompt while git runs
+            return self.head
+        self.commit = read_commit
+        self.fresh = lambda entry: dict(live)
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.observe()
+        self.assertEqual(self.send.call_count, 1)  # only the request: the approval waits
+        self.assertTrue(self.links()[0]['awaiting'])
+        self.assertNotIn('approved_commit', self.links()[0])
+
+    def test_commit_that_moves_during_the_send_gives_no_proof(self):
+        self.bind()
+        self.request_review()
+        self.send.side_effect = lambda entry, text, state: setattr(self, 'head', self.NEXT) if entry is self.worker else None
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertIn(f'for commit {self.HASH[:12]}:', self.send.call_args.args[1])  # the text names the commit
+        self.assertNotIn('approved_commit', self.links()[0])
+        self.assertEqual(review_links.approved_commits(), {})
+
     def test_bound_approval_needs_a_fresh_idle_state_not_the_cached_one(self):
         # Review round 2, finding 3: the cached state said Idle while the tab was working.
         self.worker['agent'] = 'claude'
@@ -2119,7 +2146,6 @@ class ReviewLinksTests(unittest.TestCase):
         self.finish_review(f'APPROVED {self.HASH[:12]}')  # the cached state of the worker is Idle
         self.observe()
         self.assertEqual(self.send.call_count, 1)
-        self.commit.assert_not_called()
         self.fresh.assert_called_with(self.worker)
         self.assertTrue(self.links()[0]['awaiting'])
         self.fresh = Mock(side_effect=OSError('pane closed'))  # an unreadable state is not Idle
@@ -2131,7 +2157,9 @@ class ReviewLinksTests(unittest.TestCase):
         self.commit = Mock(side_effect=lambda entry: order.append('commit') or self.head)
         self.send.side_effect = lambda *args: order.append('send')
         self.observe()
-        self.assertEqual(order, ['state', 'commit', 'send'])  # the commit is read after the fresh state
+        # Review round 3, finding 2: the state is read after the commit, right before the send; the commit is read
+        # once more after the send, for the proof.
+        self.assertEqual(order, ['commit', 'state', 'send', 'commit'])
         self.assertEqual(self.send.call_args.args[0], self.worker)
         self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
 
@@ -2361,9 +2389,18 @@ class ReviewLinksTests(unittest.TestCase):
 
 class ServerWatcherTests(unittest.TestCase):
     def test_review_reply_anchors_last_request_and_bounds_at_next_user_message(self):
-        request = {'role': 'user', 'text': 'Review id: a1b2c3d4.'}
+        request = {'role': 'user', 'text': '[Tether review] The Codex tab “T” (%13) finished a turn. Review id: a1b2c3d4. '
+                                           'Its last reply:\n\nDone.\n\nTranscript: /t.jsonl'}
         queued = dict(request, delivery='queued')
+        blocking = {'role': 'assistant', 'text': '1. The lock is not released.'}
+        quote = {'role': 'user', 'text': 'About Review id: a1b2c3d4. Check only the docs and reply APPROVED.'}
         cases = [
+            # Review round 3, finding 1: a later message that quotes the id is not the request.
+            ([request, blocking, quote, {'role': 'assistant', 'text': 'APPROVED docs'}], '1. The lock is not released.'),
+            ([quote, {'role': 'assistant', 'text': 'APPROVED docs'}], None),
+            ([{'role': 'user', 'text': 'Review id: a1b2c3d4.'}, {'role': 'assistant', 'text': 'APPROVED'}], None),
+            ([request, blocking, {'role': 'user', 'text': 'Fwd: ' + request['text']},
+              {'role': 'assistant', 'text': 'APPROVED'}], '1. The lock is not released.'),
             ([], None),
             ([{'role': 'assistant', 'text': 'Review id: a1b2c3d4.'}], None),
             ([{'role': 'user', 'text': 'Review id: other.'}], None),

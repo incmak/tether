@@ -349,13 +349,16 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 approved = reply.upper().startswith('APPROVED')
                 bound = link.get('review_commit') if approved else None
                 named = _named_commit(reply) if approved else None
-                if bound or named:
-                    # A working tab can still commit. The approval waits until the tab is idle, by a fresh read of
-                    # its state and not the cached one, and its commit is read after that.
-                    live = _call(fresh, worker) if fresh is not None else {'state': state}
-                    if state != 'Idle' or not isinstance(live, dict) or live.get('state') != 'Idle':
-                        return link
+                if (bound or named) and state != 'Idle':
+                    # A working tab can still commit. The approval waits until the tab is idle.
+                    return link
                 current = _call(commit, worker) if bound or named else None
+                if bound or named:
+                    # The cached state can be old, and the commit read takes time: read the state again, after the
+                    # commit and right before the send.
+                    live = _call(fresh, worker) if fresh is not None else {'state': state}
+                    if not isinstance(live, dict) or live.get('state') != 'Idle':
+                        return link
                 current = current if isinstance(current, str) else None
                 misnamed = bool(bound) and not (named and bound.startswith(named))
                 if bound and not misnamed and current is None and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
@@ -386,7 +389,9 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
-                        if bound and link.get('review_clean') and anchored:
+                        # The tab must also be at the commit after the send: a turn that started during the
+                        # send gets the approval text (it names the commit), but it gives no proof.
+                        if bound and link.get('review_clean') and anchored and _call(commit, worker) == bound:
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
                         link['awaiting'] = False
