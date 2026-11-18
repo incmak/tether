@@ -3,9 +3,10 @@
 const { spawn } = require('node:child_process')
 const path = require('node:path')
 const fs = require('node:fs')
-const root = path.resolve(__dirname, '../.release-work/2026-11-16/responsive/tools')
+const { shotsDir } = require('./browser_test_helper.cjs')
+const root = shotsDir('responsive/tools')
 async function run(suite, second) {
-  const shots = path.join(root, 'shots', second ? 'second' : '.')
+  const shots = path.join(root, second ? 'second' : '.')
   fs.mkdirSync(shots, { recursive: true })
   console.log(`Tools responsive: ${suite}, ${second ? 'second input' : 'first input'}`)
   return new Promise(resolve => {

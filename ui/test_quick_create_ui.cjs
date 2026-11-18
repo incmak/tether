@@ -4,10 +4,10 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser, serveLocal } = require('./browser_test_helper.cjs')
+const { getBrowser, serveLocal, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/search-anywhere/shots')
+const SHOTS = shotsDir('search-anywhere')
 const ids = { tether: '$1', blender: '$2' }
 const pane = (id, session, name, extra = {}) => ({ id, tmux_session: ids[session], label: `${session}:0.${id.slice(1)}`, ask: null, agent: 'claude', dir: `/srv/${session}`, state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, pane_name: name, ...extra })
 const panes = [pane('%1', 'tether', 'Voice mode latency', { group: 'g1' }), pane('%2', 'tether', 'Release notes'), pane('%4', 'blender', 'Render farm')]

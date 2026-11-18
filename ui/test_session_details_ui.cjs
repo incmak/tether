@@ -3,10 +3,10 @@
 // Run: npm run build -- --outDir <dir>, then DIST=<dir> node test_session_details_ui.cjs. Request routes serve the build.
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/session-brief/shots')
+const SHOTS = shotsDir('session-brief')
 const now = () => Math.floor(Date.now() / 1000)
 const pane = { id: '%1', tmux_session: '$fixture', label: 'work:0.1', pane_name: 'Files search', agent: 'claude', state: 'Idle', dir: '/srv/fixture/app', thread: 'thread-1', writable: true }
 const AI = { name: 'Files search', description: 'Adds a search box to the Files panel and ranks matches by path.', description_by: 'ai', state: 'done' }
