@@ -228,6 +228,27 @@ async function functional(page) {
   await settle(page, rotated.height)
   const rotation = (await finish(page)).filter(f => f.h === rotated.height)
   check('6. a new width establishes its own baseline', rotation.every(f => !f.keyboard && f.display !== 'none'))
+  // Rotate with the keyboard open: the new width has no baseline yet, so the screen height stands in.
+  await page.setViewportSize(phone)
+  await page.waitForFunction(h => innerHeight === h && !document.querySelector('main.app-shell').getAnimations().length, phone.height)
+  await field.focus()
+  await page.setViewportSize(keyboard)
+  await page.waitForFunction(() => document.documentElement.hasAttribute('data-keyboard'))
+  // Playwright makes the screen as small as the viewport; a phone in landscape keeps its full screen.
+  await page.evaluate(() => Object.defineProperty(screen, 'availHeight', { get: () => 390 }))
+  const turn = height => page.setViewportSize({ width: 700, height })
+  await turn(200)
+  await page.waitForFunction(() => innerWidth === 700 && innerHeight === 200)
+  const turnedOpen = await read(page), availHeight = await page.evaluate(() => screen.availHeight)
+  await turn(360)
+  await page.waitForFunction(() => innerHeight === 360)
+  const turnedClosed = await read(page)
+  // Only measured heights become the baseline: 225 is a keyboard against 390 (the screen), not against 360 (measured).
+  await turn(225)
+  await page.waitForFunction(() => innerHeight === 225)
+  const measured = !(await read(page)).keyboard
+  check('6b. rotating with the keyboard open keeps it open, and closing it gives the tabs back', turnedOpen.keyboard && turnedOpen.display === 'none' && !turnedClosed.keyboard && turnedClosed.display !== 'none' && measured,
+    { availHeight, measured, open: turnedOpen.keyboard, closed: turnedClosed.keyboard })
 }
 
 async function main() {

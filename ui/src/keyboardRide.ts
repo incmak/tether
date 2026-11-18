@@ -30,7 +30,7 @@ export function useKeyboardRide(shell: HTMLElement | null) {
       const baseline = Math.max(height, known ?? (open ? screen.availHeight : height))
       const keyboard = height < baseline - 150 && (editable(document.activeElement) || (open && !stale))
       root.toggleAttribute('data-keyboard', keyboard)
-      if (!keyboard) baselines.set(width, baseline)
+      if (!keyboard) baselines.set(width, Math.max(height, known ?? height))
       stale = false
 
       let edge = settled.H - settled.bottom
