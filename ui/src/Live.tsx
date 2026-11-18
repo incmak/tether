@@ -12,6 +12,7 @@ import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } f
 import { bloomFromBubble, foldToBubble, openFrom, popBubble, settle } from './liveMotion'
 import { speakable } from './speech'
 import { BACKLOG_PATH } from './backlogNews'
+import { addReminders, listReminders } from './fridayReminders'
 import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
 import { reportVoice } from './voiceLog'
@@ -468,6 +469,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       await live.current.api(`${BACKLOG_PATH}-start`, { item: item.ref, who }).catch(() => null)
       return { ok: true, item: item.ref, chat: paneTitle(pane) }
     },
+    reminder_add: async ({ reminders: asked }) => addReminders(live.current.api, asked),
+    reminder_list: async () => listReminders(live.current.api),
   })
   /** The open backlog items, in list order. */
   async function openItems() {
