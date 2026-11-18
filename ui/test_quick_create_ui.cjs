@@ -31,6 +31,7 @@ async function main() {
   let saved = { text: '- [ ] Write the release notes #B3\n', version: 'v1', limit: 50000, next_id: 4 }
   // Each test sets how the quick-tab endpoints answer.
   let routeAnswer = { place: audio, source: 'ai' }, routeDelay = 0, startFails = 0
+  let backlogPending
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -67,6 +68,7 @@ async function main() {
             const next = Math.max(saved.next_id, ...[...body.text.matchAll(/#B(\d+)/g)].map(match => Number(match[1]) + 1))
             saved = { ...saved, text: body.text, version: `v${calls.length + 1}`, next_id: next }
           }
+          if (!body && backlogPending) await backlogPending
           return route.fulfill({ json: saved })
         }
         if (endpoint === 'quick-tab/route') {
@@ -94,14 +96,27 @@ async function main() {
     const menu = page.locator('dialog.command-menu')
     const toast = page.locator('.quick-toast')
     const active = () => menu.locator('.command-row.active .command-label').innerText()
+    const searchFocus = menu.locator('.command-search input:focus')
     // Open search, type, and put the cursor on a row of the "New" group with the keyboard only.
     const searchFor = async (query, row) => {
       await page.keyboard.press('Alt+Space')
-      await menu.waitFor()
+      await searchFocus.waitFor()
       await page.keyboard.type(query)
       await menu.getByText(`Add “${query}” to the backlog`).waitFor()
       await page.keyboard.press('Control+End')
       for (let step = 0; step < 3 && (await active()) !== row; step++) await page.keyboard.press('ArrowUp')
+      return (await active()) === row
+    }
+    const searchWhileBacklogLoads = async (query, row) => {
+      let finish
+      backlogPending = new Promise(resolve => { finish = resolve })
+      try {
+        if (!await searchFor(query, row)) return false
+      } finally {
+        backlogPending = undefined
+        finish()
+      }
+      await menu.getByText(`Search the backlog for “${query}”`).waitFor()
       return (await active()) === row
     }
 
@@ -125,7 +140,7 @@ async function main() {
     check('#search keeps Back usable', (await page.evaluate(() => history.length)) <= before + 2)
 
     // No match: the menu says so and still offers the three "New" rows last.
-    check('search reaches "Add to the backlog" by keyboard', await searchFor('Write the onboarding doc', 'Add “Write the onboarding doc” to the backlog'))
+    check('search keeps "Add to the backlog" selected when backlog results arrive', await searchWhileBacklogLoads('Write the onboarding doc', 'Add “Write the onboarding doc” to the backlog'))
     check('no match says so', await menu.getByText('Nothing matches “Write the onboarding doc”.').isVisible())
     const labels = await menu.locator('.command-row .command-label').allInnerTexts()
     check('the New rows come last, in order', JSON.stringify(labels.slice(-3)) === JSON.stringify(['Add “Write the onboarding doc” to the backlog', 'Start a new tab for “Write the onboarding doc”', 'Start a new tab for “Write the onboarding doc” in…']), JSON.stringify(labels))
@@ -146,7 +161,7 @@ async function main() {
 
     // Start a new tab, Tether chooses in time: the tab starts in that place. Only the query goes to route.
     calls.length = 0
-    check('search reaches "Start a new tab" by keyboard', await searchFor('Fix the mic echo', 'Start a new tab for “Fix the mic echo”'))
+    check('search keeps "Start a new tab" selected when backlog results arrive', await searchWhileBacklogLoads('Fix the mic echo', 'Start a new tab for “Fix the mic echo”'))
     await page.keyboard.press('Enter')
     await toast.getByText('Started “Fix the mic echo” in tether · Audio stack.').waitFor()
     const route = calls.find(call => call.endpoint === 'quick-tab/route'), start = calls.find(call => call.endpoint === 'quick-tab/start')
@@ -257,6 +272,7 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `picker-${width}.png`) })
       await page.keyboard.press('Escape')
       await listbox.waitFor({ state: 'detached' })
+      await searchFocus.waitFor()
       await page.keyboard.press('Enter')
       await toast.getByText(/^Started/).waitFor()
       const toastBox = await toast.boundingBox()
@@ -264,6 +280,18 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `toast-${width}.png`) })
       await toast.getByRole('button', { name: 'Dismiss' }).click()
     }
+
+    // At phone width, late matches can push the selected action below the list viewport.
+    const query = 'Review the draft'
+    saved = { ...saved, text: Array.from({ length: 6 }, (_, index) => `- [ ] ${query} ${index + 1} #B${index + 10}\n`).join('') }
+    check('320px search keeps the last create row selected after a full result set loads',
+      await searchWhileBacklogLoads(query, `Start a new tab for “${query}” in…`))
+    check('320px selected action stays inside the list viewport', await menu.locator('.command-row.active').evaluate(row => {
+      const box = row.getBoundingClientRect(), viewport = row.closest('.command-list').getBoundingClientRect()
+      return box.top >= viewport.top - 1 && box.bottom <= viewport.bottom + 1
+    }))
+    await page.keyboard.press('Escape')
+    await menu.waitFor({ state: 'detached' })
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})
