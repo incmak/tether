@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -177,7 +178,7 @@ def set_mode(mode):
 
 # ---- git ----
 
-def _git_env(helpers=()):
+def _git_env(helpers=(), *, worktree_attributes=False):
     """The same Git settings for local commands, network commands and the checklist."""
     full = dict(os.environ)
     for key in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
@@ -189,7 +190,9 @@ def _git_env(helpers=()):
                 GIT_ATTR_NOSYSTEM='1')
     settings = [('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'), ('fetch.prune', 'false'),
                 ('fetch.pruneTags', 'false'), ('fetch.recurseSubmodules', 'false'), ('push.recurseSubmodules', 'no'),
-                ('push.followTags', 'false'), ('submodule.recurse', 'false'), ('core.attributesFile', os.devnull)]
+                ('push.followTags', 'false'), ('submodule.recurse', 'false')]
+    if not worktree_attributes:
+        settings.append(('core.attributesFile', os.devnull))
     settings.extend(('credential.helper', helper) for helper in helpers)
     full['GIT_CONFIG_COUNT'] = str(len(settings))
     for index, (key, value) in enumerate(settings):
@@ -213,11 +216,15 @@ def _credential_helpers():
     return ('', *result.stdout.split('\0')[:-1])
 
 
-def _git(folder, *args, network=False, check=True, env=None, binary=False):
+def _git(folder, *args, **kwargs):
+    return _run_git(('-C', str(folder)), *args, **kwargs)
+
+
+def _run_git(prefix, *args, network=False, check=True, env=None, binary=False):
     """Run git with a clean environment. Raise GitError on a failure, a timeout or a missing git."""
     decoding = {} if binary else {'encoding': 'utf-8', 'errors': 'surrogateescape'}
     try:
-        result = RUN(['git', '-C', str(folder), *args], stdin=subprocess.DEVNULL, capture_output=True,
+        result = RUN(['git', *prefix, *args], stdin=subprocess.DEVNULL, capture_output=True,
                      env={**_git_env(), 'GIT_NO_LAZY_FETCH': '1'} if env is None else env,
                      timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -457,48 +464,24 @@ DIRTY = 'The worktree has uncommitted or untracked files.'
 UNSUPPORTED = ('The worktree uses a checkout filter (for example Git LFS) that Tether does not run, '
                'so it cannot confirm that the tree is clean.')
 SUBMODULE_DEPTH = 5
+STATUS_CORE = {
+    'autocrlf', 'eol', 'safecrlf', 'filemode', 'symlinks', 'ignorecase', 'precomposeunicode', 'trustctime',
+    'checkstat', 'excludesfile', 'attributesfile', 'sparsecheckout', 'sparsecheckoutcone', 'splitindex',
+}
 
 
 def _status_env():
-    """Git's own view of the worktree: the user's and the system's config and attributes apply, as they do for the
-    user's `git status`, so line-end and text rules are Git's effective ones. Nothing here may start a program: the
-    file-system monitor stays off, no index is rewritten (so no index hook), and _dirty refuses filter paths."""
-    env = _git_env()
+    """Read config and attributes from the worktree as the user's Git sees them."""
+    env = _git_env(worktree_attributes=True)
     for key in ('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_ATTR_NOSYSTEM'):
         if key in os.environ:
             env[key] = os.environ[key]  # the server's own setting, as the user's git sees it
         else:
             env.pop(key, None)
-    settings = [('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'), ('submodule.recurse', 'false'),
-                ('status.submoduleSummary', 'false')]
-    for key in [name for name in env if name.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))]:
-        del env[key]
-    env['GIT_CONFIG_COUNT'] = str(len(settings))
-    for index, (key, value) in enumerate(settings):
-        env[f'GIT_CONFIG_KEY_{index}'] = key
-        env[f'GIT_CONFIG_VALUE_{index}'] = value
     return env
 
 
-def _filter_drivers(folder, env):
-    """The names of the filter drivers that Git's config defines for this folder (system, global, repository)."""
-    listed = _git(folder, 'config', '--null', '--name-only', '--get-regexp', r'^filter\.', env=env, check=False)
-    if listed.returncode not in (0, 1):
-        raise GitError('Could not read the configured Git filters.')
-    names = set()
-    for key in listed.stdout.split('\0')[:-1]:
-        parts = key.split('.')
-        if len(parts) < 3 or '\n' in key:
-            raise GitError('Git printed a filter setting Tether does not know.')
-        names.add('.'.join(parts[1:-1]))
-    return names
-
-
-def _has_filter(folder, env, drivers, depth=0):
-    """True when a tracked path, here or in a checked-out submodule, has a filter attribute. Git would run that
-    filter's program to compare the file, so Tether does not ask. check-attr, config and ls-files only read.
-    drivers: collects the filter drivers configured here and in the submodules."""
-    drivers.update(_filter_drivers(folder, env))
+def _index_paths(folder, env):
     raw = _git(folder, 'ls-files', '-s', '-z', env=env, binary=True).stdout
     paths, links = [], []
     for line in raw.split(b'\0')[:-1]:
@@ -506,6 +489,19 @@ def _has_filter(folder, env, drivers, depth=0):
         if not sep or not path:
             raise GitError('git ls-files printed an entry Tether does not know.')
         (links if meta.startswith(b'160000 ') else paths).append(path)
+    return paths, links
+
+
+def _checked_out_submodules(folder, links):
+    for link in dict.fromkeys(links):
+        inner = folder / os.fsdecode(link)
+        if os.path.lexists(inner / '.git'):
+            yield inner
+
+
+def _has_filter(folder, env, depth=0):
+    """True when a tracked path, here or in a checked-out submodule, has a filter attribute."""
+    paths, links = _index_paths(folder, env)
     if paths:
         try:
             result = RUN(['git', '-C', str(folder), 'check-attr', '-z', '--stdin', 'filter'], input=b'\0'.join(paths) + b'\0',
@@ -517,41 +513,121 @@ def _has_filter(folder, env, drivers, depth=0):
             raise GitError('git check-attr gave no clear answer.')
         if any(value not in (b'unspecified', b'unset') for value in fields[2::3]):
             return True
-    for link in links:
-        inner = Path(os.fsdecode(os.path.join(os.fsencode(str(folder)), link)))
-        # Only decides where else to look for filters. Whether the submodule is clean is Git's answer below.
-        if (inner / '.git').exists() and (depth >= SUBMODULE_DEPTH or _has_filter(inner, env, drivers, depth + 1)):
+    for inner in _checked_out_submodules(folder, links):
+        if depth >= SUBMODULE_DEPTH or _has_filter(inner, env, depth + 1):
             return True
     return False
 
 
-def _dirty(folder):
-    """'' for a clean worktree, DIRTY when Git reports any change, UNSUPPORTED when Git would need a filter program.
+def _shadow_config(checkout):
+    raw = _git(checkout, 'config', '--null', '--list', env=_status_env()).stdout
+    entries = raw.split('\0')
+    if entries[-1]:
+        raise GitError('git config did not finish its last entry.')
+    settings = {'core.repositoryformatversion': '0', 'core.bare': 'false', 'core.untrackedcache': 'false'}
+    object_format = 'sha1'
+    active = []
+    for entry in entries[:-1]:
+        key, sep, value = entry.partition('\n')
+        # Git normalizes sections and variable names. Keep the spelling of submodule names.
+        lower = key.lower()
+        if lower == 'extensions.objectformat':
+            object_format = value
+        elif lower.startswith('extensions.') and lower != 'extensions.worktreeconfig':
+            return None
+        elif lower == 'submodule.active':
+            if not sep:
+                raise GitError('git config gave no pathspec for submodule.active.')
+            active.append((key, value))
+        elif ((lower.startswith('core.') and lower[5:] in STATUS_CORE)
+              or re.fullmatch(r'submodule\..+\.(url|active|ignore)', lower)):
+            if not sep and (lower in ('core.eol', 'core.checkstat', 'core.excludesfile', 'core.attributesfile')
+                            or lower.endswith(('.url', '.ignore'))):
+                raise GitError(f'git config gave no value for {key}.')
+            settings[key] = value if sep else 'true'
+    return [*settings.items(), *active] if object_format == 'sha1' else None
 
-    Git itself answers: `git status --porcelain=v2` with untracked files and submodules included. Tether applies no
-    rule of its own for line ends, text detection or submodules. Any status entry means not clean."""
-    env = _status_env()
-    drivers = set()
-    if _has_filter(folder, env, drivers):
+
+def _shadow(checkout, gitdir, common):
+    """Build a private Git directory, or return None for repository extensions it cannot mirror."""
+    settings = _shadow_config(checkout)
+    if settings is None:
+        return None
+    head = _head(checkout)
+    objects = os.fsencode(common / 'objects')
+    if b'\n' in objects:
+        raise GitError('The Git object directory path contains a newline.')
+    cache = (paths.CACHE / 'auto-merge-status').absolute()
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shadow = Path(tempfile.mkdtemp(dir=cache))
+    try:
+        (shadow / 'HEAD').write_text(head + '\n', encoding='ascii')
+        # Preserve the index timestamp so Git can detect a file with a racy stat entry.
+        try:
+            shutil.copy2(gitdir / 'index', shadow / 'index')
+        except FileNotFoundError as exc:
+            raise GitError('The worktree has no Git index.') from exc
+        for shared in gitdir.glob('sharedindex.*'):
+            shutil.copy2(shared, shadow / shared.name)
+        (shadow / 'objects/info').mkdir(parents=True)
+        (shadow / 'objects/info/alternates').write_bytes(objects + b'\n')
+        (shadow / 'refs').mkdir()
+        (shadow / 'info').mkdir()
+        for info in (common / 'info/exclude', common / 'info/attributes', gitdir / 'info/sparse-checkout'):
+            try:
+                shutil.copyfile(info, shadow / 'info' / info.name)
+            except FileNotFoundError:
+                pass
+        env = _git_env()
+        for key, value in settings:
+            _run_git((), 'config', '--file', str(shadow / 'config'), '--add', '--', key, value, env=env)
+    except BaseException:
+        shutil.rmtree(shadow)
+        raise
+    return shadow
+
+
+def _shadow_status(checkout, env, depth=0):
+    if depth > SUBMODULE_DEPTH:
         return UNSUPPORTED
-    # Attributes can change between the check above and Git's own read. So every configured filter driver is turned
-    # off for the status call (an empty command runs nothing), also in the submodules, which inherit these settings.
-    off = _status_env()
-    count = int(off['GIT_CONFIG_COUNT'])
-    for name in sorted(drivers):
-        for key, value in (('clean', ''), ('smudge', ''), ('process', ''), ('required', 'false')):
-            off[f'GIT_CONFIG_KEY_{count}'] = f'filter.{name}.{key}'
-            off[f'GIT_CONFIG_VALUE_{count}'] = value
-            count += 1
-    off['GIT_CONFIG_COUNT'] = str(count)
-    status = _git(folder, 'status', '--porcelain=v2', '-z', '--ignore-submodules=none', '--untracked-files=all',
-                  env=off, binary=True)
-    if status.stderr.strip():
+    gitdir = _git_dir(checkout, '--absolute-git-dir')
+    common = _git_dir(checkout, '--git-common-dir')
+    try:
+        shadow = _shadow(checkout, gitdir, common)
+        if shadow is None:
+            return UNSUPPORTED
+        try:
+            # Git compares submodule commits in-process. Check each submodule's files in its own shadow.
+            status = _run_git((f'--git-dir={shadow}', f'--work-tree={checkout}'), 'status', '--porcelain=v2', '-z',
+                              '--ignore-submodules=dirty', '--untracked-files=all',
+                              env=_git_env(worktree_attributes=True), binary=True)
+        finally:
+            shutil.rmtree(shadow)
+    except OSError as exc:
+        raise GitError(f'Could not prepare or remove the shadow Git directory: {exc.strerror}') from exc
+    if status.stderr:
         raise GitError('git status printed a warning, so the tree is not confirmed clean.')
-    # With a filter attribute that appeared meanwhile, Git compared raw bytes: its answer does not count.
-    if _has_filter(folder, env, set()):
+    answer = DIRTY if status.stdout else ''
+    _, links = _index_paths(checkout, env)
+    for inner in _checked_out_submodules(checkout, links):
+        result = _shadow_status(inner, env, depth + 1)
+        if result == UNSUPPORTED:
+            return UNSUPPORTED
+        answer = answer or result
+    return answer
+
+
+def _dirty(folder):
+    """Ask Git for changes using private Git directories that define no filters."""
+    checkout = Path(folder).absolute()
+    env = _status_env()
+    if _has_filter(checkout, env):
         return UNSUPPORTED
-    return DIRTY if status.stdout else ''
+    result = _shadow_status(checkout, env)
+    # With a filter attribute that appeared meanwhile, Git compared raw bytes: its answer does not count.
+    if _has_filter(checkout, env):
+        return UNSUPPORTED
+    return result
 
 
 def _tree_diff(folder, base, head):

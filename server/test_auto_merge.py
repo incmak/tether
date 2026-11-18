@@ -29,6 +29,15 @@ def git_settings(env):
             for index in range(int(env['GIT_CONFIG_COUNT']))]
 
 
+def is_shadow_status(argv):
+    return argv[0] == 'git' and argv[1].startswith('--git-dir=') and argv[3:4] == ['status']
+
+
+def expire_stat_cache(path):
+    found = path.stat()
+    os.utime(path, ns=(found.st_atime_ns, found.st_mtime_ns - 2_000_000_000))
+
+
 class Handler:
     def __init__(self, body=None, headers=None):
         raw = json.dumps(body).encode() if body is not None else b''
@@ -275,38 +284,83 @@ class Decision(Base):
         app = self.work / 'ui/src/App.tsx'
         real = subprocess.run
 
-        def touch():  # Git must read the file again, not trust its cached stat data
-            found = app.stat()
-            os.utime(app, ns=(found.st_atime_ns, found.st_mtime_ns - 2_000_000_000))
-
-        cases = [(kind, target) for kind in ('clean', 'process')
+        cases = [(kind, target, late_driver) for late_driver in (False, True) for kind in ('clean', 'process')
                  for target in (self.work / '.gitattributes', self.repo / '.git/info/attributes')]
-        for kind, target in cases:
-            with self.subTest(kind=kind, target=target.name):
-                self.git(self.repo, 'config', f'filter.late.{kind}', f'touch {marker}; cat')
+        for kind, target, late_driver in cases:
+            with self.subTest(kind=kind, target=target.name, late_driver=late_driver):
+                driver = 'late2' if late_driver else 'late'
+                key = f'filter.{driver}.{kind}'
+                if not late_driver:
+                    self.git(self.repo, 'config', key, f'touch "{marker}"; cat')
 
                 def run(argv, **kwargs):
-                    if argv[0] == 'git' and argv[3] == 'status':
+                    if is_shadow_status(argv):
+                        if late_driver:
+                            self.git(self.repo, 'config', key, f'touch "{marker}"; cat')
                         target.parent.mkdir(exist_ok=True)
-                        target.write_text('* filter=late\n')
+                        target.write_text(f'* filter={driver}\n')
                     return real(argv, **kwargs)
 
                 try:
-                    touch()
+                    expire_stat_cache(app)
                     with mock.patch.object(auto_merge, 'RUN', run):
                         result = auto_merge._dirty(self.work)
                     self.assertFalse(marker.exists())
                     self.assertEqual(result, auto_merge.UNSUPPORTED)  # Git's raw comparison does not count
                     # Control: the same change with a plain `git status` does start the program.
-                    touch()
+                    expire_stat_cache(app)
                     subprocess.run(['git', '-C', str(self.work), 'status', '--porcelain'], capture_output=True, timeout=20)
                     self.assertTrue(marker.exists())
                 finally:
                     marker.unlink(missing_ok=True)
                     target.unlink(missing_ok=True)
-                    self.git(self.repo, 'config', '--unset', f'filter.late.{kind}')
+                    self.git(self.repo, 'config', '--unset', key)
                     self.git(self.work, 'update-index', '-q', '--refresh')
         self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+
+    def test_a_late_submodule_filter_attribute_starts_no_program(self):
+        library = self.root / 'library'
+        self.git(self.root, 'init', '-q', '-b', 'main', str(library))
+        self.write(library, 'lib.txt', 'library\n')
+        self.commit(library, 'Library')
+        self.git(self.work, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(library), 'vendor/lib')
+        self.commit(self.work, 'Submodule')
+        inside = self.work / 'vendor/lib'
+        marker = self.root / 'submodule-filter-ran'
+        self.git(inside, 'config', 'filter.x.clean', f'touch "{marker}"; cat')
+        worktrees = []
+
+        def run(argv, **kwargs):
+            if is_shadow_status(argv):
+                worktrees.append(argv[2])
+                if argv[2] == f'--work-tree={self.work}':
+                    self.write(inside, '.gitattributes', 'lib.txt filter=x\n')
+                    expire_stat_cache(inside / 'lib.txt')
+            return subprocess.run(argv, **kwargs)
+
+        with mock.patch.object(auto_merge, 'RUN', run):
+            self.assertEqual(auto_merge._dirty(self.work), auto_merge.UNSUPPORTED)
+        self.assertEqual(worktrees, [f'--work-tree={self.work}', f'--work-tree={inside}'])
+        self.assertFalse(marker.exists())
+        self.assertNotEqual(self.git(self.work, 'status', '--porcelain', '--ignore-submodules=none'), '')
+        self.assertTrue(marker.exists())
+
+    def test_a_late_fsmonitor_setting_starts_no_program(self):
+        marker = self.root / 'late-fsmonitor-ran'
+        hook = self.root / 'late-fsmonitor'
+        hook.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+        hook.chmod(0o755)
+
+        def run(argv, **kwargs):
+            if is_shadow_status(argv):
+                self.git(self.repo, 'config', 'core.fsmonitor', str(hook))
+            return subprocess.run(argv, **kwargs)
+
+        with mock.patch.object(auto_merge, 'RUN', run):
+            self.assertEqual(auto_merge._dirty(self.work), '')
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
+        self.assertTrue(marker.exists())
 
     def test_the_clean_check_is_gits_own_answer(self):
         """The reviewer's cases: Tether must agree with `git status`, whatever the line-end rules are."""
@@ -369,6 +423,78 @@ class Decision(Base):
         agrees(head, False)
         (self.root / 'moved-out').rename(self.work / 'vendor/lib')
         agrees(head, True)
+
+    def test_global_excludes_and_split_indexes_in_main_and_linked_worktrees(self):
+        excludes = self.root / 'ignore "this"'
+        excludes.write_text('*.ignored\n')
+        config = self.root / 'global-excludes.conf'
+        self.git(self.repo, 'config', '--file', str(config), 'core.excludesFile', str(excludes))
+        for folder in (self.repo, self.work):
+            with self.subTest(folder=folder):
+                self.git(folder, 'update-index', '--split-index')
+                self.assertTrue(self.git(folder, 'rev-parse', '--shared-index-path'))
+                self.write(folder, 'extra.ignored', 'extra\n')
+                with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config)):
+                    self.assertEqual(self.git(folder, 'status', '--porcelain', '--untracked-files=all'), '')
+                    self.assertEqual(auto_merge._dirty(folder), '')
+                    tracked = folder / 'ui/src/App.tsx'
+                    tracked.write_text('edited\n')
+                    self.assertNotEqual(self.git(folder, 'status', '--porcelain', '--untracked-files=all'), '')
+                    self.assertEqual(auto_merge._dirty(folder), auto_merge.DIRTY)
+                    self.git(folder, 'checkout', '--', 'ui/src/App.tsx')
+                self.assertEqual(self.git(folder, 'status', '--porcelain', '--untracked-files=all'), '?? extra.ignored')
+                self.assertEqual(auto_merge._dirty(folder), auto_merge.DIRTY)
+
+    def test_shadow_uses_the_effective_attributes_file(self):
+        attributes = self.root / 'attributes'
+        attributes.write_text('*.tsx text eol=crlf\n')
+        config = self.root / 'global-attributes.conf'
+        self.git(self.repo, 'config', '--file', str(config), 'core.attributesFile', os.devnull)
+        self.git(self.repo, 'config', 'core.attributesFile', str(attributes))
+        app = self.work / 'ui/src/App.tsx'
+        with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config)):
+            app.unlink()
+            self.git(self.work, 'checkout', '--', 'ui/src/App.tsx')
+            self.assertIn(b'\r\n', app.read_bytes())
+            expire_stat_cache(app)
+            self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
+            self.assertEqual(auto_merge._dirty(self.work), '')
+            self.git(self.repo, 'config', '--unset', 'core.attributesFile')
+            expire_stat_cache(app)
+            self.assertNotEqual(self.git(self.work, 'status', '--porcelain'), '')
+            self.assertEqual(auto_merge._dirty(self.work), auto_merge.DIRTY)
+
+    def test_a_repository_extension_the_shadow_cannot_mirror_is_unsupported(self):
+        sha256 = self.root / 'sha256'
+        self.git(self.root, 'init', '-q', '--object-format=sha256', str(sha256))
+        self.write(sha256, 'file', 'content\n')
+        self.commit(sha256, 'SHA-256')
+        self.git(self.repo, 'config', 'core.repositoryformatversion', '1')
+        self.git(self.repo, 'config', 'extensions.preciousObjects', 'true')
+        for folder in (sha256, self.work):
+            with self.subTest(folder=folder):
+                self.assertEqual(self.git(folder, 'status', '--porcelain'), '')
+                self.assertEqual(auto_merge._dirty(folder), auto_merge.UNSUPPORTED)
+
+    def test_shadow_is_private_and_removed_on_a_status_error(self):
+        cache = paths.CACHE / 'auto-merge-status'
+
+        def run(argv, **kwargs):
+            if is_shadow_status(argv):
+                shadow = Path(argv[1].removeprefix('--git-dir='))
+                self.assertEqual(stat.S_IMODE(shadow.stat().st_mode), 0o700)
+                return subprocess.CompletedProcess(argv, 0, b'', b'\n')
+            return subprocess.run(argv, **kwargs)
+
+        with mock.patch.object(auto_merge, 'RUN', run):
+            with self.assertRaisesRegex(auto_merge.GitError, 'git status printed a warning'):
+                auto_merge._dirty(self.work)
+        self.assertEqual(list(cache.iterdir()), [])
+        index = Path(self.git(self.work, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
+        index.rename(self.root / 'saved-index')
+        with self.assertRaisesRegex(auto_merge.GitError, 'no Git index'):
+            auto_merge._dirty(self.work)
+        self.assertEqual(list(cache.iterdir()), [])
 
     def test_nested_worker_folder_uses_the_whole_worktree(self):
         for name in ('ui/src/App.tsx', 'ui/index.html'):
@@ -763,15 +889,17 @@ class Modes(Base):
         Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n')
 
         def run(argv, **kwargs):
-            if argv[:2] == ['git', 'config']:
+            if argv[:3] == ['git', 'config', '--global']:
                 self.assertEqual(argv[-3:], ['--null', '--get-all', 'credential.helper'])
                 self.assertNotIn('env', kwargs)
                 helping.append(1)
+            elif argv[:3] == ['git', 'config', '--file']:
+                self.assertEqual(git_settings(kwargs['env']), GIT_SETTINGS)
             elif argv[0] == 'git':
                 command = argv[3:]
                 seen.append(command)
                 env = kwargs['env']
-                if command[0] in ('status', 'check-attr') or command[:2] == ['ls-files', '-s'] or (command[0] == 'config' and r'^filter\.' in command):
+                if command[0] == 'check-attr' or command[:2] == ['ls-files', '-s'] or command == ['config', '--null', '--list']:
                     # The clean check asks Git with the user's own config, and only these read-only commands.
                     self.assertEqual(env['GIT_CONFIG_GLOBAL'], global_config)
                     self.assertEqual(git_settings(env)[:1], [('core.fsmonitor', 'false')])
@@ -780,6 +908,8 @@ class Modes(Base):
                 self.assertEqual(env['GIT_CONFIG_NOSYSTEM'], '1')
                 self.assertEqual(env['GIT_ATTR_NOSYSTEM'], '1')
                 want = GIT_SETTINGS
+                if is_shadow_status(argv):
+                    want = GIT_SETTINGS[:-1]
                 if command[0] in ('fetch', 'ls-remote'):
                     want = GIT_SETTINGS + [('credential.helper', helper)
                                            for helper in ('', 'cache', 'store --file /srv/credentials')]
@@ -805,15 +935,38 @@ class Modes(Base):
 
     def test_observe_runs_only_the_metadata_allowlist_in_the_worker_repository(self):
         head = self.change()
+        active = ['vendor/**', ':(exclude)vendor/ignored']
+        for value in active:
+            self.git(self.repo, 'config', '--add', 'submodule.active', value)
         scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
-        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr', 'status'}
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr'}
+        cache = paths.CACHE / 'auto-merge-status'
         object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
         for folder in (self.work, self.work / 'server'):
             with self.subTest(folder=folder), mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
                 self.assertEqual(auto_merge.process({**self.job(head), 'folder': str(folder)})['outcome'], 'would_merge')
                 seen = set()
+                shadows = set()
+                configs = set()
+                active_copies = []
                 for call in run.call_args_list:
                     argv = call.args[0]
+                    if is_shadow_status(argv):
+                        shadow = Path(argv[1].removeprefix('--git-dir='))
+                        self.assertEqual(shadow.parent, cache)
+                        self.assertEqual(argv[2], f'--work-tree={self.work}')
+                        self.assertEqual(argv[4:], ['--porcelain=v2', '-z', '--ignore-submodules=dirty', '--untracked-files=all'])
+                        self.assertEqual(call.kwargs['env']['GIT_OPTIONAL_LOCKS'], '0')
+                        shadows.add(shadow)
+                        continue
+                    if argv[:3] == ['git', 'config', '--file']:
+                        config = Path(argv[3])
+                        self.assertEqual(config.name, 'config')
+                        self.assertEqual(argv[4:6], ['--add', '--'])
+                        configs.add(config.parent)
+                        if argv[6] == 'submodule.active':
+                            active_copies.append(argv[7])
+                        continue
                     if argv[:2] != ['git', '-C']:
                         self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-all', 'credential.helper'])
                         continue
@@ -826,6 +979,10 @@ class Modes(Base):
                         self.assertEqual(call.kwargs['env']['GIT_ATTR_SOURCE'], auto_merge.EMPTY_TREE)
                         seen.add(command)
                 self.assertTrue(object_commands <= seen)
+                self.assertEqual(len(shadows), 1)
+                self.assertEqual(configs, shadows)
+                self.assertEqual(active_copies, active)
+                self.assertEqual(list(cache.iterdir()), [])
         self.assertEqual(stat.S_IMODE(scratch.stat().st_mode), 0o700)
         self.assertEqual((scratch / 'objects/info/alternates').read_bytes(),
                          os.fsencode(self.repo / '.git/objects') + b'\n')
