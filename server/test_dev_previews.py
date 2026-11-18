@@ -45,9 +45,16 @@ def dev_names(inodes, uid):
     return {inode: {'name': 'node', 'folder': 'app', 'pids': [4000 + index], 'kind': 'dev'} for index, inode in enumerate(inodes)}
 
 
-# The proxy tests run their dev server in this very process: Tether's own pid rule would refuse it.
-LOCAL = {'names': functools.partial(dev_previews.process_names, own_pid=0),
-         'kind': functools.partial(dev_previews.process_kind, own_pid=0)}
+def fixture_kind(pid):
+    """The dev servers are in this test process or its children, even in a CI service cgroup."""
+    test_pid = os.getpid()
+    if pid == test_pid or test_pid in dev_previews._ancestors(pid):
+        return 'dev'
+    return 'unknown'
+
+
+# Keep real socket ownership checks. KindTests checks classification with its own process tree.
+LOCAL = {'names': functools.partial(dev_previews.process_names, kind=fixture_kind), 'kind': fixture_kind}
 
 
 @unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')

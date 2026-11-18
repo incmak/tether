@@ -436,16 +436,17 @@ def holds(pid, inode, root='/proc'):
     return False
 
 
-def process_names(inodes, uid, root='/proc', own_pid=None):
+def process_names(inodes, uid, root='/proc', own_pid=None, *, kind=None):
     """{inode: {'name', 'folder', 'pids', 'kind'}} for this user's listening sockets (Linux): the command, its folder's
     name, the processes that hold the socket and their kind (process_kind). The kind is 'dev' only when every holder
     is a dev server and the scan saw every process. A socket without a visible holder is left out."""
+    classify = kind if kind is not None else lambda pid: process_kind(pid, root, own_pid)
     holders, complete = socket_holders(inodes, uid, root)
     found = {}
     for inode, pids in holders.items():
-        kinds = {process_kind(pid, root, own_pid) for pid in pids}
-        kind = kinds.pop() if len(kinds) == 1 and complete else 'unknown'
-        entry = {'name': '', 'folder': '', 'pids': sorted(pids), 'kind': kind}
+        kinds = {classify(pid) for pid in pids}
+        socket_kind = kinds.pop() if len(kinds) == 1 and complete else 'unknown'
+        entry = {'name': '', 'folder': '', 'pids': sorted(pids), 'kind': socket_kind}
         base = '%s/%d' % (root, min(pids))
         try:
             command = _read(base + '/cmdline').split(b'\0')[0].decode('utf-8', 'replace')
