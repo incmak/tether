@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 
+import lesson_candidates
 import lessons
 import paths
 
@@ -26,6 +27,12 @@ def arguments(argv):
     add.add_argument('--new', dest='force_new', action='store_true')
     add.add_argument('--quote', default='')
     add.add_argument('text')
+    propose = actions.add_parser('propose')  # a candidate for the person to decide on (lesson_candidates.py)
+    kind = propose.add_mutually_exclusive_group(required=True)
+    kind.add_argument('--avoid', dest='kind', action='store_const', const='avoid')
+    kind.add_argument('--keep', dest='kind', action='store_const', const='keep')
+    propose.add_argument('--quote', default='')
+    propose.add_argument('text')
     for action in ('reinforce', 'propose-global'):
         actions.add_parser(action).add_argument('id')
     dispute = actions.add_parser('dispute')
@@ -67,6 +74,9 @@ def main(argv=None):
             return 8
         if args.action == 'list':
             result = {'lessons': lessons.entries(pid)}
+        elif args.action == 'propose':
+            text = sys.stdin.read() if args.text == '-' else args.text
+            result = lesson_candidates.propose(pid, text, args.kind, agent, quote=args.quote, tab=tab, pane=pane)
         elif args.action == 'add':
             text = sys.stdin.read() if args.text == '-' else args.text
             result = lessons.add(pid, text, args.kind, args.source, agent, args.force_new,

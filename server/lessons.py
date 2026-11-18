@@ -296,6 +296,43 @@ def remove_global(identifier):
     return _remove(global_path(), identifier)
 
 
+def find(pid, identifier):
+    """One lesson of a project (pid None: the global list), or None."""
+    rows = _read(global_path() if pid is None else path(pid))
+    return next((dict(row) for row in rows if row['id'] == identifier), None)
+
+
+def take(pid, identifier, before):
+    """Remove one lesson (pid None: the global list) and return it, or None when it is gone. before(row) runs under
+    the lesson file's lock, on the row as it is at that moment, just before the write: it may raise to refuse (the
+    lesson stays) and it may save a copy. No reinforce or edit can land between the check and the removal."""
+    file = global_path() if pid is None else path(pid)
+    with _locked(file):
+        rows = _read(file)
+        row = next((row for row in rows if row['id'] == identifier), None)
+        if row is None:
+            return None
+        before(dict(row))
+        _save(file, [other for other in rows if other['id'] != identifier])
+        return dict(row)
+
+
+def restore(pid, row):
+    """Put back a lesson that prune.py removed (pid None: the global list). It never pushes another lesson out:
+    a full list refuses. Returns False when a lesson with this ID is there already."""
+    file, limit = (global_path(), 30) if pid is None else (path(pid), 60)
+    with _locked(file):
+        rows = _read(file)
+        if any(entry['id'] == row.get('id') for entry in rows):
+            return False
+        if len(rows) >= limit:
+            where = 'The global list has 30 lessons' if pid is None else 'This project has 60 lessons'
+            raise ValueError(where + '. Remove one first, then undo again.')
+        _save(file, rows + [dict(row)])
+        _read(file)  # a row that the store does not accept must not stay
+        return True
+
+
 def promote(pid, identifier):
     file, target = path(pid), global_path()
     with _locked(file, target):

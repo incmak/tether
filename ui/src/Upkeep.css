@@ -1,0 +1,10 @@
+/* Upkeep.tsx: the clean-up sheet, the postmortem sheet and the daily ops report in Settings. Rows reuse the lesson styles. */
+.upkeep-sheet .review-actions { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.upkeep-remove { color: var(--error); }
+.upkeep-empty { margin: 20px 0 8px; }
+.upkeep-note { margin: 12px 0 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--sidebar); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.upkeep-note:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-group .review-lesson .review-actions .secondary { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; }
+.upkeep-retry { display: inline-flex; align-items: center; min-height: 24px; }
+/* The lesson-flag grey is 4.2:1 on its chip at 11 px; this label uses the text colour (WCAG 1.4.3). */
+.upkeep-flag { color: var(--text); }
