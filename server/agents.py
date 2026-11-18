@@ -43,6 +43,30 @@ def descendants(pid, processes):
         found |= children
 
 
+def _pane_agent(pane_pid, processes, tree, registered=()):
+    """Choose the closest agent process to the pane root, with PID as the tie-breaker. A process with a Claude
+    registry for this pane (`registered`) is Claude whatever its process name; a nested `claude -p` or `codex exec`
+    run by the pane's agent never wins."""
+    def depth_from_pane(pid):
+        depth = 0
+        while pid != pane_pid:
+            pid = processes[pid][0]
+            depth += 1
+        return depth
+
+    candidates = (pid for pid in tree if pid in processes
+                  and (pid in registered or processes[pid][1] in ('claude', 'codex', 'agy', 'exe')))
+    owner = min(candidates, key=lambda pid: (depth_from_pane(pid), pid), default=None)
+    if owner is None:
+        return None, None
+    return owner, 'claude' if owner in registered else processes[owner][1]
+
+
+def _pane_registries(claude, pane, tree):
+    """The Claude registries of processes in this pane, by pid."""
+    return {r['pid']: r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)}
+
+
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
@@ -554,12 +578,10 @@ def codex_recheck(entry, run):
         pane, pid, session, zoom, cwd = (line.split('\t', 4) + [''] * 4)[:5]
         if not pid.isdigit() or zoom or session == SIDE_SHELLS:  # the panes that discover() skips
             continue
-        tree = descendants(int(pid), processes)
-        if any(r['pid'] in tree and r.get('tmux', '').endswith('.' + pane) for r in claude) \
-                or any(processes[p][1] == 'claude' for p in tree if p in processes):
-            continue  # a Claude pane, by the rules of discover(), even when Claude runs `codex exec`
-        owner = next((p for p in tree if p in processes and processes[p][1] == 'codex'), None)
-        if owner:
+        pane_pid = int(pid)
+        tree = descendants(pane_pid, processes)
+        owner, agent = _pane_agent(pane_pid, processes, tree, _pane_registries(claude, pane, tree))
+        if agent == 'codex':
             entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': process_start(owner)})
     connection = codex_database()
     try:
@@ -613,11 +635,13 @@ def discover(config, run):
                 cwd, pane_name = '\t'.join(fields[5:-1]), fields[-1]
             else:
                 cwd, pane_name = '\t'.join(fields[5:]), ''
-            tree = descendants(int(pid), processes)
-            names = {processes[p][1] for p in tree if p in processes}
+            pane_pid = int(pid)
+            tree = descendants(pane_pid, processes)
+            registered = _pane_registries(claude, pane, tree)
+            owner, agent = _pane_agent(pane_pid, processes, tree, registered)
             entry = {'id': pane, 'tmux_session': tmux_session, 'label': label, 'position': position,
                      'agent': 'shell', 'writable': False, 'worktree': worktree.strip()[:200], 'group': group.strip()[:16],
-                     'pane_pid': int(pid), 'pane_start': process_start(int(pid)), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
+                     'pane_pid': pane_pid, 'pane_start': process_start(pane_pid), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
             if role in ('advisor', 'second-advisor'):
                 entry['role'] = 'advisor'
@@ -625,7 +649,7 @@ def discover(config, run):
                 entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
             elif role in ('coordinator', 'coordinator-needs', 'coordinator-off'):
                 entry['coordinator'] = role.partition('-')[2] or 'all'  # the session's coordinator tab and what it gets (coordinator.py)
-            live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
+            live = registered.get(owner) if agent == 'claude' else None
             if live:
                 transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
@@ -636,23 +660,24 @@ def discover(config, run):
                 if live.get('nameSource') == 'user' and isinstance(live.get('name'), str) and live['name'].strip():
                     entry['agent_name'] = ' '.join(live['name'].split())
                     entry['agent_named_at'] = live.get('nameSince') if isinstance(live.get('nameSince'), int) else 0
-            elif 'claude' in names:
-                owner = next(p for p in tree if p in processes and processes[p][1] == 'claude')
+            elif agent == 'claude':
                 started = process_start(owner)
                 pending = 'pending-' + str(owner) + '-' + started
                 transcript = HOME / '.claude/projects' / 'pending' / (pending + '.jsonl')
                 entry.update(agent='claude', thread=pending, transcript=str(transcript),
                              writable=True, owner_pid=owner, process_start=started,
                              pending_conversation=True)
-            elif 'codex' in names:
-                owner = next(p for p in tree if p in processes and processes[p][1] == 'codex')
+            elif agent == 'codex':
                 started = process_start(owner)
                 entry['codex_profile'] = codex_provider.pane_profile(owner)  # 'foundry' for `codex -p foundry`; None = the plan
                 # bind_codex (below) chooses the conversation once every pane is known: one pane's evidence can rule out another's guess.
                 entry.update(agent='codex', writable=True, cwd=cwd, owner_pid=owner, process_start=started)
-            elif 'agy' in names or any(processes[p][1] in ('agy', 'exe') for p in tree if p in processes):
+            elif agent in ('agy', 'exe'):
                 entry['agent'] = 'antigravity'
-                entry.update(antigravity_entry([p for p in tree if p in processes and processes[p][1] in ('agy', 'exe')], cwd=cwd))
+                # The native binary can hold the conversation lock inside the agy wrapper.
+                pids = [owner] + sorted(p for p in descendants(owner, processes)
+                                        if p != owner and processes[p][1] in ('agy', 'exe'))
+                entry.update(antigravity_entry(pids, cwd=cwd))
             entries.append(entry)
         bind_codex(connection, entries, run, processes)
     finally:

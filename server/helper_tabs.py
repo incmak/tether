@@ -3,14 +3,17 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 import unicodedata
 
 import paths
+from agents import BOUND
 from terminal_input import UUID
 
 OPTION = '@tether_helper'
+AGENTS = ('claude', 'codex', 'antigravity')
 MAX_REPLY = 100000
 MAX_PROMPT = 8000
 SETTLE = 3
@@ -30,8 +33,20 @@ def _thread(entry):
     return thread if isinstance(thread, str) and UUID.fullmatch(thread) and not entry.get('pending_conversation') else None
 
 
+def verified_thread(entry):
+    """Return the conversation identity this entry can prove."""
+    if entry is None:
+        return None
+    agent = entry.get('agent')
+    if agent == 'claude' and not entry.get('registry'):
+        return None
+    if agent == 'codex' and (entry.get('codex_binding') not in BOUND or entry.get('codex_unresolved')):
+        return None
+    return _thread(entry)
+
+
 def new_record(caller):
-    return {'owner_pane': caller['id'], 'owner_thread': _thread(caller),
+    return {'owner_pane': caller['id'], 'owner_thread': verified_thread(caller),
             'helper_thread': None, 'sent_at': time.time(), 'before': None}
 
 
@@ -65,17 +80,28 @@ def check(caller_pane, caller, helper, record, run, *, pane=None):
     # A discovery miss has no helper entry; retain the requested pane for owner binding.
     if record is None or record['owner_pane'] != caller_pane:
         raise ValueError('That tab is not a helper of this tab.')
-    if record.get('owner_thread') and record['owner_thread'] != caller.get('thread'):
-        raise Stale('This tab changed conversations. Its helper tabs no longer accept its commands.')
-    if helper is not None and record.get('helper_thread') and record['helper_thread'] != helper.get('thread'):
-        raise Stale('That helper changed conversations. Start a new helper.')
-    changed = False
-    for key, entry in (('owner_thread', caller), ('helper_thread', helper)):
-        if record.get(key) is None and entry is not None and _thread(entry):
-            record[key] = _thread(entry)
-            changed = True
-    if changed:
-        save(helper['id'] if helper is not None else pane, record, run)
+    pane = helper['id'] if helper is not None else pane
+    bindings = {}
+    for side, entry, subject, stale in (
+            ('owner', caller, 'this tab', 'This tab changed conversations. Its helper tabs no longer accept its commands.'),
+            ('helper', helper, 'that helper', 'That helper changed conversations. Start a new helper.')):
+        if side == 'helper' and (entry is None or entry.get('agent') not in AGENTS):
+            continue  # no agent runs there: no conversation to confirm; poll reports Missing, then gone
+        key = side + '_thread'
+        bound, seen = record.get(key), verified_thread(entry)
+        if bound:
+            if seen is None:
+                raise RuntimeError(f"Tether cannot confirm {subject}'s conversation right now. Try again in a moment.")
+            if seen != bound:
+                print(f"helper check refused {pane} ({side}): bound {bound} seen {seen} agent {entry.get('agent')} "
+                      f"binding {entry.get('codex_binding')} pending {bool(entry.get('pending_conversation'))}",
+                      file=sys.stderr)
+                raise Stale(stale)
+        elif bound is None and seen is not None:
+            bindings[key] = seen
+    if bindings:
+        record.update(bindings)
+        save(pane, record, run)
 
 
 def _pane(body):

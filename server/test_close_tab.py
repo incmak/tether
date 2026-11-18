@@ -11,6 +11,8 @@ from unittest.mock import Mock, patch
 
 import server
 
+from test_helper_tabs import HELPER, OTHER, OWNER, UNCONFIRMED_HELPER, Tmux
+
 
 class CloseTabTest(unittest.TestCase):
     def setUp(self):
@@ -114,6 +116,67 @@ class CloseTabTest(unittest.TestCase):
                     remaining = json.loads(self.review_file.read_text())
                     self.assertEqual({link['worker'] for link in remaining if 'saved_at' in link}, expected)
                     self.assertEqual(server.review_links.reviewed_by(), {pane: ['%4'] for pane in expected})
+
+
+class CloseHelperTabTest(unittest.TestCase):
+    def setUp(self):
+        self.owner = dict(id='%12', agent='codex', thread=OWNER, codex_binding='open')
+        self.helper = dict(id='%13', agent='codex', thread=HELPER, codex_binding='open', helper='reviewer')
+        self.entries = [self.owner, self.helper]
+        self.record = dict(owner_pane='%12', owner_thread=OWNER, helper_thread=HELPER, sent_at=1000)
+        self.run = Tmux()
+        self.run.options['%13'] = json.dumps(self.record)
+        self.kill = self.enterContext(patch.object(server.agent_tabs.helper_close, 'close_pane'))
+        self.capture = self.enterContext(patch.object(server.undo, 'capture_safe', return_value=None))
+        self.enterContext(patch.object(server.undo, 'record_tab_close'))
+        self.enterContext(patch.object(server.audit, 'record'))
+        self.enterContext(contextlib.redirect_stderr(io.StringIO()))
+
+    def close(self):
+        return server.agent_tabs.close_tab({'pane': '%13'}, self.owner, self.entries, self.run,
+                                           lambda entry: {'state': 'Idle'})
+
+    def assert_pane_untouched(self):
+        self.capture.assert_not_called()
+        self.kill.assert_not_called()
+        self.assertEqual(self.run.saves(), [])
+        self.assertEqual(self.run.record(), self.record)
+
+    def test_close_refuses_unverified_reviewer_until_thread_is_confirmed(self):
+        for unknown in (dict(thread=OTHER, codex_binding='guess'),
+                        dict(thread='pending-13-1', codex_binding='tie', pending_conversation=True),
+                        dict(thread=HELPER, codex_binding='open', codex_unresolved=True)):
+            with self.subTest(unknown=unknown):
+                self.helper.update(pending_conversation=False, codex_unresolved=False)
+                self.helper.update(unknown)
+                with self.assertRaises(RuntimeError) as raised:
+                    self.close()
+                self.assertIs(type(raised.exception), RuntimeError)
+                self.assertEqual(str(raised.exception), UNCONFIRMED_HELPER)
+                self.assert_pane_untouched()
+        self.helper.update(thread=HELPER, codex_binding='open', codex_unresolved=False)
+        self.assertEqual(self.close(), {'closed': '%13'})
+        self.kill.assert_called_once_with('%13', self.run)
+
+    def test_close_refuses_a_verified_conversation_change_for_both_agents(self):
+        for agent, evidence in (('claude', dict(registry='/fake/13.json')), ('codex', dict(codex_binding='title'))):
+            with self.subTest(agent=agent):
+                self.helper.update(agent=agent, thread=OTHER, **evidence)
+                with self.assertRaisesRegex(server.helper_tabs.Stale, 'That helper changed conversations'):
+                    self.close()
+                self.assert_pane_untouched()
+
+    def test_close_closes_a_bound_helper_whose_agent_has_exited(self):
+        for gone in ('absent', 'shell'):
+            with self.subTest(gone=gone):
+                self.kill.reset_mock()
+                self.run.options['%13'] = json.dumps(self.record)
+                if gone == 'absent':
+                    self.entries[:] = [self.owner]
+                else:
+                    self.entries[:] = [self.owner, dict(id='%13', agent='shell')]
+                self.assertEqual(self.close(), {'closed': '%13'})
+                self.kill.assert_called_once_with('%13', self.run)
 
 
 if __name__ == '__main__':

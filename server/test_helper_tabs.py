@@ -27,6 +27,8 @@ OWNER = '0f8fad5b-d9cb-469f-a165-70867728950e'
 HELPER = '1f8fad5b-d9cb-469f-a165-70867728950e'
 OTHER = '2f8fad5b-d9cb-469f-a165-70867728950e'
 REVIEW_SEND = server.review_send
+UNCONFIRMED_HELPER = "Tether cannot confirm that helper's conversation right now. Try again in a moment."
+UNCONFIRMED_OWNER = "Tether cannot confirm this tab's conversation right now. Try again in a moment."
 
 
 class Tmux:
@@ -61,8 +63,9 @@ class HelperTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.entries = [dict(id='%12', agent='codex', thread=OWNER, writable=True),
-                        dict(id='%13', agent='claude', thread=HELPER, writable=True)]
+        self.entries = [dict(id='%12', agent='codex', thread=OWNER, codex_binding='open', writable=True),
+                        dict(id='%13', agent='claude', thread=HELPER, registry='/fake/13.json',
+                             codex_binding='open', writable=True)]
         self.run = Tmux()
         self.enterContext(patch.object(server.subprocess, 'run', side_effect=self.run))
         self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
@@ -132,10 +135,110 @@ class HelperTests(unittest.TestCase):
                         self.assertEqual(self.run.saves(), [])
             self.reset_record()
             self.entries[1]['thread'] = None
-            self.assertEqual(self.request('wait')[0], 409)
-            self.assertEqual(self.request('send')[0], 409)
+            self.assertEqual(self.request('wait')[0], 503)
+            self.assertEqual(self.request('send')[0], 503)
             self.entries[1]['thread'] = HELPER
         self.send.assert_not_called()
+
+    def test_codex_start_guess_does_not_bind_and_open_thread_binds(self):
+        self.reset_record(helper_thread=None)
+        helper = self.entries[1]
+        helper.update(agent='codex', thread=OTHER, codex_binding='guess')
+        self.assertEqual(self.poll()['status'], 'running')
+        seen = self.run.record()['helper_thread']
+        helper.update(thread=HELPER, codex_binding='open')
+        # The old code stores OTHER on the first poll, then rejects the first verified thread.
+        self.assertEqual(self.poll()['status'], 'running')
+        self.assertIsNone(seen)
+        self.assertEqual(self.run.record()['helper_thread'], HELPER)
+        self.assertEqual(self.poll()['status'], 'running')
+        self.assertEqual(len(self.run.saves()), 1)
+
+    def test_codex_reviewer_unknown_thread_retries_wait_and_refuses_send(self):
+        helper = self.entries[1]
+        helper.update(agent='codex', helper='reviewer')
+        for unknown in (dict(thread=OTHER, codex_binding='guess'),
+                        dict(thread=HELPER, codex_binding='guess'),
+                        dict(thread='pending-13-1', codex_binding='tie'),
+                        dict(thread=HELPER, codex_binding='open', pending_conversation=True),
+                        dict(thread=HELPER, codex_binding='open', codex_unresolved=True),
+                        dict(thread=None, codex_binding='open')):
+            with self.subTest(unknown=unknown), contextlib.redirect_stderr(io.StringIO()):
+                original = self.reset_record()
+                helper.update(pending_conversation=False, codex_unresolved=False)
+                helper.update(unknown)
+                with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper') as raised:
+                    self.poll()
+                self.assertIs(type(raised.exception), RuntimeError)
+                for action in ('wait', 'send'):
+                    self.assertEqual(self.request(action), (503, {'error': UNCONFIRMED_HELPER, 'draft': False}))
+                self.assertEqual(self.run.record(), original)
+                self.assertEqual(self.run.saves(), [])
+                self.send.assert_not_called()
+                helper.update(thread=HELPER, codex_binding='open', pending_conversation=False, codex_unresolved=False)
+                self.assertEqual(self.poll()['status'], 'running')
+
+    def test_unknown_helper_thread_then_a_verified_change_stays_stale(self):
+        helper = self.entries[1]
+        for agent, unknown in (('claude', dict(registry=None)), ('codex', dict(codex_binding='guess'))):
+            with self.subTest(agent=agent), contextlib.redirect_stderr(io.StringIO()):
+                original = self.reset_record()
+                helper.update(agent=agent, thread=HELPER, **unknown)
+                self.assertEqual(self.request('wait')[0], 503)
+                helper.update(thread=OTHER, registry='/fake/13.json', codex_binding='title')
+                for action in ('wait', 'send'):
+                    self.assertEqual(self.request(action), (409, {'error':
+                        'That helper changed conversations. Start a new helper.'}))
+                self.assertEqual(self.run.record(), original)
+                self.assertEqual(self.run.saves(), [])
+                self.send.assert_not_called()
+
+    def test_owner_guess_or_pending_refuses_without_binding_helper(self):
+        owner = self.entries[0]
+        for unknown in (dict(thread=OTHER, codex_binding='guess', pending_conversation=False),
+                        dict(thread=OWNER, codex_binding='open', pending_conversation=True)):
+            with self.subTest(unknown=unknown), contextlib.redirect_stderr(io.StringIO()):
+                original = self.reset_record(helper_thread=None)
+                owner.update(unknown)
+                for action in ('wait', 'send'):
+                    self.assertEqual(self.request(action), (503, {'error': UNCONFIRMED_OWNER, 'draft': False}))
+                self.assertEqual(self.run.record(), original)
+                self.assertEqual(self.run.saves(), [])
+                self.send.assert_not_called()
+        owner.update(thread=OTHER, codex_binding='title', pending_conversation=False)
+        self.assertEqual(self.request('wait'), (409, {'error':
+            'This tab changed conversations. Its helper tabs no longer accept its commands.'}))
+        self.assertEqual(self.run.saves(), [])
+
+    def test_new_record_does_not_bind_a_guessed_codex_owner(self):
+        self.entries[0].update(codex_binding='guess')
+        self.assertIsNone(helpers.new_record(self.entries[0])['owner_thread'])
+
+    def test_unbound_codex_guess_keeps_poll_and_send_behavior(self):
+        self.reset_record(helper_thread=None)
+        self.entries[1].update(agent='codex', thread=OTHER, codex_binding='guess')
+        self.status.return_value = {'state': 'Working'}
+        self.assertEqual(self.poll(), dict(status='running', pane='%13', state='Working'))
+        self.status.return_value = {'state': 'Idle'}
+        self.reply.return_value = 'New reply'
+        self.assertEqual(self.poll(), dict(status='finished', pane='%13', reply='New reply', truncated=False))
+        self.assertEqual(self.run.saves(), [])
+        self.assertEqual(self.request('send')[0], 200)
+        self.send.assert_called_once()
+        self.assertIsNone(self.run.record()['helper_thread'])
+
+    def test_stale_log_names_the_pane_side_and_both_verified_threads(self):
+        for index, side, bound in ((0, 'owner', OWNER), (1, 'helper', HELPER)):
+            with self.subTest(side=side):
+                original = self.reset_record()
+                self.entries[index].update(agent='codex', thread=OTHER, codex_binding='title')
+                with contextlib.redirect_stderr(io.StringIO()) as log:
+                    self.assertEqual(self.request('wait')[0], 409)
+                self.assertEqual(log.getvalue().splitlines(), [
+                    f'helper check refused %13 ({side}): bound {bound} seen {OTHER} agent codex binding title pending False'])
+                self.assertEqual(self.run.record(), original)
+                self.assertEqual(self.run.saves(), [])
+                self.entries[index]['thread'] = bound
 
     def test_first_sight_binds_once_and_skips_pending_or_invalid_threads(self):
         for agent in ('claude', 'codex'):
@@ -227,6 +330,7 @@ class HelperTests(unittest.TestCase):
         self.send.assert_not_called()
 
     def test_shell_helper_is_missing_instead_of_stale(self):
+        self.reset_record(helper_thread=None, sent_at=700)
         self.entries[1].update(agent='shell', thread=None)
         self.assertEqual(self.request('send'),
                          (400, {'error': 'That session has ended. Select another tab.'}))
@@ -244,9 +348,10 @@ class HelperTests(unittest.TestCase):
                 with self.subTest(helper_thread=helper_thread, elapsed=elapsed):
                     self.reset_record(helper_thread=helper_thread)
                     with own_time(helpers, time=Mock(return_value=1000 + elapsed)):
-                        expected = (503, {'error': 'That helper is still starting. Try again in a moment.',
-                                          'draft': False}) if helper_thread is None and elapsed < helpers.START_WAIT else (
-                            400, {'error': 'That session has ended. Select another tab.'})
+                        if helper_thread is None and elapsed < helpers.START_WAIT:
+                            expected = (503, {'error': 'That helper is still starting. Try again in a moment.', 'draft': False})
+                        else:
+                            expected = (400, {'error': 'That session has ended. Select another tab.'})
                         self.assertEqual(self.request('send'), expected)
         self.send.assert_not_called()
         self.assertEqual(self.run.saves(), [])
@@ -262,6 +367,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.run.saves(), [])
 
     def test_gone_clears_missing_tracking(self):
+        self.reset_record(helper_thread=None, sent_at=700)
         self.entries.pop()
         self.poll(1010)
         self.assertIn('%13', helpers._missing)
@@ -429,6 +535,7 @@ class HelperTests(unittest.TestCase):
                 self.assertEqual(self.poll()['prompt'], text)
 
     def test_gone_start_and_discovery_grace_and_recovery(self):
+        self.reset_record(helper_thread=None, sent_at=700)
         helper = self.entries.pop()
         self.assertEqual(self.poll(), dict(status='running', pane='%13', state='Missing'))
         self.assertEqual(self.poll(1019)['status'], 'running')
@@ -437,7 +544,7 @@ class HelperTests(unittest.TestCase):
         self.poll(1021)
         self.assertNotIn('%13', helpers._missing)
         self.entries.pop()
-        self.assertEqual(self.poll(1022)['state'], 'Missing')
+        self.assertEqual(self.poll(1022)['state'], 'Missing')  # a bound helper whose agent left is missing, not unconfirmed
         self.reset_record(helper_thread=None)
         self.assertEqual(self.poll(1299), dict(status='running', pane='%13', state='Starting'))
         helpers._missing.clear()

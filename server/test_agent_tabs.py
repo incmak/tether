@@ -28,9 +28,10 @@ class AgentTabsTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.enterContext(patch.object(review_links, 'FILE', self.root / 'links.json'))
-        self.entries = [dict(id='%12', agent='codex', thread=THREAD, writable=True,
+        self.entries = [dict(id='%12', agent='codex', thread=THREAD, codex_binding='open', writable=True,
                              transcript='/project/source.jsonl', pane_name='Source', label='Other name'),
-                        dict(id='%13', agent='claude', thread=THREAD, writable=True, label='Reviewer'),
+                        dict(id='%13', agent='claude', thread=THREAD, registry='/fake/13.json',
+                             writable=True, label='Reviewer'),
                         dict(id='%14', agent='claude', thread=None, pane_name='Second reviewer')]
         self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
         self.enterContext(patch.object(server, 'agent_folder', return_value=str(self.root)))
