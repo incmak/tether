@@ -73,13 +73,16 @@ Only the maintainer creates release tags. A push to `main` does not release soft
 
 Run `python3 scripts/release.py X.Y.Z` from any checkout.
 
+- The script fetches `origin/main` and pins its commit. A passing GitHub `tests` run for that commit lets it skip the local checks.
+- Use `--check` to check the version, tag, commit, and CI state without changing the repository or waiting for CI.
+- If CI is still running, the script checks again every 15 seconds. Use `--ci-wait SECONDS` to change the 600-second limit.
+- If CI fails or is missing, fix main or use `--local-checks`. That option runs the full local tests and UI checks, including the build.
 - The script makes a clean worktree and bumps the version. It preserves your checkout and its uncommitted work.
-- It runs all tests locally, including real tmux and Chromium tests, plus the UI checks and build.
-- It commits the version changes, creates an annotated tag, and pushes `main` before the tag.
+- It commits the version changes, creates an annotated tag, and pushes `main` and the tag together.
 - It waits for the release if `gh` is available. Use `--no-push` to keep the release local, or `--keep` to keep the worktree.
 
 The tag must equal `v` plus the contents of `VERSION`.
-CI only builds the UI, packages, and publishes. Tests run locally before the tag.
+The release workflow builds the UI, packages the release, and publishes it.
 It creates `tether-<version>.tar.gz` with the tracked tree and `ui/dist`, plus `SHA256SUMS`.
 The archive excludes git metadata, dependencies, and untracked test data.
 Only the publication job has `contents: write` permission.
