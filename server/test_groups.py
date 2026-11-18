@@ -113,16 +113,14 @@ class RenderTests(Bundles):
     GPID = 'b1b2b3b4b5b6'
 
     def test_group_part_comes_after_the_session_part_and_names_its_notes_folder(self):
-        # The rendered text holds CLI paths of this checkout; the largest budget keeps a long worktree path from cutting the notes.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
-        projects.set_instructions(PID, 'Use pnpm.', 1)
+        projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         projects.set_instructions(self.GPID, 'Only touch the dashboard.', 0)
         projects.write_note(self.GPID, 'chart.md', '# Chart\nUse the bar chart.')
         with mock.patch('backlog.summary', return_value=(['B1 Check the dashboard'], 1)):
             text = projects.render(PID, 'claude', self.home, group={'pid': self.GPID, 'name': 'Home dashboard'},
                                    backlog_project='tether')
-        self.assertLessEqual(len(text), projects.meta(PID)['budget'])
+        self.assertLessEqual(len(text), projects.BUDGET_MAX)
         self.assertTrue(text.startswith('# Tether project'))
         self.assertLess(text.index('Use pnpm.'), text.index('## Stack: Home dashboard'))
         self.assertLess(text.index('## Stack: Home dashboard'), text.index('Only touch the dashboard.'))
@@ -141,13 +139,13 @@ class RenderTests(Bundles):
         for number in range(8):
             projects.write_note(self.GPID, f'n{number}.md', f'# Note {number}\n' + 'word ' * 300)
         text = projects.render(PID, 'codex', self.home, group={'pid': self.GPID, 'name': 'Big'})
-        self.assertLessEqual(len(text), projects.BUDGET_MIN)
+        fixed_chars = projects.state(PID, self.home)['fixed_chars']
+        self.assertLessEqual(len(text) - fixed_chars, projects.BUDGET_MIN)
         self.assertIn('Session rule.', text)
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
-        projects.set_instructions(PID, 'Use pnpm.', 1)
+        projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         text = projects.render(PID, 'claude', self.home)
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)
@@ -200,7 +198,7 @@ class LaunchTests(Bundles):
                 self.assertIn('## Stack: Docs\n', text)
                 self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
                 self.assertIn('Docs rule.', text)
-                self.assertLessEqual(len(text), budget)
+                self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], budget)
 
     def test_current_group_reads_the_pane_and_makes_the_bundle(self):
         with mock.patch.object(groups, 'group_of_pane', return_value=('$1', {'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''})), \
@@ -223,7 +221,7 @@ class LaunchTests(Bundles):
                 text = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
                 self.assertIn('## Stack: Docs\n', text)
                 self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
-                self.assertLessEqual(len(text), budget)
+                self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], budget)
 
 
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')

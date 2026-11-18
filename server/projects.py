@@ -6,9 +6,9 @@ paths.TETHER/projects/<id>/:
   INSTRUCTIONS.md   what the person wrote
   files/            pinned copies; links.json holds pins that point at files that exist elsewhere
   notes/            agent notes that the person reviews; a deleted note goes to notes/.trash/
-render() builds the text an agent gets at start, resume, clear and compact. It stays inside the budget. An
-empty project gives only the short Notes part, so agents learn where notes go. Rename, cd, split and close do not change the id. A bundle folder exists only after the
-first write."""
+render() builds the text an agent gets at start, resume, clear and compact. Built-in guidance has its own
+allowance. The project budget covers the remaining content, and the whole prompt has a hard cap.
+Rename, cd, split and close do not change the id. A bundle folder exists only after the first write."""
 import json
 import os
 import re
@@ -317,7 +317,7 @@ def mark_seen(pid):
 # ---- what an agent gets ----
 
 def _fit(parts, budget):
-    """Join the parts in order. The first part that does not fit is cut, and the rest are left out."""
+    """Keep the parts in order. The first part that does not fit is cut, and the rest are left out."""
     out, used = [], 0
     for part in parts:
         if used + len(part) <= budget:
@@ -331,7 +331,7 @@ def _fit(parts, budget):
         elif budget - used >= len(note):
             out.append(note)
         break
-    return ''.join(out)
+    return out
 
 
 def _group_parts(group, home):
@@ -360,43 +360,45 @@ def _group_parts(group, home):
 
 
 def render(pid, agent='claude', home=None, group=None, backlog_project=None):
-    """The text an agent gets. An empty project still gets the Notes part: without it no agent knows the notes folder,
-    so no note is ever written. Claude keeps its own auto memory where it is: Tether does not move it, so Claude's
-    notes from before stay in reach. Both agents get the same text. Reading never makes the bundle folder.
-    The project header, notes directions, instructions, pinned files, and stack guidance come first. The fixed
-    Tether rules follow, then open backlog items, note lists, and note excerpts. _fit keeps this order when it cuts.
+    """The text both agents get. Reading never makes the bundle folder.
     group: {'pid', 'name'} for a tab in a group (groups.py). Stack note lists and excerpts follow the project's.
     backlog_project: the agent's repository name (backlog.project_name). With it, the open backlog items for the inbox
     and that project are listed. The project preview has no tab, so it passes none."""
-    data = meta(pid)
+    prompt, _ = _render(pid, meta(pid), home, group, backlog_project)
+    return prompt
+
+
+def _render(pid, data, home, group=None, backlog_project=None):
+    """Build the prompt and count the characters that do not use the project budget."""
     text = instructions(pid).strip()
     pinned = pins(pid, home)
     found = notes(pid)
     folder = bundle(pid)
-    parts = [f'# Tether project{": " + data["name"] if data["name"] else ""}\n'
-             + ('Project guidance from Tether. The user wrote it for every agent in this tmux session. Follow it.\n'
-                if text or pinned else 'Agents in this tmux session share this project folder.\n')
-             + f'Project folder: {folder}\n']
-    parts.append(f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
-                 '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
+    heading = '# Tether project'
+    intro = (('\nProject guidance from Tether. The user wrote it for every agent in this tmux session. Follow it.\n'
+              if text or pinned else '\nAgents in this tmux session share this project folder.\n')
+             + f'Project folder: {folder}\n'
+             + f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
+             '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
+    content = [': ' + data['name'] if data['name'] else '']
     if text:
-        parts.append(f'\n## Instructions\n{text}\n')
+        content.append(f'\n## Instructions\n{text}\n')
     if pinned:
         lines = '\n'.join(f'- {item["name"]}: {item["path"]}{" (gone)" if item["missing"] else ""}' for item in pinned)
-        parts.append(f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n')
+        content.append(f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n')
     if group:
         main, group_listing, group_excerpts = _group_parts(group, home)
-        parts.append(main)
-    parts.append('\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
-                 f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n')
-    parts.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
-    parts.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
+        content.append(main)
+    fixed = ['\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
+             f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n']
+    fixed.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
+    fixed.append('\n## Claims of absence\nBefore you say that something does not exist, cannot work, or has no fix, read the primary source for the exact version in use: '
                  'source code, official docs, or the real config. A failed search on guessed names, or a page that did not load, is not evidence of absence. '
                  'If you did not read the primary source, write "not checked", name what you did not read, and keep looking when the answer can change what the user does.\n')
-    parts.append('\n## Watchers\nTo watch for events (messages, CI, logs), use Monitor: a script prints one line per new event, no message bodies. '
+    fixed.append('\n## Watchers\nTo watch for events (messages, CI, logs), use Monitor: a script prints one line per new event, no message bodies. '
                  'Re-arm it when it expires. Use CronCreate only for work due at a set time, never to poll.\n')
     cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
-    parts.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
+    fixed.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
                  'Give separate user tasks to worker tabs. Send a full spec, use `--worktree` for code, then `wait`. '
                  'Other tabs are for reviewers, advisors or work the user wants to steer.\n'
                  f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
@@ -413,7 +415,7 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'then run `close --pane %N`. Busy tabs stay open. '
                  'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply).\n')
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
-    parts.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
+    fixed.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '
                  '`--project NAME` files elsewhere. `list`: the inbox and this project\'s open items. `show B12`: its details.\n'
                  '- Add an item, without asking, for real work outside your task over about 5 minutes. No style nits or steps of your task.\n'
@@ -436,16 +438,27 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
     if group:
         listing += [group_listing] if group_listing else []
         excerpts += group_excerpts
-    return _fit(parts + waiting + listing + excerpts, data['budget'])
+    rules = ''.join(fixed)
+    fixed_chars = len(heading) + len(intro) + len(rules)
+    limit = min(data['budget'], BUDGET_MAX - fixed_chars)
+    fitted = _fit(content + waiting + listing + excerpts, limit)
+    # Keep the project name on the heading line and the backlog list after the built-in rules.
+    title = ''.join(fitted[:1])
+    main = ''.join(fitted[1:len(content)])
+    extra = ''.join(fitted[len(content):])
+    prompt = heading + title + intro + main + rules + extra
+    return prompt, fixed_chars
 
 
 def state(pid, home=None):
     """What the Project sheet shows."""
     data = meta(pid)
-    preview = render(pid, 'claude', home)
+    preview, fixed_chars = _render(pid, data, home)
     return {'id': pid, 'name': data['name'], 'revision': data['revision'], 'budget': data['budget'],
-            'budget_min': BUDGET_MIN, 'budget_max': BUDGET_MAX, 'instructions': instructions(pid),
-            'pins': pins(pid, home), 'notes': notes(pid), 'preview': preview, 'chars': len(preview),
+            'budget_min': BUDGET_MIN, 'budget_max': BUDGET_MAX,
+            'usable_budget_max': max(BUDGET_MIN, BUDGET_MAX - fixed_chars), 'instructions': instructions(pid),
+            'pins': pins(pid, home), 'notes': notes(pid), 'preview': preview,
+            'chars': len(preview) - fixed_chars, 'fixed_chars': fixed_chars,
             'folder': str(bundle(pid))}
 
 

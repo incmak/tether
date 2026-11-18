@@ -88,7 +88,7 @@ class ProjectTests(unittest.TestCase):
         real = text.replace(str(paths.TETHER), '/srv/user/.tether')
         real = real.replace(code, '/srv/user/apps/tether')
         real = real.replace(sys.executable, '/usr/bin/python3')  # CI's interpreter path is about 36 characters longer
-        self.assertLess(len(real), 3824)  # +150 subagents-first rule, +150 worker tab for a separate task (2026-11-14), +100 close --self (2026-11-15), +220 watchers use Monitor (2026-11-17), +145 reminders CLI, +54 backlog follows autonomy (B294) (2026-11-18)
+        self.assertLess(len(real), 4500)  # Keep the built-in guidance below half of the prompt cap.
         self.assertIn('use Monitor', text)
         self.assertLess(text.index('## Claims of absence'), text.index('## Watchers'))
         self.assertLess(text.index('## Watchers'), text.index('## New tabs and reviewers'))
@@ -123,7 +123,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('Asked to close this tab: run `close --self`', text)
         self.assertFalse(projects.has_context(PID, self.home))
         state = projects.state(PID, self.home)
-        self.assertEqual((state['chars'] > 0, state['revision']), (True, 0))
+        self.assertEqual((state['chars'], state['fixed_chars'], state['revision']), (0, len(text), 0))
         projects.set_name(PID, 'web')
         projects.mark_seen(PID)
         self.assertFalse(projects.bundle(PID).exists())
@@ -150,20 +150,55 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('## Instructions\nUse pnpm.', text)
         self.assertIn('Project guidance from Tether', text)
 
-    def test_render_stays_inside_the_budget(self):
-        projects.set_instructions(PID, 'x' * 20000, 0)
+    def test_small_budget_cuts_instructions_and_keeps_all_builtin_guidance(self):
+        projects.set_instructions(PID, 'Use pnpm.', 0)
         projects.set_name(PID, 'web')
-        text = projects.render(PID)
-        self.assertTrue(text.startswith('# Tether project: web\n'))
-        self.assertIn(f'Project folder: {projects.bundle(PID)}\n', text)
-        self.assertIn('\n## Notes\n', text)
-        self.assertLessEqual(len(text), projects.BUDGET)
+        full = projects.render(PID)
+        projects.set_budget(PID, 1000, 1)
+        instructions = 'Use pnpm.\n' * 1000 + 'End of instructions.'
+        projects.set_instructions(PID, instructions, 2)
+        state = projects.state(PID, self.home)
+        preview = state['preview']
+        intro, rules = full.split('\n## Instructions\nUse pnpm.\n')
+        self.assertTrue(preview.startswith(intro))
+        self.assertTrue(preview.endswith(rules))
+        self.assertIn('\n## Instructions\nUse pnpm.\n', preview)
+        self.assertIn('Cut to fit', preview)
+        self.assertNotIn('End of instructions.', preview)
+        self.assertLessEqual(state['chars'], 1000)
+        self.assertEqual(state['chars'] + state['fixed_chars'], len(preview))
+        self.assertEqual(state['budget'], 1000)
+        self.assertEqual(projects.instructions(PID), instructions + '\n')
+
+    def test_full_prompt_stays_under_the_cap_with_the_largest_budget(self):
+        projects.set_instructions(PID, 'Use pnpm.\n' * 1000, 0)
         projects.set_budget(PID, 10000, 1)
-        text = projects.render(PID)
-        self.assertLessEqual(len(text), 10000)
-        self.assertIn('Cut to fit', text)
+        state = projects.state(PID, self.home)
+        self.assertLessEqual(len(state['preview']), 10000)
+        self.assertGreater(len(state['preview']), 9900)
+        self.assertIn('Cut to fit', state['preview'])
+        self.assertIn('\n## Backlog\n', state['preview'])
+        self.assertEqual(projects.meta(PID)['budget'], 10000)
         with self.assertRaises(projects.ProjectError):
             projects.set_budget(PID, 50000, 2)
+
+    def test_state_reports_the_usable_maximum_without_rewriting_the_budget(self):
+        for saved in (4000, 8000):
+            with self.subTest(saved=saved):
+                projects.set_budget(PID, saved, projects.meta(PID)['revision'])
+                metadata = projects.bundle(PID) / 'project.json'
+                before = metadata.read_bytes()
+                state = projects.state(PID, self.home)
+                self.assertEqual(state['usable_budget_max'], projects.BUDGET_MAX - state['fixed_chars'])
+                self.assertEqual(state['budget'], saved)
+                self.assertEqual(metadata.read_bytes(), before)
+
+    def test_state_keeps_the_usable_maximum_at_least_the_minimum(self):
+        fixed_chars = len(projects.render(PID, home=self.home))
+        with mock.patch.object(projects, 'BUDGET_MAX', fixed_chars + 500):
+            state = projects.state(PID, self.home)
+        self.assertEqual(state['usable_budget_max'], projects.BUDGET_MIN)
+        self.assertLessEqual(len(state['preview']), fixed_chars + 500)
 
     def test_pins_link_and_copy_and_refuse_secrets(self):
         (self.home / 'docs').mkdir()
@@ -197,8 +232,6 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(names['build.md']['new'])
         projects.mark_seen(PID)
         self.assertFalse(any(item['new'] for item in projects.notes(PID)))
-        # Note excerpts come last. Give them space independent of the launch command path lengths.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         claude, codex = projects.render(PID, 'claude'), projects.render(PID, 'codex')
         self.assertEqual(claude, codex)
         self.assertIn('### MEMORY.md', claude)
@@ -212,8 +245,6 @@ class ProjectTests(unittest.TestCase):
                 projects.write_note(PID, bad, 'x')
 
     def test_only_five_newest_notes_have_text(self):
-        # Test the excerpt count separately from truncation by the launch budget.
-        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         for at in range(7):
             projects.write_note(PID, f'n{at}.md', f'# Note {at}\nbody {at}\n')
             os.utime(projects.bundle(PID) / f'notes/n{at}.md', (time.time() + at, time.time() + at))
