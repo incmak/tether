@@ -100,6 +100,11 @@ async function main() {
     })
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
     const pings = () => posts.filter(post => post.endpoint === 'activity')
+    const waitForPing = pane => page.waitForResponse(response => {
+      const request = response.request()
+      return new URL(response.url()).pathname === '/mobile/api/activity'
+        && request.method() === 'POST' && request.postDataJSON()?.pane === pane
+    })
     for (const [width, height] of sizes) {
       const at = `${width}px`
       prefs = { selected: '%1' }; version++
@@ -165,21 +170,18 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `settings-publish-${width}.png`) })
 
       // Back in the chat: input in the chat panel pings for that tab, once a minute at most.
-      await page.keyboard.press('Escape')
-      await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
-      await chat.waitFor()
-      await chat.click({ position: { x: 20, y: 120 } })
-      await page.waitForTimeout(300)
-      await chat.click({ position: { x: 20, y: 140 } })
-      await page.waitForTimeout(300)
+      // Close Settings in this document so its saved preference is already active when input arrives.
+      await page.getByRole('button', { name: 'Close settings' }).click()
+      await keep.waitFor({ state: 'hidden' })
+      const message = chat.locator('.composer textarea')
+      await Promise.all([waitForPing('%1'), message.click()])
+      await message.press('ArrowLeft')
       check(`${at} chat input pings its tab once`, pings().length === 1 && pings()[0].body.pane === '%1' && typeof pings()[0].body.zone === 'string', JSON.stringify(pings()))
       // A click on another tab's button counts for that tab, not for the tab that was open before the click.
-      const other = page.locator('[role="tab"][data-pane="%2"]').first()
-      if (await other.isVisible()) {
-        await other.click()
-        await page.waitForTimeout(300)
-        check(`${at} tab click pings the clicked tab`, pings().length === 2 && pings()[1].body.pane === '%2', JSON.stringify(pings()))
-      }
+      await message.blur()
+      const other = page.locator('[role="tab"][data-pane="%2"]:visible').first()
+      await Promise.all([waitForPing('%2'), other.click()])
+      check(`${at} tab click pings the clicked tab`, pings().length === 2 && pings()[1].body.pane === '%2', JSON.stringify(pings()))
     }
     check('no page errors', !pageErrors.length, pageErrors.join('\n'))
   } catch (error) {
