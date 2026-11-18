@@ -185,7 +185,7 @@ class CloseHelperTabTest(unittest.TestCase):
     def test_linked_reviewer_cannot_close_an_unconfirmed_helper(self):
         reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
         self.entries[1] = dict(self.helper, thread=OTHER, codex_binding='guess')
-        with patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%14']}):
+        with patch.object(server.review_links, 'linked_worker_threads', return_value={None}):
             with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
                 server.agent_tabs.close_tab({'pane': '%13'}, reviewer, self.entries + [reviewer], self.run,
                                             lambda entry: {'state': 'Idle'})
@@ -199,8 +199,7 @@ class CloseHelperTabTest(unittest.TestCase):
         reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
         for bound, closes in ((HELPER, False), (None, True), (OTHER, True)):
             with self.subTest(bound=bound), \
-                    patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%14']}), \
-                    patch.object(server.review_links, 'linked_worker_threads', return_value={bound}):
+                    patch.object(server.review_links, 'linked_worker_threads', return_value={bound}) as links:
                 entries = [self.owner, dict(self.helper, thread=OTHER, codex_binding='title'), reviewer]
                 if closes:
                     self.assertEqual(server.agent_tabs.close_tab({'pane': '%13'}, reviewer, entries, self.run,
@@ -210,6 +209,7 @@ class CloseHelperTabTest(unittest.TestCase):
                         server.agent_tabs.close_tab({'pane': '%13'}, reviewer, entries, self.run,
                                                     lambda entry: {'state': 'Idle'})
                     self.assert_pane_untouched()
+                links.assert_called_once_with('%13', '%14')  # one locked read decides the link and its conversation
 
     def test_close_binds_and_closes_an_unbound_verified_helper(self):
         self.record = dict(self.record, helper_thread=None)

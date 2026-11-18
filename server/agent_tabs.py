@@ -80,13 +80,14 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise ValueError('That session has ended. Select another tab.')
     target = next((entry for entry in entries if entry['id'] == pane), None)
     owner = record is not None and record['owner_pane'] == caller['id']
-    if not owner and caller['id'] not in review_links.reviewed_by().get(pane, []):
+    linked = set() if owner else review_links.linked_worker_threads(pane, caller['id'])  # empty: no link
+    if not owner and not linked:
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     if helper_tabs.verified_thread(target) is None:  # closing is final: only a confirmed conversation
         raise RuntimeError("Tether cannot confirm that helper's conversation right now. Try again in a moment.")
     if owner:
         helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
-    elif review_links.linked_worker_threads(pane, caller['id']) - {None, helper_tabs.verified_thread(target)}:
+    elif linked - {None, helper_tabs.verified_thread(target)}:
         raise helper_tabs.Stale('That tab changed conversations since your review started.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
