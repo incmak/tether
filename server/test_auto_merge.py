@@ -169,6 +169,55 @@ class Decision(Base):
                 self.git(self.work, 'clean', '-fd')
         self.assertFalse(auto_merge._dirty(self.work, scratch, head))
 
+    def test_unchanged_submodule_and_crlf_checkout_are_clean(self):
+        # A submodule that main already has, checked out and unchanged.
+        library = self.root / 'library'
+        self.git(self.root, 'init', '-q', '-b', 'main', str(library))
+        self.write(library, 'lib.txt', 'library\n')
+        self.commit(library, 'Library')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(library), 'vendor/library')
+        self.write(self.repo, '.gitattributes', '*.txt text eol=crlf\n')
+        self.write(self.repo, 'ui/src/notes.txt', 'one\ntwo\n')
+        self.commit(self.repo, 'Submodule and CRLF file')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'merge', '-q', '--ff-only', 'main')
+        self.git(self.work, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+        self.assertEqual((self.work / 'ui/src/notes.txt').read_bytes(), b'one\r\ntwo\r\n')
+        self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
+        head = self.change()
+        decision, plan = auto_merge.evaluate(self.work, head)
+        self.assertEqual(self.failed(decision), [])
+        self.assertIsNotNone(plan)
+        # A real edit of the CRLF file, and a second kind: a lone CR change, are still uncommitted work.
+        for data in (b'one\r\nthree\r\n', b'one\rtwo\r\n'):
+            (self.work / 'ui/src/notes.txt').write_bytes(data)
+            decision = auto_merge.evaluate(self.work, head)[0]
+            self.assertEqual(self.failed(decision), ['branch'])
+            self.assertEqual(decision['checks'][1]['text'], auto_merge.DIRTY)
+        (self.work / 'ui/src/notes.txt').write_bytes(b'one\r\ntwo\r\n')
+        self.write(self.work / 'vendor/library', 'new.txt', 'inside the submodule\n')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+
+    def test_a_filter_that_tether_does_not_run_is_unsupported_not_dirty(self):
+        marker = self.root / 'filter-ran'
+        for attribute, config in (('filter=evil', ('filter.evil.clean', f'touch {marker}; cat')), ('ident', None),
+                                  ('filter=lfs', None)):
+            with self.subTest(attribute=attribute):
+                self.git(self.work, 'reset', '-q', '--hard', 'origin/main')
+                self.write(self.work, '.gitattributes', f'*.dat {attribute}\n')
+                self.write(self.work, 'ui/src/blob.dat', 'stored\n')
+                head = self.commit(self.work, f'Add {attribute}')
+                if config:
+                    self.git(self.repo, 'config', *config)
+                (self.work / 'ui/src/blob.dat').write_bytes(b'what the smudge filter wrote\n')
+                decision = auto_merge.evaluate(self.work, head)[0]
+                self.assertIn('branch', self.failed(decision))
+                self.assertEqual(decision['checks'][1]['text'], auto_merge.UNSUPPORTED)
+                self.assertFalse(marker.exists())
+                # Another file without the attribute that differs is plain uncommitted work.
+                self.write(self.work, 'ui/src/App.tsx', 'export const app = "edited"\n')
+                self.assertEqual(auto_merge.evaluate(self.work, head)[0]['checks'][1]['text'], auto_merge.DIRTY)
+
     def test_nested_worker_folder_uses_the_whole_worktree(self):
         for name in ('ui/src/App.tsx', 'ui/index.html'):
             with self.subTest(name=name):
@@ -411,7 +460,7 @@ class Decision(Base):
             self.git(self.work, 'update-index', '--add', '--cacheinfo', f'160000,{base},{path}')
             self.git(self.work, 'commit', '-m', 'Gitlink', '-m', STAMP)
             decision = auto_merge.evaluate(self.work, self.git(self.work, 'rev-parse', 'HEAD'))[0]
-            self.assertEqual(self.failed(decision), ['branch', 'scope'])
+            self.assertEqual(self.failed(decision), ['scope'])  # the worktree itself is clean
             self.assertIn(f'{path} is a link or a submodule', decision['checks'][-3]['text'])
 
     def test_late_nul_and_large_text_blobs_wait(self):
@@ -600,7 +649,7 @@ class Modes(Base):
     def test_observe_runs_only_the_metadata_allowlist_in_the_worker_repository(self):
         head = self.change()
         scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
-        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files'}
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr'}
         object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
         for folder in (self.work, self.work / 'server'):
             with self.subTest(folder=folder), mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:

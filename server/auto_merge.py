@@ -454,10 +454,25 @@ def _tree(folder, revision):
     return entries
 
 
-def _dirty(folder, scratch, head):
-    """Compare the index and raw worktree bytes to HEAD without running filters.
+DIRTY = 'The worktree has uncommitted or untracked files.'
+UNSUPPORTED = ('The worktree uses a checkout filter (for example Git LFS) that Tether does not run, '
+               'so it cannot confirm that the tree is clean.')
 
-    Files that need a clean filter, such as autocrlf or LFS, read as dirty when their raw bytes differ.
+
+def _filtered(folder, name):
+    """True when attributes give the file a filter, an ident or an encoding. check-attr reads attributes; it runs
+    no program."""
+    out = _git(folder, 'check-attr', '-z', 'filter', 'ident', 'working-tree-encoding', '--', name).stdout.split('\0')
+    return any(value not in ('unspecified', 'unset') for value in out[2::3])
+
+
+def _dirty(folder, scratch, head):
+    """'' for a clean worktree, DIRTY for uncommitted or untracked work, UNSUPPORTED when only a filter could tell.
+
+    It compares the index and the raw worktree bytes to HEAD and never runs a filter. A submodule entry is not
+    compared: its content is not part of this repository. A file checked out with CRLF line ends is clean when its
+    bytes match after the line ends are put back. A file with a filter attribute whose raw bytes differ cannot be
+    judged without the filter, so it is unsupported, not dirty.
     """
     raw = _git(folder, 'ls-files', '-s', '-z', '--sparse', binary=True).stdout
     if raw and not raw.endswith(b'\0'):
@@ -465,17 +480,21 @@ def _dirty(folder, scratch, head):
     index = {}
     for line in raw.split(b'\0')[:-1]:
         meta, sep, path = line.partition(b'\t')
-        match = re.fullmatch(rb'(100644|100755|120000) ([0-9a-f]{40}) 0', meta)
+        match = re.fullmatch(rb'(100644|100755|120000|160000) ([0-9a-f]{40}) 0', meta)
         if not match or not sep or not path or any(part in (b'', b'.', b'..') for part in path.split(b'/')):
-            return True
-        index[os.fsdecode(path)] = (match[1].decode('ascii'), 'blob', match[2].decode('ascii'))
+            return DIRTY
+        mode = match[1].decode('ascii')
+        index[os.fsdecode(path)] = (mode, 'commit' if mode == '160000' else 'blob', match[2].decode('ascii'))
     if index != _tree(scratch, head):
-        return True
+        return DIRTY
+    unsupported = False
     for name, (mode, _, sha) in index.items():
+        if mode == '160000':
+            continue
         path = folder / name
         try:
             if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')):
-                return True
+                return DIRTY
             kind = path.lstat().st_mode
             if mode == '120000' and stat.S_ISLNK(kind):
                 data = os.readlink(os.fsencode(path))
@@ -485,16 +504,24 @@ def _dirty(folder, scratch, head):
                 with os.fdopen(fd, 'rb') as stream:
                     found = os.fstat(stream.fileno())
                     if not stat.S_ISREG(found.st_mode) or bool(found.st_mode & stat.S_IXUSR) != (mode == '100755'):
-                        return True
+                        return DIRTY
                     blob = hashlib.sha1(b'blob %d\0' % found.st_size)
                     hashlib.file_digest(stream, lambda: blob)
+                    if blob.hexdigest() != sha and found.st_size <= 64 * 1024 * 1024:
+                        stream.seek(0)
+                        data = stream.read().replace(b'\r\n', b'\n')  # what Git stores for a CRLF checkout
+                        blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
             else:
-                return True
+                return DIRTY
         except OSError:
-            return True
+            return DIRTY
         if blob.hexdigest() != sha:
-            return True
-    return bool(_git(folder, 'ls-files', '--others', '--exclude-standard', '-z', '--sparse', binary=True).stdout)
+            if not _filtered(folder, name):
+                return DIRTY
+            unsupported = True
+    if _git(folder, 'ls-files', '--others', '--exclude-standard', '-z', '--sparse', binary=True).stdout:
+        return DIRTY
+    return UNSUPPORTED if unsupported else ''
 
 
 def _tree_diff(folder, base, head):
@@ -949,8 +976,8 @@ def evaluate(folder, approved):
             check('branch', False, 'The tab is not on a worker branch.')
         elif (checkout := _worker_checkout(folder)) is None:
             check('branch', False, 'The tab works in the main checkout, not in a worktree of its own.')
-        elif _dirty(checkout, scratch, head):
-            check('branch', False, 'The worktree has uncommitted or untracked files.')
+        elif (dirty := _dirty(checkout, scratch, head)):
+            check('branch', False, dirty)
         else:
             check('branch', True, f'Worker branch {branch}, with no uncommitted changes.')
     except GitError as exc:
@@ -1118,7 +1145,7 @@ def merge(plan, reviewer, job):
         except GitError as exc:
             raise NotAuthorized(str(exc)) from exc
         if dirty:
-            raise NotAuthorized('The worktree has uncommitted or untracked files.')
+            raise NotAuthorized(dirty)
         current = job.get('current')
         try:
             live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None

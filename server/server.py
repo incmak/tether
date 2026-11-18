@@ -251,7 +251,8 @@ def review_alert(title, body, session, review=None):
 def auto_merge_alert(title, body, session):
     payload = {'title': title, 'body': body, 'tag': 'auto-merge-' + str(session), 'priority': 'important', 'silent': False}
     if session:
-        payload.update(session=session, url='/mobile/#session=' + quote(session))
+        # Inside the app scope /chat/, so the installed app opens it (note android-links-open-tether-app.md).
+        payload.update(session=session, url='/chat/?session=' + quote(session, safe=''))
     notify(payload, False)
 
 
