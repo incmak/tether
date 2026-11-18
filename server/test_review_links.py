@@ -14,6 +14,7 @@ import threading
 import unittest
 from unittest.mock import ANY, Mock, patch
 
+import audit
 import review_links
 import review_scope
 import server
@@ -1017,6 +1018,27 @@ class ReviewLinksTests(unittest.TestCase):
     def request_review(self):
         self.observe(**{'%13': 'Working'})
         self.observe(**{'%13': 'Idle'})
+
+    def test_audit_verdict_records_forwarded_reply_once_across_poll_retries(self):
+        self.reviewer['pane_name'] = 'Reviewer'
+        commit = 'a1b2c3d4' * 5
+        self.commit = Mock(return_value=commit)
+        self.review_reply = Mock()
+        for approved, reply in ((True, f'APPROVED {commit}'), (False, f'Fix the lock in commit {commit}.')):
+            with self.subTest(approved=approved), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(audit.paths, 'CONFIG', Path(folder)):
+                self.add()
+                self.request_review()
+                self.review_reply.return_value = reply
+                self.send.side_effect = DraftError('draft')
+                self.observe()
+                self.assertEqual(audit.query(kinds=['review.verdict'])['entries'], [])
+                self.send.side_effect = None
+                for _ in range(3):
+                    self.observe()
+                entry, = audit.query(kinds=['review.verdict'])['entries']
+                self.assertEqual(entry['actor'], {'source': 'server', 'pane': '%12', 'tab': 'Reviewer'})
+                self.assertEqual(entry['detail'], {'worker': '%13', 'approved': approved, 'commit': commit[:12]})
 
     def test_busy_claude_reviewer_skips_first_idle_reply(self):
         self.observe(**{'%13': 'Working', '%12': 'Working'})

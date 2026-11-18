@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 
+import audit
 import auth
 import auto_resume
 import auto_stacks
@@ -85,7 +86,9 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
     closed = undo.capture_safe(pane, run, entries)
+    name = (closed or {}).get('name') or delegate.source_title(target or {}, fallback=pane)
     helper_close.close_pane(pane, run)
+    audit.record('tab.close', f'Closed tab {name}', pane=pane)
     undo.record_tab_close(closed, run)
     return {'closed': pane}
 
@@ -204,6 +207,7 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                                             cwd=made['path'], worktree=made['branch'],
                                             owner=_owner(caller, root, fresh), group=group,
                                             name=title)
+        audit.record('tab.start', f"Started tab {name} ({request['agent']})", pane=pane)
         undo.record_tab_start(pane, run)
         handler.respond(201, {'pane': pane, 'name': name, 'worktree': made})
         return
@@ -227,6 +231,7 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                                             run=run, recent=lambda: snapshot(caller).get('messages') or [],
                                             cwd=body.get('cwd'), owner=_owner(caller, root, entries),
                                             group=group, name=title)
+            audit.record('tab.start', f"Started tab {name} ({request['agent']})", pane=pane)
             undo.record_tab_start(pane, run)
             result = 201, {'pane': pane, 'name': name}
         elif action == 'link':

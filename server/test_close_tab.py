@@ -15,7 +15,7 @@ import server
 class CloseTabTest(unittest.TestCase):
     def setUp(self):
         self.killed = []
-        self.listed = [{'id': '%1', 'thread': 'chat-a'}, {'id': '%2', 'thread': None}]
+        self.listed = [{'id': '%1', 'thread': 'chat-a', 'pane_name': 'Audit Log'}, {'id': '%2', 'thread': None}]
         self.kill_fails = False
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.review_file = Path(directory) / 'review-links.json'
@@ -41,6 +41,7 @@ class CloseTabTest(unittest.TestCase):
         encoded = json.dumps(payload).encode()
         handler.rfile, handler.wfile = io.BytesIO(encoded), io.BytesIO()
         handler.headers = {'Host': 'phone.test', 'Origin': 'http://phone.test', 'X-Codex-Mobile': '1',
+                           'X-Tether-Client': 'web', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/1',
                            'Content-Length': str(len(encoded))}
         handler.deny = Mock(return_value=False)
         handler.respond = Mock()
@@ -54,8 +55,19 @@ class CloseTabTest(unittest.TestCase):
                 patch.object(server.auto_resume, 'forget_pane'), \
                 patch.object(server.auto_resume, 'forget_session'), \
                 patch.object(server.groups, 'closing', lambda pane: contextlib.nullcontext()):
-            handler._delete_plain()
+            handler.do_DELETE()
         return handler.respond.call_args.args, forget
+
+    def test_audit_records_one_close_with_device_and_skips_failed_kill(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(server.paths, 'CONFIG', Path(folder)):
+            self.kill_fails = True
+            self.assertEqual(self.close({'pane': '%1', 'thread': 'chat-a'})[0][0], 503)
+            self.assertEqual(server.audit.query()['entries'], [])
+            self.kill_fails = False
+            self.assertEqual(self.close({'pane': '%1', 'thread': 'chat-a'})[0][0], 200)
+            entry, = server.audit.query()['entries']
+            self.assertEqual((entry['kind'], entry['summary']), ('tab.close', 'Closed tab Audit Log'))
+            self.assertEqual(entry['actor'], {'source': 'ui', 'device': 'Safari on iPhone'})
 
     def test_close_with_the_same_chat_kills_the_pane(self):
         (status, body), forget = self.close({'pane': '%1', 'thread': 'chat-a'})

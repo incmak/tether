@@ -569,7 +569,8 @@ class AnswerEndpointTest(unittest.TestCase):
         self.clear.assert_called_once_with('%1', 't1')
         self.clear.reset_mock()
         self.assertEqual(self.post('approval', action='reject', feedback='Use the safer plan'), 200)
-        self.respond_approval.assert_called_with(self.config, None, 'reject', choice=None, feedback='Use the safer plan')
+        self.respond_approval.assert_called_with(self.config, None, 'reject', choice=None, feedback='Use the safer plan',
+                                                on_answer=mock.ANY)
         self.clear.assert_called_once_with('%1', 't1')
 
     def test_broadcast_only_clears_successful_sends(self):

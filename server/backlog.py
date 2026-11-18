@@ -10,6 +10,7 @@ paths.TETHER/backlog/
 Codex's sandbox gets write access to this folder only, so it holds nothing else. Agents change the list through
 agent_backlog_cli.py. A saved version check catches anything that edits the file another way."""
 import contextlib
+from collections import Counter, defaultdict
 import fcntl
 import hashlib
 import os
@@ -17,6 +18,7 @@ import re
 import time
 from pathlib import Path
 
+import audit
 import paths
 from projects import ProjectError, _read, _write, invalid
 
@@ -179,16 +181,19 @@ def _archive(text, everything=False):
     return '\n'.join(line for at, line in enumerate(lines) if at not in drop)
 
 
-def _replace(current, text, everything=False):
+def _replace(current, text, everything=False, audit_before=None):
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
+    edited = text
     text = _archive(text, everything)
     if len(text) > LIMIT:
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     _keep(current)  # an agent may have edited the file directly since the last copy
     _write(_path(), text)
     _keep(text)
+    if audit_before is not None:
+        _audit_changes(audit_before, edited)
     return _state(text)
 
 
@@ -231,7 +236,7 @@ def save(text, version):
         current = read()
         if current['version'] != version:
             raise ProjectError(409, 'The backlog changed while you were editing.')
-        return _replace(current['text'], with_ids(text, current['text']))
+        return _replace(current['text'], with_ids(text, current['text']), audit_before=current['text'])
 
 
 def archive_done(dry_run=False):
@@ -278,12 +283,12 @@ def _insert_at_end(lines, start, end, new):
         lines.insert(after, '')
 
 
-def _change(change):
+def _change(change, audit_action=True):
     with _locked():
         current = read()['text']
         lines = _lines(current)
         result = change(lines)
-        _replace(current, with_ids('\n'.join(lines) + '\n', current))
+        _replace(current, with_ids('\n'.join(lines) + '\n', current), audit_before=current if audit_action else None)
     return result
 
 
@@ -316,6 +321,71 @@ def _open_items(lines, project):
 def _bare(text):
     """An item's words, without its ID and the record of who added it."""
     return SOURCE.sub('', ID.sub('', text))
+
+
+def _audit_items(text):
+    lines = text.split('\n')
+    items, unnumbered = {}, Counter()
+    project = None
+    for at, line in enumerate(lines):
+        heading = HEADING.fullmatch(line)
+        if heading:
+            project = heading[1] or None
+        elif item := ITEM.fullmatch(line):
+            doing = next((part.strip()[len('- Doing:'):].strip() for part in reversed(lines[at + 1:_item_end(lines, at)])
+                          if part.lstrip().startswith('- Doing:')), None)
+            stage = 'done' if item[1] != ' ' else 'building' if doing is not None else 'ready'
+            snapshot = (project, _bare(item[2]).strip(), stage, doing)
+            if number := ID.search(line):
+                items[f'B{number[1]}'] = snapshot
+            else:
+                unnumbered[snapshot] += 1
+    return items, unnumbered
+
+
+def _audit_changes(before, after):
+    # The sheet saves a whole list, while the CLI and board change one item. Compare the intended items before
+    # automatic archiving so the same action records once and archiving does not look like a deletion.
+    if before == after:
+        return
+    previous, unnumbered = _audit_items(before)
+    current, _ = _audit_items(after)
+    by_title = defaultdict(list)
+    if unnumbered:
+        # An existing item can get its first ID during a write. Match unchanged items before matching a legacy
+        # item whose stage or section changed, so a save neither invents an add nor loses that actual action.
+        added = {ref: row for ref, row in current.items() if ref not in previous}
+        for ref, row in added.items():
+            if unnumbered[row]:
+                previous[ref] = row
+                unnumbered[row] -= 1
+        for row, count in unnumbered.items():
+            by_title[row[1]].extend([row] * count)
+        for ref, (_, title, _, _) in added.items():
+            if ref not in previous and by_title[title]:
+                previous[ref] = by_title[title].pop()
+    for ref, (project, title, stage, doing) in current.items():
+        short = title[:80]
+        if ref not in previous:
+            audit.record('backlog.add', f'{ref} added: {short}', project=project)
+            continue
+        old_project, _, old_stage, old_doing = previous[ref]
+        if project != old_project:
+            audit.record('backlog.move', f'{ref} moved: {short}', project=project,
+                         from_project=old_project or 'Inbox', to_project=project or 'Inbox')
+        if stage == 'building' and (stage != old_stage or doing != old_doing):
+            audit.record('backlog.start', f'{ref} started: {short}', project=project)
+        elif stage == 'done' and stage != old_stage:
+            audit.record('backlog.done', f'{ref} done: {short}', project=project)
+        elif stage == 'ready' and stage != old_stage:
+            audit.record('backlog.move', f'{ref} moved to Ready: {short}', project=project, from_stage=old_stage,
+                         to_stage=stage)
+    for ref, (project, title, _, _) in previous.items():
+        if ref not in current:
+            audit.record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
+    for rows in by_title.values():
+        for project, title, _, _ in rows:
+            audit.record('backlog.remove', f'Removed backlog item: {title[:80]}', project=project)
 
 
 def _by_id(lines, number, need_open):
@@ -356,7 +426,7 @@ def add_detail(query, text, project=''):
     def change(lines):
         at = _block_end(lines, _match(lines, query, project, need_open=False))
         lines.insert(at, f'  - {text}')
-    _change(change)
+    _change(change, audit_action=False)
 
 
 def reword(query, text, project=''):
@@ -373,7 +443,7 @@ def reword(query, text, project=''):
         source = SOURCE.search(ID.sub('', body))
         lines[at] = f'{line[:line.index("] ") + 2]}{text}{source[0].rstrip() if source else ""}{number[0] if number else ""}'
         return lines[at]
-    return _change(change)
+    return _change(change, audit_action=False)
 
 
 def move(query, target, project=''):
@@ -724,6 +794,6 @@ def set_stage(ref, stage, version, who='Mak'):
             lines.insert(_item_end(lines, at), _done_line('', who))
         text = '\n'.join(lines) + '\n'
         if text != current:
-            _replace(current, with_ids(text, current))
+            _replace(current, with_ids(text, current), audit_before=current)
     card = next((c for c in board_items() if c['id'] == f'B{number}'), None)
     return card or {'id': f'B{number}', 'stage': stage, 'gone': True}

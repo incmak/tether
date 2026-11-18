@@ -34,6 +34,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import codex_level  # noqa: E402
 import paths  # noqa: E402
 
 MODELS = (
@@ -47,6 +48,7 @@ MODELS = (
 )
 NAMES = {key: name for key, name, _ in MODELS}
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
+_SETTINGS_LOCK = threading.Lock()
 # Families from weakest to strongest for the advisor role (code.claude.com/docs/en/advisor#choose-an-advisor-model).
 # Opus 5 and 5.5 accept Fable or Opus 5+; a Fable main model accepts only Fable (table row "Fable 5.2 | Fable 5.2",
 # and the pairing "Fable main + Fable advisor"). The aliases resolve to the newest version of each family, so only
@@ -297,10 +299,19 @@ def post(handler):
         if not isinstance(body, dict):
             raise AdvisorError(400, 'Invalid request.')
         pid = body.get('project')
-        if pid is None:
-            set_global(body.get('model'))
-        else:
-            set_project(pid, body.get('override'), body.get('model'))
+        model = body.get('model')
+        with _SETTINGS_LOCK:
+            if pid is None:
+                old, new = read_global(), model
+                set_global(model)
+            else:
+                current = resolve(pid)
+                previous = current['project'] or {'model': current['global'], 'override': False}
+                override = body.get('override')
+                set_project(pid, override, model)
+                old = codex_level._override_value(previous['model'], previous['override'])
+                new = codex_level._override_value(model, override)
+            codex_level._record_setting('setting.claude_advisor', 'Claude advisor', old, new, pid=pid)
         handler.respond(200, state(pid))
     except AdvisorError as exc:
         handler.respond(exc.status, {'error': str(exc)})

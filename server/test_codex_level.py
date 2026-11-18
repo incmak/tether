@@ -10,8 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import audit
 import codex_level
 import paths
+import projects
 
 PID = 'abcdef012345'
 
@@ -334,6 +336,42 @@ class Http(Base):
         self.assertEqual(handler.status, 400)
         self.assertTrue(codex_level.handles('/mobile/api/codex-level?project=abc'))
         self.assertFalse(codex_level.handles('/mobile/api/codex-levels'))
+
+    def test_level_audit_records_successful_change_and_undo(self):
+        codex_level.set_global(3)
+        with audit.acting('ui', device='Chrome on Mac'):
+            for body, status in (({'level': 1, 'undo': 'yes'}, 400),
+                                 ({'level': 1}, 200), ({'level': 1}, 200),
+                                 ({'level': 3, 'undo': True}, 200)):
+                handler = Handler(codex_level.PATH, body)
+                codex_level.post(handler)
+                self.assertEqual(handler.status, status, handler.body)
+        rows = audit.query(kinds=['setting.codex_level'])['entries']
+        self.assertCountEqual([(row['summary'], row['old'], row['new'], row.get('undo')) for row in rows],
+                              [('Codex level 3 → 1', 3, 1, None), ('Undo: Codex level 1 → 3', 1, 3, True)])
+        self.assertTrue(all(row['actor'] == {'source': 'ui', 'device': 'Chrome on Mac'} for row in rows))
+
+    def test_level_audit_records_project_override_change_at_the_same_level(self):
+        codex_level.set_project(PID, False, 2)
+        projects.set_name(PID, 'Example Project')
+        with audit.acting('ui'):
+            handler = Handler(codex_level.PATH, {'project': PID, 'override': True, 'level': 2})
+            codex_level.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.codex_level'])['entries']
+        self.assertEqual(row['project'], 'Example Project')
+        self.assertEqual(row['summary'], 'Codex level for Example Project: 2 (override off) → 2 (override on)')
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('2 (override off)', '2 (override on)', {'source': 'ui'}))
+
+    def test_run_audit_records_changed_model_effort_and_fast(self):
+        handler = Handler(codex_level.PATH, {'run': {'model': 'gpt-test', 'effort': 'high', 'fast': True}})
+        with audit.acting('ui'):
+            codex_level.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.codex_run'])['entries']
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('auto · auto · fast off', 'gpt-test · high · fast on', {'source': 'ui'}))
 
 
 if __name__ == '__main__':

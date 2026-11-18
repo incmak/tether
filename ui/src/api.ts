@@ -258,7 +258,7 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
   const init: RequestInit = {
     method: method ?? (body === undefined ? 'GET' : 'POST'),
     credentials: 'same-origin',
-    headers: body === undefined ? undefined : { 'Content-Type': raw ? body.type || 'application/octet-stream' : 'application/json', 'X-Codex-Mobile': '1' },
+    headers: body === undefined ? undefined : { 'Content-Type': raw ? body.type || 'application/octet-stream' : 'application/json', 'X-Codex-Mobile': '1', 'X-Tether-Client': 'web' },
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
   }

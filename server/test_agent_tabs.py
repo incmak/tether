@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 
 import agent_tab_cli as cli
 import agent_tabs
+import audit
 import auth
 import delegate
 import review_links
@@ -219,6 +220,35 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(self.request({'action': 'start', 'message': '', 'review': 'new',
                                            'thread': 'ignored', 'name': 'New tab', 'cwd': str(self.root)}),
                              (201, {'pane': '%15', 'name': 'New tab'}))
+
+    def test_audit_records_one_start_and_close_with_cli_actor(self):
+        headers = {'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': '%12'}
+        ownership = {'owner_pane': '%12', 'owner_thread': THREAD, 'helper_thread': THREAD}
+        with patch.object(audit.paths, 'CONFIG', self.root), patch.object(audit, '_tab_name', return_value='Source'), \
+                patch.object(delegate, 'start', return_value=('%15', 'Audit Log')), \
+                patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, ownership)), \
+                patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \
+                patch.object(agent_tabs.auto_resume, 'forget_pane'):
+            self.assertEqual(self.request({'action': 'start', 'agent': 'claude', 'message': 'Task'}, headers)[0], 201)
+            self.assertEqual(self.request({'action': 'close', 'pane': '%13'}, headers)[0], 200)
+            entries = {entry['kind']: entry for entry in audit.query()['entries']}
+            self.assertEqual(len(audit.query()['entries']), 2)
+        for kind, summary in (('tab.start', 'Started tab Audit Log (claude)'), ('tab.close', 'Closed tab Reviewer')):
+            self.assertEqual(entries[kind]['summary'], summary)
+            self.assertEqual(entries[kind]['actor'], {'source': 'agent-cli', 'pane': '%12', 'tab': 'Source'})
+
+    def test_audit_records_one_link_and_stop_with_request_actor(self):
+        headers = {'X-Tether-Client': 'web', 'User-Agent': 'Firefox/1 (Linux)'}
+        with patch.object(audit.paths, 'CONFIG', self.root):
+            pair = {'worker': '%12', 'reviewer': '%13'}
+            self.assertEqual(self.request(pair, headers, path='/mobile/api/review-link')[0], 200)
+            self.assertEqual(self.request({'action': 'stop', **pair}, headers)[0], 200)
+            self.assertEqual(self.request({'action': 'stop', **pair}, headers)[1], {'stopped': False})
+            entries = audit.query()['entries']
+        self.assertCountEqual([entry['kind'] for entry in entries], ['review.link', 'review.stop'])
+        for entry in entries:
+            self.assertEqual(entry['actor'], {'source': 'ui', 'device': 'Firefox on Linux'})
+            self.assertEqual(entry['detail'], pair)
 
     def test_agent_override_shell_default_and_large_body(self):
         with patch.object(delegate, 'start', return_value=('%15', 'task')) as start:
@@ -615,6 +645,7 @@ class CLITests(unittest.TestCase):
                                              context=True, agent='codex', name='Name', cwd=os.path.abspath('relative')))
         for name, value in (('Origin', 'http://127.0.0.1:12345'), ('Content-type', 'application/json'),
                             ('X-codex-mobile', '1'), ('X-tether-hook', 'derived-credential'),
+                            ('X-tether-client', 'agent-cli'), ('X-tether-pane', '%12'),
                             ('Cookie', auth.COOKIE + '=derived-credential')):
             self.assertEqual(request.get_header(name), value)
         self.assertEqual(self.opener.open.call_args.kwargs, {'timeout': 30})

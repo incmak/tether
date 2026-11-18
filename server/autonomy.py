@@ -23,6 +23,7 @@ import codex_level  # noqa: E402
 import claude_advisor  # noqa: E402
 import advisor  # noqa: E402
 import approval  # noqa: E402
+import audit  # noqa: E402
 import autonomy_setup  # noqa: E402
 import decisions  # noqa: E402
 import delegate  # noqa: E402
@@ -99,7 +100,7 @@ TIERS = ('critical', 'normal', 'light')
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CLAUDE_REVIEW_MODELS = tuple(model for model, _ in delegate.CLAUDE_MODELS)  # what a new tab accepts
 TIER_DEFAULT = {'agent': 'auto', 'model': 'auto', 'effort': 'auto'}
-_LEVEL_LOCK = threading.Lock()
+_SETTINGS_LOCK = threading.Lock()
 
 
 # ---- the files ----
@@ -613,6 +614,52 @@ def _lessons(handler, body, payload):
     return state(pid)
 
 
+def _choice_value(choice):
+    return f'{choice["agent"]} · {choice["model"]} · {choice["effort"]}'
+
+
+def _save_advisor(settings):
+    previous = advisor.read()
+    advisor.write(settings)
+    old, new = (' / '.join(f'{role}: {_choice_value(value[role])}' for role in ('main', 'second'))
+                for value in (previous, settings))
+    audit.record('setting.advisor', 'Advisor settings changed', old=old, new=new)
+
+
+def _save_reviewers(settings):
+    previous = read_reviewers()
+    set_reviewers(settings)
+    tiers = [tier for tier in TIERS if previous[tier] != settings[tier]]
+    if tiers:
+        old, new = (' / '.join(f'{tier}: {_choice_value(value[tier])}' for tier in tiers)
+                    for value in (previous, settings))
+        audit.record('setting.reviewers', f'Reviewers changed: {", ".join(tiers)}', old=old, new=new)
+
+
+def _save_level(handler, body, payload, pid):
+    undo = body.get('undo', False)
+    if not isinstance(undo, bool):
+        raise LevelError(400, 'Undo must be true or false.')
+    level, override = body.get('level'), body.get('override')
+    if not _valid(level) or (pid is not None and not isinstance(override, bool)):
+        raise LevelError(400, f'Choose a level from 0 to {len(LEVELS) - 1}.')
+    if pid is not None:
+        project_path(pid)
+    current = resolve(pid)
+    effective = current['global'] if pid is not None and not override else level
+    if effective > current['level']:
+        approval.require(handler, 'level-raise', payload, body.get('approval'))
+    if pid is None:
+        old, new = current['global'], level
+        set_global(level)
+    else:
+        previous = current['project'] or {'level': current['global'], 'override': False}
+        old = codex_level._override_value(previous['level'], previous['override'])
+        new = codex_level._override_value(level, override)
+        set_project(pid, override, level)
+    codex_level._record_setting('setting.autonomy_level', 'Autonomy level', old, new, pid=pid, undo=undo)
+
+
 def post(handler):
     """Set autonomy options, perform an explicit setup action, or save/delete a project answer."""
     try:
@@ -659,28 +706,14 @@ def post(handler):
         pid = body.get('project')
         if body.get('catalog') == 'recheck':
             model_catalog.recheck()
-        elif 'advisor' in body:
-            advisor.write(body['advisor'])
-        elif 'reviewers' in body:
-            set_reviewers(body['reviewers'])
         else:
-            with _LEVEL_LOCK:
-                level = body.get('level')
-                if not _valid(level) or (pid is not None and not isinstance(body.get('override'), bool)):
-                    raise LevelError(400, f'Choose a level from 0 to {len(LEVELS) - 1}.')
-                if pid is None:
-                    raises = level > read_global()
+            with _SETTINGS_LOCK:
+                if 'advisor' in body:
+                    _save_advisor(body['advisor'])
+                elif 'reviewers' in body:
+                    _save_reviewers(body['reviewers'])
                 else:
-                    project_path(pid)
-                    current = resolve(pid)
-                    effective = level if body['override'] else current['global']
-                    raises = effective > current['level']
-                if raises:
-                    approval.require(handler, 'level-raise', payload, body.get('approval'))
-                if pid is None:
-                    set_global(level)
-                else:
-                    set_project(pid, body['override'], level)
+                    _save_level(handler, body, payload, pid)
         handler.respond(200, state(pid))
     except approval.ApprovalError as exc:
         approval.error(handler, exc)

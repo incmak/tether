@@ -18,6 +18,7 @@ else:
     HAS_CRYPTO = True
 
 import approval
+import audit
 import codex_level
 import paths
 import server
@@ -133,6 +134,29 @@ class PasskeyCase(unittest.TestCase):
 
 
 class Ceremonies(PasskeyCase):
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
+    def test_passkey_add_audit_keeps_only_display_name(self):
+        with audit.acting('ui', device='Safari on iPhone'):
+            self.add(name='My device')
+        row, = audit.query()['entries']
+        self.assertEqual({key: value for key, value in row.items() if key not in ('id', 'at')},
+                         {'kind': 'passkey.add', 'summary': 'Added passkey My device',
+                          'actor': {'source': 'ui', 'device': 'Safari on iPhone'}})
+
+    @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
+    def test_passkey_remove_audit_keeps_only_display_name(self):
+        self.add(name='My device')
+        payload = {'id': approval._b64(self.identifier)}
+        proof = self.assertion('passkey-remove', payload)
+        handler = Handler(body={'op': 'remove', **payload, 'approval': proof})
+        with audit.acting('ui', device='Safari on iPhone'):
+            approval.post(handler)
+        self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['passkey.remove'])['entries']
+        self.assertEqual({key: value for key, value in row.items() if key not in ('id', 'at')},
+                         {'kind': 'passkey.remove', 'summary': 'Removed passkey My device',
+                          'actor': {'source': 'ui', 'device': 'Safari on iPhone'}})
+
     @unittest.skipUnless(HAS_CRYPTO, 'cryptography is not installed')
     def test_enroll_status_private_store_and_stable_user(self):
         self.assertEqual(approval.status('tether.test'), {'passkeys': [], 'here': 0})
@@ -315,7 +339,7 @@ class Ceremonies(PasskeyCase):
             with self.assertRaises(OSError):
                 self.require(self.assertion())
         self.assertEqual((paths.CONFIG / 'passkeys.json').read_bytes(), old)
-        self.assertEqual([p.name for p in paths.CONFIG.iterdir()], ['passkeys.json'])
+        self.assertCountEqual([p.name for p in paths.CONFIG.iterdir()], ['passkeys.json', 'audit'])
         data = json.loads(old)
         data['passkeys'] = [dict(data['passkeys'][0], id=approval._b64(bytes([i]))) for i in range(10)]
         approval._write(data)
@@ -430,7 +454,8 @@ class Ceremonies(PasskeyCase):
                 mock.patch.object(server.attention.STORE, 'clear') as clear, \
                 mock.patch.object(approval, 'post') as post:
             handler.do_POST()
-            terminal.assert_called_once_with(config, 'terminal-prompt', None, choice=1, feedback=None)
+            terminal.assert_called_once_with(config, 'terminal-prompt', None, choice=1, feedback=None,
+                                            on_answer=mock.ANY)
             clear.assert_called_once_with('%12', 'chat')
             post.assert_not_called()
             handler.respond.assert_called_with(200, {'accepted': True})

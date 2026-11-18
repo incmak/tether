@@ -25,8 +25,10 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+import audit  # noqa: E402
 import paths  # noqa: E402
 import procinfo  # noqa: E402
+import projects  # noqa: E402
 import prompt_context  # noqa: E402
 
 LEVELS = (
@@ -59,6 +61,7 @@ COMMON = (
     'Do not change the level. The user sets it in Tether.',
 )
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
+_SETTINGS_LOCK = threading.Lock()
 
 
 class LevelError(Exception):
@@ -437,6 +440,22 @@ def get(handler):
         handler.respond(exc.status, {'error': str(exc)})
 
 
+def _override_value(value, override):
+    return f'{value} (override {"on" if override else "off"})'
+
+
+def _record_setting(kind, label, old, new, *, pid=None, undo=False):
+    project = projects.audit_name(pid) if pid is not None else None
+    if pid is not None:
+        label = f'{label} for {project}:' if project else f'{label} for project:'
+    prefix = 'Undo: ' if undo else ''
+    audit.record(kind, f'{prefix}{label} {old} → {new}', old=old, new=new, project=project, undo=undo)
+
+
+def _run_value(run):
+    return f'{run["model"]} · {run["effort"]} · fast {"on" if run["fast"] else "off"}'
+
+
 def post(handler):
     """{level} sets the global level. {project, override, level} sets a project override. {run} sets the Codex options."""
     try:
@@ -446,13 +465,29 @@ def post(handler):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise LevelError(400, 'Invalid request.')
+        undo = body.get('undo', False)
+        if not isinstance(undo, bool):
+            raise LevelError(400, 'Undo must be true or false.')
         pid = body.get('project')
-        if 'run' in body:
-            set_run(body['run'])
-        elif pid is None:
-            set_global(body.get('level'))
-        else:
-            set_project(pid, body.get('override'), body.get('level'))
+        with _SETTINGS_LOCK:
+            if 'run' in body:
+                old_run = read_run()
+                set_run(body['run'])
+                _record_setting('setting.codex_run', 'Codex run:', _run_value(old_run), _run_value(body['run']),
+                                undo=undo)
+            elif pid is None:
+                old = read_global()
+                level = body.get('level')
+                set_global(level)
+                _record_setting('setting.codex_level', 'Codex level', old, level, undo=undo)
+            else:
+                current = resolve(pid)
+                previous = current['project'] or {'level': current['global'], 'override': False}
+                level, override = body.get('level'), body.get('override')
+                set_project(pid, override, level)
+                _record_setting('setting.codex_level', 'Codex level',
+                                _override_value(previous['level'], previous['override']),
+                                _override_value(level, override), pid=pid, undo=undo)
         handler.respond(200, state(pid))
     except LevelError as exc:
         handler.respond(exc.status, {'error': str(exc)})

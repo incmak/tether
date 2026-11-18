@@ -11,6 +11,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
+import audit
 import auth
 import paths
 import push
@@ -342,6 +343,7 @@ def enroll(handler, name, credential, approval=None):
             'sign_count': count, 'name': name, 'created': _now(), 'last_used': None, 'rp_id': host})
         _write(data)
         left = len(data['passkeys'])
+        audit.record('passkey.add', f'Added passkey {name}')
     _notice('added', name, left)
 
 
@@ -355,6 +357,7 @@ def remove(handler, passkey_id, approval):
         data['passkeys'].remove(row)
         _write(data)
         left = len(data['passkeys'])
+        audit.record('passkey.remove', f'Removed passkey {row["name"]}')
     _notice('removed', row['name'], left)
 
 

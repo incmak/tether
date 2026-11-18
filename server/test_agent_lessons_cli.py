@@ -29,7 +29,9 @@ class Cli(unittest.TestCase):
 
     def process(self, command, **options):
         self.assertEqual(command[:5], [paths.TMUX, 'display-message', '-p', '-t', '%7'])
-        self.assertEqual(options, dict(capture_output=True, text=True, timeout=5))
+        timeout = options.get('timeout')
+        self.assertIn(timeout, (1, 5) if command[-1] == '#{@chat_name}' else (5,))
+        self.assertEqual(options, dict(capture_output=True, text=True, timeout=timeout))
         return SimpleNamespace(returncode=0, stdout=self.values[command[-1]])
 
     def invoke(self, args):

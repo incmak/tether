@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import audit
 import backlog
 import paths
 import projects
@@ -420,6 +421,88 @@ class BacklogTests(unittest.TestCase):
             self.assertEqual(agent_backlog_cli.main(['reword', 'B1', 'Chat links for every file type']), 0)
         self.assertEqual(self.text(), '## tether\n- [ ] Chat links for every file type (claude · chat abc) #B1\n  - why one\n  - why two\n')
 
+
+
+class BacklogAuditTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(paths, 'TETHER', root / 'tether'))
+        self.enterContext(mock.patch.object(paths, 'CONFIG', root / 'config'))
+        initial = '## Docs\n- [ ] Write the release notes #B56\n\n## Build\n- [ ] Fix warnings #B57\n'
+        backlog.folder().mkdir(parents=True)
+        (backlog.folder() / 'BACKLOG.md').write_text(initial)
+        self.actor = {'source': 'ui', 'device': 'Chrome on Mac'}
+        self.enterContext(audit.acting(**self.actor))
+
+    def assert_entry(self, kind, summary, project):
+        entries = audit.query()['entries']
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual((entry['kind'], entry['summary'], entry['project'], entry['actor']),
+                         (kind, summary, project, self.actor))
+        self.assertNotIn('old', entry)
+        self.assertNotIn('new', entry)
+        return entry
+
+    def test_add_caps_the_title(self):
+        title = 'Add the checklist ' * 6
+        backlog.add(title, project='Docs')
+        self.assert_entry('backlog.add', f'B58 added: {title[:80].rstrip()}', 'Docs')
+
+    def test_start_uses_the_item_project_and_ignores_a_repeat(self):
+        backlog.start('B56', 'claude', project='Build')
+        backlog.start('B56', 'claude', project='Build')
+        self.assert_entry('backlog.start', 'B56 started: Write the release notes', 'Docs')
+
+    def test_done_records_the_actor_and_ignores_archiving(self):
+        backlog.mark_done('B57')
+        backlog.archive_done()
+        self.assert_entry('backlog.done', 'B57 done: Fix warnings', 'Build')
+
+    def test_move_uses_the_actual_source_and_destination(self):
+        backlog.move('B56', 'Build')
+        entry = self.assert_entry('backlog.move', 'B56 moved: Write the release notes', 'Build')
+        self.assertEqual(entry['detail'], {'from_project': 'Docs', 'to_project': 'Build'})
+
+    def test_save_records_a_removal_and_no_event_for_unchanged_items(self):
+        state = backlog.read()
+        backlog.save(state['text'].replace('- [ ] Fix warnings #B57\n', ''), state['version'])
+        self.assert_entry('backlog.remove', 'B57 removed: Fix warnings', 'Build')
+
+    def test_work_board_status_writes_use_the_same_kind(self):
+        card = backlog.board_items()[1]
+        backlog.set_stage(card['id'], 'building', card['version'])
+        self.assert_entry('backlog.start', 'B57 started: Fix warnings', 'Build')
+
+    def test_sheet_mark_done_uses_the_same_kind(self):
+        state = backlog.read()
+        backlog.save(state['text'].replace('- [ ] Write', '- [x] Write'), state['version'])
+        self.assert_entry('backlog.done', 'B56 done: Write the release notes', 'Docs')
+
+    def test_assigning_id_to_existing_legacy_item_is_silent(self):
+        file = backlog.folder() / 'BACKLOG.md'
+        file.write_text(file.read_text() + '- [ ] Typed by hand\n')
+        legacy = backlog.read()
+        saved = backlog.save(legacy['text'], legacy['version'])
+        self.assertIn('Typed by hand #B58', saved['text'])
+        self.assertEqual(audit.query()['entries'], [])
+
+    def test_an_add_preserves_legacy_id_assignment(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n')
+        self.assertEqual(backlog.add('New item', project='Docs'), '- [ ] New item #B2')
+        self.assertIn('Typed by hand #B3', backlog.read()['text'])
+        self.assert_entry('backlog.add', 'B2 added: New item', 'Docs')
+
+    def test_start_a_legacy_item_tracks_its_assigned_id(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
+        self.assertEqual(backlog.start('typed', 'claude', project='Docs'), '- [ ] Typed by hand')
+        self.assert_entry('backlog.start', 'B1 started: Typed by hand', 'Docs')
+
+    def test_save_records_removal_of_an_item_without_an_id(self):
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
+        legacy = backlog.read()
+        backlog.save(legacy['text'].replace('- [ ] Typed by hand\n', ''), legacy['version'])
+        self.assert_entry('backlog.remove', 'Removed backlog item: Typed by hand', 'Docs')
 
 
 class BoardTests(unittest.TestCase):

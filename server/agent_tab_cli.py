@@ -129,6 +129,7 @@ def main(argv=None):
         seconds = body.pop('timeout') if waiting else None
         request = Request(url + PATH, json.dumps(body).encode(), headers={
             'Content-Type': 'application/json', 'Origin': url, 'X-Codex-Mobile': '1',
+            'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': pane,
             'X-Tether-Hook': credential, 'Cookie': auth.COOKIE + '=' + credential})
         opener = build_opener(ProxyHandler({}))
         if not waiting:

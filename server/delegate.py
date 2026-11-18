@@ -163,8 +163,8 @@ def prompt_text(entry, message, agent, *, context=False, review=False, recent=''
     return text
 
 
-def source_title(entry):
-    return entry.get('pane_name') or entry.get('agent_name') or entry.get('label') or 'that tab'
+def source_title(entry, fallback='that tab'):
+    return entry.get('pane_name') or entry.get('agent_name') or entry.get('label') or fallback
 
 
 def reviewer_prompt(entry, message, recent):

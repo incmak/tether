@@ -174,6 +174,7 @@ def capture_screen(entry, lines=80, run=subprocess.run):
 COUNTDOWN = re.compile(r'(block\s+this\s+request\s+in\s+)(?:\d+[:hms.]?\s?)+', re.I)
 DIALOG_FRAME = detection_rules.pattern('common', 'DIALOG_FRAME')
 APPROVAL_QUESTION = detection_rules.pattern('common', 'APPROVAL_QUESTION')
+APPROVAL_REJECT = re.compile(r'(?:No\b|Reject\b|Cancel\b|Exit\b|Don.t trust\b|Do not trust\b)', re.I)
 
 
 def joined_lines(lines):
@@ -213,8 +214,7 @@ def approval(screen):
         elif trust and (match := re.match(r'^\s*([>❯›]?)\s*((?:Yes|No|Trust|Don.t trust|Do not trust|Exit)\b[^?]*)$', line)):  # capitalised, and not a wrapped question line
             choices.append((i, bool(match[1]), match[2]))
             choice_numbers.append(len(choices))
-    reject = r'(?:No\b|Reject\b|Cancel\b|Exit\b|Don.t trust\b|Do not trust\b)'
-    if not choices or not any(re.match(reject, c[2], re.I) for c in choices):
+    if not choices or not any(APPROVAL_REJECT.match(c[2]) for c in choices):
         return None
     selected = next((i for i, c in enumerate(choices) if c[1]), None)
     # Fingerprint includes the visible tool request, independent of cursor position.
@@ -259,7 +259,7 @@ def approval(screen):
             'actionable': sum(c[1] for c in choices) == 1 and numbers == list(range(1, len(numbers) + 1)), 'options': options,
             '_numbers': numbers,
             '_selected': selected, '_once': once,
-            '_reject': next(i for i, c in enumerate(choices) if re.match(reject, c[2], re.I))}
+            '_reject': next(i for i, c in enumerate(choices) if APPROVAL_REJECT.match(c[2]))}
 
 
 PLAN_MENU_OPTION = detection_rules.pattern('claude', 'PLAN_MENU_OPTION')
@@ -1615,7 +1615,7 @@ def rename_agent(entry, name, run=subprocess.run):
     return ''
 
 
-def respond_approval(entry, identifier, action=None, run=subprocess.run, choice=None, feedback=None):
+def respond_approval(entry, identifier, action=None, run=subprocess.run, choice=None, feedback=None, *, on_answer=None):
     if choice is None and action not in ('approve', 'reject'):
         raise ValueError('Invalid approval action.')
     verify(entry, run)
@@ -1660,6 +1660,12 @@ def respond_approval(entry, identifier, action=None, run=subprocess.run, choice=
     if not current or current['id'] != identifier or current['_selected'] != target:
         raise RuntimeError('Could not confirm the selected approval choice. Review it in Termius.')
     run([paths.TMUX, 'send-keys', '-t', entry['id'], 'Enter'], check=True, capture_output=True, timeout=5)
+    if on_answer is not None:
+        label = pending['options'][target]['text']
+        if APPROVAL_REJECT.match(label) or (plan_menu(pending) and PLAN_MENU_OPTION.search(label)):
+            on_answer('deny')
+        elif re.match(r'(?:Yes|Trust|Allow|Approve|Proceed)\b', label, re.I):
+            on_answer('approve')
     if feedback is not None:
         deadline = time.monotonic() + 2
         while True:

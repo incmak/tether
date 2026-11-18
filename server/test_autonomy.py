@@ -13,10 +13,12 @@ from unittest import mock
 import autonomy
 import advisor
 import approval
+import audit
 import codex_level
 import decisions
 import lessons
 import paths
+import projects
 import model_catalog
 import server
 from test_approval import HAS_CRYPTO, Handler as PasskeyHandler, PasskeyCase
@@ -510,6 +512,50 @@ class Http(Base):
                          (400, {'error': 'Choose an advisor, a model and an effort.'}))
         self.assertEqual(advisor.read(), dict(value, version=2))
 
+    def test_level_audit_records_project_and_global_changes_with_undo(self):
+        autonomy.set_project(PID, False, 1)
+        projects.set_name(PID, 'Example Project')
+        with audit.acting('ui'), mock.patch.object(approval, 'require') as require:
+            for body, status in (({'level': 1, 'undo': 1}, 400),
+                                 ({'level': 1, 'undo': True}, 200),
+                                 ({'project': PID, 'override': True, 'level': 1}, 200)):
+                handler = Handler(body=body)
+                autonomy.post(handler)
+                self.assertEqual(handler.status, status, handler.body)
+            require.assert_not_called()
+        rows = audit.query(kinds=['setting.autonomy_level'])['entries']
+        self.assertCountEqual([(row['summary'], row['old'], row['new'], row.get('project'), row.get('undo'))
+                               for row in rows],
+                              [('Undo: Autonomy level 2 → 1', 2, 1, None, True),
+                               ('Autonomy level for Example Project: 1 (override off) → 1 (override on)',
+                                '1 (override off)', '1 (override on)', 'Example Project', None)])
+        self.assertTrue(all(row['actor'] == {'source': 'ui'} for row in rows))
+
+    def test_reviewers_audit_names_every_changed_tier(self):
+        value = reviewers(critical={'agent': 'none'}, light={'agent': 'claude', 'model': 'haiku'})
+        with audit.acting('ui'):
+            for _ in range(2):
+                handler = Handler(body={'reviewers': value})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.reviewers'])['entries']
+        self.assertEqual(row['summary'], 'Reviewers changed: critical, light')
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('critical: auto · auto · auto / light: auto · auto · auto',
+                          'critical: none · auto · auto / light: claude · haiku · auto', {'source': 'ui'}))
+
+    def test_advisor_audit_records_main_and_second_choices(self):
+        value = {'main': dict(advisor.DEFAULT['main'], model='opus'), 'second': dict(advisor.OFF)}
+        with audit.acting('ui'):
+            for _ in range(2):
+                handler = Handler(body={'advisor': value})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        row, = audit.query(kinds=['setting.advisor'])['entries']
+        self.assertEqual((row['old'], row['new'], row['actor']),
+                         ('main: claude · latest · high / second: codex · latest · high',
+                          'main: claude · opus · high / second: none · latest · auto', {'source': 'ui'}))
+
     def test_bad_requests(self):
         for body in ({'level': 9}, {'level': '2'}, {'level': True}, {'project': 'x', 'override': True, 'level': 1},
                      {'project': PID, 'override': 'yes', 'level': 1}, {'reviewers': {}}, [1]):
@@ -706,6 +752,16 @@ class Learning(Base):
                          stdout='' if args[-1] == '#{@tether_helper}' else PID))
         out = json.loads(autonomy.hook_output({'prompt': 'wrong'}, {'TMUX': '/fixture', 'TMUX_PANE': '%1'}, tmux))
         self.assertIn('This message may correct', out['hookSpecificOutput']['additionalContext'])
+
+    def test_learning_audit_records_toggles_once(self):
+        with audit.acting('ui'):
+            for enabled in (False, False, True):
+                handler = Handler(autonomy.PATH + '/lessons', {'enabled': enabled})
+                autonomy.post(handler)
+                self.assertEqual(handler.status, 200, handler.body)
+        rows = audit.query(kinds=['setting.learning'])['entries']
+        self.assertCountEqual([(row['old'], row['new']) for row in rows], [(True, False), (False, True)])
+        self.assertTrue(all(row['actor'] == {'source': 'ui'} for row in rows))
 
     def test_api_learning_keys_and_all_user_actions(self):
         review = {'due': False, 'reason': None, 'new': 0, 'disputed': 0, 'total': 0}

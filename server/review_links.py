@@ -18,6 +18,7 @@ import threading
 import time
 import unicodedata
 
+import audit
 import helper_tabs
 import paths
 from terminal_input import DraftError
@@ -43,6 +44,7 @@ DELIVERY_ERROR = 'Review feedback is being delivered. Try linking again.'
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
 SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
+MENTIONED_COMMIT = re.compile(r'\bcommit\s+[`*]*([0-9a-f]{7,64})\b', re.I)
 FULL = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # a short hash can match two commits; only a full one names a commit
 GRACE = 30
 LOSS_TICKS = 30
@@ -414,6 +416,7 @@ def add(*, worker, reviewer, reviewer_thread, name, agent, seen_working=False, w
         links = [row for row in rows if _is_link(row) and
                  (row['worker'], row['reviewer']) != (worker, reviewer)]
         _write([row for row in rows if _is_cap(row)] + (links + [link])[-MAX_LINKS:])
+        audit.record('review.link', f'Linked reviewer {reviewer} to {name}', worker=worker, reviewer=reviewer)
 
 
 def reviewed_by():
@@ -465,11 +468,13 @@ def approved_commits():
 def remove(worker, reviewer=None):
     with _lock:
         rows = _read()
-        remaining = [row for row in rows if not (_is_link(row) and row['worker'] == worker
-                                                and reviewer in (None, row['reviewer']))]
-        if remaining == rows:
+        stopped = [row for row in rows if _is_link(row) and row['worker'] == worker
+                   and reviewer in (None, row['reviewer'])]
+        if not stopped:
             return False
-        _write(remaining)
+        _write([row for row in rows if row not in stopped])
+        audit.record('review.stop', f"Stopped review for {stopped[0]['name']}", worker=worker,
+                     **({'reviewer': reviewer} if reviewer else {}))
         return True
 
 
@@ -748,6 +753,10 @@ def _linked(link, snapshot, entries, *, delivery=None, blocking=None):
         if blocking is not None and _at_cap(blocking):
             return False
         if delivery is not None:
+            # A competing tick may have consumed or replaced this request while its reply was read.
+            if not stored.get('awaiting') or any(stored.get(field) != link.get(field)
+                    for field in ('request_id', 'send_reply', 'reviewer_before')):
+                return False
             # The browser holds SEND_LOCK when it calls add. Never take that lock while holding _lock.
             _feedback_in_flight[key] = delivery
         return True
@@ -1168,6 +1177,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 reply = raw.strip()
                 count = 'empty_rounds' if link.get('empty_turn') else 'rounds'
                 approved = reply.upper().startswith('APPROVED')
+                forwarded = False
                 bound = link.get('review_commit') if approved else None
                 named = _named_commit(reply) if approved else None
                 if (bound or named) and state != 'Idle':
@@ -1210,7 +1220,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                             + ('It covered uncommitted changes, so no commit is approved yet: commit the work in this '
                                'turn, and Tether asks the reviewer to confirm that commit. ' if uncommitted else '')
                             + 'Do the next step your instructions give for an approved review, then stop.')
-                    if not _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery):
+                    forwarded = _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery)
+                    if not forwarded:
                         pass  # not delivered: the same checks run again on the next tick
                     elif bound and _call(commit, worker) != bound:
                         # The commit moved between the read above and the delivery. The tab has the approval text
@@ -1271,6 +1282,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         if not _send_worker(link, cap, snapshot, worker, text, state, send, clear,
                                             entries, delivery, summary=stage is not None, blocking=True):
                             return link
+                        forwarded = True
                         paused_now = _record_round(cap, link, count)
                         link.pop('empty_turn', None)
                         if stop:
@@ -1280,6 +1292,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                             elif paused_now:
                                 reply_effect['alert'] = (_findings_preview(reply), limit)
                         link['awaiting'] = False
+                if forwarded and reply:
+                    mentioned = MENTIONED_COMMIT.search(reply)
+                    reply_effect['verdict'] = approved, named or (mentioned[1].lower() if mentioned else None)
         if not link['awaiting']:
             for key in ('wait_ticks', 'idle_ticks', 'reviewer_before', 'reviewer_seen_working',
                         'retries', 'request_id', 'send_reply', 'verify_ticks'):
@@ -1555,6 +1570,13 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             if not applied:
                 continue
             name = link['name']
+            if 'verdict' in reply_effect:
+                approved, named = reply_effect['verdict']
+                reviewer = by_pane[link['reviewer']]
+                verdict = 'Approved review' if approved else 'Requested changes'
+                audit.record('review.verdict', f'{verdict} for {name}', approved=approved,
+                             actor={'source': 'server', 'pane': reviewer['id'], 'tab': reviewer.get('pane_name')},
+                             worker=key[0], **({'commit': named[:12]} if named else {}))
             if updated is None:
                 reason = link['lost_reason']
                 print(f"review link removed: worker={key[0]} reviewer={link['reviewer']} name={name} reason={reason}",

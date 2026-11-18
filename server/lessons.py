@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 
+import audit
 import decisions
 import paths
 import projects
@@ -90,7 +91,10 @@ def set_enabled(value):
         raise ValueError('Choose whether learning is on.')
     file = paths.CONFIG / 'learning.json'
     with _locked(file):
+        old = enabled()
         _write(file, {'enabled': value})
+        audit.record('setting.learning', f'Learning {"on" if old else "off"} → {"on" if value else "off"}',
+                     old=old, new=value)
 
 
 def _read(file):
@@ -191,6 +195,10 @@ def _words(text):
     return set(re.findall(r'\b[^\W\d_]{3,}\b', text.lower()))
 
 
+def _audit_lesson(kind, verb, pid, row):
+    audit.record(kind, f'{verb} lesson: {row["text"][:120]}', project=projects.audit_name(pid))
+
+
 def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane='', evict=True):
     file, text = path(pid), clean(text)
     quote, tab = _text(quote, 160), _text(tab, 60)
@@ -216,10 +224,11 @@ def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane=
                    created=now, last_hit=now, proposed_global=False, status='trial', quote=quote,
                    tab=tab, first_pane=pane, disputes=[], reviewed_at=None)
         _save(file, rows + [row])
+        _audit_lesson('lesson.add', 'Added', pid, row)
         return {'status': 'added', 'lesson': row}
 
 
-def _change(file, identifier, change, fallback=None):
+def _change(file, identifier, change, fallback=None, after_save=None):
     files = (file, fallback) if fallback is not None else (file,)
     with _locked(*files):
         for target in files:
@@ -228,6 +237,8 @@ def _change(file, identifier, change, fallback=None):
             if row is not None:
                 change(row)
                 _save(target, rows)
+                if after_save is not None:
+                    after_save(row, target)
                 return dict(row)
     return None
 
@@ -260,7 +271,7 @@ def edit(pid, identifier, text):
     def change(row):
         row['text'] = text
         _keep(row)
-    return _change(path(pid), identifier, change)
+    return _change(path(pid), identifier, change, after_save=lambda row, _: _audit_lesson('lesson.add', 'Edited', pid, row))
 
 
 def dispute(pid, identifier, pane, reason):
@@ -273,29 +284,24 @@ def dispute(pid, identifier, pane, reason):
         if len(row['disputes']) >= 20:
             raise ValueError('This lesson has 20 disputes. Review it in Tether first.')
         row['disputes'].append({'pane': pane, 'reason': reason, 'at': time.time()})
-    return _change(path(pid), identifier, change, fallback=global_path())
+
+    def saved(row, target):
+        _audit_lesson('lesson.dispute', 'Disputed', pid if target == file else None, row)
+
+    file = path(pid)
+    return _change(file, identifier, change, fallback=global_path(), after_save=saved)
 
 
 def propose_global(pid, identifier):
     return _change(path(pid), identifier, lambda row: row.update(proposed_global=True))
 
 
-def _remove(file, identifier):
-    with _locked(file):
-        rows = _read(file)
-        kept = [row for row in rows if row['id'] != identifier]
-        if len(kept) == len(rows):
-            return False
-        _save(file, kept)
-        return True
-
-
 def remove(pid, identifier):
-    return _remove(path(pid), identifier)
+    return take(pid, identifier) is not None
 
 
 def remove_global(identifier):
-    return _remove(global_path(), identifier)
+    return take(None, identifier) is not None
 
 
 def find(pid, identifier):
@@ -304,7 +310,7 @@ def find(pid, identifier):
     return next((dict(row) for row in rows if row['id'] == identifier), None)
 
 
-def take(pid, identifier, before):
+def take(pid, identifier, before=None):
     """Remove one lesson (pid None: the global list) and return it, or None when it is gone. before(row) runs under
     the lesson file's lock, on the row as it is at that moment, just before the write: it may raise to refuse (the
     lesson stays) and it may save a copy. No reinforce or edit can land between the check and the removal."""
@@ -314,8 +320,10 @@ def take(pid, identifier, before):
         row = next((row for row in rows if row['id'] == identifier), None)
         if row is None:
             return None
-        before(dict(row))
+        if before is not None:
+            before(dict(row))
         _save(file, [other for other in rows if other['id'] != identifier])
+        _audit_lesson('lesson.remove', 'Removed', pid, row)
         return dict(row)
 
 
@@ -332,6 +340,7 @@ def restore(pid, row):
             raise ValueError(where + '. Remove one first, then undo again.')
         _save(file, rows + [dict(row)])
         _read(file)  # a row that the store does not accept must not stay
+        _audit_lesson('lesson.add', 'Restored', pid, row)
         return True
 
 

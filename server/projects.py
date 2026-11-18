@@ -112,6 +112,14 @@ def meta(pid):
             'archived_from': data.get('archived_from') if isinstance(data.get('archived_from'), list) else []}
 
 
+def audit_name(pid):
+    """Use the saved project name when the audit log can read it."""
+    try:
+        return meta(pid)['name'] or None
+    except Exception:  # Optional audit metadata must not affect the change being recorded.
+        return None
+
+
 def _save_meta(pid, data):
     _write(bundle(pid) / 'project.json', json.dumps(data, indent=2) + '\n')
 

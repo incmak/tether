@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from agents import claude_consume, claude_snapshot, discover, usage
 from agents import records
 import agents
+import audit
 import codex_messages
 import continuations
 import pane_icons
@@ -2314,6 +2315,8 @@ class Handler(BaseHTTPRequestHandler):
                 app_identity.get(self)
             elif codex_level.handles(path):
                 codex_level.get(self)
+            elif audit.handles(path):
+                audit.get(self)
             elif commit_gate.handles(path):
                 commit_gate.get(self)
             elif claude_advisor.handles(path):
@@ -3226,7 +3229,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/approval':
                 with SEND_LOCK:
-                    respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'), feedback=body.get('feedback'))
+                    tab = delegate.source_title(config, fallback=config['id'])
+
+                    def answer_record(action):
+                        kind = 'approval.approve' if action == 'approve' else 'approval.deny'
+                        summary = 'Approved' if action == 'approve' else 'Denied'
+                        audit.record(kind, f'{summary} a permission prompt in {tab}', tab=tab, action=action)
+
+                    respond_approval(config, body.get('approval'), body.get('action'), choice=body.get('choice'),
+                                     feedback=body.get('feedback'), on_answer=answer_record)
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
             else:
@@ -3321,6 +3332,7 @@ class Handler(BaseHTTPRequestHandler):
                     if pane not in active_panes:
                         self.respond(404, {'error': 'That chat tab has already ended.'})
                         return
+                    entry = None
                     if 'thread' in body:  # the page names the chat it saw: refuse when the tab now holds another one
                         forget_sessions()
                         entry = next((item for item in sessions() if item['id'] == pane), None)
@@ -3328,10 +3340,12 @@ class Handler(BaseHTTPRequestHandler):
                             self.respond(409, {'error': 'That tab now holds another chat. Reload and try again.'})
                             return
                     closed = undo.capture_safe(pane, entries=sessions)
+                    name = (closed or {}).get('name') or delegate.source_title(entry or {}, fallback=pane)
                     auto_resume.forget_pane(pane, run=subprocess.run)
                     with groups.closing(pane):  # its auto stack goes when empty or root-only
                         subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
                                        capture_output=True, timeout=5)
+                    audit.record('tab.close', f'Closed tab {name}', pane=pane)
                     review_links.close(pane)
                     undo.record_tab_close(closed)
                 self.respond(200, {'closed': pane})
@@ -3375,14 +3389,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         import share_api
-        with undo_store.acting('user'), undo_store.step():  # the tab, session and stack steps this request makes
+        actor = audit.actor_from_request(getattr(self, 'headers', {}))
+        with audit.acting(**actor), undo_store.acting('user'), undo_store.step():
             if not share_api.dispatch(self):
                 self._post_without_share()
 
     _delete_plain = do_DELETE
 
     def do_DELETE(self):
-        with undo_store.acting('user'), undo_store.step():
+        with audit.acting(**audit.actor_from_request(self.headers)), undo_store.acting('user'), undo_store.step():
             self._delete_plain()
 
     def do_HEAD(self):
@@ -3457,6 +3472,7 @@ def start_office_origin(host):
 
 if __name__ == '__main__':
     undo_store.enable()
+    audit.prune()
     import share_api
     share_api.get_store()  # Reconcile private storage before accepting requests.
     import atexit

@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import audit
 import lessons
 import paths
+import projects
 from own_time import own_time
 
 PID = 'abcdef012345'
@@ -44,6 +46,56 @@ class Lessons(unittest.TestCase):
         self.assertEqual(file.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(ValueError):
             lessons.set_enabled(1)
+
+    def assert_lesson_event(self, kind, summary, action):
+        projects.set_name(PID, 'Example')
+        actor = {'source': 'agent-cli', 'pane': '%7', 'tab': 'Build'}
+        before = {entry['id'] for entry in audit.query()['entries']}
+        with audit.acting(**actor):
+            action()
+        entries = [entry for entry in audit.query()['entries'] if entry['id'] not in before]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual((entry['kind'], entry['summary'], entry['project'], entry['actor']),
+                         (kind, summary, 'Example', actor))
+        self.assertNotIn('old', entry)
+        self.assertNotIn('new', entry)
+        return entry
+
+    def test_audit_add_caps_the_lesson_and_ignores_similar(self):
+        text = 'When a check fails, inspect ' + 'x' * 130
+
+        def add_twice():
+            self.assertEqual(self.add(text, quote='private quote')['status'], 'added')
+            self.assertEqual(self.add(text)['status'], 'similar')
+
+        entry = self.assert_lesson_event('lesson.add', f'Added lesson: {text[:120]}', add_twice)
+        self.assertNotIn('private quote', json.dumps(entry))
+
+    def test_audit_remove_ignores_a_repeat(self):
+        row = self.add()['lesson']
+
+        def remove_twice():
+            self.assertTrue(lessons.remove(PID, row['id']))
+            self.assertFalse(lessons.remove(PID, row['id']))
+
+        self.assert_lesson_event('lesson.remove', f'Removed lesson: {row["text"]}', remove_twice)
+
+    def test_audit_dispute_records_the_lesson_once(self):
+        row = self.add()['lesson']
+
+        def dispute_twice():
+            lessons.dispute(PID, row['id'], '%7', 'private reason')
+            with self.assertRaisesRegex(ValueError, 'already disputed'):
+                lessons.dispute(PID, row['id'], '%7', 'another reason')
+
+        entry = self.assert_lesson_event('lesson.dispute', f'Disputed lesson: {row["text"]}', dispute_twice)
+        self.assertNotIn('private reason', json.dumps(entry))
+
+    def test_audit_edit_uses_a_distinct_summary(self):
+        row = self.add()['lesson']
+        text = 'When checks fail, read the logs first.'
+        self.assert_lesson_event('lesson.add', f'Edited lesson: {text}', lambda: lessons.edit(PID, row['id'], text))
 
     def test_clean_rules_and_denied_phrases(self):
         self.assertEqual(lessons.clean(' when  checks\n fail,\x00\u202e read output. '), 'when checks fail, read output.')

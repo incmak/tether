@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 
+import audit
 import helper_close
 
 WAIT = 600
@@ -23,7 +24,9 @@ def schedule(entry, run, status, *, sessions, lock, fresh, start=None, sleep=tim
     with _lock:
         if pane not in _pending:
             _pending.add(pane)
-            job = lambda: watch(entry, run, status, sessions=sessions, lock=lock, fresh=fresh, sleep=sleep, now=now)
+            actor = audit.capture_actor()
+            job = lambda: watch(entry, run, status, sessions=sessions, lock=lock,
+                                fresh=fresh, sleep=sleep, now=now, actor=actor)
             (start or (lambda work: threading.Thread(target=work, name=f'self-close {pane}', daemon=True).start()))(job)
     return {'closing': pane, 'when': 'after this reply ends'}
 
@@ -37,7 +40,7 @@ def same_tab(entry, sessions):
     return current
 
 
-def watch(entry, run, status, *, sessions, lock, fresh, sleep=time.sleep, now=time.monotonic):
+def watch(entry, run, status, *, sessions, lock, fresh, sleep=time.sleep, now=time.monotonic, actor=None):
     """'closed', 'gone' (the pane ended or changed first), 'timeout' or 'failed'."""
     pane = entry['id']
     try:
@@ -71,6 +74,8 @@ def watch(entry, run, status, *, sessions, lock, fresh, sleep=time.sleep, now=ti
                 with undo_store.acting('agent', name):  # the tab asked to close itself: Cmd+Z brings it back
                     closed = undo.capture_safe(pane, run, [current])
                     helper_close.close_pane(pane, run)
+                    audit.record('tab.close', f"Closed tab {(closed or {}).get('name') or name or pane}",
+                                 actor=actor, pane=pane)
                     undo.record_tab_close(closed, run)
                 return 'closed'
             finally:

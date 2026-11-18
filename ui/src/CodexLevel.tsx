@@ -4,6 +4,7 @@ import { SelectMenu } from './SelectMenu'
 import { errorText } from './api'
 import type { Api } from './api'
 import { usePolling } from './hooks'
+import { useLevelUndo } from './LevelUndo'
 
 // The Codex level (server: codex_level.py). A Claude Code UserPromptSubmit hook gives Claude the active level's rules
 // on each prompt. The person sets the level; nothing raises it.
@@ -26,8 +27,8 @@ function useCodexLevel(api: Api, project?: string) {
   const [error, setError] = useState('')
   async function save(body: Record<string, unknown>) {
     setPending(body); setError('')
-    try { await api<CodexLevelState>('codex-level', body); await refresh() }
-    catch (failure) { setError(errorText(failure)) }
+    try { await api<CodexLevelState>('codex-level', body); await refresh(); return true }
+    catch (failure) { setError(errorText(failure)); return false }
     finally { setPending(null) }
   }
   return { data, error: error || loadError, pending, save }
@@ -85,14 +86,21 @@ function RunOptions({ run, models, disabled, onChange }: { run: CodexRun; models
 export function GlobalCodexLevel({ api }: { api: Api }) {
   const { data, error, pending, save } = useCodexLevel(api)
   const value = typeof pending?.level === 'number' ? pending.level : data?.global
+  const { offer, toast } = useLevelUndo()
+  async function change(level: number) {
+    const old = data?.global
+    if (await save({ level }) && old !== undefined && old !== level)
+      offer(`Codex level ${old} → ${level}`, `Undid: Codex level ${level} → ${old}`, () => save({ level: old, undo: true }))
+  }
   return <section className="settings-group" aria-labelledby="settings-codex"><h3 id="settings-codex">Codex helper</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
     {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading Codex helper"><StepperBone /><NoteBone lines={2} /><RunOptionsBone /><SwitchBone control="none" from={1} /></SettingSkeleton> : <>
-      <Stepper name="codex-level-global" legend="Level" levels={data.levels} value={value ?? 0} disabled={!!pending} onChange={level => void save({ level })} />
+      <Stepper name="codex-level-global" legend="Level" levels={data.levels} value={value ?? 0} disabled={!!pending} onChange={level => void change(level)} />
       <p className="setting-note">For every Claude session. Claude gets the rules with each prompt. A project can use its own level. Below level 5, UI design and prototyping stay with Claude.</p>
       <RunOptions run={(pending?.run as CodexRun | undefined) ?? data.run} models={data.models} disabled={!!pending} onChange={run => void save({ run })} />
       <Runs runs={data.runs} />
     </>}
+    {toast}
   </section>
 }
 
@@ -101,13 +109,20 @@ export function ProjectCodexLevel({ api, project, panes }: { api: Api; project: 
   const { data, error, pending, save } = useCodexLevel(api, project)
   const override = typeof pending?.override === 'boolean' ? pending.override : !!data?.project?.override
   const level = typeof pending?.level === 'number' ? pending.level : data?.project?.level ?? data?.global ?? 0
+  const { offer, toast } = useLevelUndo()
+  async function change(next: number) {
+    const old = data?.project?.override ? data.project.level : undefined
+    if (await save({ project, override: true, level: next }) && old !== undefined && old !== next)
+      offer(`Project Codex level ${old} → ${next}`, `Undid: project Codex level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true }))
+  }
   return <section className="settings-group" aria-labelledby="project-codex"><h3 id="project-codex">Codex level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
     {!data ? error ? <p className="setting-note" role="alert">{error}</p> : <SettingSkeleton label="Loading Codex level"><SwitchBone /><StepperBone /><SwitchBone control="none" from={1} /></SettingSkeleton> : <>
       <label className="switch-row"><span><strong>Use a project level</strong><small>{override ? `Claude here uses level ${level}, not the global level ${data.global}.` : `Claude here uses the global level ${data.global}.`}</small></span>
         <input type="checkbox" role="switch" checked={override} disabled={!!pending} onChange={event => void save({ project, override: event.target.checked, level })} /></label>
-      <Stepper name="codex-level-project" legend="Level" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void save({ project, override: true, level: next })} />
+      <Stepper name="codex-level-project" legend="Level" levels={data.levels} value={level} disabled={!!pending || !override} onChange={next => void change(next)} />
       <Runs runs={data.runs} panes={panes} />
     </>}
+    {toast}
   </section>
 }
