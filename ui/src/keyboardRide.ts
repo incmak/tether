@@ -17,14 +17,21 @@ export function useKeyboardRide(shell: HTMLElement | null) {
     const target = () => ({ H: root.clientHeight, bottom: parseFloat(getComputedStyle(shell).bottom) })
     let settled = target()
     let ride: { animation: Animation; H: number; from: number; to: number } | undefined
-    let disposed = false
+    let disposed = false, stale = false, blurTimer = 0
 
     function check() {
       if (!shell || disposed) return
       const width = Math.round(view?.width ?? innerWidth), height = view?.height ?? innerHeight
-      const baseline = Math.max(height, baselines.get(width) ?? height)
-      baselines.set(width, baseline)
-      root.toggleAttribute('data-keyboard', editable(document.activeElement) && height < baseline - 150)
+      // Focus opens the keyboard, but only the height closes it: a blur comes before Chrome grows the page, and the tab
+      // bar must not come back into the small page (the composer would rise, then fall). A blur that leaves the page
+      // small (split screen) clears it after a moment. A width first seen with the keyboard open (rotation) has no
+      // baseline yet; the screen height stands in until the keyboard closes.
+      const open = root.hasAttribute('data-keyboard'), known = baselines.get(width)
+      const baseline = Math.max(height, known ?? (open ? screen.availHeight : height))
+      const keyboard = height < baseline - 150 && (editable(document.activeElement) || (open && !stale))
+      root.toggleAttribute('data-keyboard', keyboard)
+      if (!keyboard) baselines.set(width, Math.max(height, known ?? height))
+      stale = false
 
       let edge = settled.H - settled.bottom
       if (ride) {
@@ -44,7 +51,11 @@ export function useKeyboardRide(shell: HTMLElement | null) {
       animation.onfinish = () => { if (ride?.animation === animation) ride = undefined }
     }
 
-    const afterFocus = () => queueMicrotask(check)
+    const afterFocus = () => {
+      queueMicrotask(check)
+      clearTimeout(blurTimer)
+      blurTimer = window.setTimeout(() => { if (!editable(document.activeElement)) { stale = true; check() } }, 700)
+    }
     check()
     window.addEventListener('resize', check)
     view?.addEventListener('resize', check)
@@ -53,6 +64,7 @@ export function useKeyboardRide(shell: HTMLElement | null) {
     reduced.addEventListener('change', check)
     return () => {
       disposed = true
+      clearTimeout(blurTimer)
       window.removeEventListener('resize', check)
       view?.removeEventListener('resize', check)
       document.removeEventListener('focusin', check)

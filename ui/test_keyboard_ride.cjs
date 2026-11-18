@@ -168,10 +168,28 @@ async function functional(page) {
   check('3. the last message stays attached to the composer', opening.every(f => f.message <= f.top + 2) && gap <= 2, { maxGapChange: gap })
   await page.screenshot({ path: path.join(SHOTS, 'keyboard-open.png') })
 
-  await page.setViewportSize(phone)
+  // A tap outside blurs first; Chrome grows the page a moment later. Until then nothing may move.
+  const open = await read(page)
   await record(page)
+  await field.evaluate(el => el.blur())
+  await page.waitForFunction(() => window.rideFrames.length >= 4)
+  await page.setViewportSize(phone)
   await settle(page, phone.height)
-  await finish(page)
+  const blurring = await finish(page)
+  const waiting = blurring.filter(f => f.h === keyboard.height), growing = blurring.filter(f => f.h === phone.height)
+  check('3b. a blur before the resize keeps the composer still, then it rides down', waiting.length >= 3 && waiting.every(f => f.keyboard && f.display === 'none' && Math.abs(f.bottom - open.bottom) < 1)
+    && growing.every((f, i) => i === 0 || f.bottom >= growing[i - 1].bottom - 2) && growing.at(-1).display !== 'none',
+    { waiting: waiting.length, moved: Math.max(...waiting.map(f => Math.abs(f.bottom - open.bottom))) })
+  await field.focus()
+  // A blur that leaves the page small (split screen, no keyboard) gives the tab bar back after a moment.
+  await page.setViewportSize(keyboard)
+  await page.waitForFunction(() => document.documentElement.hasAttribute('data-keyboard'))
+  await field.evaluate(el => el.blur())
+  const cleared = await page.waitForFunction(() => !document.documentElement.hasAttribute('data-keyboard') && getComputedStyle(document.querySelector('.phone-tabbar')).display !== 'none', null, { timeout: 2000 }).then(() => true, () => false)
+  check('3c. a blur that leaves the page small gives the tab bar back', cleared)
+  await page.setViewportSize(phone)
+  await page.waitForFunction(h => innerHeight === h && !document.querySelector('main.app-shell').getAnimations().length, phone.height)
+  await field.focus()
   await record(page)
   await page.setViewportSize(keyboard)
   await waitResize(page, keyboard.height)
@@ -210,6 +228,27 @@ async function functional(page) {
   await settle(page, rotated.height)
   const rotation = (await finish(page)).filter(f => f.h === rotated.height)
   check('6. a new width establishes its own baseline', rotation.every(f => !f.keyboard && f.display !== 'none'))
+  // Rotate with the keyboard open: the new width has no baseline yet, so the screen height stands in.
+  await page.setViewportSize(phone)
+  await page.waitForFunction(h => innerHeight === h && !document.querySelector('main.app-shell').getAnimations().length, phone.height)
+  await field.focus()
+  await page.setViewportSize(keyboard)
+  await page.waitForFunction(() => document.documentElement.hasAttribute('data-keyboard'))
+  // Playwright makes the screen as small as the viewport; a phone in landscape keeps its full screen.
+  await page.evaluate(() => Object.defineProperty(screen, 'availHeight', { get: () => 390 }))
+  const turn = height => page.setViewportSize({ width: 700, height })
+  await turn(200)
+  await page.waitForFunction(() => innerWidth === 700 && innerHeight === 200)
+  const turnedOpen = await read(page), availHeight = await page.evaluate(() => screen.availHeight)
+  await turn(360)
+  await page.waitForFunction(() => innerHeight === 360)
+  const turnedClosed = await read(page)
+  // Only measured heights become the baseline: 225 is a keyboard against 390 (the screen), not against 360 (measured).
+  await turn(225)
+  await page.waitForFunction(() => innerHeight === 225)
+  const measured = !(await read(page)).keyboard
+  check('6b. rotating with the keyboard open keeps it open, and closing it gives the tabs back', turnedOpen.keyboard && turnedOpen.display === 'none' && !turnedClosed.keyboard && turnedClosed.display !== 'none' && measured,
+    { availHeight, measured, open: turnedOpen.keyboard, closed: turnedClosed.keyboard })
 }
 
 async function main() {

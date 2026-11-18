@@ -354,7 +354,7 @@ export interface FooterTask { id: string; type?: string; status?: string; descri
 export const usageLabel = (label: string) => ({ '5h': '5-hour', '168h': 'Weekly', '7d': 'Weekly' })[label] ?? label
 export const creditsLabel = (credits?: Footer['credits']) => credits?.unlimited ? 'Unlimited' : credits?.balance != null ? String(credits.balance) : ''
 // The strip under Claude's input box: its suggested next prompt, notices, mode, status line and background agents.
-export interface Footer { observed?: boolean; suggestion?: string; notices?: string[]; effort?: string; mode?: string; status?: string; agents?: FooterAgent[]; update?: string
+export interface Footer { observed?: boolean; suggestion?: string; notices?: string[]; effort?: string; tier?: string; mode?: string; status?: string; agents?: FooterAgent[]; update?: string
   model?: string; advisor?: { model: string; name: string; source: 'tether' | 'claude'; problems: { code: string; text: string }[] } | null; context?: { percent: number; tokens?: number | null; limit?: number | null }; windows?: UsageWindow[]
   credits?: { balance?: string | number | null; unlimited?: boolean; has_credits?: boolean }
   goal?: string; goal_status?: string; tasks?: string[]; task_details?: FooterTask[]; ide?: string; crons?: FooterCron[]

@@ -13,10 +13,12 @@ const AI = { name: 'Files search', description: 'Adds a search box to the Files 
 let state
 
 function fixture(endpoint, url) {
+  const agent = state.agent || pane.agent
+  const footer = { observed: true, model: agent === 'codex' ? 'GPT-6.2-Sol' : 'Opus 5.5', effort: 'high', tier: state.tier, mode: 'default', context: { percent: 42 }, goal: state.goal ? 'active' : undefined, tasks: state.tasks, task_details: [], ide: state.ide }
   const fixtures = {
-    sessions: { sessions: [{ ...pane, thread: state.thread, finished: now() - 300, brief: state.brief }], default_thread: state.thread },
-    chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: state.thread, agent: 'claude', state: 'Idle', writable: true },
-    footer: { observed: true, model: 'Opus 5.5', effort: 'high', mode: 'default', context: { percent: 42 }, goal: state.goal ? 'active' : undefined, tasks: state.tasks, task_details: [], ide: state.ide },
+    sessions: { sessions: [{ ...pane, agent, thread: state.thread, finished: now() - 300, brief: state.brief }], default_thread: state.thread },
+    chat: { messages: [], earlier: 0, limit: 40, session: pane.id, thread: state.thread, agent, state: 'Idle', writable: true, footer: agent === 'codex' ? footer : undefined },
+    footer,
     prefs: { prefs: {}, version: 1 }, host: { name: 'Fixture' }, 'projects/marks': {}, 'side-shells': { shells: [] },
     'projects/backlog': { text: '## tether\n- [ ] Add search to Files (claude · pane %1 · chat thread-1) #B4\n', version: 'v1', limit: 50000 },
     catalog: { commands: [], plugins: [], mcp: [] }, usage: { claude: null, codex: null }, subagents: { main: {}, agents: [], tasks: [] }, 'codex-runs': { runs: [] },
@@ -226,6 +228,37 @@ async function main() {
     await drawer.getByText(AI.description).waitFor({ timeout: 8000 })
     check('running: the finished brief shows without a reload', true)
     await close()
+
+    for (const [width, height, tier, label] of [[320, 640, 'fast', 'Fast'], [1280, 860, 'ultrafast', 'Ultrafast'], [1280, 860, undefined, '']]) {
+      reset({ agent: 'codex', tier })
+      await page.setViewportSize({ width, height })
+      await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+      const pillLabel = 'Model and effort' + (label ? `. ${label} mode on` : '')
+      const pill = page.locator('.composer-pills button').filter({ hasText: 'GPT-6.2-Sol' })
+      await pill.waitFor({ state: 'attached' })
+      await page.locator('.composer textarea').focus()
+      check(`${width}px ${tier ?? 'default'}: accessible model pill`, await pill.getAttribute('aria-label') === pillLabel)
+      check(`${width}px ${tier ?? 'default'}: tier icon`, await pill.locator('.pill-tier svg[aria-hidden="true"]').isVisible() === Boolean(tier))
+      const word = pill.locator('.pill-tier-word')
+      check(`${width}px ${tier ?? 'default'}: tier word`, await word.isVisible() === Boolean(tier && width > 320))
+      if (tier) check(`${width}px ${tier}: correct tier word`, await word.textContent() === tier)
+      if (tier === 'fast') {
+        await pill.press('Enter')
+        const picker = page.locator('dialog.model-sheet[open]')
+        await picker.waitFor()
+        await page.keyboard.press('Escape')
+        await picker.waitFor({ state: 'detached' })
+        check('320px fast: keyboard opens the model picker', true)
+      }
+      const expected = 'GPT-6.2-Sol · high' + (tier ? ` · ${tier}` : '')
+      await open()
+      const row = drawer.getByRole('button', { name: /^Model and effort/ }).locator('.sd-row-value')
+      check(`${width}px ${tier ?? 'default'}: details model and tier`, await row.textContent() === expected)
+      await drawer.getByRole('button', { name: /^Usage and credits/ }).click()
+      const usage = page.getByRole('dialog', { name: 'Usage', exact: true })
+      check(`${width}px ${tier ?? 'default'}: usage model and tier`, await usage.locator('.sheet-sub').textContent() === expected)
+      await page.keyboard.press('Escape')
+    }
 
     check('no page errors', !errors.length, errors.join('\n'))
   } catch (error) {

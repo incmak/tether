@@ -415,7 +415,8 @@ class CodexFooterTests(unittest.TestCase):
         return state
 
     def report(self, state):
-        return footer.codex(server.codex_metrics({'id': '%fixture'}, state['usage'], state['model'], state['effort'], state['credits']))
+        return footer.codex(server.codex_metrics({'id': '%fixture'}, state['usage'], state['model'], state['effort'], state['credits'],
+                                                 tier=state.get('tier', '')))
 
     def test_rollout_exact_context_rates_effort_and_credits(self):
         result = self.report(self.rollout())

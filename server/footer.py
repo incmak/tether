@@ -32,7 +32,7 @@ CARD_KEYS = {
 AGENT = re.compile(r'^\s*([●◯○])\s+(\S+)(?:\s{2,}(.*?))?(?:\s{2,}(\d[\dhms ]*\S.*))?\s*$')
 AGENT_LOOSE = re.compile(r'^\s*([●◯○])\s+(\S+)\s(.*)$')
 CODEX_CONTEXT = re.compile(r'\bContext\s+(\d+(?:\.\d+)?)%\s+(left|used)\b|(\d+(?:\.\d+)?)%\s+context\s+(left|used)\b', re.I)
-CODEX_MODEL = re.compile(r'^\s*([\w.-]+)(?:\s+(minimal|low|medium|high|xhigh|extra high|max))?\s+·', re.I)
+CODEX_MODEL = re.compile(r'^\s*([\w.-]+)(?:\s+(minimal|low|medium|high|xhigh|extra high|max))?(?:\s+(fast|ultrafast))?\s+·', re.I)
 
 
 def codex_screen(screen):
@@ -47,6 +47,8 @@ def codex_screen(screen):
             result['context'] = {'percent': max(0, min(100, 100 - value if direction.lower() == 'left' else value))}
         if model and model[2]:
             result['effort'] = model[2].lower()
+        if model and model[3]:
+            result['tier'] = model[3].lower()
         credits = re.search(r'\bcredits(?: balance)?\s*:?\s+(\d+(?:\.\d+)?|unlimited)\b', line, re.I)
         if credits:
             result['credits'] = {'unlimited': True} if credits[1].lower() == 'unlimited' else {'balance': credits[1]}
@@ -59,7 +61,7 @@ def codex_screen(screen):
 
 def codex(report):
     """Expose Codex metrics through the same status/effort strip as Claude."""
-    result = {key: report[key] for key in ('model', 'effort', 'credits') if report.get(key) not in (None, '', {})}
+    result = {key: report[key] for key in ('model', 'effort', 'tier', 'credits') if report.get(key) not in (None, '', {})}
     context = report.get('context') or {}
     if context.get('percent') is not None:
         result['context'] = context

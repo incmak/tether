@@ -9,7 +9,7 @@ import { shellCommand } from './shellCommand'
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useWords } from './words'
-import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X } from 'lucide-react'
+import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
 import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
@@ -997,6 +997,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // Claude: the model from its status-line JSON; a custom status line's first part when Tether's status line is not set.
   const model = footer.model || (activePane.agent === 'codex' ? '' : footer.status?.split('|')[0].trim())
   const advisorAlert = activePane.agent === 'claude' && !!footer.advisor?.problems.length
+  const tier = footer.tier === 'fast' || footer.tier === 'ultrafast' ? footer.tier : ''
+  const tierLabel = tier ? `. ${tier === 'fast' ? 'Fast' : 'Ultrafast'} mode on` : ''
   const context = footer.context ? String(Math.round(footer.context.percent)) : /ctx\s+(\d+)%/.exec(footer.status ?? '')?.[1]
   const currentMode = modeBusy || modeKey(footer.mode)
   async function chooseMode(target: string) {
@@ -1240,7 +1242,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {continueSheet && <ContinueWith api={api} pane={activePane} thread={data?.thread ?? null} idle={state === 'Idle' || state === 'Stopped'} onClose={() => setContinueSheet(false)} onCreated={id => { setContinueSheet(false); onContinued(id) }} />}
     {modelSheet && <ModelSheet onContinue={() => { setModelSheet(false); setContinueSheet(true) }} api={api} pane={activePane} thread={data?.thread ?? null} currentLabel={model} currentEffort={footer.effort} advisor={footer.advisor} onClose={() => setModelSheet(false)} onDone={message => { setModelSheet(false); setToast(message); readFooter.current() }} />}
     <Composer onTerminalEscape={() => void sendKey('Escape')} options={activePane.agent === 'shell' ? undefined : <span className="composer-pills">
-      <button type="button" className="pill" aria-label={advisorAlert ? `Model and effort. Advisor ${footer.advisor?.name} is not attached` : 'Model and effort'} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>{advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}<span className="pill-text">{model || 'Model'}</span>{footer.effort && <span className="pill-effort">· {footer.effort}</span>}<ChevronDown size={13} /></button>
+      <button type="button" className="pill" aria-label={`Model and effort${advisorAlert ? `. Advisor ${footer.advisor?.name} is not attached` : ''}${tierLabel}`} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>
+        {advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}
+        <span className="pill-text">{model || 'Model'}</span>
+        {footer.effort && <span className="pill-effort">· {footer.effort}</span>}
+        {tier && <span className="pill-tier"><Zap size={12} aria-hidden="true" /><span className="pill-tier-word">{tier}</span></span>}
+        <ChevronDown size={13} />
+      </button>
       <AgentPill list={subAgents.data} onOpen={() => setAgentMapThread(agentThread)} />
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>

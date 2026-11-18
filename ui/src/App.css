@@ -498,7 +498,7 @@ a { -webkit-touch-callout: default; }
 .composer { container-type: inline-size; }
 /* Phone width: the model name keeps the room. Effort shows in the model sheet, the task count drops its word, the mode its icon. */
 @container (max-width: 400px) {
-  .composer-pills .pill-effort, .composer-pills .agent-pill-word, .composer-pills .mode-container .pill > svg { display: none; }
+  .composer-pills .pill-effort, .composer-pills .pill-tier-word, .composer-pills .agent-pill-word, .composer-pills .mode-container .pill > svg { display: none; }
 }
 /* The smallest phones (320 px): tighter gaps, so the model and mode names stay readable. */
 @container (max-width: 300px) {
