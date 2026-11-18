@@ -136,7 +136,7 @@ def launched(day):
     for folder in sorted(root.iterdir()) if root.is_dir() else []:
         marker = folder / 'notes' / 'postmortems' / f'.{day}.tab'
         # A linked project folder is another project's folder: it is counted there, once.
-        if (projects.ID.fullmatch(folder.name) and not folder.is_symlink() and marker.is_file()
+        if (projects.ID.fullmatch(folder.name) and not folder.is_symlink() and not marker.is_symlink() and marker.is_file()
                 and marker.parent.resolve() == root.resolve() / folder.name / 'notes' / 'postmortems'):
             found.append(folder.name)
     return found
