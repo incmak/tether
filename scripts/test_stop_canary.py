@@ -9,12 +9,14 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
 
-from scripts import stop_canary as canary
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import stop_canary as canary  # noqa: E402
 
 FIXTURE = canary.FIXTURES / 'claude_2.1.325_tasks'
 NO_SECTIONS = canary.FIXTURES / 'claude_2.1.327_tasks' / 'list_no_sections.txt'
