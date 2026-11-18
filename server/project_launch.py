@@ -3,7 +3,7 @@
 Claude Code's SessionStart hook.
 
   project_launch.py claude [args...]   run claude, with the project folder and the hook when the session has a project
-  project_launch.py codex [args...]    run codex, with the backlog folder and the project text as developer_instructions
+  project_launch.py codex [args...]    run codex, with standing rules, project text, and the backlog folder
   project_launch.py hook <id>          Claude Code SessionStart hook: print the project text as additionalContext
 
 ~/.local/bin/tether-claude and tether-codex call this. Any failure runs the plain agent with the same args, and the
@@ -157,15 +157,6 @@ def claude_plain_args(args):
     return ['--settings', json.dumps(entry), *args] if entry else args
 
 
-def codex_has_own_instructions():
-    import paths
-    try:
-        text = (Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml').read_text(errors='replace')
-    except OSError:
-        return False
-    return re.search(r'^\s*developer_instructions\s*=', text, re.M) is not None
-
-
 SUBCOMMANDS = {'resume', 'fork', 'exec', 'e', 'review'}
 SANDBOX_PREFIXES = ('-s', '--sandbox', '-c', '--config', '-p', '--profile', '--approve-for-me', '-a', '--ask-for-approval')
 WRITE_FLAGS = {'--dangerously-bypass-approvals-and-sandbox', '--yolo'}
@@ -175,18 +166,20 @@ UNMODELLED_FLAGS = {'--worktree', '--ignore-user-config'}
 UNSURE = object()
 
 
-def _option(args, short, long):
-    """Every value of an option, in order: `-s X`, `-sX`, `--sandbox X` and `--sandbox=X`."""
-    values = []
+def _option_locations(args, short, long):
+    """Yield the argument index and prefix of each option value, in order."""
     for i, arg in enumerate(args):
         if arg in (short, long) and i + 1 < len(args):
-            values.append(args[i + 1])
+            yield i + 1, ''
         elif long and arg.startswith(long + '='):
-            values.append(arg[len(long) + 1:])
+            yield i, long + '='
         elif short and arg.startswith(short) and len(arg) > len(short) and not arg.startswith('--'):
-            value = arg[len(short):]
-            values.append(value[1:] if value.startswith('=') else value)  # clap reads -c=X as -c X
-    return values
+            yield i, short + '=' if arg.startswith(short + '=') else short
+
+
+def _option(args, short, long):
+    """Every value of an option, in order: `-s X`, `-sX`, `--sandbox X` and `--sandbox=X`."""
+    return [args[i][len(prefix):] for i, prefix in _option_locations(args, short, long)]
 
 
 def _mode(value):
@@ -460,11 +453,34 @@ def codex_folders(args=()):
 
 
 def codex_args(pid, args, group=None):
-    if any(arg in CODEX_PLAIN for arg in args):
+    options = args[:args.index('--')] if '--' in args else args
+    if any(arg in CODEX_PLAIN for arg in options):
         return args
+    import autonomy
+    import codex_level
+    import paths
+    block = autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
+    subagent_args = ['-c', 'features.multi_agent_v2.subagent_developer_instructions=' + toml_string(block)]
     folder_args = codex_folders(args) if pid else []
-    if any('developer_instructions' in arg for arg in args) or codex_has_own_instructions():
-        return [*folder_args, *args]
+
+    # Replace the last CLI instruction in place so its scope and precedence are preserved on resume/fork.
+    for i, prefix in reversed(list(_option_locations(options, '-c', '--config'))):
+        key, sep, value = options[i][len(prefix):].partition('=')
+        if sep and key.strip() == 'developer_instructions':
+            user = _override(value)
+            if isinstance(user, str):
+                args = list(args)
+                args[i] = prefix + 'developer_instructions=' + toml_string(user + '\n\n' + block)
+            return [*subagent_args, *folder_args, *args]
+
+    config = {} if '--ignore-user-config' in options else _toml(Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml')
+    if config is None:
+        return [*subagent_args, *folder_args, *args]  # An unreadable config may contain user instructions.
+    if 'developer_instructions' in config:
+        user = config['developer_instructions']
+        root_args = ['-c', 'developer_instructions=' + toml_string(user + '\n\n' + block)] if isinstance(user, str) else []
+        return [*root_args, *subagent_args, *folder_args, *args]
+
     text = ''
     if pid:
         import backlog
@@ -475,7 +491,8 @@ def codex_args(pid, args, group=None):
         from agent_browser_cli import note
         text = text + '\n\n' + note() if text else note()
         args = [*codex_browser_env_args(), *args]
-    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args] if text else args
+    text = text + '\n\n' + block if text else block
+    return ['-c', 'developer_instructions=' + toml_string(text), *subagent_args, *folder_args, *args]
 
 
 def codex_browser_env_args():
