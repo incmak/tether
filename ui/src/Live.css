@@ -72,6 +72,24 @@
 .live .live-status { display: block; flex: none; max-width: 100%; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--muted); }
 .live-words { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 30em; min-height: 0; margin-top: -4px; padding-top: 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--live-hair) transparent; -webkit-mask-image: linear-gradient(to bottom, transparent, black 8px); mask-image: linear-gradient(to bottom, transparent, black 8px); }
 .live-words p { margin: 0; }
+/* Earlier in the call: small, quiet lines above the newest exchange. Scroll up to read them. */
+.live-words[tabindex] { -webkit-mask-image: linear-gradient(to bottom, transparent, black 28px); mask-image: linear-gradient(to bottom, transparent, black 28px); padding-top: 20px; }
+.live-words:focus-visible { outline: 2px solid var(--live-you); outline-offset: 2px; border-radius: 12px; }
+.live-now { display: flex; flex-direction: column; gap: 10px; }
+.live-past { display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0 0 6px; list-style: none; text-align: left; }
+.live-past li { max-width: 88%; font-size: 15px; line-height: 1.42; text-wrap: pretty; overflow-wrap: anywhere; color: color-mix(in oklab, var(--text) 82%, transparent); }
+.live-past li[data-you="true"] { align-self: flex-end; text-align: right; color: var(--muted); }
+.live-past .live-who { margin-bottom: 2px; font-size: 12px; text-align: inherit; }
+/* Lines ease back as they scroll out of the top, so the newest words stay in front. */
+@supports (animation-timeline: view()) {
+  .live-past li { animation: live-recede linear both; animation-timeline: view(); animation-range: exit 0% exit 100%; }
+}
+@keyframes live-recede { to { opacity: .2; transform: translateY(-6px) scale(.97); } }
+.live .live-latest { position: absolute; z-index: 2; bottom: 4px; left: 50%; translate: -50% 0; display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0 12px; border-radius: 99px; border: 1px solid var(--line); background: var(--g-solid, var(--surface)); color: var(--text); font-size: 13px; cursor: pointer;
+  box-shadow: 0 6px 16px -6px rgb(0 0 0 / .45); animation: live-in .18s cubic-bezier(.23, 1, .32, 1) both; }
+@media (hover: hover) { .live .live-latest:hover { background: var(--hover); } }
+.live-latest:active { scale: .96; }
+@media (pointer: coarse) { .live-latest { min-height: 40px; } }
 .live-said, .live-reply { font-size: clamp(22px, 8cqw, 32px); font-weight: 300; line-height: 1.18; letter-spacing: -.012em; text-wrap: balance; overflow-wrap: anywhere; color: var(--text); }
 .live-said[data-small="true"] { font-size: 15px; font-weight: 400; letter-spacing: 0; color: var(--muted); }
 .live-reply { animation: live-in .25s cubic-bezier(.23, 1, .32, 1) both; }
@@ -221,6 +239,7 @@
 @media (prefers-reduced-motion: reduce) {
   .live-orb { transition: none; }
   .live-reply { animation: none; }
+  .live-past li, .live-latest { animation: none; }
   .live-bubble[data-asking="true"]::after { animation: none; opacity: 0; }
   .live, .live-window, .live-bubble, .live .live-icon { transition: none; }
 }

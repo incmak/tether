@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { ArrowUp, AudioLines, Check, ChevronDown, GripHorizontal, Maximize2, Mic, MicOff, Minimize2, Minus, PhoneOff, Square } from 'lucide-react'
+import { ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, GripHorizontal, Maximize2, Mic, MicOff, Minimize2, Minus, PhoneOff, Square } from 'lucide-react'
 import { chatMessages, errorText, SESSION_NAME, type Api, type Approval, type ChatData, type Choice, type Pane, type SessionsData } from './api'
 import type { Command } from './CommandMenu'
 import { agentNames, groupSessions, paneTitle } from './Sidebar'
@@ -16,6 +16,7 @@ import { parseBacklog, type Item } from './backlogItems'
 import { itemPrompt } from './backlogSend'
 import { reportVoice } from './voiceLog'
 import { ASSISTANT } from './assistant'
+import { answered, heard, remember, type Hero, type Line, type Spoken } from './liveHistory'
 import './Live.css'
 
 // Live mode: talk to the agents hands-free. The orb listens, the words go to the target pane,
@@ -121,6 +122,23 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const [phase, setPhase] = useState<Phase>('starting')
   const [said, setSaid] = useState('')
   const [reply, setReply] = useState({ who: ASSISTANT, text: '' })
+  // The hero shows the newest exchange; earlier lines stay above it, so the call scrolls back.
+  const [past, setPast] = useState<Line[]>([])
+  const hero = useRef<Hero>({ said: '', reply: { who: ASSISTANT, text: '' } })
+  const lineId = useRef(0)
+  // Plain refs and setters only, so the voice callbacks can hold these for the whole call.
+  const lines = useRef({
+    keep(step: { hero: Hero; keep: Omit<Line, 'id'>[] }) {
+      hero.current = step.hero
+      if (step.keep.length) setPast(old => remember(old, step.keep, () => ++lineId.current))
+      setSaid(step.hero.said)
+      setReply(step.hero.reply)
+    },
+    said(text: string) { lines.current.keep(heard(hero.current, text)) },
+    reply(next: Spoken) { lines.current.keep(answered(hero.current, next)) },
+  })
+  const showSaid = (text: string) => lines.current.said(text)
+  const showReply = (next: Spoken) => lines.current.reply(next)
   const [muted, setMuted] = useState(false)
   const [awake, setAwake] = useState(false)
   const [problem, setProblem] = useState('')
@@ -133,8 +151,52 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const canvas = useRef<HTMLCanvasElement>(null)
   const lit = useRef<HTMLElement>(null)  // the light in the Interrupt pill, or in the bubble
   const words = useRef<HTMLDivElement>(null)
-  // Keep the newest words in view when a long reply scrolls.
-  useEffect(() => { const box = words.current; if (box) box.scrollTop = box.scrollHeight }, [said, reply.text, problem, approval?.id])
+  // Follow the newest words, unless the person scrolled back to read; then offer a way back down.
+  const following = useRef(true)
+  const jumping = useRef(false)
+  const lastTop = useRef(0)
+  const [behind, setBehind] = useState(false)
+  useEffect(() => {
+    const box = words.current
+    if (!box) return
+    if (following.current) box.scrollTop = box.scrollHeight
+    else setBehind(true)
+  }, [said, reply.text, problem, approval?.id, past.length])
+  const hasPast = past.length > 0
+  // Keep the newest line in view while the box or its lines change size, for example when the orb shrinks.
+  useEffect(() => {
+    const box = words.current
+    if (!box || typeof ResizeObserver === 'undefined') return
+    const pin = new ResizeObserver(() => { if (following.current) box.scrollTop = box.scrollHeight })
+    pin.observe(box)
+    for (const child of Array.from(box.children)) pin.observe(child)
+    return () => pin.disconnect()
+  }, [hasPast])
+  const onWordsScroll = () => {
+    const box = words.current
+    if (!box) return
+    const top = box.scrollTop
+    const up = top < lastTop.current - 1
+    lastTop.current = top
+    const bottom = box.scrollHeight - top - box.clientHeight < 32
+    // A smooth jump to the latest line passes through "not at the bottom": keep following until it lands.
+    if (jumping.current) { if (bottom) jumping.current = false; return }
+    if (bottom) { following.current = true; setBehind(false); return }
+    // Only the person scrolling up stops following. A layout change (the orb resizing) only moves the bottom.
+    if (up) { following.current = false; setBehind(true) }
+    else if (following.current) box.scrollTop = box.scrollHeight
+  }
+  /** The person scrolls again during a jump: they take over. */
+  const stopJump = () => { jumping.current = false }
+  const toLatest = () => {
+    const box = words.current
+    if (!box) return
+    following.current = true
+    jumping.current = true
+    setBehind(false)
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    box.scrollTo({ top: box.scrollHeight, behavior: still ? 'auto' : 'smooth' })
+  }
   const talkButton = useRef<HTMLButtonElement>(null)
   const phaseNow = useRef<Phase>('starting')
   const talking = useRef(false)  // the person is mid-phrase: hold announcements until they pause
@@ -149,9 +211,9 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const flow = useRef({
     async say(who: string, text: string) {
       if (!text.trim()) return
-      if (agent.current) { setReply({ who, text }); agent.current.say(text); return }
+      if (agent.current) { showReply({ who, text }); agent.current.say(text); return }
       if (!voice.current) return
-      setReply({ who, text })
+      showReply({ who, text })
       go('speaking')
       const done = await voice.current.speak(sentences(text))
       if (done) flow.current.next()
@@ -192,8 +254,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
         if (!response.ok) throw new Error(data.error || 'Voice-to-text failed.')
         const text = (data.text ?? '').trim()
         if (!text) { flow.current.rest(); return }
-        setSaid(text)
-        setReply(old => ({ ...old, text: '' }))
+        showSaid(text)
         setProblem('')
         await flow.current.act(text)
       } catch (failure) {
@@ -242,7 +303,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       try {
         await flow.current.deliver(pane, text)
         voice.current?.cue('sent')
-        setReply({ who: name(pane), text: '' })
+        showReply({ who: name(pane), text: '' })
         flow.current.listenOrWork()
       } catch (failure) {
         await flow.current.say(ASSISTANT, `That did not send. ${errorText(failure)}`)
@@ -457,8 +518,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           if (turn === 'listening') flow.current.listen()
           else go(turn)
         },
-        onUserText: (text, final) => { if (final) { setSaid(text); setReply(old => ({ ...old, text: '' })); setProblem('') } },
-        onBotText: text => setReply({ who: ASSISTANT, text }),
+        onUserText: (text, final) => { if (final) { lines.current.said(text); setProblem('') } },
+        onBotText: text => lines.current.reply({ who: ASSISTANT, text }),
         onMetrics: metrics => console.debug('Friday turn', metrics),
         onVoice: kind => { if (!gone) setVoiceKind(kind) },
         onClosed: reason => {
@@ -691,7 +752,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     if (agent.current) {  // Friday hears all the time: this only stops its reply. The mic button mutes.
       if (phase === 'speaking' || phase === 'thinking') agent.current.interrupt('tap', phase)
       // A tap while Friday thinks drops the answer it was about to give, so say so.
-      if (phase === 'thinking') setReply({ who: ASSISTANT, text: 'Stopped. Say it again.' })
+      if (phase === 'thinking') showReply({ who: ASSISTANT, text: 'Stopped. Say it again.' })
       return
     }
     const engine = voice.current
@@ -787,11 +848,17 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
           <canvas ref={canvas} aria-hidden="true" onClick={talk} />
         </div>
         <div className="live-status" aria-live="polite" title={`${awake ? 'Screen on' : 'Screen may sleep'}${agentOn ? ` · ${voiceInfo}` : ''}`}>{status}{working ? <span> · {working} working</span> : null}</div>
-        <div ref={words} className="live-words" data-no-drag aria-live="polite">
-          {said && <p className="live-said" data-small={!!reply.text}>{said}</p>}
-          {reply.text && <p className="live-reply" data-long={reply.text.length > 110}>{reply.who !== ASSISTANT && <span className="live-who">{reply.who}</span>}{reply.text}</p>}
-          {problem && <p className="live-problem" role="alert">{problem}</p>}
+        <div ref={words} className="live-words" data-no-drag tabIndex={past.length ? 0 : undefined} role={past.length ? 'region' : undefined} aria-label={past.length ? 'Conversation' : undefined} onScroll={onWordsScroll} onWheel={stopJump} onTouchStart={stopJump} onKeyDown={stopJump}>
+          {past.length > 0 && <ol className="live-past" aria-label="Earlier in this call">
+            {past.map(line => <li key={line.id} data-you={line.you}><span className="live-who">{line.you ? 'You' : line.who}</span>{line.text}</li>)}
+          </ol>}
+          <div className="live-now" aria-live="polite">
+            {said && <p className="live-said" data-small={!!reply.text}>{said}</p>}
+            {reply.text && <p className="live-reply" data-long={reply.text.length > 110}>{reply.who !== ASSISTANT && <span className="live-who">{reply.who}</span>}{reply.text}</p>}
+            {problem && <p className="live-problem" role="alert">{problem}</p>}
+          </div>
         </div>
+        {behind && <button type="button" className="live-latest" data-no-drag onClick={toLatest}><ArrowDown size={14} aria-hidden="true" />Latest</button>}
       </div>
 
       {approval && approvalPane && <div className="live-approval" data-no-drag role="group" aria-label={`${paneTitle(approvalPane)} needs your OK`}>
