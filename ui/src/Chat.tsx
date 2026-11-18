@@ -13,7 +13,7 @@ import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks,
 import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
-import { ApiError, canFork, creditsLabel, cronsLabel, cronSummary, errorText, goalStatusLabel } from './api'
+import { ApiError, canFork, chatMessages, cleanChat, creditsLabel, cronsLabel, cronSummary, errorText, goalStatusLabel } from './api'
 import type { Api, Approval, AskBridge, Attention, ChatData, ChatMessage, Choice, DialogAction, Footer, Pane, PromptAction } from './api'
 import { usePolling } from './hooks'
 import { useBackStep } from './backNav'
@@ -148,7 +148,7 @@ function saveDock(id: string, page: HTMLElement | null) {
 // A still copy of a next-door pane's chat, from the cache. It waits just off screen on its side (side 1 = right,
 // -1 = left), at the place the real chat opens, so a side swipe drags both chats together like photos in a gallery.
 const ChatPeek = memo(function ChatPeek({ id, data, api, side, peekRef }: { id: string; data: ChatData | undefined; api: Api; side: 1 | -1; peekRef: React.RefObject<HTMLDivElement | null> }) {
-  const messages = useMemo(() => data?.messages ?? [], [data?.messages])
+  const messages = useMemo(() => chatMessages(data), [data])
   const ends = useMemo(() => turnEndsOf(messages, data?.state === 'Working'), [messages, data?.state])
   const folded = useMemo(() => foldWatchCycles(messages), [messages])
   const runtime = useExternalStoreRuntime({ messages: folded, convertMessage, isRunning: data?.state === 'Working', onNew: async () => {} })
@@ -219,7 +219,7 @@ function codexSendEvidence(data: ChatData | undefined, text: string) {
   if (!paths.length) return
   const files = JSON.stringify(paths.sort()), words = squash(rest)
   let complete = 0, imageOnly = 0
-  for (const message of data.messages) {
+  for (const message of chatMessages(data)) {
     if (message.role !== 'user' || message.kind) continue
     const received = uploadImageParts(message.text)
     if (JSON.stringify(received.paths.sort()) !== files) continue
@@ -292,8 +292,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     return api<ChatData>(`chat?${chatQuery}${document.visibilityState === 'visible' ? '&watch=1' : ''}`, undefined, signal)
   }, [api, chatQuery])
   const streamPath = useCallback((shown?: ChatData) => `stream?${chatQuery}&delta=1${shown?.version ? `&have=${encodeURIComponent(shown.version)}` : ''}`, [chatQuery])
-  const { data, error, loading, refresh } = usePolling(fetchChat, 1500, streamPath, chatCache.get(pane.id))
-  useEffect(() => { if (data) cacheChat(pane.id, data) }, [pane.id, data])
+  const { data: received, error, loading, refresh } = usePolling(fetchChat, 1500, streamPath, chatCache.get(pane.id))
+  useEffect(() => { if (received) cacheChat(pane.id, received) }, [pane.id, received])
+  // Everything below reads a clean transcript. `transcript` says whether the server sent a list at all.
+  const data = useMemo(() => cleanChat(received), [received])
+  const transcript = Array.isArray(received?.messages)
   const preview = useSteadyPreview(liveReplyPreview ? data?.preview?.text : undefined)
   // Connection state for the banner: the browser's offline flag, plus failed chat reads while a chat is already on screen.
   const [offline, setOffline] = useState(() => !navigator.onLine)
@@ -686,7 +689,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const { dropping, fileDrop } = useFileDrop(activePane.id, dropRefusal({ agent: activePane.agent, writable: activePane.writable && writable }, draft, !!data), setToast)
   // The name the tab shows: the pane's own name, else the session's (a bare number is not a name).
   const claudeName = pane.pane_name || (session && !/^\d+$/.test(session.name) ? session.name : '')
-  const messages = useMemo(() => data?.messages ?? [], [data?.messages])
+  const messages = useMemo(() => chatMessages(data), [data])
   const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind).map(message => message.text), [messages])
   // Read a new reply aloud when its turn ends. Replies already there when the chat opens are not read.
   useEffect(() => readAloud ? keepAudioUnlocked() : undefined, [readAloud])
@@ -696,13 +699,13 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const readUpTo = useRef<string | null | undefined>(undefined)
   const cachedAtOpen = useRef(chatCache.get(pane.id))
   useEffect(() => {
-    if (!data || data === cachedAtOpen.current) return  // saved data is not "there when the chat opens"; wait for fresh data
+    if (!data || received === cachedAtOpen.current) return  // saved data is not "there when the chat opens"; wait for fresh data
     if (readUpTo.current === undefined || !readAloud) { readUpTo.current = lastReply?.id ?? null; return }
     if (state === 'Working' || !lastReply || lastReply.id === readUpTo.current) return
     readUpTo.current = lastReply.id
     if (document.visibilityState !== 'visible') return
     speak(lastReply.text, lastReply.text, handsFree && micOk && writable ? () => setListenRequest(count => count + 1) : undefined)
-  }, [data, state, lastReply, readAloud, handsFree, micOk, writable])
+  }, [data, received, state, lastReply, readAloud, handsFree, micOk, writable])
   useEffect(() => () => stopSpeaking(), [])
   const [pending, setPendingState] = useState<Pending[]>(() => pendingByPane.get(pane.id) ?? [])
   // A running `!` command shows in the thread with its live output, so its queued bubble is hidden.
@@ -717,24 +720,25 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const queueLabel = [waiting ? `${waiting} queued` : '', notSent ? `${notSent} not sent` : ''].filter(Boolean).join(' · ')
   const setPending = useCallback((update: (list: Pending[]) => Pending[]) => setPendingState(list => { const next = update(list); pendingByPane.set(pane.id, next); savePending(); return next }), [pane.id])
   const dataReceivedAt = useRef(0)
-  useEffect(() => { dataReceivedAt.current = data && data !== cachedAtOpen.current ? Date.now() : 0 }, [data])
+  useEffect(() => { dataReceivedAt.current = received && received !== cachedAtOpen.current ? Date.now() : 0 }, [received])
   const refreshedFor = useRef(new WeakSet<Pending>())
   const [recheck, setRecheck] = useState(0)
   useEffect(() => {
     const now = Date.now()
     let left: Pending[]
     let needsRefresh = false
-    if (data && (!data.session || data.session === pane.id)) {
-      const cached = data === cachedAtOpen.current
+    // Reconcile only against a real transcript. A partial body (an error, an old server) keeps the queue as it is.
+    if (data && (!data.session || data.session === pane.id) && transcript) {
+      const cached = received === cachedAtOpen.current
       const card = data.attention || data.approval || data.plan
-      const lastId = data.messages[data.messages.length - 1]?.id ?? null
+      const lastId = () => data.messages[data.messages.length - 1]?.id ?? null
       left = pending.flatMap(item => {
         if (cached && !keepPending(item)) return keepPendingOnLoad(item) ? [item] : []
         const next = afterTranscript(item, data)
         if (!next || !keepPending(next)) return []
         // A pane's first prompt starts a thread where there was none; that is a chat effect too.
         const threadChanged = changedThread(item, data) || (item.thread === null && data.thread != null)
-        if (item.terminal) return card || threadChanged || lastId !== item.terminal.lastId ? [] : [item]
+        if (item.terminal) return card || threadChanged || lastId() !== item.terminal.lastId ? [] : [item]
         if (next.failed || !slashCommand(next.text) || now - next.at <= SLASH_CHECK) return [next]
         // These cards open at once, even while the agent works: /btw, /mcp, /config, /permissions. The command ran.
         if (['side', 'dialog', 'permissions', 'panel'].includes(data.attention?.reason ?? '')) return []
@@ -748,7 +752,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
         // Only a confirmed Idle pane says the command ran with no output. Other states (Unknown, Unavailable, Approval) leave quietly, as before.
         // A card or a new thread shows its effect in the chat, so leave quietly too.
         if (data.state !== 'Idle' || card || threadChanged) return []
-        if (dataReceivedAt.current >= item.at + SLASH_CHECK) return [{ ...item, terminal: { lastId } }]
+        if (dataReceivedAt.current >= item.at + SLASH_CHECK) return [{ ...item, terminal: { lastId: lastId() } }]
         // An idle stream can report the same version without delivering another data object. Ask for one fresh read.
         if (!refreshedFor.current.has(item)) { refreshedFor.current.add(item); needsRefresh = true }
         return [item]
@@ -768,7 +772,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (!Number.isFinite(deadline)) return
     const timer = window.setTimeout(() => setRecheck(n => n + 1), Math.max(0, deadline - Date.now()))
     return () => window.clearTimeout(timer)
-  }, [data, pane.id, pending, recheck, refresh, setPending])
+  }, [data, received, transcript, pane.id, pending, recheck, refresh, setPending])
   useEffect(() => {
     if (!toast) return
     const timer = setTimeout(() => setToast(''), 6000)
@@ -879,7 +883,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
     if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
     const key = squash(text).slice(0, 80)
-    const images = codexSendEvidence(data, text)
+    // The send must go out even when the delivery check cannot read the chat.
+    let images: ReturnType<typeof codexSendEvidence>
+    try { images = codexSendEvidence(data, text) } catch { images = undefined }
     const seen = retryOf?.seen ?? images?.complete ?? matches(messages, key, imagesOnly(text))
     const thread = retryOf?.thread ?? data?.thread ?? null
     const accepted = await write('message', { session: pane.id, thread, message: text, ...(activePane.agent === 'shell' ? { mode: 'shell' } : {}) })
@@ -906,10 +912,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     if (retrying !== null) return
     setRetrying(item.id)
     try {
-      const fresh = await api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`).catch(() => null)
+      let fresh = await api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`).catch(() => null)
       if (!fresh || !Array.isArray(fresh.messages)) {
         setToast('Could not check delivery. Reconnect and try again.'); return
       }
+      fresh = cleanChat(fresh)!
       if (fresh.session !== pane.id || changedThread(item, fresh)) {
         setToast('The thread changed. Use Edit to recover this message.'); void refresh(); return
       }

@@ -1,7 +1,7 @@
 import { Loading } from './Skeleton'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowUp } from 'lucide-react'
-import { ApiError, errorText } from './api'
+import { ApiError, chatMessages, errorText } from './api'
 import type { Api, Approval, AskBridge, Attention, ChatData, Choice, DialogAction, Pane, PromptAction } from './api'
 import { ChoiceDock } from './Dock'
 import { usePolling } from './hooks'
@@ -106,7 +106,8 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
     if (ownAnswer) void write('menu', { choice: ownAnswer.id, answer: text }, true)
     else void write('message', { message: text }, false)
   }
-  const lastTurn = pane.finished ?? (data?.messages.length ? Date.parse(data.messages[data.messages.length - 1].time) / 1000 : 0)
+  const transcript = chatMessages(data)
+  const lastTurn = pane.finished ?? (transcript.length ? Date.parse(transcript[transcript.length - 1].time) / 1000 : 0)
   const ago = lastTurn ? agoSeconds(lastTurn) : 'now'
   const context = approval ? `${agent} needs your permission` : data?.state === 'Working' || data?.busy ? 'Working'
     : ago === 'now' ? 'Last turn just now' : `Last turn ${ago} ago`

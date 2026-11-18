@@ -149,6 +149,7 @@ async function main() {
   const quickHooks = harness(), quickCalls = [], Dock = () => null
   quickHooks.hooks.useLayoutEffect = quickHooks.hooks.useEffect
   const quick = load('src/QuickReply.tsx', { react: quickHooks.hooks,
+    './api': { ApiError: class ApiError extends Error {}, errorText: error => error.message, chatMessages: data => Array.isArray(data?.messages) ? data.messages : [] },
     './hooks': { usePolling: () => ({ data: { attention: dockProps.attention, messages: [], thread: 'conversation', writable: true }, refresh: async () => {} }) },
     './Dock': { ChoiceDock: Dock }, './Sidebar': { paneTitle: () => 'Fixture', agoSeconds: () => 'now', agentNames: { claude: 'Claude' } },
   }).QuickReply

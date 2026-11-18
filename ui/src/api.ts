@@ -149,6 +149,77 @@ export interface ChatMessage {
   images?: number  // Claude: images inside this user message. GET message-image serves them by image_key.
   image_key?: string
 }
+// Chat data comes from the server and is not trusted. A message needs a role and text to render or to match a send.
+// Its optional fields must have their declared types, or the readers that walk them (tools, members) would throw.
+const MESSAGE_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
+  id: 'string', kind: 'string', quiet: 'string', watch: 'string', result: 'string', cron: 'string', title: 'string',
+  count: 'string', time: 'string', image_key: 'string', cycles: 'number', images: 'number', schedule: 'boolean',
+  rearmed: 'boolean', reported: 'boolean',
+}
+const TOOL_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
+  is_error: 'boolean', status: 'string', images: 'number', description: 'string', started: 'string', ended: 'string',
+}
+const isObject = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
+const hasStrings = (item: Record<string, unknown>, keys: string[]) => keys.every(key => typeof item[key] === 'string')
+const isArtifact = (item: unknown) => isObject(item) && hasStrings(item, ['url', 'path', 'title'])
+/** Each entry cleaned; entries that clean to null drop out. The same array when every entry came back as itself.
+ *  A rejected entry (null in, null out) counts as a change, and so does a hole in a sparse array. */
+function cleanEach<T>(list: unknown[], clean: (item: unknown) => T | null): T[] {
+  const out: T[] = []
+  let same = true
+  for (let index = 0; index < list.length; index++) {
+    const entry = index in list ? clean(list[index]) : null
+    if (entry === null || entry !== list[index]) same = false
+    if (entry !== null) out.push(entry)
+  }
+  return same ? list as T[] : out
+}
+/** The tool itself when valid, a copy without its wrong-type fields, or null when it has no id, name and title. */
+const cleanTool = (item: unknown): ToolSummary | null => {
+  if (!isObject(item) || !hasStrings(item, ['id', 'name', 'title'])) return null
+  const bad = Object.entries(TOOL_FIELDS).filter(([key, type]) => item[key] !== undefined && typeof item[key] !== type).map(([key]) => key)
+  if (item.artifact !== undefined && !isArtifact(item.artifact)) bad.push('artifact')
+  if (!bad.length) return item as unknown as ToolSummary
+  const rest = { ...item }
+  for (const key of bad) delete rest[key]
+  return rest as unknown as ToolSummary
+}
+const isStringList = (item: unknown) => Array.isArray(item) && item.every(entry => typeof entry === 'string')
+/** The message itself when every field it has is the right type; a copy without the wrong fields when it has a role and
+ *  text; else null. Bad tools drop out of the tool list, and bad members out of the member list. */
+const cleanMessage = (item: unknown): ChatMessage | null => {
+  if (!isObject(item) || typeof item.role !== 'string' || typeof item.text !== 'string') return null
+  let copy: Record<string, unknown> | null = null
+  const set = (key: string, value: unknown) => { copy ??= { ...item }; if (value === undefined) delete copy[key]; else copy[key] = value }
+  for (const [key, type] of Object.entries(MESSAGE_FIELDS)) if (item[key] !== undefined && typeof item[key] !== type) set(key, undefined)
+  if (item.tools !== undefined) {
+    if (!Array.isArray(item.tools)) set('tools', undefined)
+    else {
+      const tools = cleanEach(item.tools, cleanTool)
+      if (tools !== item.tools) set('tools', tools)
+    }
+  }
+  if (item.members !== undefined) {
+    const members = Array.isArray(item.members) ? cleanList(item.members) : undefined
+    if (members !== item.members) set('members', members)
+  }
+  if (item.watches !== undefined && !isStringList(item.watches)) set('watches', undefined)
+  return (copy ?? item) as unknown as ChatMessage
+}
+/** A list of clean messages. A list that is already clean comes back as the same array. */
+const cleanList = (list: unknown[]): ChatMessage[] => cleanEach(list, cleanMessage)
+/** The transcript of a chat answer, without entries that are not messages. An error body or an old server can send no
+ *  list or another type; read that as empty. A valid list comes back as the same array, so memos keep it. */
+export const chatMessages = (data: { messages?: unknown } | null | undefined): ChatMessage[] => {
+  const list: unknown = data?.messages
+  return Array.isArray(list) ? cleanList(list) : []
+}
+/** The same chat data with a clean transcript. Valid data comes back as the same object. */
+export const cleanChat = <T extends { messages?: unknown }>(data: T | undefined): T | undefined => {
+  if (!data) return data
+  const messages = chatMessages(data)
+  return messages === data.messages ? data : { ...data, messages }
+}
 export interface ChatData {
   /** A hash of this payload. The chat stream takes it as `have` and skips sending the same payload again (B63). */
   version?: string
