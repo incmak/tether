@@ -47,6 +47,7 @@ GIT_TIMEOUT = 20
 PLACEHOLDER = '_The ops tab has not written this section yet._'
 QUIET = '_Nothing went wrong in the facts above, so no ops tab ran._'
 DAY = re.compile(r'\d{4}-\d{2}-\d{2}')
+MARKER = re.compile(r'\.\d{4}-\d{2}-\d{2}\.tab')
 PAUSE_TITLES = ('Review paused', 'Review needs you')
 ITEM = r'[a-z][a-z-]*\([^()\n]+\)'
 STAMP = re.compile(rf'none(?: \([^()\n]+\))?|{ITEM}(?: +{ITEM})*')  # the same rule as scripts/verification.py
@@ -131,8 +132,14 @@ def _marker(pid, day):
 def launched(day):
     """The projects that have a launch record for a day."""
     root = projects.root()
-    return [folder.name for folder in sorted(root.iterdir()) if projects.ID.fullmatch(folder.name)
-            and (folder / 'notes' / 'postmortems' / f'.{day}.tab').is_file()] if root.is_dir() else []
+    found = []
+    for folder in sorted(root.iterdir()) if root.is_dir() else []:
+        marker = folder / 'notes' / 'postmortems' / f'.{day}.tab'
+        # A linked project folder is another project's folder: it is counted there, once.
+        if (projects.ID.fullmatch(folder.name) and not folder.is_symlink() and marker.is_file()
+                and marker.parent.resolve() == root.resolve() / folder.name / 'notes' / 'postmortems'):
+            found.append(folder.name)
+    return found
 
 
 def reserve(day, pid):
@@ -150,7 +157,11 @@ def reserve(day, pid):
             os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         except FileExistsError:
             return 'This project already got its ops tab for that day.'
-        for old in sorted(marker.parent.glob('.*.tab'))[:-LAUNCH_DAYS]:  # Tether's own records, oldest first
+        # Old records go, oldest first. Only a file that is exactly Tether's own record: the name .<day>.tab, a
+        # plain file, empty. Any other file in the folder is the person's and is never touched.
+        own = sorted(file for file in marker.parent.iterdir() if MARKER.fullmatch(file.name)
+                     and not file.is_symlink() and file.is_file() and file.stat().st_size == 0)
+        for old in own[:-LAUNCH_DAYS]:
             old.unlink(missing_ok=True)
         return ''
 

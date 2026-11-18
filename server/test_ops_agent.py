@@ -237,10 +237,18 @@ class RunTests(Case):
         self.assertIn('at most 3', records[0]['why'])
         ops_agent.release(DAY, 'a' * 12)
         self.assertEqual(ops_agent.reserve(DAY, 'f' * 12), '')
+        folder = projects.bundle('a' * 12) / 'notes' / 'postmortems'
+        mine = {'.2026-09-17.draft.tab': 'my draft', '.2020-01-01.tab': 'not empty, so not a record', '.notes.tab': '',
+                '2020-01-02.md': '# an old postmortem'}
+        for name, text in mine.items():
+            (folder / name).write_text(text)
         for index in range(ops_agent.LAUNCH_DAYS + 5):
             ops_agent.reserve(f'2027-{1 + index // 28:02d}-{1 + index % 28:02d}', 'a' * 12)
-        folder = projects.bundle('a' * 12) / 'notes' / 'postmortems'
-        self.assertEqual(len(list(folder.glob('.*.tab'))), ops_agent.LAUNCH_DAYS)
+        self.assertEqual({name: (folder / name).read_text() for name in mine}, mine)  # the person's files stay
+        records = [file for file in folder.iterdir() if ops_agent.MARKER.fullmatch(file.name) and not file.stat().st_size]
+        self.assertEqual(len(records), ops_agent.LAUNCH_DAYS)
+        (projects.root() / ('9' * 12)).symlink_to(projects.bundle('b' * 12), target_is_directory=True)
+        self.assertEqual(ops_agent.launched(DAY), ['b' * 12, 'e' * 12, 'f' * 12])  # a linked folder is not counted twice
         self.assertEqual(projects.notes('a' * 12), [])  # the records are not notes
 
     def test_a_launch_record_never_follows_a_link(self):
