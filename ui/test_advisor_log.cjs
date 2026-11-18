@@ -43,7 +43,10 @@ const fixture = {
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
   'work/board': { revision: 1, projects: [], items: [], stages: [] }, subagents: { main: null, agents: [], tasks: [] },
+  reminders: { reminders: [], deleted: [], now }, feedback: { ratings: {} },
   'projects/project': project, 'push/config': { enabled: false },
+  'claude-advisor': { models: [{ model: 'off', name: 'Off', summary: 'Tether adds no advisor.' }], global: 'off', model: 'off', source: 'global', project: { override: false, model: 'off' }, user_setting: null, problems: {} },
+  'commit-gate': { modes: [{ mode: 'observe', name: 'Observe', summary: 'Report commits that would be blocked.' }], global: 'observe', mode: 'observe', source: 'global', project: { override: false, mode: 'observe' }, stats: { days: 7, commits: 0, passed: 0, would_block: 0, blocked: 0, let_through: 0, unknown: 0, stamped: 0, unstamped: 0, false_blocks: 0, rate: null }, max_blocks: 3 },
   autonomy: { levels, global: 4, level: 4, source: 'global', project: { override: false, level: 4 }, reviewers: {}, tiers: [], models: { claude: [], codex: [] }, efforts: [], decisions: [] },
   'codex-level': { levels: levels.slice(0, 5), global: 1, level: 1, source: 'global', project: { override: false, level: 1 }, runs: { today: 0, running: 0, panes: [] }, run: { model: '', effort: '', fast: false }, models: [] },
 }
@@ -51,7 +54,8 @@ const fixture = {
 async function main() {
   let browser, page, server, failed = 0
   const pageErrors = [], unexpected = new Set()
-  let logMode = 'rows'  // rows | empty | error | slow
+  let logMode = 'rows'  // rows | empty | error
+  let loading
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -87,7 +91,7 @@ async function main() {
         if (endpoint === 'projects/advisor-log') {
           asked.push(url.searchParams.get('project'))
           if (logMode === 'error') return route.fulfill({ status: 500, json: { error: 'Tether could not read or write the project folder.' } })
-          if (logMode === 'slow') await new Promise(resolve => setTimeout(resolve, 1500))
+          if (loading) await loading
           return route.fulfill({ json: { entries: logMode === 'empty' ? [] : rows, keep: 200 } })
         }
         if (endpoint === 'projects/advisor-entry') {
@@ -148,11 +152,16 @@ async function main() {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
 
-      logMode = 'slow'
-      await openSheet()
-      await section.locator('.advisor-skeleton').waitFor()
-      check(`${at} loading skeleton announces itself`, (await section.getByRole('status').first().innerText()).includes('Loading advisor decisions'))
-      logMode = 'rows'
+      let finishLoading
+      loading = new Promise(resolve => { finishLoading = resolve })
+      try {
+        await openSheet()
+        const status = section.locator('.advisor-skeleton').getByRole('status')
+        check(`${at} loading skeleton announces itself`, (await status.innerText()).includes('Loading advisor decisions'))
+      } finally {
+        loading = undefined
+        finishLoading()
+      }
       await section.locator('.advisor-row').first().waitFor()
       check(`${at} asks for this project`, asked.at(-1) === PID, String(asked.at(-1)))
 
