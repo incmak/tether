@@ -202,28 +202,41 @@ def _git_env(helpers=(), *, worktree_attributes=False):
     return full
 
 
-CREDENTIAL_KEY = re.compile(r'credential\.(?:.+\.)?(?:helper|usehttppath|username)', re.I)
+CREDENTIAL_KEY = re.compile(r'credential\.(?:.+\.)?(helper|usehttppath|username)', re.I | re.S)
 
 
-def _credential_helpers():
-    """[(key, value)] for the user's own credential settings, in their order: credential.helper and the settings for
-    one host, such as credential.https://github.com.helper. This lookup alone uses the user's environment. Nothing
-    else is taken from the global config."""
+def _credential_helpers(root):
+    """[(key, value)] for the user's own credential settings, in Git's order: credential.helper and the settings for
+    one URL, such as credential.https://github.com.helper.
+
+    Git itself lists them, in the repository `root`, so both global files, their includes and the conditions of
+    `includeIf` apply as they do for the user. Only entries with the scope "global" pass: nothing comes from the
+    repository, the system file, the command line or the environment. This lookup alone uses the user's environment.
+    The output is read as bytes: a name can contain a carriage return, and text mode turns that into a line break."""
     try:
-        result = RUN(['git', 'config', '--global', '--null', '--get-regexp', r'^credential\.'],
-                     stdin=subprocess.DEVNULL, capture_output=True, encoding='utf-8', errors='surrogateescape',
-                     timeout=GIT_TIMEOUT)
+        result = RUN(['git', '-C', str(root), 'config', '--includes', '--null', '--show-scope', '--get-regexp',
+                      r'^credential\.'], stdin=subprocess.DEVNULL, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError('Could not read global Git credential helpers.') from exc
     if result.returncode == 1:
         return ()
-    if result.returncode:
+    fields = result.stdout.split(b'\0')
+    if result.returncode or fields[-1] or len(fields) % 2 != 1:
         raise GitError('Could not read global Git credential helpers.')
     found = []
-    for entry in result.stdout.split('\0')[:-1]:
-        key, _, value = entry.partition('\n')
-        if CREDENTIAL_KEY.fullmatch(key):
-            found.append((key, value))
+    for scope, entry in zip(fields[:-1:2], fields[1:-1:2]):
+        if scope != b'global':
+            continue
+        key, separator, value = (os.fsdecode(part) for part in entry.partition(b'\n'))
+        match = CREDENTIAL_KEY.fullmatch(key)
+        if match is None:
+            continue
+        if not separator:
+            # A name without "=" is "true" for a yes/no setting. Git refuses it for the two text settings.
+            if match[1].lower() != 'usehttppath':
+                raise GitError(f'The global Git setting {key!r} has no value.')
+            value = 'true'
+        found.append((key, value))
     return tuple(found)
 
 
@@ -247,15 +260,17 @@ def _run_git(prefix, *args, network=False, check=True, env=None, binary=False):
     return result
 
 
-def _object_git(scratch, *args, network=False, check=True, identity=None, binary=False):
-    env = _git_env(_credential_helpers() if network else ())
+def _object_git(scratch, *args, network=None, check=True, identity=None, binary=False):
+    """Run git in the scratch repository. `network` is the user's repository for a command that uses the remote:
+    its credential settings apply."""
+    env = _git_env(_credential_helpers(network) if network else ())
     for key in ('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE'):
         env.pop(key, None)
     # A push URL may select a built-in transport, but not an arbitrary remote helper.
     env.update(GIT_ATTR_SOURCE=EMPTY_TREE, GIT_NO_LAZY_FETCH='1',
                GIT_ALLOW_PROTOCOL='file:git:http:https:ssh')
     env.update(identity or {})
-    return _git(scratch, *args, network=network, check=check, env=env, binary=binary)
+    return _git(scratch, *args, network=bool(network), check=check, env=env, binary=binary)
 
 
 def _commit_sha(result, revision):
@@ -377,12 +392,12 @@ def _fetch_target(root, scratch):
         # Git treats a colon before the first slash as a transport or an SSH host.
         if not re.match(r'^[^/]*:', url):
             url = str(Path(root) / url)
-        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
+        ref = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
         match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
         if match is None:
             raise GitError(f'The push repository has no unique {TARGET} branch.')
         sha = match[1]
-        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True)
+        _object_git(scratch, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=root)
         _object_git(scratch, 'cat-file', '-e', sha + '^{commit}')
     except GitError:
         _target_cache.pop(root, None)
@@ -1235,7 +1250,7 @@ def _push_argv(url, made):
     return argv
 
 
-def _fast_forward_push(scratch, url, checked, made):
+def _fast_forward_push(root, scratch, url, checked, made):
     """Push the merge commit with a plain `git push`. No --force and no --force-with-lease, here or anywhere.
 
     Before the push: the merge commit must contain the checked main commit as its first parent, and the remote main
@@ -1247,11 +1262,11 @@ def _fast_forward_push(scratch, url, checked, made):
         raise GitError('The merge commit does not contain the checked main commit.')
     if _sha(scratch, made + '^1') != checked:
         raise GitError('The merge commit does not have the checked main commit as its first parent.')
-    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
+    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
     if seen != f'{checked}\t{TARGET_REF}\n':
         raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
     try:
-        _object_git(scratch, *_push_argv(url, made), network=True)
+        _object_git(scratch, *_push_argv(url, made), network=root)
     except GitError as exc:
         raise MainMoved(f'{REMOTE}/{TARGET} did not accept a plain push, so it moved or refused it. Nothing is forced: {exc}') from exc
 
@@ -1315,7 +1330,7 @@ def merge(plan, reviewer, job):
             raise NotAuthorized('Could not read the current reviewer approval.') from exc
         if not matches:
             raise NotAuthorized('The reviewer approval changed or is no longer available.')
-        _fast_forward_push(scratch, plan['url'], plan['target_sha'], made)
+        _fast_forward_push(root, scratch, plan['url'], plan['target_sha'], made)
     return made
 
 

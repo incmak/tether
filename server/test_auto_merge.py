@@ -30,6 +30,10 @@ def git_settings(env):
             for index in range(int(env['GIT_CONFIG_COUNT']))]
 
 
+def credential_lookup(root):
+    return ['git', '-C', str(root), 'config', '--includes', '--null', '--show-scope', '--get-regexp', r'^credential\.']
+
+
 def is_shadow_status(argv):
     return argv[0] == 'git' and argv[1].startswith('--git-dir=') and argv[3:4] == ['status']
 
@@ -952,8 +956,8 @@ class Modes(Base):
                                        '[core]\n\tfsmonitor = /srv/evil\n')
 
         def run(argv, **kwargs):
-            if argv[:3] == ['git', 'config', '--global']:
-                self.assertEqual(argv[-3:], ['--null', '--get-regexp', r'^credential\.'])
+            if argv[3:5] == ['config', '--includes']:
+                self.assertEqual(argv, credential_lookup(self.repo))
                 self.assertNotIn('env', kwargs)
                 helping.append(1)
             elif argv[:3] == ['git', 'config', '--file']:
@@ -1034,9 +1038,11 @@ class Modes(Base):
                         if argv[6] == 'submodule.active':
                             active_copies.append(argv[7])
                         continue
-                    if argv[:2] != ['git', '-C']:
-                        self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-regexp', r'^credential\.'])
+                    if argv[3:5] == ['config', '--includes']:
+                        self.assertEqual(argv, credential_lookup(self.repo))
+                        self.assertNotIn('env', call.kwargs)
                         continue
+                    self.assertEqual(argv[:2], ['git', '-C'])
                     directory, command = Path(argv[2]), argv[3]
                     if directory in (self.work, folder, self.repo):
                         self.assertIn(command, local_commands, argv)
@@ -1584,6 +1590,60 @@ class Modes(Base):
         self.assertFalse([call for call in run.call_args_list if call.args[0][3] == 'push'])
         self.assertEqual(self.git(self.origin, 'show', 'main:server/server.py'), 'print(7)')
         self.assertEqual(self.git(self.origin, 'log', '-1', '--format=%s', 'main'), 'Race')
+
+
+class Credentials(Base):
+    """The lookup of the user's credential settings, with real Git and a home folder of its own."""
+
+    def lookup(self, files, root=None, **environment):
+        home = self.root / 'home'
+        for name, text in files.items():
+            path = home / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(text if isinstance(text, bytes) else text.encode())
+        clean = {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+        clean.update(HOME=str(home), XDG_CONFIG_HOME=str(home / '.config'), GIT_CONFIG_NOSYSTEM='1', **environment)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            return auto_merge._credential_helpers(root or self.repo)
+
+    def test_a_carriage_return_in_a_name_cannot_turn_another_setting_into_a_credential_helper(self):
+        # In text mode the "\r" became a line break: the key ended there and the rest became the value.
+        files = {'.gitconfig': b'[credential "https://git.example.helper\r!/srv/evil"]\n\tother = 1\n'
+                               b'[other "credential.https://git.example.helper\r!/srv/evil"]\n\thelper = 1\n'
+                               b'[credential "https://two\rlines"]\n\thelper = kept\n\tusername = a\\nb\n'}
+        self.assertEqual(self.lookup(files), (('credential.https://two\rlines.helper', 'kept'),
+                                              ('credential.https://two\rlines.username', 'a\nb')))
+
+    def test_both_global_files_and_their_includes_give_the_settings_in_the_order_of_git(self):
+        files = {'.config/git/config': '[credential]\n\thelper = xdg\n',
+                 '.gitconfig': '[credential "https://git.example"]\n\thelper = home\n[include]\n\tpath = more\n',
+                 'more': '[credential]\n\tuseHttpPath = true\n[core]\n\tfsmonitor = /srv/evil\n'}
+        self.assertEqual(self.lookup(files), (('credential.helper', 'xdg'), ('credential.https://git.example.helper', 'home'),
+                                              ('credential.usehttppath', 'true')))
+
+    def test_a_conditional_include_applies_only_in_its_repository(self):
+        other = self.root / 'other'
+        self.git(self.root, 'init', '-q', str(other))
+        files = {'.gitconfig': f'[includeIf "gitdir:{self.repo}/"]\n\tpath = work\n',
+                 'work': '[credential "https://git.example"]\n\tusername = work\n'}
+        self.assertEqual(self.lookup(files), (('credential.https://git.example.username', 'work'),))
+        self.assertEqual(self.lookup(files, root=other), ())
+
+    def test_settings_of_the_repository_and_of_the_command_environment_do_not_pass(self):
+        self.git(self.repo, "config", "credential.helper", "!/srv/local")
+        files = {'.gitconfig': '[credential]\n\thelper = mine\n'}
+        found = self.lookup(files, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='credential.helper', GIT_CONFIG_VALUE_0='!/srv/command')
+        self.assertEqual(found, (('credential.helper', 'mine'),))
+
+    def test_a_name_without_a_value_is_true_for_the_path_setting_and_an_error_for_a_helper(self):
+        self.assertEqual(self.lookup({'.gitconfig': '[credential]\n\tuseHttpPath\n'}), (('credential.usehttppath', 'true'),))
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential]\n\thelper\n'})
+
+    def test_no_settings_and_a_broken_config_are_different(self):
+        self.assertEqual(self.lookup({'.gitconfig': '[user]\n\tname = x\n'}), ())
+        with self.assertRaises(auto_merge.GitError):
+            self.lookup({'.gitconfig': '[credential\n'})
 
 
 class Ladder(Base):
