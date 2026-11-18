@@ -33,8 +33,10 @@ const done = { said: 'Run it', reply: { who: 'Friday', text: 'Done.' } }
 const second = plain(m.answered(done, { who: 'Friday', text: 'Done. The tests passed.' }, true))
 assert.deepEqual(second.keep.map(line => line.text), ['Run it', 'Done.'])
 assert.deepEqual(second.hero.reply.text, 'Done. The tests passed.')
-// The same words again stay one reply, even when marked fresh: a stream can report a sentence twice.
-assert.equal(plain(m.answered(done, { who: 'Friday', text: 'Done.' }, true)).keep.length, 0)
+// A fresh reply with the same words is a second entry, not a lost one.
+assert.deepEqual(plain(m.answered(done, { who: 'Friday', text: 'Done.' }, true)).keep.map(line => line.text), ['Run it', 'Done.'])
+// The same words again inside one stream (not fresh) stay one reply.
+assert.equal(plain(m.answered(done, { who: 'Friday', text: 'Done.' })).keep.length, 0)
 // Without fresh, a longer version of the same reply still grows in place.
 assert.equal(plain(m.answered(done, { who: 'Friday', text: 'Done. The tests passed.' })).keep.length, 0)
 // Blank lines are not kept.
