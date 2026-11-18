@@ -52,6 +52,11 @@ def work():
     return TETHER / 'work'
 
 
+def reminders():
+    """Reminders (reminders.py). Codex tabs get write access to this folder (project_launch.py)."""
+    return Path(os.environ.get('TETHER_REMINDERS') or TETHER / 'reminders')
+
+
 def items():
     """Work items, by project prefix. Codex tabs get write access to this folder only (project_launch.py)."""
     return TETHER / 'items'

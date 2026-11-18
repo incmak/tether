@@ -34,10 +34,12 @@ async function notify(payload) {
   const title = payload.title || 'Tether', body = payload.body || ''
   for (const item of await self.registration.getNotifications({ tag: SUMMARY })) item.close()
   await self.registration.showNotification(title, { ...ICONS, body, tag: payload.tag, silent: payload.silent === true,
-    data: { session: payload.session, thread: payload.thread, approval: payload.approval, body: payload.body, review: payload.review, go: payload.go },
+    data: { session: payload.session, thread: payload.thread, approval: payload.approval, body: payload.body,
+      review: payload.review, go: payload.go, reminder: payload.reminder, occ: payload.occ },
     // A plain yes/no prompt gets Approve and Deny (the server picked it as safe to answer from here); others get Urgent only.
     actions: payload.approval ? [{ action: 'approve', title: 'Approve' }, { action: 'deny', title: 'Deny' }]
       : payload.review ? [{ action: 'resend', title: 'Ask again' }, { action: 'latest', title: 'Send this reply' }]
+      : payload.reminder ? [{ action: 'reminder-done', title: 'Done' }, { action: 'reminder-snooze', title: 'Snooze 1 h' }]
       : payload.session ? [{ action: 'mute', title: 'Urgent only' }, { action: 'agents', title: 'All agents' }] : [],
   })
 }
@@ -80,6 +82,27 @@ async function resumeReview(notification, action) {
     for (const shown of await self.registration.getNotifications({ tag: notification.tag })) if (shown.title === title) shown.close()
   }
 }
+// A reminder: Done, or Snooze for an hour, without opening a window. A refusal (say it was deleted) says why, and a tap
+// on that opens Reminders.
+async function reminderAction(notification, action) {
+  const { reminder, occ } = notification.data || {}
+  const done = action === 'reminder-done'
+  let error = ''
+  let changed = false
+  try {
+    const response = await fetch(`/mobile/api/reminders/${done ? 'done' : 'snooze'}`, { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Codex-Mobile': '1' },
+      body: JSON.stringify(done ? { id: reminder, occ } : { id: reminder, occ, for: 3600 }) })
+    if (!response.ok) {
+      changed = response.status === 409
+      error = (await response.json().catch(() => ({}))).error || `Error ${response.status}`
+    }
+  } catch { error = 'Could not reach the server.' }
+  if (!error) return
+  const title = changed ? 'Reminder changed' : `Reminder: not ${done ? 'done' : 'snoozed'}`
+  await self.registration.showNotification(title, { ...ICONS, body: changed ? error : `${error} Tap to open.`,
+    tag: `${notification.tag}-action`, data: { go: 'reminders' } })
+}
 self.addEventListener('notificationclick', event => {
   event.notification.close()
   const session = event.notification.data?.session
@@ -91,6 +114,10 @@ self.addEventListener('notificationclick', event => {
     event.waitUntil(answer(event.notification, event.action === 'approve'))
     return
   }
+  if ((event.action === 'reminder-done' || event.action === 'reminder-snooze') && event.notification.data?.reminder) {
+    event.waitUntil(reminderAction(event.notification, event.action))
+    return
+  }
   if (event.action === 'mute' && session) {
     // One tap from the notification: no window opens.
     event.waitUntil(fetch('/mobile/api/push/level', { method: 'POST', credentials: 'same-origin',
@@ -98,7 +125,7 @@ self.addEventListener('notificationclick', event => {
     return
   }
   const go = event.action === 'agents' ? 'agents' : event.notification.data?.go
-  event.waitUntil(['agents', 'work', 'factory', 'cleanup'].includes(go) ? openPage(go) : openPane(session))
+  event.waitUntil(['agents', 'work', 'factory', 'cleanup', 'reminders'].includes(go) ? openPage(go) : openPane(session))
 })
 // "All agents" (or an old summary) opens the Agents page; a work item question opens Needs you. In the open Tether
 // window when there is one, else in a new window.

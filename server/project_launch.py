@@ -446,14 +446,14 @@ def codex_writable(args, cwd=None, assume=None):
 
 
 def codex_folders(args=()):
-    """--add-dir for the backlog and work item folders: the sandbox blocks `tether backlog` and `tether item` writes
+    """--add-dir for the backlog, work item and reminder folders: the sandbox blocks `tether backlog`, `tether item` and reminder writes
     without them. Given even when the user has own instructions, but never to a read-only Codex: it exits on them."""
     import backlog
     import paths
     if not codex_writable(list(args)):
         return []
     out = []
-    for place in (backlog.folder(), paths.items()):
+    for place in (backlog.folder(), paths.items(), paths.reminders()):
         place.mkdir(mode=0o700, parents=True, exist_ok=True)
         out += ['--add-dir', str(place)]
     return out

@@ -29,6 +29,8 @@ import { TabSelectionBar } from './TabSelectionBar'
 import type { Place } from './Sheets'
 import { ProjectSheet, useProjectMarks } from './Project'
 import { BacklogSheet } from './Backlog'
+import { RemindersSheet } from './Reminders'
+import { groupReminders, useReminders } from './reminders'
 import { BacklogAddSheet } from './BacklogAdd'
 import { orderPanes, reorderPanes } from './PaneTabs'
 import { worktreeNotice } from './Worktree'
@@ -149,6 +151,9 @@ function App() {
   const [settings, setSettings] = useState<boolean | 'layout-maker' | 'notifications'>(false)
   // The backlog: a sheet, or a full page with views and projects. `query` opens it on a search (the command menu does this).
   const [backlog, setBacklog] = useState<null | { mode: 'sheet' | 'page'; query?: string }>(null)
+  const [remindersOpen, setRemindersOpen] = useState(false)
+  const reminderList = useReminders(api)
+  const dueReminders = useMemo(() => groupReminders(reminderList.data?.reminders ?? []).due, [reminderList.data])
   const menuBacklog = useMemo(() => ({ api, open: (query: string) => setBacklog({ mode: 'page', query }) }), [api])
   const [backlogAdd, setBacklogAdd] = useState<{ text: string; pane: Pane } | null>(null)
   // The Project sheet for a tmux session, with a file from Files to pin when it came from there.
@@ -350,6 +355,7 @@ function App() {
       else if (view === 'factory') setFactory(true)
       else if (view === 'lessons') setReviewing(true)
       else if (view === 'cleanup') setCleanup(true)
+      else if (view === 'reminders') setRemindersOpen(true)
       else return false
       return true
     })
@@ -401,6 +407,8 @@ function App() {
   const { data: lessonsReview, error: reviewError, refresh: refreshReview } = useLessonsReview(api, prefs.attention)
   const [reviewing, setReviewing] = useState(false)
   const review = lessonsReview?.due ? { label: reviewReason(lessonsReview), onOpen: () => { setDrawer(false); setReviewing(true) } } : undefined
+  // Due reminders join Waiting on you as one row, like the lessons review.
+  const reminderEntry = dueReminders.length ? { items: dueReminders, onOpen: () => { setDrawer(false); setRemindersOpen(true) } } : undefined
   const waitingCount = new Set([...groups.needs.map(item => item.pane.id), ...waiting.map(item => item.pane.id)]).size
   const stacked = !!desk.stack && slotPanes.length === 2
   // Keep the stored slots in step with what shows, so focus moves and pane picks survive a reload.
@@ -580,6 +588,7 @@ function App() {
     else if (go === 'factory') { setDrawer(false); setFactory(true) }
     else if (go === 'cleanup') { setDrawer(false); setCleanup(true) }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
+    else if (go === 'reminders') { setDrawer(false); setRemindersOpen(true) }
     // A framed Tether's notification hint opens this server's own window here (SettingsControls.tsx).
     else if (go === 'notifications') { setDrawer(false); setSettings('notifications') }
     // Like ⌥Space: inside another dialog (Settings), search does not open over it.
@@ -882,7 +891,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const commands: Command[] = view ? [
     { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
@@ -910,6 +919,7 @@ function App() {
     { label: 'Plan usage', run: () => setPlanSheet(true) },
     { label: 'Backlog', key: '⌥B', run: () => setBacklog({ mode: 'sheet' }) },
     { label: 'Backlog page', key: '⌥⇧B', run: () => setBacklog({ mode: 'page' }) },
+    { label: 'Reminders', run: () => setRemindersOpen(true) },
     { label: 'Work board', run: () => setWorkSheet('board') },
     { label: 'Agents page', run: () => setAgentsPage('list') },
     { label: 'Factory view', run: () => setFactory(true) },
@@ -981,9 +991,9 @@ function App() {
       panelTools={<PanelTools desk={desk} pane={pane} setPanels={setPanels} onSideChat={() => void sideChat()} />}
       panels={<PanelColumn api={api} desk={desk} pane={pane} setPanels={setPanels} renderChat={id => { const target = panes.find(item => item.id === id); return target ? chatFor(target) : null }} />} /> : chatFor(pane)) : null}
     {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
-    {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={prefs.attention && (waiting.length || review) ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={review} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
+    {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={(prefs.attention && (waiting.length || review)) || reminderEntry ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={prefs.attention ? review : undefined} reminder={reminderEntry} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
-    {home && <Home api={api} groups={groups} asks={waiting} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
+    {home && <Home api={api} groups={groups} asks={waiting} reminders={reminderEntry} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
     {noTerminal && <NoTerminal loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onMenu={() => setDrawer(true)} />}
     {files && <Suspense fallback={<PanelLoading label="Files" />}><Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} /></Suspense>}
     {share && <Suspense fallback={<PanelLoading label="Share" cover={!wide} />}><Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {
@@ -1021,6 +1031,8 @@ function App() {
     {project && sessions.some(item => item.id === project.session && (!project.group || item.groups?.some(group => group.id === project.group))) && <ProjectSheet key={`${project.session}/${project.group ?? ''}`} api={api} session={sessions.find(item => item.id === project.session)!} group={project.group ? sessions.find(item => item.id === project.session)!.groups?.find(item => item.id === project.group) : undefined} mark={marks[project.session]} pin={project.pin} onChanged={loadMarks} onClose={() => setProject(null)} />}
     {backlog && <BacklogSheet key={backlog.query ?? ''} api={api} panes={panes} onOpenPane={openPane} page={backlog.mode === 'page'} query={backlog.query}
       onResize={() => setBacklog({ ...backlog, mode: backlog.mode === 'page' ? 'sheet' : 'page' })} onClose={() => setBacklog(null)} />}
+    {remindersOpen && <RemindersSheet api={api} polled={reminderList} panes={panes} current={panes.find(item => item.id === openId)} onOpenPane={openPane}
+      onOpenItem={query => setBacklog({ mode: 'page', query })} onClose={() => setRemindersOpen(false)} />}
     {backlogAdd && <BacklogAddSheet key={backlogAdd.text} api={api} text={backlogAdd.text} pane={backlogAdd.pane} onClose={() => setBacklogAdd(null)} onAdded={setNotice} />}
     {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === true ? undefined : settings || undefined} />}
     {!settings && <TrialBar onRevert={revertLook} />}

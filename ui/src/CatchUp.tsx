@@ -5,7 +5,8 @@ import { Check, CheckCheck, ChevronRight, GalleryVerticalEnd, ListChecks } from 
 import type { Pane } from './api'
 import type { Prefs } from './prefs'
 import { SortButton } from './Attention'
-import type { ReviewEntry } from './Attention'
+import { ReminderRows } from './Attention'
+import type { DueReminders, ReviewEntry } from './Attention'
 import { LATE, waitingAsks } from './attention'
 import { age } from './needs'
 import { SkeletonRows } from './Skeleton'
@@ -26,11 +27,12 @@ interface Props {
   error: string
   now: number
   review?: ReviewEntry
+  reminder?: DueReminders
   onOpen: (pane: Pane) => void
   onDeck?: () => void
 }
 
-export function CatchUp({ sessions, prefs, update, selected, loaded, error, now, review, onOpen, onDeck }: Props) {
+export function CatchUp({ sessions, prefs, update, selected, loaded, error, now, review, reminder, onOpen, onDeck }: Props) {
   const ids = { needs: useId(), finished: useId(), working: useId() }
   const [allFinished, setAllFinished] = useState(false)
   const [showWorking, setShowWorking] = useState(false)
@@ -58,14 +60,15 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
   const folded = finished.filter((pane, at) => at < FINISHED_SHOWN || pane.id === selected), hidden = finished.length - folded.length
   const shownFinished = allFinished ? finished : folded
   return <div className="catchup">
-    {waiting > 0 || review ? <section className="catchup-part" aria-labelledby={ids.needs}>
-      <h2 className="catchup-head" id={ids.needs}><span className="catchup-mark need" aria-hidden="true" />Needs you<span className="catchup-count">· {waiting}</span>
+    {waiting > 0 || review || reminder ? <section className="catchup-part" aria-labelledby={ids.needs}>
+      <h2 className="catchup-head" id={ids.needs}><span className="catchup-mark need" aria-hidden="true" />Needs you<span className="catchup-count">· {waiting + (reminder?.items.length ?? 0)}</span>
         {waiting > 1 && <SortButton order={prefs.waitingOrder ?? 'oldest'} onOrder={waitingOrder => update(() => ({ waitingOrder }))} />}
         {onDeck && asks > 0 && <button type="button" className="icon-button waiting-sort" aria-label="Answer one by one" title="Answer one by one" onClick={onDeck}><GalleryVerticalEnd size={15} aria-hidden="true" /></button>}
       </h2>
       {shownGoals.map(goal => <GoalBlock key={goal.key} goal={goal} now={now} selected={selected} nameOf={nameOf} onOpen={onOpen} />)}
       {review && <button type="button" className="catchup-row catchup-review" aria-label={`Review lessons: ${review.label}`} title={review.label} onClick={review.onOpen}>
         <ListChecks size={14} className="catchup-icon" aria-hidden="true" /><span className="catchup-name">Review lessons</span></button>}
+      {reminder && <ReminderRows due={reminder} now={now} className="catchup-row catchup-review" list />}
     </section> : null}
     {finished.length > 0 && <section className="catchup-part" aria-labelledby={ids.finished}>
       <h2 className="catchup-head" id={ids.finished}><span className="catchup-mark done" aria-hidden="true" />Finished since you looked<span className="catchup-count">· {finished.length}</span>
@@ -79,7 +82,7 @@ export function CatchUp({ sessions, prefs, update, selected, loaded, error, now,
       </button></li>)}</ul>
       {hidden > 0 && <button type="button" className="catchup-more" aria-expanded={allFinished} onClick={() => setAllFinished(!allFinished)}>{allFinished ? 'Show fewer' : `+${hidden} more`}</button>}
     </section>}
-    {!waiting && !review && !finished.length && <p className="catchup-empty"><Check size={16} aria-hidden="true" />You are caught up.</p>}
+    {!waiting && !review && !reminder && !finished.length && <p className="catchup-empty"><Check size={16} aria-hidden="true" />You are caught up.</p>}
     {working.length > 0 && <section className="catchup-part">
       <button type="button" className="catchup-toggle" aria-expanded={showWorking} aria-controls={ids.working} onClick={() => setShowWorking(!showWorking)}>
         <span className="catchup-mark working" aria-hidden="true" />{showWorking ? 'Hide' : 'Show'} {working.length} working<ChevronRight size={14} className="chevron" aria-hidden="true" />

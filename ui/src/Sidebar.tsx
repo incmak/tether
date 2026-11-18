@@ -1,4 +1,5 @@
 import { BacklogButton } from './Backlog'
+import { RemindersButton } from './Reminders'
 import { WorkButton, WorkMark } from './WorkBoard'
 import type { WorkLinks } from './WorkBoard'
 import { Bone, SkeletonRows, Spinner } from './Skeleton'
@@ -36,7 +37,7 @@ import { OrganizeMenu, tagDot } from './Organize'
 import { useWords } from './words'
 import { CatchUp } from './CatchUp'
 import { isQuiet, waitCount } from './catchUp'
-import type { ReviewEntry } from './Attention'
+import type { DueReminders, ReviewEntry } from './Attention'
 import { useNow } from './attention'
 import { HOLD_MS } from './gesture'
 import { field, matchSessions, searchWords } from './search'
@@ -249,6 +250,9 @@ type Moved = { session: string; name: string; pane: string }
 interface Props {
   onDeck?: () => void
   review?: ReviewEntry
+  /** Due reminders: a row in Needs you, and the count on the Reminders button. */
+  reminder?: DueReminders
+  reminders?: { due: number; onOpen: () => void }
   api: Api
   sessions: Session[]
   selected: string | undefined
@@ -304,7 +308,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
+export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -552,6 +556,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
       ? <button type="button" className="search-key" aria-label="Command menu" aria-keyshortcuts="Control+K Meta+K" title="Go to a pane or run a command" onClick={onCommandMenu}>{shortcutLabel}</button>
       : <kbd className="search-key" aria-hidden="true">{shortcutLabel}</kbd>}</label><button type="button" className="icon-button organize-button" aria-label="Organize sessions" title="Group and sort" aria-haspopup="dialog" onClick={event => setOrganizing({ at: matchMedia('(hover: hover)').matches ? anchorOf(event) : undefined })}><SlidersHorizontal size={17} /></button></div>
     <BacklogButton api={api} onOpen={onBacklog} />
+    {reminders && <RemindersButton due={reminders.due} onOpen={reminders.onOpen} />}
     {work && <WorkButton links={work} />}
     {!search && <div className="side-modes">
       <div className="side-mode-switch" role="group" aria-label="Sidebar view">
@@ -566,7 +571,7 @@ export function Sidebar({ onDeck, review, api, sessions, selected, prefs, update
       {error && <div className="sidebar-error" role="alert"><span>{loaded ? 'Could not refresh sessions.' : 'Could not load sessions.'} {error}</span><RetryButton onRetry={onRetry} /></div>}
       {openingChat && <div className="past-opening" role="status">Opening {openingChat}…</div>}
       {mergeError && <div className="sidebar-error" role="alert">{mergeError}<button onClick={() => setMergeError('')}>Dismiss</button></div>}
-      {catchUp ? <CatchUp sessions={sessions} prefs={prefs} update={update} selected={selected} loaded={loaded} error={error} now={now} review={review} onOpen={onOpen} onDeck={onDeck} /> : <>
+      {catchUp ? <CatchUp sessions={sessions} prefs={prefs} update={update} selected={selected} loaded={loaded} error={error} now={now} review={review} reminder={reminder} onOpen={onOpen} onDeck={onDeck} /> : <>
       {groups.map(group => { const waits = group.key === 'archived' ? 0 : waitCount(group.items.flatMap(session => session.panes), now, prefs.attention)
         const quiet = foldQuiet(group.key) ? group.items.filter(quietSession) : [], showQuiet = quietOpen.includes(group.key)
         const items = showQuiet || !quiet.length ? group.items : group.items.filter(session => !quiet.includes(session))

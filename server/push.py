@@ -83,10 +83,19 @@ def valid_subscription(value):
     return parts.scheme == 'https' and any(host == service or host.endswith('.' + service) for service in PUSH_SERVICES)
 
 
-def load(store=STORE):
+def load_strict(store=STORE):
     try:
         data = json.loads(store.read_text())
-        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError('Push subscriptions must be a JSON object.')
+    return data
+
+
+def load(store=STORE):
+    try:
+        return load_strict(store)
     except (OSError, ValueError):
         return {}
 
@@ -207,23 +216,60 @@ def allows(level, priority):
                         'urgent': ('urgent',), 'off': ()}.get(level, ())
 
 
-def send_all(payload, urgent=False, store=STORE, sender=None):
-    """Deliver one notification to every subscribed browser; forget subscriptions the push service has dropped."""
+# HTTP client errors that prove the request never reached the push service. Only these retry.
+NOT_SENT = frozenset({'ConnectTimeout', 'NewConnectionError', 'NameResolutionError', 'ConnectionRefusedError',
+                      'SSLError', 'ProxyError', 'gaierror', 'InvalidURL', 'InvalidSchema', 'MissingSchema'})
+
+
+def _chain(exc, seen=None):
+    """The error, its causes, and the errors it wraps (urllib3 keeps them in .reason and args)."""
+    seen = set() if seen is None else seen
+    if not isinstance(exc, BaseException) or id(exc) in seen:
+        return
+    seen.add(id(exc))
+    yield exc
+    for inner in (exc.__cause__, exc.__context__, getattr(exc, 'reason', None), *getattr(exc, 'args', ())):
+        yield from _chain(inner, seen)
+
+
+def maybe_delivered(exc):
+    """True when an HTTP client error came after the request may have reached the push service: a lost answer
+    (read timeout, peer closed the connection, broken response). The service may have accepted it, so a retry could
+    show the notification twice. Errors that prove nothing was sent, and errors outside the HTTP client, return False."""
+    kinds = {kind.__name__ for error in _chain(exc) for kind in type(error).__mro__}
+    return 'RequestException' in kinds and not kinds & NOT_SENT
+
+
+def send_all(payload, urgent=False, store=STORE, sender=None, *, endpoints=None, on_delivered=None, before_each=None):
+    """Return the count and report each acceptance. Stop if before_each refuses the next endpoint."""
     sender = sender or webpush
     if sender is None:
         return 0
     pem, _ = vapid_keys()
     delivered = 0
     for endpoint, record in list(load(store).items()):
+        if endpoints is not None and endpoint not in endpoints:
+            continue
+        if before_each is not None and not before_each(endpoint):
+            break
         try:
             sender(subscription_info=record['subscription'], data=json.dumps(payload), vapid_private_key=Vapid02.from_pem(pem.encode()),
                    vapid_claims={'sub': SUBJECT}, ttl=3600, headers={'Urgency': 'high' if urgent else 'normal'}, timeout=10)
-            delivered += 1
         except WebPushException as exc:
             if getattr(exc.response, 'status_code', None) in (404, 410):
                 unsubscribe(endpoint, store)
-        except (OSError, ValueError):
-            continue
+        except (OSError, ValueError) as exc:
+            if not maybe_delivered(exc):
+                continue
+            print(f'Web Push answer lost for one browser ({type(exc).__name__}); counted as delivered to avoid a duplicate',
+                  file=sys.stderr)
+            delivered += 1
+            if on_delivered is not None:
+                on_delivered(endpoint)
+        else:
+            delivered += 1
+            if on_delivered is not None:
+                on_delivered(endpoint)
     return delivered
 
 

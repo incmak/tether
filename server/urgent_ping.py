@@ -5,6 +5,7 @@ an optional base_url. Run `python3 urgent_ping.py test` to check delivery.
 """
 from collections import deque
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,6 +20,7 @@ _LOCK = threading.Lock()
 _PANES = {}
 _SENT = deque()
 _ALERTS = deque()  # Security alerts have their own limit, so routine pings cannot use it up.
+_REMINDERS = deque()  # Reminders too: a busy hour of urgent asks must not drop a reminder.
 
 
 def _name(pane):
@@ -67,9 +69,9 @@ def _argv(ask, security=False):
             or any(not isinstance(arg, str) or '\0' in arg for arg in command) or not command[0]):
         return None
     pane = str(ask.get('pane') or '')
-    values = {'{title}': 'Tether: ' + str(ask.get('name') or _name(pane) or pane),
+    values = {'{title}': 'Tether: ' + str(ask.get('name') or _name(pane) or pane),  # a reminder sets name and path
               '{question}': str(ask.get('next') or ''), '{pane}': pane,
-              '{url}': _url(base_url, pane)}
+              '{url}': base_url.rstrip('/') + ask['path'] if ask.get('path') and base_url else _url(base_url, pane)}
     argv = []
     for arg in command:
         for placeholder, value in values.items():
@@ -130,6 +132,44 @@ def alert(text, *, clock=time.monotonic, runner=subprocess.run):
         threading.Thread(target=_run, args=(argv, runner), daemon=True).start()
         _ALERTS.append(now)
     return True
+
+
+def remind(reminder, *, clock=time.monotonic, runner=subprocess.run):
+    """Run a reminder ping in the caller's thread with its own limit (20 an hour) and a link to Reminders."""
+    title = 'Reminder (late)' if reminder.get('late') else 'Reminder'
+    argv = _argv({'pane': '', 'name': title, 'next': reminder.get('text') or '', 'path': '/chat/?go=reminders'})
+    if argv is None:
+        return True
+    with _LOCK:
+        now = clock()
+        while _REMINDERS and _REMINDERS[0][0] <= now - 3600:
+            _REMINDERS.popleft()
+        if len(_REMINDERS) >= 20:
+            print('Reminder ping rate limit: will try again', file=sys.stderr)
+            return False
+        # Reserve a slot while the command runs without holding the lock used by send() and alert().
+        slot = (now, object())
+        _REMINDERS.append(slot)
+
+    ran = False
+
+    try:
+        env = dict(os.environ, TETHER_PING_KEY=f"{reminder['id']}:{reminder['occ']}")
+        result = runner(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env=env)
+        ran = True
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        ran = True
+        print('Reminder ping timed out; not retried to avoid a duplicate', file=sys.stderr)
+        return True
+    except Exception as exc:
+        print(f'Reminder ping failed: {exc}', file=sys.stderr)
+        return False
+    finally:
+        if not ran:
+            with _LOCK:
+                if slot in _REMINDERS:
+                    _REMINDERS.remove(slot)
 
 
 def run_test():

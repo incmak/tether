@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { RetryButton } from './Retry'
 import { groupOf, placeName } from './groups'
-import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
-import { Check, ClipboardList, Hand, Menu, MessageCircle, Plus, Terminal } from 'lucide-react'
+import type { FocusEvent as ReactFocusEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, Ref } from 'react'
+import { BellRing, Check, ClipboardList, Hand, Menu, MessageCircle, Plus, Terminal } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { AnswerActions } from './answers'
 import { useAnswers } from './useAnswers'
@@ -15,6 +15,10 @@ import { LATE, useNow } from './attention'
 import { OldestButton, SortButton, ordered } from './Attention'
 import type { WaitSort } from './Attention'
 import type { Waiting } from './attention'
+import type { DueReminders } from './Attention'
+import { act, fullLabel, whenLabel } from './reminders'
+import type { Reminder } from './reminders'
+import { errorText } from './api'
 import { age } from './needs'
 import type { Session } from './Sidebar'
 import { AgentIcon, agentNames, chatTitle, sessionName, shownIndex } from './Sidebar'
@@ -34,7 +38,7 @@ const GROUPS: { key: GroupKey; label: string; dot: string; empty: string }[] = [
   { key: 'done', label: 'Done', dot: 'done', empty: 'You saw every finished turn.' },
 ]
 
-const headline = (count: number, asks: number) => count ? `${count} agent${count === 1 ? ' needs' : 's need'} you` : asks ? `${asks} tab${asks === 1 ? ' waits' : 's wait'} on you` : 'Nothing needs you'
+const headline = (count: number, asks: number, due: number) => count ? `${count} agent${count === 1 ? ' needs' : 's need'} you` : asks ? `${asks} tab${asks === 1 ? ' waits' : 's wait'} on you` : due ? `${due} reminder${due === 1 ? '' : 's'} due` : 'Nothing needs you'
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 const groupId = (key: GroupKey) => `home-group-${key}`
 const focusRow = (id: string) => document.querySelector<HTMLButtonElement>(`.home [data-pane="${CSS.escape(id)}"] .home-open`)?.focus()
@@ -109,13 +113,14 @@ export function Card({ api, card, group, waiting, error, onOpen, onAnswer, onFai
 }
 
 /** Attention mode: the tabs whose last reply asks you something, oldest first. Each card opens the tab. */
-function AsksGroup({ items, sessions, sort, onOpen }: { items: Waiting[]; sessions: Session[]; sort?: WaitSort; onOpen: (pane: Pane) => void }) {
+function AsksGroup({ api, items, reminders, sessions, sort, onOpen }: { api: Api; items: Waiting[]; reminders?: DueReminders; sessions: Session[]; sort?: WaitSort; onOpen: (pane: Pane) => void }) {
   const now = useNow()
+  const due = reminders?.items ?? []
   return <section id="home-group-asks" className="home-group asks" aria-labelledby="home-group-asks-title">
     <div className="home-group-head">
       <h2 id="home-group-asks-title"><Hand size={14} aria-hidden="true" />Waiting on you</h2>
-      <span className="home-count">{items.length}</span>
-      {sort && <SortButton {...sort} className="home-sort" />}
+      <span className="home-count">{items.length + due.length}</span>
+      {sort && items.length > 1 && <SortButton {...sort} className="home-sort" />}
     </div>
     <ul>{ordered(items, sort?.order).map(({ pane, ask }) => {
       const session = sessions.find(item => item.id === pane.tmux_session)
@@ -134,14 +139,42 @@ function AsksGroup({ items, sessions, sort, onOpen }: { items: Waiting[]; sessio
           <span className="home-meta">{seen}</span>
         </button>
       </li>
-    })}</ul>
+    })}
+    {reminders && due.map(item => <ReminderCard key={`${item.id}:${item.occ ?? 0}`} api={api} item={item} now={now} onOpen={reminders.onOpen} />)}</ul>
   </section>
 }
 
-function Blank({ title, text, children, onMenu }: { title: string; text: string; children?: ReactNode; onMenu: () => void }) {
-  return <section className="home home-blank">
+/** A due reminder on Home: the text opens the Reminders sheet; Done and Snooze 1 h act here. */
+function ReminderCard({ api, item, now, onOpen }: { api: Api; item: Reminder; now: number; onOpen: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const when = `${item.late ? 'Late, was due' : 'Due'} ${whenLabel(item.due, now)}`
+  const run = async (action: 'done' | 'snooze', body: Record<string, unknown>) => {
+    setBusy(true); setError('')
+    try { await act(api, action, { id: item.id, occ: item.occ, ...body }) } catch (failure) { setError(errorText(failure)); setBusy(false) }
+  }
+  return <li className="home-card asks home-reminder">
+    <button type="button" className="home-open" onClick={onOpen} aria-label={`Reminder: ${item.text}. ${when}. Open Reminders`}>
+      <span className="home-card-top">
+        <span className="home-icon"><BellRing size={14} aria-hidden="true" /></span>
+        <span className="home-source">Reminder</span>
+        <time className={item.late ? 'home-time late' : 'home-time'} dateTime={new Date(item.due * 1000).toISOString()} title={fullLabel(item.due)}>{whenLabel(item.due, now)}</time>
+      </span>
+      <span className="home-status" title={item.text}>{item.text}</span>
+    </button>
+    <div className="inbox-actions" role="group" aria-label={`Reminder: ${item.text}`}>
+      <button type="button" className="inbox-yes" disabled={busy} onClick={() => void run('done', {})}>Done</button>
+      <button type="button" disabled={busy} onClick={() => void run('snooze', { for: 3600 })}>Snooze 1 h</button>
+    </div>
+    {error && <p className="inbox-error" role="alert">{error}</p>}
+  </li>
+}
+
+function Blank({ title, text, children, onMenu, rootRef }: { title: string; text: string; children?: ReactNode; onMenu: () => void; rootRef?: Ref<HTMLElement> }) {
+  // h1 takes focus when the last card leaves under it (Home's focus recovery reaches it through rootRef).
+  return <section className="home home-blank" ref={rootRef}>
     <button type="button" className="icon-button mobile-menu" aria-label="Open sessions" onClick={onMenu}><Menu /></button>
-    <div><Terminal size={32} strokeWidth={1.4} /><h1>{title}</h1>{text && <p>{text}</p>}{children}</div>
+    <div><Terminal size={32} strokeWidth={1.4} /><h1 tabIndex={-1}>{title}</h1>{text && <p>{text}</p>}{children}</div>
   </section>
 }
 
@@ -155,8 +188,8 @@ export function NoTerminal({ loaded, loading, error, onRetry, onMenu }: { loaded
   </Blank>
 }
 
-export function Home({ api, groups: all, asks = [], sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
-  api: Api; groups: HomeGroups; asks?: Waiting[]; sessions?: Session[]; sort?: WaitSort; decisions?: ReactNode; decisionCount?: number; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
+export function Home({ api, groups: all, asks = [], reminders, sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
+  api: Api; groups: HomeGroups; asks?: Waiting[]; reminders?: DueReminders; sessions?: Session[]; sort?: WaitSort; decisions?: ReactNode; decisionCount?: number; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
   onRetry: () => unknown; onOpen: (pane: Pane) => void; onMarkRead: (panes: string[]) => void; onUpdate: () => void; onNew: () => void; onMenu: () => void; onBacklog?: () => void
 }) {
   const root = useRef<HTMLElement>(null)
@@ -172,7 +205,7 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, decisio
   useEffect(() => {
     const tick = () => {
       const now = Date.now() / 1000
-      root.current?.querySelectorAll<HTMLElement>('.home-time').forEach(item => {
+      root.current?.querySelectorAll<HTMLElement>('.home-time[data-at]').forEach(item => {
         const text = cardTime({ kind: item.dataset.kind ?? '', at: Number(item.dataset.at) }, now)
         if (item.textContent !== text) item.textContent = text
       })
@@ -190,7 +223,9 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, decisio
 
   // A card can leave under the focus: read, answered or closed. Focus then moves to the card now in that place.
   const focused = useRef<{ element: HTMLElement; at: number } | null>(null)
-  const cardKeys = cards.map(card => `${card.pane.id}:${card.kind}`).join(',')
+  // Every card that can leave counts: agent cards, asks, and due reminders (Done or Snooze removes one).
+  const cardKeys = [...cards.map(card => `${card.pane.id}:${card.kind}`), ...asks.map(item => `ask:${item.pane.id}`),
+    ...(reminders?.items ?? []).map(item => `reminder:${item.id}:${item.occ ?? 0}`)].join(',')
   useLayoutEffect(() => {
     const last = focused.current
     if (!last || last.element.isConnected || (document.activeElement && document.activeElement !== document.body)) return
@@ -219,20 +254,20 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, decisio
   // The first paint, before any list has come back, and a server that never answered.
   if (!loaded && !loading) return <Blank title="Could not load sessions" text={error || 'The session list did not load.'} onMenu={onMenu}><span className="home-blank-action"><RetryButton onRetry={onRetry} className="secondary" /></span></Blank>
   // With no agent and no open question, the blank page still shows the last answer's result (sent or not).
-  if (loaded && !hasAgents && !decisionCount) return <Blank title="Space for your next task." text="No agent is running. Open a session, or start something new." onMenu={onMenu}><button type="button" className="primary home-blank-action" onClick={onNew}><Plus size={18} />New session</button>{decisions}</Blank>
+  if (loaded && !hasAgents && !decisionCount && !reminders) return <Blank rootRef={root} title="Space for your next task." text="No agent is running. Open a session, or start something new." onMenu={onMenu}><button type="button" className="primary home-blank-action" onClick={onNew}><Plus size={18} />New session</button>{decisions}</Blank>
 
   return <section className="home" ref={root} aria-label="Home" onFocus={onFocus}>
     <div className="home-inner">
       <header className="home-head">
         <button type="button" className="icon-button mobile-menu" aria-label="Open sessions" onClick={onMenu}><Menu /></button>
-        <h1 tabIndex={-1} aria-live="polite">{loaded ? headline(groups.needs.length, asks.length) : <><Bone w="9.5em" className="home-head-bone" /><span className="visually-hidden">Finding your agents…</span></>}</h1>
+        <h1 tabIndex={-1} aria-live="polite">{loaded ? headline(groups.needs.length, asks.length, reminders?.items.length ?? 0) : <><Bone w="9.5em" className="home-head-bone" /><span className="visually-hidden">Finding your agents…</span></>}</h1>
         {loaded && asks.length > 0 && <OldestButton items={asks} sessions={sessions} onOpen={onOpen} />}
         <button type="button" className="secondary home-new" onClick={onNew} aria-label="New session" title="New session"><Plus size={16} /><span>New session</span></button>
         {loaded && cards.length > 0 && <p className="home-scope">{plural(cards.length, 'active agent')} across {plural(sessionCount, 'session')}</p>}
         {!loaded && <div className="home-summary home-summary-bone" aria-hidden="true">{GROUPS.map(group => <span key={group.key}><Bone w={group.key === 'needs' ? 74 : 62} /></span>)}</div>}
         {loaded && <div className="home-summary" role="group" aria-label="Jump to a group">
           {decisionCount > 0 && <button type="button" onClick={() => document.getElementById('home-group-decisions')?.scrollIntoView({ block: 'start' })}><ClipboardList size={13} aria-hidden="true" className="home-decisions-mark" /><b>{decisionCount}</b> Decisions</button>}
-          {asks.length > 0 && <button type="button" onClick={() => document.getElementById('home-group-asks')?.scrollIntoView({ block: 'start' })}><Hand size={13} aria-hidden="true" className="home-asks-mark" /><b>{asks.length}</b> Waiting on you</button>}
+          {(asks.length > 0 || reminders) && <button type="button" onClick={() => document.getElementById('home-group-asks')?.scrollIntoView({ block: 'start' })}><Hand size={13} aria-hidden="true" className="home-asks-mark" /><b>{asks.length + (reminders?.items.length ?? 0)}</b> Waiting on you</button>}
           {GROUPS.map(group => <button key={group.key} type="button" onClick={() => document.getElementById(groupId(group.key))?.scrollIntoView({ block: 'start' })}>
             <span className={`state-dot ${group.dot}`} aria-hidden="true" /><b>{groups[group.key].length}</b> {group.label}
           </button>)}
@@ -242,7 +277,7 @@ export function Home({ api, groups: all, asks = [], sessions = [], sort, decisio
       {error && loaded && <p className="home-stale" role="alert"><span>Could not refresh this list. {error}</span><RetryButton onRetry={onRetry} className="ghost sm" /></p>}
       <div className={`home-board${loaded ? '' : ' loading skeleton'}`} aria-busy={!loaded}>
         {loaded && decisions}
-        {loaded && asks.length > 0 && <AsksGroup items={asks} sessions={sessions} sort={sort} onOpen={onOpen} />}
+        {loaded && (asks.length > 0 || reminders) && <AsksGroup api={api} items={asks} reminders={reminders} sessions={sessions} sort={sort} onOpen={onOpen} />}
         {GROUPS.map(group => {
           const items = groups[group.key]
           return <section key={group.key} id={groupId(group.key)} className={`home-group ${group.key}`} aria-labelledby={`${groupId(group.key)}-title`}>

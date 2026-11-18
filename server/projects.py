@@ -411,7 +411,8 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '
                  '`--project NAME` files elsewhere. `list`: the inbox and this project\'s open items. `show B12`: its details.\n'
                  '- Add an item, without asking, for real work outside your task over about 5 minutes. No style nits or steps of your task.\n'
-                 '- Work on an item only when the user asks. Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n')
+                 '- Work on an item only when the user asks. Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n'
+                 '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (IST), `list`, `done R3`.\n')
     parts.append(f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
                  '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
     listing, excerpts, waiting = [], [], []

@@ -67,6 +67,7 @@ import voice_log
 import friday_proxy
 import live_mode
 import attention
+import reminders
 import suggest_groups
 import suggest_names
 import thread_started
@@ -210,6 +211,20 @@ def notify(payload, urgent):
     threading.Thread(target=push.send_all, args=(payload, urgent), daemon=True).start()
 
 
+def deliver_reminder_push(reminder):
+    """Send Web Push to the occurrence's audience with the urgent delivery setting."""
+    mode = push.delivery_settings().get('urgent', 'sound')
+    if mode == 'off':
+        return True
+
+    def send(endpoints, accepted, before_each):
+        push.send_all(reminders.payload(reminder, silent=mode == 'silent'), True, store=push.STORE,
+                      endpoints=endpoints, on_delivered=accepted, before_each=before_each)
+
+    return reminders.deliver_push(reminder, lambda: push.load_strict(push.STORE), send)
+
+
+REMINDERS = reminders.Ticker({'push': deliver_reminder_push, 'ping': urgent_ping.remind})
 HELPER_CLOSER = helper_close.Closer()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings, context=lambda entry: notification_context(entry))
 WORK_WATCHER = work_api.Watcher(notify, delivery=push.delivery_settings)
@@ -2264,6 +2279,8 @@ class Handler(BaseHTTPRequestHandler):
                 live_mode.get(self, lambda: session_rows(sessions()))
             elif attention.handles(path):
                 attention.get(self)
+            elif reminders.handles(path):
+                reminders.get(self)
             elif path == '/mobile/api/stream':
                 query = parse_qs(urlsplit(self.path).query)
                 self.stream_chat(query.get('session', [None])[0], query.get('mode') == ['shell'], window_limit(query), preview=query.get('preview') == ['1'], have=query.get('have', [''])[0][:64],
@@ -2357,7 +2374,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2540,6 +2557,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if attention.handles(self.path):
                 attention.serve(self, body, choose)
+                return
+            if reminders.handles(self.path):
+                reminders.serve(self, body)
                 return
             if self.path == '/mobile/api/message' and (not isinstance(message, str) or not message.strip()):
                 self.respond(400, {'error': 'Enter a message first.'})
@@ -3376,12 +3396,14 @@ if __name__ == '__main__':
     host = os.environ.get('MOBILE_TMUX_HOST', '127.0.0.1')
     port = int(os.environ.get('MOBILE_TMUX_PORT', '7683'))
     auth.check_startup(host)
+    http = ThreadingHTTPServer((host, port), Handler)
     browser_cdp.start(notify, agent_finder=lambda pane: next(
         (entry['agent'] for entry in sessions() if entry['id'] == pane), 'agent'), identity_finder=pane_identity)
     if auth.MODE == 'token':
         print('Mobile Tmux listening on http://%s:%d/mobile/ -- sign in with the token in %s' % (host, port, auth.TOKEN_FILE), flush=True)
         auth.token()
     threading.Thread(target=monitor_notices, daemon=True).start()
+    REMINDERS.start()  # its own thread: a failing session scan never delays a reminder
     threading.Thread(target=tmux_names.watch, daemon=True).start()  # tmux renames flow back into pane names
     threading.Thread(target=auto_resume.watch, kwargs={
         'entries': lambda: (forget_sessions(), sessions())[1],
@@ -3398,4 +3420,4 @@ if __name__ == '__main__':
     start_office_origin(host)
     start_browser_live_origin(host)
     start_dev_previews(host, port)
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    http.serve_forever()
