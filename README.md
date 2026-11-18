@@ -255,9 +255,10 @@ A branch passes the checks when all of this holds:
 
 If one check fails, or Tether cannot tell, the branch waits for you.
 
-In Enforce, Tether will make one merge commit and push it to `refs/heads/main` with a lease-guarded fast-forward.
-The merge commit's first parent must be the checked `main` commit. The push will succeed only if the remote
-`main` still points to that commit. Working trees and local refs will stay untouched. Use `git revert -m 1 <merge>`
+In Enforce, Tether will make one merge commit and push it to `refs/heads/main` with a plain `git push`. It never
+uses `--force` or `--force-with-lease`. The merge commit's first parent must be the checked `main` commit, and Tether
+looks at the remote `main` once more right before the push. If `main` moved, nothing is pushed, nothing is retried,
+and the branch waits for a new approval or for you. Working trees and local refs will stay untouched. Use `git revert -m 1 <merge>`
 to undo a merge. Deployment remains a separate action.
 
 You will use your passkey in Settings to turn on Enforce. A server restart will pause Enforce and return Tether to

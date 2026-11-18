@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import subprocess
@@ -1257,13 +1258,15 @@ class Modes(Base):
         self.assertEqual(self.origin_main(), before)
         self.assertEqual(alerts[0][0], 'Auto-merge failed')
         self.assertTrue(pushes)
+        self.assertEqual(len(pushes), 1)  # one plain attempt, no retry
         for args in pushes:
-            flags = [item for item in args if item.startswith('-')]
-            self.assertEqual(len(flags), 1, args)
-            self.assertRegex(flags[0], r'^--force-with-lease=main:[0-9a-f]{40}$')
-            self.assertFalse(any(item.startswith('+') for item in args), args)
+            self.assertFalse([item for item in args if item.startswith(('-', '+'))], args)
+        self.assertIn('Nothing is forced', decision['error'])
 
-    def test_lease_refuses_a_changed_behind_or_deleted_main(self):
+    def pushes_of(self, run):
+        return [call.args[0] for call in run.call_args_list if call.args[0][0] == 'git' and call.args[0][3] == 'push']
+
+    def test_a_main_that_moved_before_the_push_is_refused_without_a_push(self):
         self.enforce()
         behind = self.origin_main()
         head = self.change()
@@ -1272,7 +1275,6 @@ class Modes(Base):
         self.git(self.origin, 'update-ref', 'refs/heads/main', checked)
         newer = self.git(self.origin, 'commit-tree', tree, '-p', checked, '-m', 'Newer main')
         unrelated = self.git(self.origin, 'commit-tree', tree, '-m', 'Unrelated main')
-        scratch = auto_merge._scratch(self.repo)
         for remote in (unrelated, newer, behind, None):
             with self.subTest(remote=remote):
                 decision, plan = auto_merge.evaluate(self.work, head)
@@ -1283,17 +1285,72 @@ class Modes(Base):
                 else:
                     self.git(self.origin, 'update-ref', 'refs/heads/main', remote)
                 with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run, \
-                        self.assertRaisesRegex(auto_merge.GitError, 'lease-guarded fast-forward failed'):
+                        self.assertRaisesRegex(auto_merge.MainMoved, 'moved after the checks'):
                     auto_merge.merge(plan, 'codex', self.job(head))
-                pushes = [call.args[0] for call in run.call_args_list if call.args[0][3] == 'push']
-                self.assertEqual(len(pushes), 1)
-                self.assertEqual(pushes[0][:6], ['git', '-C', str(scratch), 'push',
-                                                 f'--force-with-lease=main:{checked}', str(self.origin)])
+                self.assertEqual(self.pushes_of(run), [])
                 self.assertEqual(self.git(self.origin, 'for-each-ref', '--format=%(objectname)', 'refs/heads/main'),
                                  remote or '')
                 self.git(self.origin, 'update-ref', 'refs/heads/main', checked)
 
-    def test_lease_never_calls_push_for_an_unchecked_first_parent(self):
+    def test_a_main_that_moves_during_the_push_gets_a_rejected_plain_push_and_no_force(self):
+        self.enforce()
+        real = subprocess.run
+        for kind in ('newer', 'unrelated'):
+            with self.subTest(kind=kind):
+                self.git(self.work, 'fetch', '-q', 'origin')
+                self.git(self.work, 'reset', '-q', '--hard', 'origin/main')
+                head = self.change(text=f'export const app = "{kind}"\n')
+                checked = self.origin_main()
+                tree = self.git(self.origin, 'rev-parse', 'main^{tree}')
+                parents = ['-p', checked] if kind == 'newer' else []
+                moved = self.git(self.origin, 'commit-tree', tree, *parents, '-m', f'{kind} main')
+                seen = []
+
+                def run(argv, **kwargs):
+                    if argv[0] == 'git':
+                        seen.append(argv[3:])
+                        if argv[3] == 'push':  # another session lands on main after Tether's last look
+                            self.git(self.origin, 'update-ref', 'refs/heads/main', moved)
+                    return real(argv, **kwargs)
+
+                alerts = []
+                with mock.patch.object(auto_merge, 'RUN', run):
+                    decision = auto_merge.process(self.job(head), lambda *args: alerts.append(args))
+                self.assertEqual(decision['outcome'], 'failed', decision)
+                self.assertIn('did not accept a plain push', decision['error'])
+                self.assertEqual(self.origin_main(), moved)  # the other session's commit stays
+                pushes = [command for command in seen if command[0] == 'push']
+                self.assertEqual(len(pushes), 1)
+                self.assertEqual(pushes[0][1], str(self.origin))
+                self.assertRegex(pushes[0][2], r'^[0-9a-f]{40}:refs/heads/main$')
+                self.assertEqual(len(pushes[0]), 3)
+                self.assertEqual(alerts[0][0], 'Auto-merge failed')
+                self.assertEqual(self.git(self.work, 'rev-parse', 'HEAD'), head)  # the branch waits, unchanged
+
+    def test_no_auto_merge_command_can_force(self):
+        # The built push command, for any input, has no option and no forced refspec.
+        self.assertEqual(auto_merge._push_argv('/srv/origin.git', 'a' * 40), ['push', '/srv/origin.git', 'a' * 40 + ':refs/heads/main'])
+        for url, made in (('--force', 'a' * 40), ('+refs/heads/x', 'a' * 40), ('/srv/origin.git', '+' + 'a' * 39),
+                          ('-f', 'a' * 40), ('--force-with-lease=main:' + 'a' * 40, 'a' * 40)):
+            with self.assertRaises(auto_merge.GitError):
+                auto_merge._push_argv(url, made)
+        # No source line of the module builds a force flag or a forced refspec.
+        source = Path(auto_merge.__file__).read_text()
+        code = '\n'.join(line.split('#', 1)[0] for line in source.splitlines())
+        code = re.sub(r'"""(?:.|\n)*?"""', '', code)
+        for banned in ('--force', '--mirror', '--delete', "'-f'", '"-f"'):
+            self.assertFalse(banned in code, f'{banned} appears in the code of auto_merge.py')
+        # Every git argv of a whole Enforce run, merge included, is free of them too.
+        self.enforce()
+        head = self.change()
+        with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+            self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'merged')
+        for call in run.call_args_list:
+            for item in call.args[0]:
+                self.assertFalse(item.startswith(('--force', '+')) or item == '-f', call.args[0])
+        self.assertEqual(len(self.pushes_of(run)), 1)
+
+    def test_push_is_never_called_for_an_unchecked_first_parent(self):
         self.enforce()
         head = self.change()
         checked = self.origin_main()
@@ -1309,25 +1366,23 @@ class Modes(Base):
             return subprocess.run(argv, **kwargs)
 
         with mock.patch.object(auto_merge, 'RUN', run):
-            for altered, message in ((unrelated, 'does not descend'), (head, 'as its first parent')):
+            for altered, message in ((unrelated, 'does not contain the checked main'), (head, 'as its first parent')):
                 with self.subTest(altered=altered), self.assertRaisesRegex(auto_merge.GitError, message):
                     auto_merge.merge({**plan, 'target_sha': altered}, 'codex', self.job(head))
         self.assertNotIn('push', seen)
         self.assertEqual(self.origin_main(), checked)
 
-    def test_lease_happy_path_uses_exact_push_argv(self):
+    def test_happy_path_uses_the_exact_plain_push_argv(self):
         self.enforce()
         scratch = auto_merge._scratch(self.repo)
         for number in (2, 3):
             with self.subTest(number=number):
                 head = self.change(text=f'export const app = {number}\n')
-                checked = self.origin_main()
                 with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
                     decision = auto_merge.process(self.job(head))
                 self.assertEqual(decision['outcome'], 'merged', decision)
-                pushes = [call.args[0] for call in run.call_args_list if call.args[0][3] == 'push']
-                self.assertEqual(pushes, [['git', '-C', str(scratch), 'push', f'--force-with-lease=main:{checked}',
-                                          str(self.origin), f"{decision['merge']}:refs/heads/main"]])
+                self.assertEqual(self.pushes_of(run), [['git', '-C', str(scratch), 'push', str(self.origin),
+                                                       f"{decision['merge']}:refs/heads/main"]])
                 self.assertEqual(self.origin_main(), decision['merge'])
 
     def test_leaving_enforce_before_the_push_stops_the_merge(self):
@@ -1439,7 +1494,7 @@ class Modes(Base):
                 self.git(self.work, 'reset', '-q', '--hard', head)
                 (self.work / 'nested/new.txt').unlink(missing_ok=True)
 
-    def test_the_merge_runs_when_main_moved_after_the_first_decision(self):
+    def test_a_main_that_moved_after_the_decision_stops_the_merge_with_one_attempt(self):
         self.enforce()
         head = self.change()
         real = auto_merge.evaluate
@@ -1454,11 +1509,15 @@ class Modes(Base):
             calls.append(1)
             return result
 
-        with mock.patch.object(auto_merge, 'evaluate', evaluate):
+        with mock.patch.object(auto_merge, 'evaluate', evaluate), \
+                mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
             decision = auto_merge.process(self.job(head))
-        self.assertEqual(decision['outcome'], 'merged')
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(decision['outcome'], 'failed')
+        self.assertIn('moved after the checks', decision['error'])
+        self.assertEqual(len(calls), 1)  # no second decision, no retry
+        self.assertFalse([call for call in run.call_args_list if call.args[0][3] == 'push'])
         self.assertEqual(self.git(self.origin, 'show', 'main:server/server.py'), 'print(7)')
+        self.assertEqual(self.git(self.origin, 'log', '-1', '--format=%s', 'main'), 'Race')
 
 
 class Ladder(Base):

@@ -15,7 +15,7 @@ Each unknown fails closed: a git error, a timeout, a missing file or a missing a
 
 Modes (paths.CONFIG/auto-merge): "off", "observe" (the default, and what a missing or bad file means) and "enforce".
 Observe records the decision and merges nothing. When available, Enforce will make one merge commit (parents: the main
-branch, the approved commit) and push it with a lease-guarded fast-forward. `git revert -m 1 <merge>` undoes it.
+branch, the approved commit) and push it with a plain fast-forward push, never a forced one. `git revert -m 1 <merge>` undoes it.
 A merge is not a deploy.
 
 The trust ladder gives each area a limit on changed lines. The limit widens after clean merges that Tether made and
@@ -1187,24 +1187,43 @@ def _authorization_problem(setting, approved_at):
     return None
 
 
-def _lease_guarded_fast_forward(scratch, url, checked, made):
-    """Push only if the remote still has the checked first parent and the update advances it."""
+class MainMoved(GitError):
+    """The main branch is not at the commit that passed the checks. Nothing is retried and nothing is forced."""
+
+
+def _push_argv(url, made):
+    """The one push Tether makes: a plain push of one commit to main. Git refuses it unless it is a fast-forward."""
+    argv = ['push', url, f'{made}:{TARGET_REF}']
+    if any(item.startswith(('-', '+')) for item in argv[1:]):
+        raise GitError('The push arguments must not contain an option or a forced refspec.')
+    return argv
+
+
+def _fast_forward_push(scratch, url, checked, made):
+    """Push the merge commit with a plain `git push`. No --force and no --force-with-lease, here or anywhere.
+
+    Before the push: the merge commit must contain the checked main commit as its first parent, and the remote main
+    must still be at that commit. A remote that moved, went back or lost the branch is "main moved". Git itself
+    refuses the push when main moved after that look to a commit the merge does not contain."""
     if not _hash(checked) or not _hash(made):
-        raise GitError('The lease-guarded fast-forward needs two commit hashes.')
+        raise GitError('The push needs two commit hashes.')
     if not _ancestor(scratch, checked, made):
-        raise GitError('The lease-guarded fast-forward does not descend from the checked main commit.')
+        raise GitError('The merge commit does not contain the checked main commit.')
     if _sha(scratch, made + '^1') != checked:
-        raise GitError('The lease-guarded fast-forward does not have the checked main commit as its first parent.')
+        raise GitError('The merge commit does not have the checked main commit as its first parent.')
+    seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=True).stdout
+    if seen != f'{checked}\t{TARGET_REF}\n':
+        raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
     try:
-        _object_git(scratch, 'push', f'--force-with-lease={TARGET}:{checked}', url, f'{made}:{TARGET_REF}', network=True)
+        _object_git(scratch, *_push_argv(url, made), network=True)
     except GitError as exc:
-        raise GitError(f'The lease-guarded fast-forward failed: {exc}') from exc
+        raise MainMoved(f'{REMOTE}/{TARGET} did not accept a plain push, so it moved or refused it. Nothing is forced: {exc}') from exc
 
 
 def merge(plan, reviewer, job):
     """Make the merge commit and push it. Return its hash. Raise GitError when anything is in doubt.
 
-    The lease-guarded fast-forward refuses a change to main since the checks ran. Working trees and local refs stay
+    The push is a plain fast-forward push; a main branch that moved since the checks stops it. Working trees and local refs stay
     untouched."""
     if not ENFORCE_AVAILABLE:
         raise NotAuthorized(ENFORCE_UNAVAILABLE)
@@ -1260,7 +1279,7 @@ def merge(plan, reviewer, job):
             raise NotAuthorized('Could not read the current reviewer approval.') from exc
         if not matches:
             raise NotAuthorized('The reviewer approval changed or is no longer available.')
-        _lease_guarded_fast_forward(scratch, plan['url'], plan['target_sha'], made)
+        _fast_forward_push(scratch, plan['url'], plan['target_sha'], made)
     return made
 
 
@@ -1294,17 +1313,8 @@ def process(job, alert=None):
     else:
         with _merge_lock:
             try:
-                try:
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'), job)
-                except NotAuthorized:
-                    raise
-                except GitError:
-                    # The main branch may have moved between the fetch and the push. Decide again, once.
-                    again, plan = evaluate(job['folder'], job.get('commit'))
-                    if plan is None:
-                        raise
-                    decision.update(checks=again['checks'], areas=again['areas'], files=again['files'])
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'), job)
+                # One attempt. When main moved, the branch stays for a new approval or for the user.
+                decision['merge'] = merge(plan, job.get('reviewer_agent'), job)
                 decision['outcome'] = 'merged'
             except GitError as exc:
                 decision['outcome'] = 'failed'
