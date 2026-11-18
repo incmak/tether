@@ -442,13 +442,13 @@ class LiveTabs(unittest.TestCase):
     def test_a_long_name_matches_in_full_not_by_its_first_40_characters(self):
         title = 'a-very-long-triage-item-title-that-runs-on-and-on'
         item = {**self.item(self.tab('%300', 1000, name=f'{title} · needs decision')), 'title': title}
-        entries = [self.live('%9', f'{title} · fixed'), self.live('%10', title[:40] + '-but-another-item')]
+        entries = [self.live('%9', f'{title} · fixed, review'), self.live('%10', title[:40] + '-but-another-item')]
         self.assertEqual(self.panes(item, entries), ['%9'])
 
     def test_an_old_link_never_takes_a_pane_that_runs_another_conversation(self):
         entries = [self.live('%7', 'exhibits-carry-over', thread='chat-other')]
         self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), [''])
-        entries.append(self.live('%8', 'exhibits-carry-over · fixed'))  # no conversation known yet: the name decides
+        entries.append(self.live('%8', 'exhibits-carry-over · fixed, review'))  # no conversation known yet: the name decides
         self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%8'])
 
     def test_a_pane_listed_under_two_sessions_is_one_match(self):
@@ -458,7 +458,19 @@ class LiveTabs(unittest.TestCase):
     def test_a_link_from_the_second_tmux_started_is_checked_but_kept_when_nothing_matches(self):
         entries = [self.live('%195', 'exhibits-carry-over')]
         self.assertEqual(self.panes(self.item(self.tab('%300', 2000.5)), entries), ['%195'])
+        entries.append(self.live('%5', 'new tab'))
         self.assertEqual(self.panes(self.item(self.tab('%5', 2000.5, name='new tab')), entries), ['%5'])
+        entries = [self.live('%12', 'another tab', thread='chat-other')]  # its id now runs another conversation
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone', chat='chat-9')), entries), [''])
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone')), []), [''])  # no such pane now
+
+    def test_a_title_with_a_separator_matches_only_its_own_tab(self):
+        item = {**self.item(self.tab('%300', 1000, name='Invoice · Canada · needs decision')), 'title': 'Invoice · Canada'}
+        self.assertEqual(self.panes(item, [self.live('%7', 'Invoice · UK · fixed, review')]), [''])
+        self.assertEqual(self.panes(item, [self.live('%7', 'Invoice · UK · fixed, review'),
+                                           self.live('%8', 'Invoice · Canada · fixed, review')]), ['%8'])
+        plain = {**self.item(self.tab('%300', 1000, name='Invoice')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(plain, [self.live('%7', 'Invoice · UK')]), [''])
 
     def test_the_tab_that_asked_follows_its_conversation(self):
         item = {**self.item(), 'ask': {'id': 'a1', 'q': 'Go?', 'pane': '%300', 'chat': 'chat-9', 'at': 1000}}

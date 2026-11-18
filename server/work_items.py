@@ -568,8 +568,11 @@ def board():
 
 
 def _base(name):
-    """A tab name without its status: triage tabs are named "<title> · <status>" and the status changes."""
-    return (name or '').split(' · ')[0].strip()
+    """A tab name without its status: triage tabs are named "<title> · <status>" (work_triage.LABEL), and the status
+    changes. Only a known status at the end goes: a title may contain " · " too."""
+    import work_triage  # it imports this module
+    head, _, tail = (name or '').strip().rpartition(' · ')
+    return head.strip() if head and tail in set(work_triage.LABEL.values()) else (name or '').strip()
 
 
 def live_tabs(items, entries, started):
@@ -602,8 +605,12 @@ def _relink(link, item, entries, started):
         return link
     pane = _find_tab(link, item, entries)
     # tmux gives its start time in whole seconds: a link from that second may be newer than tmux. It keeps its pane
-    # when nothing else matches.
-    return {**link, 'pane': pane or (link.get('pane', '') if at >= started else '')}
+    # when nothing else matches, while that pane does not run another conversation.
+    if not pane and at >= started:
+        chat = link.get('chat')
+        kept = [e for e in entries if e['id'] == link.get('pane') and not (chat and e.get('thread') not in (None, '', chat))]
+        pane = link.get('pane', '') if kept else ''
+    return {**link, 'pane': pane}
 
 
 def _find_tab(tab, item, entries):
