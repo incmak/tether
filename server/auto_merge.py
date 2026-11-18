@@ -87,6 +87,7 @@ REVERT = re.compile(r'This reverts commit ([0-9a-f]{40})')
 _lock = threading.RLock()
 _ladder_cache = {}
 _target_cache = {}
+_target_errors = {}  # root -> (time, message): Settings does not ask a failing remote again for TARGET_TTL
 _mode_lock = threading.Lock()
 _grant = None
 RUN = subprocess.run     # tests replace this to prove that observe mode never writes
@@ -193,7 +194,7 @@ def _git_env(helpers=(), *, worktree_attributes=False):
                 ('push.followTags', 'false'), ('submodule.recurse', 'false')]
     if not worktree_attributes:
         settings.append(('core.attributesFile', os.devnull))
-    settings.extend(('credential.helper', helper) for helper in helpers)
+    settings.extend(helpers)
     full['GIT_CONFIG_COUNT'] = str(len(settings))
     for index, (key, value) in enumerate(settings):
         full[f'GIT_CONFIG_KEY_{index}'] = key
@@ -201,19 +202,29 @@ def _git_env(helpers=(), *, worktree_attributes=False):
     return full
 
 
+CREDENTIAL_KEY = re.compile(r'credential\.(?:.+\.)?(?:helper|usehttppath|username)', re.I)
+
+
 def _credential_helpers():
-    # This lookup alone uses the user's environment. Keep only the helpers, in their original order.
+    """[(key, value)] for the user's own credential settings, in their order: credential.helper and the settings for
+    one host, such as credential.https://github.com.helper. This lookup alone uses the user's environment. Nothing
+    else is taken from the global config."""
     try:
-        result = RUN(['git', 'config', '--global', '--null', '--get-all', 'credential.helper'],
+        result = RUN(['git', 'config', '--global', '--null', '--get-regexp', r'^credential\.'],
                      stdin=subprocess.DEVNULL, capture_output=True, encoding='utf-8', errors='surrogateescape',
                      timeout=GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError('Could not read global Git credential helpers.') from exc
     if result.returncode == 1:
-        return ('',)
+        return ()
     if result.returncode:
         raise GitError('Could not read global Git credential helpers.')
-    return ('', *result.stdout.split('\0')[:-1])
+    found = []
+    for entry in result.stdout.split('\0')[:-1]:
+        key, _, value = entry.partition('\n')
+        if CREDENTIAL_KEY.fullmatch(key):
+            found.append((key, value))
+    return tuple(found)
 
 
 def _git(folder, *args, **kwargs):
@@ -377,6 +388,7 @@ def _fetch_target(root, scratch):
         _target_cache.pop(root, None)
         raise
     _target_cache[root] = time.monotonic(), (url, sha)
+    _target_errors.pop(root, None)
     return url, sha
 
 
@@ -1432,10 +1444,15 @@ def handles(path):
 def _trust(root, known):
     """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
+    failed = _target_errors.get(root)
+    if failed and time.monotonic() - failed[0] < TARGET_TTL:
+        entry['error'] = failed[1]
+        return entry if known else None
     try:
         scratch = _scratch(root)
         cached = _target_cache.get(root)
         _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root, scratch)
+        _target_errors.pop(root, None)
         entry['target'] = f'{REMOTE}/{TARGET}'
         rules = rules_at(scratch, target_sha)
         if rules is None:
@@ -1443,8 +1460,11 @@ def _trust(root, known):
             return entry if known else None
         levels = ladder(root, scratch, rules, target_sha)
     except GitError as exc:
+        # A repository Tether cannot read is listed only when it has decisions: other open repositories are not
+        # part of auto-merge, and their remote errors do not belong on the Settings page.
         entry['error'] = str(exc)
-        return entry
+        _target_errors[root] = time.monotonic(), entry['error']
+        return entry if known else None
     for area in rules:
         level = levels[area['name']]
         entry['areas'].append({'name': area['name'], 'label': area['label'], 'rung': level['rung'], 'limit': level['limit'],

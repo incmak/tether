@@ -73,6 +73,7 @@ class Base(unittest.TestCase):
             self.enterContext(mock.patch.object(auto_merge, 'ENFORCE_AVAILABLE', True))
         auto_merge._ladder_cache.clear()
         auto_merge._target_cache.clear()
+        auto_merge._target_errors.clear()
         auto_merge._seen.clear()
         self.rows = []
         self.enterContext(mock.patch.object(auto_merge, 'checklist_rows', lambda *args: self.rows))
@@ -944,11 +945,15 @@ class Modes(Base):
         seen = []
         global_config = str(self.root / 'global.conf')
         helping = []
-        Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n')
+        Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n'
+                                       '[credential "https://git.example"]\n\thelper =\n\thelper = !/usr/bin/tool get\n'
+                                       '\tusername = someone\n[credential "https://other.example"]\n\tuseHttpPath = true\n'
+                                       '[url "https://evil.example/"]\n\tinsteadOf = https://git.example/\n'
+                                       '[core]\n\tfsmonitor = /srv/evil\n')
 
         def run(argv, **kwargs):
             if argv[:3] == ['git', 'config', '--global']:
-                self.assertEqual(argv[-3:], ['--null', '--get-all', 'credential.helper'])
+                self.assertEqual(argv[-3:], ['--null', '--get-regexp', r'^credential\.'])
                 self.assertNotIn('env', kwargs)
                 helping.append(1)
             elif argv[:3] == ['git', 'config', '--file']:
@@ -969,8 +974,12 @@ class Modes(Base):
                 if is_shadow_status(argv):
                     want = GIT_SETTINGS[:-1]
                 if command[0] in ('fetch', 'ls-remote'):
-                    want = GIT_SETTINGS + [('credential.helper', helper)
-                                           for helper in ('', 'cache', 'store --file /srv/credentials')]
+                    # Only the user's credential settings come from the global config, host settings included.
+                    want = GIT_SETTINGS + [('credential.helper', 'cache'), ('credential.helper', 'store --file /srv/credentials'),
+                                           ('credential.https://git.example.helper', ''),
+                                           ('credential.https://git.example.helper', '!/usr/bin/tool get'),
+                                           ('credential.https://git.example.username', 'someone'),
+                                           ('credential.https://other.example.usehttppath', 'true')]
                 self.assertEqual(git_settings(env), want)
             result = real(argv, **kwargs)
             if argv[3] == 'merge-base':
@@ -1026,7 +1035,7 @@ class Modes(Base):
                             active_copies.append(argv[7])
                         continue
                     if argv[:2] != ['git', '-C']:
-                        self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-all', 'credential.helper'])
+                        self.assertEqual(argv, ['git', 'config', '--global', '--null', '--get-regexp', r'^credential\.'])
                         continue
                     directory, command = Path(argv[2]), argv[3]
                     if directory in (self.work, folder, self.repo):
@@ -1879,6 +1888,25 @@ class Http(Base):
         self.assertEqual([area['name'] for area in handler.body['trust'][0]['areas']], ['tests', 'ui'])
         self.assertEqual(handler.body['trust'][0]['areas'][0]['need'], auto_merge.CLEAN_MERGES)
 
+    def test_a_repository_tether_cannot_read_is_not_listed_and_not_asked_again(self):
+        other = self.root / 'private'
+        self.git(self.root, 'init', '-q', '-b', 'main', str(other))
+        self.git(other, 'remote', 'add', 'origin', str(self.root / 'no-such-remote.git'))
+        self.git(other, 'commit', '-q', '--allow-empty', '-m', 'First')
+        auto_merge._target_errors.clear()
+        with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+            for _ in range(3):
+                listed = auto_merge.state([str(other), str(self.repo)])['trust']
+                self.assertEqual([item['repo'] for item in listed], ['project'])
+        asked = [call.args[0] for call in run.call_args_list if 'ls-remote' in call.args[0] and str(self.root / 'no-such-remote.git') in call.args[0]]
+        self.assertEqual(len(asked), 1)
+        # With a decision in the log the repository is listed, with the reason.
+        auto_merge.record({'root': str(other), 'head': 'a' * 40, 'mode': 'observe', 'outcome': 'wait', 'checks': []})
+        listed = auto_merge.state([str(self.repo)])['trust']
+        self.assertEqual([item['repo'] for item in listed], ['private', 'project'])
+        self.assertIn('ls-remote', listed[0]['error'])
+        auto_merge._target_errors.clear()
+
     def test_a_repository_without_rules_is_listed_only_when_it_has_decisions(self):
         other = self.root / 'other'
         remote = self.root / 'other.git'
@@ -1918,17 +1946,15 @@ class Http(Base):
             self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Frontend')
             self.assertEqual(fetch.call_args_list, [mock.call(root, scratch)] * 3)
 
-    def test_settings_shows_target_errors_with_or_without_decisions(self):
+    def test_settings_shows_a_target_error_only_for_a_repository_with_decisions(self):
         root = str(self.repo)
         self.git(self.repo, 'remote', 'set-url', '--push', 'origin', str(self.root / 'gone.git'))
-        for known in (False, True):
-            with self.subTest(known=known):
-                if known:
-                    auto_merge.process(self.job(self.change()))
-                trust = auto_merge.state([root])['trust']
-                self.assertEqual(len(trust), 1)
-                self.assertEqual(trust[0]['root'], root)
-                self.assertIn('git ls-remote failed', trust[0]['error'])
+        self.assertEqual(auto_merge.state([root])['trust'], [])
+        auto_merge.process(self.job(self.change()))
+        trust = auto_merge.state([root])['trust']
+        self.assertEqual(len(trust), 1)
+        self.assertEqual(trust[0]['root'], root)
+        self.assertIn('git ls-remote failed', trust[0]['error'])
 
     def test_post_sets_the_mode_and_refuses_agents_and_bad_values(self):
         handler = Handler({'mode': 'enforce'})
