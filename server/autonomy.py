@@ -85,8 +85,10 @@ VERIFIED = ('End each commit message you write with a "Verified:" line that says
             '"Verified: tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)". When you did not check '
             'it, write "Verified: none (reason)". Each deploy record you write (such as a DEPLOYED.md line) ends with '
             'the same stamp.')
-URGENT = ('When you must ask, end the reply with "Needs you: yes". If the question blocks the work, put a line '
-          '"Urgent: <the question in one sentence>" just before it.')
+URGENT = ('When you must ask, end the reply with "Needs you: yes". Add a line "Urgent: <the question in one sentence>" just '
+          'before it only when waiting costs something now: production is down or broken for users, a security issue, data or '
+          'money at risk, or a deadline today. A question that only pauses this task (a choice, a priority, a follow-up with '
+          'another person) is not urgent: write "Needs you: yes" without the Urgent line.')
 DECISIONS = ('The user saved answers for this project in {path}. Reuse one only when it answers the same question; '
              'if in doubt, ask.')
 LAST = 'Do not change the level. The user sets it in Tether.'
