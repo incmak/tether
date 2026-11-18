@@ -9,7 +9,7 @@ import { useModal, usePolling } from './hooks'
 import { startTrial } from './lookTrial'
 import { TrialBar } from './TrialBar'
 import type { Anchor } from './hooks'
-import { goBack, goForward, setPlace, setPlaceHandler, setSearchOpener, setViewOpener, useNavAvailability } from './backNav'
+import { goBack, goForward, reloadPage, setPlace, setPlaceHandler, setSearchOpener, setViewOpener, useNavAvailability } from './backNav'
 import { BACK_KEY, FORWARD_KEY, isNavKey } from './navKeys'
 import { usePrefs } from './prefs'
 import { resumeBackground } from './backgrounds'
@@ -205,7 +205,7 @@ function App() {
   }, [themeShown, prefs.textSize])
   useLayoutEffect(() => { applyScheme(prefs.scheme); applyLayoutTheme(JSON.parse(lookTheme)) }, [prefs.scheme, lookTheme])
   // Unsent drafts are part of the synced prefs: a reload, a pane switch or another device keeps them.
-  const reload = () => location.reload()
+  const reload = reloadPage
   const setDraft = (id: string, text: string) => update(current => (current.drafts[id]?.text ?? '') === text ? {} : { drafts: { ...current.drafts, [id]: { text, at: Date.now() / 1000 } } })
   // An installed app on Android resumes instead of reloading. When it comes back to the front, check for a newer build.
   const [updated, setUpdated] = useState(false)

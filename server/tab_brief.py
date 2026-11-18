@@ -193,11 +193,6 @@ def provider(entry):
     return {'codex-plan': 'plan', 'codex-foundry': 'foundry'}.get(continuations.current(entry), 'other')
 
 
-CODEX_OFF = ('hooks', 'plugins', 'apps', 'browser_use', 'browser_use_external', 'computer_use', 'in_app_browser',
-             'shell_tool', 'multi_agent', 'image_generation', 'view_image', 'skill_mcp_dependency_install',
-             'tool_suggest', 'memories')
-
-
 def command(kind, folder):
     """The model command, or None when its CLI is not installed. kind: 'claude' or 'plan'."""
     if kind == 'claude':
@@ -209,17 +204,11 @@ def command(kind, folder):
     executable = shutil.which('codex')
     if not executable:
         return None
-    import suggest_groups  # the same fast model that Suggest groups uses
-    model = suggest_groups.codex_fast_model()
+    import suggest_groups
     schema = os.path.join(folder, 'schema.json')
     with open(schema, 'w', encoding='utf-8') as stream:
         json.dump(SCHEMA, stream)
-    off = [flag for feature in CODEX_OFF for flag in ('--disable', feature)]
-    # --ignore-user-config drops config.toml (MCP servers, notify, the switched default provider); the provider is
-    # pinned to the plan, as the thread's own provider was checked first.
-    return [executable, 'exec', '--ignore-user-config', '--ignore-rules', *off, '--skip-git-repo-check', '--ephemeral',
-            '-s', 'read-only', '-c', 'model_provider="openai"', *(['-m', model] if model else []),
-            '-c', 'model_reasoning_effort=low', '--output-schema', schema,
+    return [*suggest_groups.isolated_codex_command(executable), '--output-schema', schema,
             '-o', os.path.join(folder, 'reply.txt'), '-']
 
 

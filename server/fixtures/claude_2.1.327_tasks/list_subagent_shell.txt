@@ -1,0 +1,11 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔
+  Background
+  3 active shells
+
+    ● sleep 600             running · general-purpose subagent
+    ● Stop canary monitor   running
+  ❯ ● sleep 600             running
+
+      Earlier in this session (0)
+
+  ↑/↓ to navigate · x to stop · Enter to view · Esc to close

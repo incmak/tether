@@ -34,6 +34,28 @@ REVIEW_REQUEST = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) 
                   r'( This is the last round: your reply stays here\.)?\s*$')
 
 
+def guard_subprocess(test):
+    for name in ('run', 'Popen'):
+        process = test.enterContext(patch.object(
+            subprocess, name, side_effect=AssertionError(f'unexpected subprocess.{name}')))
+        # Monitor observers can catch the exception. The attempted call must still fail the test.
+        test.addCleanup(process.assert_not_called)
+
+
+def isolate_notice_monitor(test):
+    guard_subprocess(test)
+    # Keep the monitor loop real. Other observers can read or write panes,
+    # start background jobs, or change shared state between tests.
+    for observer in (
+        server.NOTIFIER, server.auto_merge, server.attention.STORE, server.coordinator.FEED,
+        server.tab_brief.BRIEFER, server.WORK_WATCHER, server.activity_time.STORE, server.work_jira.MOVER,
+        server.work_feeds.POLLER, server.HELPER_CLOSER, server.UPKEEP,
+    ):
+        test.enterContext(patch.object(observer, 'observe'))
+    test.enterContext(patch.object(server.attention.STORE, 'digest_due', return_value=None))
+    test.enterContext(patch.object(server.activity_time.STORE, 'maybe_publish'))
+
+
 class ReviewLinksTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -4184,13 +4206,13 @@ class ReviewLinksTests(unittest.TestCase):
             review_links.check_cap('%13', WORKER_THREAD)
 
     def test_notice_monitor_fake_pane_tick_preserves_seeded_link(self):
+        isolate_notice_monitor(self)
         link, = self.links()
         link['created'] = 0
         self.file.write_text(json.dumps([link]))
         entry = {'id': '%1', 'agent': 'claude', 'thread': 'conversation', 'owner_pid': 1, 'writable': True}
         with patch.object(server, 'sessions', return_value=[entry]), \
                 patch.object(server, 'live_status', return_value={'state': 'Idle'}), \
-                patch.object(server.NOTIFIER, 'observe'), \
                 own_time(server, sleep=Mock(side_effect=StopIteration)):
             with self.assertRaises(StopIteration):
                 server.monitor_notices()
@@ -5171,6 +5193,7 @@ class ServerWatcherTests(unittest.TestCase):
             self.assertEqual(server.last_reply({}), '')
 
     def test_monitor_runs_watcher_on_each_loop(self):
+        isolate_notice_monitor(self)
         entries = [{'id': '%12'}]
         with patch.object(server, 'sessions', return_value=entries), \
                 patch.object(server.review_links, 'observe') as observe, \
@@ -5189,6 +5212,7 @@ class ServerWatcherTests(unittest.TestCase):
             parent.assert_called_once_with(entries[0], entries)
 
     def test_session_discovery_exception_skips_watcher_and_loop_recovers(self):
+        isolate_notice_monitor(self)
         entries = [{'id': '%12'}]
         with patch.object(server, 'sessions', side_effect=[KeyError('pane'), entries]) as sessions, \
                 patch.object(server.review_links, 'observe') as observe, \
@@ -5207,7 +5231,8 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 
     def test_review_alert_uses_native_payload_keys(self):
-        with patch.object(server, 'notify') as notify:
+        guard_subprocess(self)
+        with patch.object(server, 'sessions', return_value=[]), patch.object(server, 'notify') as notify:
             server.review_alert('Review link lost', 'Tab vanished.', '%13')
         notify.assert_called_once_with({
             'title': 'Review link lost', 'body': 'Tab vanished.', 'tag': 'review-%13', 'session': '%13',
@@ -5215,8 +5240,9 @@ class ServerWatcherTests(unittest.TestCase):
         }, True)
 
     def test_review_alert_includes_review_actions_only_when_given(self):
+        guard_subprocess(self)
         review = {'worker': '%13', 'reviewer': '%12', 'id': 'a1b2c3d4'}
-        with patch.object(server, 'notify') as notify:
+        with patch.object(server, 'sessions', return_value=[]), patch.object(server, 'notify') as notify:
             server.review_alert('Review stalled', 'Reply not found.', '%13', review=review)
         notify.assert_called_once_with({
             'title': 'Review stalled', 'body': 'Reply not found.', 'tag': 'review-%13', 'session': '%13',

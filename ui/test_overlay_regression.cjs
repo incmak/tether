@@ -291,7 +291,8 @@ async function main() {
       fixture = fixtures(state)
       cases++
       try {
-        // Each case gets a fresh page to contain stray history.back() from the previous case.
+        // A viewport change can close the previous case's menu. Its history.back() can still be pending
+        // when the next goto starts and abort it. See B33 and test_back_nav_leave.cjs.
         if (page) await page.close().catch(() => {})
         page = await openPage()
         await page.setViewportSize({ width, height })

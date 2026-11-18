@@ -1,0 +1,14 @@
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔
+  Background
+  2 active shells · 1 active agent
+
+    Shells
+  ❯ ● Stop canary monitor   running
+    ● sleep 600             running
+
+    Background agents
+    ● Stop canary agent     running · Haiku 5.5
+
+      Earlier in this session (0)
+
+  ↑/↓ to navigate · x to stop · Enter to view · Esc to close
