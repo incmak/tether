@@ -1218,7 +1218,7 @@ def notification_reply(entry, records=None):
 def notification_reply_turn(entry, records=None):
     """Read the last reply and its record's stable turn id from one bounded tail.
 
-    A reply without a turn id cannot start an ask on the first read after startup.
+    A reply without a turn id cannot start an ask on the first successful read after startup.
     It can start one after a later live turn end changes the finished marker.
     """
     records = notification_records(entry) if records is None else records

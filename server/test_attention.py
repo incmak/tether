@@ -413,6 +413,41 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(*panes)
         self.assertEqual(self.world.store.waiting(), [])
 
+    def test_stale_codex_turn_stays_handled_after_newer_turn_and_restart(self):
+        pane = entry(agent='codex')
+        reply = 'Next: deploy?\nNeeds you: yes'
+        self.world.turn('%1', reply, 10, turn_id='A')
+        self.world.observe(pane)
+        self.store.act('%1', 't1', 'handled')
+        self.world.turn('%1', 'Done.\nNeeds you: no', 20, turn_id='B')
+        self.world.observe(pane)
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.turn('%1', reply, 20, turn_id='A')
+        self.world.observe(pane)
+        self.assertEqual(self.world.store.waiting(), [])
+        self.assertEqual(json.loads(self.path.read_text())['turns']['t1']['turn'], 'B')
+
+    def test_stale_turn_from_old_store_does_not_clear_newer_ask(self):
+        self.path.write_text(json.dumps({'turns': {'t1': {'turn': 0, 'at': self.clock.now}}}))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        pane = entry(agent='antigravity')
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 20, turn_id=1)
+        self.world.observe(pane)
+        self.world.turn('%1', 'Done.\nNeeds you: no', 30, turn_id=0)
+        self.world.observe(pane)
+        self.assertEqual([ask['next'] for ask in self.world.store.waiting()], ['deploy?'])
+
+    def test_turn_history_retains_the_latest_fifty_ids_across_restart(self):
+        pane = entry(agent='antigravity')
+        for step in range(51):
+            self.world.turn('%1', 'Done.\nNeeds you: no', step, turn_id=step)
+            self.world.observe(pane)
+        self.assertEqual(json.loads(self.path.read_text())['turns']['t1'].get('history'), list(range(1, 51)))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 51, turn_id=1)
+        self.world.observe(pane)
+        self.assertEqual(self.world.store.waiting(), [])
+
     def test_upgrade_adopts_old_digests_without_changing_asks(self):
         reply = 'Urgent: Deploy?\nNeeds you: yes'
         digest = hashlib.sha256(reply.encode()).hexdigest()[:24]
@@ -427,14 +462,78 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(*panes)
         self.assertEqual(self.world.store.waiting(), [original])
         data = json.loads(self.path.read_text())
-        self.assertEqual(data['turns'], {'t1': {'turn': '%1:10', 'at': self.clock.now},
-                                         't2': {'turn': '%2:10', 'at': self.clock.now}})
+        self.assertEqual(data['turns'], {'t1': {'turn': '%1:10', 'history': ['%1:10'], 'at': self.clock.now},
+                                         't2': {'turn': '%2:10', 'history': ['%2:10'], 'at': self.clock.now}})
         self.world.turn('%2', reply, 20)
         self.world.observe(*panes)
         self.assertEqual(self.world.store.ask('%2', 't2')['since'], self.clock.now)
         data = json.loads(self.path.read_text())
         self.assertNotIn('reply', data['asks']['%2'])
         self.assertNotIn('reply', data['seen'].get('%2', {}))
+
+    def test_upgrade_moves_legacy_asks_by_conversation_across_restarts(self):
+        reply = 'Urgent: Deploy?\nNeeds you: yes'
+        digest = hashlib.sha256(reply.encode()).hexdigest()[:24]
+        original = dict(pane='%1', thread='t1', since=self.clock.now - 500, next='Deploy?', kind='reply',
+                        opened=True, snoozed_until=None, urgent=True)
+        for source in ('handled', 'open'):
+            with self.subTest(source=source):
+                seen = {'%1': {'thread': 't1', 'reply': digest}} if source == 'handled' else {}
+                asks = {'%1': dict(original, reply=digest)} if source == 'open' else {}
+                self.path.write_text(json.dumps({'seen': seen, 'asks': asks}))
+                self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+                self.world.observe()
+                saved = json.loads(self.path.read_text())
+                self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+                self.world.turn('%8', reply, 10, turn_id='deploy')
+                self.world.observe(entry('%8'))
+                expected = [dict(original, pane='%8')] if source == 'open' else []
+                self.assertEqual(self.world.store.waiting(), expected)
+                self.assertIn('t1', saved.get('legacy', {}))
+                self.assertNotIn('t1', json.loads(self.path.read_text())['legacy'])
+
+    def test_upgrade_legacy_digest_expires_from_first_load(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        digest = hashlib.sha256(reply.encode()).hexdigest()[:24]
+        self.path.write_text(json.dumps({'seen': {'%1': {'thread': 't1', 'reply': digest}}}))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.observe()
+        self.clock.now += 20 * 86400
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.clock.now += 11 * 86400
+        self.world.turn('%1', reply, 10)
+        self.world.observe(entry())
+        self.assertEqual([ask['since'] for ask in self.world.store.waiting()], [self.clock.now])
+
+    def test_empty_reply_retries_the_same_finished_marker(self):
+        self.world.turn('%1', '', 10, turn_id=None)
+        self.world.observe(entry())
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 10, turn_id='deploy')
+        self.world.observe(entry())
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
+
+    def test_upgrade_adopts_legacy_reply_after_empty_startup_read(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        digest = hashlib.sha256(reply.encode()).hexdigest()[:24]
+        self.path.write_text(json.dumps({'seen': {'%1': {'thread': 't1', 'reply': digest}}}))
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.turn('%1', '', 10, turn_id=None)
+        self.world.observe(entry())
+        self.world.turn('%1', reply, 20, turn_id='deploy')
+        self.world.observe(entry())
+        self.assertEqual(self.world.store.waiting(), [])
+        self.assertEqual(json.loads(self.path.read_text())['turns']['t1']['turn'], 'deploy')
+
+    def test_empty_reply_does_not_count_as_first_successful_read_without_turn_id(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        self.world.turn('%1', '', 10, turn_id=None)
+        self.world.observe(entry())
+        self.world.turn('%1', reply, 20, turn_id=None)
+        self.world.observe(entry())
+        self.assertEqual(self.store.waiting(), [])
+        self.world.turn('%1', reply, 30, turn_id=None)
+        self.world.observe(entry())
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
 
     def test_missing_turn_id_requires_a_live_turn_end(self):
         reply = 'Next: deploy?\nNeeds you: yes'
@@ -452,6 +551,30 @@ class AttentionTest(unittest.TestCase):
         self.world.store = attention.Attention(self.path, self.clock)
         self.world.observe(entry())
         self.assertEqual(self.world.store.waiting(), [])
+
+    def test_live_handled_turn_stays_quiet_after_thirty_one_days_and_restart(self):
+        pane = entry()
+        self.world.turn('%1', 'Next: deploy?\nNeeds you: yes', 10)
+        self.world.observe(pane)
+        self.store.act('%1', 't1', 'handled')
+        self.clock.now += 31 * 86400
+        self.world.observe(pane)
+        self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
+        self.world.observe(pane)
+        self.assertEqual(self.world.store.waiting(), [])
+
+    def test_live_working_conversation_refreshes_turn_age_at_most_once_a_day(self):
+        pane = entry(agent='codex')
+        self.world.turn('%1', 'Done.\nNeeds you: no', 10)
+        self.world.observe(pane)
+        self.world.status['%1'] = {'state': 'Working'}
+        self.clock.now += 86401
+        self.assertTrue(self.world.observe(pane))
+        refreshed = json.loads(self.path.read_text())['turns']['t1']['at']
+        self.assertEqual(refreshed, self.clock.now)
+        self.clock.now += 3600
+        self.assertFalse(self.world.observe(pane))
+        self.assertEqual(json.loads(self.path.read_text())['turns']['t1']['at'], refreshed)
 
     def test_prunes_only_turns_and_parked_asks_older_than_thirty_days(self):
         reply = 'Next: deploy?\nNeeds you: yes'

@@ -26,6 +26,8 @@ PREFIX = '/mobile/api/attention'
 ACTIONS = ('handled', 'snooze', 'opened')
 SNOOZE = 24 * 3600
 RETENTION = 30 * 86400
+TURN_REFRESH_INTERVAL = 86400
+TURN_HISTORY_LIMIT = 50
 URGENT_GRACE = 180
 LIMIT = 160
 QUIET = 8  # seconds after you answer a prompt in which the same prompt, still on screen, does not start a new ask
@@ -75,7 +77,7 @@ def age_text(seconds):
 class Attention:
     """Live asks and dismissed prompts belong to panes. Turns read and parked reply asks belong to conversations.
 
-    checked remembers the conversation and live turn-end marker for each pane read in this process.
+    checked remembers the conversation and live turn-end marker for each pane with a successful reply read.
     """
 
     def __init__(self, path=None, clock=time.time, on_urgent=urgent_ping.send):
@@ -83,9 +85,11 @@ class Attention:
         self.on_urgent = on_urgent
         self.lock = threading.Lock()
         self.checked, self.quiet = {}, {}
+        self._legacy_needs_save = False
         data = self._load()
         self.asks, self.seen, self.digest = data['asks'], data['seen'], data['digest']
         self.turns, self.parked = data['turns'], data['parked']
+        self.legacy = data['legacy']
 
     def _load(self):
         try:
@@ -100,19 +104,36 @@ class Attention:
         turns = {thread: value for thread, value in (data.get('turns') or {}).items()
                  if isinstance(value, dict) and isinstance(value.get('turn'), (str, int))
                  and isinstance(value.get('at'), (int, float))}
+        for value in turns.values():
+            latest = value['turn']
+            history = value.get('history')
+            if not isinstance(history, list):
+                history = []
+            older = [turn for turn in history if isinstance(turn, (str, int)) and turn != latest]
+            value['history'] = older[-(TURN_HISTORY_LIMIT - 1):] + [latest]
+        legacy = {thread: value for thread, value in (data.get('legacy') or {}).items()
+                  if thread not in turns and isinstance(value, dict) and isinstance(value.get('reply'), str)
+                  and isinstance(value.get('at'), (int, float))}
+        now = self.clock()
+        for value in (*seen.values(), *asks.values()):
+            thread, reply = value.get('thread'), value.pop('reply', None)
+            if isinstance(thread, str) and thread and isinstance(reply, str) and reply:
+                self._legacy_needs_save = True
+                if thread not in turns:
+                    legacy.setdefault(thread, {'reply': reply, 'at': now})
         parked = {thread: ask for thread, ask in (data.get('parked') or {}).items()
                   if isinstance(ask, dict) and ask.get('kind') == 'reply' and ask.get('thread') == thread
                   and isinstance(ask.get('since'), (int, float)) and isinstance(ask.get('parked_at'), (int, float))}
         digest = data.get('digest') if isinstance(data.get('digest'), dict) else {}
         hour = digest.get('hour')
-        return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked,
+        return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked, 'legacy': legacy,
                 'digest': {'enabled': digest.get('enabled') is True,
                            'hour': hour if isinstance(hour, int) and 0 <= hour <= 23 else 9,
                            'sent': digest.get('sent') if isinstance(digest.get('sent'), str) else None}}
 
     def _prune(self, now):
         changed = False
-        for store, field in ((self.turns, 'at'), (self.parked, 'parked_at')):
+        for store, field in ((self.turns, 'at'), (self.parked, 'parked_at'), (self.legacy, 'at')):
             expired = [thread for thread, value in store.items() if value[field] < now - RETENTION]
             for thread in expired:
                 del store[thread]
@@ -127,8 +148,9 @@ class Attention:
         try:
             with os.fdopen(fd, 'w') as stream:
                 json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest,
-                           'turns': self.turns, 'parked': self.parked}, stream)
+                           'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy}, stream)
             os.replace(temp, self.path)
+            self._legacy_needs_save = False
         except OSError:
             try:
                 os.unlink(temp)
@@ -164,7 +186,8 @@ class Attention:
 
     def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None):
         """Start and clear asks from the live session list. Read (reply, turn id) from reply_of(entry) once the
-        conversation is idle or stopped, then read again only when finished_of(entry) changes.
+        conversation is idle or stopped. Retry empty reads, and after a successful read wait for a new
+        conversation or finished_of(entry) marker.
         """
         now = self.clock()
         live = {}
@@ -173,7 +196,13 @@ class Attention:
             if entry.get('agent') in AGENTS and PANE.fullmatch(pane) and not entry.get('ambiguous'):
                 live[pane] = None if entry.get('pending_conversation') else (entry.get('thread') or None)
         with self.lock:
-            changed = self._prune(now)
+            changed = self._legacy_needs_save
+            for thread in live.values():
+                turn = self.turns.get(thread)
+                if turn and turn['at'] < now - TURN_REFRESH_INTERVAL:
+                    turn['at'] = now
+                    changed = True
+            changed = self._prune(now) or changed
             for store in (self.asks, self.seen):
                 for pane in list(store):
                     thread = live.get(pane, False)
@@ -184,10 +213,6 @@ class Attention:
                         continue
                     if store is self.asks and value['kind'] == 'reply' and previous_thread:
                         self.parked[previous_thread] = dict(value, parked_at=now)
-                    if store is self.seen and thread is False and 'reply' in value:
-                        # An upgrade can see a bad scan before it has read the old pane's transcript.
-                        changed = value.pop('dismissed', None) is not None or changed
-                        continue
                     del store[pane]
                     changed = True
             for pane in list(self.checked):
@@ -232,19 +257,21 @@ class Attention:
             checked = self.checked.get(pane)
             if checked == (thread, marker):
                 continue
-            self.checked[pane] = (thread, marker)
             reply, turn_id = reply_of(entry)
+            if not reply:
+                continue
+            self.checked[pane] = (thread, marker)
             first_read = checked is None or checked[0] != thread
             if turn_id is None and (first_read or marker is None):
                 continue
-            changed = self.note_reply(pane, thread, reply, turn_id, now, first_read=first_read) or changed
+            changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
         if changed:
             with self.lock:
                 self._save(now)
         self.due_pings(now)
         return changed
 
-    def note_reply(self, pane, thread, reply, turn_id, now=None, *, first_read=False):
+    def note_reply(self, pane, thread, reply, turn_id, now=None):
         """Apply a finished turn once per conversation, even if its pane changes."""
         if not reply:
             return False
@@ -253,15 +280,13 @@ class Attention:
             ask = self.asks.get(pane)
             if thread and turn_id is not None:
                 previous = self.turns.get(thread)
-                if previous and previous['turn'] == turn_id:
+                history = previous['history'] if previous else []
+                if turn_id in history:
                     return False
-                self.turns[thread] = {'turn': turn_id, 'at': now}
-                seen = self.seen.get(pane, {})
-                old_seen = seen.pop('reply', None) if seen.get('thread') == thread else None
-                old_ask = ask.pop('reply', None) if ask and ask.get('thread') == thread else None
-                legacy = old_seen or old_ask
-                if first_read and previous is None and legacy and legacy == _digest(reply):
-                    if ask and ask['kind'] == 'reply':
+                self.turns[thread] = {'turn': turn_id, 'history': (history + [turn_id])[-TURN_HISTORY_LIMIT:], 'at': now}
+                legacy = self.legacy.pop(thread, None)
+                if previous is None and legacy and legacy['reply'] == _digest(reply):
+                    if ask and ask['kind'] == 'reply' and ask.get('thread') == thread:
                         ask['turn'] = turn_id
                     return True
                 if ask and ask.get('turn') == turn_id:
