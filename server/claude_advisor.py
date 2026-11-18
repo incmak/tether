@@ -11,12 +11,18 @@ that cannot apply only leaves the advisor off (code.claude.com/docs/en/advisor).
 in the person's own Claude settings still applies. A change applies to tabs that start or restart after it.
 
 The advisor runs server-side. Claude Code attaches it only when it can (code.claude.com/docs/en/advisor):
-- the advisor ranks at or above the main model (a Fable main model takes no Opus advisor);
+- the advisor ranks at or above the main model (a Fable main model takes a Fable advisor, but no Opus advisor);
 - feature flags are fetched (DISABLE_TELEMETRY and similar variables turn the fetch off);
 - CLAUDE_CODE_DISABLE_ADVISOR_TOOL is not set;
-- for Fable on some plans, the person accepted the usage-credits consent with /model fable.
+- for Fable on the plans that bill it to usage credits, the person accepted Claude Code's one-time consent.
 Claude Code does not report these cases outside its own screen, so problems() checks the inputs it can read and
-names each case. Tether never accepts the Fable consent: that bills usage credits, and it is the person's choice."""
+names each case it has evidence for. It has no evidence for the consent: a plan that includes Fable writes no consent
+record, so a missing record does not mean the advisor stays off. On a plan that needs the consent, Claude Code does
+not ask while Fable is only the advisor: it sends requests without the advisor and shows its own notice in the tab,
+which points to /model fable (code.claude.com/docs/en/advisor#fable-advisor-and-usage-credits). So an empty problems()
+list means "set, no known problem", not "attached". Tether never accepts the consent. The Fable summary names
+/model fable as the way to give it, and says what else that command does: it makes Fable the main model and saves it
+as the default for new sessions."""
 import json
 import os
 import re
@@ -34,14 +40,17 @@ MODELS = (
     ('off', 'Off', 'Tether adds no advisor.'),
     ('opus', 'Opus', 'Claude consults Opus before it commits to an approach, when an error repeats, and before it '
      'reports a task done. Advisor calls count toward your plan limits.'),
-    ('fable', 'Fable', 'Claude consults Fable at the same points. On some plans, Fable advisor calls bill to usage '
-     'credits, and Claude Code first needs your one-time consent from /model fable.'),
+    ('fable', 'Fable', 'Claude consults Fable at the same points. On some plans, Fable calls bill to usage credits. On '
+     'those plans, Claude Code leaves the Fable advisor off until you give a one-time consent with /model fable. '
+     '/model fable also makes Fable the main model for new sessions; switch back with /model opus. Tether never '
+     'accepts the consent for you.'),
 )
 NAMES = {key: name for key, name, _ in MODELS}
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
 # Families from weakest to strongest for the advisor role (code.claude.com/docs/en/advisor#choose-an-advisor-model).
-# Opus 5 and 5.5 accept Fable or Opus 5+; a Fable main model accepts only Fable. The aliases resolve to the newest
-# version of each family, so only the family decides whether the main model outranks the advisor.
+# Opus 5 and 5.5 accept Fable or Opus 5+; a Fable main model accepts only Fable (table row "Fable 5.2 | Fable 5.2",
+# and the pairing "Fable main + Fable advisor"). The aliases resolve to the newest version of each family, so only
+# the family decides whether the main model outranks the advisor: a main model of the same family never does.
 RANK = ('haiku', 'sonnet', 'opus', 'fable')
 # Variables that turn the advisor off, or turn off the feature-flag fetch it needs
 # (code.claude.com/docs/en/env-vars#features-that-need-feature-flag-fetching).
@@ -154,23 +163,6 @@ def user_setting(home=None):
     return value if isinstance(value, str) else ''
 
 
-def fable_consent(home=None):
-    """True when ~/.claude.json records a Fable usage-credits consent for the active account that holds in every
-    consent mode (fableOverageConsentV2, Claude Code 2.1.326). False otherwise, which means "may not attach": a plan
-    that includes Fable needs no consent."""
-    config = _json((Path(home) if home else paths.HOME) / '.claude.json')
-    data, account = config.get('fableOverageConsentV2'), config.get('oauthAccount')
-    if not isinstance(data, dict) or not isinstance(account, dict):
-        return False
-    # Claude Code keys the consent by the active organization or account. A server feature flag that Tether cannot
-    # read decides whether it needs the key with the ":2" suffix. A consent given in that mode writes both keys, so
-    # only a key pair holds in either mode; a plain key alone may be from an older consent.
-    owners = [value for value in (account.get('organizationUuid'),
-                                  f"acct:{account['accountUuid']}" if account.get('accountUuid') else None)
-              if isinstance(value, str) and value]
-    return any(data.get(owner) is True and data.get(owner + ':2') is True for owner in owners)
-
-
 def family(model):
     """'haiku', 'sonnet', 'opus' or 'fable' for an alias, a model id or a display name; '' when unknown."""
     text = str(model or '').lower()
@@ -199,15 +191,12 @@ def env_problems(env=os.environ, home=None):
 
 
 def problems(model, env=os.environ, home=None, main_model='', started=None):
-    """[{'code', 'text'}] for each known reason the advisor will not attach. Empty for Off.
+    """[{'code', 'text'}] for each reason Tether has evidence that the advisor will not attach. Empty for Off.
+    The Fable usage-credits consent is not one: Tether cannot tell whether the plan needs it (see the module text).
     started: the environment problems a running tab recorded at launch; None checks the given env now."""
     if model == 'off':
         return []
     out = list(env_problems(env, home) if started is None else started)
-    if model == 'fable' and not fable_consent(home):
-        out.append({'code': 'consent', 'text': 'Claude Code has no record of a current Fable usage-credits consent for this account. If your '
-                                               'plan needs it, Claude Code does not attach Fable. To review it, run '
-                                               '/model fable in a Claude tab.'})
     if main_model and outranked(model, main_model):
         out.append({'code': 'outranked', 'text': f'The main model ({main_model}) ranks above {NAMES[model]}, so Claude '
                                                  'Code does not attach the advisor to it.'})

@@ -427,7 +427,7 @@ def hook_output(data, env=os.environ, tmux=codex_level._tmux, agent='claude'):
         try:
             shown = tmux('display-message', '-p', '-t', pane, '#{@advisor}')
             started = claude_advisor.tab_state(shown.stdout.strip()) if not shown.returncode else None
-            # Only launch problems rule it out here: the main model and the Fable consent can change in the tab.
+            # Only launch problems rule it out here: the main model can change in the tab.
             blocked = started and any(item['code'] in ('disabled', 'no-flags') for item in started['problems'])
             tab_advisor = started['model'] if started and started['source'] == 'tether' and not blocked else ''
         except (OSError, subprocess.SubprocessError):

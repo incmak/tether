@@ -522,7 +522,8 @@ class WrapperTests(unittest.TestCase):
             fake.chmod(0o755)
         self.socket = str(self.temp / 'tmux.sock')
         self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE', 'TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL')}
-        self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh')
+        self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh',
+                        MOBILE_TMUX_CONFIG=str(self.temp / 'config'))  # not the developer's own advisor choice
         (self.temp / 'codex').mkdir()
         (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
         self.tmux('new-session', '-d', '-s', 'proj', '-c', str(self.temp),  # no real .codex folder above it
