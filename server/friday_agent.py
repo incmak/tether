@@ -342,8 +342,10 @@ def action_ack(name, args, result):
     args = args if isinstance(args, dict) else {}
     chat = field('chat')
     to_chat = ' to ' + chat if chat else ''
+    # 'queued': the agent was busy; the prompt waits in its input queue, so "sent" would overclaim.
+    queued = field('delivery') == 'queued'
     if name == 'send_to_chat':
-        return f'Sent{to_chat}.'
+        return f'Queued for {chat}. It is busy.' if queued and chat else 'Queued.' if queued else f'Sent{to_chat}.'
     if name == 'answer_approval':
         decision = field('decision') or args.get('decision')
         if decision in ('approve', 'deny'):
@@ -361,6 +363,8 @@ def action_ack(name, args, result):
         return f'Added {item_id}.' if item_id else 'Added.'
     if name == 'backlog_send':
         item = field('item')
+        if queued:
+            return f'Queued {item} for {chat}. It is busy.' if item and chat else 'Queued.'
         sent = 'Sent ' + item if item else 'Sent'
         return f'{sent}{to_chat}.'
     if name == 'reminder_add':

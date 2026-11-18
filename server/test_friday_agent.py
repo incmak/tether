@@ -291,6 +291,16 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(name=name, result=result):
                 self.assertEqual(friday.action_ack(name, args, dict(result, ok=True)), expected)
 
+    def test_action_ack_says_queued_for_a_busy_chat(self):
+        ack = friday.action_ack
+        self.assertEqual(ack('send_to_chat', {}, {'ok': True, 'chat': 'Docs', 'delivery': 'queued'}),
+                         'Queued for Docs. It is busy.')
+        self.assertEqual(ack('send_to_chat', {}, {'ok': True, 'delivery': 'queued'}), 'Queued.')
+        self.assertEqual(ack('send_to_chat', {}, {'ok': True, 'chat': 'Docs', 'delivery': 'submitted'}), 'Sent to Docs.')
+        self.assertEqual(ack('backlog_send', {}, {'ok': True, 'chat': 'Docs', 'item': 'B12', 'delivery': 'queued'}),
+                         'Queued B12 for Docs. It is busy.')
+        self.assertEqual(ack('backlog_send', {}, {'ok': True, 'chat': 'Docs', 'item': 'B12'}), 'Sent B12 to Docs.')
+
     def test_action_ack_requires_confirmed_success(self):
         for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
                        {'question': 'Which chat?', 'choices': ['Docs', 'Tests']},
