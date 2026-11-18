@@ -39,6 +39,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.turn_source = None
         self.scope = None
         self.commit = None
+        self.fresh = None
         self.reply = Mock(return_value='I fixed it.')
         self.add()
 
@@ -54,7 +55,7 @@ class ReviewLinksTests(unittest.TestCase):
         review_links.observe(entries if entries is not None else [self.worker, self.reviewer],
                              self.status, self.send, self.reply, alert=self.alert, work_mark=self.work_mark,
                              review_reply=self.review_reply, turn_source=self.turn_source,
-                             scope=self.scope, commit=self.commit)
+                             scope=self.scope, commit=self.commit, fresh=self.fresh)
 
     def test_idle_review_forwards_anchored_reply_before_unrelated_turn(self):
         self.review_reply = server.review_reply
@@ -1055,6 +1056,7 @@ class ReviewLinksTests(unittest.TestCase):
 
     def finish_review(self, reply='Needs a regression test.'):
         self.reply.return_value = reply
+        self.anchored_reply = reply
         self.observe(**{'%12': 'Working'})
         self.observe(**{'%12': 'Idle'})
 
@@ -1899,6 +1901,9 @@ class ReviewLinksTests(unittest.TestCase):
         self.head = commit or self.HASH
         self.scope = lambda entry: {'commit': self.head, 'dirty': dirty, 'folder': '/work/my tree', 'rules': rules}
         self.commit = lambda entry: self.head
+        # As in the server: the reviewer's reply is read at the transcript anchor of the request.
+        self.anchored_reply = None
+        self.review_reply = lambda entry, request_id: self.anchored_reply
 
     def test_request_names_the_commit_the_rules_and_the_approval_form(self):
         self.bind()
@@ -1932,14 +1937,31 @@ class ReviewLinksTests(unittest.TestCase):
                 self.add()
                 self.send.reset_mock()
                 self.scope = scope
-                self.commit = Mock()
+                self.commit = Mock(return_value=None)
                 self.request_review()
                 self.assertNotIn('Commit under review', self.send.call_args.args[1])
                 self.assertNotIn('review_commit', self.links()[0])
-                self.finish_review(f'APPROVED {self.NEXT[:12]}')
+                self.finish_review('APPROVED')
                 self.assertIn('Approved by the reviewer tab (%12):', self.send.call_args.args[1])
                 self.assertNotIn('approved_commit', self.links()[0])
-                self.commit.assert_not_called()
+                self.commit.assert_not_called()  # no commit named, none to compare
+
+    def test_unbound_approval_that_names_a_commit_the_tab_is_not_at_is_not_forwarded(self):
+        # Review round 2, finding 1: the request was not bound, git answers again, the reply approves an old commit.
+        self.scope = lambda entry: None
+        self.head = self.NEXT
+        self.commit = lambda entry: self.head
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(self.links()[0]['stale_commit'], self.HASH[:12])
+        self.observe()
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Review id: {self.links()[0]["request_id"]}. Your approval of {self.HASH[:12]} was not '
+                      'forwarded: this tab is not at that commit. Its last reply:', self.send.call_args.args[1])
+        self.finish_review(f'APPROVED {self.NEXT[:12]}')  # names the commit the tab is at: forwarded, not recorded
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertNotIn('approved_commit', self.links()[0])
 
     def test_approval_of_the_current_clean_commit_is_forwarded_and_recorded(self):
         for reply in (f'APPROVED {self.HASH[:12]}', f'APPROVED `{self.HASH}`: fine',
@@ -2041,8 +2063,9 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.send.call_args.args[0], self.reviewer)
                 self.assertIn(note + 'Its last reply:', self.send.call_args.args[1])
 
-    def test_latest_reply_of_a_stalled_bound_review_needs_the_commit_too(self):
-        # Review round 1, finding 3: "Send latest reply" has no transcript anchor. The named commit ties it to the review.
+    def test_latest_reply_of_a_stalled_bound_review_needs_the_commit_and_is_never_commit_proof(self):
+        # Review round 1, finding 3 and round 2, finding 2: "Send latest reply" has no transcript anchor. The reply
+        # may answer an earlier request (for example a review of the same commit with uncommitted changes).
         for reply, forwarded in (('APPROVED', False), (f'APPROVED {self.HASH[:12]}', True)):
             with self.subTest(reply=reply):
                 self.add()
@@ -2050,16 +2073,18 @@ class ReviewLinksTests(unittest.TestCase):
                 self.reply.return_value = reply
                 request_id = self.stall_review()
                 self.assertEqual(self.links()[0]['review_commit'], self.HASH)
+                self.assertTrue(self.links()[0]['review_clean'])
                 review_links.resume_stalled('%13', '%12', request_id, 'latest',
                                             last_reply=self.reply, reviewer_entry=self.reviewer)
                 self.send.reset_mock()
                 self.observe(**{'%12': 'Idle'})
+                self.assertNotIn('approved_commit', self.links()[0])
+                self.assertEqual(review_links.approved_commits(), {})
                 if forwarded:
                     self.assertEqual(self.send.call_args.args[0], self.worker)
-                    self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
+                    self.assertIn(f'for commit {self.HASH[:12]}:', self.send.call_args.args[1])
                 else:
                     self.send.assert_not_called()
-                    self.assertNotIn('approved_commit', self.links()[0])
                     self.assertEqual(self.links()[0]['stale_commit'], '')
 
     def test_bound_approval_waits_until_a_working_claude_worker_is_idle(self):
@@ -2068,7 +2093,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.bind()
         self.request_review()
         self.commit = Mock(side_effect=lambda entry: self.head)
-        self.reply.return_value = f'APPROVED {self.HASH[:12]}'
+        self.reply.return_value = self.anchored_reply = f'APPROVED {self.HASH[:12]}'
         self.observe(**{'%12': 'Working'})
         self.observe(**{'%12': 'Idle', '%13': 'Working'})
         self.observe()
@@ -2082,6 +2107,33 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertNotIn('approved_commit', self.links()[0])
         self.observe()
         self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+
+    def test_bound_approval_needs_a_fresh_idle_state_not_the_cached_one(self):
+        # Review round 2, finding 3: the cached state said Idle while the tab was working.
+        self.worker['agent'] = 'claude'
+        self.bind()
+        self.request_review()
+        live = {'state': 'Working'}
+        self.fresh = Mock(side_effect=lambda entry: dict(live))
+        self.commit = Mock(side_effect=lambda entry: self.head)
+        self.finish_review(f'APPROVED {self.HASH[:12]}')  # the cached state of the worker is Idle
+        self.observe()
+        self.assertEqual(self.send.call_count, 1)
+        self.commit.assert_not_called()
+        self.fresh.assert_called_with(self.worker)
+        self.assertTrue(self.links()[0]['awaiting'])
+        self.fresh = Mock(side_effect=OSError('pane closed'))  # an unreadable state is not Idle
+        self.observe()
+        self.assertEqual(self.send.call_count, 1)
+        live['state'] = 'Idle'
+        order = []
+        self.fresh = Mock(side_effect=lambda entry: order.append('state') or dict(live))
+        self.commit = Mock(side_effect=lambda entry: order.append('commit') or self.head)
+        self.send.side_effect = lambda *args: order.append('send')
+        self.observe()
+        self.assertEqual(order, ['state', 'commit', 'send'])  # the commit is read after the fresh state
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
 
     def test_unbound_approval_still_reaches_a_working_claude_worker(self):
         self.worker['agent'] = 'claude'
@@ -2111,28 +2163,42 @@ class ReviewLinksTests(unittest.TestCase):
         self.finish_review(f'APPROVED {self.HASH[:12]}')  # the reviewer repeats the old approval
         self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))
 
-    def test_commit_unreadable_for_long_sends_an_unbound_request_that_says_so(self):
+    def test_commit_unreadable_for_long_pauses_the_review_and_asks_the_user(self):
+        # Review round 2, finding 1: a timeout cannot show that an approval is for the current commit.
         self.bind()
         self.request_review()
-        self.finish_review('The lock is not released.')
+        self.head = self.NEXT
+        self.finish_review(f'APPROVED {self.HASH[:12]}')  # stale: a new request is due
         self.scope = lambda entry: None
         self.send.reset_mock()
-        self.observe(**{'%13': 'Working'})
-        self.observe(**{'%13': 'Idle'})
-        for _ in range(review_links.SCOPE_TICKS - 2):
+        for _ in range(review_links.SCOPE_TICKS - 1):
             self.observe()
         self.send.assert_not_called()
+        self.alert.assert_not_called()
         self.observe()
-        text = self.send.call_args.args[1]
-        self.assertIn('Tether could not read the commit in the folder of that tab, so this review is not bound to a '
-                      'commit. Its last reply:', text)
-        self.assertNotIn('Commit under review', text)
+        self.send.assert_not_called()  # no unbound request went out
         link = self.links()[0]
-        self.assertNotIn('review_commit', link)
-        self.assertNotIn('scope_ticks', link)
-        self.finish_review('APPROVED')
-        self.assertIn('Approved by the reviewer tab (%12):', self.send.call_args.args[1])
-        self.assertNotIn('approved_commit', self.links()[0])
+        self.assertTrue(link['paused'])
+        for key in ('review_commit', 'review_clean', 'stale_commit', 'scope_ticks'):
+            self.assertNotIn(key, link)
+        self.alert.assert_called_once_with('Review needs you',
+            '“Fix the bug”: Tether cannot read the commit in the folder of that tab, so it cannot tie the review '
+            'to a commit. Answer in that tab to restart reviews.', '%13')
+        self.observe()
+        self.observe(**{'%13': 'Working'})  # a background turn does not restart
+        self.turn_source = lambda entry: 'background'
+        self.observe(**{'%13': 'Idle'})
+        self.send.assert_not_called()
+        self.turn_source = lambda entry: 'user'  # the user answers: reviews restart, without the old binding
+        self.request_review()
+        self.send.assert_called_once()
+        self.assertNotIn('Commit under review', self.send.call_args.args[1])
+        self.assertNotIn('unreadable', self.links()[0])
+        self.assertNotIn('paused', self.links()[0])
+        self.commit = lambda entry: self.NEXT  # git answers again
+        self.finish_review(f'APPROVED {self.HASH[:12]}')  # the reviewer repeats the old approval
+        self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))
+        self.assertEqual(self.links()[0]['stale_commit'], self.HASH[:12])
 
     def test_store_change_during_a_step_keeps_the_approval_state_and_sends_once(self):
         # Review round 1, finding 5: agent_prompt() ran during the commit read; the step's result was dropped and
@@ -2154,13 +2220,48 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe()
         self.assertEqual(self.send.call_count, 2)
 
-    def test_merge_keeps_both_changes_and_refuses_a_change_of_the_same_field(self):
-        old = {'worker': '%1', 'awaiting': True, 'request_id': 'a'}
-        updated = {'worker': '%1', 'awaiting': False, 'rounds': 1}
-        self.assertEqual(review_links._merge(old, updated, {**old, 'agent_prompt': 5}),
-                         {'worker': '%1', 'awaiting': False, 'rounds': 1, 'agent_prompt': 5})
-        self.assertIsNone(review_links._merge(old, updated, {**old, 'awaiting': False}))
-        self.assertIsNone(review_links._merge(old, updated, {'worker': '%1', 'awaiting': True}))  # request_id removed by both
+    def test_merge_keeps_the_steps_fields_and_a_newer_agent_prompt(self):
+        old = {'worker': '%1', 'awaiting': True, 'request_id': 'a', 'agent_prompt': 1}
+        updated = {'worker': '%1', 'awaiting': False, 'rounds': 1}  # the step also consumed agent_prompt
+        self.assertEqual(review_links._merge(old, updated, {**old, 'stalled': 'x'}),
+                         {'worker': '%1', 'awaiting': False, 'rounds': 1, 'stalled': 'x'})
+        # The same field changed by both: the step's value records a send that happened, so it wins.
+        self.assertEqual(review_links._merge(old, updated, {**old, 'awaiting': 'other', 'request_id': 'b'}),
+                         {'worker': '%1', 'awaiting': False, 'rounds': 1})
+        # A newer agent_prompt mark is kept: it belongs to a prompt sent after the step read the link.
+        self.assertEqual(review_links._merge(old, updated, {**old, 'agent_prompt': 9})['agent_prompt'], 9)
+
+    def test_agent_prompt_refreshed_during_a_step_does_not_send_the_approval_twice(self):
+        # Review round 2, finding 4: the step consumes agent_prompt at the end of the worker's turn; another agent
+        # refreshed it during the commit read. Both changed the same field, and the step's result was dropped.
+        self.bind()
+        review_links.agent_prompt('%13')
+        self.request_review()
+        def read_commit(entry):
+            review_links.agent_prompt('%13')
+            return self.HASH
+        self.commit = read_commit
+        with patch.object(review_links.time, 'time', return_value=time.time() + 5):
+            self.finish_review(f'APPROVED {self.HASH[:12]}')
+            self.commit = lambda entry: self.HASH
+            self.observe()
+            self.observe()
+        self.assertEqual([call.args[0] for call in self.send.call_args_list], [self.reviewer, self.worker])
+        self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
+        self.assertFalse(self.links()[0]['awaiting'])
+
+    def test_link_removed_during_the_commit_read_sends_nothing(self):
+        # Review round 2, finding 4: the link was removed during the read and the approval still went out.
+        self.bind()
+        self.request_review()
+        def read_commit(entry):
+            review_links.remove('%13', '%12')
+            return self.HASH
+        self.commit = read_commit
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.observe()
+        self.assertEqual(self.send.call_count, 1)  # only the request
+        self.assertEqual(self.links(), [])
 
     def test_a_replaced_link_is_not_merged_with_the_step_of_the_old_one(self):
         self.bind()
@@ -2316,7 +2417,7 @@ class ServerWatcherTests(unittest.TestCase):
         observe.assert_called_with(entries, server.shared_status, server.review_send, server.last_reply,
                                    alert=server.review_alert, work_mark=server.review_work_mark,
                                    review_reply=server.review_reply, turn_source=server.review_turn_source,
-                scope=server.review_scope_of, commit=server.review_commit)
+                scope=server.review_scope_of, commit=server.review_commit, fresh=server.fresh_status)
 
     def test_session_discovery_exception_skips_watcher_and_loop_recovers(self):
         entries = [{'id': '%12'}]
@@ -2330,7 +2431,7 @@ class ServerWatcherTests(unittest.TestCase):
         observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
                                         review_reply=server.review_reply, turn_source=server.review_turn_source,
-                scope=server.review_scope_of, commit=server.review_commit)
+                scope=server.review_scope_of, commit=server.review_commit, fresh=server.fresh_status)
         self.assertEqual([call.args for call in clock.call_args_list], [(2,), (2,)])
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 

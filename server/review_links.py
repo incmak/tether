@@ -26,7 +26,7 @@ MAX_ROUNDS = 3
 # that did not match the commit the tab was at.
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
-SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound goes out unbound
+SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
 GRACE = 30
 LOSS_TICKS = 30
@@ -193,21 +193,32 @@ def _named_commit(reply):
 
 
 def _merge(old, updated, stored):
-    """`stored` with the step's changes (old -> updated), or None when both changed the same field. Another writer
-    (agent_prompt, a stalled-review action) may change a link while a step runs; dropping the step's result would
-    send the same message again on the next tick."""
+    """`stored` with the step's changes (old -> updated). Another writer (agent_prompt, a stalled-review action) may
+    change a link while a step runs. The step's fields win: they record a message that was already sent, and a lost
+    record sends it again on the next tick. A newer agent_prompt mark is the one field the other writer keeps."""
     missing = object()
-    changed = {key for key in set(old) | set(updated) if old.get(key, missing) != updated.get(key, missing)}
-    theirs = {key for key in set(old) | set(stored) if old.get(key, missing) != stored.get(key, missing)}
-    if changed & theirs:
-        return None
     merged = dict(stored)
-    for key in changed:
+    for key in set(old) | set(updated):
+        if old.get(key, missing) == updated.get(key, missing):
+            continue
+        if key == 'agent_prompt' and stored.get(key, missing) != old.get(key, missing):
+            continue
         if key in updated:
             merged[key] = updated[key]
         else:
             merged.pop(key, None)
     return merged
+
+
+def _same(link, stored):
+    return isinstance(stored, dict) and all(stored.get(key) == link.get(key) for key in ('worker', 'reviewer', 'created'))
+
+
+def _linked(link):
+    """The link is still in the store. A slow read may run between the step's start and a send; a link that was
+    removed or replaced in that time must not send."""
+    with _lock:
+        return any(_same(link, stored) for stored in _read())
 
 
 def _call(callback, entry):
@@ -222,7 +233,7 @@ def _call(callback, entry):
 
 def _send_worker(link, worker, text, state, send, clear, feedback_sent):
     if not (state == 'Idle' or state == 'Working' and worker.get('agent') == 'claude') \
-            or not clear(link['worker']):
+            or not clear(link['worker']) or not _linked(link):
         return False
     try:
         send(worker, text, state)
@@ -240,7 +251,7 @@ def _send_worker(link, worker, text, state, send, clear, feedback_sent):
 
 
 def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sent, work_mark, review_reply,
-          stalled_replies, turn_source=None, escalations=None, scope=None, commit=None):
+          stalled_replies, turn_source=None, escalations=None, scope=None, commit=None, fresh=None):
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
     if link['reviewer_thread'] is None:
@@ -284,6 +295,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             # The new task keeps only the failed reviews of its own turn. A limit reached in this turn alone stays.
             if start.get('paused') or not _at_round_limit(link):
                 link.pop('paused', None)
+                link.pop('unreadable', None)
     if state == 'Idle' and link.pop('worker_busy_send', False):
         return link
     feedback = _feedback_turns.get(link['worker'])
@@ -336,21 +348,30 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 reply = raw.strip()
                 approved = reply.upper().startswith('APPROVED')
                 bound = link.get('review_commit') if approved else None
-                if bound and state != 'Idle':
-                    # A working tab can still commit. The approval waits until the tab is idle and its commit is read.
-                    return link
-                current = _call(commit, worker) if bound else None
-                named = _named_commit(reply) if bound else None
+                named = _named_commit(reply) if approved else None
+                if bound or named:
+                    # A working tab can still commit. The approval waits until the tab is idle, by a fresh read of
+                    # its state and not the cached one, and its commit is read after that.
+                    live = _call(fresh, worker) if fresh is not None else {'state': state}
+                    if state != 'Idle' or not isinstance(live, dict) or live.get('state') != 'Idle':
+                        return link
+                current = _call(commit, worker) if bound or named else None
+                current = current if isinstance(current, str) else None
                 misnamed = bool(bound) and not (named and bound.startswith(named))
                 if bound and not misnamed and current is None and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
                     # The worker's commit is unreadable now (a slow git, a folder that moved). Ask again next tick.
                     link['verify_ticks'] = link.get('verify_ticks', 0) + 1
                     return link
+                # stale: the commit that the approval is for, when the tab is not at it ('' = it names none).
+                stale = None
                 if bound and (current != bound or misnamed):
-                    # The approval does not name the commit under review, or the tab is not at that commit. It is not
-                    # an approval of the current work and not a finding either: ask for a review of the current
+                    stale = (named or '') if misnamed else bound
+                elif not bound and named and current and not current.startswith(named):
+                    stale = named  # no binding (no readable commit at the request), but the reply names a commit
+                if stale is not None:
+                    # Not an approval of the current work and not a finding either: ask for a review of the current
                     # commit. The count stops a loop.
-                    link['stale_commit'] = (named or '') if misnamed else bound
+                    link['stale_commit'] = stale
                     link['stale_rounds'] = link.get('stale_rounds', 0) + 1
                     link['seen_working'] = True
                     link['awaiting'] = False
@@ -361,9 +382,11 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                             f'{_bounded_reply(reply, reviewer)}\n\nThe review is complete. Do the next step your instructions give '
                             'for an approved review, then stop.')
                     if _send_worker(link, worker, text, state, send, clear, feedback_sent):
-                        for key in (*COUNTS, 'paused', 'stale_commit', 'approved_commit', 'approved_at'):
+                        for key in (*COUNTS, 'paused', 'unreadable', 'stale_commit', 'approved_commit', 'approved_at'):
                             link.pop(key, None)
-                        if bound and link.get('review_clean'):
+                        # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
+                        # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
+                        if bound and link.get('review_clean') and anchored:
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
                         link['awaiting'] = False
@@ -425,27 +448,31 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             request_id = secrets.token_hex(4)
             target = _call(scope, worker)
             target = target if isinstance(target, dict) and isinstance(target.get('commit'), str) else None
-            was_bound = 'review_commit' in link or 'stale_commit' in link
+            was_bound = 'review_commit' in link
             if target is None and was_bound and link.get('scope_ticks', 0) + 1 < SCOPE_TICKS:
                 # The last review of this tab was bound to a commit. One failed read must not remove the binding.
                 link['scope_ticks'] = link.get('scope_ticks', 0) + 1
                 return link
-            binding = ''
             if target is None and was_bound:
-                binding = ('Tether could not read the commit in the folder of that tab, so this review is not bound '
-                           'to a commit. ')
+                # Still unreadable. A timeout does not show that an approval is for the current commit: the review
+                # stops and the user decides. The user's next prompt restarts reviews without the old binding.
+                for key in ('review_commit', 'review_clean', 'stale_commit', 'scope_ticks'):
+                    link.pop(key, None)
+                link.update(paused=True, unreadable=True, seen_working=False)
+                return link
+            stale = link.get('stale_commit')
+            binding = '' if not isinstance(stale, str) else (
+                f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
+                else 'Your approval was not forwarded: it did not name the commit right after APPROVED. ')
             if target is not None:
                 folder = shlex.quote(str(target.get('folder') or ''))
-                stale = link.get('stale_commit')
                 binding = (
                     f"Commit under review: {target['commit']} in {folder}"
                     + (' plus uncommitted changes' if target.get('dirty') else '') + '. '
                     + (f'Read the review rules first: `git -C {folder} show origin/main:REVIEW.md`. '
                        if target.get('rules') else '')
                     + f"An approval counts only for this commit: start it with `APPROVED {target['commit'][:12]}`. "
-                    + ('' if not isinstance(stale, str) else
-                       f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
-                       else 'Your approval was not forwarded: it did not name the commit right after APPROVED. '))
+                    + binding)
             text = (f"[Tether review] The {agent} tab “{link['name']}” ({link['worker']}) finished a turn. "
                     'Review its work: check the changes and the claims, then list what is wrong or missing. '
                     'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. '
@@ -487,7 +514,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
 
 
 def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None, turn_source=None,
-            scope=None, commit=None):
+            scope=None, commit=None, fresh=None):
     """Callbacks run outside the store lock: send takes SEND_LOCK, while add already holds it."""
     try:
         if not any(isinstance(entry.get('id'), str) and entry['id'].startswith('%') for entry in entries):
@@ -516,7 +543,7 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             try:
                 copy = dict(link)
                 updated = _step(copy, by_pane, status, send, last_reply, awaiting, clear, feedback_sent,
-                                work_mark, review_reply, stalled_replies, turn_source, escalations, scope, commit)
+                                work_mark, review_reply, stalled_replies, turn_source, escalations, scope, commit, fresh)
             except Exception:  # a malformed link or one bad pane must not stop other reviews
                 continue
             if updated != link:
@@ -539,10 +566,9 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     applied.append((old, updated, reason))
                 elif updated is not None:
                     # The same link (same pair and creation time) changed during a callback: keep both changes.
-                    same = [index for index, stored in enumerate(current) if isinstance(stored, dict) and all(
-                        stored.get(key) == old.get(key) for key in ('worker', 'reviewer', 'created'))]
-                    merged = _merge(old, updated, current[same[0]]) if len(same) == 1 else None
-                    if merged is not None:
+                    same = [index for index, stored in enumerate(current) if _same(old, stored)]
+                    if len(same) == 1:
+                        merged = _merge(old, updated, current[same[0]])
                         current[same[0]] = merged
                         applied.append((old, merged, reason))
             if applied:
@@ -563,6 +589,10 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     title = 'Review needs you'
                     body = (f'“{old["name"]}”: the reviewer still found blocking problems after {MAX_ROUNDS} rounds. '
                             f'Answer in that tab to restart reviews. Open findings: “{preview}”')
+                elif updated.get('unreadable'):
+                    title = 'Review needs you'
+                    body = (f'“{old["name"]}”: Tether cannot read the commit in the folder of that tab, so it cannot '
+                            'tie the review to a commit. Answer in that tab to restart reviews.')
                 elif updated.get('stale_rounds', 0) >= MAX_ROUNDS:
                     title = 'Review needs you'
                     body = (f'“{old["name"]}”: {MAX_ROUNDS} approvals in a row did not match the commit the tab '

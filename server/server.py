@@ -272,7 +272,8 @@ def monitor_notices():
                 continue
         review_links.observe(entries, shared_status, review_send, last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
-                             turn_source=review_turn_source, scope=review_scope_of, commit=review_commit)
+                             turn_source=review_turn_source, scope=review_scope_of, commit=review_commit,
+                             fresh=fresh_status)
         try:
             attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()
