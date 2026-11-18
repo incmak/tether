@@ -46,6 +46,8 @@ def arguments(argv):
     stop = actions.add_parser('stop')
     stop.add_argument('--worker', required=True)
     stop.add_argument('--reviewer')
+    escalate = actions.add_parser('escalate', help='hand a helper tab’s paused review to Mak')
+    escalate.add_argument('--pane', required=True, help='pane of the helper tab with a review waiting on you')
     link = actions.add_parser('link')
     link.add_argument('--worker', required=True)
     link.add_argument('--reviewer', required=True)
@@ -76,6 +78,8 @@ def arguments(argv):
         body['worker'] = args.worker
         if args.reviewer is not None:
             body['reviewer'] = args.reviewer
+    elif args.action == 'escalate':
+        body['pane'] = args.pane
     elif args.action == 'send':
         message = sys.stdin.read() if args.text == '-' else args.text
         if not message.strip():

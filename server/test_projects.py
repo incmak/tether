@@ -103,6 +103,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn(str(Path(projects.__file__).with_name('agent_tab_cli.py')), text)
         for option in ('--review-it', '--reviews-me', '--agent claude|codex', '--name NAME',
                        '--cwd DIR', '--worktree BRANCH', '--context', 'stop --worker %N [--reviewer %N]', '`list`',
+                       '`escalate --pane %N` sends a helper tab\'s paused review to Mak.',
                        '`link --worker %N --reviewer %N` makes one open tab review another.', 'Start your review reply with APPROVED when nothing is wrong.',
                        'send --pane %N "text"', 'wait --pane %N [--timeout SECONDS]',
                        'max 600', '3 timeout (still working)', '4 gone', '5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost).'):

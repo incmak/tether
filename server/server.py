@@ -103,6 +103,7 @@ import work_feeds
 import work_jira
 import groups
 import helper_close
+import helper_tabs
 import groups_api
 import undo
 import undo_api
@@ -224,6 +225,28 @@ def review_turn_source(entry):
     return notification_priority.turn_source(entry.get('agent'), notification_records(entry))
 
 
+def review_level(entry):
+    try:
+        shown = codex_level._tmux('display-message', '-p', '-t', entry['id'], '#{@project}')
+        value = shown.stdout.strip()
+        pid = value if shown.returncode == 0 and autonomy.PROJECT_ID.fullmatch(value) else None
+        return autonomy.resolve(pid)['level']
+    except Exception:
+        return 0
+
+
+def review_parent(entry, entries):
+    try:
+        exists, record = helper_tabs.load(entry['id'], subprocess.run)
+        if exists and record is not None:
+            owner = helper_tabs._helper(entries, record['owner_pane'])
+            if owner is not None and record.get('owner_thread') in (None, owner.get('thread')):
+                return owner['id'], owner.get('thread')
+    except Exception:
+        pass
+    return None
+
+
 def review_work_mark(entry):
     cwd = entry.get('cwd')
     if not cwd:
@@ -258,7 +281,8 @@ def monitor_notices():
                 continue
         review_links.observe(entries, shared_status, review_send, last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
-                             turn_source=review_turn_source)
+                             turn_source=review_turn_source, level=review_level,
+                             parent=lambda entry: review_parent(entry, entries))
         try:
             attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()

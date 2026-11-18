@@ -186,7 +186,7 @@ class HelperTests(unittest.TestCase):
             mark.assert_not_called()
             self.reset_record()
             self.assertEqual(self.request('send')[0], 200)
-            mark.assert_called_once_with('%13')
+            mark.assert_called_once_with('%13', sender='%12', sender_thread=OWNER)
 
     def test_send_checks_helper_availability_and_prompts(self):
         for agent in ('claude', 'codex'):
