@@ -18,6 +18,7 @@ import threading
 import time
 import unicodedata
 
+import agents
 import helper_tabs
 import paths
 from terminal_input import DraftError
@@ -49,6 +50,7 @@ LOSS_TICKS = 30
 START_WAIT = 300
 AGENT_PROMPT_TTL = 600  # an agent prompt that started no turn in 10 minutes no longer blocks Mak's restart
 SEND_GAP = 6
+TRANSCRIPT_TAIL_BYTES = 256 * 1024
 UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _lock = threading.Lock()
 _last_sent = {}
@@ -1057,6 +1059,39 @@ def _step_parent(cap, entries, status, send, clear):
     return None
 
 
+def _turn_ended_on_limit(worker):
+    """Detect a terminal Claude limit or login error from the bounded transcript tail."""
+    path = worker.get('transcript')
+    if worker.get('agent') != 'claude' or not isinstance(path, str) or not path:
+        return False
+    try:
+        with open(path, 'rb') as stream:
+            end = stream.seek(0, os.SEEK_END)
+            start = max(0, end - TRANSCRIPT_TAIL_BYTES)
+            stream.seek(start)
+            data = stream.read(end - start)
+        if start:
+            data = data.partition(b'\n')[2]  # The first line can start inside a record.
+        last_assistant = {}
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                return False
+            if record.get('isSidechain') or record.get('isMeta'):
+                continue
+            if record.get('type') == 'assistant':
+                last_assistant = record
+            elif agents.person_prompt(record) or (
+                    record.get('type') == 'user' and isinstance(record.get('scheduledTaskId'), str)):
+                last_assistant = {}
+        return (last_assistant.get('isApiErrorMessage') is True
+                and last_assistant.get('error') in ('rate_limit', 'authentication_failed'))
+    except (OSError, ValueError, AttributeError, TypeError, RecursionError):
+        return False
+
+
 def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clear, delivery,
           work_mark, review_reply, stalled_replies, turn_source, sources, level, parent, reply_effect,
           scope=None, commit=None, fresh=None):
@@ -1309,6 +1344,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if not committed:
                 link['seen_working'] = False
                 return link
+        if _turn_ended_on_limit(worker):
+            link['seen_working'] = False
+            return link
         if _at_cap(cap) or cap.get('unreadable'):
             _pause_at_limit(cap, link)
             link['seen_working'] = False
