@@ -1,0 +1,40 @@
+  "sleep 599" and timeout_ms 600000. Do not substitute tools or commands. After starting the three tasks, reply without
+  waiting.
+
+● Agent(Stop canary agent)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Ran 1 shell command
+
+● Monitor(Stop canary monitor)
+  ⎿  Monitor started · task bnvq0ij35 · timeout 10m
+
+● All three background tasks for the Stop test are started. I didn't wait for them.
+
+  - Agent "Stop canary agent" (general-purpose, haiku, background), with the prompt you specified verbatim.
+  - Bash sleep 600 in the background, timeout 600000.
+  - Monitor "Stop canary monitor", command sleep 599, timeout_ms 600000.
+
+  I'll get a notification as each one finishes.
+
+✻ Waiting for 1 background agent to finish
+
+● Agent "Stop canary agent" is waiting on its own background work · 2s
+
+● The "Stop canary agent" has not finished yet. It reported that its 601-second background sleep is still running, so
+  this result is interim and it should notify again when that sleep completes. The Bash sleep 600 and the Monitor are
+  still running, and I haven't received their notifications.
+
+✻ Baked for 12s · done 9:03 PM · 2 shells, 1 monitor still running
+ You've used 87% of your weekly limit · resets Nov 20, 1:30pm (Asia/Kolkata) · /usage-credits to keep using Claude Co… ▔
+  Stop canary monitor
+  monitor
+
+  Status:   running
+  Runtime:  10s
+  Script:   sleep 599
+
+  Output
+  No output yet
+
+  ← to go back · x to stop · Enter/Space to close · Esc to close

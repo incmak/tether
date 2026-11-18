@@ -59,7 +59,7 @@ class RowsTests(unittest.TestCase):
 ''')
         self.assertEqual([(row['label'], row['section']) for row in stop.rows(screen)],
                          [('sleep 1502', 'Shells'), ('sleep 1501', 'Shells')])
-        self.assertEqual([row['section'] for row in stop.rows('1 active agent\n❯ ● Quiet wait  running · Haiku 5.5\n')],
+        self.assertEqual([row['section'] for row in stop.rows('Background\n1 active agent\n❯ ● Quiet wait  running · Haiku 5.5\n')],
                          ['Local agents'])
 
     def test_shell_detail_facts(self):
@@ -72,7 +72,7 @@ class RowsTests(unittest.TestCase):
         self.assertFalse(stop.fits(screen.replace('sleep 1502', 'sleep 1501'), target, 79))
 
     def test_five_rows_across_sections_ignore_other_lines_and_stop_at_hint(self):
-        screen = ('● Before section\nShells (2)\n❯ ● Shell one running\n'
+        screen = ('Background\n● Before section\nShells (2)\n❯ ● Shell one running\n'
                   '● Shell two completed\n\nOther text\nLocal agents (2)\n'
                   '● Agent one failed\n● Agent two stopped\nEarlier in this session (1)\n'
                   '● Old agent killed\n' + LIST_HINT + '\n● After hint running\n')
@@ -407,7 +407,7 @@ class StopTests(unittest.TestCase):
         self.assertEqual(self.pane.keys, [])
 
     def test_changed_list_after_move_refuses_stop_and_closes(self):
-        self.pane.after_move = ('Local agents (1)\n❯ ● Different task    running · Haiku 5.5\n' + LIST_HINT)
+        self.pane.after_move = ('Background\nLocal agents (1)\n❯ ● Different task    running · Haiku 5.5\n' + LIST_HINT)
         with self.assertRaisesRegex(stop.StopError, 'Could not identify'):
             self.stop()
         self.assertNotIn(('x',), self.pane.keys)
@@ -415,7 +415,7 @@ class StopTests(unittest.TestCase):
 
     def test_navigation_is_bounded_at_40_keys(self):
         self.pane.after_move = (
-            'Local agents (2)\n❯ ● Beta wait    running · Haiku 5.5\n'
+            'Background\nLocal agents (2)\n❯ ● Beta wait    running · Haiku 5.5\n'
             '  ● Alpha wait    running · Haiku 5.5\n' + LIST_HINT)
         with self.assertRaisesRegex(stop.StopError, 'Could not reach'):
             self.stop()
@@ -780,6 +780,7 @@ class StopRouteTests(unittest.TestCase):
 class RealScreenTests(unittest.TestCase):
     """Real /tasks screens captured from Claude Code. Add a folder for each new version whose screens change."""
     FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.325_tasks'
+    FOLDER_327 = FOLDER.parent / 'claude_2.1.327_tasks'
 
     def screen(self, name):
         return (self.FOLDER / f'{name}.txt').read_text()
@@ -788,6 +789,87 @@ class RealScreenTests(unittest.TestCase):
         self.assertEqual([(row['label'], row['selected'], row['section']) for row in stop.rows(self.screen('list'))], [
             ('Fixture monitor', True, 'Shells'), ('sleep 401', False, 'Shells'), ('Fixture wait 2', False, 'Local agents')])
         self.assertEqual([row['selected'] for row in stop.rows(self.screen('list_agent_selected'))], [False, False, True])
+
+    def test_2_1_327_list_identifies_each_task(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text()
+        self.assertTrue(stop.dialog_open(screen.replace(' · x to stop', '')))
+        rows = stop.rows(screen)
+        self.assertEqual([(row['label'], row['selected'], row['section']) for row in rows], [
+            ('Stop canary monitor', True, 'Shells'), ('sleep 600', False, 'Shells'),
+            ('Stop canary agent', False, 'Background agents')])
+        for label, is_task in (('Stop canary monitor', True), ('sleep 600', True), ('Stop canary agent', False)):
+            with self.subTest(label=label):
+                target = {'task': is_task}
+                self.assertEqual([row['label'] for row in rows if stop.in_section(target, row['section'])
+                                  and stop.matches(label, row['label'])], [label])
+
+    def test_detail_footer_distinguishes_both_versions_from_the_list(self):
+        detail = (self.FOLDER_327 / 'detail_agent.txt').read_text()
+        for screen in (self.screen('agent_detail'), detail):
+            with self.subTest(footer=screen.splitlines()[-1]):
+                self.assertTrue(stop.detail_open(screen))
+                self.assertTrue(stop.dialog_open(screen.replace(' · x to stop', '')))
+                self.assertFalse(stop.list_navigation(screen))
+        for screen in (self.screen('list'), (self.FOLDER_327 / 'list.txt').read_text()):
+            with self.subTest(footer=screen.splitlines()[-1]):
+                self.assertTrue(stop.list_navigation(screen))
+                self.assertTrue(stop.dialog_open(screen))
+                self.assertFalse(stop.detail_open(screen))
+        for footer in (' · Enter/Space to close', ' · Esc to close'):
+            with self.subTest(missing=footer):
+                self.assertFalse(stop.detail_open(detail.replace(footer, '')))
+        self.assertFalse(stop.detail_open(detail.replace(' · Esc to close', ' and Esc to close')))
+
+    def test_2_1_327_list_ignores_chat_above_last_background_title(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text()
+        chat = 'Background\nShells\n● sleep 600  running\n'
+        self.assertEqual(stop.rows(chat + screen), stop.rows(screen))
+
+    def test_list_refuses_without_background_title(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text().replace('  Background\n', '')
+        self.assertEqual(stop.rows(screen), [])
+        target = {'task': True, 'labels': ['sleep 600'], 'body': 'sleep 600'}
+        with patch.object(stop, 'visible', side_effect=['❯ /tasks', screen]), patch.object(stop, 'press') as press:
+            with self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+                stop.stop_selected({}, target, None, lambda _: None)
+        self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',)])
+
+    def test_2_1_327_matching_shell_suffix_refuses_before_row_keys(self):
+        screen = (self.FOLDER_327 / 'list_subagent_shell.txt').read_text()
+        target = {'task': True, 'labels': ['sleep 600'], 'body': 'sleep 600'}
+        for suffix in (' · general-purpose subagent', ' · general-purpose subag…', ' · unknown stopped', ' owned elsewhere', '·'):
+            for only_match in (False, True):
+                with self.subTest(suffix=suffix, only_match=only_match):
+                    listed = screen.replace(' · general-purpose subagent', suffix)
+                    if only_match:
+                        listed = listed.replace('  ❯ ● sleep 600             running\n', '').replace(
+                            '    ● sleep 600', '  ❯ ● sleep 600')
+                    with patch.object(stop, 'visible', side_effect=['❯ /tasks', listed]), \
+                            patch.object(stop, 'press') as press, \
+                            self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+                        stop.stop_selected({}, target, None, lambda _: None)
+                    self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',)])
+
+    def test_matching_monitor_suffix_appears_during_selection(self):
+        screen = (self.FOLDER_327 / 'list.txt').read_text().replace('    Shells', '    Monitors').replace(
+            '  ❯ ● Stop canary monitor', '    ● Stop canary monitor').replace('    ● sleep 600', '  ❯ ● sleep 600')
+        changed = screen.replace('Stop canary monitor   running', 'Stop canary monitor   running · unknown')
+        target = {'task': True, 'labels': ['Stop canary monitor'], 'body': 'sleep 599'}
+        with patch.object(stop, 'visible', side_effect=['❯ /tasks', screen, changed]), \
+                patch.object(stop, 'press') as press, self.assertRaisesRegex(stop.StopError, 'Could not identify that task'):
+            stop.stop_selected({}, target, None, lambda _: None)
+        self.assertEqual([call.args[1:] for call in press.call_args_list], [('-l', '/tasks'), ('Enter',), ('Up',)])
+
+    def test_2_1_327_list_without_sections_distinguishes_session_tasks_from_child_shell(self):
+        screen = (self.FOLDER_327 / 'list_no_sections.txt').read_text()
+        rows = stop.rows(screen)
+        self.assertEqual([(row['label'], row['section'], row['selected']) for row in rows], [
+            ('sleep 601', 'Shells', True), ('Stop canary monitor', 'Shells', False), ('sleep 600', 'Shells', False),
+        ])
+        for label, matches in (('Stop canary monitor', [1]), ('sleep 600', [2]), ('sleep 601', [])):
+            with self.subTest(label=label):
+                target = {'task': True, 'labels': [label]}
+                self.assertEqual([i for i, row in enumerate(rows) if stop.is_target(target, row)], matches)
 
     def test_shell_detail(self):
         target = {'task': True, 'labels': ['Fixture shell', 'sleep 401'], 'kind': 'shell', 'started': 1000.0,
@@ -812,6 +894,32 @@ class RealScreenTests(unittest.TestCase):
         self.assertTrue(stop.fits(self.screen('agent_detail'), target, 1138))
         self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, body='Another prompt'), 1138))
         self.assertFalse(stop.fits(self.screen('agent_detail'), dict(target, kind='Explore'), 1138))
+
+    def test_2_1_327_agent_detail_matches_the_name_kind_prompt_and_runtime(self):
+        screen = (self.FOLDER_327 / 'detail_agent.txt').read_text()
+        body = 'Run Bash `sleep 600` in the foreground with timeout 600000, then reply done.'
+        target = {'task': False, 'labels': ['Stop canary agent'], 'kind': 'general-purpose',
+                  'started': 1000.0, 'body': body}
+        self.assertEqual(stop.detail_facts(screen, target), (True, '2s', body))
+        self.assertTrue(stop.fits(screen, target, 1002))
+        self.assertFalse(stop.fits(screen, target, 1010))
+        for field, wrong in (('kind', 'Explore'), ('labels', ['Another agent']), ('body', 'Another prompt')):
+            with self.subTest(field=field):
+                self.assertFalse(stop.fits(screen, dict(target, **{field: wrong}), 1002))
+
+    def test_2_1_327_shell_and_monitor_details_match_command_and_runtime(self):
+        for name, label, command, runtime in (('detail_shell', 'sleep 600', 'sleep 600', 8),
+                                              ('detail_monitor', 'Stop canary monitor', 'sleep 599', 10)):
+            with self.subTest(name=name):
+                screen = (self.FOLDER_327 / f'{name}.txt').read_text()
+                self.assertTrue(stop.detail_open(screen))
+                self.assertFalse(stop.list_navigation(screen))
+                self.assertTrue(stop.has_action(screen, 'x to stop'))
+                target = {'task': True, 'labels': [label, command], 'kind': '', 'started': 1000.0, 'body': command}
+                self.assertEqual(stop.detail_facts(screen, target), (True, f'{runtime}s', command))
+                self.assertTrue(stop.fits(screen, target, 1000 + runtime))
+                self.assertFalse(stop.fits(screen, target, 1000 + runtime + 30))
+                self.assertFalse(stop.fits(screen, dict(target, labels=['sleep 601'], body='sleep 601'), 1000 + runtime))
 
 
 if __name__ == '__main__':
