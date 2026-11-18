@@ -2885,6 +2885,33 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertNotIn('paused', link)
         self.alert.assert_not_called()
 
+    def test_findings_at_the_round_limit_end_a_run_of_approvals_that_did_not_match(self):
+        # Review round 9: two mismatches, then the findings that reach the round limit. The count stayed, so after
+        # a restart one more mismatch paused the review as "3 in a row".
+        self.bind()
+        self.request_review()
+        for _ in range(2):
+            self.finish_review(f'APPROVED {self.NEXT}')
+            self.observe()
+        self.assertEqual(self.links()[0]['stale_rounds'], 2)
+        link, = self.links()
+        link['rounds'] = review_links.MAX_ROUNDS - 1
+        self.file.write_text(json.dumps([link]))
+        self.finish_review('Still broken.')
+        link = self.links()[0]
+        self.assertTrue(link['paused'])
+        self.assertNotIn('stale_rounds', link)
+        self.turn_source = lambda entry: 'user'
+        self.request_review()  # the worker's reply to the stop message
+        count = self.send.call_count
+        self.request_review()  # the user restarts
+        self.assertEqual(self.send.call_count, count + 1)
+        self.finish_review(f'APPROVED {self.NEXT}')
+        self.observe()
+        link = self.links()[0]
+        self.assertEqual(link['stale_rounds'], 1)
+        self.assertNotIn('paused', link)
+
     def test_three_approvals_that_do_not_match_pause_the_review_and_alert(self):
         self.bind()
         self.request_review()

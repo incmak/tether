@@ -586,6 +586,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                     if _send_worker(link, worker, text, state, send, clear, feedback_sent):
                         link.pop('empty_turn', None)
                         link[count] = link.get(count, 0) + 1
+                        link.pop('stale_rounds', None)  # findings end a run of approvals that did not match
                         if stage is not None:
                             link['parent_stage'] = stage
                         elif not link.get('paused'):
