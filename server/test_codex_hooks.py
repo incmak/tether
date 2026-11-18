@@ -185,23 +185,37 @@ class CodexHooksTests(unittest.TestCase):
         self.transcript.write_text(self.rollout('task_started'))
         self.assertEqual(self.status('› ')['state'], 'Working')
 
-    def footer(self):
+    def test_consume_tracks_turn_start_until_complete_or_aborted(self):
+        state = server.codex_state()
+        self.assertIsNone(state['busy_since'])
+        for index, (event, stamp, expected) in enumerate((
+                ('task_started', 100, 100),
+                ('task_started', 150, 150),
+                ('task_complete', 160, None),
+                ('task_started', 200, 200),
+                ('turn_aborted', 210, None))):
+            with self.subTest(event=event, stamp=stamp):
+                server.codex_consume(state, index, json.loads(self.rollout(event, stamp)))
+                self.assertEqual(state['busy_since'], expected)
+                self.assertEqual(state['busy'], expected is not None)
+
+    def footer(self, now=170):
         handler = server.Handler.__new__(server.Handler)
         handler.path = '/mobile/api/footer?session=%25fixture'
         handler.deny = lambda: False
         replies = []
         handler.respond = lambda status, data: replies.append((status, data))
         with patch.object(server, 'choose', return_value=self.entry), \
-                patch.object(server.history, 'read', return_value={'usage': {}, 'model': 'test'}), \
                 patch.object(server, 'codex_metrics', return_value={}), \
                 patch.object(server.footer, 'codex', return_value={'context': {'percent': 10}}), \
-                own_time(server, time=Mock(return_value=170)):
+                own_time(server, time=Mock(return_value=now)), own_time(hooks, time=Mock(return_value=now)):
             handler.do_GET()
         self.assertEqual(replies[0][0], 200)
         return replies[0][1]
 
     def test_footer_tools_waiting_idle_and_fallback(self):
         self.assertEqual(self.footer(), {'context': {'percent': 10}})
+        self.transcript.write_text(self.rollout('task_started', timestamp=None))
         self.feed('UserPromptSubmit')
         self.tool()
         result = self.footer()
@@ -211,6 +225,38 @@ class CodexHooksTests(unittest.TestCase):
             self.feed(event, 102)
             self.assertIsNone(self.footer()['spinner'])
             self.assertIsNone(self.footer()['running'])
+
+    def test_footer_uses_rollout_start_after_mid_turn_prompt(self):
+        now = 4000
+        self.transcript.write_text(self.rollout('task_started', now - 51 * 60))
+        self.feed('UserPromptSubmit', now - 29)
+        self.assertEqual(self.footer(now)['spinner'], {'verb': 'Working…', 'detail': '51m 0s'})
+        self.permission(now - 10)
+        self.assertIsNone(self.footer(now)['spinner'])
+
+    def test_footer_uses_rollout_start_without_live_hooks(self):
+        now = 4000
+        self.transcript.write_text(self.rollout('task_started', 100))
+        for expired_hook in (False, True):
+            with self.subTest(expired_hook=expired_hook):
+                if expired_hook:
+                    self.feed('UserPromptSubmit', 100)
+                self.assertIsNone(self.live(now))
+                result = self.footer(now)
+                self.assertEqual(result['spinner'], {'verb': 'Working…', 'detail': '65m 0s'})
+                self.assertIsNone(result.get('running'))
+        with self.transcript.open('a') as stream:
+            stream.write(self.rollout('task_complete', now))
+        self.assertIsNone(self.footer(now).get('spinner'))
+
+    def test_footer_stays_idle_when_only_the_hook_is_busy(self):
+        self.feed('UserPromptSubmit')
+        self.assertTrue(self.live()['busy'])
+        self.assertIsNone(self.footer().get('spinner'))
+
+    def test_footer_rejects_a_future_rollout_start(self):
+        self.transcript.write_text(self.rollout('task_started', 180))
+        self.assertIsNone(self.footer().get('spinner'))
 
     def test_installer_preserves_groups_mode_and_one_backup(self):
         path = paths.CODEX_HOOKS
