@@ -23,11 +23,15 @@ export function loadCatalog(api: Api, pane: string) {
   return cached.pending
 }
 
-// What the end of the draft asks for: "/com" at the start, "$sk" at the start for Codex, or "@src/ap" anywhere.
+// A slash command starts the trimmed draft. Codex skills and file mentions can also follow whitespace.
 function trigger(draft: string, agent: Pane['agent']) {
-  // A command or skill at the start, or after a space (to mention a skill mid-message).
   const command = /(^|\s)([/$])([^\s/]*)$/.exec(draft)
-  if (command && (command[2] === '/' || agent === 'codex')) return { kind: 'command' as const, query: command[2] + command[3], start: command.index + command[1].length }
+  if (command) {
+    const start = command.index + command[1].length
+    if (command[2] === '/' ? !draft.slice(0, start).trim() : agent === 'codex') {
+      return { kind: 'command' as const, query: command[2] + command[3], start }
+    }
+  }
   const file = /(^|\s)@([^\s]*)$/.exec(draft)
   if (file) return { kind: 'file' as const, query: file[2], start: file.index + file[1].length }
   return null
