@@ -925,6 +925,71 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe(**{'%13': 'Idle'})
         self.assertEqual(self.send.call_count, 2)
 
+    def test_claude_review_requests_use_structured_terminal_errors(self):
+        cases = (
+            ('session limit', {'isApiErrorMessage': True, 'error': 'rate_limit'},
+             "You've hit your session limit · resets 12:50pm", False),
+            ('login expired', {'isApiErrorMessage': True, 'error': 'authentication_failed'},
+             'Login expired · Please run /login', False),
+            ('server error', {'isApiErrorMessage': True, 'error': 'server_error'}, 'API Error', True),
+            ('normal reply', {}, 'I fixed it.', True),
+            ('limit in prose', {}, 'The test prints "usage limit reached".', True),
+            ('no API error flag', {'error': 'rate_limit'}, 'I fixed it.', True),
+            ('unreadable transcript', None, 'I fixed it.', True),
+            ('malformed transcript', {'isApiErrorMessage': True, 'error': 'rate_limit'},
+             "You've hit your weekly limit", True),
+        )
+        self.worker['agent'] = 'claude'
+        for index, (case, fields, reply, sent) in enumerate(cases):
+            with self.subTest(case=case):
+                transcript = self.file.parent / f'claude-{index}.jsonl'
+                self.worker['transcript'] = str(transcript)
+                if fields is not None:
+                    record = {'type': 'assistant', 'message': {'role': 'assistant',
+                              'content': [{'type': 'text', 'text': reply}]}, **fields}
+                    transcript.write_text(json.dumps(record) + '\n'
+                                          + ('{\n' if case == 'malformed transcript' else '{"type":"system"}\n'))
+                self.reply.return_value = reply
+                self.add(agent='claude')
+                self.send.reset_mock()
+                self.observe(**{'%13': 'Working'})
+                self.assertTrue(self.links()[0]['seen_working'])
+                self.observe(**{'%13': 'Idle'})
+                self.assertFalse(self.links()[0]['seen_working'])
+                self.assertEqual(self.send.call_count, int(sent))
+                if sent:
+                    self.assertIn('finished a turn.', self.send.call_args.args[1])
+
+    def test_claude_next_turn_is_reviewed_after_usage_limit(self):
+        self.add(agent='claude')
+        transcript = self.file.parent / 'claude.jsonl'
+        self.worker.update(agent='claude', transcript=str(transcript))
+        transcript.write_text('{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit"}\n')
+        self.observe(**{'%13': 'Working'})
+        self.observe(**{'%13': 'Idle'})
+        self.observe()
+        self.send.assert_not_called()
+        self.assertFalse(self.links()[0]['seen_working'])
+
+        self.observe(**{'%13': 'Working'})
+        with transcript.open('a') as stream:
+            stream.write('{"type":"user","message":{"role":"user","content":"continue"}}\n'
+                         '{"type":"assistant","message":{"role":"assistant","content":"I fixed it."}}\n')
+        self.observe(**{'%13': 'Idle'})
+        self.send.assert_called_once()
+        self.assertIn('finished a turn.', self.send.call_args.args[1])
+
+    def test_claude_limit_detection_uses_only_current_turn_in_bounded_tail(self):
+        transcript = self.file.parent / 'claude.jsonl'
+        worker = dict(self.worker, agent='claude', transcript=str(transcript))
+        transcript.write_bytes(b'x' * review_links.TRANSCRIPT_TAIL_BYTES + b'\n'
+                               b'{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit"}\n'
+                               b'{"type":"assistant","isSidechain":true}\n')
+        self.assertTrue(review_links._turn_ended_on_limit(worker))
+        with transcript.open('a') as stream:
+            stream.write('{"type":"user","message":{"role":"user","content":"continue"}}\n')
+        self.assertFalse(review_links._turn_ended_on_limit(worker))
+
     def test_idle_to_idle_does_not_send_or_rewrite(self):
         self.observe()  # record the first worker thread
         with patch.object(review_links, '_write') as write:
