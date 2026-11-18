@@ -183,6 +183,23 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.fake.panes('$3'), ['%4', '%1'])
         self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']] * 2)
 
+    def test_placeholder_kill_does_not_retry_if_the_marker_changes(self):
+        self.fake.fail('kill-pane')
+
+        def run(argv, **kwargs):
+            try:
+                return self.fake.run(argv, **kwargs)
+            except subprocess.TimeoutExpired:
+                if argv[1] == 'kill-pane':
+                    self.fake.markers['%4'] = 'new-marker'
+                raise
+
+        self.run_tmux = run
+        result = self.break_out()
+        self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
+        self.assertEqual(result['warning'], 'A session “Review” may be left open.')
+        self.assertEqual(self.fake.panes('$3'), ['%4', '%1'])
+
     def test_breakout_reports_moved_and_warns_when_ungroup_times_out(self):
         self.fake.fail('kill-pane', times=2)
         self.fake.fail('set-option')
@@ -207,29 +224,51 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.assertNotIn('-e', new_session)
         self.assertEqual(self.calls('set-environment'), [])
 
-    def test_new_session_timeout_after_creation_cleans_up_by_id(self):
-        self.fake.names['$2'] = 'Review old'
+    def test_new_session_timeout_without_output_leaves_marked_pane_open(self):
         self.fake.fail('new-session', applied=True)
-        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. A session “Review” may be left open\.$'):
             self.break_out()
-        self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
-        self.assertEqual(set(self.fake.sessions), {'$1', '$2'})
-        self.assertEqual(self.fake.panes('$1'), ['%1', '%2'])
+        self.assertEqual(self.calls('kill-pane'), [])
+        self.assertEqual(self.fake.panes('$3'), ['%4'])
 
-    def test_new_session_nonzero_after_creation_cleans_up_by_id(self):
-        self.fake.fail('new-session', applied=True, nonzero=True)
-        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
-            self.break_out()
-        self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
-        self.assertEqual(set(self.fake.sessions), {'$1', '$2'})
+    def test_unterminated_creation_record_is_ignored(self):
+        for status in (None, 1, 0):
+            with self.subTest(status=status):
+                self.fake = FakeTmux()
+
+                def run(argv, **kwargs):
+                    result = self.fake.run(argv, **kwargs)
+                    if argv[1] == 'new-session':
+                        self.fake.sessions['$3']['@4'] = ['%10']
+                        self.fake.markers['%10'] = self.fake.markers.pop('%4')
+                        if status is None:
+                            raise subprocess.TimeoutExpired(argv, 5, output=b'$3\t%1')
+                        return subprocess.CompletedProcess(argv, status, '$3\t%1', '')
+                    return result
+
+                self.run_tmux = run
+                message = r'^Could not start a session\.'
+                message += r' A session “Review” may be left open\.$' if status != 1 else '$'
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self.break_out()
+                self.assertEqual(self.calls('kill-pane'), [])
+                self.assertEqual(self.calls('break-pane'), [])
+                self.assertEqual(self.fake.panes('$1'), ['%1', '%2'])
+                self.assertEqual(self.fake.panes('$3'), ['%10'])
 
     def test_new_session_timeout_warns_if_ownership_read_fails(self):
         for nonzero in (False, True):
             with self.subTest(nonzero=nonzero):
                 self.fake = FakeTmux()
-                self.run_tmux = self.fake.run
-                self.fake.fail('new-session', applied=True)
-                self.fake.fail('list-panes', nonzero=nonzero, skip=2)
+
+                def run(argv, **kwargs):
+                    result = self.fake.run(argv, **kwargs)
+                    if argv[1] == 'new-session':
+                        raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
+                    return result
+
+                self.run_tmux = run
+                self.fake.fail('display-message', nonzero=nonzero, skip=3)
                 with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. A session .* may be left open\.$'):
                     self.break_out()
                 self.assertEqual(self.calls('kill-pane'), [])
@@ -238,22 +277,23 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
     def test_new_session_timeout_keeps_a_window_moved_into_the_session(self):
         def run(argv, **kwargs):
             if argv[1] == 'new-session':
-                self.fake.run(argv, **kwargs)
+                result = self.fake.run(argv, **kwargs)
                 self.fake.execute('move-window', ['-s', '@3', '-t', '$3:'])
-                raise subprocess.TimeoutExpired(argv, 5)
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
             return self.fake.run(argv, **kwargs)
 
         self.run_tmux = run
-        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. '
+                                    r'The new session “Review” stays open\. Close it from the sidebar\.$'):
             self.break_out()
         self.assertEqual(self.fake.panes('$3'), ['%3'])
 
     def test_new_session_timeout_cleans_up_a_renamed_session(self):
         def run(argv, **kwargs):
             if argv[1] == 'new-session':
-                self.fake.run(argv, **kwargs)
+                result = self.fake.run(argv, **kwargs)
                 self.fake.names['$3'] = 'renamed'
-                raise subprocess.TimeoutExpired(argv, 5)
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
             return self.fake.run(argv, **kwargs)
 
         self.run_tmux = run
@@ -261,15 +301,15 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
             self.break_out()
         self.assertEqual(set(self.fake.sessions), {'$1', '$2'})
 
-    def test_new_session_failure_with_an_id_cleans_up_an_unmarked_pane(self):
+    def test_new_session_failure_with_a_record_cleans_up_the_marked_pane(self):
         for output, nonzero in ((b'$3\t%4\n', False), ('$3\t%4\n', False), ('$3\t%4\n', True),
-                                ('$3\t%4\nextra output\n', True)):
+                                ('$3\t%4\nextra output\n', True), ('$3\t%4\n$2\t%3', True)):
             with self.subTest(output=output, nonzero=nonzero):
                 self.fake = FakeTmux()
 
                 def run(argv, **kwargs):
                     if argv[1] == 'new-session':
-                        self.fake.run(argv[:argv.index(';')], **kwargs)
+                        self.fake.run(argv, **kwargs)
                         if nonzero:
                             return subprocess.CompletedProcess(argv, 1, output, 'set-option failed')
                         raise subprocess.TimeoutExpired(argv, 5, output=output)
@@ -295,28 +335,33 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.assertEqual(self.fake.panes('$3'), ['%4'])
         self.assertEqual(self.fake.panes('$2'), ['%3'])
 
-    def test_new_session_cleanup_warns_if_the_pane_still_exists(self):
-        self.fake.fail('new-session', applied=True)
+    def test_new_session_cleanup_warns_if_the_session_stays_open(self):
+        def run(argv, **kwargs):
+            result = self.fake.run(argv, **kwargs)
+            if argv[1] == 'new-session':
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
+            return result
+
+        self.run_tmux = run
         self.fake.fail('kill-pane')
-        with self.assertRaisesRegex(RuntimeError, 'Review.*may be left open'):
+        with self.assertRaisesRegex(RuntimeError, 'The new session “Review” stays open. Close it from the sidebar.'):
             self.break_out()
         self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
         self.assertEqual(self.fake.panes('$3'), ['%4'])
 
-    def test_new_session_cleanup_warns_if_two_panes_match_the_marker(self):
+    def test_new_session_cleanup_warns_if_session_read_times_out(self):
         def run(argv, **kwargs):
+            result = self.fake.run(argv, **kwargs)
             if argv[1] == 'new-session':
-                self.fake.run(argv, **kwargs)
-                self.fake.markers['%3'] = argv[-1]
-                raise subprocess.TimeoutExpired(argv, 5)
-            return self.fake.run(argv, **kwargs)
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
+            return result
 
         self.run_tmux = run
-        with self.assertRaisesRegex(RuntimeError, 'Review.*may be left open'):
+        self.fake.fail('list-sessions', skip=1)
+        with self.assertRaisesRegex(RuntimeError, 'A session “Review” may be left open'):
             self.break_out()
-        self.assertEqual(self.calls('kill-pane'), [])
-        self.assertEqual(self.fake.panes('$3'), ['%4'])
-        self.assertEqual(self.fake.panes('$2'), ['%3'])
+        self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
+        self.assertNotIn('$3', self.fake.sessions)
 
     def test_new_session_timeout_before_creation_leaves_other_sessions_alone(self):
         self.fake.names['$2'] = 'Review old'
@@ -324,6 +369,7 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Review.*may be left open'):
             self.break_out()
         self.assertEqual(self.calls('kill-session'), [])
+        self.assertEqual(self.calls('kill-pane'), [])
         self.assertEqual(set(self.fake.sessions), {'$1', '$2'})
 
     def test_failed_breakout_keeps_a_session_with_an_added_pane(self):
@@ -335,7 +381,7 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
             return self.fake.run(argv, **kwargs)
 
         self.run_tmux = run
-        with self.assertRaisesRegex(RuntimeError, 'Review.*was left open'):
+        with self.assertRaisesRegex(RuntimeError, 'The new session “Review” stays open. Close it from the sidebar.'):
             self.break_out()
         self.assertEqual(self.calls('kill-session'), [])
         self.assertEqual(self.fake.panes('$3'), ['%6'])  # only the placeholder this call made goes
@@ -359,10 +405,10 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.assert_broke_out(self.break_out())
         self.assertEqual(self.calls('kill-session'), [])
 
-    def test_failed_cleanup_says_the_session_may_be_left_open(self):
+    def test_failed_cleanup_names_the_session_that_stays_open(self):
         self.fake.fail('break-pane')
         self.fake.fail('kill-pane', times=2)
-        with self.assertRaisesRegex(RuntimeError, 'Review.*may be left open'):
+        with self.assertRaisesRegex(RuntimeError, 'The new session “Review” stays open. Close it from the sidebar.'):
             self.break_out()
         self.assertEqual(self.fake.panes('$3'), ['%4'])
 
@@ -645,7 +691,7 @@ class TmuxMergeTests(unittest.TestCase):
                 session, _ = result.stdout.strip().split('\t')
                 renamed = self.tmux('rename-session', '-t', session, 'renamed')
                 self.assertEqual(renamed.returncode, 0, renamed.stderr)
-                raise subprocess.TimeoutExpired(argv, 5)
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
             return result
 
         with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
@@ -667,11 +713,12 @@ class TmuxMergeTests(unittest.TestCase):
                 self.assertEqual((start.returncode, start.stdout), (0, '\n'))
                 moved = self.tmux('move-window', '-d', '-s', window, '-t', session + ':')
                 self.assertEqual(moved.returncode, 0, moved.stderr)
-                raise subprocess.TimeoutExpired(argv, 5)
+                raise subprocess.TimeoutExpired(argv, 5, output=result.stdout)
             return result
 
         self.tmux('set-option', '-p', '-t', pane, '@chat_name', 'Review')
-        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. '
+                                    r'The new session “Review” stays open\. Close it from the sidebar\.$'):
             tmux_merge.break_out(pane, run=run)
         self.assertEqual(self.sessions(), ['Review', 'alpha'])
         dest = self.tmux('display-message', '-p', '-t', other_pane, '#{session_id}').stdout.strip()
@@ -692,8 +739,10 @@ class TmuxMergeTests(unittest.TestCase):
         self.assertEqual(self.sessions(), ['Review', 'alpha', 'beta'])
         self.assertEqual(len(self.panes(competing[0])), 1)
 
-    def test_real_new_session_cleans_up_when_setting_the_marker_fails(self):
+    def test_real_new_session_leaves_unmarked_pane_open_when_setting_the_marker_fails(self):
         pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@chat_name', 'Review')
+        created_panes = []
 
         def run(argv, **kwargs):
             if argv[1] == 'new-session':
@@ -701,12 +750,39 @@ class TmuxMergeTests(unittest.TestCase):
                 result = self.run_tmux(argv, **kwargs)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertRegex(result.stdout, r'^\$[0-9]+\t%[0-9]+\n$')
+                created_panes.append(result.stdout.split()[1])
                 return result
+            self.assertNotEqual(argv[1], 'kill-pane')
             return self.run_tmux(argv, **kwargs)
 
-        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\.$'):
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. A session “Review” may be left open\.$'):
             tmux_merge.break_out(pane, run=run)
-        self.assertEqual(self.sessions(), ['alpha', 'beta'])
+        self.assertEqual(self.sessions(), ['Review', 'alpha', 'beta'])
+        self.assertEqual(self.panes('=Review'), created_panes)
+
+    def test_real_new_session_hook_marks_a_different_pane(self):
+        pane = self.panes(self.a)[0]
+        self.tmux('set-option', '-p', '-t', pane, '@chat_name', 'Review')
+        hook = self.tmux('set-hook', '-g', 'after-new-session', 'split-window')
+        self.assertEqual(hook.returncode, 0, hook.stderr)
+        created_panes = []
+
+        def run(argv, **kwargs):
+            self.assertNotEqual(argv[1], 'kill-pane')
+            result = self.run_tmux(argv, **kwargs)
+            if argv[1] == 'new-session':
+                self.assertEqual(result.returncode, 0, result.stderr)
+                session, printed = result.stdout.split()
+                created_panes.extend(self.panes(session))
+                other, = set(created_panes) - {printed}
+                for target, expected in ((printed, '\n'), (other, argv[-1] + '\n')):
+                    marker = self.tmux('display-message', '-p', '-t', target, '#{@tether_breakout}')
+                    self.assertEqual((marker.returncode, marker.stdout), (0, expected))
+            return result
+
+        result = tmux_merge.break_out(pane, run=run)
+        self.assertEqual(result['warning'], 'A session “Review” may be left open.')
+        self.assertCountEqual(self.panes(result['session']), [pane, *created_panes])
 
     def test_real_new_session_hook_timeout_does_not_hide_a_leftover(self):
         pane = self.panes(self.a)[0]
@@ -728,10 +804,9 @@ class TmuxMergeTests(unittest.TestCase):
                     raise
             return self.run_tmux(argv, **kwargs)
 
-        with self.assertRaisesRegex(RuntimeError, 'Could not start a session') as caught:
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. A session “Review” may be left open\.$'):
             tmux_merge.break_out(pane, run=run)
-        if 'Review' in self.sessions():
-            self.assertIn('may be left open', str(caught.exception))
+        self.assertIn('Review', self.sessions())
         self.assertIn(pane, self.panes(self.a))
 
     def test_real_breakout_reports_moved_and_warns_when_ungroup_times_out(self):

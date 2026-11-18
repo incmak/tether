@@ -232,13 +232,22 @@ def _free_name(run, wanted=''):
     return name
 
 
-def _remove_placeholder(run, pane):
-    """Retry once when an uncertain kill left the shell pane open."""
+def _has_breakout_marker(run, pane, token):
+    result = _try_tmux(run, 'display-message', '-p', '-t', pane, '#{@tether_breakout}')
+    return result is not None and result.returncode == 0 and result.stdout == token + '\n'
+
+
+def _remove_placeholder(run, pane, token):
+    """Retry an uncertain kill once. Return None if the marker cannot be confirmed before a kill."""
+    if not _has_breakout_marker(run, pane, token):
+        return None
     killed = _try_tmux(run, 'kill-pane', '-t', pane)
     if killed is not None and not killed.returncode:
         return True
     current = _target_session(run, pane, gone='')
     if current:
+        if not _has_breakout_marker(run, pane, token):
+            return None
         _try_tmux(run, 'kill-pane', '-t', pane)
         current = _target_session(run, pane, gone='')
     return current == ''
@@ -252,34 +261,13 @@ def _session_open(run, session):
     return session in result.stdout.split()
 
 
-def _breakout_panes(run):
-    """Read pane ids and markers across all sessions. None means the scan could not be confirmed."""
-    listed = _try_tmux(run, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_breakout}')
-    if listed is None or listed.returncode:
-        return None
-    panes = [line.split('\t', 1) for line in listed.stdout.splitlines()]
-    if any(len(fields) != 2 or not PANE.fullmatch(fields[0]) for fields in panes):
-        return None
-    return panes
-
-
-def _drop_new(run, name, token, *, placeholder=None, uncertain=False):
-    """Remove only the pane identified by the creation output or its unique marker."""
-    warning = f' A session “{name}” may be left open.'
-    if placeholder is None:
-        panes = _breakout_panes(run)
-        if panes is None:
-            return warning
-        matches = [pane for pane, marker in panes if marker == token]
-        if not matches:
-            # After a timeout the server may still create a pane.
-            return warning if uncertain else ''
-        if len(matches) != 1:
-            return warning
-        placeholder = matches[0]
-    _try_tmux(run, 'kill-pane', '-t', placeholder)
-    panes = _breakout_panes(run)
-    return warning if panes is None or any(pane == placeholder for pane, _ in panes) else ''
+def _session_warning(run, name, session=None):
+    left = _session_open(run, session) if session is not None else None
+    if left is None:
+        return f' A session “{name}” may be left open.'
+    if left:
+        return f' The new session “{name}” stays open. Close it from the sidebar.'
+    return ''
 
 
 def break_out(pane, run=subprocess.run):
@@ -303,11 +291,16 @@ def break_out(pane, run=subprocess.run):
         output = created.stdout
     if isinstance(output, bytes):
         output = output.decode(errors='replace')  # TimeoutExpired can hold bytes even with text=True.
-    records = [record for line in (output or '').splitlines() if (record := BREAKOUT_IDS.fullmatch(line))]
+    # The last field after splitting on newline may be a clipped record.
+    records = [record for line in (output or '').split('\n')[:-1] if (record := BREAKOUT_IDS.fullmatch(line))]
     ids = records[0] if len(records) == 1 else None
     if created is None or created.returncode or ids is None:
-        warning = _drop_new(run, name, token, placeholder=ids[2] if ids else None,
-                            uncertain=created is None or created.returncode == 0 or bool(records))
+        checked_session = None
+        if ids and _has_breakout_marker(run, ids[2], token):
+            _try_tmux(run, 'kill-pane', '-t', ids[2])
+            checked_session = ids[1]
+        warning = (_session_warning(run, name, checked_session)
+                   if created is None or created.returncode == 0 or records else '')
         raise RuntimeError('Could not start a session.' + warning)
     session_id, placeholder = ids.groups()
     moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', session_id + ':')
@@ -318,15 +311,17 @@ def break_out(pane, run=subprocess.run):
             raise RuntimeError(f'Could not confirm the move. The new session “{name}” may be left open.')
         recheck_move = current != session_id
     # Killing only the placeholder lets a move that lands during cleanup keep its pane.
-    removed = _remove_placeholder(run, placeholder)
+    removed = _remove_placeholder(run, placeholder, token)
     if recheck_move and _target_session(run, pane, gone='') != session_id:
-        left = _session_open(run, session_id) if removed else None
-        if left is None:
-            raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
-        if left:
-            raise RuntimeError(f'Could not move the pane. The new session “{name}” was left open.')
+        warning = _session_warning(run, name, session_id if removed is not None else None)
+        if warning:
+            raise RuntimeError('Could not move the pane.' + warning)
         _check(moved, 'Could not move the pane.')
-    warning = '' if removed else 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
+    warning = ''
+    if removed is None:
+        warning = _session_warning(run, name).lstrip()
+    elif not removed:
+        warning = 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
     try:
         _ungroup(run, pane)
         result = _moved(run, session_id, pane)
