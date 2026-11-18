@@ -295,12 +295,16 @@ def break_out(pane, run=subprocess.run):
     records = [record for line in (output or '').split('\n')[:-1] if (record := BREAKOUT_IDS.fullmatch(line))]
     ids = records[0] if len(records) == 1 else None
     if created is None or created.returncode or ids is None:
-        checked_session = None
+        checked_session, confirmed = None, False
         if ids and _has_breakout_marker(run, ids[2], token):
-            _try_tmux(run, 'kill-pane', '-t', ids[2])
-            checked_session = ids[1]
+            killed = _try_tmux(run, 'kill-pane', '-t', ids[2])
+            checked_session, confirmed = ids[1], killed is not None and not killed.returncode
+        # Any printed output, even a clipped record, means tmux may have made the session.
         warning = (_session_warning(run, name, checked_session)
-                   if created is None or created.returncode == 0 or records else '')
+                   if created is None or created.returncode == 0 or (output or '').strip() else '')
+        if checked_session and not confirmed and not warning:
+            # The session is gone, but an unconfirmed kill may have missed a placeholder moved elsewhere.
+            warning = _session_warning(run, name)
         raise RuntimeError('Could not start a session.' + warning)
     session_id, placeholder = ids.groups()
     moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', session_id + ':')

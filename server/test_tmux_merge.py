@@ -248,13 +248,32 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
 
                 self.run_tmux = run
                 message = r'^Could not start a session\.'
-                message += r' A session “Review” may be left open\.$' if status != 1 else '$'
+                message += r' A session “Review” may be left open\.$'
                 with self.assertRaisesRegex(RuntimeError, message):
                     self.break_out()
                 self.assertEqual(self.calls('kill-pane'), [])
                 self.assertEqual(self.calls('break-pane'), [])
                 self.assertEqual(self.fake.panes('$1'), ['%1', '%2'])
                 self.assertEqual(self.fake.panes('$3'), ['%10'])
+
+    def test_failed_placeholder_kill_warns_when_session_is_gone(self):
+        def run(argv, **kwargs):
+            if argv[1] == 'kill-pane':
+                # The placeholder moved to another session; the kill does not reach it.
+                self.fake.calls.append(argv)
+                self.fake.sessions['$1']['@9'] = self.fake.sessions['$3'].pop('@4')
+                del self.fake.sessions['$3']
+                return subprocess.CompletedProcess(argv, 1, '', 'tmux reported an error')
+            result = self.fake.run(argv, **kwargs)
+            if argv[1] == 'new-session':
+                return subprocess.CompletedProcess(argv, 1, '$3\t%4\n', 'hook failed')
+            return result
+
+        self.run_tmux = run
+        with self.assertRaisesRegex(RuntimeError, r'^Could not start a session\. A session “Review” may be left open\.$'):
+            self.break_out()
+        self.assertEqual(self.calls('kill-pane'), [[paths.TMUX, 'kill-pane', '-t', '%4']])
+        self.assertIn('%4', self.fake.panes('$1'))
 
     def test_new_session_timeout_warns_if_ownership_read_fails(self):
         for nonzero in (False, True):
