@@ -717,17 +717,24 @@ class ReviewLinksTests(unittest.TestCase):
             self.assertEqual(review_links.reviewed_by(), {'%13': ['%12'], '%20': ['%21']})
         read_store.assert_called_once_with()
 
-    def test_linked_worker_threads_reads_links_of_one_pair_under_lock(self):
+    def test_linked_worker_threads_reads_links_of_one_reviewer_conversation_under_lock(self):
         link, cap = self.rows()
-        links = [dict(link, worker='%20', reviewer='%21', worker_thread=WORKER_THREAD),
-                 {'worker': '%20', 'reviewer': '%21'}, {'worker': '%20', 'reviewer': '%22', 'worker_thread': 'x'},
+        links = [dict(link, worker='%20', reviewer='%21', reviewer_thread=THREAD, worker_thread=WORKER_THREAD),
+                 {'worker': '%20', 'reviewer': '%21'},  # not bound to a reviewer conversation yet: counts
+                 {'worker': '%20', 'reviewer': '%21', 'reviewer_thread': PARENT_THREAD, 'worker_thread': 'z'},
+                 {'worker': '%20', 'reviewer': '%22', 'worker_thread': 'x'},
                  dict(cap, worker='%20', worker_thread='y'), None, {'worker': '%20', 'reviewer': 21}]
         def read():
             self.assertTrue(review_links._lock.locked())
             return links
-        with patch.object(review_links, '_read', side_effect=read):
-            self.assertEqual(review_links.linked_worker_threads('%20', '%21'), {WORKER_THREAD, None})
-            self.assertEqual(review_links.linked_worker_threads('%13', '%21'), set())
+        with patch.object(review_links, '_read', side_effect=read) as reads:
+            self.assertEqual(review_links.linked_worker_threads('%20', '%21', THREAD), {WORKER_THREAD, None})
+            # A link of an earlier reviewer conversation in the same pane does not count.
+            self.assertEqual(review_links.linked_worker_threads('%20', '%21', PARENT_THREAD), {'z', None})
+            self.assertEqual(review_links.linked_worker_threads('%13', '%21', THREAD), set())
+            self.assertEqual(reads.call_count, 3)
+            self.assertEqual(review_links.linked_worker_threads('%20', '%21', None), set())  # unverified reviewer
+            self.assertEqual(reads.call_count, 3)
 
     def test_paused_reads_once_under_lock_and_skips_unpaused_or_malformed_rows(self):
         link, cap = self.rows()

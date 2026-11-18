@@ -185,9 +185,15 @@ class CloseHelperTabTest(unittest.TestCase):
     def test_close_closes_a_helper_whose_agent_exited_when_tmux_shows_a_shell(self):
         # Live 2026-11-19: after /exit, discovery reports shell and tmux shows zsh. Both must agree.
         reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
-        for command, closes in (('zsh', True), ('bash', True), ('claude', False), ('node', False), (None, False)):
+        shell = {1: (0, 'tmux'), 100: (1, 'zsh')}
+        late_agent = {**shell, 101: (100, 'codex')}  # an agent that started after the cached discovery
+        cases = (('zsh', shell, True), ('bash', shell, True), ('zsh', late_agent, False), ('zsh', {}, False),
+                 ('claude', shell, False), ('node', shell, False), (None, shell, False))
+        for command, table, closes in cases:
             for caller, links in ((self.owner, set()), (reviewer, {HELPER})):
-                with self.subTest(command=command, caller=caller['id']), \
+                with self.subTest(command=command, table=table, caller=caller['id']), \
+                        patch.object(server.agent_tabs.procinfo, 'table', return_value=table), \
+                        patch.object(server.agent_tabs.agents, 'claude_registries', return_value=[]), \
                         patch.object(server.review_links, 'linked_worker_threads', return_value=links):
                     self.kill.reset_mock()
                     self.run.commands = {'%13': command} if command else {}
@@ -230,7 +236,7 @@ class CloseHelperTabTest(unittest.TestCase):
                         server.agent_tabs.close_tab({'pane': '%13'}, reviewer, entries, self.run,
                                                     lambda entry: {'state': 'Idle'})
                     self.assert_pane_untouched()
-                links.assert_called_once_with('%13', '%14')  # one locked read decides the link and its conversation
+                links.assert_called_once_with('%13', '%14', OTHER)  # one locked read decides the link and its conversation
 
     def test_close_binds_and_closes_an_unbound_verified_helper(self):
         self.record = dict(self.record, helper_thread=None)

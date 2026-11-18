@@ -39,10 +39,10 @@ class Tmux:
 
     def __call__(self, args, **kwargs):
         self.calls.append((args, kwargs))
-        if args[:4] == [paths.TMUX, 'display-message', '-p', '-t'] and args[5] == '#{pane_current_command}':
+        if args[:4] == [paths.TMUX, 'display-message', '-p', '-t'] and args[5] == '#{pane_pid}\t#{pane_current_command}':
             assert kwargs == dict(capture_output=True, text=True, timeout=5)
             command = self.commands.get(args[4])
-            return subprocess.CompletedProcess(args, 0 if command else 1, stdout=(command or '') + '\n')
+            return subprocess.CompletedProcess(args, 0 if command else 1, stdout=f'100\t{command or ""}\n')
         if args[:4] == [paths.TMUX, 'display-message', '-p', '-t']:
             assert args[5] == '#{pane_id}\t#{@tether_helper}'
             assert kwargs == dict(capture_output=True, text=True, timeout=5)

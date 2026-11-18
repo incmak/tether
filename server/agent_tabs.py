@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 
+import agents
 import audit
 import auth
 import auto_resume
@@ -14,6 +15,7 @@ import groups
 import helper_close
 import helper_tabs
 import paths
+import procinfo
 import review_links
 import self_close
 import undo
@@ -75,11 +77,18 @@ def _agent_exited(target, run):
     if target is None or target.get('agent') != 'shell':
         return False
     try:
-        result = run([paths.TMUX, 'display-message', '-p', '-t', target['id'], '#{pane_current_command}'],
+        result = run([paths.TMUX, 'display-message', '-p', '-t', target['id'], '#{pane_pid}\t#{pane_current_command}'],
                      capture_output=True, text=True, timeout=5)
-    except (OSError, subprocess.SubprocessError):
+        pane_pid, command = result.stdout.strip().split('\t')
+        if result.returncode or not pane_pid.isdigit() or command not in SHELLS:
+            return False
+        # Discovery may be up to a second old: read the process tree again before a close.
+        processes = procinfo.table()
+        tree = agents.descendants(int(pane_pid), processes)
+        registered = agents._pane_registries(agents.claude_registries(processes), target['id'], tree)
+        return int(pane_pid) in processes and agents._pane_agent(int(pane_pid), processes, tree, registered)[0] is None
+    except (OSError, subprocess.SubprocessError, ValueError):
         return False
-    return result.returncode == 0 and result.stdout.strip() in SHELLS
 
 
 def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
@@ -96,7 +105,8 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise ValueError('That session has ended. Select another tab.')
     target = next((entry for entry in entries if entry['id'] == pane), None)
     owner = record is not None and record['owner_pane'] == caller['id']
-    linked = set() if owner else review_links.linked_worker_threads(pane, caller['id'])  # empty: no link
+    linked = set() if owner else review_links.linked_worker_threads(  # empty: no link
+        pane, caller['id'], helper_tabs.verified_thread(caller))
     if not owner and not linked:
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     exited = _agent_exited(target, run)
