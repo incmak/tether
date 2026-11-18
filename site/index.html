@@ -171,7 +171,7 @@ footer { color: var(--muted); padding: 24px 0 48px; font-size: 0.92em; }
           <h3>Terminal</h3>
           <ol>
             <li>Download and check the release:
-<pre><code>curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.14/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
+<pre><code>curl -fL https://raw.githubusercontent.com/incmak/tether/v0.1.15/integrations/claude/tether/skills/setup/bootstrap.py -o tether-bootstrap.py
 python3 tether-bootstrap.py</code></pre>This writes only under <code>~/.local/share/tether</code>. It starts no services.</li>
             <li>Read the plan. It writes nothing. Fix each failed check. The plan turns on the web terminal if <code>ttyd</code> is installed. To leave it off, add <code>--no-terminal</code> to this command and the next.
 <pre><code>python3 ~/.local/share/tether/current/install.py --plan --no-build-ui</code></pre></li>
