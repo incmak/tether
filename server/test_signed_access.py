@@ -112,7 +112,9 @@ class EndedHistoryTests(unittest.TestCase):
 
     def test_reason_table(self):
         groups = [
-            (('debugger_detached',), "Chrome's debugging bar was closed."),
+            (('debugger_canceled',), "Chrome's debugging bar was closed."),
+            (('debugger_target_closed',), 'Chrome closed the debugging connection to the tab. Ask again.'),
+            (('debugger_detached',), 'Chrome ended the debugging connection.'),
             (('tab_closed',), 'The tab was closed.'),
             (('expired',), 'The time ran out.'),
             (('action_stop', 'local_stop'), 'It was stopped from the Chrome extension.'),

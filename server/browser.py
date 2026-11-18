@@ -18,6 +18,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import browser_container
 import paths
@@ -295,7 +296,10 @@ def _channel():
 
 
 def launch(chrome, profile, extra=(), *, headed=False, env=None):
-    """Start Chromium in its own process group with the DevTools pipe on fds 3 and 4. Returns (pid, read_fd, write_fd)."""
+    """Start Chromium in its own process group with DevTools on fds 3 and 4.
+
+    Return (pid, read_fd, write_fd). TETHER_CHROME_STDERR sets the directory for per-launch logs.
+    """
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     for folder in (profile.parent, profile):  # mkdir's mode does not apply to folders that already exist
         folder.chmod(0o700)
@@ -305,11 +309,17 @@ def launch(chrome, profile, extra=(), *, headed=False, env=None):
             '--window-size=%d,%d' % DESKTOP, '--force-device-scale-factor=2', *extra, 'about:blank']
     if needs_no_sandbox():
         args.insert(2, '--no-sandbox')
+    stderr = (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0)
+    if log_dir := os.environ.get('TETHER_CHROME_STDERR'):
+        folder = Path(log_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        log = folder / f'chrome-{uuid4().hex}.log'
+        stderr = (os.POSIX_SPAWN_OPEN, 2, str(log), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     to_child_r, to_child_w = _channel()
     from_child_r, from_child_w = _channel()
     actions = [(os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
                (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
-               (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
+               stderr,
                (os.POSIX_SPAWN_DUP2, to_child_r, 3),
                (os.POSIX_SPAWN_DUP2, from_child_w, 4)]
     try:

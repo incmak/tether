@@ -5,7 +5,7 @@ const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 
 let now = 0
-const code = ts.transpileModule(readFileSync('src/Suggest.tsx', 'utf8'), {
+const code = ts.transpileModule(readFileSync('src/Suggest.tsx', 'utf8') + '\nexport { trigger }\n', {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
 }).outputText
 const exportsMap = {}
@@ -13,8 +13,29 @@ runInNewContext(code, {
   exports: exportsMap, Date: { now: () => now },
   require: name => name.startsWith('./') ? {} : require(name),
 })
-const { loadCatalog } = exportsMap
+const { loadCatalog, trigger } = exportsMap
 const catalog = name => ({ commands: [{ name }], plugins: [], mcp: [], note: '' })
+
+const triggerCases = [
+  ['/clear', 'claude', 'command', '/clear', 0],
+  ['/clear', 'codex', 'command', '/clear', 0],
+  ['Describe /clear', 'claude', null],
+  ['Describe /clear', 'codex', null],
+  ['Use $review', 'codex', 'command', '$review', 4],
+  ['Open @src', 'claude', 'file', 'src', 5],
+  ['line one\n/clear', 'claude', null],
+  ['  /clear', 'claude', 'command', '/clear', 2],
+  ['/clear /help', 'claude', null],
+  ['/help', 'antigravity', 'command', '/help', 0],
+  ['Describe /help', 'antigravity', null],
+  ['Use $review', 'claude', null],
+]
+for (const [draft, agent, kind, query, start] of triggerCases) {
+  const result = trigger(draft, agent)
+  assert.deepEqual(result ? [result.kind, result.query, result.start] : null,
+    kind ? [kind, query, start] : null, `${agent}: ${JSON.stringify(draft)}`)
+}
+console.log(`Suggestion triggers: ${triggerCases.length} passed`)
 
 async function main() {
   const old = catalog('old')

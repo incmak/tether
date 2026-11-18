@@ -325,51 +325,59 @@ def mark_seen(pid):
 # ---- what an agent gets ----
 
 def _fit(parts, budget):
-    """Keep the parts in order. The first part that does not fit is cut, and the rest are left out."""
-    out, used = [], 0
-    for part in parts:
-        if used + len(part) <= budget:
-            out.append(part)
-            used += len(part)
+    """Fit (priority, text) parts by priority 1 through 5 and keep their original reading order.
+
+    Reserve room for identity, then user guidance, lists and excerpts. Within each
+    priority, keep the earlier parts first. Cut the first overflow at a line end and omit the rest.
+    Returns one string per part, in the input order ('' for a part left out).
+    """
+    out = [''] * len(parts)
+    for index in sorted(range(len(parts)), key=lambda index: parts[index][0]):
+        _, part = parts[index]
+        if len(part) <= budget:
+            out[index] = part
+            budget -= len(part)
             continue
         note = '\n[Cut to fit the project size limit. The full text is in the project folder.]\n'
-        room = budget - used - len(note)
+        room = budget - len(note)
         if room > 200:
-            out.append(part[:room].rsplit('\n', 1)[0] + note)
-        elif budget - used >= len(note):
-            out.append(note)
+            out[index] = part[:room].rpartition('\n')[0] + note
+        elif budget >= len(note):
+            out[index] = note   # nothing of the part fits, but the agent must know that text was cut
         break
     return out
 
 
 def _group_parts(group, home):
-    """A group's context in three tiers, most important first: (main part, notes list, note excerpts)."""
+    """A stack's identity and guidance in reading order, followed by its note list and excerpts."""
     gpid, name = group['pid'], group['name']
     text = instructions(gpid).strip()
     pinned = pins(gpid, home)
     found = notes(gpid)
     folder = bundle(gpid)
-    main = (f'\n## Stack: {name}\nThis tab is in the stack "{name}" of this tmux session. '
-            + ('The user wrote this guidance for agents in the stack. Follow it.\n' if text or pinned else '\n')
-            + f'Stack folder: {folder}\n'
-            + f'Save a fact that only this stack needs as a Markdown note in {folder}/notes/ (same rules as project notes). '
-            'Facts for the whole session go in the project notes folder.\n')
+    parts = [(1, f'\n## Stack: {name}\nThis tab is in the stack "{name}" of this tmux session. '
+              + ('The user wrote this guidance for agents in the stack. Follow it.\n' if text or pinned else '\n')
+              + f'Stack folder: {folder}\n'
+              + f'Save a fact that only this stack needs as a Markdown note in {folder}/notes/ (same rules as project notes). '
+              'Facts for the whole session go in the project notes folder.\n')]
     if text:
-        main += f'\n### Stack instructions\n{text}\n'
+        parts.append((2, f'\n### Stack instructions\n{text}\n'))
     if pinned:
         lines = '\n'.join(f'- {item["name"]}: {item["path"]}{" (gone)" if item["missing"] else ""}' for item in pinned)
-        main += f'\n### Stack pinned files\nRead a file when the task needs it.\n{lines}\n'
+        parts.append((2, f'\n### Stack pinned files\nRead a file when the task needs it.\n{lines}\n'))
     listing = ('\n### Stack notes\n' + ''.join(f'- {item["name"]}: {item["title"]}\n' for item in found)) if found else ''
     excerpts = []
     for item in found[:NEWEST]:
         body = _read(folder / 'notes' / item['name'], EXCERPT + 1).strip()
         excerpts.append(f'\n#### {item["name"]}\n{body[:EXCERPT]}{" …" if len(body) > EXCERPT else ""}\n')
-    return main, listing, excerpts
+    return parts, listing, excerpts
 
 
 def render(pid, agent='claude', home=None, group=None, backlog_project=None):
     """The text both agents get. Reading never makes the bundle folder.
     group: {'pid', 'name'} for a tab in a group (groups.py). Stack note lists and excerpts follow the project's.
+    Tether's rules are always whole. The budget goes to the rest by priority: the project name and stack identity,
+    then user instructions and pins, then note and backlog lists, then note excerpts. Output keeps its reading order.
     backlog_project: the agent's repository name (backlog.project_name). With it, the open backlog items for the inbox
     and that project are listed. The project preview has no tab, so it passes none."""
     prompt, _ = _render(pid, meta(pid), home, group, backlog_project)
@@ -388,15 +396,15 @@ def _render(pid, data, home, group=None, backlog_project=None):
              + f'Project folder: {folder}\n'
              + f'\n## Notes\nSave a project fact that other agents in this session need as a Markdown file in {folder}/notes/ '
              '(one topic per file, a "# Title" first line). Keep your own memory as before. The user reviews notes in Tether.\n')
-    content = [': ' + data['name'] if data['name'] else '']
+    content = [(1, ': ' + data['name'] if data['name'] else '')]
     if text:
-        content.append(f'\n## Instructions\n{text}\n')
+        content.append((2, f'\n## Instructions\n{text}\n'))
     if pinned:
         lines = '\n'.join(f'- {item["name"]}: {item["path"]}{" (gone)" if item["missing"] else ""}' for item in pinned)
-        content.append(f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n')
+        content.append((2, f'\n## Pinned files\nRead a file when the task needs it.\n{lines}\n'))
     if group:
-        main, group_listing, group_excerpts = _group_parts(group, home)
-        content.append(main)
+        group_parts, group_listing, group_excerpts = _group_parts(group, home)
+        content.extend(group_parts)
     fixed = ['\n## Tab icon\nOnce the task is clear, run `tmux set-option -p -t "$TMUX_PANE" @chat_icon NAME`. NAME: a lucide.dev '
              f'icon name, or svg-X after you write a 24x24 stroke SVG to {paths.TETHER}/icons/X.svg. Skip it if @chat_icon_by is "user" or "tether".\n']
     fixed.append('\n## Naming tabs\nIn replies, write the visible name of a tab in backticks, like `B69 review`: Tether links it. Never write a pane id like %71 unless the user must type it.\n')
@@ -421,7 +429,8 @@ def _render(pid, data, home, group=None, backlog_project=None):
                  'Exit: 0 finished, 3 timeout (still working), 4 gone, 5 needs_input (with prompt), 6 no_turn (none in 60 s; message may be lost). '
                  'When a tab you started or review is done, save a note in notes/ (what it did, outcome, findings), '
                  'then run `close --pane %N`. Busy tabs stay open. '
-                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply).\n')
+                 'Asked to close this tab: run `close --self` (exit 0 = it closes after your reply). '
+                 'To coordinate this session\'s tabs: `agent_coordinator_cli.py claim` (same folder).\n')
     backlog = f'{sys.executable} {Path(__file__).resolve().with_name("agent_backlog_cli.py")}'
     fixed.append(f'\n## Backlog\nOne backlog serves all sessions. Change it only with `{backlog}`, never edit its file. '
                  'Commands: `list`, `add "title" --detail "why"`, `detail B12 "text"`, `start B12`, `done B12 "result"`, `move B12 PROJECT`. '
@@ -449,7 +458,7 @@ def _render(pid, data, home, group=None, backlog_project=None):
     rules = ''.join(fixed)
     fixed_chars = len(heading) + len(intro) + len(rules)
     limit = min(data['budget'], BUDGET_MAX - fixed_chars)
-    fitted = _fit(content + waiting + listing + excerpts, limit)
+    fitted = _fit(content + [(4, part) for part in waiting + listing] + [(5, part) for part in excerpts], limit)
     # Keep the project name on the heading line and the backlog list after the built-in rules.
     title = ''.join(fitted[:1])
     main = ''.join(fitted[1:len(content)])

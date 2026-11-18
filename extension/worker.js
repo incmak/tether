@@ -185,7 +185,12 @@ chrome.commands.onCommand.addListener(async name => {
   await chrome.windows.update(target.windowId, {focused: true});
   await chrome.tabs.update(target.tab, target.url ? {active: true, url: target.url} : {active: true});
 });
-chrome.debugger.onDetach.addListener(source => { if (source.tabId === grant?.tab) end('debugger_detached'); });
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (!grant || source.tabId !== grant.tab) return;
+  if (reason === 'canceled_by_user') end('debugger_canceled');
+  else if (reason === 'target_closed') end('debugger_target_closed');
+  else end('debugger_detached');
+});
 chrome.tabs.onRemoved.addListener(tab => { if (tab === grant?.tab) end('tab_closed'); });
 chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
   const g = grant;

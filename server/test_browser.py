@@ -2,11 +2,12 @@ import base64
 import io
 import json
 import os
+from pathlib import Path
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
 import browser
 import browser_api
@@ -176,6 +177,35 @@ class InputTests(unittest.TestCase):
                     {'type': 'down', 'x': True, 'y': 1}):
             with self.assertRaises(ValueError):
                 browser.input_command(bad)
+
+
+class LaunchTests(unittest.TestCase):
+    def test_stderr_defaults_to_devnull(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ), \
+                patch.object(browser.os, 'posix_spawn', return_value=321) as spawn:
+            os.environ.pop('TETHER_CHROME_STDERR', None)
+            _, read_fd, write_fd = browser.launch('/fixture/chrome', Path(folder) / 'profile')
+            os.close(read_fd)
+            os.close(write_fd)
+        self.assertIn((os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0), spawn.call_args.kwargs['file_actions'])
+
+    def test_stderr_capture_keeps_one_file_per_launch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            chrome = root / 'chrome'
+            chrome.write_text('#!/bin/sh\nprintf "%s\\n" "$$" >&2\n')
+            chrome.chmod(0o700)
+            profile = root / 'profile'
+            logs = root / 'logs' / 'stderr'
+            expected = []
+            with patch.dict(os.environ, {'TETHER_CHROME_STDERR': str(logs)}):
+                for _ in range(2):
+                    pid, read_fd, write_fd = browser.launch(str(chrome), profile)
+                    os.close(read_fd)
+                    os.close(write_fd)
+                    self.assertEqual(os.waitpid(pid, 0), (pid, 0))
+                    expected.append(f'{pid}\n')
+            self.assertCountEqual([path.read_text() for path in logs.iterdir()], expected)
 
 
 class FakePipeTests(unittest.TestCase):
