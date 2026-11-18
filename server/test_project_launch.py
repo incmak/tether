@@ -393,14 +393,14 @@ class UnitTests(unittest.TestCase):
         folder = str(backlog.folder())
         items = str(paths.items())
         rem = str(paths.reminders())
-        self.assertEqual(args[4:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
         self.assertTrue(paths.items().is_dir())
         self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
         projects.set_instructions(PID, 'Use "pnpm".\nNo emoji 🙂', 0)
         args = project_launch.codex_args(PID, ['resume', '--last'])
         self.assertEqual(args[0], '-c')
-        self.assertEqual(args[4:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
         key, _, value = args[1].partition('=')
         self.assertEqual(key, 'developer_instructions')
         self.assertIn('Use "pnpm".', tomllib.loads('v = ' + value)['v'])
@@ -417,7 +417,12 @@ class UnitTests(unittest.TestCase):
             key, _, value = arg.partition('=')
             if key in ('developer_instructions', SUBAGENT_INSTRUCTIONS):
                 values[key] = value
+        self.assertNotIn(SUBAGENT_INSTRUCTIONS, values)  # It would replace what subagents inherit.
         return {key: tomllib.loads('v = ' + value)['v'] for key, value in values.items()}
+
+    @staticmethod
+    def block(pid):
+        return autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
 
     def test_codex_gets_standing_rules_for_the_project_or_the_global_settings(self):
         autonomy.set_global(2)
@@ -427,7 +432,7 @@ class UnitTests(unittest.TestCase):
         for pid, level, codex in ((PID, 0, 4), (None, 2, 1)):
             with self.subTest(project=pid):
                 overrides = self.standing_instructions(project_launch.codex_args(pid, ['resume', '--last']))
-                block = overrides[SUBAGENT_INSTRUCTIONS]
+                block = self.block(pid)
                 self.assertIn(autonomy.SAFETY, block)
                 self.assertIn(f'Autonomy level {level} (', block)
                 self.assertIn(f'Codex level {codex} (', block)
@@ -448,7 +453,7 @@ class UnitTests(unittest.TestCase):
                 argv = project_launch.codex_args(PID, args)
                 overrides = self.standing_instructions(argv)
                 self.assertEqual(overrides['developer_instructions'],
-                                 expected + '\n\n' + overrides[SUBAGENT_INSTRUCTIONS])
+                                 expected + '\n\n' + self.block(PID))
                 folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()),
                            '--add-dir', str(paths.reminders())]
                 self.assertIn(folders, [argv[i:i+len(folders)] for i in range(len(argv))])
@@ -474,7 +479,8 @@ class UnitTests(unittest.TestCase):
                     args = project_launch.codex_args(pid, ['resume', '--last'])
                     text = tomllib.loads(args[1])['developer_instructions']
                     self.assertEqual(note() in text, enabled)
-                    block = self.standing_instructions(args)[SUBAGENT_INSTRUCTIONS]
+                    self.standing_instructions(args)
+                    block = self.block(pid)
                     if pid:
                         self.assertIn('## Notes', text)
                         if enabled:
@@ -536,7 +542,7 @@ url = "https://example.test/playwright"
                 mock.patch.object(project_launch.os, 'execv') as execute:
             project_launch.launch('codex', ['resume'])
             overrides = self.standing_instructions(execute.call_args.args[1][1:])
-            self.assertEqual(overrides['developer_instructions'], note() + '\n\n' + overrides[SUBAGENT_INSTRUCTIONS])
+            self.assertEqual(overrides['developer_instructions'], note() + '\n\n' + self.block(None))
             os.environ.pop('TETHER_LAUNCH')
             with mock.patch.object(project_launch, 'codex_browser_env_args', side_effect=ValueError('bad config')), \
                     mock.patch.object(project_launch.sys, 'stderr'):
@@ -601,7 +607,7 @@ class WrapperTests(unittest.TestCase):
         folder = str(self.temp / 'tether/backlog')
         items = str(self.temp / 'tether/items')
         rem = str(self.temp / 'tether/reminders')
-        self.assertEqual((argv[1], argv[5:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last', '1']))  # the Notes part, even with no instructions
+        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last', '1']))  # the Notes part, even with no instructions
         with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
             projects.set_instructions(pid, 'Use pnpm.', 0)
         argv = self.run_in_pane(f'{launcher} codex resume --last')

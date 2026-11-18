@@ -459,8 +459,9 @@ def codex_args(pid, args, group=None):
     import autonomy
     import codex_level
     import paths
+    # Children inherit the root developer_instructions, and Codex rebuilds them after compaction. Do not set
+    # features.multi_agent_v2.subagent_developer_instructions: it would replace what children inherit.
     block = autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
-    subagent_args = ['-c', 'features.multi_agent_v2.subagent_developer_instructions=' + toml_string(block)]
     folder_args = codex_folders(args) if pid else []
 
     # Replace the last CLI instruction in place so its scope and precedence are preserved on resume/fork.
@@ -471,15 +472,15 @@ def codex_args(pid, args, group=None):
             if isinstance(user, str):
                 args = list(args)
                 args[i] = prefix + 'developer_instructions=' + toml_string(user + '\n\n' + block)
-            return [*subagent_args, *folder_args, *args]
+            return [*folder_args, *args]
 
     config = {} if '--ignore-user-config' in options else _toml(Path(os.environ.get('CODEX_HOME') or paths.CODEX) / 'config.toml')
     if config is None:
-        return [*subagent_args, *folder_args, *args]  # An unreadable config may contain user instructions.
+        return [*folder_args, *args]  # An unreadable config may contain user instructions.
     if 'developer_instructions' in config:
         user = config['developer_instructions']
         root_args = ['-c', 'developer_instructions=' + toml_string(user + '\n\n' + block)] if isinstance(user, str) else []
-        return [*root_args, *subagent_args, *folder_args, *args]
+        return [*root_args, *folder_args, *args]
 
     text = ''
     if pid:
@@ -492,7 +493,7 @@ def codex_args(pid, args, group=None):
         text = text + '\n\n' + note() if text else note()
         args = [*codex_browser_env_args(), *args]
     text = text + '\n\n' + block if text else block
-    return ['-c', 'developer_instructions=' + toml_string(text), *subagent_args, *folder_args, *args]
+    return ['-c', 'developer_instructions=' + toml_string(text), *folder_args, *args]
 
 
 def codex_browser_env_args():
