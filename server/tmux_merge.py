@@ -18,8 +18,30 @@ SESSION = re.compile(r'\$[0-9]+')
 GONE = 'That session or pane is gone. Refresh the list and try again.'
 
 
-def _tmux(run, *args):
-    return run([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
+def _tmux(run, *args, command=None):
+    return run([*(command or [paths.TMUX]), *args], capture_output=True, text=True, timeout=5)
+
+
+def _try_tmux(run, *args, command=None):
+    """A timeout leaves the command's effect unknown."""
+    try:
+        return _tmux(run, *args, command=command)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _target_session(run, target, *, gone=None):
+    """Read an exact pane or window's session. A confirmed absence can be distinguished from a failed read."""
+    field = '#{pane_id}' if target.startswith('%') else '#{window_id}'
+    result = _try_tmux(run, 'display-message', '-p', '-t', target, field + '\t#{session_id}')
+    if result is None or result.returncode:
+        return None
+    fields = result.stdout.rstrip('\r\n').split('\t')
+    if fields == ['', '']:
+        return gone
+    if len(fields) == 2 and fields[0] == target and SESSION.fullmatch(fields[1]):
+        return fields[1]
+    return None
 
 
 def _info(run, target, fmt):
@@ -53,6 +75,8 @@ def _pane(run, pane_id):
 
 
 def _check(result, message):
+    if result is None:
+        raise RuntimeError(message)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or message)
 
@@ -147,8 +171,14 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     _check(windows, GONE)
     plan = _name_plan(run, source, target, list(_names(run, source)))
     groups.merge_into(source, target, run)  # before the move, so no moved pane points to a missing group
-    for window in windows.stdout.split():
-        _check(_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':'), 'Could not move the window.')
+    for moved_count, window in enumerate(windows.stdout.split()):
+        moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
+        if moved is None or moved.returncode:
+            if _target_session(run, window) == target:
+                continue
+            if moved_count:
+                raise RuntimeError('Only part of the session moved. Check both sessions.')
+            _check(moved, 'Could not move the window.')
     _apply_names(run, plan)
     _apply_project(run, target, kept, dropped)
     return _moved(run, target, None)
@@ -160,7 +190,13 @@ def move_pane(pane, target, run=subprocess.run):
     if source == target:
         raise ValueError('The pane is already in that session.')
     plan = _name_plan(run, source, target, [pane])
-    _check(_tmux(run, 'break-pane', '-d', '-s', pane, '-t', target + ':'), 'Could not move the pane.')
+    moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', target + ':')
+    if moved is None or moved.returncode:
+        current = _target_session(run, pane, gone='')
+        if current is None:
+            raise RuntimeError('Could not confirm the move. Refresh the list.')
+        if current != target:
+            _check(moved, 'Could not move the pane.')
     _ungroup(run, pane)
     _apply_names(run, plan)
     return _moved(run, target, pane)
@@ -181,6 +217,45 @@ def _free_name(run, wanted=''):
     return name
 
 
+def _remove_placeholder(run, pane):
+    """Retry once when an uncertain kill left the shell pane open."""
+    killed = _try_tmux(run, 'kill-pane', '-t', pane)
+    if killed is not None and not killed.returncode:
+        return True
+    current = _target_session(run, pane, gone='')
+    if current:
+        _try_tmux(run, 'kill-pane', '-t', pane)
+        current = _target_session(run, pane, gone='')
+    return current == ''
+
+
+def _session_open(run, session):
+    """True or False by the exact session id; None when tmux did not answer."""
+    result = _try_tmux(run, 'list-sessions', '-F', '#{session_id}')
+    if result is None or result.returncode:
+        return None
+    return session in result.stdout.split()
+
+
+def _drop_new(run, name, started):
+    """A new-session that timed out may still have made the session. Kill it only when it is surely this call's: the
+    exact name the call chose, created at or after the call started, with one pane. Returns the text the error adds."""
+    found = _try_tmux(run, 'display-message', '-p', '-t', f'={name}:',
+                      '#{session_id}\t#{session_created}\t#{session_panes}')
+    if found is None or found.returncode:
+        return f' A session “{name}” may be left open.'
+    if not found.stdout.strip():  # tmux 3.4 prints nothing for a missing exact name: the call made no session
+        return ''
+    fields = found.stdout.strip().split('\t')
+    if (len(fields) != 3 or not SESSION.fullmatch(fields[0]) or not fields[1].isdigit()
+            or int(fields[1]) < started or fields[2] != '1'):
+        return f' A session “{name}” may be left open.'
+    killed = _try_tmux(run, 'kill-session', '-t', fields[0])
+    if killed is None or killed.returncode or _session_open(run, fields[0]) is not False:
+        return f' A session “{name}” may be left open.'
+    return ''
+
+
 def break_out(pane, run=subprocess.run):
     """Move one pane into a new session of its own, started in the pane's folder."""
     source = _pane(run, pane)
@@ -190,17 +265,38 @@ def break_out(pane, run=subprocess.run):
         raise ValueError('That pane is already a session of its own.')
     folder = _info(run, pane, '#{pane_current_path}')[0]
     wanted = _names(run, source).get(pane, '')
-    created = run([*paths.tmux_new_session(), 'new-session', '-d', '-s', _free_name(run, wanted), '-c', folder,
-                   '-P', '-F', '#{session_id}\t#{pane_id}'], capture_output=True, text=True, timeout=5)
+    name = _free_name(run, wanted)
+    started = int(time.time())
+    created = _try_tmux(run, 'new-session', '-d', '-s', name, '-c', folder, '-P', '-F',
+                        '#{session_id}\t#{pane_id}', command=paths.tmux_new_session())
+    if created is None:
+        raise RuntimeError('Could not start a session.' + _drop_new(run, name, started))
     _check(created, 'Could not start a session.')
     session_id, placeholder = created.stdout.strip().split('\t')
-    moved = _tmux(run, 'break-pane', '-d', '-s', pane, '-t', session_id + ':')
-    if moved.returncode:
-        _tmux(run, 'kill-session', '-t', session_id)
-        _check(moved, 'Could not move the pane.')
-    _tmux(run, 'kill-pane', '-t', placeholder)
+    moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', session_id + ':')
+    removed = False
+    if moved is None or moved.returncode:
+        current = _target_session(run, pane, gone='')
+        if current not in (session_id, source, ''):
+            raise RuntimeError(f'Could not confirm the move. The new session “{name}” may be left open.')
+        if current != session_id:
+            # The placeholder goes by its pane id, not the session: a break-pane that lands late keeps its pane.
+            removed = _remove_placeholder(run, placeholder)
+            if not removed:
+                raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
+            if _target_session(run, pane, gone='') != session_id:
+                left = _session_open(run, session_id)
+                if left is None:
+                    raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
+                if left:
+                    raise RuntimeError(f'Could not move the pane. The new session “{name}” was left open.')
+                _check(moved, 'Could not move the pane.')
+    removed = removed or _remove_placeholder(run, placeholder)
     _ungroup(run, pane)
-    return _moved(run, session_id, pane)
+    result = _moved(run, session_id, pane)
+    if not removed:
+        result['warning'] = 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
+    return result
 
 
 def merge(kind, source, target, run=subprocess.run, keep=None):

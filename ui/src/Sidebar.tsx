@@ -246,7 +246,7 @@ type Section = 'pinned' | 'agents' | 'terminals' | 'shells' | 'archived' | 'past
 // What a sidebar drag carries: a whole session, or one pane of a session with several panes.
 type Carry = { session: string; pane?: string; chat?: PastChat }
 // The server's answer to a merge: the session that now holds the moved panes, for the rename prompt.
-type Moved = { session: string; name: string; pane: string }
+type Moved = { session: string; name: string; pane: string; warning?: string }
 interface Props {
   onDeck?: () => void
   now?: number  // the app's clock, so Catch up and the deck agree on when a snooze ends
@@ -328,6 +328,7 @@ export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api,
     const single = sessions.find(session => session.id === target)?.panes.length === 1
     api<Moved>('merge', { kind, source, target, ...(keep && { keep }) }).then(moved => {
       if (kind === 'break' ? /^split-\d{6}/.test(moved.name) : single) setRenaming({ moved, before: sessions })
+      if (moved.warning) setMergeError(moved.warning)  // the move happened, but tmux left an extra shell tab
       onRetry()
     }, failure => { setMergeError(errorText(failure)); onMarks?.() })
   }
