@@ -179,6 +179,7 @@ async function main() {
       check(`${at} Observe is checked`, await section.getByRole('radio', { name: 'Observe' }).isChecked())
       check(`${at} the mode note says it merges nothing`, (await section.locator('#auto-merge-note').innerText()).includes('It merges nothing.'))
 
+      check(`${at} the limit of the protection is stated`, await section.getByText('so the passkey protects this switch, not the repository.', { exact: false }).isVisible())
       // Trust by area: the limit, the count to the next step, the top step and zero trust.
       const areas = await section.locator('.auto-merge-areas > li').allInnerTexts()
       check(`${at} three areas`, areas.length === 3, String(areas.length))
@@ -238,9 +239,13 @@ async function main() {
       await confirm.getByRole('button', { name: 'Turn on Enforce' }).focus()
       await page.keyboard.press('Escape')
       await confirm.waitFor({ state: 'detached' })
+      await page.waitForFunction(() => document.activeElement?.matches('.auto-merge input[name="auto-merge-mode"]:checked'))
+      check(`${at} Escape returns focus to the mode`, await page.evaluate(() => document.activeElement?.value === 'observe'))
       check(`${at} Escape cancels and Settings stays open`, posts.length === 0 && await section.isVisible() && await section.getByRole('radio', { name: 'Observe' }).isChecked())
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()
       await confirm.getByRole('button', { name: 'Cancel' }).click()
+      await page.waitForFunction(() => document.activeElement?.matches('.auto-merge input[name="auto-merge-mode"]:checked'))
+      check(`${at} Cancel returns focus to the mode`, await page.evaluate(() => document.activeElement?.value === 'observe'))
       check(`${at} Cancel keeps Observe and sends nothing`, posts.length === 0 && await section.getByRole('radio', { name: 'Observe' }).isChecked())
       // Without a passkey nothing changes, and the message says what to do.
       hasKey = false
@@ -254,6 +259,8 @@ async function main() {
       await section.getByText('Tether merges a branch into the main branch when every check passes.').waitFor()
       check(`${at} Enforce is saved only with a passkey approval`, posts.length === 2 && !approved(posts[0]) && approved(posts[1]) && posts[1].mode === 'enforce' && state.mode === 'enforce'
         && await section.getByRole('radio', { name: 'Enforce' }).isChecked(), JSON.stringify(posts.map(post => [post.mode, !!post.approval])))
+      await page.waitForFunction(() => document.activeElement?.matches('.auto-merge input[name="auto-merge-mode"]:checked'))
+      check(`${at} after the save, focus is on the new mode`, await page.evaluate(() => document.activeElement?.value === 'enforce'))
       check(`${at} the passkey check is bound to this action`, passkeyAsks.length === 1 && passkeyAsks[0].action === 'auto-merge' && passkeyAsks[0].payload?.mode === 'enforce', JSON.stringify(passkeyAsks))
 
       // Off and Observe save at once. A failed save says so and keeps the old mode.
@@ -270,6 +277,8 @@ async function main() {
       const restore = section.getByRole('button', { name: 'Restore trust for Docs in project' })
       await restore.click()
       await restore.waitFor({ state: 'detached' })
+      await page.waitForFunction(() => document.activeElement?.textContent === 'Trust by area')
+      check(`${at} after Restore, focus is on the trust heading`, true)
       check(`${at} Restore sends the repository and the area, with a passkey approval`, JSON.stringify(posts.at(-1).restore) === JSON.stringify({ root: ROOT, area: 'docs' }) && approved(posts.at(-1)), JSON.stringify(posts.at(-1)))
 
       // After a restart the server holds no grant: Enforce is paused and the page says so.

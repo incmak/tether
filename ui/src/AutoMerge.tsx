@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { NoteBone, SettingSkeleton, SwitchBone } from './SettingBones'
 import { agoSeconds } from './Sidebar'
 import { errorText } from './api'
@@ -64,12 +64,17 @@ export function AutoMergeSettings({ api }: { api: Api }) {
   const [pending, setPending] = useState<AutoMergeMode | 'restore' | null>(null)
   const [asking, setAsking] = useState(false)
   const [error, setError] = useState('')
+  const modes = useRef<HTMLFieldSetElement>(null)
+  const trust = useRef<HTMLHeadingElement>(null)
+  // The confirmation and the Restore button leave the page when they finish. Focus goes back to a control that stays.
+  const focusMode = () => setTimeout(() => modes.current?.querySelector<HTMLInputElement>('input:checked')?.focus(), 0)
+  const cancel = () => { setAsking(false); focusMode() }
   async function save(body: Record<string, unknown>, kind: AutoMergeMode | 'restore') {
     setPending(kind); setError(''); setAsking(false)
     // Enforce and Restore give Tether more power, so the server asks for a passkey. Off and Observe save at once.
     try { await (kind === 'enforce' || kind === 'restore' ? withApproval<AutoMergeState>(api, 'auto-merge', 'auto-merge', body) : api<AutoMergeState>('auto-merge', body)); await refresh() }
     catch (failure) { setError(errorText(failure)) }
-    finally { setPending(null) }
+    finally { setPending(null); if (kind === 'restore') setTimeout(() => trust.current?.focus(), 0); else if (kind === 'enforce') focusMode() }
   }
   const choose = (mode: AutoMergeMode) => { if (mode === 'enforce') setAsking(true); else void save({ mode }, mode) }
   const value = pending && pending !== 'restore' ? pending : asking ? 'enforce' : data?.mode ?? 'observe'
@@ -77,7 +82,7 @@ export function AutoMergeSettings({ api }: { api: Api }) {
   return <section className="settings-group auto-merge" aria-labelledby="settings-auto-merge"><h3 id="settings-auto-merge">Auto-merge</h3>
     {data && (error || loadError) && <p className="error" role="alert">{error || loadError}</p>}
     {!data ? loadError ? <p className="setting-note" role="alert">{loadError}</p> : <SettingSkeleton label="Loading auto-merge"><NoteBone lines={1} /><SwitchBone /><NoteBone lines={2} /></SettingSkeleton> : <>
-      <fieldset className="choice" disabled={!!pending}>
+      <fieldset className="choice" disabled={!!pending} ref={modes}>
         <legend>Mode</legend>
         <div className="segmented">{data.modes.map(item => <label key={item.mode}>
           <input type="radio" name="auto-merge-mode" value={item.mode} checked={value === item.mode} aria-describedby="auto-merge-note" onChange={() => choose(item.mode)} /><span>{item.name}</span>
@@ -85,17 +90,18 @@ export function AutoMergeSettings({ api }: { api: Api }) {
         {current && <p id="auto-merge-note" className="setting-note">{current.summary}</p>}
       </fieldset>
       {data.paused && !asking && <p className="provider-warning" role="status"><strong>Enforce is paused.</strong> Tether restarted, or the setting changed outside Settings. It only observes until you turn on Enforce again.</p>}
-      {asking && <div className="provider-warning auto-merge-confirm" role="group" aria-labelledby="auto-merge-confirm-title" aria-describedby="auto-merge-confirm-text" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation(); setAsking(false) } }}>
+      {asking && <div className="provider-warning auto-merge-confirm" role="group" aria-labelledby="auto-merge-confirm-title" aria-describedby="auto-merge-confirm-text" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); event.nativeEvent.stopImmediatePropagation(); cancel() } }}>
         <strong id="auto-merge-confirm-title">Turn on Enforce?</strong>
         <p id="auto-merge-confirm-text">Tether then merges a worker branch into the main branch on origin without you, when every check passes. It pushes one merge commit, never a forced push. <code>git revert -m 1</code> undoes a merge. A merge is not a deploy. Approvals from before now do not merge. Tether asks for your passkey, and again after it restarts.</p>
         <div className="auto-merge-actions">
-          <button type="button" className="secondary" onClick={() => setAsking(false)}>Cancel</button>
+          <button type="button" className="secondary" onClick={cancel}>Cancel</button>
           <button type="button" className="primary" autoFocus onClick={() => void save({ mode: 'enforce' }, 'enforce')}>Turn on Enforce</button>
         </div>
       </div>}
       <p className="setting-note">A branch merges without you only when all of this holds: the reviewer approved the exact commit, its stamp names tests, every changed file is in a trusted area and within the area’s limit, no reliability checklist row is hit, and the commit merges with no conflict. If one check fails, the branch waits for you.</p>
+      <p className="setting-note">These checks guard against mistakes. Agents run under your account on this machine and can already push to the main branch themselves, so the passkey protects this switch, not the repository.</p>
 
-      <h4 className="auto-merge-heading">Trust by area</h4>
+      <h4 className="auto-merge-heading" ref={trust} tabIndex={-1}>Trust by area</h4>
       {data.trust.length === 0 ? <p className="hint">No open repository has a <code>{data.rules_file}</code> on its main branch, so nothing can auto-merge yet.</p>
         : data.trust.map(repo => <div key={repo.root} className="auto-merge-repo">
           <p className="auto-merge-repo-name"><strong>{repo.repo}</strong>{repo.target && <small> · {repo.target}</small>}</p>

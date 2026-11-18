@@ -246,9 +246,9 @@ A branch merges without you only when all of this holds:
 
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
 - The head commit has a `Verified:` stamp with a `tests(...)` item.
-- `main` at the push URL has `docs/auto-merge.json`. Every changed file in the proposed merge is a regular text file
-  in the same area. The total of added and deleted lines fits the area's trust limit.
-- `scripts/checklist.py` finds no reliability checklist row for the diff.
+- `main` at the push URL has `docs/auto-merge.json`. The branch diff and the proposed merge each stay within one
+  area and change only regular text files. The branch diff's added and deleted lines fit the area's trust limit.
+- `scripts/checklist.py` finds no reliability checklist row for the branch diff. It reads Git attributes from `main`.
 - The trial merge has no conflict. Every path it changes matches the approved commit, including deletions.
 
 If one check fails, or Tether cannot tell, the branch waits for you.
@@ -256,6 +256,10 @@ If one check fails, or Tether cannot tell, the branch waits for you.
 In Enforce, Tether makes one merge commit and pushes it to `refs/heads/main` with a normal push. It leaves working trees
 and local refs alone. `git revert -m 1 <merge>` undoes a merge. A merge does not deploy the code.
 At the push, the server must still hold the Enforce grant. The approval must come after the grant and be at most 24 hours old.
+Tether checks the worker branch, its head commit, the clean worktree and the current approval again before the push.
+Git reads the push URL from the repository's local config. Tether uses one Git configuration for discovery and push,
+with system and global config disabled. Network commands still use your global credential helpers. The repository's
+pre-push hook still runs.
 
 `docs/auto-merge.json` names the areas. Tether reads it from the main branch, never from the worker branch:
 
@@ -268,10 +272,17 @@ In a path, `**` crosses folders; `*` and `?` stay inside one name. A repository 
 Trust is per area. Each area starts at 60 changed lines. After 5 clean Tether merges in an area, the limit widens to 150,
 then to 300. Tether matches each merge on the first-parent history of `main` to the approved commit and the decision log.
 A revert on `main` narrows the limit by one step. The reduction stays after the revert leaves the history window.
-At zero, you merge that area until you approve **Restore trust** with your passkey in Settings.
+Each area's trust is capped by a replay of the history window. At zero, you merge that area until you approve
+**Restore trust** with your passkey in Settings. A restore returns the area to 60 changed lines at the current tip.
+Settings reads trust from the push repository's `main` and can reuse that tip for up to five minutes.
 
-`python3 server/auto_merge.py check --cwd WORKTREE --approved SHA` prints each check for a branch. It never merges.
-Add `--no-fetch` to check against the last fetched `origin/main` without contacting the remote.
+`python3 server/auto_merge.py check --cwd WORKTREE --approved SHA` checks a branch against the push repository's
+`main`. It never merges.
+
+These checks guard against mistakes: a stale approval, a change outside the areas, a wrong repository. Tether and its
+agents run under one OS account, so an agent can already push to `main` with your Git credentials and can change
+Tether's own files. The passkey protects the switch in Tether, not the repository. To make auto-merge the only way
+to `main`, give it a separate identity and block direct pushes on the Git host.
 
 ## Usage reports
 

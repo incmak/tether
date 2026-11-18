@@ -54,7 +54,6 @@ RULES_FILE = 'docs/auto-merge.json'
 REMOTE = 'origin'
 TARGET = 'main'
 TARGET_REF = f'refs/heads/{TARGET}'
-TRACKING_REF = f'refs/remotes/{REMOTE}/{TARGET}'
 SHA = re.compile(r'[0-9a-f]{40}')
 AREA_NAME = re.compile(r'[a-z][a-z0-9-]{0,23}')
 MAX_AREAS = 8
@@ -64,6 +63,7 @@ MODES_OK = ('100644', '100755')
 MAX_BLOB = 512 * 1024
 GIT_TIMEOUT = 15
 NET_TIMEOUT = 45
+TARGET_TTL = 300        # seconds Settings can reuse the push repository's main
 HISTORY = 3000           # commits of the main branch the ladder reads
 LOG_KEEP = 2000          # decision records kept
 SHOWN = 30               # decision records the Settings page gets
@@ -78,6 +78,7 @@ REVERT = re.compile(r'This reverts commit ([0-9a-f]{40})')
 
 _lock = threading.RLock()
 _ladder_cache = {}
+_target_cache = {}
 _mode_lock = threading.Lock()
 _grant = None
 RUN = subprocess.run     # tests replace this to prove that observe mode never writes
@@ -164,28 +165,48 @@ def set_mode(mode):
 
 # ---- git ----
 
+def _git_env(helpers=()):
+    """The same Git settings for local commands, network commands and the checklist."""
+    full = dict(os.environ)
+    for key in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
+                'GIT_ATTR_SOURCE', 'GIT_EXTERNAL_DIFF', 'GIT_DIFF_OPTS'):
+        full.pop(key, None)
+    # Git warns when the graft file exists, even if it is empty. The checklist treats stderr as an error.
+    full.update(GIT_TERMINAL_PROMPT='0', LC_ALL='C', GIT_OPTIONAL_LOCKS='0', GIT_NO_REPLACE_OBJECTS='1',
+                GIT_GRAFT_FILE=os.path.join(os.devnull, 'grafts'), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1',
+                GIT_ATTR_NOSYSTEM='1')
+    settings = [('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'), ('fetch.prune', 'false'),
+                ('fetch.pruneTags', 'false'), ('fetch.recurseSubmodules', 'false'), ('push.recurseSubmodules', 'no'),
+                ('push.followTags', 'false'), ('submodule.recurse', 'false'), ('core.attributesFile', os.devnull)]
+    settings.extend(('credential.helper', helper) for helper in helpers)
+    full['GIT_CONFIG_COUNT'] = str(len(settings))
+    for index, (key, value) in enumerate(settings):
+        full[f'GIT_CONFIG_KEY_{index}'] = key
+        full[f'GIT_CONFIG_VALUE_{index}'] = value
+    return full
+
+
+def _credential_helpers():
+    # This lookup alone uses the user's environment. Keep only the helpers, in their original order.
+    try:
+        result = RUN(['git', 'config', '--global', '--null', '--get-all', 'credential.helper'],
+                     stdin=subprocess.DEVNULL, capture_output=True, encoding='utf-8', errors='surrogateescape',
+                     timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitError('Could not read global Git credential helpers.') from exc
+    if result.returncode == 1:
+        return ('',)
+    if result.returncode:
+        raise GitError('Could not read global Git credential helpers.')
+    return ('', *result.stdout.split('\0')[:-1])
+
+
 def _git(folder, *args, network=False, check=True, env=None, binary=False):
     """Run git with a clean environment. Raise GitError on a failure, a timeout or a missing git."""
-    full = dict(os.environ)
-    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'):
-        full.pop(key, None)
-    full.update(GIT_TERMINAL_PROMPT='0', LC_ALL='C', GIT_OPTIONAL_LOCKS='0', GIT_NO_REPLACE_OBJECTS='1',
-                GIT_GRAFT_FILE=os.devnull)
-    if network:
-        # These options can expand the requested refspec even when Git takes a literal URL.
-        settings = {'fetch.prune': 'false', 'fetch.pruneTags': 'false', 'fetch.recurseSubmodules': 'false',
-                    'push.recurseSubmodules': 'no', 'push.followTags': 'false'}
-        full['GIT_CONFIG_COUNT'] = str(len(settings))
-        for index, (key, value) in enumerate(settings.items()):
-            full[f'GIT_CONFIG_KEY_{index}'] = key
-            full[f'GIT_CONFIG_VALUE_{index}'] = value
-    else:
-        full.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
-    full.update(env or {})
     decoding = {} if binary else {'encoding': 'utf-8', 'errors': 'surrogateescape'}
     try:
         result = RUN(['git', '-C', str(folder), *args], stdin=subprocess.DEVNULL, capture_output=True,
-                     env=full, timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
+                     env=_git_env() if env is None else env, timeout=NET_TIMEOUT if network else GIT_TIMEOUT, **decoding)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f'git {args[0]} did not run: {type(exc).__name__}') from exc
     if check and result.returncode:
@@ -222,16 +243,35 @@ def _check_push_url(folder, url):
             raise GitError(f'Git would rewrite the push URL for {REMOTE} again.')
 
 
-def _fetch_target(folder):
-    url = _git(folder, 'remote', 'get-url', '--push', REMOTE).stdout.rstrip('\n')
-    _check_push_url(folder, url)
-    ref = _git(folder, 'ls-remote', url, TARGET_REF, network=True).stdout
-    match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
-    if match is None:
-        raise GitError(f'The push repository has no unique {TARGET} branch.')
-    sha = match[1]
-    _git(folder, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True)
-    _git(folder, 'cat-file', '-e', sha + '^{commit}')
+def _push_url(root):
+    for key in ('pushurl', 'url'):
+        result = _git(root, 'config', '--local', '--null', '--get-all', f'remote.{REMOTE}.{key}', check=False)
+        if result.returncode == 1:
+            continue
+        if result.returncode == 0:
+            values = result.stdout.split('\0')
+            if len(values) == 2 and not values[-1]:
+                return values[0]
+        break
+    raise GitError(f'{REMOTE} must have exactly one push URL.')
+
+
+def _fetch_target(root):
+    try:
+        url = _push_url(root)
+        _check_push_url(root, url)
+        ref = _git(root, 'ls-remote', url, TARGET_REF, network=True, env=_git_env(_credential_helpers())).stdout
+        match = re.fullmatch(r'([0-9a-f]{40})\t' + TARGET_REF + r'\n', ref)
+        if match is None:
+            raise GitError(f'The push repository has no unique {TARGET} branch.')
+        sha = match[1]
+        _git(root, 'fetch', '--no-tags', '--no-write-fetch-head', url, TARGET_REF, network=True,
+             env=_git_env(_credential_helpers()))
+        _git(root, 'cat-file', '-e', sha + '^{commit}')
+    except GitError:
+        _target_cache.pop(root, None)
+        raise
+    _target_cache[root] = time.monotonic(), (url, sha)
     return url, sha
 
 
@@ -440,7 +480,8 @@ def checklist_rows(folder, base, head):
         return None
     try:
         result = RUN([sys.executable, str(script), '--repo', str(folder), '--base', base, '--head', head, '--json'],
-                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GIT_TIMEOUT,
+                     env={**_git_env(), 'GIT_ATTR_SOURCE': base})
         answer = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -582,11 +623,9 @@ def _reverted_areas(root, rules, sha, reverted):
     return {area_of(rules, path) for path in paths} - {None}
 
 
-def _apply_history(root, rules, target_sha, entry):
+def _history_events(root, rules, target_sha):
     commits = _history(root, target_sha)
     window = {sha for sha, *_ in commits}
-    merges_seen = set(entry['merges_seen']) & window
-    reverts_seen = set(entry['reverts_seen']) & window
     logged = {(item['merge'], item['head']) for item in _records()
               if item.get('root') == root and item['outcome'] == 'merged'
               and _hash(item.get('merge')) and _hash(item.get('head'))}
@@ -597,44 +636,49 @@ def _apply_history(root, rules, target_sha, entry):
     # Follow the first-parent order for commits that share a timestamp.
     events = []
     for sha, when, parents, subject, body in reversed(commits):
-        if sha not in merges_seen and len(parents) == 2 and (sha, parents[1]) in logged \
+        if len(parents) == 2 and (sha, parents[1]) in logged \
                 and '(Tether auto-merge)' in subject and f'Approved commit: {parents[1]}' in body.splitlines():
             areas, problems = classify(rules, changed(root, parents[0], sha))
-            merges_seen.add(sha)
-            if not problems:
-                events.append((when, 'merge', sha, areas))
+            events.append((when, 'merge', sha, () if problems else areas))
         reverted = REVERT.findall(body)
-        if reverted and sha not in reverts_seen and epoch is not None and _ancestor(root, epoch, sha):
+        if reverted and epoch is not None and _ancestor(root, epoch, sha):
             touched = set()
             for commit in reverted:
                 touched.update(_reverted_areas(root, rules, sha, commit))
-            reverts_seen.add(sha)
-            if touched:
-                events.append((when, 'revert', sha, touched))
-
-    for when, kind, sha, areas in sorted(events, key=lambda event: event[0]):
-        for name in areas:
-            area = entry['areas'][name]
-            if kind == 'merge':
-                area['merges'] += 1
-                area['streak'] += 1
-                if area['streak'] >= CLEAN_MERGES and 0 < area['rung'] < len(RUNGS) - 1:
-                    area['rung'] += 1
-                    area['streak'] = 0
-            else:
-                area['rung'] = max(0, area['rung'] - 1)
-                area['streak'] = 0
-                area['reverts'] += 1
-                area['last_revert'] = {'commit': sha, 'at': when}
-    entry.update(tip=target_sha, merges_seen=sorted(merges_seen), reverts_seen=sorted(reverts_seen))
+            events.append((when, 'revert', sha, touched))
+    return window, sorted(events, key=lambda event: event[0])
 
 
-def _levels(entry, names):
-    return {name: {**entry['areas'][name], 'limit': RUNGS[entry['areas'][name]['rung']]} for name in names}
+def _apply_event(level, kind, sha, when):
+    if kind == 'merge':
+        level['merges'] += 1
+        level['streak'] += 1
+        if level['streak'] >= CLEAN_MERGES and 0 < level['rung'] < len(RUNGS) - 1:
+            level['rung'] += 1
+            level['streak'] = 0
+    else:
+        level['rung'] = max(0, level['rung'] - 1)
+        level['streak'] = 0
+        level['reverts'] += 1
+        level['last_revert'] = {'commit': sha, 'at': when}
 
 
-def ladder(root, rules, target_sha, *, persist=True):
-    """Apply new first-parent events and save each area's trust, including reductions that age out."""
+def _restored_at(root, target_sha, saved, names):
+    restored = {}
+    if isinstance(saved, dict):
+        for name in names:
+            sha = saved.get(name)
+            if _hash(sha):
+                try:
+                    if _sha(root, sha) == sha and _ancestor(root, sha, target_sha):
+                        restored[name] = sha
+                except GitError:
+                    pass  # A saved hash can name a commit Git does not have.
+    return restored
+
+
+def ladder(root, rules, target_sha):
+    """Keep saved reductions, with trust capped by a replay of the current first-parent history."""
     names = [area['name'] for area in rules]
 
     def key():
@@ -649,27 +693,40 @@ def ladder(root, rules, target_sha, *, persist=True):
         stored = data.get(root)
         entry = stored if _valid_trust(stored) else {'areas': {}, 'merges_seen': [], 'reverts_seen': []}
         entry = {**entry, 'areas': {name: level.copy() for name, level in entry['areas'].items()}}
-        for name in names:
-            entry['areas'].setdefault(name, {'rung': START_RUNG, 'streak': 0, 'merges': 0, 'reverts': 0,
-                                            'last_revert': None})
+        replayed = {name: {'rung': START_RUNG, 'streak': 0, 'merges': 0, 'reverts': 0, 'last_revert': None}
+                    for name in names}
+        for name, level in replayed.items():
+            entry['areas'].setdefault(name, level.copy())
         tip = entry.get('tip')
-        # Settings and --no-fetch can see an older origin/main. They must not replay or prune that history.
+        # A concurrent fetch may have saved a newer tip. Do not prune or replace its saved reductions.
         stale = False
         if tip and tip != target_sha:
             stale = _ancestor(root, target_sha, tip)
             if not stale and not _ancestor(root, tip, target_sha):
                 raise GitError('The main branch no longer contains the saved trust history.')
+        window, events = _history_events(root, rules, target_sha)
+        seen = {kind: set(entry[f'{kind}s_seen']) & window for kind in ('merge', 'revert')}
+        restored = _restored_at(root, target_sha, entry.get('restored'), names)
+        for when, kind, sha, areas in events:
+            for name in areas:
+                if not stale and sha not in seen[kind]:
+                    _apply_event(entry['areas'][name], kind, sha, when)
+                if name not in restored or not _ancestor(root, sha, restored[name]):
+                    _apply_event(replayed[name], kind, sha, when)
+            seen[kind].add(sha)
         if not stale:
-            _apply_history(root, rules, target_sha, entry)
-            if persist and entry != stored:
+            entry.update(tip=target_sha, merges_seen=sorted(seen['merge']), reverts_seen=sorted(seen['revert']))
+            if entry != stored:
                 data[root] = entry
                 try:
                     _write(trust_path(), json.dumps(data) + '\n')
                 except OSError as exc:
                     raise GitError('Could not save the trust ladder.') from exc
-        levels = _levels(entry, names)
-        if persist:
-            _ladder_cache[root] = key(), levels
+        levels = {}
+        for name in names:
+            level = min(entry['areas'][name], replayed[name], key=lambda level: level['rung'])
+            levels[name] = {**level, 'limit': RUNGS[level['rung']]}
+        _ladder_cache[root] = key(), levels
         return levels
 
 
@@ -687,7 +744,10 @@ def restore(root, name):
             if name not in levels or levels[name]['rung'] != 0:
                 raise AutoMergeError(409, 'Only an area at zero trust can be restored.')
             data = _trust_data()
-            data[root]['areas'][name].update(rung=START_RUNG, streak=0)
+            entry = data[root]
+            entry['areas'][name].update(rung=START_RUNG, streak=0)
+            restored = entry.get('restored')
+            entry['restored'] = {**(restored if isinstance(restored, dict) else {}), name: target_sha}
             _write(trust_path(), json.dumps(data) + '\n')
             _ladder_cache.pop(root, None)
     except GitError as exc:
@@ -706,7 +766,7 @@ def _trial_merge(folder, target_sha, head):
     return tree
 
 
-def evaluate(folder, approved, *, fetch=True):
+def evaluate(folder, approved):
     """(decision, plan) for the branch in `folder`. Git can write objects during fetch and trial merge.
 
     decision: the record for the log and the Settings page. plan: what merge() needs, or None when a check failed."""
@@ -723,7 +783,7 @@ def evaluate(folder, approved, *, fetch=True):
         head = _sha(folder, 'HEAD')
         branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False).stdout.strip()
         decision.update(root=root, repo=Path(root).name, head=head, branch=branch, target=f'{REMOTE}/{TARGET}')
-        url, target_sha = _fetch_target(folder) if fetch else (None, _sha(folder, TRACKING_REF))
+        url, target_sha = _fetch_target(root)
         if _ancestor(folder, head, target_sha):
             decision['outcome'] = 'already'
             return decision, None
@@ -791,13 +851,23 @@ def evaluate(folder, approved, *, fetch=True):
         merge_problem = str(exc)
     if rules is None:
         check('scope', False, 'Without the rules file, every file is outside the auto-merge areas.')
-    elif files is not None:
-        areas, problems = classify(rules, files)
+    else:
+        branch_files = []
+        try:
+            branch_files = changed(folder, base, head)
+            areas, problems = classify(rules, branch_files)
+            if files is not None:
+                _, merge_problems = classify(rules, files)
+                problems.extend(problem for problem in merge_problems if problem not in problems)
+            elif tree is not None:
+                problems.append(merge_problem)
+        except GitError as exc:
+            areas, problems = {}, [str(exc)]
         decision['areas'] = areas
-        decision['files'] = len(files)
+        decision['files'] = len(branch_files)
         labels = {area['name']: area['label'] for area in rules}
         try:
-            levels = ladder(root, rules, target_sha, persist=fetch)
+            levels = ladder(root, rules, target_sha)
             for name, lines in areas.items():
                 limit = levels[name]['limit']
                 if limit == 0:
@@ -843,13 +913,11 @@ def _authorization_problem(setting, approved_at):
     return None
 
 
-def merge(plan, reviewer, approved_at):
+def merge(plan, reviewer, job):
     """Make the merge commit and push it. Return its hash. Raise GitError when anything is in doubt.
 
     The push is a normal one: git refuses it when the main branch moved, and nothing is forced. No working tree and
     no local branch changes, so other sessions' uncommitted work in the main checkout is never touched."""
-    if plan['url'] is None:
-        raise GitError('Auto-merge needs the current main branch from the push repository.')
     folder = plan['folder']
     stamp = merge_stamp(plan['items'], reviewer, plan['head'])
     areas = ', '.join(f'{name} {lines} lines' for name, lines in plan['areas'].items())
@@ -860,22 +928,42 @@ def merge(plan, reviewer, approved_at):
                f'Areas: {areas}\n'
                'Undo: git revert -m 1 <this commit>\n\n'
                f'Verified: {stamp}\n')
-    identity = {}
+    identity = _git_env()
     if _git(folder, 'config', 'user.name', check=False).returncode or _git(folder, 'config', 'user.email', check=False).returncode:
-        identity = {'GIT_AUTHOR_NAME': 'Tether auto-merge', 'GIT_AUTHOR_EMAIL': 'tether@localhost',
-                    'GIT_COMMITTER_NAME': 'Tether auto-merge', 'GIT_COMMITTER_EMAIL': 'tether@localhost'}
+        identity.update(GIT_AUTHOR_NAME='Tether auto-merge', GIT_AUTHOR_EMAIL='tether@localhost',
+                        GIT_COMMITTER_NAME='Tether auto-merge', GIT_COMMITTER_EMAIL='tether@localhost')
     made = _git(folder, 'commit-tree', plan['tree'], '-p', plan['target_sha'], '-p', plan['head'], '-m', message,
                 env=identity).stdout.strip()
     if not SHA.fullmatch(made):
         raise GitError('git made no merge commit.')
     if _git(folder, 'rev-parse', '--verify', made + '^{tree}').stdout.strip() != plan['tree']:
         raise GitError('The merge commit does not contain the planned tree.')
-    _check_push_url(folder, plan['url'])
+    root = plan['root']
+    _check_push_url(root, plan['url'])
+    env = _git_env(_credential_helpers())
     with _mode_lock:
-        problem = _authorization_problem(read_setting(), approved_at)
+        problem = _authorization_problem(read_setting(), job.get('approved_at'))
         if problem:
             raise NotAuthorized(problem)
-        _git(folder, 'push', plan['url'], f'{made}:{TARGET_REF}', network=True)
+        try:
+            head = _sha(folder, 'HEAD')
+            branch = _git(folder, 'symbolic-ref', '--quiet', '--short', 'HEAD').stdout.strip()
+            dirty = _git(folder, 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none').stdout
+        except GitError as exc:
+            raise NotAuthorized(str(exc)) from exc
+        if head != plan['head'] or branch != plan['branch']:
+            raise NotAuthorized('The worker branch changed before the push.')
+        if dirty:
+            raise NotAuthorized('The worktree has uncommitted or untracked files.')
+        current = job.get('current')
+        try:
+            live = current().get(job.get('worker'), {}).get(job.get('reviewer')) if callable(current) else None
+            matches = live == {'commit': head, 'at': job['approved_at']}
+        except Exception as exc:
+            raise NotAuthorized('Could not read the current reviewer approval.') from exc
+        if not matches:
+            raise NotAuthorized('The reviewer approval changed or is no longer available.')
+        _git(root, 'push', plan['url'], f'{made}:{TARGET_REF}', network=True, env=env)
     return made
 
 
@@ -885,8 +973,8 @@ _merge_lock = threading.Lock()
 def process(job, alert=None):
     """Decide one approved commit and, in enforce mode, merge it. Returns the recorded decision, or None.
 
-    job: {'folder', 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent'}. The mode is read here,
-    when the work runs, not when the approval was seen."""
+    job: {'folder', 'commit', 'approved_at', 'worker', 'name', 'reviewer', 'reviewer_agent', 'current'}.
+    The mode is read here, when the work runs, not when the approval was seen."""
     setting = read_setting()
     if setting['mode'] == 'off':
         return None
@@ -910,7 +998,7 @@ def process(job, alert=None):
         with _merge_lock:
             try:
                 try:
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'), at)
+                    decision['merge'] = merge(plan, job.get('reviewer_agent'), job)
                 except NotAuthorized:
                     raise
                 except GitError:
@@ -919,7 +1007,7 @@ def process(job, alert=None):
                     if plan is None:
                         raise
                     decision.update(checks=again['checks'], areas=again['areas'], files=again['files'])
-                    decision['merge'] = merge(plan, job.get('reviewer_agent'), at)
+                    decision['merge'] = merge(plan, job.get('reviewer_agent'), job)
                 decision['outcome'] = 'merged'
             except GitError as exc:
                 decision['outcome'] = 'failed'
@@ -960,7 +1048,7 @@ def _work(alert):
             print(f'auto-merge failed: {exc!r}', file=sys.stderr, flush=True)
 
 
-def observe(entries, approvals, folder_of, alert=None, start=True):
+def observe(entries, approvals, folder_of, alert=None, start=True, current=None):
     """Queue each approval once. approvals: review_links.approved_commits(). Git runs on another thread, so
     the monitor never waits for it. Returns the jobs it queued."""
     global _thread
@@ -989,7 +1077,7 @@ def observe(entries, approvals, folder_of, alert=None, start=True):
             _seen.add(key)
             jobs.append({'folder': folder, 'commit': commit, 'approved_at': at, 'worker': worker,
                          'name': str(entry.get('name') or '')[:80], 'reviewer': reviewer,
-                         'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent')})
+                         'reviewer_agent': (by_pane.get(reviewer) or {}).get('agent'), 'current': current})
     if jobs and start:
         with _wake:
             if _thread is None:
@@ -1014,16 +1102,17 @@ def _trust(root, known):
     """One repository's ladder for the Settings page. known: the repository appears in the decision log."""
     entry = {'root': root, 'repo': Path(root).name, 'areas': [], 'error': ''}
     try:
-        target_sha = _sha(root, TRACKING_REF)
+        cached = _target_cache.get(root)
+        _, target_sha = cached[1] if cached and time.monotonic() - cached[0] < TARGET_TTL else _fetch_target(root)
         entry['target'] = f'{REMOTE}/{TARGET}'
         rules = rules_at(root, target_sha)
         if rules is None:
             entry['error'] = f'{REMOTE}/{TARGET} has no valid {RULES_FILE}. Nothing auto-merges in this repository.'
             return entry if known else None
-        levels = ladder(root, rules, target_sha, persist=False)
+        levels = ladder(root, rules, target_sha)
     except GitError as exc:
         entry['error'] = str(exc)
-        return entry if known else None
+        return entry
     for area in rules:
         level = levels[area['name']]
         entry['areas'].append({'name': area['name'], 'label': area['label'], 'rung': level['rung'], 'limit': level['limit'],
@@ -1095,9 +1184,8 @@ def main(argv=None):
     check = commands.add_parser('check', help='print each check for the branch in --cwd')
     check.add_argument('--cwd', default=os.getcwd())
     check.add_argument('--approved', help='the commit the reviewer approved (full hash). Default: none.')
-    check.add_argument('--no-fetch', action='store_true', help='use the origin branch as last fetched')
     args = parser.parse_args(argv)
-    decision, plan = evaluate(args.cwd, args.approved, fetch=not args.no_fetch)
+    decision, plan = evaluate(args.cwd, args.approved)
     if decision['outcome'] == 'already':
         print(f"{decision['head'][:12]} is already on {decision['target']}.")
         return 0

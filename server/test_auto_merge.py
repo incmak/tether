@@ -15,8 +15,16 @@ RULES = {'version': 1, 'areas': [
     {'name': 'tests', 'label': 'Tests', 'paths': ['server/test_*.py', 'server/fixtures/**', 'ui/test_*.cjs']},
     {'name': 'ui', 'label': 'UI', 'paths': ['ui/src/**', 'ui/index.html']}]}
 STAMP = 'Verified: tests(server 12 ok) screenshots(2)'
+GIT_SETTINGS = [('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'), ('fetch.prune', 'false'),
+                ('fetch.pruneTags', 'false'), ('fetch.recurseSubmodules', 'false'), ('push.recurseSubmodules', 'no'),
+                ('push.followTags', 'false'), ('submodule.recurse', 'false'), ('core.attributesFile', os.devnull)]
 
 CHECKLIST_ROWS = auto_merge.checklist_rows  # the real function: Base replaces it with a fixed answer
+
+
+def git_settings(env):
+    return [(env[f'GIT_CONFIG_KEY_{index}'], env[f'GIT_CONFIG_VALUE_{index}'])
+            for index in range(int(env['GIT_CONFIG_COUNT']))]
 
 
 class Handler:
@@ -48,6 +56,7 @@ class Base(unittest.TestCase):
             self.enterContext(mock.patch.object(paths, name, value))
         self.enterContext(mock.patch.object(auto_merge, '_grant', None))
         auto_merge._ladder_cache.clear()
+        auto_merge._target_cache.clear()
         auto_merge._seen.clear()
         self.rows = []
         self.enterContext(mock.patch.object(auto_merge, 'checklist_rows', lambda *args: self.rows))
@@ -88,7 +97,8 @@ class Base(unittest.TestCase):
     def job(self, head, at='now'):
         at = int(auto_merge.time.time()) + 5 if at == 'now' else at
         return {'folder': str(self.work), 'commit': head, 'approved_at': at,
-                'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex'}
+                'worker': '%1', 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex',
+                'current': lambda: {'%1': {'%2': {'commit': head, 'at': at}}}}
 
     def origin_main(self):
         return self.git(self.origin, 'rev-parse', 'main')
@@ -150,6 +160,52 @@ class Decision(Base):
             self.assertIn(name, decision['checks'][-3]['text'])
             self.git(self.work, 'reset', '-q', '--hard', 'main')
 
+    def test_branch_files_already_on_main_still_count_for_scope(self):
+        for path, text in (('server/server.py', 'print(2)\n'), ('ui/package.json', '{}\n')):
+            with self.subTest(path=path):
+                self.git(self.work, 'reset', '-q', '--hard', 'main')
+                self.write(self.work, path, text)
+                head = self.change(text=f'// worker {path}\n')
+                self.write(self.repo, path, text)
+                self.commit(self.repo, f'Main changes {path} too')
+                self.git(self.repo, 'push', 'origin', 'main')
+                decision, plan = auto_merge.evaluate(self.work, head)
+                self.assertEqual(self.failed(decision), ['scope'])
+                self.assertIn(path, decision['checks'][-3]['text'])
+                self.assertIsNone(plan)
+
+    def test_lines_already_on_main_still_count_for_the_branch_limit(self):
+        for path in ('ui/src/New.tsx', 'server/test_new.py'):
+            with self.subTest(path=path):
+                self.git(self.work, 'reset', '-q', '--hard', 'main')
+                text = 'large change\n' * 120
+                self.write(self.work, path, text)
+                marker = 'ui/src/Small.tsx' if path.startswith('ui/') else 'server/test_small.py'
+                head = self.change(marker, 'small change\n')
+                self.write(self.repo, path, text)
+                self.commit(self.repo, f'Main adds {path} too')
+                self.git(self.repo, 'push', 'origin', 'main')
+                decision, plan = auto_merge.evaluate(self.work, head)
+                self.assertEqual(self.failed(decision), ['scope'])
+                self.assertIn('121 changed lines', decision['checks'][-3]['text'])
+                self.assertIsNone(plan)
+
+    def test_scope_fails_if_either_diff_cannot_be_read(self):
+        head = self.change()
+        tree = auto_merge._trial_merge(self.work, self.origin_main(), head)
+        real = auto_merge.changed
+        for unreadable, failed_checks in ((head, ['scope']), (tree, ['scope', 'merge'])):
+            with self.subTest(failed_checks=failed_checks):
+                def changed(folder, base, revision):
+                    if revision == unreadable:
+                        raise auto_merge.GitError('Could not read the diff.')
+                    return real(folder, base, revision)
+
+                with mock.patch.object(auto_merge, 'changed', side_effect=changed):
+                    decision, plan = auto_merge.evaluate(self.work, head)
+                self.assertEqual(self.failed(decision), failed_checks)
+                self.assertIsNone(plan)
+
     def test_rules_come_from_the_main_branch_not_from_the_worker_branch(self):
         wide = {'version': 1, 'areas': [{'name': 'all', 'label': 'All', 'paths': ['s**', 'd**', 'u**']}]}
         self.write(self.work, 'docs/auto-merge.json', json.dumps(wide))
@@ -185,8 +241,11 @@ class Decision(Base):
         self.enforce()
         before = self.origin_main()
         head = self.change('server/server.py', 'print(2)\n')
-        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head, fetch=False)[0]), [])
         self.assertEqual(self.failed(auto_merge.process(self.job(head))), ['scope'])
+        with mock.patch('sys.stdout', new_callable=io.StringIO) as cli:
+            self.assertEqual(auto_merge.main(['check', '--cwd', str(self.work), '--approved', head]), 3)
+        self.assertIn('WAIT  scope:', cli.getvalue())
+        self.assertEqual(auto_merge.state([str(self.repo)])['trust'][0]['areas'][1]['name'], 'ui')
         self.assertEqual(self.origin_main(), before)
         self.git(self.work, 'reset', '-q', '--hard', before)
         result = auto_merge.process(self.job(self.change()))
@@ -199,7 +258,6 @@ class Decision(Base):
         self.git(self.origin, 'update-ref', 'refs/heads/integration', self.origin_main())
         self.git(self.origin, 'symbolic-ref', 'HEAD', 'refs/heads/integration')
         self.git(self.origin, 'update-ref', '-d', 'refs/heads/main')
-        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head, fetch=False)[0]), [])
         self.assertEqual(self.failed(auto_merge.process(self.job(head))), ['git'])
 
     def test_a_push_url_cannot_resolve_as_a_remote_name_or_be_rewritten_again(self):
@@ -210,9 +268,32 @@ class Decision(Base):
         self.assertEqual(self.failed(auto_merge.process(self.job(head))), ['git'])
         self.assertEqual(self.refs(), refs)
         self.git(self.repo, 'remote', 'set-url', '--push', 'origin', str(self.origin))
-        self.git(self.repo, 'config', f'url.{self.root / "other.git"}.pushInsteadOf', str(self.origin))
-        self.assertEqual(self.failed(auto_merge.process(self.job(head))), ['git'])
-        self.assertEqual(self.refs(), refs)
+        for option in ('pushInsteadOf', 'insteadOf'):
+            key = f'url.{self.root / "other.git"}.{option}'
+            self.git(self.repo, 'config', key, str(self.origin))
+            self.assertEqual(self.failed(auto_merge.process(self.job(head))), ['git'])
+            self.assertEqual(self.refs(), refs)
+            self.git(self.repo, 'config', '--unset', key)
+
+    def test_origin_must_supply_one_literal_push_url(self):
+        head = self.change()
+        self.git(self.repo, 'config', '--add', 'remote.origin.url', str(self.origin))
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), ['git'])
+        self.git(self.repo, 'config', '--add', 'remote.origin.pushurl', str(self.origin))
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+        self.git(self.repo, 'config', '--add', 'remote.origin.pushurl', str(self.origin))
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), ['git'])
+
+    def test_relative_push_urls_use_the_same_root_for_settings_and_push(self):
+        self.enforce()
+        for count, url in enumerate(('../origin.git', './../origin.git'), 1):
+            with self.subTest(url=url):
+                self.git(self.repo, 'remote', 'set-url', '--push', 'origin', url)
+                result = auto_merge.process(self.job(self.change(text=f'export const app = {count + 1}\n')))
+                self.assertEqual(result['outcome'], 'merged', result)
+                self.assertEqual(self.origin_main(), result['merge'])
+                auto_merge._target_cache.clear()
+                self.assertFalse(auto_merge.state([str(self.repo)])['trust'][0]['error'])
 
     def test_no_rules_file_on_main_means_nothing_merges(self):
         self.git(self.repo, 'rm', '-q', 'docs/auto-merge.json')
@@ -426,21 +507,35 @@ class Modes(Base):
         real = subprocess.run
         seen = []
         global_config = str(self.root / 'global.conf')
+        helping = []
+        Path(global_config).write_text('[credential]\n\thelper = cache\n\thelper = store --file /srv/credentials\n')
 
         def run(argv, **kwargs):
-            if argv[0] == 'git':
+            if argv[:2] == ['git', 'config']:
+                self.assertEqual(argv[-3:], ['--null', '--get-all', 'credential.helper'])
+                self.assertNotIn('env', kwargs)
+                helping.append(1)
+            elif argv[0] == 'git':
                 command = argv[3:]
                 seen.append(command)
+                env = kwargs['env']
+                self.assertEqual(env['GIT_CONFIG_GLOBAL'], os.devnull)
+                self.assertEqual(env['GIT_CONFIG_NOSYSTEM'], '1')
+                self.assertEqual(env['GIT_ATTR_NOSYSTEM'], '1')
+                want = GIT_SETTINGS
                 if command[0] in ('fetch', 'ls-remote'):
-                    self.assertEqual(kwargs['env']['GIT_CONFIG_GLOBAL'], global_config)
-                else:
-                    self.assertEqual(kwargs['env']['GIT_CONFIG_GLOBAL'], os.devnull)
-                    self.assertEqual(kwargs['env']['GIT_CONFIG_NOSYSTEM'], '1')
-            return real(argv, **kwargs)
+                    want = GIT_SETTINGS + [('credential.helper', helper)
+                                           for helper in ('', 'cache', 'store --file /srv/credentials')]
+                self.assertEqual(git_settings(env), want)
+            result = real(argv, **kwargs)
+            if argv[3] == 'merge-base':
+                self.assertEqual(result.stderr, '')
+            return result
 
         with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=global_config), mock.patch.object(auto_merge, 'RUN', run):
             decision = auto_merge.process(self.job(head))
         self.assertEqual(decision['outcome'], 'would_merge')
+        self.assertEqual(len(helping), 2)
         self.assertEqual(self.origin_main(), before)
         self.assertEqual(self.refs(), refs)
         self.assertFalse(fetch_head.exists())
@@ -450,6 +545,41 @@ class Modes(Base):
         self.assertFalse({'push', 'commit-tree', 'update-ref', 'merge', 'commit', 'reset', 'checkout', 'rebase',
                           'stash', 'branch'} & {command[0] for command in seen}, seen)
         self.assertEqual([item['outcome'] for item in auto_merge.records()], ['would_merge'])
+
+    def test_observe_disables_configured_fsmonitor_hooks(self):
+        head = self.change()
+        called = self.root / 'fsmonitor-called'
+        self.git(self.repo, 'config', 'extensions.worktreeConfig', 'true')
+        for scope in ('--local', '--worktree'):
+            with self.subTest(scope=scope):
+                hook = self.root / f'fsmonitor-{scope}'
+                hook.write_text(f'#!/bin/sh\necho called > "{called}"\nexit 1\n')
+                hook.chmod(0o755)
+                self.git(self.work, 'config', scope, 'core.fsmonitor', str(hook))
+                self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
+                self.assertFalse(called.exists())
+
+    def test_push_ignores_global_url_rewrites_and_runs_the_repository_hook(self):
+        other = self.root / 'other.git'
+        self.git(self.root, 'clone', '--bare', str(self.origin), str(other))
+        before = self.origin_main()
+        config = self.root / 'global.conf'
+        called = self.root / 'pre-push-called'
+        hook = self.root / 'hooks' / 'pre-push'
+        self.write(self.root, 'hooks/pre-push', f'#!/bin/sh\necho called >> "{called}"\n')
+        hook.chmod(0o755)
+        self.git(self.repo, 'config', 'core.hooksPath', str(hook.parent))
+        self.enforce()
+        for count, option in enumerate(('insteadOf', 'pushInsteadOf'), 1):
+            with self.subTest(option=option):
+                config.write_text(f'[url "{other}"]\n\t{option} = {self.origin}\n')
+                head = self.change(text=f'export const app = {count + 1}\n')
+                with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config)):
+                    result = auto_merge.process(self.job(head))
+                self.assertEqual(result['outcome'], 'merged', result)
+                self.assertEqual(self.origin_main(), result['merge'])
+                self.assertEqual(self.git(other, 'rev-parse', 'main'), before)
+                self.assertEqual(called.read_text().splitlines(), ['called'] * count)
 
     def test_configured_refspecs_do_not_move_local_refs_in_either_mode(self):
         self.git(self.repo, 'branch', 'victim')
@@ -599,8 +729,8 @@ class Modes(Base):
         before = self.origin_main()
         decision, plan = auto_merge.evaluate(self.work, head)
         auto_merge.set_mode('observe')
-        with self.assertRaises(auto_merge.GitError):
-            auto_merge.merge(plan, 'codex', self.job(head)['approved_at'])
+        with self.assertRaises(auto_merge.NotAuthorized):
+            auto_merge.merge(plan, 'codex', self.job(head))
         self.assertEqual(self.origin_main(), before)
 
     def test_a_new_grant_before_the_push_rejects_the_old_approval_without_retry(self):
@@ -637,17 +767,15 @@ class Modes(Base):
         with mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
             for at in (old, float('nan'), float('inf')):
                 with self.subTest(at=at), self.assertRaises(auto_merge.NotAuthorized):
-                    auto_merge.merge(plan, 'codex', at)
+                    auto_merge.merge(plan, 'codex', self.job(plan['head'], at=at))
         self.assertFalse(any(call.args[0][3] == 'push' for call in run.call_args_list))
         self.assertEqual(self.origin_main(), before)
 
-    def test_push_refuses_a_tracking_plan_or_a_commit_with_the_wrong_tree(self):
+    def test_push_refuses_a_commit_with_the_wrong_tree(self):
         self.enforce()
         head = self.change()
         before = self.origin_main()
-        _, offline = auto_merge.evaluate(self.work, head, fetch=False)
-        _, online = auto_merge.evaluate(self.work, head)
-        at = self.job(head)['approved_at']
+        _, plan = auto_merge.evaluate(self.work, head)
         wrong_tree = self.git(self.work, 'rev-parse', 'main^{tree}')
 
         def run(argv, **kwargs):
@@ -657,11 +785,52 @@ class Modes(Base):
             return subprocess.run(argv, **kwargs)
 
         with mock.patch.object(auto_merge, 'RUN', side_effect=run):
-            with self.assertRaisesRegex(auto_merge.GitError, 'needs the current main branch'):
-                auto_merge.merge(offline, 'codex', at)
             with self.assertRaisesRegex(auto_merge.GitError, 'does not contain the planned tree'):
-                auto_merge.merge(online, 'codex', at)
+                auto_merge.merge(plan, 'codex', self.job(head))
         self.assertEqual(self.origin_main(), before)
+
+    def test_a_changed_worker_or_approval_fails_at_the_push_without_retry(self):
+        self.enforce()
+        head = self.change()
+        before = self.origin_main()
+        real = auto_merge.evaluate
+        job = self.job(head)
+
+        def fail_read():
+            raise RuntimeError('approval store failed')
+
+        cases = (
+            (lambda: self.change(text='advanced\n'), 'branch changed'),
+            (lambda: self.git(self.work, 'switch', '-c', 'other'), 'branch changed'),
+            (lambda: self.write(self.work, 'nested/new.txt', 'untracked\n'), 'untracked files'),
+            (lambda: self.write(self.work, 'ui/src/App.tsx', 'uncommitted\n'), 'uncommitted'),
+            (lambda: job.update(current=self.job(head, at=job['approved_at'] + 1)['current']), 'approval changed'),
+            (lambda: job.update(current=self.job('a' * 40, at=job['approved_at'])['current']), 'approval changed'),
+            (lambda: job.update(current=lambda: {}), 'approval changed'),
+            (lambda: job.update(current=None), 'approval changed'),
+            (lambda: job.update(current=fail_read), 'Could not read'),
+        )
+        for change, reason in cases:
+            with self.subTest(reason=reason):
+                job = self.job(head)
+
+                def evaluate(*args, **kwargs):
+                    result = real(*args, **kwargs)
+                    self.assertIsNotNone(result[1])
+                    change()
+                    return result
+
+                with mock.patch.object(auto_merge, 'evaluate', side_effect=evaluate) as check, \
+                        mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
+                    decision = auto_merge.process(job)
+                self.assertEqual(decision['outcome'], 'failed')
+                self.assertIn(reason, decision['error'])
+                check.assert_called_once()
+                self.assertFalse(any(call.args[0][3] == 'push' for call in run.call_args_list))
+                self.assertEqual(self.origin_main(), before)
+                self.git(self.work, 'switch', '-q', 'work')
+                self.git(self.work, 'reset', '-q', '--hard', head)
+                (self.work / 'nested/new.txt').unlink(missing_ok=True)
 
     def test_the_merge_runs_when_main_moved_after_the_first_decision(self):
         self.enforce()
@@ -687,8 +856,7 @@ class Modes(Base):
 
 class Ladder(Base):
     def levels(self):
-        self.git(self.repo, 'fetch', '-q', 'origin')
-        target = self.git(self.repo, 'rev-parse', 'origin/main')
+        _, target = auto_merge._fetch_target(str(self.repo))
         return auto_merge.ladder(str(self.repo), auto_merge.rules_at(self.repo, target), target)
 
     def merge_one(self, number, name='ui/src/App.tsx'):
@@ -729,6 +897,37 @@ class Ladder(Base):
         levels = self.levels()
         self.assertEqual((levels['ui']['rung'], levels['ui']['streak'], levels['ui']['limit']), (2, 0, auto_merge.RUNGS[2]))
         self.assertEqual(levels['tests']['rung'], 1)
+
+    def test_edited_rungs_cannot_raise_the_limit_without_history(self):
+        self.levels()
+        path = auto_merge.trust_path()
+        data = json.loads(path.read_text())
+        for area, name in (('ui', 'ui/src/Large.tsx'), ('tests', 'server/test_large.py')):
+            with self.subTest(area=area):
+                data[str(self.repo)]['areas'][area].update(rung=3, streak=24, merges=24)
+                path.write_text(json.dumps(data))
+                level = self.levels()[area]
+                self.assertEqual((level['rung'], level['limit'], level['streak'], level['merges']), (1, 60, 0, 0))
+                self.git(self.work, 'reset', '-q', '--hard', 'main')
+                decision, plan = auto_merge.evaluate(self.work, self.change(name, 'line\n' * 120))
+                self.assertEqual(self.failed(decision), ['scope'])
+                self.assertIn('120 changed lines. The trust limit for this area is 60', decision['checks'][-3]['text'])
+                self.assertIsNone(plan)
+
+    def test_edited_seen_lists_and_streak_do_not_count_as_clean_merges(self):
+        self.enforce()
+        self.levels()
+        path = auto_merge.trust_path()
+        data = json.loads(path.read_text())
+        entry = data[str(self.repo)]
+        for area, name in (('ui', 'ui/src/App.tsx'), ('tests', 'server/test_a.py')):
+            with self.subTest(area=area):
+                entry['merges_seen'] = [self.origin_main()]
+                entry['areas'][area].update(streak=30, merges=30)
+                path.write_text(json.dumps(data))
+                self.merge_one(1, name)
+                level = self.levels()[area]
+                self.assertEqual((level['rung'], level['limit'], level['streak'], level['merges']), (1, 60, 1, 1))
 
     def test_stamped_commits_pushed_by_agents_and_observe_decisions_do_not_widen(self):
         for number in range(auto_merge.CLEAN_MERGES + 1):
@@ -797,6 +996,33 @@ class Ladder(Base):
             auto_merge.restore(str(self.work), 'ui')     # not a main checkout
         auto_merge.restore(str(self.repo), 'ui')
         self.assertEqual(self.levels()['ui']['rung'], 1)
+        auto_merge._ladder_cache.clear()
+        self.assertEqual(self.levels()['ui']['rung'], 1)
+        saved = json.loads(auto_merge.trust_path().read_text())[str(self.repo)]
+        self.assertEqual(saved['restored'], {'ui': revert})
+        self.revert(self.merge_one(2), '-m', '1')
+        self.assertEqual(self.levels()['ui']['rung'], 0)
+        auto_merge.restore(str(self.repo), 'ui')
+        self.assertEqual(self.levels()['ui']['rung'], 1)
+
+    def test_a_restore_marker_must_be_an_ancestor_commit(self):
+        worker = self.change('ui/src/Other.tsx', 'worker\n')
+        self.write(self.repo, 'ui/src/App.tsx', 'main change\n')
+        commit = self.commit(self.repo, 'Main change')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.revert(commit)
+        self.assertEqual(self.levels()['ui']['rung'], 0)
+        path = auto_merge.trust_path()
+        data = json.loads(path.read_text())
+        entry = data[str(self.repo)]
+        entry['areas']['ui']['rung'] = 3
+        self.git(self.repo, 'tag', '-am', 'Restore tag', 'restore-tag')
+        tag = self.git(self.repo, 'rev-parse', 'restore-tag')
+        for marker in (worker, tag, 'a' * 40, 'short', {'tip': self.origin_main()}):
+            with self.subTest(marker=marker):
+                entry['restored'] = {'ui': marker}
+                path.write_text(json.dumps(data))
+                self.assertEqual(self.levels()['ui']['rung'], 0)
 
     def test_reductions_survive_pruning_and_a_restart_then_restore(self):
         self.enforce()
@@ -811,10 +1037,12 @@ class Ladder(Base):
             saved = json.loads(auto_merge.trust_path().read_text())[str(self.repo)]
             self.assertEqual((saved['merges_seen'], saved['reverts_seen']), ([], []))
             self.assertEqual(saved['areas']['ui']['last_revert']['commit'], revert)
-            # An older tracking tip must neither replay the revert nor replace the snapshot after restart.
+            # Settings uses the push repository even if a tracking ref points to an older tip.
             auto_merge._ladder_cache.clear()
+            auto_merge._target_cache.clear()
             self.git(self.repo, 'update-ref', 'refs/remotes/origin/main', revert)
             self.assertEqual(auto_merge.state([str(self.repo)])['trust'][0]['areas'][1]['reverts'], 1)
+            self.assertEqual(json.loads(auto_merge.trust_path().read_text())[str(self.repo)]['tip'], self.origin_main())
             auto_merge.restore(str(self.repo), 'ui')
             levels = self.levels()
             self.assertEqual((levels['ui']['rung'], levels['ui']['streak'], levels['ui']['reverts']), (1, 0, 1))
@@ -877,12 +1105,15 @@ class Watcher(Base):
         entries = [{'id': '%1', 'name': 'Worker', 'agent': 'claude'}, {'id': '%2', 'agent': 'codex'}]
         approvals = {'%1': {'%2': {'commit': 'a' * 40, 'at': 5}}, '%9': {'%2': {'commit': 'b' * 40, 'at': 5}},
                      '%2': {'%1': {'commit': 'short', 'at': 5}}}
-        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)
+        def current():
+            return approvals
+
+        jobs = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
         self.assertEqual(jobs, [{'folder': str(self.work), 'commit': 'a' * 40, 'approved_at': 5, 'worker': '%1',
-                                 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex'}])
+                                 'name': 'Worker', 'reviewer': '%2', 'reviewer_agent': 'codex', 'current': current}])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2']['at'] = 6
-        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False)
+        renewed = auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False, current=current)
         self.assertEqual(renewed, [dict(jobs[0], approved_at=6)])
         self.assertEqual(auto_merge.observe(entries, approvals, lambda entry: str(self.work), start=False), [])
         approvals['%1']['%2'] = {'commit': 'c' * 40, 'at': 6}
@@ -903,9 +1134,53 @@ class Http(Base):
 
     def test_a_repository_without_rules_is_listed_only_when_it_has_decisions(self):
         other = self.root / 'other'
+        remote = self.root / 'other.git'
+        self.git(self.root, 'init', '-q', '--bare', '-b', 'main', str(remote))
         self.git(self.root, 'init', '-q', '-b', 'main', str(other))
+        self.git(other, 'commit', '--allow-empty', '-m', 'No rules')
+        self.git(other, 'remote', 'add', 'origin', str(remote))
+        self.git(other, 'push', 'origin', 'main')
         self.assertEqual(auto_merge.state([str(other)])['trust'], [])
         self.assertEqual(len(auto_merge.state([str(self.repo)])['trust']), 1)
+
+    def test_settings_fetches_the_push_target_then_reuses_it_for_five_minutes(self):
+        root = str(self.repo)
+        with mock.patch.object(auto_merge, '_fetch_target', wraps=auto_merge._fetch_target) as fetch, \
+                mock.patch.object(auto_merge.time, 'monotonic', return_value=100) as now:
+            self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'UI')
+            changed_rules = json.loads(json.dumps(RULES))
+            changed_rules['areas'][1]['label'] = 'Browser'
+            self.write(self.repo, auto_merge.RULES_FILE, json.dumps(changed_rules))
+            self.commit(self.repo, 'Rename UI area')
+            self.git(self.repo, 'push', 'origin', 'main')
+            now.return_value = 399
+            self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'UI')
+            fetch.assert_called_once_with(root)
+            now.return_value = 400
+            self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Browser')
+            self.assertEqual(fetch.call_count, 2)
+
+            changed_rules['areas'][1]['label'] = 'Frontend'
+            self.write(self.repo, auto_merge.RULES_FILE, json.dumps(changed_rules))
+            self.commit(self.repo, 'Rename UI area again')
+            self.git(self.repo, 'push', 'origin', 'main')
+            decision, plan = auto_merge.evaluate(self.work, self.change())
+            self.assertEqual(self.failed(decision), [])
+            self.assertEqual(plan['target_sha'], self.origin_main())
+            self.assertEqual(auto_merge.state([root])['trust'][0]['areas'][1]['label'], 'Frontend')
+            self.assertEqual(fetch.call_args_list, [mock.call(root)] * 3)
+
+    def test_settings_shows_target_errors_with_or_without_decisions(self):
+        root = str(self.repo)
+        self.git(self.repo, 'remote', 'set-url', '--push', 'origin', str(self.root / 'gone.git'))
+        for known in (False, True):
+            with self.subTest(known=known):
+                if known:
+                    auto_merge.process(self.job(self.change()))
+                trust = auto_merge.state([root])['trust']
+                self.assertEqual(len(trust), 1)
+                self.assertEqual(trust[0]['root'], root)
+                self.assertIn('git ls-remote failed', trust[0]['error'])
 
     def test_post_sets_the_mode_and_refuses_agents_and_bad_values(self):
         handler = Handler({'mode': 'enforce'})
@@ -965,7 +1240,7 @@ class Http(Base):
 class Checklist(unittest.TestCase):
     """The contract of scripts/checklist.py (B209): only status "clear" with exit 0 means no row is hit."""
 
-    def answer(self, output, code, script=True):
+    def answer(self, output, code, script=True, base='a' * 40):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -973,12 +1248,16 @@ class Checklist(unittest.TestCase):
         (root / 'scripts').mkdir()
         if script:
             (root / 'scripts' / 'checklist.py').write_text(
-                'import json, sys\n'
+                'import json, os, sys\n'
                 f'json.dump(sys.argv[1:], open({str(root / "argv")!r}, "w"))\n'
+                'env = {key: val for key, val in os.environ.items() if key.startswith(("GIT_CONFIG_", "GIT_ATTR_", '
+                '"GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS"))}\n'
+                f'json.dump(env, open({str(root / "env")!r}, "w"))\n'
                 f'sys.stdout.write({output!r})\nsys.exit({code})\n')
         with mock.patch.object(auto_merge, 'HERE', root / 'server'):
-            rows = CHECKLIST_ROWS('/repo', 'a' * 40, 'b' * 40)
+            rows = CHECKLIST_ROWS('/repo', base, 'b' * 40)
         self.argv = json.loads((root / 'argv').read_text()) if script else None
+        self.env = json.loads((root / 'env').read_text()) if script else None
         return rows
 
     def test_clear_means_no_rows_and_the_call_names_main_and_the_head(self):
@@ -988,6 +1267,22 @@ class Checklist(unittest.TestCase):
     def test_hit_lists_the_rows(self):
         rows = self.answer('{"status": "hit", "rows": [{"id": "R3", "title": "tmux kill-server"}, {"id": "R7"}]}', 1)
         self.assertEqual(rows, ['R3 tmux kill-server', 'R7'])
+
+    def test_the_checklist_uses_controlled_git_settings_and_attributes_from_main(self):
+        env = {'GIT_CONFIG_GLOBAL': '/srv/global-config', 'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.fsmonitor',
+               'GIT_CONFIG_VALUE_0': 'true', 'GIT_EXTERNAL_DIFF': '/srv/diff', 'GIT_DIFF_OPTS': '--unified=99',
+               'GIT_ATTR_SOURCE': 'HEAD'}
+        with mock.patch.dict(os.environ, env):
+            for base in ('a' * 40, 'c' * 40):
+                with self.subTest(base=base):
+                    self.assertEqual(self.answer('{"status": "clear", "rows": []}', 0, base=base), [])
+                    self.assertEqual(git_settings(self.env), GIT_SETTINGS)
+                    self.assertEqual(self.env['GIT_CONFIG_GLOBAL'], os.devnull)
+                    self.assertEqual(self.env['GIT_CONFIG_NOSYSTEM'], '1')
+                    self.assertEqual(self.env['GIT_ATTR_NOSYSTEM'], '1')
+                    self.assertEqual(self.env['GIT_ATTR_SOURCE'], base)
+                    self.assertNotIn('GIT_EXTERNAL_DIFF', self.env)
+                    self.assertNotIn('GIT_DIFF_OPTS', self.env)
 
     def test_every_other_answer_counts_as_a_hit(self):
         for output, code in (('{"status": "absent", "rows": [], "reason": "no checklist"}', 2),
