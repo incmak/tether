@@ -65,6 +65,8 @@ const readline = require('readline');
 '''
 
 
+@unittest.skipUnless(os.environ.get('TETHER_REAL_BROWSER_TEST') == '1',
+                     'Set TETHER_REAL_BROWSER_TEST=1 to run the real Chromium test')
 @unittest.skipUnless(browser.find_chrome() and shutil.which('node') and playwright_modules(),
                      'Chromium, node, and ui/npm ci are required')
 class RealBridgeDeviceTests(unittest.TestCase):
@@ -77,6 +79,8 @@ class RealBridgeDeviceTests(unittest.TestCase):
                                       env_runner=lambda *a, **k: None, pane_finder=lambda *a: None)
         self.addCleanup(self.real.stop)
         self.addCleanup(self.proxy.stop)
+        # Report launch failures in setUp. Browser.getVersion still has Tether's 30 s deadline.
+        self.real.ensure()
         self.proxy.start()
         self.node = subprocess.Popen(['node', '-e', CLIENT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True,

@@ -78,8 +78,8 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends fonts-unifont
           fi
-      - name: Real Chromium smoke test
-        # Release checks rely on this run, so the server's own Chromium launch must run here, not skip.
+      - name: Real Chromium smoke and bridge device tests
+        # Release checks rely on this run. Fail if any real browser test skips.
         # The hosted image supplies the shared libraries. The launch fails if a library is missing.
         shell: bash
         run: |
@@ -90,8 +90,9 @@ jobs:
             exit 1
           fi
           cd server
-          MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest 2>&1 | tee ../smoke.log
+          MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest test_browser_device 2>&1 | tee ../smoke.log
           grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
+          grep -Fxq 'OK' ../smoke.log
       - name: Browser UI tests
         env:
           SHOTS: ../.release-work/ci-browser
