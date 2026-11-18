@@ -164,6 +164,13 @@ async function main() {
     check('the stack row counts its waiting tabs (2)', await tether.locator('.pane-stack-head', { hasText: 'Release' }).locator('.rollup').textContent() === '2')
     check('a tab whose ask waits has the Needs you dot', await tether.locator('.pane-children button', { hasText: 'Release notes' }).locator('.state-dot.approval').count() === 1)
     check('the stack row says it to a screen reader', (await tether.locator('.pane-stack-head', { hasText: 'Release' }).getAttribute('aria-label')).includes('2 need you'))
+    const releaseStack = tether.locator('.pane-stack', { has: page.locator('.pane-stack-head', { hasText: 'Release' }) })
+    await releaseStack.locator('.pane-stack-fold').click()
+    await releaseStack.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('the folded Release stack still shows its waiting count (2)', await releaseStack.locator('.pane-stack-head .rollup').textContent() === '2'
+      && await releaseStack.locator('button[data-select-pane]').count() === 0)
+    await releaseStack.locator('.pane-stack-fold').click()
+    await releaseStack.locator('.pane-stack-fold[aria-expanded="true"]').waitFor()
     check('a quiet session with several tabs starts folded', await page.locator(`${SIDE} .session-list > li[data-id="$3"] .pane-children`).count() === 0)
     await page.locator(`${SIDE} .session-list > li[data-id="$3"] .session-main`).click()
     check('its row opens it', await page.locator(`${SIDE} .session-list > li[data-id="$3"] .pane-children`).count() === 1)
@@ -185,7 +192,7 @@ async function main() {
     check('Show brings the quiet tabs back', await tether.locator('.pane-stack-head', { hasText: 'Quiet stack' }).count() === 1 && await tether.locator('.quiet-more').getAttribute('aria-expanded') === 'true')
     await page.locator(`${SIDE} .group > .quiet-more`).click()
     check('Show brings the quiet sessions back', await page.locator(`${SIDE} .session-list > li[data-id="$4"]`).count() === 1)
-    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head, .quiet-more, .row-close)')].length)
+    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button[data-select-pane]')].length)
     check('keyboard rows count every shown tab', rows === 6, String(rows))
 
     // 4. The view stays after a reload (this device).
