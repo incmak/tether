@@ -318,6 +318,9 @@ def break_out(pane, run=subprocess.run):
     removed = _remove_placeholder(run, placeholder, token)
     if recheck_move and _target_session(run, pane, gone='') != session_id:
         warning = _session_warning(run, name, session_id if removed is not None else None)
+        if removed is False and not warning:
+            # The session is gone, but an unconfirmed kill may have missed a placeholder moved elsewhere.
+            warning = _session_warning(run, name)
         if warning:
             raise RuntimeError('Could not move the pane.' + warning)
         _check(moved, 'Could not move the pane.')

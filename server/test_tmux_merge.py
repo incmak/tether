@@ -166,6 +166,25 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
         self.assertEqual(set(self.fake.sessions), {'$1', '$2'})
         self.assertEqual(self.fake.panes('$1'), ['%1', '%2'])
 
+    def test_break_pane_timeout_with_failed_kill_warns_when_session_is_gone(self):
+        self.fake.fail('break-pane')
+
+        def run(argv, **kwargs):
+            if argv[1] == 'kill-pane':
+                # The placeholder moved to another session; neither kill reaches it.
+                self.fake.calls.append(argv)
+                if '@4' in self.fake.sessions.get('$3', {}):
+                    self.fake.sessions['$1']['@9'] = self.fake.sessions['$3'].pop('@4')
+                    del self.fake.sessions['$3']
+                return subprocess.CompletedProcess(argv, 1, '', 'tmux reported an error')
+            return self.fake.run(argv, **kwargs)
+
+        self.run_tmux = run
+        with self.assertRaisesRegex(RuntimeError, r'^Could not move the pane\. A session “Review” may be left open\.$'):
+            self.break_out()
+        self.assertNotIn('$3', self.fake.sessions)
+        self.assertIn('%4', self.fake.panes('$1'))
+
     def test_break_pane_nonzero_after_move_finishes_breakout(self):
         self.fake.fail('break-pane', applied=True, nonzero=True)
         self.assert_broke_out(self.break_out())
