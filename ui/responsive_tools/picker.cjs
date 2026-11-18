@@ -164,14 +164,19 @@ async function main() {
       await page.screenshot({path:path.join(SHOTS,`${process.env.PHASE||'after'}-picker-move-${width}.png`)})
       await page.keyboard.press('Escape')
       const cdp=await context.newCDPSession(page)
+      const viewportMeta=page.locator('meta[name="viewport"]')
+      const originalViewport=await viewportMeta.getAttribute('content')
       for(const scale of [2,4]) {
         await cdp.send('Emulation.setPageScaleFactor',{pageScaleFactor:scale})
-        await page.waitForTimeout(150)
-        const badge=page.locator('.zoom-badge')
+        // The viewport event schedules a frame before the badge updates.
+        const badge=page.getByRole('button',{name:`Zoomed to ${scale*100}%. Reset to 100%.`,exact:true})
+        await badge.waitFor()
         check(`zoom ${scale} ${width}`,await badge.evaluate(el=>{const r=el.getBoundingClientRect(),v=visualViewport;return el.matches(':popover-open')&&r.left>=v.offsetLeft&&r.right<=v.offsetLeft+v.width+1&&r.top>=v.offsetTop&&r.bottom<=v.offsetTop+v.height+1}))
-        await badge.click({force:true})
-        await page.waitForTimeout(350)
         if(width===320)await page.screenshot({path:path.join(SHOTS,`${process.env.PHASE||'after'}-zoom-${scale}-${width}.png`)})
+        await badge.click()
+        // Reset hides the badge or changes its label to the pinch-out instruction.
+        await badge.waitFor({state:'hidden'})
+        await page.waitForFunction(content=>document.querySelector('meta[name="viewport"]').content===content,originalViewport)
       }
       await cdp.send('Emulation.setPageScaleFactor',{pageScaleFactor:1})
       await cdp.detach()
