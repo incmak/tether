@@ -101,7 +101,7 @@ class IntentEvalTests(unittest.TestCase):
 
     def test_readback_must_authorize_a_follow_up_yes(self):
         example = case(expect={'tool': None, 'readback_chat': 'friday test'})
-        good = 'I will ask friday test to fix the login bug. Shall I send that?'
+        good = 'I will ask friday test to fix the login bug. Shall I send that to friday test?'
         self.assertEqual(self.run_script(example, assistant(good))[0]['passed'], 1)
         self.assertEqual(self.run_script(example, assistant('Okay.'))[0]['fails'], {'readback': 1})
         follow_up = case('send_to_chat', user='yes', history=[assistant(good), assistant(None)])
@@ -119,7 +119,10 @@ class IntentEvalTests(unittest.TestCase):
     def test_readback_requires_send_and_the_chat_name(self):
         example = case(expect={'tool': None, 'readback_chat': 'api-server'})
         for reply in ("I'll explain the options.", 'Shall I send the fix?', 'I can fix api-server.',
-                      "I won't send anything to api-server.", 'I can send that to api-server.'):
+                      "I won't send anything to api-server.", 'I can send that to api-server.',
+                      "I won't send anything to api-server. Do you want a summary?",
+                      'Should I send it to docs-site instead of api-server?',
+                      'Should I send it to api-server-old?'):
             with self.subTest(reply=reply):
                 self.assertEqual(self.run_script(example, assistant(reply))[0]['fails'], {'readback': 1})
         self.assertEqual(self.run_script(example, assistant('Shall I send the fix to api-server?'))[0]['passed'], 1)

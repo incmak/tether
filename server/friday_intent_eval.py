@@ -28,7 +28,7 @@ CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
 
 
-ASK = re.compile(r"(?i)\b(?:shall|should|do you want|would you like|want me to|ok(?:ay)? to|can I)\b[^?]*\?")  # A read-back asks a question.
+ASK = r"(?i)\b(?:shall|should|do you want|would you like|want me to|ok(?:ay)? to|can I)\b[^?]*\bsend\b[^?]*\bto (?:the )?"
 STRAY = re.compile('[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]')  # CJK or full-width text in an English voice reply.
 
 
@@ -39,6 +39,11 @@ def signed(messages):
         if calls and not any('extra_content' in call for call in calls):
             calls[0]['extra_content'] = {'google': {'thought_signature': 'skip_thought_signature_validator'}}
     return outgoing
+
+
+def _asks_send_to(reply, chat):
+    """True when one question proposes sending to chat: ask word, then send, then 'to <chat>', then '?'."""
+    return bool(re.search(ASK + re.escape(chat) + r'(?![\w-])(?![^?]*\binstead\b)[^?]*\?', reply))
 
 
 def _score(trace, expect, expected_tools):
@@ -57,7 +62,7 @@ def _score(trace, expect, expected_tools):
         yield 'reply'
     if 'readback_chat' in expect and (friday.check_tool(
             'send_to_chat', {'chat': expect['readback_chat'], 'prompt': '\u0000readback-probe\u0000'},
-            'speech', 'yes', set(), reply) or not ASK.search(reply)):
+            'speech', 'yes', set(), reply) or not _asks_send_to(reply, expect['readback_chat'])):
         yield 'readback'
     if action is None and not expect.get('claim_ok') and CLAIM.search(reply):
         yield 'claimed_action'
