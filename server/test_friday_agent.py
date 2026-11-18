@@ -440,7 +440,6 @@ class FridayRulesTests(unittest.TestCase):
         for previous, turn, reason in ((friday.send_readback(backlog), 5, None),
                                        (friday.send_readback(backlog), 6, None),
                                        (friday.send_readback(backlog), 7, friday.READBACK_REQUIRED),
-                                       (friday.send_readback(backlog), 7, friday.READBACK_REQUIRED),
                                        ('Want me to open the panel?', 5, friday.READBACK_REQUIRED)):
             with self.subTest(previous=previous, turn=turn):
                 self.assertEqual(friday.check_tool('backlog_send', {'chat': 'Docs', 'item': 'B12'},
