@@ -1,8 +1,8 @@
 """Persistent worker/reviewer links and one bounded watcher step.
 
 B205: a review is bound to a commit. The request names HEAD of the worker's folder (link 'review_commit'); an APPROVED
-reply is forwarded as approval only while the folder is still at that commit. A clean approved commit stays on the
-link as 'approved_commit' (see approved_commits).
+reply is forwarded as approval only when it names that commit, the worker is idle and the folder is still at that
+commit. A clean approved commit stays on the link as 'approved_commit' (see approved_commits).
 """
 import hashlib
 import json
@@ -26,7 +26,8 @@ MAX_ROUNDS = 3
 # that did not match the commit the tab was at.
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
-NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,40})\b', re.I)
+SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound goes out unbound
+NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
 GRACE = 30
 LOSS_TICKS = 30
 START_WAIT = 300
@@ -185,9 +186,28 @@ def _at_round_limit(link):
 
 
 def _named_commit(reply):
-    """The commit an approval names right after APPROVED, in lower case, or None. A word of letters only is not a hash."""
+    """The commit an approval names right after APPROVED, in lower case, or None. A hash later in the reply does not
+    count: only the start says what the approval is for."""
     found = NAMED.match(reply)
-    return found[1].lower() if found and re.search(r'[0-9]', found[1]) else None
+    return found[1].lower() if found else None
+
+
+def _merge(old, updated, stored):
+    """`stored` with the step's changes (old -> updated), or None when both changed the same field. Another writer
+    (agent_prompt, a stalled-review action) may change a link while a step runs; dropping the step's result would
+    send the same message again on the next tick."""
+    missing = object()
+    changed = {key for key in set(old) | set(updated) if old.get(key, missing) != updated.get(key, missing)}
+    theirs = {key for key in set(old) | set(stored) if old.get(key, missing) != stored.get(key, missing)}
+    if changed & theirs:
+        return None
+    merged = dict(stored)
+    for key in changed:
+        if key in updated:
+            merged[key] = updated[key]
+        else:
+            merged.pop(key, None)
+    return merged
 
 
 def _call(callback, entry):
@@ -316,17 +336,21 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 reply = raw.strip()
                 approved = reply.upper().startswith('APPROVED')
                 bound = link.get('review_commit') if approved else None
+                if bound and state != 'Idle':
+                    # A working tab can still commit. The approval waits until the tab is idle and its commit is read.
+                    return link
                 current = _call(commit, worker) if bound else None
                 named = _named_commit(reply) if bound else None
-                misnamed = bool(named) and not bound.startswith(named)
-                if bound and current is None and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
+                misnamed = bool(bound) and not (named and bound.startswith(named))
+                if bound and not misnamed and current is None and link.get('verify_ticks', 0) + 1 < VERIFY_TICKS:
                     # The worker's commit is unreadable now (a slow git, a folder that moved). Ask again next tick.
                     link['verify_ticks'] = link.get('verify_ticks', 0) + 1
                     return link
                 if bound and (current != bound or misnamed):
-                    # The approval is for a commit the tab is not at. It is not an approval of the current work and
-                    # not a finding either: ask for a review of the current commit. The count stops a loop.
-                    link['stale_commit'] = named if misnamed else bound
+                    # The approval does not name the commit under review, or the tab is not at that commit. It is not
+                    # an approval of the current work and not a finding either: ask for a review of the current
+                    # commit. The count stops a loop.
+                    link['stale_commit'] = (named or '') if misnamed else bound
                     link['stale_rounds'] = link.get('stale_rounds', 0) + 1
                     link['seen_working'] = True
                     link['awaiting'] = False
@@ -368,6 +392,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                     if _send_worker(link, worker, text, state, send, clear, feedback_sent):
                         key = 'empty_rounds' if link.pop('empty_turn', False) else 'rounds'
                         link[key] = link.get(key, 0) + 1
+                        link.pop('stale_rounds', None)  # findings end a run of approvals that did not match
                         link['awaiting'] = False
         if not link['awaiting']:
             for key in ('wait_ticks', 'idle_ticks', 'reviewer_before', 'reviewer_seen_working',
@@ -400,7 +425,15 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             request_id = secrets.token_hex(4)
             target = _call(scope, worker)
             target = target if isinstance(target, dict) and isinstance(target.get('commit'), str) else None
+            was_bound = 'review_commit' in link or 'stale_commit' in link
+            if target is None and was_bound and link.get('scope_ticks', 0) + 1 < SCOPE_TICKS:
+                # The last review of this tab was bound to a commit. One failed read must not remove the binding.
+                link['scope_ticks'] = link.get('scope_ticks', 0) + 1
+                return link
             binding = ''
+            if target is None and was_bound:
+                binding = ('Tether could not read the commit in the folder of that tab, so this review is not bound '
+                           'to a commit. ')
             if target is not None:
                 folder = shlex.quote(str(target.get('folder') or ''))
                 stale = link.get('stale_commit')
@@ -410,8 +443,9 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                     + (f'Read the review rules first: `git -C {folder} show origin/main:REVIEW.md`. '
                        if target.get('rules') else '')
                     + f"An approval counts only for this commit: start it with `APPROVED {target['commit'][:12]}`. "
-                    + (f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. '
-                       if isinstance(stale, str) else ''))
+                    + ('' if not isinstance(stale, str) else
+                       f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
+                       else 'Your approval was not forwarded: it did not name the commit right after APPROVED. '))
             text = (f"[Tether review] The {agent} tab “{link['name']}” ({link['worker']}) finished a turn. "
                     'Review its work: check the changes and the claims, then list what is wrong or missing. '
                     'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. '
@@ -431,6 +465,7 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             link.pop('send_reply', None)
             link['request_id'] = request_id
             link.pop('stale_commit', None)
+            link.pop('scope_ticks', None)
             if target is not None:
                 link['review_commit'] = target['commit']
                 link['review_clean'] = not target.get('dirty')
@@ -502,6 +537,14 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     else:
                         current[index] = updated
                     applied.append((old, updated, reason))
+                elif updated is not None:
+                    # The same link (same pair and creation time) changed during a callback: keep both changes.
+                    same = [index for index, stored in enumerate(current) if isinstance(stored, dict) and all(
+                        stored.get(key) == old.get(key) for key in ('worker', 'reviewer', 'created'))]
+                    merged = _merge(old, updated, current[same[0]]) if len(same) == 1 else None
+                    if merged is not None:
+                        current[same[0]] = merged
+                        applied.append((old, merged, reason))
             if applied:
                 _write(current)
         for old, updated, reason in applied:

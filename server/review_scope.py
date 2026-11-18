@@ -10,7 +10,7 @@ import subprocess
 
 RULES = 'origin/main:REVIEW.md'
 TIMEOUT = 5
-HASH = re.compile(r'[0-9a-f]{40}')
+HASH = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # SHA-1 or SHA-256 repositories
 
 
 def git(folder, *args):
@@ -33,13 +33,13 @@ def head(folder):
 
 def scope(folder):
     """{'commit', 'dirty', 'folder', 'rules'} for a review request, or None when the folder has no readable commit.
-    dirty: tracked or untracked changes exist, so the commit alone does not hold the work.
+    dirty: tracked or untracked changes exist, so the commit alone does not hold the work. A status that cannot be
+    read counts as dirty: only a tree that is known to be clean gives an approved commit.
     rules: origin/main has a REVIEW.md that the reviewer can read with `git show`."""
     commit = head(folder)
     if commit is None:
         return None
-    status = git(folder, 'status', '--porcelain')
-    if status is None:
-        return None
-    return {'commit': commit, 'dirty': bool(status.strip()), 'folder': str(folder),
+    # The repository's own settings (status.showUntrackedFiles=no) must not hide untracked files.
+    status = git(folder, 'status', '--porcelain', '--untracked-files=normal')
+    return {'commit': commit, 'dirty': status is None or bool(status.strip()), 'folder': str(folder),
             'rules': git(folder, 'cat-file', '-e', RULES) is not None}

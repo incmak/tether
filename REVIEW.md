@@ -42,9 +42,11 @@ Tether reads the start of your reply.
 
 An approval counts only for the commit in the request.
 
+- The hash must come right after `APPROVED`. Tether does not forward an approval with no hash or with another hash.
+  It asks you again.
 - If the worker's folder is at another commit when your reply arrives, Tether does not forward the approval. It asks
   you to review the new commit.
-- If you name another hash than the one in the request, Tether does the same.
+- Tether forwards an approval only when the worker tab is idle.
 - An approval of a commit "plus uncommitted changes" lets the worker continue. It is not an approval of a commit that
   can merge: the worker must commit first and get that commit reviewed.
 
