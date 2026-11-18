@@ -32,7 +32,6 @@ import math
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import threading
@@ -457,114 +456,72 @@ def _tree(folder, revision):
 DIRTY = 'The worktree has uncommitted or untracked files.'
 UNSUPPORTED = ('The worktree uses a checkout filter (for example Git LFS) that Tether does not run, '
                'so it cannot confirm that the tree is clean.')
+SUBMODULE_DEPTH = 5
 
 
-def _filtered(folder, name):
-    """True when attributes give the file a filter, an ident or an encoding. check-attr reads attributes; it runs
-    no program."""
-    out = _git(folder, 'check-attr', '-z', 'filter', 'ident', 'working-tree-encoding', '--', name).stdout.split('\0')
-    return any(value not in ('unspecified', 'unset') for value in out[2::3])
+def _status_env():
+    """Git's own view of the worktree: the user's and the system's config and attributes apply, as they do for the
+    user's `git status`, so line-end and text rules are Git's effective ones. Nothing here may start a program: the
+    file-system monitor stays off, no index is rewritten (so no index hook), and _dirty refuses filter paths."""
+    env = _git_env()
+    for key in ('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_ATTR_NOSYSTEM'):
+        if key in os.environ:
+            env[key] = os.environ[key]  # the server's own setting, as the user's git sees it
+        else:
+            env.pop(key, None)
+    settings = [('core.fsmonitor', 'false'), ('core.untrackedCache', 'false'), ('submodule.recurse', 'false'),
+                ('status.submoduleSummary', 'false')]
+    for key in [name for name in env if name.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))]:
+        del env[key]
+    env['GIT_CONFIG_COUNT'] = str(len(settings))
+    for index, (key, value) in enumerate(settings):
+        env[f'GIT_CONFIG_KEY_{index}'] = key
+        env[f'GIT_CONFIG_VALUE_{index}'] = value
+    return env
 
 
-def _crlf_checkout(folder, name, data):
-    """True when Git itself turns CRLF into LF for this file at commit: a text or eol attribute, or core.autocrlf
-    in the repository's own config. Without one, CRLF bytes are a real edit. A `-text` file is never converted."""
-    out = _git(folder, 'check-attr', '-z', 'text', 'eol', '--', name).stdout.split('\0')
-    text, eol = out[2], out[5]
-    if text == 'unset':
-        return False
-    if text == 'set' or eol in ('lf', 'crlf'):
-        return True
-    auto = _git(folder, 'config', '--get', 'core.autocrlf', check=False).stdout.strip().lower()
-    if text == 'auto' or (text == 'unspecified' and auto in ('true', 'input')):
-        return b'\0' not in data  # Git converts only what it takes for text
+def _has_filter(folder, env, depth=0):
+    """True when a tracked path, here or in a checked-out submodule, has a filter attribute. Git would run that
+    filter's program to compare the file, so Tether does not ask. check-attr and ls-files only read."""
+    raw = _git(folder, 'ls-files', '-s', '-z', env=env, binary=True).stdout
+    paths, links = [], []
+    for line in raw.split(b'\0')[:-1]:
+        meta, sep, path = line.partition(b'\t')
+        if not sep or not path:
+            raise GitError('git ls-files printed an entry Tether does not know.')
+        (links if meta.startswith(b'160000 ') else paths).append(path)
+    if paths:
+        try:
+            result = RUN(['git', '-C', str(folder), 'check-attr', '-z', '--stdin', 'filter'], input=b'\0'.join(paths) + b'\0',
+                         capture_output=True, env=env, timeout=GIT_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise GitError(f'git check-attr did not run: {type(exc).__name__}') from exc
+        fields = result.stdout.split(b'\0')
+        if result.returncode or fields[-1] or (len(fields) - 1) != 3 * len(paths):
+            raise GitError('git check-attr gave no clear answer.')
+        if any(value not in (b'unspecified', b'unset') for value in fields[2::3]):
+            return True
+    for link in links:
+        inner = Path(os.fsdecode(os.path.join(os.fsencode(str(folder)), link)))
+        # Only decides where else to look for filters. Whether the submodule is clean is Git's answer below.
+        if (inner / '.git').exists() and (depth >= SUBMODULE_DEPTH or _has_filter(inner, env, depth + 1)):
+            return True
     return False
 
 
-SUBMODULE_DEPTH = 3
+def _dirty(folder):
+    """'' for a clean worktree, DIRTY when Git reports any change, UNSUPPORTED when Git would need a filter program.
 
-
-def _dirty(folder, scratch, head, depth=0):
-    """'' for a clean worktree, DIRTY for uncommitted or untracked work, UNSUPPORTED when only a filter could tell.
-
-    It compares the index and the raw worktree bytes to HEAD and never runs a filter.
-    - A file with CRLF line ends is clean only when Git would convert it for this path (_crlf_checkout) and its
-      bytes match after the line ends are put back.
-    - A file with a filter attribute whose raw bytes differ cannot be judged without the filter: unsupported.
-    - A submodule that is not checked out is clean. A checked-out one must be at the recorded commit and is checked
-      the same way, from its own repository.
-    scratch: the repository to read the HEAD tree from.
-    """
-    raw = _git(folder, 'ls-files', '-s', '-z', '--sparse', binary=True).stdout
-    if raw and not raw.endswith(b'\0'):
-        raise GitError('git ls-files did not finish its last index entry.')
-    index = {}
-    for line in raw.split(b'\0')[:-1]:
-        meta, sep, path = line.partition(b'\t')
-        match = re.fullmatch(rb'(100644|100755|120000|160000) ([0-9a-f]{40}) 0', meta)
-        if not match or not sep or not path or any(part in (b'', b'.', b'..') for part in path.split(b'/')):
-            return DIRTY
-        mode = match[1].decode('ascii')
-        index[os.fsdecode(path)] = (mode, 'commit' if mode == '160000' else 'blob', match[2].decode('ascii'))
-    if index != _tree(scratch, head):
-        return DIRTY
-    unsupported = False
-    for name, (mode, _, sha) in index.items():
-        path = folder / name
-        if mode == '160000':
-            try:
-                if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')) \
-                        or path.is_symlink():
-                    return DIRTY
-                if not (path / '.git').exists():
-                    continue  # not checked out: Git reports nothing for it either
-            except OSError:
-                return DIRTY
-            if depth >= SUBMODULE_DEPTH:
-                unsupported = True
-                continue
-            try:
-                if _head(path) != sha:
-                    return DIRTY
-                inner = _dirty(path, path, sha, depth + 1)
-            except GitError:
-                return DIRTY
-            if inner == DIRTY:
-                return DIRTY
-            unsupported = unsupported or bool(inner)
-            continue
-        try:
-            if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')):
-                return DIRTY
-            kind = path.lstat().st_mode
-            if mode == '120000' and stat.S_ISLNK(kind):
-                data = os.readlink(os.fsencode(path))
-                blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
-            elif mode in MODES_OK and stat.S_ISREG(kind):
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                with os.fdopen(fd, 'rb') as stream:
-                    found = os.fstat(stream.fileno())
-                    if not stat.S_ISREG(found.st_mode) or bool(found.st_mode & stat.S_IXUSR) != (mode == '100755'):
-                        return DIRTY
-                    blob = hashlib.sha1(b'blob %d\0' % found.st_size)
-                    hashlib.file_digest(stream, lambda: blob)
-                    if blob.hexdigest() != sha and found.st_size <= 64 * 1024 * 1024:
-                        stream.seek(0)
-                        data = stream.read()
-                        if b'\r\n' in data and _crlf_checkout(folder, name, data):
-                            data = data.replace(b'\r\n', b'\n')  # what Git stores for a CRLF checkout
-                            blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
-            else:
-                return DIRTY
-        except OSError:
-            return DIRTY
-        if blob.hexdigest() != sha:
-            if not _filtered(folder, name):
-                return DIRTY
-            unsupported = True
-    if _git(folder, 'ls-files', '--others', '--exclude-standard', '-z', '--sparse', binary=True).stdout:
-        return DIRTY
-    return UNSUPPORTED if unsupported else ''
+    Git itself answers: `git status --porcelain=v2` with untracked files and submodules included. Tether applies no
+    rule of its own for line ends, text detection or submodules. Any status entry means not clean."""
+    env = _status_env()
+    if _has_filter(folder, env):
+        return UNSUPPORTED
+    status = _git(folder, 'status', '--porcelain=v2', '-z', '--ignore-submodules=none', '--untracked-files=all',
+                  env=env, binary=True)
+    if status.stderr.strip():
+        raise GitError('git status printed a warning, so the tree is not confirmed clean.')
+    return DIRTY if status.stdout else ''
 
 
 def _tree_diff(folder, base, head):
@@ -1019,7 +976,7 @@ def evaluate(folder, approved):
             check('branch', False, 'The tab is not on a worker branch.')
         elif (checkout := _worker_checkout(folder)) is None:
             check('branch', False, 'The tab works in the main checkout, not in a worktree of its own.')
-        elif (dirty := _dirty(checkout, scratch, head)):
+        elif (dirty := _dirty(checkout)):
             check('branch', False, dirty)
         else:
             check('branch', True, f'Worker branch {branch}, with no uncommitted changes.')
@@ -1184,7 +1141,7 @@ def merge(plan, reviewer, job):
         if checkout is None or head != plan['head'] or branch != plan['branch']:
             raise NotAuthorized('The worker branch changed before the push.')
         try:
-            dirty = _dirty(checkout, scratch, head)
+            dirty = _dirty(checkout)
         except GitError as exc:
             raise NotAuthorized(str(exc)) from exc
         if dirty:

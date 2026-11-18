@@ -245,7 +245,8 @@ available when auto-merge has its own identity, so agents on the same OS account
 A branch passes the checks when all of this holds:
 
 - The reviewer approved the exact commit at the head of the branch. The worktree has no uncommitted or untracked files.
-  Tether compares raw file bytes to the index. Files that need a clean filter, such as autocrlf or LFS, can read as dirty.
+  Git itself answers (`git status`, with untracked files and submodules). A tree with a filter such as Git LFS
+  waits: Tether does not run the filter's program.
 - The head commit has a `Verified:` stamp with a `tests(...)` item.
 - `main` at the push URL has `docs/auto-merge.json`. The branch diff and the proposed merge each stay within one
   area and change only regular text files. The branch diff's added and deleted lines fit the area's trust limit.

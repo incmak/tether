@@ -139,10 +139,10 @@ class Decision(Base):
         scratch = auto_merge._scratch(self.repo)
         app = self.work / 'ui/src/App.tsx'
         link = app.with_name('link')
-        self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+        self.assertFalse(auto_merge._dirty(self.work))
         for name in ('ignored.txt', 'ignored-dir/file'):
             self.write(self.work, name, 'ignored\n')
-            self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+            self.assertFalse(auto_merge._dirty(self.work))
         cases = (
             ('staged', lambda: (self.write(self.work, 'ui/src/App.tsx', 'staged\n'),
                                 self.git(self.work, 'add', 'ui/src/App.tsx'))),
@@ -161,13 +161,13 @@ class Decision(Base):
         for label, change in cases:
             with self.subTest(label=label):
                 change()
-                self.assertTrue(auto_merge._dirty(self.work, scratch, head))
+                self.assertTrue(auto_merge._dirty(self.work))
                 decision, plan = auto_merge.evaluate(app.parent, head)
                 self.assertIn('branch', self.failed(decision))
                 self.assertIsNone(plan)
                 self.git(self.work, 'reset', '--hard', head)
                 self.git(self.work, 'clean', '-fd')
-        self.assertFalse(auto_merge._dirty(self.work, scratch, head))
+        self.assertFalse(auto_merge._dirty(self.work))
 
     def test_unchanged_submodule_and_crlf_checkout_are_clean(self):
         # A submodule that main already has, checked out and unchanged.
@@ -234,17 +234,17 @@ class Decision(Base):
                 self.assertEqual(self.failed(decision), ['branch'])
                 self.assertEqual(decision['checks'][1]['text'], auto_merge.DIRTY)
                 (self.work / name).write_bytes(old)
-        # With core.autocrlf in the repository's own config, a CRLF checkout of a plain text file is clean.
+        # With core.autocrlf in the repository's own config, a CRLF checkout that Git made is clean.
         self.git(self.repo, 'config', 'core.autocrlf', 'true')
-        (self.work / 'ui/src/plain.css').write_bytes(b'a {}\r\nb {}\r\n')
-        # Git has nothing to commit here: the diff is empty (status alone can still list the file by its size).
-        self.assertEqual(self.git(self.work, 'diff', '--exit-code'), '')
+        (self.work / 'ui/src/plain.css').unlink()
+        self.git(self.work, 'checkout', '--', 'ui/src/plain.css')
+        self.assertEqual((self.work / 'ui/src/plain.css').read_bytes(), b'a {}\r\nb {}\r\n')
+        self.assertEqual(self.git(self.work, 'status', '--porcelain'), '')
         self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
 
     def test_a_filter_that_tether_does_not_run_is_unsupported_not_dirty(self):
         marker = self.root / 'filter-ran'
-        for attribute, config in (('filter=evil', ('filter.evil.clean', f'touch {marker}; cat')), ('ident', None),
-                                  ('filter=lfs', None)):
+        for attribute, config in (('filter=evil', ('filter.evil.clean', f'touch {marker}; cat')), ('filter=lfs', None)):
             with self.subTest(attribute=attribute):
                 self.git(self.work, 'reset', '-q', '--hard', 'origin/main')
                 self.write(self.work, '.gitattributes', f'*.dat {attribute}\n')
@@ -252,14 +252,83 @@ class Decision(Base):
                 head = self.commit(self.work, f'Add {attribute}')
                 if config:
                     self.git(self.repo, 'config', *config)
-                (self.work / 'ui/src/blob.dat').write_bytes(b'what the smudge filter wrote\n')
-                decision = auto_merge.evaluate(self.work, head)[0]
-                self.assertIn('branch', self.failed(decision))
-                self.assertEqual(decision['checks'][1]['text'], auto_merge.UNSUPPORTED)
+                # Unchanged or changed, Tether does not ask Git about a tree that needs the filter.
+                for data in (b'stored\n', b'what the smudge filter wrote\n'):
+                    (self.work / 'ui/src/blob.dat').write_bytes(data)
+                    decision = auto_merge.evaluate(self.work, head)[0]
+                    self.assertIn('branch', self.failed(decision))
+                    self.assertEqual(decision['checks'][1]['text'], auto_merge.UNSUPPORTED)
                 self.assertFalse(marker.exists())
-                # Another file without the attribute that differs is plain uncommitted work.
-                self.write(self.work, 'ui/src/App.tsx', 'export const app = "edited"\n')
-                self.assertEqual(auto_merge.evaluate(self.work, head)[0]['checks'][1]['text'], auto_merge.DIRTY)
+        # An ident attribute needs no program: Git answers, and an edit is an edit.
+        self.git(self.work, 'reset', '-q', '--hard', 'origin/main')
+        self.write(self.work, '.gitattributes', '*.dat ident\n')
+        self.write(self.work, 'ui/src/blob.dat', 'stored\n')
+        head = self.commit(self.work, 'Add ident')
+        self.assertNotIn('branch', self.failed(auto_merge.evaluate(self.work, head)[0]))
+        self.write(self.work, 'ui/src/blob.dat', 'edited\n')
+        self.assertEqual(auto_merge.evaluate(self.work, head)[0]['checks'][1]['text'], auto_merge.DIRTY)
+
+    def test_the_clean_check_is_gits_own_answer(self):
+        """The reviewer's cases: Tether must agree with `git status`, whatever the line-end rules are."""
+        def agrees(head, expect_clean):
+            listed = self.git(self.work, 'status', '--porcelain', '--untracked-files=all')
+            self.assertEqual(listed == '', expect_clean, listed)
+            failed = self.failed(auto_merge.evaluate(self.work, head)[0])
+            self.assertEqual('branch' not in failed, expect_clean, failed)
+
+        # 1. A real edit to a binary file with no NUL byte, under text=auto and under core.autocrlf=true.
+        binary = bytes(range(1, 9)) * 40 + b'\n' + bytes(range(14, 32)) * 20 + b'\n'
+        (self.repo / 'ui/src/data.bin').write_bytes(binary)
+        self.commit(self.repo, 'Binary without NUL')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'merge', '-q', '--ff-only', 'main')
+        head = self.change()
+        attributes = self.repo / '.git/info/attributes'
+        for rule in ('attribute', 'config'):
+            with self.subTest(rule=rule):
+                if rule == 'attribute':
+                    attributes.write_text('*.bin text=auto\n')
+                else:
+                    attributes.unlink()
+                    self.git(self.repo, 'config', 'core.autocrlf', 'true')
+                agrees(head, True)
+                (self.work / 'ui/src/data.bin').write_bytes(binary.replace(b'\n', b'\r\n'))
+                agrees(head, False)
+                (self.work / 'ui/src/data.bin').write_bytes(binary)
+                self.git(self.work, 'update-index', '-q', '--refresh')
+        self.git(self.repo, 'config', '--unset', 'core.autocrlf')
+
+        # 2. A clean checkout whose CRLF line ends come from the user's global core.autocrlf.
+        global_config = self.root / 'global-autocrlf.conf'
+        global_config.write_text('[core]\n\tautocrlf = true\n')
+        with mock.patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(global_config)):
+            (self.work / 'ui/src/App.tsx').unlink()
+            self.git(self.work, 'checkout', '--', 'ui/src/App.tsx')
+            self.assertIn(b'\r\n', (self.work / 'ui/src/App.tsx').read_bytes())
+            agrees(head, True)
+            self.write(self.work, 'ui/src/App.tsx', 'export const app = "edited"\r\n')
+            agrees(head, False)
+            self.git(self.work, 'checkout', '--', 'ui/src/App.tsx')
+            agrees(head, True)
+        self.git(self.work, 'reset', '-q', '--hard', head)
+
+        # 3. A checked-out submodule whose folder was moved out of the worktree.
+        library = self.root / 'library'
+        self.git(self.root, 'init', '-q', '-b', 'main', str(library))
+        self.write(library, 'lib.txt', 'library\n')
+        self.commit(library, 'Library')
+        self.git(self.repo, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', str(library), 'vendor/lib')
+        self.commit(self.repo, 'Submodule')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'reset', '-q', '--hard', 'main')
+        head = self.change()
+        agrees(head, True)   # not checked out: Git lists nothing
+        self.git(self.work, '-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init')
+        agrees(head, True)
+        (self.work / 'vendor/lib').rename(self.root / 'moved-out')
+        agrees(head, False)
+        (self.root / 'moved-out').rename(self.work / 'vendor/lib')
+        agrees(head, True)
 
     def test_nested_worker_folder_uses_the_whole_worktree(self):
         for name in ('ui/src/App.tsx', 'ui/index.html'):
@@ -662,6 +731,11 @@ class Modes(Base):
                 command = argv[3:]
                 seen.append(command)
                 env = kwargs['env']
+                if command[0] in ('status', 'check-attr') or command[:2] == ['ls-files', '-s']:
+                    # The clean check asks Git with the user's own config, and only these read-only commands.
+                    self.assertEqual(env['GIT_CONFIG_GLOBAL'], global_config)
+                    self.assertEqual(git_settings(env)[:1], [('core.fsmonitor', 'false')])
+                    return real(argv, **kwargs)
                 self.assertEqual(env['GIT_CONFIG_GLOBAL'], os.devnull)
                 self.assertEqual(env['GIT_CONFIG_NOSYSTEM'], '1')
                 self.assertEqual(env['GIT_ATTR_NOSYSTEM'], '1')
@@ -692,7 +766,7 @@ class Modes(Base):
     def test_observe_runs_only_the_metadata_allowlist_in_the_worker_repository(self):
         head = self.change()
         scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
-        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr', 'ls-tree'}
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr', 'status'}
         object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
         for folder in (self.work, self.work / 'server'):
             with self.subTest(folder=folder), mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:
@@ -801,6 +875,13 @@ class Modes(Base):
                 path = self.work / 'ui/src' / name
                 status = path.stat()
                 os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns - 2_000_000_000))
+                # A path with a filter is never compared: the branch waits and the filter does not run.
+                decision = auto_merge.process(self.job(head))
+                self.assertEqual(decision['outcome'], 'wait')
+                self.assertEqual(decision['checks'][1]['text'], auto_merge.UNSUPPORTED)
+                self.assertFalse(called.exists())
+                # A textconv alone is not a filter: Git status does not use it, and the decision stands.
+                attributes.write_text(f'{name} diff=evil\n')
                 self.assertEqual(auto_merge.process(self.job(head))['outcome'], 'would_merge')
                 self.assertFalse(called.exists())
                 attributes.unlink()
