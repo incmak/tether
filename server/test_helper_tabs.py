@@ -34,10 +34,15 @@ UNCONFIRMED_OWNER = "Tether cannot confirm this tab's conversation right now. Tr
 class Tmux:
     def __init__(self):
         self.options = {}
+        self.commands = {}
         self.calls = []
 
     def __call__(self, args, **kwargs):
         self.calls.append((args, kwargs))
+        if args[:4] == [paths.TMUX, 'display-message', '-p', '-t'] and args[5] == '#{pane_current_command}':
+            assert kwargs == dict(capture_output=True, text=True, timeout=5)
+            command = self.commands.get(args[4])
+            return subprocess.CompletedProcess(args, 0 if command else 1, stdout=(command or '') + '\n')
         if args[:4] == [paths.TMUX, 'display-message', '-p', '-t']:
             assert args[5] == '#{pane_id}\t#{@tether_helper}'
             assert kwargs == dict(capture_output=True, text=True, timeout=5)

@@ -182,6 +182,27 @@ class CloseHelperTabTest(unittest.TestCase):
                     self.close()
                 self.assert_pane_untouched()
 
+    def test_close_closes_a_helper_whose_agent_exited_when_tmux_shows_a_shell(self):
+        # Live 2026-11-19: after /exit, discovery reports shell and tmux shows zsh. Both must agree.
+        reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
+        for command, closes in (('zsh', True), ('bash', True), ('claude', False), ('node', False), (None, False)):
+            for caller, links in ((self.owner, set()), (reviewer, {HELPER})):
+                with self.subTest(command=command, caller=caller['id']), \
+                        patch.object(server.review_links, 'linked_worker_threads', return_value=links):
+                    self.kill.reset_mock()
+                    self.run.commands = {'%13': command} if command else {}
+                    entries = [self.owner, dict(id='%13', agent='shell'), reviewer]
+                    call = lambda: server.agent_tabs.close_tab({'pane': '%13'}, caller, entries, self.run,
+                                                               lambda entry: {'state': 'Idle'})
+                    if closes:
+                        self.assertEqual(call(), {'closed': '%13'})
+                        self.kill.assert_called_once_with('%13', self.run)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
+                            call()
+                        self.kill.assert_not_called()
+        self.assertEqual(self.run.saves(), [])
+
     def test_linked_reviewer_cannot_close_an_unconfirmed_helper(self):
         reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
         self.entries[1] = dict(self.helper, thread=OTHER, codex_binding='guess')

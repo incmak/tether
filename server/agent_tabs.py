@@ -66,6 +66,22 @@ def link_pair(body, entries, last_reply, *, reset=False):
     return {'linked': True}
 
 
+SHELLS = ('zsh', 'bash', 'sh', 'dash', 'fish', 'ksh', 'tcsh')
+
+
+def _agent_exited(target, run):
+    """Two sources agree that no agent runs in the pane: discovery found no agent process, and tmux shows a shell
+    as the foreground command. Then no conversation is left to confirm."""
+    if target is None or target.get('agent') != 'shell':
+        return False
+    try:
+        result = run([paths.TMUX, 'display-message', '-p', '-t', target['id'], '#{pane_current_command}'],
+                     capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() in SHELLS
+
+
 def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     """Close a tab this tab started or reviews, after its work is done. A working tab stays open."""
     if body.get('self') is True:
@@ -83,11 +99,12 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     linked = set() if owner else review_links.linked_worker_threads(pane, caller['id'])  # empty: no link
     if not owner and not linked:
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
-    if helper_tabs.verified_thread(target) is None:  # closing is final: only a confirmed conversation
+    exited = _agent_exited(target, run)
+    if not exited and helper_tabs.verified_thread(target) is None:  # closing is final: only a confirmed conversation
         raise RuntimeError("Tether cannot confirm that helper's conversation right now. Try again in a moment.")
     if owner:
         helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
-    elif linked - {None, helper_tabs.verified_thread(target)}:
+    elif not exited and linked - {None, helper_tabs.verified_thread(target)}:
         raise helper_tabs.Stale('That tab changed conversations since your review started.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
