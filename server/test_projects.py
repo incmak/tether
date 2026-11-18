@@ -98,8 +98,8 @@ class ProjectTests(unittest.TestCase):
         self.assertLess(text.index('## Tab icon'), text.index('## New tabs and reviewers'))
         self.assertLess(text.index('## Tab icon'), text.index('## Naming tabs'))
         self.assertLess(text.index('## Naming tabs'), text.index('## New tabs and reviewers'))
-        self.assertLess(text.index('## New tabs and reviewers'), text.index('## Notes'))
-        self.assertIn('Use your own subagents', text[text.index('## New tabs and reviewers'):text.index('## Notes')])
+        self.assertLess(text.index('## Notes'), text.index('## Tab icon'))
+        self.assertIn('Use your own subagents', text[text.index('## New tabs and reviewers'):text.index('## Backlog')])
         self.assertIn(str(Path(projects.__file__).with_name('agent_tab_cli.py')), text)
         for option in ('--review-it', '--reviews-me', '--agent claude|codex', '--name NAME',
                        '--cwd DIR', '--worktree BRANCH', '--context', 'stop --worker %N [--reviewer %N]', '`list`',
@@ -141,7 +141,12 @@ class ProjectTests(unittest.TestCase):
 
     def test_render_stays_inside_the_budget(self):
         projects.set_instructions(PID, 'x' * 20000, 0)
-        self.assertLessEqual(len(projects.render(PID)), projects.BUDGET)
+        projects.set_name(PID, 'web')
+        text = projects.render(PID)
+        self.assertTrue(text.startswith('# Tether project: web\n'))
+        self.assertIn(f'Project folder: {projects.bundle(PID)}\n', text)
+        self.assertIn('\n## Notes\n', text)
+        self.assertLessEqual(len(text), projects.BUDGET)
         projects.set_budget(PID, 10000, 1)
         text = projects.render(PID)
         self.assertLessEqual(len(text), 10000)
@@ -194,11 +199,13 @@ class ProjectTests(unittest.TestCase):
                 projects.write_note(PID, bad, 'x')
 
     def test_only_five_newest_notes_have_text(self):
+        # Test the excerpt count separately from truncation by the launch budget.
+        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         for at in range(7):
             projects.write_note(PID, f'n{at}.md', f'# Note {at}\nbody {at}\n')
             os.utime(projects.bundle(PID) / f'notes/n{at}.md', (time.time() + at, time.time() + at))
         text = projects.render(PID, 'codex')
-        self.assertEqual(text.count('\n### '), 5)
+        self.assertEqual(text.count('\n### n'), 5)  # five excerpts; the list has its own '### Project notes' heading
         self.assertIn('- n0.md: Note 0', text)
         self.assertNotIn('body 0', text)
 

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -118,13 +119,19 @@ class RenderTests(Bundles):
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         projects.set_instructions(self.GPID, 'Only touch the dashboard.', 0)
         projects.write_note(self.GPID, 'chart.md', '# Chart\nUse the bar chart.')
-        text = projects.render(PID, 'claude', self.home, group={'pid': self.GPID, 'name': 'Home dashboard'})
+        with mock.patch('backlog.summary', return_value=(['B1 Check the dashboard'], 1)):
+            text = projects.render(PID, 'claude', self.home, group={'pid': self.GPID, 'name': 'Home dashboard'},
+                                   backlog_project='tether')
         self.assertLessEqual(len(text), projects.meta(PID)['budget'])
         self.assertTrue(text.startswith('# Tether project'))
         self.assertLess(text.index('Use pnpm.'), text.index('## Stack: Home dashboard'))
         self.assertLess(text.index('## Stack: Home dashboard'), text.index('Only touch the dashboard.'))
         self.assertIn(f'{projects.bundle(self.GPID)}/notes/', text)
+        self.assertLess(text.index('Only touch the dashboard.'), text.index('## Tab icon'))
+        self.assertLess(text.index('## Backlog'), text.index('### Open backlog items (1)'))
+        self.assertLess(text.index('### Open backlog items (1)'), text.index('### Project notes'))
         self.assertLess(text.index('### Project notes\n- setup.md: Setup'), text.index('### Stack notes\n- chart.md: Chart'))
+        self.assertLess(text.index('### Stack notes'), text.index('### setup.md'))
         self.assertIn('#### chart.md\n# Chart\nUse the bar chart.', text)
 
     def test_group_text_is_cut_to_the_session_budget_and_keeps_the_session_part(self):
@@ -145,7 +152,7 @@ class RenderTests(Bundles):
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)
         self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
-        self.assertNotIn('### Project notes', text)
+        self.assertIn('\n### Project notes\n- setup.md: Setup\n', text)  # the list has its own heading: Notes comes first now
         self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
 
     def test_marks_cover_the_group_revision(self):
@@ -182,11 +189,17 @@ class LaunchTests(Bundles):
         self.assertEqual(json.loads(args[1])['permissions']['additionalDirectories'],
                          [str(projects.bundle(PID)), str(projects.bundle(self.GPID))])
         self.tmux.assert_called_with('set-option', '-p', '-t', '%4', '@project_rev', f'{PID}:0+{self.GPID}:1')
-        args = project_launch.codex_args(PID, [], self.group)
-        self.assertIn('## Stack: Docs', args[1])
-        self.assertIn('Docs rule.', args[1])
         project_launch.claude_args(PID, ['task'])
         self.tmux.assert_called_with('set-option', '-p', '-t', '%4', '@project_rev', f'{PID}:0')
+        for budget in (projects.BUDGET, projects.BUDGET_MIN):
+            with self.subTest(budget=budget):
+                projects.set_budget(PID, budget, projects.meta(PID)['revision'])
+                args = project_launch.codex_args(PID, [], self.group)
+                text = tomllib.loads(args[1])['developer_instructions']
+                self.assertIn('## Stack: Docs\n', text)
+                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
+                self.assertIn('Docs rule.', text)
+                self.assertLessEqual(len(text), budget)
 
     def test_current_group_reads_the_pane_and_makes_the_bundle(self):
         with mock.patch.object(groups, 'group_of_pane', return_value=('$1', {'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''})), \
@@ -199,12 +212,17 @@ class LaunchTests(Bundles):
             self.assertIsNone(project_launch.current_group())
 
     def test_hook_reads_the_group_at_hook_time(self):
-        output = io.StringIO()
-        with mock.patch.object(project_launch, 'current_group', return_value=self.group), \
-                mock.patch('sys.stdin', io.StringIO('{}')), mock.patch('sys.stdout', output):
-            project_launch.hook(PID)
-        text = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
-        self.assertIn('## Stack: Docs', text)
+        for budget in (projects.BUDGET, projects.BUDGET_MIN):
+            with self.subTest(budget=budget):
+                projects.set_budget(PID, budget, projects.meta(PID)['revision'])
+                output = io.StringIO()
+                with mock.patch.object(project_launch, 'current_group', return_value=self.group), \
+                        mock.patch('sys.stdin', io.StringIO('{}')), mock.patch('sys.stdout', output):
+                    project_launch.hook(PID)
+                text = json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+                self.assertIn('## Stack: Docs\n', text)
+                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
+                self.assertLessEqual(len(text), budget)
 
 
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
