@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import urllib.request
 
+import codex_provider
 import paths
 
 PATH = '/mobile/api/suggest-groups'
@@ -18,6 +19,9 @@ MODEL_TIMEOUT = 90
 AGENT_TIMEOUT = 45
 # Agent CLIs in the order Automatic tries them. Add a new agent here and in agent_output.
 AGENTS = ('claude', 'codex')
+CODEX_OFF = ('hooks', 'plugins', 'apps', 'browser_use', 'browser_use_external', 'computer_use', 'in_app_browser',
+             'shell_tool', 'multi_agent', 'image_generation', 'view_image', 'skill_mcp_dependency_install',
+             'tool_suggest', 'memories')
 PROMPT = """Input is one session per line: id | name | folder | chat1; chat2; chat3. Empty parts are omitted.
 Make 2–8 groups by project or purpose. Use short names of 1–3 words.
 Every group must have 2 or more sessions. Do not just repeat one session name as a group name.
@@ -149,7 +153,9 @@ def parse_output(output, prefix='$'):
 
 
 def output_groups(output, entries, prefix='$', kind='sessions'):
-    if kind == 'tabs' and isinstance(output, str) and output.strip().strip('.').upper() == 'NONE':
+    # Only the first line counts: Codex can add a line from its AGENTS.md after the answer.
+    first = next((line for line in output.splitlines() if line.strip()), '') if isinstance(output, str) else ''
+    if kind == 'tabs' and first.strip().strip('.').upper() == 'NONE':
         return []  # the model found no useful stack: an answer, not a failure
     groups = validate(parse_output(output, prefix), entries, kind)
     if not any(group['name'] != 'Other' and len(group['sessions']) > 1 for group in groups):
@@ -172,6 +178,15 @@ def codex_fast_model():
         return None
 
 
+def isolated_codex_command(executable):
+    model = codex_fast_model()
+    off = [flag for feature in CODEX_OFF for flag in ('--disable', feature)]
+    # Drop config.toml (including MCP servers and notify) and pin the provider to the ChatGPT plan.
+    return [executable, 'exec', '--ignore-user-config', '--ignore-rules', *off, '--skip-git-repo-check', '--ephemeral',
+            '-s', 'read-only', '-c', 'model_provider="openai"', *(['-m', model] if model else []),
+            '-c', 'model_reasoning_effort=low']
+
+
 def run_agent(agent, executable, prompt, content, timeout, started=None):
     """One tool-free, settings-free agent CLI call in a fresh temporary folder. started(process) lets a caller kill a
     call that a newer one replaces. A timeout kills the whole process group."""
@@ -179,20 +194,23 @@ def run_agent(agent, executable, prompt, content, timeout, started=None):
         outfile = Path(folder) / 'groups.txt'
         if agent == 'claude':
             command = [executable, '-p', '--model', 'haiku', '--tools', '', '--setting-sources', '',
-                       '--strict-mcp-config', '--no-session-persistence', '--system-prompt', prompt]
+                       '--settings', '{"disableAllHooks":true}', '--disable-slash-commands',
+                       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                       '--no-session-persistence', '--system-prompt', prompt]
+            model_input_text = content
         else:
-            model = codex_fast_model()
-            command = [executable, 'exec', '--skip-git-repo-check', '--ephemeral', '-s', 'read-only',
-                       *(['-m', model] if model else []),
-                       '-c', 'model_reasoning_effort=low', '-o', str(outfile), '--', prompt + '\n\n' + content]
-        process = subprocess.Popen(command, cwd=folder,
-                                   stdin=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
+            # The isolated command pins the ChatGPT plan. Send nothing when the user moved Codex to another provider.
+            if codex_provider.chosen() != 'plan' or codex_provider.default_provider() != 'openai':
+                raise ValueError('Codex runs on another provider.')
+            command = [*isolated_codex_command(executable), '-o', str(outfile), '-']
+            model_input_text = prompt + '\n\n' + content
+        process = subprocess.Popen(command, cwd=folder, stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE if agent == 'claude' else subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, text=True, start_new_session=True)
         if started:
             started(process)
         try:
-            output, _ = process.communicate(input=content if agent == 'claude' else None, timeout=timeout)
+            output, _ = process.communicate(input=model_input_text, timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(process.pid, signal.SIGKILL)

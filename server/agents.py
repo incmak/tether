@@ -623,6 +623,8 @@ def discover(config, run):
                 entry['role'] = 'advisor'
             elif role == 'reviewer':
                 entry['helper'] = 'reviewer'  # not a role: reviewers keep their AI tab names (tab_brief.py)
+            elif role in ('coordinator', 'coordinator-needs', 'coordinator-off'):
+                entry['coordinator'] = role.partition('-')[2] or 'all'  # the session's coordinator tab and what it gets (coordinator.py)
             live = next((r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)), None)
             if live:
                 transcript = claude_transcript(live['cwd'], live['sessionId'])

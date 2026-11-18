@@ -99,6 +99,24 @@ class Resolve(Base):
 
 
 class Rules(Base):
+    def test_codex_standing_rules_fit_for_each_level(self):
+        safety = ('At every level, ask before you delete data, force-push, run a destructive migration, spend money, '
+                  'make a public release, or send a message to another person.')
+        for level, (name, _) in enumerate(autonomy.LEVELS):
+            for codex, (codex_name, _) in enumerate(codex_level.LEVELS):
+                with self.subTest(autonomy=level, codex=codex):
+                    text = autonomy.codex_standing_rules({'level': level}, {'level': codex})
+                    self.assertLessEqual(len(text), 1200)
+                    self.assertIn(f'Autonomy level {level} ({name})', text)
+                    self.assertIn(f'Codex level {codex} ({codex_name})', text)
+                    self.assertIn(safety, text.splitlines())
+                    self.assertIn(autonomy.VERIFIED, text.splitlines())
+                    reviewer = next(line for line in text.splitlines() if line.startswith('Choose a reviewer'))
+                    for risk in ('Critical:', 'Normal:', 'Light:'):
+                        self.assertIn(risk, reviewer)
+                    self.assertEqual(text.splitlines()[-1],
+                                     'Tether may send newer rules in this chat; the newest rules win.')
+
     def test_each_level_has_its_rules_and_safety_and_last_line(self):
         safety = ('At every level, ask before you delete data, force-push, run a destructive migration, spend money, '
                   'make a public release, or send a message to another person.')

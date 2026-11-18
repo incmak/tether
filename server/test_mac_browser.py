@@ -237,6 +237,8 @@ const {chromium} = require('playwright-core');
 '''
 
 
+@unittest.skipUnless(os.environ.get('TETHER_REAL_BROWSER_TEST') == '1',
+                     'Set TETHER_REAL_BROWSER_TEST=1 to run the real Chromium tests')
 @unittest.skipUnless(browser.find_chrome(), 'Headless Chromium is required')
 class RealContextTests(GrantHarness, unittest.TestCase):
     transport_type = ChromiumTransport
@@ -494,21 +496,29 @@ class GrantTests(GrantHarness, unittest.TestCase):
                 self.access.end(row['id'], 'expired')
                 self.assertEqual(self.access.state()['ended'][-1]['browser'], 'chrome')
 
-    def test_extension_end_reason_row_http_and_open_socket(self):
+    def test_extension_debugger_canceled(self):
+        self.assert_extension_end_reason('debugger_canceled', "Chrome's debugging bar was closed.")
+
+    def test_extension_debugger_target_closed(self):
+        self.assert_extension_end_reason('debugger_target_closed', 'Chrome closed the debugging connection to the tab. Ask again.')
+
+    def test_extension_legacy_debugger_detached(self):
+        self.assert_extension_end_reason('debugger_detached', 'Chrome ended the debugging connection.')
+
+    def assert_extension_end_reason(self, reason, message):
         signed.Access._listen(self.access)
         grant = self.grant()
         url = self.access.url(grant)
         stream = open_grant_socket(self, self.access, grant)
         self.device.handle({'type': 'ended', 'epoch': self.device.epoch, 'id': grant.row['id'],
-                            'reason': 'debugger_detached'})
-        message = "Chrome's debugging bar was closed."
+                            'reason': reason})
         assert_grant_close(self, stream, message)
         wait_for(lambda: grant.row['id'] not in self.access.grants)
-        self.assertEqual(grant.end_reason, 'debugger_detached')
+        self.assertEqual(grant.end_reason, reason)
         row = self.access.state()['ended'][0]
         self.assertEqual(row, dict(id=grant.row['id'], pane='%12', agent='agent', browser='chrome',
-                                   reason='debugger_detached', message=message, at=row['at']))
-        assert_ended_http(self, url, 'debugger_detached', message)
+                                   reason=reason, message=message, at=row['at']))
+        assert_ended_http(self, url, reason, message)
         panel = FakeHandler(browser_api.PREFIX + 'signed/access')
         browser_api.get(panel, signed_browser=self.broker.browser)
         self.assertNotIn(grant.token, json.dumps(panel.replies))
@@ -516,7 +526,7 @@ class GrantTests(GrantHarness, unittest.TestCase):
         panel = FakeHandler(browser_api.PREFIX + 'signed/dismiss', {'id': grant.row['id']})
         browser_api.post(panel, signed_browser=self.broker.browser)
         self.assertEqual(panel.replies[0][1]['ended'], [])
-        assert_ended_http(self, url, 'debugger_detached', message)
+        assert_ended_http(self, url, reason, message)
 
     def test_tether_end_wins_over_extension_echo(self):
         signed.Access._listen(self.access)

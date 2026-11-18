@@ -896,8 +896,8 @@ function App() {
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
   const sidebarProps = { onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
-  const commands: Command[] = view ? [
-    { label: 'Home', key: '⌥H', run: () => chooseScreen('home') },
+  const desktopKeys = wide && !files && !share
+  const slotCommands: Command[] = view ? [
     ...(slotPanes.length < 3 ? [{ label: 'Split right', key: '⌘\\', run: () => setCount(Math.max(2, slotPanes.length + 1) as DesktopLayout['count']) }] : []),
     ...(slotPanes.length < 4 ? [{ label: 'Grid of four', key: '⌘⇧\\', run: () => setCount(4) }] : []),
     ...(multi || zoomed ? [{ label: zoomed ? 'Restore the split' : 'Zoom the focused slot', key: '⌥Z', run: toggleZoom }] : []),
@@ -905,10 +905,15 @@ function App() {
     { label: 'Terminal view of the focused pane', key: '⌥T', run: toggleTerminal },
     ...(pane ? [...TOOLBAR_PANELS.map(({ kind, key }) => ({ label: `${hasPanel(panelCols(desk), kind) ? 'Hide' : 'Show'} the ${PANELS[kind].title.toLowerCase()} panel`, key, run: () => togglePanelKind(setPanels, kind) })),
       ...extraPanels(desk, pane).map(({ kind, key, open }) => ({ label: open ? `Hide the ${PANELS[kind].title.toLowerCase()} panel` : kind === 'chat' ? 'Side chat: fork this chat beside it' : `Show ${PANELS[kind].title.toLowerCase()}`, key, run: () => kind === 'chat' ? void sideChat() : togglePanelKind(setPanels, kind) }))] : []),
-    ...(pane && placesOf(sessions.find(item => item.id === pane.tmux_session)?.panes ?? [], sessions.find(item => item.id === pane.tmux_session)?.groups).filter(place => place.panes.length).length > 1 ? [{ label: 'Next stack', key: '⌥⇧]', run: () => stepGroup(1) }, { label: 'Previous stack', key: '⌥⇧[', run: () => stepGroup(-1) }] : []),
-    ...(livePins.length > 1 ? [{ label: 'Next pinned chat', key: '⌥]', run: () => stepPin(1) }, { label: 'Previous pinned chat', key: '⌥[', run: () => stepPin(-1) }] : []),
-    { label: 'New session', key: '⌥N', run: () => setNewSession({}) },
-    { label: desk.sidebar ? 'Hide the sidebar' : 'Show the sidebar', key: '⌘B', run: () => setDesk({ sidebar: !desk.sidebar }) },
+  ] : []
+  const sidebarCommand = { label: desk.sidebar ? 'Hide the sidebar' : 'Show the sidebar', key: desktopKeys ? '⌘B' : undefined, run: () => setDesk({ sidebar: !desk.sidebar }) }
+  const commandList: Command[] = [
+    ...(!home ? [{ label: 'Home', key: wide ? '⌥H' : undefined, run: () => chooseScreen('home') }] : []),
+    ...(desktopKeys && !home ? slotCommands : slotCommands.map(command => ({ ...command, key: undefined }))),
+    ...(view && pane && placesOf(sessions.find(item => item.id === pane.tmux_session)?.panes ?? [], sessions.find(item => item.id === pane.tmux_session)?.groups).filter(place => place.panes.length).length > 1 ? [{ label: 'Next stack', key: '⌥⇧]', run: () => stepGroup(1) }, { label: 'Previous stack', key: '⌥⇧[', run: () => stepGroup(-1) }] : []),
+    ...(view && livePins.length > 1 ? [{ label: 'Next pinned chat', key: '⌥]', run: () => stepPin(1) }, { label: 'Previous pinned chat', key: '⌥[', run: () => stepPin(-1) }] : []),
+    { label: 'New session', key: desktopKeys ? '⌥N' : undefined, run: () => setNewSession({}) },
+    ...(view ? [sidebarCommand] : []),
     // After the menu closes: its own entry goes first, then the step.
     ...(navAvailable.back ? [{ label: 'Back', key: BACK_KEY, run: () => setTimeout(goBack, 0) }] : []),
     ...(navAvailable.forward ? [{ label: 'Forward', key: FORWARD_KEY, run: () => setTimeout(goForward, 0) }] : []),
@@ -917,8 +922,10 @@ function App() {
     ...(undoNext.undo ? [{ label: `Undo: ${undoNext.undo}`, key: '⌘Z', run: () => requestUndo('undo') }] : []),
     ...(undoNext.redo ? [{ label: `Redo: ${undoNext.redo}`, key: '⌘⇧Z', run: () => requestUndo('redo') }] : []),
     { label: 'Undo history', run: () => setUndoHistory(true) },
-    { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
-    { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
+    ...(view ? [
+      { label: 'Make a layout', key: '⌥L', run: () => setSettings('layout-maker') },
+      { label: 'Restore the default layout', key: '⌥⇧L', run: restoreClassic },
+    ] : []),
     { label: 'Plan usage', run: () => setPlanSheet(true) },
     { label: 'Backlog', key: '⌥B', run: () => setBacklog({ mode: 'sheet' }) },
     { label: 'Backlog page', key: '⌥⇧B', run: () => setBacklog({ mode: 'page' }) },
@@ -928,7 +935,9 @@ function App() {
     { label: 'Factory view', run: () => setFactory(true) },
     ...(canMessage ? [{ label: 'Message all sessions', run: () => setAgentsPage('message') }] : []),
     { label: `${ASSISTANT} Live mode: talk hands-free`, run: openLive },
-  ] : []
+  ]
+  // The phone shows no key hints: its sheets have no shortcut keys to learn.
+  const commands = wide ? commandList : commandList.map(command => ({ ...command, key: undefined }))
   const running = runningPanes(sessions).length
   const chatFor = (target: Pane, slot?: SlotControls) => {
     const owner = sessions.find(item => item.id === target.tmux_session)
@@ -1024,7 +1033,7 @@ function App() {
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {cleanup && <CleanUp api={api} onClose={() => setCleanup(false)} />}
     {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
-    {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
+    {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={view ? commands.filter(item => !item.label.includes('Live mode')) : []} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
       onSize={(key, size) => update(current => { const sizes = { ...current.panelSizes[lookId] }; if (size === null) delete sizes[key]; else sizes[key] = size; return { panelSizes: { ...current.panelSizes, [lookId]: sizes } } })}

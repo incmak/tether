@@ -12,12 +12,15 @@ from unittest import mock
 
 import paths
 import backlog
+import autonomy
+import codex_level
 import project_launch
 import projects
 from agent_browser_cli import note
 
 HERE = Path(__file__).resolve().parent
 PID = 'a1b2c3d4e5f6'
+SUBAGENT_INSTRUCTIONS = 'features.multi_agent_v2.subagent_developer_instructions'
 
 
 class UnitTests(unittest.TestCase):
@@ -338,8 +341,7 @@ class UnitTests(unittest.TestCase):
         args = project_launch.claude_args(PID, ['fix the bug'])
         # No --add-dir: from Claude Code 2.1.326 it stops a new tab on a trust prompt (B188).
         self.assertNotIn('--add-dir', args)
-        self.assertEqual(args[0], '--settings')
-        self.assertEqual(args[-1], 'fix the bug')
+        self.assertEqual([*args[:1], *args[2:]], ['--settings', 'fix the bug'])
         self.assertEqual(json.loads(args[1])['permissions']['additionalDirectories'], [str(projects.bundle(PID))])
         hook = json.loads(args[1])['hooks']['SessionStart'][0]
         self.assertEqual(hook['matcher'], 'startup|resume|clear|compact')
@@ -391,7 +393,7 @@ class UnitTests(unittest.TestCase):
         folder = str(backlog.folder())
         items = str(paths.items())
         rem = str(paths.reminders())
-        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last']))
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
         self.assertTrue(paths.items().is_dir())
         self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
@@ -407,14 +409,55 @@ class UnitTests(unittest.TestCase):
         projects.set_instructions(PID, 'x', 0)
         for args in (['exec', 'hi'], ['e', 'hi'], ['login'], ['--help'], ['review']):
             self.assertEqual(project_launch.codex_args(PID, args), args)
-        # Own instructions: Tether adds none, but the item and backlog folders still open, so `tether item` works.
-        folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()), '--add-dir', str(paths.reminders())]
-        mine = ['-c', 'developer_instructions="mine"']
-        self.assertEqual(project_launch.codex_args(PID, mine), [*folders, *mine])
-        (paths.CODEX).mkdir()
-        (paths.CODEX / 'config.toml').write_text('model = "x"\ndeveloper_instructions = "own"\n')
-        self.assertEqual(project_launch.codex_args(PID, []), folders)
-        self.assertEqual(project_launch.codex_args('', []), [])
+
+    def standing_instructions(self, argv):
+        options = argv[:argv.index('--')] if '--' in argv else argv
+        values = {}
+        for arg in project_launch._option(options, '-c', '--config'):
+            key, _, value = arg.partition('=')
+            if key in ('developer_instructions', SUBAGENT_INSTRUCTIONS):
+                values[key] = value
+        self.assertNotIn(SUBAGENT_INSTRUCTIONS, values)  # It would replace what subagents inherit.
+        return {key: tomllib.loads('v = ' + value)['v'] for key, value in values.items()}
+
+    @staticmethod
+    def block(pid):
+        return autonomy.codex_standing_rules(autonomy.resolve(pid), codex_level.resolve(pid))
+
+    def test_codex_gets_standing_rules_for_the_project_or_the_global_settings(self):
+        autonomy.set_global(2)
+        codex_level.set_global(1)
+        autonomy.set_project(PID, True, 0)
+        codex_level.set_project(PID, True, 4)
+        for pid, level, codex in ((PID, 0, 4), (None, 2, 1)):
+            with self.subTest(project=pid):
+                overrides = self.standing_instructions(project_launch.codex_args(pid, ['resume', '--last']))
+                block = self.block(pid)
+                self.assertIn(autonomy.SAFETY, block)
+                self.assertIn(f'Autonomy level {level} (', block)
+                self.assertIn(f'Codex level {codex} (', block)
+                self.assertTrue(overrides['developer_instructions'].endswith(block))
+
+    def test_codex_keeps_home_and_cli_instructions_with_standing_rules(self):
+        home = 'Keep "quotes" and \\slashes.\nNext line 🙂'
+        self.config('"developer_instructions" = \'\'\'\n' + home + "'''\n")
+        cli = 'Keep "CLI" and \\slashes.\nTake precedence 🙂'
+        value = 'developer_instructions=' + project_launch.toml_string(cli)
+        for args, expected in (([], home), (['-c', value], cli), (['-c' + value], cli),
+                               (['--config=' + value], cli), (['-c=' + value], cli),
+                               (['-c', 'developer_instructions=older', 'resume', '--config', value,
+                                 '--', 'developer_instructions=prompt'], cli),
+                               (['--', '--config=developer_instructions=prompt'], home),
+                               (['-c', 'developer_instructions=unquoted CLI text'], 'unquoted CLI text')):
+            with self.subTest(args=args), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
+                argv = project_launch.codex_args(PID, args)
+                overrides = self.standing_instructions(argv)
+                self.assertEqual(overrides['developer_instructions'],
+                                 expected + '\n\n' + self.block(PID))
+                folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()),
+                           '--add-dir', str(paths.reminders())]
+                self.assertIn(folders, [argv[i:i+len(folders)] for i in range(len(argv))])
+                self.assertFalse(any(arg.startswith('shell_environment_policy.set.TETHER_CDP_URL') for arg in argv))
 
     def test_hook_prints_context_or_nothing(self):
         def run_hook(pid):
@@ -434,19 +477,18 @@ class UnitTests(unittest.TestCase):
             for enabled in (False, True):
                 with self.subTest(pid=pid, enabled=enabled), mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x' if enabled else ''):
                     args = project_launch.codex_args(pid, ['resume', '--last'])
-                    if not pid and not enabled:
-                        self.assertEqual(args, ['resume', '--last'])
-                        continue
                     text = tomllib.loads(args[1])['developer_instructions']
                     self.assertEqual(note() in text, enabled)
+                    self.standing_instructions(args)
+                    block = self.block(pid)
                     if pid:
                         self.assertIn('## Notes', text)
                         if enabled:
-                            self.assertTrue(text.endswith('\n\n' + note()))
+                            self.assertTrue(text.endswith('\n\n' + note() + '\n\n' + block))
                     else:
-                        self.assertEqual(text, note())
+                        self.assertEqual(text, note() + '\n\n' + block if enabled else block)
 
-    def test_codex_browser_keeps_plain_commands_and_own_instructions(self):
+    def test_codex_browser_keeps_plain_commands(self):
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'):
             self.test_codex_plain_cases()
 
@@ -490,7 +532,8 @@ url = "https://example.test/playwright"
         self.assertEqual(config['mcp_servers']['browser.tool']['env_vars'],
                          ['USER_TOKEN', {'name': 'REMOTE_TOKEN', 'source': 'remote'}, 'PLAYWRIGHT_MCP_CDP_ENDPOINT'])
         with mock.patch.dict(os.environ, TETHER_CDP_URL=''):
-            self.assertEqual(project_launch.codex_args(None, []), [])
+            args = project_launch.codex_args(None, [])
+            self.assertFalse(any(arg.startswith('mcp_servers.') for arg in args))
 
     def test_codex_launch_without_project_and_fail_open(self):
         with mock.patch.dict(os.environ, TETHER_CDP_URL='ws://127.0.0.1:1/cdp/x'), \
@@ -498,7 +541,8 @@ url = "https://example.test/playwright"
                 mock.patch.object(project_launch, 'current_project', return_value=None), \
                 mock.patch.object(project_launch.os, 'execv') as execute:
             project_launch.launch('codex', ['resume'])
-            self.assertEqual(tomllib.loads(execute.call_args.args[1][2])['developer_instructions'], note())
+            overrides = self.standing_instructions(execute.call_args.args[1][1:])
+            self.assertEqual(overrides['developer_instructions'], note() + '\n\n' + self.block(None))
             os.environ.pop('TETHER_LAUNCH')
             with mock.patch.object(project_launch, 'codex_browser_env_args', side_effect=ValueError('bad config')), \
                     mock.patch.object(project_launch.sys, 'stderr'):

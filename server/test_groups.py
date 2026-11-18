@@ -142,6 +142,8 @@ class RenderTests(Bundles):
         fixed_chars = projects.state(PID, self.home)['fixed_chars']
         self.assertLessEqual(len(text) - fixed_chars, projects.BUDGET_MIN)
         self.assertIn('Session rule.', text)
+        self.assertIn('## Stack: Big', text)
+        self.assertNotIn('Group rule. ' * 1500, text)  # the stack guidance is cut, its identity is not
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
@@ -195,10 +197,12 @@ class LaunchTests(Bundles):
                 projects.set_budget(PID, budget, projects.meta(PID)['revision'])
                 args = project_launch.codex_args(PID, [], self.group)
                 text = tomllib.loads(args[1])['developer_instructions']
-                self.assertIn('## Stack: Docs\n', text)
-                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', text)
-                self.assertIn('Docs rule.', text)
-                self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], budget)
+                project, _, standing = text.rpartition('\n\n')
+                self.assertTrue(standing.startswith('Autonomy level '))
+                self.assertIn('## Stack: Docs\n', project)
+                self.assertIn(f'Stack folder: {projects.bundle(self.GPID)}\n', project)
+                self.assertIn('Docs rule.', project)
+                self.assertLessEqual(len(project) - projects.state(PID, self.home)['fixed_chars'], budget)
 
     def test_current_group_reads_the_pane_and_makes_the_bundle(self):
         with mock.patch.object(groups, 'group_of_pane', return_value=('$1', {'id': 'gaaaaaaaa', 'name': 'Docs', 'project': ''})), \

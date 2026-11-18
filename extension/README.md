@@ -10,6 +10,8 @@ The optional **Also confirm on this Mac** setting adds a local confirmation wind
 
 The extension opens a new task tab. It attaches the debugger to that tabId only.
 The toolbar badge shows **STOP**. Click it, cancel Chrome's debugger banner, or close the task tab to stop.
+Tether records whether you canceled the debugger or Chrome closed the connection to the tab.
+If Chrome supplies no recognized reason, Tether reports that the debugging connection ended.
 Expiry and connection loss also stop control. Reconnect never restores a task grant.
 Stop leaves the task tab open for you, unless you close it yourself.
 

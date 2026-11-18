@@ -51,7 +51,9 @@ PAGE_METHODS = {
 PAGE_ALLOWED = {domain + '.' + method for domain, methods in PAGE_METHODS.items() for method in methods.split()}
 REQUEST_SECONDS = 120
 END_MESSAGES = {
-    'debugger_detached': "Chrome's debugging bar was closed.",
+    'debugger_canceled': "Chrome's debugging bar was closed.",
+    'debugger_target_closed': 'Chrome closed the debugging connection to the tab. Ask again.',
+    'debugger_detached': 'Chrome ended the debugging connection.',
     'tab_closed': 'The tab was closed.',
     'expired': 'The time ran out.',
     'action_stop': 'It was stopped from the Chrome extension.',
