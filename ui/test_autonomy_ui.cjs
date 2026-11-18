@@ -151,6 +151,11 @@ async function main() {
         if (endpoint.startsWith('autonomy')) return route.fulfill({ json: autonomy })
         if (endpoint.startsWith('codex-level')) return route.fulfill({ json: { level: 0, global: 0, levels: [], project: null, models: [] } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
+        if (endpoint === 'audit') {
+          const json = { entries: [], next: null, retention_days: 90 }
+          if (url.searchParams.get('facets') === '1') json.facets = { kinds: [], projects: [], actors: [] }
+          return route.fulfill({ json })
+        }
         if (!(endpoint in fixture)) unexpected.add(endpoint)
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         return route.fulfill({ json: fixture[endpoint] || {} })

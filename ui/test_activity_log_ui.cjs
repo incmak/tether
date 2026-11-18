@@ -602,7 +602,7 @@ async function main() {
       level = 3; rev++
     }
     // WCAG 2.2.1: the toast that offers Undo has no time limit. A fake clock moves 60 s on; it runs last, so no other
-    // step sees the fake clock. The "Undid" note has no action and still goes after 8 s.
+    // step sees the fake clock. The "Undid" note goes after 8 s unless hovered or focused.
     await page.clock.install()
     await open(sizes[sizes.length - 1][0], 'codex level')
     await page.locator('label', { has: page.locator('input[name="codex-level-global"][value="1"]') }).click()
@@ -611,7 +611,15 @@ async function main() {
     await page.clock.fastForward(60000)
     check('the Undo toast stays after 60 s', await offer.getByRole('button', { name: 'Undo' }).isVisible())
     await offer.getByRole('button', { name: 'Undo' }).click()
+    // The confirmation can open directly under the pointer left by the Undo click.
+    await page.mouse.move(0, 0)
     await offer.getByText('Undid: Codex level 1 → 3').waitFor()
+    await offer.hover()
+    await settle()
+    await page.clock.fastForward(9000)
+    check('the Undid note stays while hovered', await offer.isVisible())
+    await page.mouse.move(0, 0)
+    await settle()
     await page.clock.fastForward(9000)
     await offer.waitFor({ state: 'detached' })
     check('the Undid note goes after 8 s', true)
