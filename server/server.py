@@ -377,9 +377,8 @@ def monitor_notices():
                              scope=review_scope_of, commit=review_commit, fresh=fresh_status)
         try:
             # B213: each commit a reviewer approved is checked once. Observe mode records the decision and merges nothing.
-            approved = getattr(review_links, 'approved_commits', None)
-            if approved is not None:
-                auto_merge.observe(entries, approved(), agent_folder, auto_merge_alert, current=approved)
+            auto_merge.observe(entries, review_links.approved_commits(), agent_folder, auto_merge_alert,
+                               current=review_links.approved_commits)
         except Exception as exc:  # auto-merge must never stop the monitor
             print(f'auto-merge observe failed: {exc!r}', file=sys.stderr)
         try:
