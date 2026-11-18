@@ -26,8 +26,10 @@ const busy = {
 }
 const calm = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%30', '$4', 'Scratch', 'scratch', {})], default_thread: 't3' }
 const LONG = process.env.SECOND ? '第二个很长的名称'.repeat(14) : 'Unbroken'.repeat(12)
-let sessions = {sessions:[pane('%3', '$1', LONG, LONG, {dir:'/workspace/'+LONG}),pane('%4', '$2', LONG, LONG, {dir:'/workspace/'+LONG})],default_thread:'t3'}
-let historyMode = 'full'
+const fullSessions = {sessions:[pane('%3', '$1', LONG, LONG, {dir:'/workspace/'+LONG}),pane('%4', '$2', LONG, LONG, {dir:'/workspace/'+LONG})],default_thread:'t3'}
+const noSessions = {sessions:[],default_thread:null}
+let sessions = fullSessions
+let history = { mode: 'full' }
 const fixture = {
   chat: { messages: [], busy: false, thread: 't3', agent: 'claude', writable: true, session: '%3', earlier: 0, limit: 100, state: 'Idle', approval: null },
   footer: { observed: true, model: 'Opus 5.5', mode: 'default', notices: [] },
@@ -71,7 +73,12 @@ async function main() {
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-        if (endpoint.startsWith('history')) { if (historyMode === 'loading') await new Promise(resolve => setTimeout(resolve, 2000)); return historyMode === 'error' ? route.fulfill({status:503,json:{error:LONG}}) : route.fulfill({json:{chats:historyMode==='empty'?[]:[{id:'old1',agent:'claude',title:LONG,dir:'/workspace/'+LONG,time:new Date().toISOString()}],total:123,next:null,counts:{all:123,claude:123,codex:0},dirs:Array.from({length:12},(_,i)=>({dir:'/workspace/'+LONG+i,count:123-i}))}}) }
+        if (endpoint.startsWith('history')) {
+          const { mode, pending } = history
+          if (pending) await pending
+          if (mode === 'error') return route.fulfill({status:503,json:{error:LONG}})
+          return route.fulfill({json:{chats:mode==='empty'?[]:[{id:'old1',agent:'claude',title:LONG,dir:'/workspace/'+LONG,time:new Date().toISOString()}],total:123,next:null,counts:{all:123,claude:123,codex:0},dirs:Array.from({length:12},(_,i)=>({dir:'/workspace/'+LONG+i,count:123-i}))}})
+        }
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'sessions') return route.fulfill({ json: sessions })
         return route.fulfill({ json: fixture[endpoint] || {} })
@@ -130,28 +137,54 @@ async function main() {
       await page.getByRole('combobox',{name:'Search folders',exact:true}).fill('no-such-folder')
       await page.getByText('No folders match.',{exact:true}).waitFor()
       await page.keyboard.press('Escape')
+      await folder.waitFor({state:'hidden'})
       // Long server failures, the initial skeleton, and an empty result use the real picker.
+      // Switch tabs to remount it without navigating away from an open dialog.
+      const newSession = page.getByRole('dialog',{name:'New session',exact:true})
+      const openExisting = newSession.getByRole('tab',{name:'Open existing',exact:true})
+      const retry = cp.getByRole('button',{name:'Retry',exact:true})
       for(const mode of ['error','loading','empty']) {
-        historyMode=mode
-        const fullSessions=sessions
-        if(mode==='loading'||mode==='empty') sessions={sessions:[],default_thread:null}
-        await page.goto(`${origin}/chat/?go=new&session=%253&prefs=${encodeURIComponent(JSON.stringify({theme:process.env.SECOND?'dark':'light',look:{layout:'classic',surface:'glass',backdrop:'dusk'}}))}`)
-        await page.getByRole('tab',{name:'Open existing',exact:true}).click()
-        await page.waitForTimeout(mode==='loading'?250:400)
-        if(mode==='error') {
-          const errors=await cp.locator('.cp-list').evaluate(root=>({w:root.scrollWidth,c:root.clientWidth}))
-          check(`error ${width}`,errors.w<=errors.c+1,JSON.stringify(errors))
-          check(`retry target ${width}`,await page.getByRole('button',{name:'Retry',exact:true}).evaluate(el=>{const r=el.getBoundingClientRect();return r.width>=24&&r.height>=24}))
-          await page.getByRole('button',{name:'Retry',exact:true}).click()
-          await page.getByRole('button',{name:'Trying again…'}).waitFor()
-          await page.waitForTimeout(700)
+        await newSession.getByRole('tab',{name:'New',exact:true}).click()
+        await cp.waitFor({state:'detached'})
+        const loading = mode === 'loading' ? Promise.withResolvers() : null
+        history = { mode, pending: loading?.promise }
+        sessions = mode === 'error' ? fullSessions : noSessions
+        try {
+          await openExisting.click()
+          if(mode==='error') {
+            await retry.waitFor()
+            const errors=await cp.locator('.cp-list').evaluate(root=>({w:root.scrollWidth,c:root.clientWidth}))
+            check(`error ${width}`,errors.w<=errors.c+1,JSON.stringify(errors))
+            check(`retry target ${width}`,await retry.evaluate(el=>{const r=el.getBoundingClientRect();return r.width>=24&&r.height>=24}))
+            const attempt = Promise.withResolvers()
+            history = { mode, pending: attempt.promise }
+            try {
+              await retry.click()
+              await cp.getByRole('button',{name:'Trying again…',exact:true}).waitFor()
+            } finally {
+              attempt.resolve()
+            }
+            await retry.waitFor()
+          }
+          if(mode==='loading') {
+            await cp.locator('.skeleton .sk-label').waitFor()
+            check(`skeleton ${width}`,await cp.locator('.skeleton').count()>0 && await cp.locator('.sk-label').count()>0)
+          }
+          if(mode==='empty') {
+            await cp.locator('.cp-empty').waitFor()
+            check(`empty ${width}`,await cp.locator('.cp-empty').count()>0)
+          }
+          await page.screenshot({
+            path:path.join(SHOTS,`${process.env.PHASE||'after'}-picker-${mode}-${width}.png`),
+            animations:'disabled',
+          })
+        } finally {
+          loading?.resolve()
         }
-        if(mode==='loading') check(`skeleton ${width}`,await cp.locator('.skeleton').count()>0 && await cp.locator('.sk-label').count()>0)
-        if(mode==='empty') check(`empty ${width}`,await cp.locator('.cp-empty').count()>0)
-        sessions=fullSessions
-        await page.screenshot({path:path.join(SHOTS,`${process.env.PHASE||'after'}-picker-${mode}-${width}.png`)})
+        if(loading) await cp.locator('.cp-title').first().waitFor()
       }
-      historyMode='full'
+      history = { mode: 'full' }
+      sessions = fullSessions
       await page.keyboard.press('Escape')
       // A tab picker has a Move action. Hover/focus must reserve its space beside the status.
       await page.goto(`${origin}/chat/?session=%253&prefs=${encodeURIComponent(JSON.stringify({theme:process.env.SECOND?'dark':'light',look:{layout:'classic',surface:'glass',backdrop:'dusk'}}))}`)
