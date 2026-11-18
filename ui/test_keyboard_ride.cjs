@@ -151,10 +151,17 @@ async function functional(page) {
   const idle = await read(page)
   await record(page)
   await field.tap()
-  const focused = await read(page)
-  const tapping = [...await finish(page), focused]
-  check('1. tapping keeps the tabs and the old composer bottom', tapping.every(f => !f.keyboard && f.display !== 'none' && Math.abs(f.bottom - idle.bottom) < 1), { idle: idle.bottom, focused: focused.bottom })
+  const tapped = await read(page)
+  const tapping = [...await finish(page), tapped]
+  check('1. tapping keeps the tabs and the old composer bottom', tapping.every(f => !f.keyboard && f.display !== 'none' && Math.abs(f.bottom - idle.bottom) < 1), { idle: idle.bottom, focused: tapped.bottom })
 
+  // Measure the gap after the focus morph and its scroll adjustment. The resize below tests the keyboard ride.
+  await page.waitForFunction(() => {
+    const composer = document.querySelector('.chat-page .composer')
+    const scroller = document.querySelector('.chat-page .chat-scroll')
+    return !composer.hasAttribute('data-morph') && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop < 2
+  })
+  const focused = await read(page)
   await record(page)
   await page.setViewportSize(keyboard)
   await settle(page, keyboard.height)
@@ -236,16 +243,19 @@ async function functional(page) {
   await page.waitForFunction(() => document.documentElement.hasAttribute('data-keyboard'))
   // Playwright makes the screen as small as the viewport; a phone in landscape keeps its full screen.
   await page.evaluate(() => Object.defineProperty(screen, 'availHeight', { get: () => 390 }))
-  const turn = height => page.setViewportSize({ width: 700, height })
+  const turn = async height => {
+    const previous = (await read(page)).resizedAt
+    await page.setViewportSize({ width: 700, height })
+    // The dimensions can change before the app's resize handler updates the keyboard state.
+    await page.waitForFunction(({ height, previous }) =>
+      innerWidth === 700 && innerHeight === height && window.readRide().resizedAt > previous, { height, previous })
+  }
   await turn(200)
-  await page.waitForFunction(() => innerWidth === 700 && innerHeight === 200)
   const turnedOpen = await read(page), availHeight = await page.evaluate(() => screen.availHeight)
   await turn(360)
-  await page.waitForFunction(() => innerHeight === 360)
   const turnedClosed = await read(page)
   // Only measured heights become the baseline: 225 is a keyboard against 390 (the screen), not against 360 (measured).
   await turn(225)
-  await page.waitForFunction(() => innerHeight === 225)
   const measured = !(await read(page)).keyboard
   check('6b. rotating with the keyboard open keeps it open, and closing it gives the tabs back', turnedOpen.keyboard && turnedOpen.display === 'none' && !turnedClosed.keyboard && turnedClosed.display !== 'none' && measured,
     { availHeight, measured, open: turnedOpen.keyboard, closed: turnedClosed.keyboard })

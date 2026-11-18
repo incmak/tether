@@ -114,6 +114,6 @@
 .command-result code { padding: 1px 5px; border-radius: var(--radius-sm); background: var(--hover); color: var(--text); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 /* A "more" row is a button that scrolls the dialog's list. */
 .dlg-list li.dlg-more { padding: 0; }
-.dlg-list .dlg-more button { min-height: var(--control-lg); align-items: center; padding: 6px 12px; color: var(--accent); font-size: 13px; }
+.dlg-list .dlg-more button { min-height: var(--control-lg); align-items: center; padding: 6px 12px; color: var(--accent-ink); font-size: 13px; }
 /* The action a second click on the marked row runs. */
 .dlg-row-go { margin-left: auto; align-self: center; flex-shrink: 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; white-space: nowrap; }

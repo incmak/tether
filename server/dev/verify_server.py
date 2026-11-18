@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 from weakref import WeakValueDictionary
@@ -60,6 +61,7 @@ ALLOWED = {
 FIXTURES = {
     'codex-runs': lambda pane: {'pane': pane, 'running': 0, 'runs': []},
     'host': lambda _pane: {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False},
+    'reminders': lambda _pane: {'reminders': [], 'deleted': [], 'now': time.time()},
 }
 STATIC_PREFIX = '/chat/'
 API_PREFIX = '/mobile/api/'

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CircleCheck, ClipboardList, CornerDownLeft, ListPlus, MapPin, Search, SquareKanban, SquarePlus, SquareTerminal, Zap } from 'lucide-react'
 import type { Api, Pane } from './api'
 import { useModal } from './hooks'
@@ -96,9 +96,10 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
   // Opening the menu keeps the Forward steps, so its Forward command can use them.
   const modal = useModal(true, onClose, undefined, { keepForward: true })
   const [query, setQuery] = useState('')
-  const [active, setActive] = useState(0)
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
   const input = useRef<HTMLInputElement>(null)
+  const previousSelection = useRef<{ id: string | null; index: number } | null>(null)
   const { text: backlogText, failed: backlogFailed } = useBacklogText(backlog?.api)
   const now = useNow()
   // Each item with its project, so a search for a project name finds its items.
@@ -151,7 +152,16 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     ]
     return [...ranked(panes, paneScore), ...ranked(commandRows, row => scoreWords([field(2, row.label)], wordList)), ...workRows, ...backlogRows, ...createRows]
   }, [sessions, seen, selected, slots, commands, onPane, onSession, query, backlog, backlogItems, backlogText, index, work, now, create])
-  const at = Math.min(active, Math.max(0, rows.length - 1))
+  // Backlog results can arrive while the person moves through the list.
+  const at = Math.max(0, rows.findIndex(row => row.id === activeId))
+  const rowId = rows[at]?.id
+  useLayoutEffect(() => {
+    const previous = previousSelection.current
+    previousSelection.current = { id: activeId, index: at }
+    if (rowId === activeId && previous?.id === activeId && previous.index !== at) {
+      document.getElementById(`command-${at}`)?.scrollIntoView({ block: 'nearest' })
+    }
+  }, [activeId, at, rowId])
   const words = query.trim()
   const pick = (row: Row | undefined) => { if (!row) return; if (!row.keep) onClose(); row.run() }
   const { options: placeRows, byValue } = useMemo(() => placeOptions(sessions), [sessions])
@@ -163,7 +173,7 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
   }
   const move = (to: number) => {
     const next = (to + rows.length) % rows.length
-    setActive(next)
+    setActiveId(rows[next].id)
     document.getElementById(`command-${next}`)?.scrollIntoView({ block: 'nearest' })
   }
   const icon = (row: Row) => row.group === 'Panes' ? (row.dot ? <span className={`state-dot ${row.dot}`} /> : <SquareTerminal size={16} />)
@@ -179,7 +189,7 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
     <label className="command-search"><Search size={20} aria-hidden="true" />
       <input ref={input} autoFocus role="combobox" aria-expanded="true" aria-controls="command-list" aria-autocomplete="list" aria-activedescendant={rows.length ? `command-${at}` : undefined}
         aria-label={placeholder} placeholder={placeholder} value={query} autoComplete="off" spellCheck={false}
-        onChange={event => { setQuery(event.target.value); setActive(0) }}
+        onChange={event => { setQuery(event.target.value); setActiveId(null) }}
         onKeyDown={event => {
           if (!rows.length) return
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); move(at + (event.key === 'ArrowDown' ? 1 : -1)) }
@@ -201,7 +211,7 @@ export function CommandMenu({ sessions, seen, selected, slots, commands, onPane,
       {rows.map((row, index) => <div key={row.id} role="presentation">
         {(index === 0 || rows[index - 1].group !== row.group) && <div className="command-group" role="presentation">{row.group}</div>}
         <div id={`command-${index}`} role="option" aria-selected={index === at} className={`command-row${index === at ? ' active' : ''}${row.done ? ' done' : ''}`}
-          onMouseMove={() => { if (index !== at) setActive(index) }} onMouseDown={event => event.preventDefault()} onClick={() => pick(row)}>
+          onMouseMove={() => { if (index !== at) setActiveId(row.id) }} onMouseDown={event => event.preventDefault()} onClick={() => pick(row)}>
           <span className="command-icon" aria-hidden="true">{icon(row)}</span>
           <span className="command-label">{row.group === 'Create' || row.id.endsWith(':search') ? row.label : <Marked text={row.label} words={row.marked ?? wordList} />}</span>
           {row.hint && <span className="command-hint">{row.hint}</span>}

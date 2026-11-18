@@ -66,12 +66,13 @@ async function main() {
       if (url.origin === origin && url.pathname.startsWith('/chat/')) return serveLocal(route)
       return route.abort('blockedbyclient')
     })
-    await page.addInitScript(() => {
+    await page.addInitScript(archivedTabs => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
-      if (!sessionStorage.getItem('kept')) { localStorage.clear(); sessionStorage.setItem('kept', '1') }
+      localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
-      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, sideMode: 'sessions' }))
-    })
+      // Release notes is last used. Use the same archived tabs as the server from the first paint.
+      localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, sideMode: 'sessions', lastPane: { $1: '%3' }, archivedTabs }))
+    }, fixture.prefs.prefs.archivedTabs)
     const overflow = () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth)
     let root
     const tabs = () => root.locator('.session-groups .pane-children .pane-child-name').allInnerTexts()
@@ -80,16 +81,11 @@ async function main() {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/`, { waitUntil: 'load' })
-      // Release notes was the last-used tab, so a plain click on the session would open it.
-      await page.evaluate(() => localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, sideMode: 'sessions', lastPane: { $1: '%3' }, archivedTabs: { '%5': { thread: 't5', dir: '/srv/tether' }, '%6': { thread: 't6', dir: '/srv/notes' } } })))
-      await page.reload({ waitUntil: 'load' })
       root = page.locator(width < 800 ? 'dialog.drawer' : 'aside.sidebar')
       if (width < 800) await page.getByRole('button', { name: 'Open sessions' }).first().click()
       const search = root.getByRole('searchbox', { name: 'Search sessions' })
       await search.waitFor()
       await root.locator('.session-groups .session-title').first().waitFor()
-      // The server prefs archive Old notes after the first paint: wait for them before searching.
-      await root.locator('.session-groups .pane-children .pane-child-name', { hasText: 'Old notes' }).waitFor({ state: 'detached' })
       await search.fill('voice')
       check(`${at} tab title finds its session`, JSON.stringify(await sessionTitles()) === JSON.stringify(['tether']), JSON.stringify(await sessionTitles()))
       check(`${at} only the matching tab shows`, (await tabs()).length === 1 && (await tabs())[0].startsWith('Voice mode latency'), JSON.stringify(await tabs()))

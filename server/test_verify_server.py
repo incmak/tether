@@ -172,6 +172,7 @@ BLOCKED_REQUESTS = [
     ('GET', '/mobile/api/usage?%6cive=1', {}),
     ('POST', '/mobile/api/start', {}),
     ('POST', '/mobile/api/login/start', {}),
+    ('POST', '/mobile/api/reminders/add', {}),
     ('POST', '/mobile/api/tmux-sessions', {}),
 ]
 
@@ -231,10 +232,12 @@ import verify_server
 
 root = Path(os.environ['HOME']).parent
 handler = verify_server.fixture_handler(server.Handler, root, '%17')
-with patch.object(server.Handler, 'do_GET', side_effect=AssertionError('real route ran')):
+with patch.object(server.Handler, 'do_GET', side_effect=AssertionError('real route ran')), \
+     patch.object(verify_server.time, 'time', return_value=1234):
     for path, expected in (
         ('codex-runs?session=%259', {'pane': '%17', 'running': 0, 'runs': []}),
         ('host', {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False}),
+        ('reminders', {'reminders': [], 'deleted': [], 'now': 1234}),
     ):
         assert not verify_server.allowed_route('GET', '/mobile/api/' + path)
         for cookie, expected_status in (('', 401), (server.auth.session_value(), 200)):

@@ -1,9 +1,10 @@
 // PDF pages for Share, drawn in the browser with pdf.js. Loaded only when a PDF is shown, so the main bundle stays small.
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 
-let lib: Promise<typeof import('pdfjs-dist')> | null = null
+let lib: Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> | null = null
 function pdfjs() {
-  lib ??= Promise.all([import('pdfjs-dist'), import('pdfjs-dist/build/pdf.worker.min.mjs?url')]).then(([module, worker]) => {
+  // Use the builds that include polyfills for browsers without the latest JavaScript APIs.
+  lib ??= Promise.all([import('pdfjs-dist/legacy/build/pdf.mjs'), import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')]).then(([module, worker]) => {
     module.GlobalWorkerOptions.workerSrc = worker.default
     return module
   })

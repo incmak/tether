@@ -186,6 +186,8 @@ class ProjectTests(unittest.TestCase):
         self.assertTrue(names['build.md']['new'])
         projects.mark_seen(PID)
         self.assertFalse(any(item['new'] for item in projects.notes(PID)))
+        # Note excerpts come last. Give them space independent of the launch command path lengths.
+        projects.set_budget(PID, projects.BUDGET_MAX, 0)
         claude, codex = projects.render(PID, 'claude'), projects.render(PID, 'codex')
         self.assertEqual(claude, codex)
         self.assertIn('### MEMORY.md', claude)

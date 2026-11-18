@@ -49,6 +49,7 @@ function fixtures(state) {
     'browser/agents': { enabled: false, available: false, reason: 'Fixture browser off', agents: [], asks: [] },
     'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] },
     usage: { claude: null, codex: null },
+    reminders: { reminders: [], deleted: [], now: Math.floor(Date.now() / 1000) },
     feedback: { ratings: {} },
     subagents: { main: { model: null, context: null, title: null }, agents: [], tasks: [] },
   }

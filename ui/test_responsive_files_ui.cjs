@@ -16,8 +16,9 @@ const XLSX = require('xlsx')
 const workbook = XLSX.utils.book_new()
 for (const name of ['Sheet_' + 'W'.repeat(25), 'Second sheet']) XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Long cell', LONG, OTHER], ['Second row', 12345, 'Value']]), name)
 const officeBytes = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
-// A small valid one-page PDF, with a generated cross-reference table.
-const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>', '<< /Length 0 >>\nstream\n\nendstream']
+// A one-page PDF with a blue rectangle so the test can check that the canvas drew the page.
+const drawing = '0 0 1 rg\n0 0 300 400 re f\n'
+const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R >>', `<< /Length ${Buffer.byteLength(drawing)} >>\nstream\n${drawing}endstream`]
 let pdf = '%PDF-1.4\n', offsets = [0]
 objects.forEach((object, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${i + 1} 0 obj\n${object}\nendobj\n` })
 const xref = Buffer.byteLength(pdf)
@@ -342,7 +343,12 @@ async function main() {
       await audit(`${w}-share-rename`, '.sh-pane')
       await open('Share', w, h)
       await page.locator('.sh-tile').nth(3).click()
-      await page.locator('.sh-pdf-page').waitFor()
+      await page.waitForFunction(() => {
+        const canvas = document.querySelector('.sh-pdf-page')
+        if (!canvas) return false
+        const [red, green, blue] = canvas.getContext('2d').getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data
+        return blue > red && blue > green
+      })
       await audit(`${w}-pdf-viewer`, '.sh-pane')
       if (!wide) await open('Share', w, h)
       await page.locator('.sh-head').getByRole('button', { name: 'Select', exact: true }).click()

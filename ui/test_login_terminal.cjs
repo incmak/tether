@@ -91,7 +91,8 @@ async function main() {
   console.log('PASS terminal viewport, wrapped links, frozen selection, mouse/phone copy controls and return')
 
   const ch = harness(), typed = []
-  const dock = load('src/Dock.tsx', { react: ch.hooks }).ChoiceDock
+  const rovingRows = load('src/rovingRows.ts', { react: ch.hooks })
+  const dock = load('src/Dock.tsx', { react: ch.hooks, './rovingRows': rovingRows }).ChoiceDock
   const url = 'https://claude.com/cai/oauth/authorize?state=' + 'a'.repeat(600)
   const dockProps = { approval: null, attention: { id: 'login', reason: 'prompt', login: { url, code: true } }, agent: 'Claude', disabled: false,
     onType: async (...args) => { typed.push(args); return true }, onChoose() {}, onKey() {} }
