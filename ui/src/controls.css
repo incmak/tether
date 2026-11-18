@@ -113,6 +113,7 @@
 .pill:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .pill:disabled { opacity: .5; }
 .pill svg, .pill + .pill, .pill-effort { flex: none; }
+.pill-tier { display: inline-flex; align-items: center; gap: 2px; flex: none; color: var(--accent-ink); }
 .pill-text { overflow: hidden; text-overflow: ellipsis; }
 
 /* Chip: an item you added, with a remove button. */

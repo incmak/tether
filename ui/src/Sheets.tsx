@@ -66,7 +66,7 @@ export function Usage({ footer, onClose }: { footer: Footer; onClose: () => void
   const credits = creditsLabel(footer.credits)
   return <dialog {...modal} className="sheet" aria-labelledby="usage-title">
     <div className="sheet-heading"><h2 id="usage-title">Usage</h2><button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button></div>
-    {footer.model && <p className="sheet-sub">{footer.model}{footer.effort && ` · ${footer.effort}`}</p>}
+    {footer.model && <p className="sheet-sub">{footer.model}{footer.effort && ` · ${footer.effort}`}{footer.tier && ` · ${footer.tier}`}</p>}
     <div className="usage-detail">
       {context && <div className="usage-row"><div><strong>Context</strong><span>{context.percent.toFixed(1)}% used · {(100 - context.percent).toFixed(1)}% left</span></div>
         {context.tokens != null && context.limit != null && <small>{context.tokens.toLocaleString()} / {context.limit.toLocaleString()} tokens</small>}</div>}

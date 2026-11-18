@@ -749,7 +749,7 @@ FACTORY_READERS = {
 
 
 def codex_state():
-    return {'messages': [], 'dropped': 0, 'busy': False, 'usage': None, 'model': '', 'effort': '', 'credits': None}
+    return {'messages': [], 'dropped': 0, 'busy': False, 'usage': None, 'model': '', 'effort': '', 'tier': '', 'credits': None}
 
 
 def settings_time(stamp):
@@ -769,23 +769,41 @@ def codex_consume(state, index, entry):
         state['model'] = str(payload['model'])
         state['effort'] = payload.get('effort') or payload.get('reasoning_effort') or ''
     if entry.get('type') == 'event_msg' and kind == 'thread_settings_applied':
-        # /model writes this at once; the next turn_context comes only with the next turn.
-        settings = payload.get('thread_settings') if isinstance(payload.get('thread_settings'), dict) else {}
+        # Settings commands write this at once, before the next turn_context.
+        settings = payload.get('thread_settings')
+        if not isinstance(settings, dict):
+            return
+        stamp = entry.get('timestamp')
+        when = settings_time(stamp)
+        last_index, last_when = state.get('settings_at', (None, None))
+        adjacent = last_index == index - 1 and when is not None and last_when is not None and abs(when - last_when) <= 2
+        state['settings_at'] = (index, when)
+
+        changes = {}
         model, effort = settings.get('model'), settings.get('reasoning_effort')
         if isinstance(model, str) and model:
             effort = effort if isinstance(effort, str) else ''
-            changed = state['model'] and (model, effort) != (state['model'], state['effort'])
+            if state['model'] and (model, effort) != (state['model'], state['effort']):
+                changes['model'] = f'Model changed to {model}{" " + effort if effort else ""}.'
             state['model'], state['effort'] = model, effort
-            when = settings_time(entry.get('timestamp'))
-            last_index, last_when = state.get('settings_at') or (None, None)
-            adjacent = last_index == index - 1 and when is not None and last_when is not None and abs(when - last_when) <= 2
-            state['settings_at'] = (index, when)
-            if changed:
-                # One /model choice writes two records in a row, in the same second: the model, then the effort. Show
-                # one notice for them. A later choice is a new notice, even with no chat between the two records.
-                if adjacent and messages and messages[-1].get('kind') == 'notice' and str(messages[-1].get('text', '')).startswith('Model changed to '):
-                    messages.pop()
-                messages.append(activity.notice(index, entry.get('timestamp'), f'Model changed to {model}{" " + effort if effort else ""}.'))
+
+        service_tier = settings.get('service_tier')
+        tier = 'fast' if service_tier in ('priority', 'fast') else 'ultrafast' if service_tier == 'ultrafast' else ''
+        if last_index is not None and tier != state['tier']:
+            changes['tier'] = {'fast': 'Fast mode on.', 'ultrafast': 'Ultrafast mode on.', '': 'Fast mode off.'}[tier]
+        state['tier'] = tier
+
+        # One choice can write adjacent records. Coalesce each kind of notice independently.
+        notices = state.get('settings_notices', {}) if adjacent else {}
+        for field, message in changes.items():
+            for offset in range(1, min(len(messages), len(notices)) + 1):
+                if messages[-offset]['id'] == notices.get(field):
+                    del messages[-offset]
+                    break
+            notice = activity.notice(index if field == 'model' else f'{index}.tier', stamp, message)
+            messages.append(notice)
+            notices[field] = notice['id']
+        state['settings_notices'] = notices
         return
     if entry.get('type') == 'event_msg':
         if kind in ('error', 'warning'):
@@ -1058,7 +1076,7 @@ def fresh_codex_screen(screen):
     return not any(line.startswith('•') for line in lines) and sum(line.startswith('›') for line in lines) <= 1
 
 
-def codex_metrics(config, reported_usage, model='', effort='', credits=None):
+def codex_metrics(config, reported_usage, model='', effort='', credits=None, *, tier=''):
     """Rings for a Codex tab. Allowances are account-wide, so a tab that has not reported yet reuses the last report seen;
     the context figure falls back to the terminal footer ("Context 97% left") until the first turn is recorded."""
     context, windows, reported = reported_usage or ({}, [], None)
@@ -1101,7 +1119,8 @@ def codex_metrics(config, reported_usage, model='', effort='', credits=None):
     if not windows:
         windows = shown.get('windows', [])
     report = usage(context, windows, reported)
-    report.update(model=model, effort=effort, credits=credits if credits is not None else shown.get('credits'))
+    report.update(model=model, effort=effort, tier=tier or shown.get('tier', ''),
+                  credits=credits if credits is not None else shown.get('credits'))
     if inherited:
         stamp = reported
         try:
@@ -1216,7 +1235,8 @@ def snapshot(config=None):
         cleared = False
     if cleared:  # /clear starts a new conversation that has no history file yet; the old one must not show through
         messages, busy = [], False
-    metrics = codex_metrics(config, state['usage'], state.get('model', ''), state.get('effort', ''), state.get('credits'))
+    metrics = codex_metrics(config, state['usage'], state.get('model', ''), state.get('effort', ''), state.get('credits'),
+                            tier=state.get('tier', ''))
     return {'messages': terminal_replies.merge(config, merge_quota_notices(dict(config, agent='codex'), activity.group_actions(activity.merge(list(messages))))), 'dropped': state['dropped'], 'busy': busy, 'thread': config['thread'], 'usage': metrics,
             'agent': 'codex', 'writable': config.get('writable', True), 'session': config.get('id'), 'footer': codex_footer(config, metrics)}
 
@@ -2034,7 +2054,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = claude_hooks.overlay(config, result, screen_read_at=screen_read_at)
                 if config['agent'] == 'codex' and not config.get('ambiguous'):
                     state = history.read(config['transcript'], codex_state, codex_consume)
-                    result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''), state.get('credits')))
+                    result = codex_footer(config, codex_metrics(config, state['usage'], state['model'], state.get('effort', ''),
+                                                                state.get('credits'), tier=state.get('tier', '')))
                     live = claude_hooks.codex_live(config)
                     if live is not None:
                         result.update(spinner=None, running=None)

@@ -180,8 +180,10 @@ export function SessionDetails({ api, pane, session, stack, footer, mode, model,
       {pane.agent !== 'shell' && <Section title="Agent">
         <ul className="sd-rows">
           <Row label="Agent">{agentNames[pane.agent]}{provider && <span className="sd-muted"> · {provider}</span>}</Row>
-          {model && (onModel ? <Row label="Model and effort" onClick={onModel} hint="Change the model">{model}{footer.effort && <span className="sd-muted"> · {footer.effort}</span>}</Row>
-            : <Row label="Model and effort">{model}{footer.effort && <span className="sd-muted"> · {footer.effort}</span>}</Row>)}
+          {model && <Row label="Model and effort" onClick={onModel} hint={onModel ? 'Change the model' : undefined}>
+            {model}{footer.effort && <span className="sd-muted"> · {footer.effort}</span>}
+            {footer.tier && <span className="sd-muted"> · {footer.tier}</span>}
+          </Row>}
           {!model && footer.effort && <Row label="Effort">{footer.effort}</Row>}
           {pane.agent === 'claude' && (footer.mode || footer.observed) && <Row label="Mode">{mode}</Row>}
           {context && <Row label="Context used"><span className={Number(context) >= 80 ? 'sd-warn' : ''}>{context}%</span></Row>}

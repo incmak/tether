@@ -160,17 +160,21 @@ class CodexCatalogTests(unittest.TestCase):
     def test_builtins(self):
         items = catalog.codex_catalog(None)['commands']
         commands = {item['name']: item for item in items}
-        for name in ('permissions', 'skills', 'goal', 'stop'):
+        for name in ('fast', 'ultrafast', 'permissions', 'skills', 'goal', 'stop'):
             self.assertIn(name, commands)
-        for name in ('approvals', 'undo', 'test-approval', 'debug-m-drop', 'debug-m-update', 'rollout', 'app'):
+        for name in ('approvals', 'undo', 'test-approval', 'debug-m-drop', 'debug-m-update', 'rollout', 'app',
+                     'setup-default-sandbox', 'btw', 'debug-config', 'apps', 'quit'):
             self.assertNotIn(name, commands)
         self.assertEqual(commands['stop']['aliases'], ['clean'])
         self.assertEqual(commands['pwd']['aliases'], ['cwd'])
         self.assertEqual(commands['pets']['aliases'], ['pet'])
+        self.assertEqual(commands['exit']['aliases'], ['quit'])
         self.assertEqual(commands['review']['hint'], '[instructions]')
         self.assertEqual(commands['skills']['hint'], '')
-        self.assertEqual(len(items), 60)
-        self.assertEqual([item['name'] for item in items[:3]], ['model', 'presets', 'daybreak'])
+        self.assertEqual(commands['fast']['hint'], '')
+        self.assertEqual(commands['ultrafast']['hint'], '')
+        self.assertEqual(len(items), 57)
+        self.assertEqual([item['name'] for item in items[:5]], ['model', 'fast', 'ultrafast', 'presets', 'daybreak'])
         for item in items:
             self.assertEqual(set(item), {'name', 'description', 'aliases', 'hint', 'kind'})
             self.assertTrue(not item['hint'] or (item['hint'].startswith('[') and item['hint'].endswith(']')))
