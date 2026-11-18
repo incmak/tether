@@ -1320,13 +1320,15 @@ class KindTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = self.temp.name
 
-    def proc(self, pid, comm, cgroup, parent=1, argv=None, inode=None):
+    def proc(self, pid, comm, cgroup, parent=1, argv=None, inode=None, environ=None):
         base = Path(self.root) / str(pid)
         (base / 'fd').mkdir(parents=True)
         (base / 'status').write_text('Name:\t%s\nPPid:\t%d\n' % (comm, parent))
         (base / 'cgroup').write_text('0::%s\n' % cgroup)
         (base / 'comm').write_text(comm + '\n')
         (base / 'cmdline').write_bytes(b'\0'.join(part.encode() for part in (argv or [comm])) + b'\0')
+        if environ is not None:
+            (base / 'environ').write_bytes(b''.join(('%s=%s' % item).encode() + b'\0' for item in environ.items()))
         os.symlink('/work/shop', base / 'cwd')
         if inode:
             os.symlink('socket:[%d]' % inode, base / 'fd' / '3')
@@ -1343,6 +1345,49 @@ class KindTests(unittest.TestCase):
         self.assertEqual([kind(pid) for pid in (10, 11, 12, 13, 14, 15)], ['dev', 'service', 'agent', 'agent', 'tether', 'dev'])
         self.assertEqual(kind(500 + 1), 'unknown')  # gone, or hidden from Tether
         self.assertEqual(dev_previews.process_kind(10, self.root, own_pid=10), 'tether')
+
+    def test_agent_helpers_and_tool_runs(self):
+        scope = '/session-3.scope'
+        self.proc(100, 'claude', scope)
+        self.proc(101, 'npm', scope, parent=100, environ={})
+        self.proc(102, 'node', scope, parent=101)
+        self.proc(103, 'zsh', scope, parent=100, environ={'CLAUDE_PID': '100'})
+        self.proc(104, 'node', scope, parent=103, argv=['node', 'vite'])
+        self.proc(200, 'MainThread', scope, argv=['/usr/bin/node', '/opt/bin/codex'])
+        self.proc(201, 'python3', scope, parent=200, environ={'CODEX_TOOL_CALL_ID': 'exec-123'})
+        self.proc(202, 'node', scope, parent=200, environ={})
+        self.proc(203, 'bash', scope, parent=200)
+        self.proc(204, 'node', scope, parent=200)
+        kind = functools.partial(dev_previews.process_kind, root=self.root, own_pid=0)
+        for pid, expected in ((102, 'agent'), (104, 'dev'), (201, 'dev'), (202, 'agent'),
+                              (203, 'dev'), (204, 'agent')):
+            with self.subTest(pid=pid):
+                self.assertEqual(kind(pid), expected)
+
+    def test_markers_apply_to_the_direct_child_of_the_nearest_agent(self):
+        scope = '/session-3.scope'
+        self.proc(100, 'claude', scope)
+        self.proc(101, 'zsh', scope, parent=100, environ={'CLAUDE_PID': '100'})
+        self.proc(300, 'claude', scope, parent=101, environ={'CLAUDE_PID': '100'})
+        self.proc(301, 'npm', scope, parent=300, environ={'CLAUDE_PID': '100'})
+        self.proc(302, 'node', scope, parent=301, environ={'CLAUDE_PID': '300'})
+        self.proc(303, 'zsh', scope, parent=300, environ={'CLAUDE_PID': '300'})
+        self.proc(304, 'node', scope, parent=303, environ={'CLAUDE_PID': '100'})
+        self.proc(305, 'zsh', scope, parent=300, environ={'CLAUDE_PID': '100', 'CODEX_TOOL_CALL_ID': 'exec-123'})
+        self.proc(306, 'node', scope, parent=300, environ={'CODEX_TOOL_CALL_ID': ''})
+        kind = functools.partial(dev_previews.process_kind, root=self.root, own_pid=0)
+        for pid, expected in ((302, 'agent'), (304, 'dev'), (305, 'agent'), (306, 'agent')):
+            with self.subTest(pid=pid):
+                self.assertEqual(kind(pid), expected)
+
+    def test_an_incomplete_parent_chain_is_unknown(self):
+        scope = '/session-3.scope'
+        self.proc(10, 'node', scope, parent=11)  # parent went away before Tether could read it
+        self.proc(12, 'node', scope, parent=13)
+        self.proc(13, 'bash', scope, parent=12)
+        kind = functools.partial(dev_previews.process_kind, root=self.root, own_pid=0)
+        self.assertEqual(kind(10), 'unknown')
+        self.assertEqual(kind(12), 'unknown')
 
     def test_cgroups(self):
         user = '/user.slice/user-1000.slice/user@1000.service'

@@ -282,31 +282,65 @@ def cgroup_kind(text):
     return None
 
 
+def _process_command(base):
+    command = _read(base + '/cmdline').split(b'\0')
+    comm = _read(base + '/comm').decode('utf-8', 'replace').strip()
+    names = {comm} | {os.path.basename(part.decode('utf-8', 'replace')) for part in command[:2] if part}
+    return comm, bool(names & AGENTS)
+
+
 def process_kind(pid, root='/proc', own_pid=None):
     """What the process `pid` is, for the dev server list (Linux): 'dev' for a program the person or an agent
     started, else 'tether' (Tether or a program it started), 'service' (a systemd service, such as Tether's voice
-    and model helpers), 'agent' (Claude Code, Codex) or 'unknown' (Tether cannot tell). Only 'dev' is listed,
-    forwarded or stopped: the other kinds fail closed. A dev server inside a .service (tmux run as a service) is
-    refused too. Tether trusts the processes of its own user not to disguise themselves: they could signal any of
-    this user's processes without Tether. The rule guards against mistakes, such as stopping Tether's own helpers."""
+    and model helpers), 'agent' (Claude Code, Codex, or a helper that an agent started itself) or 'unknown' (Tether
+    cannot tell). Only 'dev' is listed, forwarded or stopped: the other kinds fail closed.
+    Below an agent, a dev server and an MCP server both descend from it (B192). Tether checks the direct child of
+    the nearest agent ancestor: a tool run has CLAUDE_PID equal to that agent (Claude Code's shell) or
+    CODEX_TOOL_CALL_ID (Codex), or, with no marker, is a shell. Anything else, such as an MCP server or the browser
+    it starts, is the agent's own helper. Tether trusts the processes of its own user not to disguise themselves:
+    they could signal any of this user's processes without Tether. The rule guards against mistakes, such as
+    stopping Tether's own helpers or an agent's tools."""
     own_pid = os.getpid() if own_pid is None else own_pid
     base = '%s/%d' % (root, pid)
+    parent_line = re.compile(r'^PPid:[ \t]*([0-9]+)[ \t]*$', re.M)
     try:
         status = _read(base + '/status').decode('utf-8', 'replace')
-        parent = int(re.search(r'^PPid:\s*(\d+)', status, re.M).group(1))
+        parent = int(parent_line.search(status).group(1))
         group = cgroup_kind(_read(base + '/cgroup').decode('utf-8', 'replace'))
-        command = _read(base + '/cmdline').split(b'\0')
-        comm = _read(base + '/comm').decode('utf-8', 'replace').strip()
+        comm, is_agent = _process_command(base)
+        if own_pid and own_pid in (pid, parent):
+            return 'tether'
+        if group:
+            return group
+        if is_agent:
+            return 'agent'
+
+        child, child_comm = pid, comm
+        for _ in range(128):
+            if parent <= 1:
+                return 'dev'
+            base = '%s/%d' % (root, parent)
+            comm, is_agent = _process_command(base)
+            if is_agent:
+                break
+            child, child_comm = parent, comm
+            status = _read(base + '/status').decode('utf-8', 'replace')
+            parent = int(parent_line.search(status).group(1))
+        else:
+            return 'dev' if parent <= 1 else 'unknown'
     except (OSError, AttributeError, ValueError):
         return 'unknown'
-    if own_pid and own_pid in (pid, parent):
-        return 'tether'
-    if group:
-        return group
-    names = {comm} | {os.path.basename(part.decode('utf-8', 'replace')) for part in command[:2] if part}
-    if names & AGENTS:
-        return 'agent'
-    return 'dev'
+
+    try:
+        with open('%s/%d/environ' % (root, child), 'rb') as stream:
+            environ = dict(entry.split(b'=', 1) for entry in stream.read().split(b'\0') if b'=' in entry)
+    except OSError:
+        environ = {}
+    if b'CLAUDE_PID' in environ:
+        return 'dev' if environ[b'CLAUDE_PID'] == str(parent).encode() else 'agent'
+    if environ.get(b'CODEX_TOOL_CALL_ID') or child_comm in {'sh', 'bash', 'zsh', 'dash', 'fish', 'ksh'}:
+        return 'dev'
+    return 'agent'
 
 
 def socket_holders(inodes, uid, root='/proc', limit=50000):
