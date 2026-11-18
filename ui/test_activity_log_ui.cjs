@@ -352,6 +352,33 @@ async function main() {
       check(`${at} a page that fails after a filter change shows no error`, await moreAlert.count() === 0)
       await search.fill('')
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
+      // B56 review 4: a page asked before a filter change and back has the same query and cursor as the page asked
+      // after it. Only the newer one may change the list, whether the older one answers with a page or an error.
+      for (const [label, old] of [['a page', { json: { entries: [{ ...all[60], id: id(1, 999999), at: 1, summary: 'Old page' }], next: null, retention_days: 90 } }], ['an error', failure]]) {
+        const first = hold((request, url) => isAudit(url, params => !!params.get('before')))
+        await loadMore.click()
+        await first.seen
+        await search.fill('Round two')
+        await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
+        await search.fill('')
+        await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
+        const second = hold((request, url) => isAudit(url, params => !!params.get('before')))
+        await loadMore.click()
+        await second.seen
+        const firstEnded = page.waitForEvent('requestfinished', request => request.url().includes('before='))
+        first.release(old)
+        await firstEnded; await settle()
+        const secondEnded = page.waitForEvent('requestfinished', request => request.url().includes('before='))
+        second.release()
+        await secondEnded; await settle()
+        const shown = await summaries()
+        check(`${at} after a filter change and back, ${label} for the older Load more does not replace the newer one`,
+          shown.length === 100 && !shown.includes('Old page') && await moreAlert.count() === 0 && await loadMore.innerText() === 'Load more', `${shown.length} ${shown[shown.length - 1]}`)
+        await search.fill('Round two')
+        await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 1)
+        await search.fill('')
+        await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
+      }
       // A filter whose reply is slow: the old list and its Load more must not show under the new filter.
       const slow = hold((request, url) => isAudit(url, params => params.get('q') === 'Round two'))
       await section.getByRole('searchbox', { name: 'Search the activity log' }).fill('Round two')

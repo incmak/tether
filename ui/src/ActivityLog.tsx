@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Calendar, FolderOpen, Monitor, RotateCw, Search, Terminal, Undo2, X } from 'lucide-react'
 import { errorText } from './api'
 import type { Api } from './api'
@@ -107,8 +107,12 @@ export function ActivityLog({ api }: { api: Api }) {
   const [text, setText] = useState('')
   // The Load more request that runs or failed. It belongs to one list (query) and one cursor.
   const [more, setMore] = useState<More | null>(null)
+  // The one Load more request whose answer may still change the list. Two requests can ask for the same query and
+  // cursor (a filter change and back), so a reply checks that it is still this request, not only the query.
+  const request = useRef<More | null>(null)
+  const drop = () => { request.current = null; setLoaded(null); setMore(null) }
   // Typing waits 250 ms before it asks the server, so each key does not send a request.
-  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { setLoaded(null); setMore(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
+  useEffect(() => { const timer = setTimeout(() => { if (text !== filters.text) { request.current = null; setLoaded(null); setMore(null); setFilters(current => ({ ...current, text })) } }, 250); return () => clearTimeout(timer) }, [text, filters.text])
   const path = queryOf(filters)
   // Each answer carries the query that asked for it, and a failure is an answer too: a page or an error for the last
   // filter must not show under this one.
@@ -144,21 +148,26 @@ export function ActivityLog({ api }: { api: Api }) {
     const asked: More = { path, cursor: next, failed: '' }
     // From now on, reloads merge into this list, so its cursor stays the one this request continues.
     if (!list) setLoaded({ path, entries: live.entries, next })
+    request.current = asked
     setMore(asked)
     try {
       const page = await api<AuditPage>(queryOf(filters, next))
       // Add the page only to the list it continues. A filter change or a reset dropped that list: then drop the page.
+      if (request.current !== asked) return
+      request.current = null
       setLoaded(before => before && before.path === asked.path && before.next === asked.cursor
         ? { path: asked.path, entries: merged(before.entries, page.entries), next: page.next } : before)
-      setMore(current => current === asked ? null : current)
+      setMore(null)
     } catch (failure) {
+      if (request.current !== asked) return
+      request.current = null
       const failed = errorText(failure) || 'The server did not answer.'
-      setMore(current => current === asked ? { ...asked, failed } : current)
+      setMore({ ...asked, failed })
     }
   }
   const filtered = filters.text.trim() !== '' || filters.group !== ANY || filters.project !== ANY || filters.actor !== ANY || !!filters.from || !!filters.to
-  const set = (change: Partial<Filters>) => { setLoaded(null); setMore(null); setFilters(current => ({ ...current, ...change })) }
-  const clear = () => { setLoaded(null); setMore(null); setText(''); setFilters(NONE) }
+  const set = (change: Partial<Filters>) => { drop(); setFilters(current => ({ ...current, ...change })) }
+  const clear = () => { drop(); setText(''); setFilters(NONE) }
   const projects = facets?.projects ?? []
   const actors = facets?.actors ?? []
   const days = live?.retention_days ?? kept?.page.retention_days ?? 90
