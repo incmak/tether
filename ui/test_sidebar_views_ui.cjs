@@ -232,10 +232,24 @@ async function main() {
     await page.waitForTimeout(200)
     check('six rows with the sixth open: all show, no more button', (await texts(`${SIDE} .catchup-row`)).length === 6 && await page.locator(`${SIDE} .catchup-more`).count() === 0)
 
-    // An approval with no ask: the row opens the tab; the deck (which answers asks) is not offered.
+    // An approval with no ask (B134): the row opens the tab, and the deck shows it as a card that opens the tab.
     sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
-    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })
-    check('a wait with no ask has no "Answer one by one"', await page.locator(`${SIDE} .catchup-row`, { hasText: 'BriskBot' }).count() === 1 && await page.locator(`${SIDE} [aria-label="Answer one by one"]`).count() === 0)
+    for (const [width, height] of [[1280, 800], [320, 700]]) {
+      await open('%3', width, height, { sideMode: 'catchup', attention: true })
+      if (width === 320) { await page.locator('.mobile-menu').locator('visible=true').first().click(); await page.locator('.drawer .catchup').waitFor() }
+      const side = width === 320 ? '.drawer' : SIDE
+      check(`${width} px: a wait with no ask offers "Answer one by one"`, await page.locator(`${side} .catchup-row`, { hasText: 'BriskBot' }).count() === 1 && await page.locator(`${side} [aria-label="Answer one by one"]`).count() === 1)
+      await page.locator(`${side} [aria-label="Answer one by one"]`).click()
+      const deck = page.locator('dialog.action-deck[open]')
+      await deck.waitFor()
+      check(`${width} px: the deck card names the tab and the prompt`, (await deck.locator('.deck-tab').textContent()).includes('BriskBot') && (await deck.locator('.deck-question').textContent()) === 'A permission prompt waits in this tab. Open the tab to answer it.' && await deck.locator('.deck-hint').count() === 0 && (await deck.locator('.deck-meta').textContent()).includes('Needs approval'))
+      check(`${width} px: the card has Open tab and no Handled or reply box`, await deck.getByRole('button', { name: 'Open tab' }).count() === 1 && await deck.getByRole('button', { name: 'Handled' }).count() === 0 && await deck.locator('textarea').count() === 0)
+      check(`${width} px: the deck fits`, await deck.evaluate(box => box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth))
+      await page.screenshot({ path: path.join(SHOTS, `${width}-deck-state-only.png`) })
+      await deck.getByRole('button', { name: 'Open tab' }).click()
+      await deck.waitFor({ state: 'detached' })
+      check(`${width} px: Open tab closes the deck and opens the tab`, await page.evaluate(() => location.hash + location.search).then(where => where.includes('%10') || where.includes('%2510')) || (await page.locator('[aria-current="page"]', { hasText: 'BriskBot' }).count()) > 0)
+    }
     sessions = busy
 
     // 7. Phone, 320 px: the drawer shows both views with no sideways scroll.

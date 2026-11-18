@@ -77,15 +77,16 @@ export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUp
         <span>{KIND[ask.kind] ?? 'Waits on you'}</span><span aria-hidden="true">·</span><span>waited {age(ask.since, now)}</span>
       </p>
       <h3 className="deck-tab">{name}</h3>
-      <p className="deck-question">{ask.next || 'Open the tab to see what it needs.'}</p>
-      {ask.kind === 'reply'
+      <p className="deck-question">{ask.next || (card.state ? `${pane.state === 'Approval' ? 'A permission prompt' : 'A prompt'} waits in this tab. Open the tab to answer it.` : 'Open the tab to see what it needs.')}</p>
+      {ask.kind === 'reply' && !card.state
         ? <ReplyBox key={`${pane.id} ${ask.since}`} name={name} busy={busy} onSend={send} />
-        : <p className="deck-hint">This prompt waits in the tab. Open the tab to answer it.</p>}
+        : !card.state && <p className="deck-hint">This prompt waits in the tab. Open the tab to answer it.</p>}
     </article>
     {status && <p className="deck-status" role="status">{status}</p>}
     <div className="deck-actions">
-      <button type="button" className="secondary" disabled={busy} onClick={() => { onClose(); onOpen(pane) }}><ExternalLink size={15} aria-hidden="true" />Open tab</button>
-      <button type="button" className="secondary" disabled={busy} onClick={handled}><Check size={15} aria-hidden="true" />Handled</button>
+      <button type="button" className={card.state ? 'primary' : 'secondary'} disabled={busy} onClick={() => { onClose(); onOpen(pane) }}><ExternalLink size={15} aria-hidden="true" />Open tab</button>
+      {/* A wait by state only has no ask to mark: it ends when the prompt in the tab is answered. */}
+      {!card.state && <button type="button" className="secondary" disabled={busy} onClick={handled}><Check size={15} aria-hidden="true" />Handled</button>}
       <button type="button" className="secondary" disabled={busy || live.length < 2} onClick={next}>Skip<ArrowRight size={15} aria-hidden="true" /></button>
     </div>
   </dialog>

@@ -50,7 +50,7 @@ import { ActionDeck, useUrgentDeck } from './ActionDeck'
 import { LessonsReview } from './LessonsReview'
 import { CleanUp } from './Upkeep'
 import { reviewReason, useLessonsReview } from './lessonsReview'
-import { useNow, visibleAsk, waitingAsks } from './attention'
+import { deckItems, useNow, visibleAsk, waitingAsks } from './attention'
 import { Home, NoTerminal } from './Home'
 import { hasAgents, homeGroups } from './homeGroups'
 import { DRAG_SLOT, WORKSPACE_QUERY, addPanel, addSlot, deskFor, deskKeyFor, hasPanel, newPanelId, panelCols, placePane, removePanel, withDesk, withPanels, resolveSlots, splitSlot, storeSlots, swapSlots } from './workspace'
@@ -405,6 +405,8 @@ function App() {
   const waitSort = { order: prefs.waitingOrder ?? 'oldest', onOrder: (waitingOrder: WaitOrder) => update(() => ({ waitingOrder })) }
   const waiting = useMemo(() => prefs.attention ? waitingAsks(panes, now) : [], [prefs.attention, panes, now])
   const [deck, setDeck] = useUrgentDeck(waiting, prefs.attention, factory)
+  // The deck also shows the tabs that wait by their state only, as cards that open the tab.
+  const deckCards = useMemo(() => prefs.attention ? deckItems(panes, now) : [], [prefs.attention, panes, now])
   // The lessons review joins Waiting on you as one quiet row; it never opens by itself.
   const { data: lessonsReview, error: reviewError, refresh: refreshReview } = useLessonsReview(api, prefs.attention)
   const [reviewing, setReviewing] = useState(false)
@@ -1032,7 +1034,7 @@ function App() {
     {browserSheet && pane && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {cleanup && <CleanUp api={api} onClose={() => setCleanup(false)} />}
-    {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
+    {deck && <ActionDeck api={api} items={deckCards} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
     {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={view ? commands.filter(item => !item.label.includes('Live mode')) : []} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
