@@ -646,6 +646,10 @@ def _save_level(handler, body, payload, pid):
     if pid is not None:
         project_path(pid)
     current = resolve(pid)
+    previous = current['project'] or {'level': current['global'], 'override': False}
+    if codex_level.stale(body, current['global'] if pid is None else
+                         {'level': previous['level'], 'override': previous['override']}):
+        raise LevelError(409, codex_level.STALE_UNDO)
     effective = current['global'] if pid is not None and not override else level
     if effective > current['level']:
         approval.require(handler, 'level-raise', payload, body.get('approval'))
@@ -653,7 +657,6 @@ def _save_level(handler, body, payload, pid):
         old, new = current['global'], level
         set_global(level)
     else:
-        previous = current['project'] or {'level': current['global'], 'override': False}
         old = codex_level._override_value(previous['level'], previous['override'])
         new = codex_level._override_value(level, override)
         set_project(pid, override, level)

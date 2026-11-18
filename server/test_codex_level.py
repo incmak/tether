@@ -351,6 +351,25 @@ class Http(Base):
                               [('Codex level 3 → 1', 3, 1, None), ('Undo: Codex level 1 → 3', 1, 3, True)])
         self.assertTrue(all(row['actor'] == {'source': 'ui', 'device': 'Chrome on Mac'} for row in rows))
 
+    def test_stale_undo_is_refused_and_not_recorded(self):
+        # B56 review: Undo of 3 → 1 after another tab set 4 must not overwrite the 4.
+        codex_level.set_global(4)
+        codex_level.set_project(PID, True, 2)
+        with audit.acting('ui'):
+            for body in ({'level': 3, 'undo': True, 'expect': 1},
+                         {'project': PID, 'override': True, 'level': 0, 'undo': True,
+                          'expect': {'level': 1, 'override': True}}):
+                handler = Handler(codex_level.PATH, body)
+                codex_level.post(handler)
+                self.assertEqual((handler.status, handler.body), (409, {'error': codex_level.STALE_UNDO}))
+            handler = Handler(codex_level.PATH, {'project': PID, 'override': True, 'level': 0, 'undo': True,
+                                                 'expect': {'level': 2, 'override': True}})
+            codex_level.post(handler)
+            self.assertEqual(handler.status, 200, handler.body)
+        self.assertEqual((codex_level.read_global(), codex_level.read_project(PID)['level']), (4, 0))
+        self.assertEqual([row['summary'] for row in audit.query()['entries']],
+                         ['Undo: Codex level for project: 2 (override on) → 0 (override on)'])
+
     def test_level_audit_records_project_override_change_at_the_same_level(self):
         codex_level.set_project(PID, False, 2)
         projects.set_name(PID, 'Example Project')

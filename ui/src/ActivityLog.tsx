@@ -31,7 +31,7 @@ function actorText(actor: AuditEntry['actor']) {
   if (source === 'agent-cli' || source === 'hook') return `${tab || pane || 'An agent'}${source === 'hook' ? ' · hook' : ''}`
   if (source === 'ui') return device || 'Tether app'
   if (source === 'cli') return 'Command line'
-  if (source === 'server') return 'Tether'
+  if (source === 'server') return tab || 'Tether'  // a review verdict names the reviewer tab
   return `Unknown client${device ? ` · ${device}` : ''}`
 }
 const ACTOR_ICON = { ui: Monitor, 'agent-cli': Bot, hook: Bot, cli: Terminal, server: Monitor, unknown: Monitor }
@@ -78,7 +78,7 @@ function Row({ entry }: { entry: AuditEntry }) {
     <time className="audit-time" dateTime={date.toISOString()} title={date.toLocaleString()}>{date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
     <span className="audit-text">
       <strong className="audit-summary">{entry.undo && <span className="audit-undo"><Undo2 size={12} aria-hidden="true" />Undo</span>}{entry.summary}</strong>
-      {change && <span className="audit-change"><span className="visually-hidden">Changed from </span><span className="audit-old" aria-hidden="true">{old}</span><span aria-hidden="true"> → </span><span className="visually-hidden"> to </span><b>{now}</b></span>}
+      {change && <span className="audit-change"><span className="visually-hidden">Changed from </span><span className="audit-old">{old}</span><span aria-hidden="true"> → </span><span className="visually-hidden"> to </span><b>{now}</b></span>}
       <small className="audit-meta">
         <span className="audit-actor"><Icon size={13} aria-hidden="true" />{actorText(entry.actor)}</span>
         <span>{groupLabel(entry.kind)}</span>
@@ -108,7 +108,10 @@ export function ActivityLog({ api }: { api: Api }) {
   const extra = older?.path === path ? older : null
   const entries = useMemo(() => {
     const seen = new Set<string>()
+    // Ids sort by time. The 20 s refresh can push the first page's last entry below the page edge; the Load more
+    // pages keep that snapshot, so a refresh never drops a row that was on screen.
     return [...(data?.entries ?? []), ...(extra?.entries ?? [])].filter(entry => !seen.has(entry.id) && !!seen.add(entry.id))
+      .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
   }, [data, extra])
   const next = extra ? extra.next : data?.next ?? null
   async function more() {
@@ -116,7 +119,7 @@ export function ActivityLog({ api }: { api: Api }) {
     setLoadingMore(true); setMoreError('')
     try {
       const page = await api<AuditPage>(queryOf(filters, next))
-      setOlder({ path, entries: [...(extra?.entries ?? []), ...page.entries], next: page.next })
+      setOlder({ path, entries: [...(data?.entries ?? []), ...(extra?.entries ?? []), ...page.entries], next: page.next })
     } catch (failure) { setMoreError(errorText(failure)) }
     finally { setLoadingMore(false) }
   }

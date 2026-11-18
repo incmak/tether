@@ -493,6 +493,15 @@ class BacklogAuditTests(unittest.TestCase):
         self.assertIn('Typed by hand #B3', backlog.read()['text'])
         self.assert_entry('backlog.add', 'B2 added: New item', 'Docs')
 
+    def test_same_legacy_title_in_two_projects_pairs_by_project(self):
+        # B56 review: both done in their own projects must not read as two moves.
+        (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Same title\n\n## Build\n- [ ] Same title\n')
+        legacy = backlog.read()
+        backlog.save(legacy['text'].replace('- [ ]', '- [x]'), legacy['version'])
+        entries = audit.query()['entries']
+        self.assertEqual(sorted((entry['kind'], entry['project']) for entry in entries),
+                         [('backlog.done', 'Build'), ('backlog.done', 'Docs')])
+
     def test_start_a_legacy_item_tracks_its_assigned_id(self):
         (backlog.folder() / 'BACKLOG.md').write_text('## Docs\n- [ ] Typed by hand\n- [ ] Another old item\n')
         self.assertEqual(backlog.start('typed', 'claude', project='Docs'), '- [ ] Typed by hand')

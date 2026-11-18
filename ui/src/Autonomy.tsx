@@ -84,7 +84,7 @@ export function GlobalAutonomy({ api }: { api: Api }) {
   async function change(level: number) {
     const old = data?.global
     if (await save({ level }) && old !== undefined && old !== level)
-      offer(`Autonomy level ${old} → ${level}`, `Undid: autonomy level ${level} → ${old}`, () => save({ level: old, undo: true }))
+      offer(`Autonomy level ${old} → ${level}`, `Undid: autonomy level ${level} → ${old}`, () => save({ level: old, undo: true, expect: level }))
   }
   return <section className="settings-group" aria-labelledby="settings-autonomy"><h3 id="settings-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
@@ -106,7 +106,7 @@ export function ProjectAutonomy({ api, project }: { api: Api; project: string })
   async function change(next: number) {
     const old = data?.project?.override ? data.project.level : undefined
     if (await save({ project, override: true, level: next }) && old !== undefined && old !== next)
-      offer(`Project autonomy level ${old} → ${next}`, `Undid: project autonomy level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true }))
+      offer(`Project autonomy level ${old} → ${next}`, `Undid: project autonomy level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true, expect: { level: next, override: true } }))
   }
   return <><section className="settings-group" aria-labelledby="project-autonomy"><h3 id="project-autonomy">Autonomy level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}

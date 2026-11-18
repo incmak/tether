@@ -1,7 +1,6 @@
 import json
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -11,7 +10,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import audit
 import paths
 import backlog
 import project_launch
@@ -393,17 +391,14 @@ class UnitTests(unittest.TestCase):
         folder = str(backlog.folder())
         items = str(paths.items())
         rem = str(paths.reminders())
-        log = str(audit.folder())
-        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem,
-                                                      '--add-dir', log, 'resume', '--last']))
-        self.assertEqual(stat.S_IMODE(audit.folder().stat().st_mode), 0o700)  # a backlog change records itself (B56)
+        self.assertEqual((args[0], args[2:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last']))
         self.assertTrue(paths.items().is_dir())
         self.assertTrue(backlog.folder().is_dir())
         self.assertIn('## Notes', tomllib.loads('v = ' + args[1].partition('=')[2])['v'])
         projects.set_instructions(PID, 'Use "pnpm".\nNo emoji 🙂', 0)
         args = project_launch.codex_args(PID, ['resume', '--last'])
         self.assertEqual(args[0], '-c')
-        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, '--add-dir', log, 'resume', '--last'])
+        self.assertEqual(args[2:], ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last'])
         key, _, value = args[1].partition('=')
         self.assertEqual(key, 'developer_instructions')
         self.assertIn('Use "pnpm".', tomllib.loads('v = ' + value)['v'])
@@ -413,8 +408,7 @@ class UnitTests(unittest.TestCase):
         for args in (['exec', 'hi'], ['e', 'hi'], ['login'], ['--help'], ['review']):
             self.assertEqual(project_launch.codex_args(PID, args), args)
         # Own instructions: Tether adds none, but the item and backlog folders still open, so `tether item` works.
-        folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()), '--add-dir', str(paths.reminders()),
-                   '--add-dir', str(audit.folder())]
+        folders = ['--add-dir', str(backlog.folder()), '--add-dir', str(paths.items()), '--add-dir', str(paths.reminders())]
         mine = ['-c', 'developer_instructions="mine"']
         self.assertEqual(project_launch.codex_args(PID, mine), [*folders, *mine])
         (paths.CODEX).mkdir()
@@ -569,9 +563,7 @@ class WrapperTests(unittest.TestCase):
         folder = str(self.temp / 'tether/backlog')
         items = str(self.temp / 'tether/items')
         rem = str(self.temp / 'tether/reminders')
-        log = str(self.temp / 'config/audit')
-        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem,
-                                                      '--add-dir', log, 'resume', '--last', '1']))  # the Notes part, even with no instructions
+        self.assertEqual((argv[1], argv[3:]), ('-c', ['--add-dir', folder, '--add-dir', items, '--add-dir', rem, 'resume', '--last', '1']))  # the Notes part, even with no instructions
         with mock.patch.object(paths, 'TETHER', self.temp / 'tether'):
             projects.set_instructions(pid, 'Use pnpm.', 0)
         argv = self.run_in_pane(f'{launcher} codex resume --last')

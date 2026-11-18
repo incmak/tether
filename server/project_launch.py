@@ -446,16 +446,14 @@ def codex_writable(args, cwd=None, assume=None):
 
 
 def codex_folders(args=()):
-    """--add-dir for the backlog, work item, reminder and audit folders: the sandbox blocks `tether backlog`, `tether item`,
-    reminder and audit-log writes without them (a backlog change records itself in the audit log, B56). Given even when
-    the user has own instructions, but never to a read-only Codex: it exits on them."""
-    import audit
+    """--add-dir for the backlog, work item and reminder folders: the sandbox blocks `tether backlog`, `tether item` and reminder writes
+    without them. Given even when the user has own instructions, but never to a read-only Codex: it exits on them."""
     import backlog
     import paths
     if not codex_writable(list(args)):
         return []
     out = []
-    for place in (backlog.folder(), paths.items(), paths.reminders(), audit.folder()):
+    for place in (backlog.folder(), paths.items(), paths.reminders()):
         place.mkdir(mode=0o700, parents=True, exist_ok=True)
         out += ['--add-dir', str(place)]
     return out

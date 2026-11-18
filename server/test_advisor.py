@@ -311,8 +311,8 @@ class Cli(Base):
         self.enterContext(patch.object(audit, '_TABS', {}))
         projects.bundle(PID).mkdir(parents=True)
         projects.set_name(PID, 'Example')
-        question = 'Which option fits?\n' + 'a' * 210 + ' private suffix'
-        self.assertEqual(self.invoke(['ask', '--critical', question])[0], 0)
+        question = 'Use token sk-test-0123456789 here?\n' + 'a' * 210 + ' private suffix'
+        self.assertEqual(self.invoke(['ask', '--critical', '--stack', 'Audit  log  review extra', question])[0], 0)
         result = audit.query()
         self.assertEqual(len(result['entries']), 1)
         entry = result['entries'][0]
@@ -320,8 +320,9 @@ class Cli(Base):
         self.assertEqual(entry['detail'], {'status': 'decided', 'critical': True})
         self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%1', 'tab': 'Build'})
         self.assertEqual(entry['project'], 'Example')
-        self.assertEqual(len(entry['summary']), 200)
-        self.assertTrue(entry['summary'].startswith('Asked advisor: Which option fits? '))
+        # Only the goal: a cut excerpt of the question could still hold a token (B56 review).
+        self.assertEqual(entry['summary'], 'Asked advisor: Audit log review')
+        self.assertNotIn('sk-test', json.dumps(entry))
         self.assertNotIn('private suffix', json.dumps(entry))
 
     def test_audit_ask_excludes_the_full_question_even_when_off(self):
@@ -333,7 +334,7 @@ class Cli(Base):
         self.assertEqual(entry['kind'], 'advisor.ask')
         self.assertEqual(entry['actor'], {'source': 'cli'})
         self.assertEqual(entry['detail'], {'status': 'off', 'critical': False})
-        self.assertEqual(entry['summary'], 'Asked advisor: Which option…')
+        self.assertEqual(entry['summary'], 'Asked advisor')
         self.assertNotIn(question, json.dumps(entry))
 
     def test_stack_goal_goes_to_each_new_advisor_tab(self):

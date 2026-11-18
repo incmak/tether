@@ -361,9 +361,12 @@ def _audit_changes(before, after):
                 unnumbered[row] -= 1
         for row, count in unnumbered.items():
             by_title[row[1]].extend([row] * count)
-        for ref, (_, title, _, _) in added.items():
+        for ref, (project, title, _, _) in added.items():
             if ref not in previous and by_title[title]:
-                previous[ref] = by_title[title].pop()
+                # Same title in two projects: pair each item with the one from its own project first, so marking
+                # both done does not look like two moves.
+                rows = by_title[title]
+                previous[ref] = rows.pop(next((at for at, row in enumerate(rows) if row[0] == project), -1))
     for ref, (project, title, stage, doing) in current.items():
         short = title[:80]
         if ref not in previous:

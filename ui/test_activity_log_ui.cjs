@@ -25,6 +25,8 @@ function entries() {
   ]
   const list = named.map((entry, n) => ({ ...entry, at: now - 60 - n * 600 }))
   for (let n = 0; n < 60; n++) list.push({ kind: n % 2 ? 'tab.start' : 'review.verdict', summary: n % 2 ? `Started tab Worker ${n} (claude)` : `Review verdict: APPROVED ${n}`, project: n % 3 ? 'Tether' : 'Other', actor: agent, at: now - 86400 * (1 + Math.floor(n / 10)) - n })
+  // A review verdict comes from the server, named by the reviewer tab (review_links.py).
+  Object.assign(list[5], { summary: 'Approved by reviewer', actor: { source: 'server', pane: '%40', tab: 'B56 review' } })
   return list.map((entry, n) => ({ id: id(entry.at, n), ...entry }))
 }
 // Like server/audit.py query(): newest first, filters, a cursor and limit+1.
@@ -191,6 +193,8 @@ async function main() {
       const plain = rows.filter({ hasText: 'Reviewers changed' })
       check(`${at} a row whose summary has no values shows old → new`, (await plain.locator('.audit-old').innerText()) === 'Fable · high' && (await plain.locator('.audit-change b').innerText()) === 'Opus · medium')
       check(`${at} screen readers hear "Changed from … to …"`, (await plain.locator('.audit-change .visually-hidden').allTextContents()).join('|') === 'Changed from | to ')
+      check(`${at} screen readers hear the old value too`, await plain.locator('.audit-old').getAttribute('aria-hidden') === null)
+      check(`${at} a review verdict names the reviewer tab`, /Approved by reviewer[\s\S]*B56 review/.test(await rows.filter({ hasText: 'Approved by reviewer' }).innerText()))
       check(`${at} an agent row names the tab and the project`, /Audit Log with a very long tab name[\s\S]*Tether/.test(await rows.nth(4).innerText()))
       check(`${at} rows sit under day headings`, (await section.locator('.audit-day h4').first().innerText()).toLowerCase() === 'today')
       check(`${at} a row has a machine time`, !!(await rows.nth(0).locator('time').getAttribute('datetime')))
@@ -215,6 +219,14 @@ async function main() {
       const ids = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
       check(`${at} Load more: 65 rows, no repeats`, new Set(ids).size === 65, String(ids.length))
       check(`${at} Load more sends the cursor`, asks.some(params => params.get('before')))
+      // B56 review: a refresh after Load more must not drop the rows that slid below the first page.
+      const total = all.length
+      all = [0, 1, 2].map(n => ({ id: id(Date.now() / 1000 + n, 800 + n), at: Date.now() / 1000 + n, kind: 'tab.start', summary: `Fresh tab ${n}`, actor: ui })).reverse().concat(all)
+      await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+      await page.waitForFunction(count => document.querySelectorAll('section.activity-log .audit-row').length === count, total + 3)
+      const merged = await rows.evaluateAll(els => els.map(el => el.querySelector('.audit-summary').textContent))
+      check(`${at} a refresh after Load more keeps every row once, newest first`, new Set(merged).size === total + 3 && merged[0] === 'Fresh tab 2', `${merged.length} ${merged[0]}`)
+      all = all.slice(3)
       check(`${at} the end says how long Tether keeps it`, await section.getByText('That is all. Tether keeps 90 days.').isVisible())
 
       // Search: one request after typing stops, and it starts again at the newest entry.
@@ -244,10 +256,11 @@ async function main() {
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 50)
       check(`${at} Clear filters brings back every row`, !asks[asks.length - 1].get('kind') && !asks[asks.length - 1].get('actor'))
       // Date range: From today sends since = the start of today, local time.
-      await section.locator('.audit-dates input').first().fill(new Date().toLocaleDateString('en-CA'))
+      // The browser's day and time zone, not the runner's: they differ when CI sets TZ (B56 review).
+      const [day, since] = await page.evaluate(() => { const now = new Date(); return [now.toLocaleDateString('en-CA'), String(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000)] })
+      await section.locator('.audit-dates input').first().fill(day)
       await page.waitForFunction(() => document.querySelectorAll('section.activity-log .audit-row').length === 5)
-      const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
-      check(`${at} From sends the start of the local day`, asks[asks.length - 1].get('since') === String(midnight.getTime() / 1000))
+      check(`${at} From sends the start of the local day`, asks[asks.length - 1].get('since') === since, `${asks[asks.length - 1].get('since')} ${since}`)
       await section.locator('.audit-tools').getByRole('button', { name: 'Clear filters' }).click()
 
       // Empty and error states.
@@ -288,7 +301,7 @@ async function main() {
       await shot(`toast-${width}`, toast)
       await toast.getByRole('button', { name: 'Undo' }).click()
       await toast.getByText('Undid: Codex level 1 → 3').waitFor()
-      check(`${at} Undo sends the old level with undo: true`, posts[1]?.body.level === 3 && posts[1].body.undo === true && posts[1].client === 'web', JSON.stringify(posts[1]))
+      check(`${at} Undo sends the old level with undo: true and the level it undoes`, posts[1]?.body.level === 3 && posts[1].body.undo === true && posts[1].body.expect === 1 && posts[1].client === 'web', JSON.stringify(posts[1]))
       check(`${at} the level is back to 3`, await page.locator('input[name="codex-level-global"][value="3"]').isChecked())
       check(`${at} the done toast has no second Undo`, await toast.getByRole('button', { name: 'Undo' }).count() === 0)
       // The log shows both records, the undo marked.
@@ -297,6 +310,20 @@ async function main() {
       const top = await rows.evaluateAll(els => els.slice(0, 2).map(el => el.innerText))
       check(`${at} the log shows the change and its undo`, /Undo: Codex level 1 → 3[\s\S]*Chrome on Mac/.test(top[0]) && /Codex level 3 → 1/.test(top[1]), top.join(' | '))
     }
+    // WCAG 2.2.1: the toast that offers Undo has no time limit. A fake clock moves 60 s on; it runs last, so no other
+    // step sees the fake clock. The "Undid" note has no action and still goes after 8 s.
+    await page.clock.install()
+    await open(sizes[sizes.length - 1][0], 'codex level')
+    await page.locator('label', { has: page.locator('input[name="codex-level-global"][value="1"]') }).click()
+    const offer = page.locator('dialog[open] .undo-toast')
+    await offer.getByRole('button', { name: 'Undo' }).waitFor()
+    await page.clock.fastForward(60000)
+    check('the Undo toast stays after 60 s', await offer.getByRole('button', { name: 'Undo' }).isVisible())
+    await offer.getByRole('button', { name: 'Undo' }).click()
+    await offer.getByText('Undid: Codex level 1 → 3').waitFor()
+    await page.clock.fastForward(9000)
+    await offer.waitFor({ state: 'detached' })
+    check('the Undid note goes after 8 s', true)
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
     check('no writes or requests outside the fixtures', !unexpected.size, [...unexpected].join(', '))
   } finally {

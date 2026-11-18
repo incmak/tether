@@ -220,11 +220,10 @@ def main(argv=None):
         except OSError as exc:
             result = dict(result_for('error', replies), error=f'Could not write the advisor log: {exc}')
     if args is not None:
-        prefix = 'Asked advisor: '
-        question = advisor_log._flat(args.question, 200)
-        # The project log holds the full question. Keep only an excerpt here, even for a short question.
-        excerpt = question[:min(len(question) - 1, 199 - len(prefix))].rstrip()
-        summary = f'{prefix}{excerpt}…' if excerpt else 'Asked advisor'
+        # Never the question text: a cut excerpt can still hold a token or a key. The project advisor log keeps the
+        # full question; the audit log names only the goal (1 to 3 words, already shown as the advisor tab name).
+        goal = ' '.join((args.stack or '').split()[:3])[:40]
+        summary = f'Asked advisor: {goal}' if goal else 'Asked advisor'
         audit.record('advisor.ask', summary, project=projects.audit_name(pid), status=result['status'],
                      critical=args.critical)
     print(json.dumps(result))

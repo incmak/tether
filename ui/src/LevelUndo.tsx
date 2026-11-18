@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { X } from 'lucide-react'
 
 // The Undo toast after a Codex or autonomy level change (B56). It looks and times out like the page's undo toast
-// (Undo.tsx), but it renders inside the open sheet: the Settings sheet is a modal dialog, and the page toast sits
+// (Undo.tsx), but it stays while it offers Undo, and it renders inside the open sheet: the Settings sheet is a modal dialog, and the page toast sits
 // under it. Undo sends the old level again through the same route with {undo: true}, so a raise still asks for the
 // passkey (withApproval) and the activity log records the undo.
 const TOAST_MS = 8000
@@ -13,9 +13,10 @@ export function useLevelUndo(): { offer: (text: string, undone: string, run: () 
   const [shown, setShown] = useState<Offer | null>(null)
   const [held, setHeld] = useState(false)
   const [busy, setBusy] = useState(false)
-  // The toast stays while the pointer or focus is on it (WCAG 2.2.1: enough time to reach its button).
+  // A toast with an Undo button stays until it is dismissed or replaced (WCAG 2.2.1: no time limit on the action).
+  // The "Undid" note has no action, so it goes after 8 s, or later while the pointer or focus is on it.
   useEffect(() => {
-    if (!shown || held || busy) return
+    if (!shown || shown.run || held || busy) return
     const timer = setTimeout(() => setShown(null), TOAST_MS)
     return () => clearTimeout(timer)
   }, [shown, held, busy])

@@ -90,7 +90,7 @@ export function GlobalCodexLevel({ api }: { api: Api }) {
   async function change(level: number) {
     const old = data?.global
     if (await save({ level }) && old !== undefined && old !== level)
-      offer(`Codex level ${old} → ${level}`, `Undid: Codex level ${level} → ${old}`, () => save({ level: old, undo: true }))
+      offer(`Codex level ${old} → ${level}`, `Undid: Codex level ${level} → ${old}`, () => save({ level: old, undo: true, expect: level }))
   }
   return <section className="settings-group" aria-labelledby="settings-codex"><h3 id="settings-codex">Codex helper</h3>
     {data && error && <p className="error" role="alert">{error}</p>}
@@ -113,7 +113,7 @@ export function ProjectCodexLevel({ api, project, panes }: { api: Api; project: 
   async function change(next: number) {
     const old = data?.project?.override ? data.project.level : undefined
     if (await save({ project, override: true, level: next }) && old !== undefined && old !== next)
-      offer(`Project Codex level ${old} → ${next}`, `Undid: project Codex level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true }))
+      offer(`Project Codex level ${old} → ${next}`, `Undid: project Codex level ${next} → ${old}`, () => save({ project, override: true, level: old, undo: true, expect: { level: next, override: true } }))
   }
   return <section className="settings-group" aria-labelledby="project-codex"><h3 id="project-codex">Codex level</h3>
     {data && error && <p className="error" role="alert">{error}</p>}

@@ -452,6 +452,19 @@ def _record_setting(kind, label, old, new, *, pid=None, undo=False):
     audit.record(kind, f'{prefix}{label} {old} → {new}', old=old, new=new, project=project, undo=undo)
 
 
+STALE_UNDO = 'The level changed after this change. Undo would overwrite the newer value, so Tether did not change it.'
+
+
+def stale(body, current):
+    """Undo sends `expect`: the value its change set. True when another tab or device changed it since (B56 review)."""
+    return 'expect' in body and body['expect'] != current
+
+
+def _check_expect(body, current):
+    if stale(body, current):
+        raise LevelError(409, STALE_UNDO)
+
+
 def _run_value(run):
     return f'{run["model"]} · {run["effort"]} · fast {"on" if run["fast"] else "off"}'
 
@@ -477,12 +490,14 @@ def post(handler):
                                 undo=undo)
             elif pid is None:
                 old = read_global()
+                _check_expect(body, old)
                 level = body.get('level')
                 set_global(level)
                 _record_setting('setting.codex_level', 'Codex level', old, level, undo=undo)
             else:
                 current = resolve(pid)
                 previous = current['project'] or {'level': current['global'], 'override': False}
+                _check_expect(body, {'level': previous['level'], 'override': previous['override']})
                 level, override = body.get('level'), body.get('override')
                 set_project(pid, override, level)
                 _record_setting('setting.codex_level', 'Codex level',
