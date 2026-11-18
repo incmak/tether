@@ -245,8 +245,7 @@ async function main() {
       check(`${width} px: the deck card names the tab and the prompt`, (await deck.locator('.deck-tab').textContent()).includes('BriskBot') && (await deck.locator('.deck-question').textContent()) === 'A permission prompt waits in this tab. Open the tab to answer it.' && await deck.locator('.deck-hint').count() === 0 && (await deck.locator('.deck-meta').textContent()).includes('Needs approval'))
       check(`${width} px: the card has Open tab and no Handled or reply box`, await deck.getByRole('button', { name: 'Open tab' }).count() === 1 && await deck.getByRole('button', { name: 'Handled' }).count() === 0 && await deck.locator('textarea').count() === 0)
       check(`${width} px: the deck fits`, await deck.evaluate(box => box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth))
-      await page.waitForTimeout(500) // let the sheet finish its opening move
-      await page.screenshot({ path: path.join(SHOTS, `${width}-deck-state-only.png`) })
+      await page.screenshot({ path: path.join(SHOTS, `${width}-deck-state-only.png`), animations: 'disabled' })
       await deck.getByRole('button', { name: 'Open tab' }).click()
       await deck.waitFor({ state: 'detached' })
       check(`${width} px: Open tab closes the deck and opens the tab`, await page.evaluate(() => location.hash + location.search).then(where => where.includes('%10') || where.includes('%2510')) || (await page.locator('[aria-current="page"]', { hasText: 'BriskBot' }).count()) > 0)
@@ -268,8 +267,14 @@ async function main() {
     check('an undated wait comes first and shows no age', (await stateDeck.locator('.deck-tab').textContent()).includes('Undated') && !(await stateDeck.locator('.deck-meta').textContent()).includes('waited'))
     await page.keyboard.press('Escape')
     await stateDeck.waitFor({ state: 'detached' })
-    await page.waitForTimeout(100)
-    check('Escape gives focus back to "Answer one by one"', await opener.evaluate(node => document.activeElement === node))
+    const refocused = await opener.evaluate(node => new Promise(done => { const end = Date.now() + 3000; const poll = () => document.activeElement === node ? done(true) : Date.now() > end ? done(false) : requestAnimationFrame(poll); poll() }))
+    check('Escape gives focus back to "Answer one by one"', refocused)
+
+    // An urgent ask in an archived tab does not open the deck by itself.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%13', '$2', 'Hidden urgent', 'briskbot:0.4', { state: 'Approval', since: NOW - 60, ask: ask('%13', 60, { kind: 'approval', urgent: true }) })], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%13': { dir: '/srv/project', thread: 't13', name: 'Hidden urgent' } } })
+    await page.locator(`${SIDE} .catchup`).waitFor()
+    check('an archived urgent ask does not open the deck', await page.locator('dialog.action-deck[open]').count() === 0)
 
     // Handled ends the ask's card; when the tab still waits by its state, its state card shows next.
     let handledAsk = false

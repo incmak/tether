@@ -249,6 +249,7 @@ type Carry = { session: string; pane?: string; chat?: PastChat }
 type Moved = { session: string; name: string; pane: string }
 interface Props {
   onDeck?: () => void
+  now?: number  // the app's clock, so Catch up and the deck agree on when a snooze ends
   review?: ReviewEntry
   /** Due reminders: a row in Needs you, and the count on the Reminders button. */
   reminder?: DueReminders
@@ -308,7 +309,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
+export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -482,7 +483,8 @@ export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, se
     return () => { drawerScrollTop = scroll; observer.disconnect(); nav.removeEventListener('scroll', save) }
   }, [drawer, search])
   const manual = prefs.sort === 'manual'
-  const now = useNow()
+  const ownNow = useNow()
+  const now = appNow ?? ownNow
   // Catch up shows what waits on you; Sessions shows the tree. A search always shows the tree.
   const catchUp = prefs.sideMode !== 'sessions' && !search
   const waitingTotal = waitCount(sessions.flatMap(session => session.panes), now, prefs.attention)
