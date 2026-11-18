@@ -17,6 +17,9 @@ const tests = fs.readdirSync(__dirname).filter(name => /^test_.*\.cjs$/.test(nam
 })
 
 const childOptions = { cwd: __dirname, timeout: 10 * 60 * 1000 }
+// In parallel mode a file must end well inside the CI job limit, so a hung file is killed, its log printed and
+// a FAIL line recorded. The slowest file took 203 s on the hosted runner.
+const parallelFileTimeout = 5 * 60 * 1000
 const failures = []
 function record(test, { status, signal, error }) {
   if (status !== 0 || error) failures.push(`FAIL ${test}: ${error?.message || signal || `exit ${status}`}`)
@@ -32,7 +35,7 @@ function runBuffered(test, artifacts) {
   try {
     // A fresh local Chromium profile per process. No worker uses the desktop CDP browser.
     const env = { ...process.env, TETHER_CDP_URL: '', MOBILE_TMUX_CONFIG: shots, SHOTS: shots }
-    child = spawn(process.execPath, [path.join(__dirname, test)], { ...childOptions, env, stdio: ['ignore', fd, fd] })
+    child = spawn(process.execPath, [path.join(__dirname, test)], { ...childOptions, timeout: parallelFileTimeout, env, stdio: ['ignore', fd, fd] })
   } finally {
     fs.closeSync(fd)
   }

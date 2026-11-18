@@ -44,7 +44,8 @@ jobs:
   browser:
     # Match the OS supported by the pinned Playwright browser/dependency bundle.
     runs-on: ubuntu-24.04
-    timeout-minutes: 11
+    # Setup about 3 min, tests about 6 min; each browser file is killed after 5 min (run_ui_tests.cjs).
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v7
@@ -84,6 +85,10 @@ jobs:
         run: |
           chrome=$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-*/headless_shell | sort | tail -1)
           test -x "$chrome"
+          if ldd "$chrome" | grep 'not found'; then
+            echo "The runner image lacks Chromium libraries (above). Restore 'npx playwright-core install-deps chromium'."
+            exit 1
+          fi
           cd server
           MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest 2>&1 | tee ../smoke.log
           grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
@@ -95,7 +100,7 @@ jobs:
           cd ui
           node run_ui_tests.cjs --browser --parallel
       - name: Upload browser test screenshots
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-browser-screenshots-${{ github.run_attempt }}
