@@ -45,6 +45,7 @@ const fixture = {
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
   'work/board': { revision: 1, projects: [], items: [], stages: [] },
+  reminders: { reminders: [], deleted: [], now }, feedback: { ratings: {} },
 }
 
 async function main() {
@@ -140,6 +141,7 @@ async function main() {
       const at = `${width}px`
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+      if (width < 640) await page.locator('.composer textarea').click()
       const pill = page.getByRole('button', { name: /1 agent running\. Open the agent map/ })
       await pill.waitFor()
       check(`${at} pill shows running count`, (await pill.textContent()).trim() === '1agent')
@@ -239,6 +241,7 @@ async function main() {
       const lookup = id => ({ ...fixture.subagents.tasks.find(item => item.id === id), output: 'ok', output_cut: false })
       await page.route('**/api/subagent-task**', route => route.fulfill({ json: lookup(new URL(route.request().url()).searchParams.get('id')) }))
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+      if (width < 640) await page.locator('.composer textarea').click()
       await page.getByRole('button', { name: /2 tasks running\. Open the agent map/ }).click()
       await map.waitFor()
       const widths = await map.evaluate(node => [node.querySelector('.agent-tasks').clientWidth, node.querySelector('.agent-tasks ul').clientWidth])
