@@ -83,7 +83,7 @@ def _agent_exited(target, run):
         if result.returncode or not pane_pid.isdigit() or command not in SHELLS:
             return False
         # Discovery may be up to a second old: read the process tree again before a close.
-        processes = procinfo.table()
+        processes = procinfo.table(fresh=True)
         tree = agents.descendants(int(pane_pid), processes)
         registered = agents._pane_registries(agents.claude_registries(processes), target['id'], tree)
         return int(pane_pid) in processes and agents._pane_agent(int(pane_pid), processes, tree, registered)[0] is None
@@ -188,7 +188,7 @@ def serve(handler, body, **kwargs):
         return _serve(handler, body, **kwargs)
 
 
-def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline):
+def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, status, send, timeline, fresh=None):
     credential = handler.headers.get('X-Tether-Hook', '')
     if (not auth.is_loopback(handler.client_address[0]) or not credential
             or not hmac.compare_digest(credential.encode(), auth.session_value().encode())):
@@ -245,7 +245,8 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
         handler.respond(201, {'pane': pane, 'name': name, 'worktree': made})
         return
     with lock:
-        entries = sessions()
+        # Closing is final: the caller's and the target's conversations come from uncached discovery.
+        entries = (fresh or sessions)() if body.get('action') == 'close' else sessions()
         caller = next((entry for entry in entries if entry['id'] == body.get('session')), None)
         if caller is None:
             raise ValueError('That session has ended. Select another tab.')

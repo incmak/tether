@@ -192,7 +192,7 @@ class CloseHelperTabTest(unittest.TestCase):
         for command, table, closes in cases:
             for caller, links in ((self.owner, set()), (reviewer, {HELPER})):
                 with self.subTest(command=command, table=table, caller=caller['id']), \
-                        patch.object(server.agent_tabs.procinfo, 'table', return_value=table), \
+                        patch.object(server.agent_tabs.procinfo, 'table', return_value=table) as processes, \
                         patch.object(server.agent_tabs.agents, 'claude_registries', return_value=[]), \
                         patch.object(server.review_links, 'linked_worker_threads', return_value=links):
                     self.kill.reset_mock()
@@ -203,6 +203,7 @@ class CloseHelperTabTest(unittest.TestCase):
                     if closes:
                         self.assertEqual(call(), {'closed': '%13'})
                         self.kill.assert_called_once_with('%13', self.run)
+                        processes.assert_called_once_with(fresh=True)
                     else:
                         with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
                             call()

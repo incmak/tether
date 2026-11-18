@@ -74,6 +74,7 @@ class HelperTests(unittest.TestCase):
         self.run = Tmux()
         self.enterContext(patch.object(server.subprocess, 'run', side_effect=self.run))
         self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
+        self.enterContext(patch.object(server, 'fresh_sessions', return_value=self.entries))
         self.enterContext(patch.object(auth, 'session_value', return_value='test-credential'))
         self.status = self.enterContext(patch.object(server, 'shared_status', return_value={'state': 'Idle'}))
         self.reply = self.enterContext(patch.object(server, 'last_reply', return_value='Old reply'))

@@ -2626,7 +2626,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'ok': True})
                 return
             if self.path == agent_tabs.PATH:
-                agent_tabs.serve(self, body, sessions=sessions, folder=agent_folder, snapshot=snapshot,
+                agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
                                  status=shared_status, send=review_send, timeline=timeline)
                 return

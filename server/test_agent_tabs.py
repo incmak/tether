@@ -34,6 +34,7 @@ class AgentTabsTests(unittest.TestCase):
                              writable=True, label='Reviewer'),
                         dict(id='%14', agent='claude', thread=None, pane_name='Second reviewer')]
         self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
+        self.fresh = self.enterContext(patch.object(server, 'fresh_sessions', return_value=self.entries))
         self.enterContext(patch.object(server, 'agent_folder', return_value=str(self.root)))
         self.enterContext(patch.object(auth, 'session_value', return_value='test-credential'))
         self.real_run = subprocess.run
@@ -552,6 +553,19 @@ class AgentTabsTests(unittest.TestCase):
         forget.assert_called_once_with('%13', run=self.run)
         self.assertEqual(self.kills()[0].args[0][-3:], ['kill-pane', '-t', '%13'])
         self.assertEqual(review_links.reviewed_by(), {})
+
+    def test_close_reads_the_caller_and_target_from_uncached_discovery(self):
+        # The one-second cache still shows the reviewer's old conversation; the fresh read shows a new one.
+        self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
+        self.link(worker='%13', reviewer='%12')
+        self.fresh.return_value = [dict(self.entries[0], thread='3c4a9a50-2c1e-4c5f-9b67-8d1f0e2a7b11'),
+                                   *self.entries[1:]]
+        result, _ = self.close()
+        self.assertEqual(result[0], 400)
+        self.assertEqual(self.kills(), [])
+        self.fresh.assert_called()
+        self.fresh.return_value = self.entries  # the same conversation: the reviewer may close
+        self.assertEqual(self.close()[0], (200, {'closed': '%13'}))
 
     def test_close_by_linked_reviewer_without_owner_record(self):
         self.status_shared = self.enterContext(patch.object(server, 'shared_status'))
