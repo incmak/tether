@@ -20,34 +20,11 @@ import subprocess
 import sys
 import tempfile
 
-ITEM = r'[a-z][a-z-]*\([^()\n]+\)'
-STAMP = re.compile(rf'none(?: \([^()\n]+\))?|{ITEM}(?: +{ITEM})*')
-FOUND = re.compile(r'\bVerified:[ \t]*([^\n]*)')
-DAY = re.compile(r'^\s*[-*]?\s*(\d{4})-(\d{2})-(\d{2})')
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'server'))
+from stamp import FOUND, message_status, status, valid  # noqa: E402,F401 - one grammar, shared with server/commit_gate.py
 
-
-def valid(stamp):
-    """The stamp text after "Verified:" with spaces tidied, or raise ValueError."""
-    text = re.sub(r'\s+', ' ', str(stamp or '')).strip()
-    if text.lower().startswith('verified:'):
-        text = text[len('verified:'):].strip()
-    if not STAMP.fullmatch(text):
-        raise ValueError('Give a verification stamp: kind(detail) items such as '
-                         '"tests(server 412 ok) screenshots(24) review(codex APPROVED)", or "none (reason)".')
-    return text
-
-
-def status(text):
-    """'verified', 'none' or 'missing' for a DEPLOYED.md line or a commit message. A malformed stamp counts as missing."""
-    found = FOUND.findall(text or '')
-    if not found:
-        return 'missing'
-    try:
-        stamp = valid(found[-1])
-    except ValueError:
-        return 'missing'
-    return 'none' if stamp.startswith('none') else 'verified'
+DAY = re.compile(r'^\s*[-*]?\s*(\d{4})-(\d{2})-(\d{2})')
 
 
 def git(folder, *args):
@@ -175,7 +152,7 @@ def unverified_commits(folder, since, revision='HEAD'):
         parts = record.strip('\n').split('\x1f')
         if len(parts) != 3:
             continue
-        kind = status(parts[2])
+        kind = message_status(parts[2])
         if kind != 'verified':
             found.append((parts[0], parts[1], kind))
     return found
@@ -187,8 +164,8 @@ def unverified_commit_range(folder, start, end):
     found = []
     for record in (out or '').split('\x1e'):
         parts = record.strip('\n').split('\x1f')
-        if len(parts) == 3 and status(parts[2]) != 'verified':
-            found.append((parts[0], parts[1], status(parts[2])))
+        if len(parts) == 3 and message_status(parts[2]) != 'verified':
+            found.append((parts[0], parts[1], message_status(parts[2])))
     return found
 
 

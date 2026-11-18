@@ -33,9 +33,9 @@ export function LevelBones({ count = 5 }: { count?: number }) {
 }
 
 /** The Codex level stepper: a legend, one segment per level and a two-line note. */
-export function StepperBone({ count = 6 }: { count?: number }) {
-  return <fieldset className="choice codex-level" disabled><legend>Level</legend>
-    <div className="segmented">{Array.from({ length: count }, (_, index) => <label key={index}><span><Bone w="1ch" /></span></label>)}</div>
+export function StepperBone({ count = 6, legend = 'Level', width = '1ch' }: { count?: number; legend?: string; width?: string }) {
+  return <fieldset className="choice codex-level" disabled><legend>{legend}</legend>
+    <div className="segmented">{Array.from({ length: count }, (_, index) => <label key={index}><span><Bone w={width} /></span></label>)}</div>
     <p className="setting-note codex-level-note"><BoneLines count={2} /></p>
   </fieldset>
 }

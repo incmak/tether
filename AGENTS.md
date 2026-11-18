@@ -25,6 +25,16 @@ Tether is a browser chat UI for Claude Code, Codex, and Antigravity in tmux, for
 - Tests use fixtures and isolated or mocked processes. Use mocks for UI writes; they control real terminals.
 - Restart the backend after Python or legacy UI changes. Legacy assets load at startup; React assets come from `ui/dist`.
 
+## Flaky tests
+
+A test that passes on one run and fails on another is a failure.
+
+- Do not add a sleep, a longer wait, or a retry to make a test pass.
+- Fix the cause: wait on a condition, isolate the state the test shares, or use a clock the test controls.
+- If you cannot fix it, delete the test. Give the reason in the commit message.
+- To find flaky tests, run `python3 scripts/run_tests.py server --label-flaky`. It runs each failed test once more, alone, and labels it `flaky` or `failed` in the report. The run still fails.
+- This rule is for tests. Network steps in CI, such as a package download, can retry.
+
 ## Terminal screens change with each agent update
 
 Claude Code, Codex and Antigravity redraw their screens between versions. Code that reads or drives a screen must survive that.
@@ -45,6 +55,7 @@ Claude Code, Codex and Antigravity redraw their screens between versions. Code t
 - Resolve routine conflicts between sessions. Ask Mak only when the conflict requires a product decision or destructive action.
 - Preserve unrelated work. Build the UI from the selected commit in a clean checkout, then install the output atomically.
 - Install with `python3 scripts/deploy-ui.py --verified STAMP BUILD_DIR ui/dist`. It preserves old chunks and publishes the entry page last.
+- The commit gate checks each Claude `git commit` for a valid `Verified:` line (`server/commit_gate.py`; mode in Settings › Agents, log in `~/.cache/tether/commit-gate.log`). It starts in observe mode: it logs and does not block.
 - Every commit and deploy says how it was verified. End each commit message with a stamp such as `Verified: tests(server 412 ok, ui 91/93) screenshots(24) review(codex APPROVED)`, or `Verified: none (reason)`. Give the same stamp to `deploy-ui.py --verified`; it refuses an install without one and adds the `DEPLOYED.md` line. For a backend-only deploy, run `python3 scripts/verification.py log --verified STAMP --commit HASH "what changed"`. List unverified work with `python3 scripts/verification.py unverified`.
 - The build writes `.build-commit`; the install records it in `ui/dist/.live-commit`. The install refuses a build that does not contain the live commit, or one from uncommitted changes. To fix, rebase or merge `origin/main` and any deployed commits not yet pushed, then rebuild. Check first with `--dry-run`. Use `--force` only to remove deployed work on purpose.
 - Verify the served entry page and deployed behavior after installation.

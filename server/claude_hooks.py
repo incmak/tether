@@ -496,6 +496,27 @@ def session_start_context(data, agent, env=os.environ):
     return '\n\n'.join(part for part in parts if part), rules
 
 
+def commit_gate_output(data):
+    """The commit gate (commit_gate.py, B204) for a Bash call that names `git` and `commit`. It prints a deny only in
+    enforce mode. Any error lets the commit through and leaves the rest of this hook as it was."""
+    try:
+        tool_input = data.get('tool_input') if isinstance(data, dict) else None
+        command = tool_input.get('command') if isinstance(tool_input, dict) else None
+        if (data.get('tool_name') != 'Bash' or not isinstance(command, str) or 'git' not in command
+                or 'commit' not in command):
+            return
+        here = str(Path(__file__).resolve().parent)
+        if here not in sys.path:
+            sys.path.insert(0, here)  # python -I omits the script's folder.
+        import commit_gate
+        if commit_gate.candidate(data):
+            out = commit_gate.hook(data)
+            if out:
+                print(out, flush=True)
+    except Exception:
+        pass  # the gate fails open
+
+
 def main():
     if sys.argv[1:] == ['install-codex']:
         added = install_codex()
@@ -506,6 +527,8 @@ def main():
         occurred = time.time()
         data = json.load(sys.stdin)
         capture(data, occurred, agent=agent)
+        if agent == 'claude':
+            commit_gate_output(data)
         if (agent == 'codex' and isinstance(data, dict) and valid_session(data.get('session_id'))
                 and data.get('hook_event_name') == 'UserPromptSubmit'):
             here = str(Path(__file__).resolve().parent)

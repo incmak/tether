@@ -8,6 +8,7 @@ import { SCHEMES, schemeById } from './schemes'
 import { canReadAloud } from './speech'
 import { playChime, prepareChime } from './sound'
 import { GlobalCodexLevel } from './CodexLevel'
+import { GlobalCommitGate } from './CommitGate'
 import { GlobalClaudeAdvisor } from './ClaudeAdvisor'
 import { GlobalAutonomy } from './Autonomy'
 import { HelperSettings } from './Helpers'
@@ -79,6 +80,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('cleanup', 'agents', 'Clean up lessons and notes', 'clean cleanup prune stale old lessons notes remove delete undo weekly tidy', <Field scope="This server"><CleanUpSettings api={api} /></Field>),
     item('ops-report', 'agents', 'Daily ops report', 'ops operations postmortem daily report verified stamps reverts paused reviews lesson candidates proposed haiku tokens schedule', <Field scope="This server"><OpsSettings api={api} /></Field>),
     item('claude-advisor', 'agents', 'Claude Code advisor', 'advisor tool advisormodel opus fable consult stronger model second opinion credits', <Field scope="This server"><GlobalClaudeAdvisor api={api} /></Field>),
+    item('commit-gate', 'agents', 'Commit gate', 'commit gate verified trailer stamp verification observe enforce block false block rate git', <Field scope="This server"><GlobalCommitGate api={api} /></Field>),
     item('codex', 'agents', 'Codex helper', 'claude delegation level model effort fast runs limits', <Field scope="This server"><GlobalCodexLevel api={api} /></Field>),
     item('browser', 'agents', 'Shared browser', 'agents chrome playwright setup connection claude codex', <Field scope="This server"><AgentBrowserSettings api={api} /></Field>),
     // The same list as the ⌘/ sheet. A search here finds a key by its action, like "split" or "backlog".

@@ -38,6 +38,12 @@ class StampTest(unittest.TestCase):
         self.assertEqual(verification.status('- 2026-11-17 · abc · Verified: tests(ok)'), 'verified')
         self.assertEqual(verification.status('Fix\n\nVerified: none (copy)\nCo-Authored-By: x'), 'none')
         self.assertEqual(verification.status('- 2026-11-17 · deployed abc'), 'missing')
+        self.assertEqual(verification.status('Fix\n\nVerified: Verified: tests(ok)'), 'missing')
+        self.assertEqual(verification.status('Verified: none-such(ok)'), 'verified')
+        self.assertEqual(verification.status('Verified: none(ok)'), 'verified')
+        # In a commit message the line starts with "Verified:"; a DEPLOYED.md line carries it inline.
+        self.assertEqual(verification.message_status('Document Verified: none'), 'missing')
+        self.assertEqual(verification.message_status('Fix\n\nVerified: none (copy)\nCo-Authored-By: x'), 'none')
         self.assertEqual(verification.status('Verified: looked at it'), 'missing')  # malformed counts as missing
         self.assertEqual(verification.status(None), 'missing')
 

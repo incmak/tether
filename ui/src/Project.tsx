@@ -7,6 +7,7 @@ import { ApiError, errorText } from './api'
 import type { Api, GroupInfo } from './api'
 import { useModal } from './hooks'
 import { ProjectCodexLevel } from './CodexLevel'
+import { ProjectCommitGate } from './CommitGate'
 import { ProjectClaudeAdvisor } from './ClaudeAdvisor'
 import { ProjectAutonomy } from './Autonomy'
 import type { Session } from './Sidebar'
@@ -188,6 +189,8 @@ export function ProjectSheet({ api, session, group, mark, pin, onChanged, onClos
       <ProjectClaudeAdvisor api={api} project={project.id} />
 
       <ProjectCodexLevel api={api} project={project.id} panes={session.panes.map(item => item.id)} />
+
+      {!group && <ProjectCommitGate api={api} project={project.id} />}
 
       <section className="settings-group" aria-labelledby="project-size"><h3 id="project-size">Size</h3>
         <div className={`meter-bar ${level > .95 ? 'high' : level > .8 ? 'warn' : ''}`} role="meter" aria-label="Project text size" aria-valuenow={project.chars} aria-valuemin={0} aria-valuemax={project.budget}><span style={{ width: `${Math.min(100, level * 100)}%` }} /></div>
