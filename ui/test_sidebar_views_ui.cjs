@@ -95,12 +95,13 @@ async function main() {
     const SIDE = '.sidebar'
     // The urgent ask opens the answer deck by itself; close it to reach the sidebar.
     const closeDeck = async () => { if (await page.locator('dialog.action-deck[open]').count()) { await page.keyboard.press('Escape'); await page.locator('dialog.action-deck[open]').waitFor({ state: 'detached' }).catch(() => {}) } }
-    const open = async (id, width = 1280, height = 800, prefs = {}) => {
+    // keepDeck: leave a deck that opened by itself, so a test can see it.
+    const open = async (id, width = 1280, height = 800, prefs = {}, { keepDeck = false } = {}) => {
       await page.setViewportSize({ width, height })
       await page.goto(`${origin}/chat/?session=${encodeURIComponent(id)}&prefs=${encodeURIComponent(JSON.stringify(prefs))}`, { waitUntil: 'load' })
       await page.locator('.chat-panel').first().waitFor()
       await page.waitForTimeout(300)
-      await closeDeck()
+      if (!keepDeck) await closeDeck()
     }
     const texts = selector => page.locator(selector).allTextContents()
     const pressed = name => page.locator(`${SIDE} .side-mode-switch button`, { hasText: name }).getAttribute('aria-pressed')
@@ -272,7 +273,10 @@ async function main() {
 
     // An urgent ask in an archived tab does not open the deck by itself.
     sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%13', '$2', 'Hidden urgent', 'briskbot:0.4', { state: 'Approval', since: NOW - 60, ask: ask('%13', 60, { kind: 'approval', urgent: true }) })], default_thread: 't3' }
-    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%13': { dir: '/srv/project', thread: 't13', name: 'Hidden urgent' } } })
+    // Control: the same urgent ask in a visible tab opens it, so the check below can see a deck that opened.
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true }, { keepDeck: true })
+    check('a visible urgent ask opens the deck by itself', await page.locator('dialog.action-deck[open]').count() === 1)
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%13': { dir: '/srv/project', thread: 't13', name: 'Hidden urgent' } } }, { keepDeck: true })
     await page.locator(`${SIDE} .catchup`).waitFor()
     check('an archived urgent ask does not open the deck', await page.locator('dialog.action-deck[open]').count() === 0)
 
@@ -319,6 +323,25 @@ async function main() {
       await page.screenshot({ path: path.join(SHOTS, `side-modes-${width}.png`), clip: { x: 0, y: 0, width: Math.min(width + 80, 1280), height: 260 } })
     }
     sessions = busy
+
+    // A snooze that ends: Catch up and the deck read one clock, so both show the tab after the same tick (320 px).
+    // It runs last: the fake clock stays on this page.
+    await page.clock.install({ time: NOW * 1000 })
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%14', '$2', 'Snoozed tab', 'briskbot:0.5', { state: 'Approval', since: NOW - 60, ask: ask('%14', 60, { kind: 'approval', snoozed_until: NOW + 20 }) })], default_thread: 't3' }
+    await open('%3', 320, 700, { sideMode: 'catchup', attention: true })
+    // The snooze ends 20 s in; the app clock next ticks 30 s in. A drawer opened at 25 s must not read a newer clock
+    // than the deck: it shows no row until the tick, and then both show the tab.
+    await page.clock.runFor(25_000)
+    await page.locator('.mobile-menu').locator('visible=true').first().click()
+    await page.locator('.drawer .catchup').waitFor()
+    check('320 px: before the tick, Catch up shows no row and no deck for the snoozed tab', await page.locator('.drawer .catchup-row', { hasText: 'Snoozed tab' }).count() === 0 && await page.locator('.drawer [aria-label="Answer one by one"]').count() === 0)
+    await page.clock.runFor(10_000)  // the app clock ticks, past the snooze end
+    await page.locator('.drawer .catchup-row', { hasText: 'Snoozed tab' }).waitFor()
+    await page.locator('.drawer [aria-label="Answer one by one"]').click()
+    const snoozeDeck = page.locator('dialog.action-deck[open]')
+    await snoozeDeck.waitFor()
+    check('320 px: after the snooze ends, Catch up and the deck agree', (await snoozeDeck.locator('.deck-count').textContent()) === '1 of 1' && (await snoozeDeck.locator('.deck-tab').textContent()).includes('Snoozed tab'))
+    await page.keyboard.press('Escape')
 
     check('no page errors', pageErrors.length === 0, pageErrors.join('\n').slice(0, 800))
   } catch (error) {
