@@ -406,7 +406,8 @@ function App() {
   const waiting = useMemo(() => prefs.attention ? waitingAsks(panes, now) : [], [prefs.attention, panes, now])
   const [deck, setDeck] = useUrgentDeck(waiting, prefs.attention, factory)
   // The deck also shows the tabs that wait by their state only, as cards that open the tab.
-  const deckCards = useMemo(() => prefs.attention ? deckItems(panes, now) : [], [prefs.attention, panes, now])
+  // Built from the visible tabs, like Catch up, so an archived tab gets no card.
+  const deckCards = useMemo(() => prefs.attention ? deckItems(sessions.flatMap(item => item.panes), now) : [], [prefs.attention, sessions, now])
   // The lessons review joins Waiting on you as one quiet row; it never opens by itself.
   const { data: lessonsReview, error: reviewError, refresh: refreshReview } = useLessonsReview(api, prefs.attention)
   const [reviewing, setReviewing] = useState(false)

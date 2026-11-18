@@ -245,11 +245,43 @@ async function main() {
       check(`${width} px: the deck card names the tab and the prompt`, (await deck.locator('.deck-tab').textContent()).includes('BriskBot') && (await deck.locator('.deck-question').textContent()) === 'A permission prompt waits in this tab. Open the tab to answer it.' && await deck.locator('.deck-hint').count() === 0 && (await deck.locator('.deck-meta').textContent()).includes('Needs approval'))
       check(`${width} px: the card has Open tab and no Handled or reply box`, await deck.getByRole('button', { name: 'Open tab' }).count() === 1 && await deck.getByRole('button', { name: 'Handled' }).count() === 0 && await deck.locator('textarea').count() === 0)
       check(`${width} px: the deck fits`, await deck.evaluate(box => box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth))
+      await page.waitForTimeout(500) // let the sheet finish its opening move
       await page.screenshot({ path: path.join(SHOTS, `${width}-deck-state-only.png`) })
       await deck.getByRole('button', { name: 'Open tab' }).click()
       await deck.waitFor({ state: 'detached' })
       check(`${width} px: Open tab closes the deck and opens the tab`, await page.evaluate(() => location.hash + location.search).then(where => where.includes('%10') || where.includes('%2510')) || (await page.locator('[aria-current="page"]', { hasText: 'BriskBot' }).count()) > 0)
     }
+
+    // Review fixes: an archived tab gets no card; an undated wait sorts first and shows no age; Escape gives focus back.
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}),
+      pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 }),
+      pane('%11', '$2', 'Old helper', 'briskbot:0.2', { state: 'Approval', since: NOW - 30 }),
+      pane('%12', '$2', 'Undated', 'briskbot:0.3', { state: 'Approval', since: null })], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true, archivedTabs: { '%11': { dir: '/srv/project', thread: 't11', name: 'Old helper' } } })
+    const deckRows = await page.locator(`${SIDE} .catchup-row`).count()
+    const opener = page.locator(`${SIDE} [aria-label="Answer one by one"]`)
+    await opener.focus()
+    await page.keyboard.press('Enter')
+    const stateDeck = page.locator('dialog.action-deck[open]')
+    await stateDeck.waitFor()
+    check('the deck has one card for each Catch up row, no archived tab', (await stateDeck.locator('.deck-count').textContent()) === `1 of ${deckRows}` && deckRows === 2, `${deckRows} rows, ${await stateDeck.locator('.deck-count').textContent()}`)
+    check('an undated wait comes first and shows no age', (await stateDeck.locator('.deck-tab').textContent()).includes('Undated') && !(await stateDeck.locator('.deck-meta').textContent()).includes('waited'))
+    await page.keyboard.press('Escape')
+    await stateDeck.waitFor({ state: 'detached' })
+    await page.waitForTimeout(100)
+    check('Escape gives focus back to "Answer one by one"', await opener.evaluate(node => document.activeElement === node))
+
+    // Handled ends the ask's card; when the tab still waits by its state, its state card shows next.
+    let handledAsk = false
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60, ask: ask('%10', 60, { kind: 'approval' }) })], default_thread: 't3' }
+    await open('%3', 1280, 800, { sideMode: 'catchup', attention: true })
+    await page.locator(`${SIDE} [aria-label="Answer one by one"]`).click()
+    await stateDeck.waitFor()
+    sessions = { sessions: [pane('%3', '$1', 'Sidebar build', 'tether', {}), pane('%10', '$2', 'BriskBot', 'briskbot', { state: 'Approval', since: NOW - 60 })], default_thread: 't3' }
+    await stateDeck.getByRole('button', { name: 'Handled' }).click()
+    handledAsk = await stateDeck.locator('.deck-question', { hasText: 'A permission prompt waits in this tab.' }).waitFor({ timeout: 5000 }).then(() => true, () => false)
+    check('after Handled, the state card of the same tab shows', handledAsk && await stateDeck.getByRole('button', { name: 'Handled' }).count() === 0)
+    await page.keyboard.press('Escape')
     sessions = busy
 
     // 7. Phone, 320 px: the drawer shows both views with no sideways scroll.

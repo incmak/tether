@@ -19,11 +19,20 @@ import './ActionDeck.css'
 
 const KIND: Record<string, string> = { reply: 'Asks you', approval: 'Needs approval', plan: 'Plan to approve', question: 'Asks a question' }
 
+// A card's identity: its pane and its ask. Handled ends this card only; a later card of the same tab still shows.
+const cardKey = (item: Waiting) => `${item.pane.id} ${item.state ? 'state' : item.ask.since}`
+
 /** Urgent asks first, then oldest first. */
 export const deckOrder = (items: Waiting[]) => [...items].sort((a, b) => Number(!!b.ask.urgent) - Number(!!a.ask.urgent) || a.ask.since - b.ask.since)
 
 export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUpdate }: { api: Api; items: Waiting[]; sessions: Session[]; review?: ReviewEntry; onOpen: (pane: Pane) => void; onClose: () => void; onUpdate: () => void }) {
   const modal = useModal(true, onClose)
+  const opener = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  useEffect(() => () => {
+    const target = opener.current
+    // After the dialog leaves, give focus back to its opener if it still exists and nothing else took focus.
+    requestAnimationFrame(() => { if (target?.isConnected && (!document.activeElement || document.activeElement === document.body)) target.focus() })
+  }, [])
   const now = useNow()
   // The deck keeps the order it opened with, so a card does not jump while you type. New asks join at the end.
   const [first] = useState(() => deckOrder(items).map(item => item.pane.id))
@@ -31,8 +40,8 @@ export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUp
   const [index, setIndex] = useState(0)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
-  const queue = [...first, ...deckOrder(items).map(item => item.pane.id).filter(id => !first.includes(id))].filter(id => !done.includes(id))
-  const live = queue.map(id => items.find(item => item.pane.id === id)).filter((item): item is Waiting => !!item)
+  const queue = [...first, ...deckOrder(items).map(item => item.pane.id).filter(id => !first.includes(id))]
+  const live = queue.map(id => items.find(item => item.pane.id === id)).filter((item): item is Waiting => !!item && !done.includes(cardKey(item)))
   const at = Math.min(index, Math.max(0, live.length - 1))
   const card = live[at]
 
@@ -53,7 +62,7 @@ export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUp
   const next = () => { setStatus(''); setIndex(at + 1 < live.length ? at + 1 : 0) }
   async function run(work: () => Promise<unknown>, result: string) {
     setBusy(true); setStatus('')
-    try { const said = await work(); setStatus(typeof said === 'string' ? said : result); onUpdate(); setDone(current => [...current, pane.id]) }
+    try { const said = await work(); setStatus(typeof said === 'string' ? said : result); onUpdate(); setDone(current => [...current, cardKey(card)]) }
     catch (error) { setStatus(errorText(error)) }
     finally { setBusy(false) }
   }
@@ -74,7 +83,7 @@ export function ActionDeck({ api, items, sessions, review, onOpen, onClose, onUp
     <article className="deck-card" aria-live="polite">
       <p className="deck-meta">
         {ask.urgent && <span className="deck-urgent"><CircleAlert size={14} aria-hidden="true" />Urgent</span>}
-        <span>{KIND[ask.kind] ?? 'Waits on you'}</span><span aria-hidden="true">·</span><span>waited {age(ask.since, now)}</span>
+        <span>{KIND[ask.kind] ?? 'Waits on you'}</span>{ask.since > 0 && <><span aria-hidden="true">·</span><span>waited {age(ask.since, now)}</span></>}
       </p>
       <h3 className="deck-tab">{name}</h3>
       <p className="deck-question">{ask.next || (card.state ? `${pane.state === 'Approval' ? 'A permission prompt' : 'A prompt'} waits in this tab. Open the tab to answer it.` : 'Open the tab to see what it needs.')}</p>

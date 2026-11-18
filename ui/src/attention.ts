@@ -23,7 +23,7 @@ export function waitingAsks(panes: Pane[], now: number): Waiting[] {
 export function deckItems(panes: Pane[], now: number): Waiting[] {
   const stateOnly = panes.filter(pane => !pane.ask && pane.agent !== 'shell' && needsYou(pane.state)).map(pane => ({
     pane, state: true,
-    ask: { pane: pane.id, thread: pane.thread ?? null, since: pane.since ?? now, next: '', kind: pane.state === 'Approval' ? 'approval' : 'question', opened: false, snoozed_until: null } as Ask,
+    ask: { pane: pane.id, thread: pane.thread ?? null, since: pane.since ?? 0, next: '', kind: pane.state === 'Approval' ? 'approval' : 'question', opened: false, snoozed_until: null } as Ask,
   }))
   return [...waitingAsks(panes, now), ...stateOnly].sort((a, b) => a.ask.since - b.ask.since)
 }
