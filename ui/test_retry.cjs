@@ -4,6 +4,10 @@ const { readFileSync } = require('node:fs')
 const { runInNewContext } = require('node:vm')
 const ts = require('typescript')
 const jsx = require('react/jsx-runtime')
+assert.match(readFileSync('src/Retry.css', 'utf8'),
+  /@media \(pointer: coarse\)\s*\{[^}]*?\.retry-button\s*[,\s][^{]*\{\s*min-height: 44px;/)
+assert.match(readFileSync('src/Sheets.tsx', 'utf8'),
+  /<p className="sheet-sub">\s*<AgentIcon\b[^>]*\/>\s*<span className="sheet-sub-text">\{chat\.title \|\| 'Untitled chat'\}<\/span>\s*<\/p>/)
 const flush = async () => { for (let n = 0; n < 12; n++) await Promise.resolve() }
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const nodes = tree => !tree || typeof tree !== 'object' ? [] : [tree, ...[tree.props?.children].flat(Infinity).flatMap(nodes)]
