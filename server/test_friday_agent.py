@@ -419,7 +419,8 @@ class FridayRulesTests(unittest.TestCase):
                                      set(), previous, pending, turn)
 
         self.assertIsNone(check())
-        self.assertIsNotNone(check(turn=6))
+        # A yes split over two runs (the first interrupted before it spoke) still answers the read-back.
+        self.assertIsNone(check(turn=6))
         self.assertIsNotNone(check(previous='Want me to read the rest?'))
         self.assertIsNotNone(check(previous=readback.lower()))
         self.assertIsNotNone(check(previous=readback + ' ', chat='Automation tether'))
@@ -437,7 +438,8 @@ class FridayRulesTests(unittest.TestCase):
             'speech', 'yes', set(), friday.send_readback(proposal), proposal, 5))
         backlog = friday.SendProposal('backlog_send', 'Docs', 'B12', 4)
         for previous, turn, reason in ((friday.send_readback(backlog), 5, None),
-                                       (friday.send_readback(backlog), 6, friday.READBACK_REQUIRED),
+                                       (friday.send_readback(backlog), 6, None),
+                                       (friday.send_readback(backlog), 7, friday.READBACK_REQUIRED),
                                        (friday.send_readback(backlog), 7, friday.READBACK_REQUIRED),
                                        ('Want me to open the panel?', 5, friday.READBACK_REQUIRED)):
             with self.subTest(previous=previous, turn=turn):
@@ -1423,11 +1425,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service._client.close()
 
-    async def test_proposal_expires_after_two_separate_speech_runs(self):
+    async def _split_runs(self, runs):
+        """Run prepare_run once per message list, then the send in the last run. Returns (run, rtvi, session)."""
         proposal = friday.SendProposal('send_to_chat', 'Docs', 'Run the tests', 0)
-        readback = {'role': 'assistant', 'content': friday.send_readback(proposal)}
-        yes = {'role': 'user', 'content': 'Yes, please do.'}
-        more = {'role': 'user', 'content': 'And for the factory floor, check the alerts.'}
         rtvi = SimpleNamespace(handle_function_call=AsyncMock())
         session = SimpleNamespace(pending_proposal=proposal, rtvi=rtvi)
         service = self.rt.FridayLLM(session, friday.brain_config({}))
@@ -1436,19 +1436,36 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                                  result_callback=AsyncMock())
         service.push_frame = AsyncMock()
         try:
-            service.prepare_run([readback, yes])
-            run = service.prepare_run([readback, yes, more])
-            self.assertEqual(run.user_turn - proposal.turn, 2)
-            self.assertIsNone(session.pending_proposal)
+            for messages in runs:
+                run = service.prepare_run(messages)
             token = service._active_run.set(run)
             try:
                 with patch('sys.stderr'):
                     await service.handle_browser_tool(params)
             finally:
                 service._active_run.reset(token)
-            rtvi.handle_function_call.assert_not_awaited()
+            return run, rtvi, session, proposal
         finally:
             await service._client.close()
+
+    async def test_split_yes_over_two_interrupted_runs_still_sends(self):
+        # 19 Nov: "Yes, please do." starts a run; more speech interrupts it before it speaks.
+        readback = {'role': 'assistant', 'content': friday.send_readback(friday.SendProposal('send_to_chat', 'Docs', 'Run the tests', 0))}
+        yes = {'role': 'user', 'content': 'Yes, please do.'}
+        more = {'role': 'user', 'content': 'And for the factory floor, check the alerts.'}
+        run, rtvi, session, proposal = await self._split_runs([[readback, yes], [readback, yes, more]])
+        self.assertEqual(run.user_turn - proposal.turn, 2)
+        rtvi.handle_function_call.assert_awaited()
+
+    async def test_proposal_expires_after_three_speech_runs(self):
+        readback = {'role': 'assistant', 'content': friday.send_readback(friday.SendProposal('send_to_chat', 'Docs', 'Run the tests', 0))}
+        words = [{'role': 'user', 'content': text} for text in ('Hmm.', 'Wait.', 'Yes, please do.')]
+        run, rtvi, session, proposal = await self._split_runs([[readback, *words[:i]] for i in (1, 2, 3)])
+        self.assertEqual(run.user_turn - proposal.turn, 3)
+        rtvi.handle_function_call.assert_not_awaited()
+        # The old proposal is gone; Friday reads the new send back instead.
+        self.assertIsNot(session.pending_proposal, proposal)
+        self.assertEqual(session.pending_proposal.turn, 3)
 
     async def test_declined_pending_proposal_clears_it_and_blocks_only_the_send(self):
         proposal = friday.SendProposal('backlog_send', 'Docs', 'B12', 0)

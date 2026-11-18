@@ -430,7 +430,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         return 'Event runs only report news; do not take actions.'
     if source != 'speech' and guarded_action:
         return 'No spoken user turn authorizes this action.'
-    has_proposal = (pending is not None and user_turn - pending.turn == 1
+    # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
+    # (the first run interrupted before it spoke).
+    has_proposal = (pending is not None and 1 <= user_turn - pending.turn <= 2
                     and previous_assistant == send_readback(pending))
     if source == 'speech' and name in SEND_TOOLS and has_proposal and APPROVAL_NO.search(last_user_text):
         return 'The user declined the proposed send.'
@@ -1180,7 +1182,7 @@ def runtime_types():
                     self.last_user_text = ' '.join(m['content'].strip() for m in messages[i + 1:]
                         if is_real_user(m) and isinstance(m.get('content'), str)
                         and m['content'].strip() and not m['content'].startswith(EVENT_PREFIX))
-                    if proposal and (previous != send_readback(proposal) or self.user_turn - proposal.turn != 1):
+                    if proposal and (previous != send_readback(proposal) or self.user_turn - proposal.turn > 2):
                         self.session.pending_proposal = proposal = None
                     if proposal and APPROVAL_NO.search(self.last_user_text):
                         self.session.pending_proposal = None
