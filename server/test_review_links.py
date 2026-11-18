@@ -37,6 +37,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.work_mark = None
         self.review_reply = None
         self.turn_source = None
+        self.scope = None
+        self.commit = None
         self.reply = Mock(return_value='I fixed it.')
         self.add()
 
@@ -51,7 +53,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.states.update(states)
         review_links.observe(entries if entries is not None else [self.worker, self.reviewer],
                              self.status, self.send, self.reply, alert=self.alert, work_mark=self.work_mark,
-                             review_reply=self.review_reply, turn_source=self.turn_source)
+                             review_reply=self.review_reply, turn_source=self.turn_source,
+                             scope=self.scope, commit=self.commit)
 
     def test_idle_review_forwards_anchored_reply_before_unrelated_turn(self):
         self.review_reply = server.review_reply
@@ -1886,6 +1889,198 @@ class ReviewLinksTests(unittest.TestCase):
                 server.monitor_notices()
         self.assertEqual(self.links(), [dict(link, lost_ticks=1, lost_reason='worker tab is gone')])
 
+    # B205: reviews bound to a commit
+
+    HASH = '1f0e' * 10
+    NEXT = '2a9d' * 10
+
+    def bind(self, commit=None, *, dirty=False, rules=True):
+        """The worker's folder is at `commit`. The request and the approval check read it from here."""
+        self.head = commit or self.HASH
+        self.scope = lambda entry: {'commit': self.head, 'dirty': dirty, 'folder': '/work/my tree', 'rules': rules}
+        self.commit = lambda entry: self.head
+
+    def test_request_names_the_commit_the_rules_and_the_approval_form(self):
+        self.bind()
+        self.request_review()
+        text = self.send.call_args.args[1]
+        request_id = self.links()[0]['request_id']
+        self.assertIn(f"Review id: {request_id}. Commit under review: {self.HASH} in '/work/my tree'. "
+                      "Read the review rules first: `git -C '/work/my tree' show origin/main:REVIEW.md`. "
+                      f'An approval counts only for this commit: start it with `APPROVED {self.HASH[:12]}`. '
+                      'Its last reply:\n\nI fixed it.', text)
+        self.assertEqual(self.links()[0]['review_commit'], self.HASH)
+        self.assertTrue(self.links()[0]['review_clean'])
+        # The UI card (ui/src/Messages.tsx REVIEW_REQUEST) still reads the request.
+        pattern = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
+                   r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
+                   r'( This is the last round: your reply stays here\.)?\s*$')
+        self.assertEqual(re.match(pattern, text).groups()[:5],
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+
+    def test_request_says_uncommitted_changes_and_omits_rules_the_repository_does_not_have(self):
+        self.bind(dirty=True, rules=False)
+        self.request_review()
+        text = self.send.call_args.args[1]
+        self.assertIn(f"Commit under review: {self.HASH} in '/work/my tree' plus uncommitted changes. An approval", text)
+        self.assertNotIn('REVIEW.md', text)
+        self.assertFalse(self.links()[0]['review_clean'])
+
+    def test_unreadable_folder_sends_the_unbound_request_and_forwards_approval_as_before(self):
+        for scope in (lambda entry: None, Mock(side_effect=OSError('git')), lambda entry: {'dirty': False}):
+            with self.subTest(scope=scope):
+                self.add()
+                self.send.reset_mock()
+                self.scope = scope
+                self.commit = Mock()
+                self.request_review()
+                self.assertNotIn('Commit under review', self.send.call_args.args[1])
+                self.assertNotIn('review_commit', self.links()[0])
+                self.finish_review(f'APPROVED {self.NEXT[:12]}')
+                self.assertIn('Approved by the reviewer tab (%12):', self.send.call_args.args[1])
+                self.assertNotIn('approved_commit', self.links()[0])
+                self.commit.assert_not_called()
+
+    def test_approval_of_the_current_clean_commit_is_forwarded_and_recorded(self):
+        for reply in ('APPROVED', f'APPROVED {self.HASH[:12]}', f'APPROVED `{self.HASH}`: fine',
+                      f'Approved for commit {self.HASH[:7].upper()}. Tests pass.', 'APPROVED defaced nothing'):
+            with self.subTest(reply=reply):
+                self.add()
+                self.send.reset_mock()
+                self.bind()
+                self.request_review()
+                with patch.object(review_links.time, 'time', return_value=1700000000.9):
+                    self.finish_review(reply)
+                self.send.assert_called_with(self.worker,
+                    f'[Tether review] Approved by the reviewer tab (%12) for commit {self.HASH[:12]}:\n\n'
+                    + reply + '\n\nThe review is complete. Do the next step your instructions give '
+                    'for an approved review, then stop.', 'Idle')
+                link = self.links()[0]
+                self.assertEqual((link['approved_commit'], link['approved_at']), (self.HASH, 1700000000))
+                self.assertEqual(review_links.approved_commits(),
+                                 {'%13': {'%12': {'commit': self.HASH, 'at': 1700000000}}})
+
+    def test_approval_of_uncommitted_work_is_forwarded_but_not_recorded_as_an_approved_commit(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
+        self.bind(dirty=True)
+        self.request_review()  # the turn that follows an approval is not reviewed
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertIn(f'(%12) for commit {self.HASH[:12]} and its uncommitted changes:', self.send.call_args.args[1])
+        self.assertNotIn('approved_commit', self.links()[0])
+        self.assertEqual(review_links.approved_commits(), {})
+
+    def test_approval_for_an_older_commit_is_not_forwarded_and_the_new_commit_is_reviewed(self):
+        self.bind()
+        self.request_review()
+        self.head = self.NEXT  # the worker committed while the reviewer read the old commit
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        self.assertEqual(self.send.call_count, 1)  # nothing reached the worker
+        link = self.links()[0]
+        self.assertEqual((link['stale_commit'], link['stale_rounds']), (self.HASH, 1))
+        self.assertFalse(link['awaiting'])
+        self.assertNotIn('approved_turn', link)
+        self.assertNotIn('approved_commit', link)
+        self.assertNotIn('rounds', link)
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+        self.assertIn(f'Your approval of {self.HASH[:12]} was not forwarded: this tab is not at that commit. '
+                      'Its last reply:', self.send.call_args.args[1])
+        link = self.links()[0]
+        self.assertEqual(link['review_commit'], self.NEXT)
+        self.assertNotIn('stale_commit', link)
+        self.finish_review(f'APPROVED {self.NEXT[:12]}')
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertIn(f'for commit {self.NEXT[:12]}:', self.send.call_args.args[1])
+        self.assertEqual(self.links()[0]['approved_commit'], self.NEXT)
+        self.assertNotIn('stale_rounds', self.links()[0])
+
+    def test_approval_that_names_another_commit_is_not_forwarded(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.NEXT[:12]}: looks right')  # the tab never left HASH
+        self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(self.links()[0]['stale_commit'], self.NEXT[:12])
+        self.observe()
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Your approval of {self.NEXT[:12]} was not forwarded', self.send.call_args.args[1])
+
+    def test_findings_for_an_older_commit_still_reach_the_worker(self):
+        self.bind()
+        self.request_review()
+        self.head = self.NEXT
+        self.finish_review('The lock is not released.')
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertIn('Feedback from the reviewer tab (%12)', self.send.call_args.args[1])
+        self.assertEqual(self.links()[0]['rounds'], 1)
+
+    def test_three_approvals_that_do_not_match_pause_the_review_and_alert(self):
+        self.bind()
+        self.request_review()
+        for _ in range(review_links.MAX_ROUNDS):
+            self.finish_review(f'APPROVED {self.NEXT[:12]}')
+            self.observe()
+        link = self.links()[0]
+        self.assertEqual(link['stale_rounds'], review_links.MAX_ROUNDS)
+        self.assertTrue(link['paused'])
+        self.assertEqual(self.send.call_count, review_links.MAX_ROUNDS)  # 3 requests, no 4th, nothing to the worker
+        self.alert.assert_called_once_with('Review needs you',
+            '“Fix the bug”: 3 approvals in a row did not match the commit the tab was at. '
+            'Answer in that tab to restart reviews.', '%13')
+        self.turn_source = lambda entry: 'user'
+        self.request_review()  # a prompt from Mak restarts
+        self.assertEqual(self.send.call_count, review_links.MAX_ROUNDS + 1)
+        self.assertNotIn('stale_rounds', self.links()[0])
+        self.assertNotIn('paused', self.links()[0])
+
+    def test_unreadable_commit_at_approval_waits_then_counts_as_not_matching(self):
+        self.bind()
+        self.request_review()
+        self.commit = Mock(return_value=None)
+        self.finish_review(f'APPROVED {self.HASH[:12]}')
+        for _ in range(review_links.VERIFY_TICKS - 2):
+            self.observe()
+        self.assertEqual(self.send.call_count, 1)
+        self.assertTrue(self.links()[0]['awaiting'])
+        self.commit = lambda entry: self.HASH  # git answers again in time
+        self.observe()
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        self.assertEqual(self.links()[0]['approved_commit'], self.HASH)
+        self.assertNotIn('verify_ticks', self.links()[0])
+
+        self.add()
+        self.send.reset_mock()
+        self.bind()
+        self.request_review()
+        self.commit = Mock(side_effect=OSError('git'))
+        self.finish_review('APPROVED')
+        for _ in range(review_links.VERIFY_TICKS):
+            self.observe()
+        self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))  # never the worker
+        self.assertNotIn('approved_commit', self.links()[0])
+        self.assertEqual(self.links()[0]['stale_rounds'], 1)
+
+    def test_link_from_before_the_restart_without_a_commit_forwards_approval(self):
+        self.request_review()  # no scope: the stored link has no review_commit
+        self.bind()
+        self.head = self.NEXT
+        self.finish_review('APPROVED')
+        self.assertIn('Approved by the reviewer tab (%12):', self.send.call_args.args[1])
+
+    def test_named_commit_reads_only_a_hash_right_after_approved(self):
+        cases = {'APPROVED': None, 'APPROVED fine': None, 'APPROVED 1f0e1f0e1f0e': '1f0e1f0e1f0e',
+                 'approved: `1F0E1F0`.': '1f0e1f0', 'APPROVED for commit 1f0e1f0e — ok': '1f0e1f0e',
+                 'APPROVED **1f0e1f0e1f0e**': '1f0e1f0e1f0e', 'APPROVED defaced': None, 'APPROVED 1f0e1': None,
+                 'APPROVED. Earlier I read 1f0e1f0e1f0e.': None, 'APPROVED 1f0e1f0e1f0ezz': None}
+        for reply, expected in cases.items():
+            with self.subTest(reply=reply):
+                self.assertEqual(review_links._named_commit(reply), expected)
+
 
 class ServerWatcherTests(unittest.TestCase):
     def test_review_reply_anchors_last_request_and_bounds_at_next_user_message(self):
@@ -1944,7 +2139,8 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertEqual(observe.call_count, 2)
         observe.assert_called_with(entries, server.shared_status, server.review_send, server.last_reply,
                                    alert=server.review_alert, work_mark=server.review_work_mark,
-                                   review_reply=server.review_reply, turn_source=server.review_turn_source)
+                                   review_reply=server.review_reply, turn_source=server.review_turn_source,
+                scope=server.review_scope_of, commit=server.review_commit)
 
     def test_session_discovery_exception_skips_watcher_and_loop_recovers(self):
         entries = [{'id': '%12'}]
@@ -1957,7 +2153,8 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertEqual(sessions.call_count, 2)
         observe.assert_called_once_with(entries, server.shared_status, server.review_send, server.last_reply,
                                         alert=server.review_alert, work_mark=server.review_work_mark,
-                                        review_reply=server.review_reply, turn_source=server.review_turn_source)
+                                        review_reply=server.review_reply, turn_source=server.review_turn_source,
+                scope=server.review_scope_of, commit=server.review_commit)
         self.assertEqual([call.args for call in clock.call_args_list], [(2,), (2,)])
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 
@@ -2020,6 +2217,61 @@ class ServerWatcherTests(unittest.TestCase):
                 self.assertIsNone(server.review_work_mark({'cwd': '/project'}))
         with patch.object(server.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'')):
             self.assertIsNone(server.review_work_mark({'cwd': '/project'}))
+
+    def test_scope_reads_head_dirty_state_and_rules_in_a_real_repository(self):
+        import review_scope
+        with tempfile.TemporaryDirectory() as root:
+            origin, folder = Path(root) / 'origin.git', Path(root) / 'work'
+            def git(*args, cwd=folder):
+                return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                                       '-c', 'commit.gpgsign=false', *args], cwd=cwd, capture_output=True, check=True,
+                                      text=True).stdout.strip()
+            git('init', '--bare', '-b', 'main', str(origin), cwd=root)
+            git('init', '-b', 'main', str(folder), cwd=root)
+            self.assertIsNone(review_scope.scope(folder))  # no commit yet
+            (folder / 'work.txt').write_text('one\n')
+            git('add', '.')
+            git('commit', '-m', 'One')
+            first = git('rev-parse', 'HEAD')
+            self.assertEqual(review_scope.scope(folder),
+                             {'commit': first, 'dirty': False, 'folder': str(folder), 'rules': False})
+            (folder / 'REVIEW.md').write_text('rules\n')
+            self.assertTrue(review_scope.scope(folder)['dirty'])  # an untracked file
+            git('add', '.')
+            git('commit', '-m', 'Rules')
+            self.assertFalse(review_scope.scope(folder)['rules'])  # on the branch only: main does not have it yet
+            git('remote', 'add', 'origin', str(origin))
+            git('push', '-q', 'origin', 'main')
+            second = git('rev-parse', 'HEAD')
+            self.assertEqual(review_scope.scope(folder),
+                             {'commit': second, 'dirty': False, 'folder': str(folder), 'rules': True})
+            self.assertEqual(review_scope.head(folder), second)
+            (folder / 'work.txt').write_text('two\n')
+            self.assertEqual(review_scope.scope(folder)['dirty'], True)
+            self.assertEqual(server.review_commit({'cwd': str(folder)}), second)
+            self.assertEqual(server.review_scope_of({'cwd': str(folder)})['commit'], second)
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertIsNone(review_scope.scope(folder))
+            self.assertIsNone(review_scope.head(folder))
+        self.assertIsNone(review_scope.head(None))
+        self.assertIsNone(server.review_scope_of({}))
+
+    def test_scope_uses_bounded_read_only_git_commands_and_handles_errors(self):
+        import review_scope
+        done = subprocess.CompletedProcess([], 0, (('1f0e' * 10) + '\n').encode())
+        with patch.object(review_scope.subprocess, 'run', return_value=done) as run:
+            self.assertEqual(review_scope.scope('/project')['commit'], ('1f0e' * 10))
+        self.assertEqual([call.args[0] for call in run.call_args_list],
+            [['git', 'rev-parse', '--verify', 'HEAD^{commit}'], ['git', 'status', '--porcelain'],
+             ['git', 'cat-file', '-e', 'origin/main:REVIEW.md']])
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs['cwd'], '/project')
+            self.assertEqual(call.kwargs['timeout'], 5)
+            self.assertEqual(call.kwargs['env']['GIT_OPTIONAL_LOCKS'], '0')
+        for failure in (OSError('missing'), subprocess.TimeoutExpired('git', 5)):
+            with patch.object(review_scope.subprocess, 'run', side_effect=failure):
+                self.assertIsNone(review_scope.scope('/project'))
+                self.assertIsNone(review_scope.head('/project'))
 
 
 if __name__ == '__main__':

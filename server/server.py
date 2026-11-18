@@ -59,6 +59,7 @@ import delegate
 import worktrees
 import agent_tabs
 import review_links
+import review_scope
 import foundry_spend
 import transcribe
 import tts
@@ -224,6 +225,19 @@ def review_turn_source(entry):
     return notification_priority.turn_source(entry.get('agent'), notification_records(entry))
 
 
+def review_folder(entry):
+    """The folder a worker commits in: where the agent says it works, else the pane's folder."""
+    return agent_folder(entry)
+
+
+def review_scope_of(entry):
+    return review_scope.scope(review_folder(entry))
+
+
+def review_commit(entry):
+    return review_scope.head(review_folder(entry))
+
+
 def review_work_mark(entry):
     cwd = entry.get('cwd')
     if not cwd:
@@ -258,7 +272,7 @@ def monitor_notices():
                 continue
         review_links.observe(entries, shared_status, review_send, last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
-                             turn_source=review_turn_source)
+                             turn_source=review_turn_source, scope=review_scope_of, commit=review_commit)
         try:
             attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()
