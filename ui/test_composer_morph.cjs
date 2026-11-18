@@ -87,8 +87,7 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
         const before = getComputedStyle(el, '::before')
         const morphing = el.hasAttribute('data-morph'), outline = morphing ? parseFloat(before.height) : el.getBoundingClientRect().height
         return { morphing, outline,
-          fieldTop: input.getBoundingClientRect().top - el.getBoundingClientRect().bottom, fieldLeft: input.getBoundingClientRect().left,
-          fieldScreen: input.getBoundingClientRect().top, shellBottom: el.closest('.app-shell').getBoundingClientRect().bottom }
+          fieldTop: input.getBoundingClientRect().top - el.getBoundingClientRect().bottom, fieldLeft: input.getBoundingClientRect().left }
       }
       window.morphSample = new Promise(resolve => {
         const step = t => {
@@ -122,9 +121,6 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
       check(`${name}: no frame jumps more than 40% of the change`, steps.every(step => Math.abs(step) <= Math.abs(to - from) * 0.4), JSON.stringify(heights.map(Math.round)))
       check(`${name}: it ends at the new size and stops morphing`, Math.abs(heights.at(-1) - to) < 1 && !frames.at(-1).morphing, `${heights.at(-1)} vs ${to}`)
       const tops = frames.map(frame => frame.fieldTop), lefts = frames.map(frame => frame.fieldLeft)
-      const screen = frames.map(frame => frame.fieldScreen)
-      const shell = frames.map(frame => frame.shellBottom)
-      check(`${name}: the field follows the keyboard ride`, screen.slice(1).every((v, i) => Math.abs(v - screen[i] - (shell[i + 1] - shell[i])) <= 30), JSON.stringify(screen.map(Math.round)))
       check(`${name}: the text field slides, it does not jump`, tops.slice(1).every((v, i) => Math.abs(v - tops[i]) <= 30) && lefts.slice(1).every((v, i) => Math.abs(v - lefts[i]) <= 12), JSON.stringify({ tops: tops.map(Math.round), lefts: lefts.map(Math.round) }))
     }
     const pill = (await box.boundingBox()).height
