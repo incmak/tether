@@ -69,6 +69,15 @@
 .factory-token .factory-flag { font-size: 0.75em; }
 .factory-flag.is-waits { background: color-mix(in srgb, var(--attention) 16%, transparent); color: var(--attention); }
 .factory-flag.is-stuck { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
+.factory-flag.is-sweep { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+/* The worktree sweep strip on the floor (B210): closed until asked for. */
+.factory-sweep { flex: none; border-bottom: 1px solid var(--line); background: var(--surface); font-size: 0.95em; }
+.factory-sweep summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2em 0.5em; min-height: 2.75em; padding: 0.3em 1em; cursor: pointer; }
+.factory-sweep summary svg { flex: none; width: 1.1em; height: 1.1em; }
+.factory-sweep summary span { color: var(--muted); font-size: 0.9em; }
+.factory-sweep summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.factory-sweep > :not(summary) { margin: 0; padding: 0 1em 0.7em; }
+.factory-sweep .factory-list { max-height: 40vh; overflow: auto; }
 
 /* Agent marks: filled circle = working, ring = idle, square = waits for you. */
 .factory-dot { display: inline-block; flex: none; width: 0.75em; height: 0.75em; margin-right: 0.15em; border: 2px solid var(--muted); border-radius: 50%; vertical-align: -0.05em; }
@@ -97,7 +106,7 @@
 .factory-task-head h2 b { margin-right: 0.2em; }
 .factory-kicker { margin: 0; color: var(--muted); font-size: 0.95em; }
 .factory-kicker::first-letter { text-transform: uppercase; }
-.factory-flags { display: flex; gap: 0.5em; margin: 0 0 0.4em; }
+.factory-flags { display: flex; flex-wrap: wrap; gap: 0.5em; margin: 0 0 0.4em; }
 .factory-flags:empty { display: none; }
 .factory-why { max-width: 60em; margin: 0; padding: 0.6em 0.8em; border-left: 3px solid var(--line); background: var(--surface); line-height: 1.4; overflow-wrap: anywhere; }
 .factory-task h3, .factory-agent h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5em; margin: 0 0 0.5em; font-size: 1.1em; }

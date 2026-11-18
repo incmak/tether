@@ -167,7 +167,7 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                 result = helper_tabs.send_message(body, caller, entries, run, status, send, last_reply,
                                                   helper_tabs.SEND_LOCK)
                 # A prompt from another agent continues the worker's current review task (B189).
-                review_links.agent_prompt(result[1]['pane'])
+                review_links.agent_prompt(result[1]['pane'], sender=caller['id'], sender_thread=caller.get('thread'))
             else:
                 handler.keep_sessions = True
                 result = 200, helper_tabs.poll(body, caller, entries, run, status, last_reply, timeline)
@@ -239,6 +239,9 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                 elif reviewer != caller['id']:
                     raise ValueError('That review link is not on this tab.')
             result = 200, {'stopped': review_links.remove(worker, reviewer)}
+        elif action == 'escalate':
+            review_links.escalate(body.get('pane'), caller['id'], caller.get('thread'))
+            result = 200, {'escalated': True}
         elif action == 'close':
             result = 200, close_tab(body, caller, entries, run, status, sessions, lock)
         elif action == 'list':

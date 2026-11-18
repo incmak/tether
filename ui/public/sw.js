@@ -98,7 +98,7 @@ self.addEventListener('notificationclick', event => {
     return
   }
   const go = event.action === 'agents' ? 'agents' : event.notification.data?.go
-  event.waitUntil(go === 'agents' || go === 'work' ? openPage(go) : openPane(session))
+  event.waitUntil(['agents', 'work', 'factory', 'cleanup'].includes(go) ? openPage(go) : openPane(session))
 })
 // "All agents" (or an old summary) opens the Agents page; a work item question opens Needs you. In the open Tether
 // window when there is one, else in a new window.

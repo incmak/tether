@@ -81,16 +81,42 @@ class Problems(Base):
         self.assertEqual(claude_advisor.problems('off', main_model='Fable 5.2'), [])
         self.assertEqual(claude_advisor.problems('opus', main_model='Opus 5.5'), [])
 
-    def test_fable_consent_counts_only_for_the_active_account(self):
-        self.assertEqual([item['code'] for item in claude_advisor.problems('fable')], ['consent'])
-        account = {'organizationUuid': 'org-1', 'accountUuid': 'u-1'}
-        for consent, ok in (({'org-2': True, 'org-2:2': True, 'acct:u-2': True}, False), ({'org-1': True}, False),
-                            ({'org-1': True, 'org-1:2': True}, True), ({'acct:u-1': True, 'acct:u-1:2': True}, True),
-                            ({'acct:u-1:2': True}, False), ({'org-1': 'yes', 'org-1:2': True}, False)):
-            (self.home / '.claude.json').write_text(json.dumps({'oauthAccount': account, 'fableOverageConsentV2': consent}))
-            self.assertEqual(claude_advisor.fable_consent(), ok, consent)
-        (self.home / '.claude.json').write_text(json.dumps({'fableOverageConsentV2': {'org-1': True, 'org-1:2': True}}))
-        self.assertFalse(claude_advisor.fable_consent())
+    def test_fable_has_no_consent_problem_whatever_the_consent_record_says(self):
+        # A plan that includes Fable writes no consent record, so no record (or an old or partial one) is not evidence.
+        account = {'organizationUuid': 'org-1', 'accountUuid': 'u-1', 'organizationType': 'claude_max'}
+        for config in (None, {}, {'oauthAccount': account}, {'oauthAccount': account, 'fableOverageConsentV2': {}},
+                       {'oauthAccount': account, 'fableOverageConsentV2': {'org-1': True}},
+                       {'oauthAccount': account, 'fableOverageConsentV2': {'org-2': True, 'org-2:2': True}},
+                       {'oauthAccount': account, 'fableOverageConsentV2': {'org-1': True, 'org-1:2': True}}):
+            if config is not None:
+                (self.home / '.claude.json').write_text(json.dumps(config))
+            self.assertEqual(claude_advisor.problems('fable'), [], config)
+            self.assertEqual(claude_advisor.state()['problems'], {'opus': [], 'fable': []}, config)
+            self.assertEqual(claude_advisor.tab_state('fable', 'Opus 5.5')['problems'], [], config)
+        self.assertFalse(hasattr(claude_advisor, 'fable_consent'))
+
+    def test_fable_copy_names_the_consent_command_and_its_side_effect(self):
+        summary = {key: text for key, _, text in claude_advisor.MODELS}['fable']
+        self.assertIn('leaves the Fable advisor off until you give a one-time consent with /model fable', summary)
+        self.assertIn('/model fable also makes Fable the main model for new sessions; switch back with /model opus', summary)
+        self.assertIn('Tether never accepts the consent for you', summary)
+        # The command stays in the summary: no problem entry tells the person to run it.
+        self.assertNotIn('/model', json.dumps(claude_advisor.state()['problems']))
+        self.assertNotIn('/model', {key: text for key, _, text in claude_advisor.MODELS}['opus'])
+
+    def test_fable_keeps_the_problems_tether_has_evidence_for(self):
+        codes = lambda found: [item['code'] for item in found]  # noqa: E731
+        self.assertEqual(codes(claude_advisor.problems('fable', env={'DISABLE_TELEMETRY': '1'})), ['no-flags'])
+        self.assertEqual(codes(claude_advisor.problems('fable', env={'CLAUDE_CODE_DISABLE_ADVISOR_TOOL': '1'})), ['disabled'])
+        self.assertEqual(codes(claude_advisor.tab_state('fable!no-flags', 'Fable 5.2')['problems']), ['no-flags'])
+
+    def test_fable_main_model_takes_a_fable_advisor(self):
+        # code.claude.com/docs/en/advisor: main Fable 5.2 accepts Fable 5.2; "Fable main + Fable advisor" is a pairing.
+        for main in ('Fable 5.2', 'claude-fable-5-2', 'claude-fable-5-2[1m]', 'Fable 5.2 (1M context)', 'fable', 'Fable 5'):
+            self.assertFalse(claude_advisor.outranked('fable', main), main)
+            self.assertEqual(claude_advisor.problems('fable', main_model=main), [], main)
+            self.assertEqual(claude_advisor.tab_state('fable', main),
+                             {'model': 'fable', 'name': 'Fable', 'source': 'tether', 'problems': []}, main)
 
     def test_main_model_ranks(self):
         for advisor, main, out in (('opus', 'Fable 5.2', True), ('opus', 'claude-fable-5-2', True),

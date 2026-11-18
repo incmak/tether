@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import agent_triage_cli
+import agents
 import paths
 import work_api
 import work_items
@@ -352,9 +353,11 @@ class StageFor(unittest.TestCase):
 
 
 class Tabs(unittest.TestCase):
-    ITEM = {'id': 'T-001', 'title': 'login-fails', 'tabs': [{'pane': '%9', 'role': 'triage'}]}
+    ITEM = {'id': 'T-001', 'title': 'login-fails', 'tabs': [
+        {'pane': '%9', 'role': 'triage', 'session': 'Triage', 'name': 'login-fails', 'at': 1000},
+    ]}
 
-    def run_with(self, answers, status, here=''):
+    def run_with(self, answers, status, here='', *, item=None, started=None, entries=()):
         calls = []
 
         answers = {k: list(v) if isinstance(v, list) else v for k, v in answers.items()}
@@ -363,8 +366,10 @@ class Tabs(unittest.TestCase):
             calls.append(args)
             answer = answers.get(args[0], '')
             return answer.pop(0) if isinstance(answer, list) else answer
-        with mock.patch.object(work_triage, '_tmux', tmux):
-            shown = work_triage.show_status(self.ITEM, status, here)
+        with mock.patch.object(work_triage, '_tmux', tmux), \
+                mock.patch.object(work_api, 'tmux_started', return_value=started), \
+                mock.patch.object(agents, 'discover', return_value=entries):
+            shown = work_triage.show_status(self.ITEM if item is None else item, status, here)
         return shown, calls
 
     def test_names_the_linked_tab(self):
@@ -373,6 +378,29 @@ class Tabs(unittest.TestCase):
         self.assertEqual(shown, 'window Triage:login-fails -> login-fails · fixing')
         self.assertIn(('rename-window', '-t', '@3', 'login-fails · fixing'), calls)
         self.assertNotIn('kill-window', [c[0] for c in calls])
+
+    def test_done_targets_the_relinked_tab_after_a_restart(self):
+        entries = [{'id': '%9', 'label': 'Triage:1.0', 'full_pane_name': 'another tab'},
+                   {'id': '%19', 'label': 'Triage:2.0', 'full_pane_name': 'login-fails · ticket'}]
+        answers = {'display-message': ['@4\tlogin-fails · ticket\tTriage', '@4\tlogin-fails · done'], 'list-panes': '%19'}
+        for here in ('', '%19'):
+            with self.subTest(here=here):
+                _, calls = self.run_with(answers, 'closed', here, started=2000, entries=entries)
+                self.assertEqual(calls[0][:4], ('display-message', '-p', '-t', '%19'))
+                self.assertIn(('rename-window', '-t', '@4', 'login-fails · done'), calls)
+                self.assertEqual(('kill-window', '-t', '@4') in calls, not here)
+
+    def test_a_reused_pane_with_the_same_name_and_another_chat_is_left_alone(self):
+        item = dict(self.ITEM, tabs=[dict(self.ITEM['tabs'][0], chat='chat-1')])
+        entries = [{'id': '%9', 'label': 'Triage', 'full_pane_name': 'login-fails', 'thread': 'chat-2'}]
+        answers = {'display-message': ['@3\tlogin-fails\tTriage', '@3\tlogin-fails · done'], 'list-panes': '%9'}
+        self.assertEqual(self.run_with(answers, 'closed', item=item, started=2000, entries=entries), ('', []))
+
+    def test_newer_links_keep_their_pane_without_discovery(self):
+        with mock.patch.object(work_api, 'tmux_started', return_value=900), \
+                mock.patch.object(agents, 'discover') as discover:
+            self.assertEqual(work_triage.triage_pane(self.ITEM), '%9')
+            discover.assert_not_called()
 
     def test_done_closes_the_window_unless_run_inside_it(self):
         answers = {'display-message': ['@3\tlogin-fails\tTriage', '@3\tlogin-fails · done'], 'list-panes': '%9'}
@@ -418,6 +446,7 @@ class Cli(Base):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(agent_triage_cli.agent_item_cli, 'here', return_value=('', '')), \
+                mock.patch.object(work_api, 'tmux_started', return_value=None), \
                 mock.patch.object(work_triage, '_tmux', return_value=None):
             code = agent_triage_cli.main(['--project', 'shop', '--view', str(self.view), *argv])
         return code, out.getvalue(), err.getvalue()

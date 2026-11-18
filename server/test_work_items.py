@@ -291,15 +291,19 @@ class Api(unittest.TestCase):
         work_items._CACHE.clear()
         work_items.save_project(dict(PROJECT), 0, create=True)
         work_items.new('shop', 'Login fails', 'agent')
-        self.asked = work_items.ask('T-001', 'Fix it?', ['Build', 'Hold'], pane='%5', chat='chat-1')
+        with mock.patch('time.time', return_value=1000):
+            self.asked = work_items.ask('T-001', 'Fix it?', ['Build', 'Hold'], pane='%5', chat='chat-1')
         self.entry = {'id': '%5', 'thread': 'chat-1', 'writable': True}
+        self.entries = [self.entry]
+        self.started = None
         self.state = 'Working'
         self.sends = []
 
     def post(self, name, body):
         handler = Handler(work_api.PREFIX + name, body)
-        work_api.post(handler, sessions=lambda: [self.entry], status=lambda entry: {'state': self.state},
-                      send=lambda entry, text, state: self.sends.append((entry['id'], text)))
+        with mock.patch.object(work_api, 'tmux_started', return_value=self.started):
+            work_api.post(handler, sessions=lambda: self.entries, status=lambda entry: {'state': self.state},
+                          send=lambda entry, text, state: self.sends.append((entry['id'], text)))
         return handler.sent
 
     def answer(self, **extra):
@@ -353,6 +357,41 @@ class Api(unittest.TestCase):
         self.assertEqual(payload['item']['stage'], 'ready')
         self.assertEqual(payload['item']['history'][-1]['text'], 'Sent to tab %5')
 
+    def test_answer_follows_the_asking_chat_after_a_restart(self):
+        self.started = 2000
+        self.entries = [{**self.entry, 'thread': 'chat-2'}, {**self.entry, 'id': '%15'}]
+        status, payload = self.answer(choice='Hold')
+        self.assertEqual(status, 200)
+        self.assertTrue(payload['sent'])
+        self.assertEqual([pane for pane, _ in self.sends], ['%15'])
+        self.assertIn('on the work board: Hold', self.sends[0][1])
+        self.assertEqual(payload['item']['history'][-1]['text'], 'Sent to tab %15')
+
+    def test_a_reused_pane_gets_nothing_if_the_asking_chat_did_not_return(self):
+        self.started = 2000
+        self.entry['thread'] = 'chat-2'
+        status, payload = self.answer(choice=None, text='Use the other option.')
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['sent'])
+        self.assertEqual(self.sends, [])
+        self.assertEqual(payload['item']['history'][-2]['text'], 'You replied: Use the other option.')
+
+    def test_the_relinked_asking_pane_still_needs_a_clear_prompt(self):
+        self.started = 2000
+        self.entry['id'] = '%15'
+        self.state = 'Input needed'
+        status, payload = self.answer()
+        self.assertEqual(status, 200)
+        self.assertFalse(payload['sent'])
+        self.assertIn('Tab %15 waits on a prompt', payload['why'])
+        self.assertEqual(self.sends, [])
+
+    def test_an_ask_made_after_tmux_started_keeps_its_pane(self):
+        self.started = 900
+        self.entries.append({**self.entry, 'id': '%15'})
+        self.assertTrue(self.answer()[1]['sent'])
+        self.assertEqual([pane for pane, _ in self.sends], ['%5'])
+
     def test_answer_is_kept_when_the_pane_runs_another_chat(self):
         self.entry['thread'] = 'chat-2'
         status, payload = self.answer()
@@ -404,6 +443,113 @@ class Api(unittest.TestCase):
         work_api.post(handler)
         self.assertEqual(handler.sent[0], 413)
         self.assertEqual(self.post('nope', {'version': 1})[0], 404)
+
+
+class LiveTabs(unittest.TestCase):
+    """A tmux restart gives every pane a new id; links made before it find their tab again (live_tabs)."""
+    STARTED = 2000
+
+    def item(self, *tabs):
+        return {'id': 'T-020', 'title': 'exhibits-carry-over', 'tabs': [dict(t) for t in tabs]}
+
+    def tab(self, pane, at, name='exhibits-carry-over · needs decision', session='Triage', chat=''):
+        return {'pane': pane, 'role': 'triage', 'chat': chat, 'name': name, 'session': session, 'stack': '', 'at': at}
+
+    def live(self, pane, name, session='Triage', thread='', position='64.0'):
+        return {'id': pane, 'label': session, 'position': position, 'tmux_pane_name': name[:40], 'full_pane_name': name,
+                'thread': thread}
+
+    def panes(self, item, entries, started=STARTED):
+        return [t['pane'] for t in work_items.live_tabs([item], entries, started)[0]['tabs']]
+
+    def test_an_old_link_finds_its_tab_by_session_and_name_with_a_new_status(self):
+        entries = [self.live('%195', 'exhibits-carry-over · fixed, review'), self.live('%191', 'tag-member-not-listed')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), ['%195'])
+
+    def test_an_old_link_skips_a_pane_that_now_reuses_its_id(self):
+        entries = [self.live('%300', 'another tab'), self.live('%12', 'exhibits-carry-over', session='Other')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), [''])
+
+    def test_an_old_link_with_a_conversation_follows_it(self):
+        entries = [self.live('%7', 'renamed by the agent', thread='chat-9'), self.live('%8', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%7'])
+
+    def test_two_matches_show_the_tab_as_closed(self):
+        entries = [self.live('%7', 'exhibits-carry-over'), self.live('%8', 'exhibits-carry-over · ticket', position='65.0')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), [''])
+
+    def test_a_long_name_matches_in_full_not_by_its_first_40_characters(self):
+        title = 'a-very-long-triage-item-title-that-runs-on-and-on'
+        item = {**self.item(self.tab('%300', 1000, name=f'{title} · needs decision')), 'title': title}
+        entries = [self.live('%9', f'{title} · fixed, review'), self.live('%10', title[:40] + '-but-another-item')]
+        self.assertEqual(self.panes(item, entries), ['%9'])
+
+    def test_an_old_link_never_takes_a_pane_that_runs_another_conversation(self):
+        entries = [self.live('%7', 'exhibits-carry-over', thread='chat-other')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), [''])
+        entries.append(self.live('%8', 'exhibits-carry-over · fixed, review'))  # no conversation known yet: the name decides
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%8'])
+
+    def test_a_pane_listed_under_two_sessions_is_one_match(self):
+        entries = [self.live('%7', 'renamed', thread='chat-9'), {**self.live('%7', 'renamed', thread='chat-9'), 'label': 'Linked'}]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%7'])
+
+    def test_a_link_from_the_second_tmux_started_must_find_its_tab_again(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 2000.5)), entries), ['%195'])
+        entries.append(self.live('%5', 'new tab'))
+        self.assertEqual(self.panes({**self.item(self.tab('%5', 2000.5, name='new tab')), 'title': 'other'}, entries), ['%5'])
+        entries = [self.live('%12', 'unrelated', thread='chat-other')]  # no chat stored, another tab has the id now
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone')), entries), [''])
+        entries = [self.live('%12', 'another tab', thread='chat-other')]  # its id now runs another conversation
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone', chat='chat-9')), entries), [''])
+        self.assertEqual(self.panes(self.item(self.tab('%12', 2000.5, name='gone')), []), [''])  # no such pane now
+
+    def test_a_title_with_a_separator_matches_only_its_own_tab(self):
+        item = {**self.item(self.tab('%300', 1000, name='Invoice · Canada · needs decision')), 'title': 'Invoice · Canada'}
+        self.assertEqual(self.panes(item, [self.live('%7', 'Invoice · UK · fixed, review')]), [''])
+        self.assertEqual(self.panes(item, [self.live('%7', 'Invoice · UK · fixed, review'),
+                                           self.live('%8', 'Invoice · Canada · fixed, review')]), ['%8'])
+        plain = {**self.item(self.tab('%300', 1000, name='Invoice')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(plain, [self.live('%7', 'Invoice · UK')]), [''])
+        literal = {**self.item(self.tab('%300', 1000, name='Invoice · ticket')), 'title': 'Invoice · ticket'}
+        self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · fixed, review')]), [''])
+        self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · ticket · fixed, review')]), ['%7'])
+        fix = {**self.item(self.tab('%300', 1000, name='T-020 fix')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(fix, [self.live('%7', 'Invoice · needs decision')]), [''])
+        self.assertEqual(self.panes(fix, [self.live('%7', 'Invoice · needs decision'), self.live('%8', 'T-020 fix')]), ['%8'])
+        unnamed = {**self.item(self.tab('%300', 1000, name='')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(unnamed, [self.live('%7', 'Invoice · needs decision')]), ['%7'])
+        other = self.item(self.tab('%300', 1000, name='Card tap fix', session='Dev'))
+        self.assertEqual(self.panes(other, [self.live('%9', 'Card tap fix', session='Dev')]), ['%9'])
+
+    def test_the_tab_that_asked_follows_its_conversation(self):
+        item = {**self.item(), 'ask': {'id': 'a1', 'q': 'Go?', 'pane': '%300', 'chat': 'chat-9', 'at': 1000}}
+        entries = [self.live('%300', 'another tab', thread='chat-x'), self.live('%195', 'x', thread='chat-9')]
+        self.assertEqual(work_items.live_tabs([item], entries, self.STARTED)[0]['ask']['pane'], '%195')
+        self.assertEqual(work_items.live_tabs([{**item, 'ask': None}], entries, self.STARTED)[0]['ask'], None)
+
+    def test_new_links_and_an_unknown_start_keep_their_pane(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 3000)), entries), ['%300'])
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries, started=None), ['%300'])
+
+    def test_a_pane_linked_again_after_the_restart_shows_once(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000), self.tab('%195', 3000)), entries), ['%195'])
+
+    def test_the_board_route_relinks_with_live_sessions(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with mock.patch.object(paths, 'TETHER', Path(temp.name)), mock.patch('time.time', return_value=1000):
+            work_items._CACHE.clear()
+            work_items.save_project(dict(PROJECT), 0, create=True)
+            work_items.new('shop', 'exhibits-carry-over', 'agent')
+            work_items.link('T-001', '%300', 'triage', name='exhibits-carry-over · needs decision', session='Triage')
+        with mock.patch.object(paths, 'TETHER', Path(temp.name)):
+            handler = Handler(work_api.PREFIX + 'board')
+            work_api.get(handler, sessions=lambda: [self.live('%195', 'exhibits-carry-over')], started=lambda: self.STARTED)
+        self.assertEqual(handler.sent[1]['items'][0]['tabs'][0]['pane'], '%195')
 
 
 class Watcher(unittest.TestCase):

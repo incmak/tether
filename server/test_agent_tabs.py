@@ -381,6 +381,24 @@ class AgentTabsTests(unittest.TestCase):
                              (400, {'error': 'Select a tab to stop reviewing.'}))
         self.assertEqual(review_links.reviewed_by(), {'%13': ['%14']})
 
+    def test_only_parent_can_escalate_its_workers_waiting_review(self):
+        self.link(worker='%13', reviewer='%14')
+        link, = json.loads(review_links.FILE.read_text())
+        link.update(paused=True, rounds=3, parent_stage=dict(pane='%12', thread=THREAD, notice='Fix it.', sent=True))
+        review_links.FILE.write_text(json.dumps([link]))
+        payload = {'action': 'escalate', 'pane': '%13'}
+        error = (400, {'error': 'That tab has no review waiting on this tab.'})
+        self.assertEqual(self.request(dict(payload, session='%14')), error)
+        self.entries[0]['thread'] = '17b9c72a-a916-46a0-bc10-bc41a8c6249a'
+        self.assertEqual(self.request(payload), error)
+        self.assertEqual(json.loads(review_links.FILE.read_text()), [link])
+        self.entries[0]['thread'] = THREAD
+        self.assertEqual(self.request(payload), (200, {'escalated': True}))
+        link.pop('parent_stage')
+        self.assertEqual(json.loads(review_links.FILE.read_text()), [dict(link, escalate='Fix it.')])
+        self.assertEqual(self.request(payload), error)
+        self.run.assert_not_called()
+
     def test_list_reports_both_sides_with_names_in_store_order(self):
         self.link()
         self.link(reviewer='%14')
@@ -541,6 +559,10 @@ class CLITests(unittest.TestCase):
     def test_close_builds_pane_body(self):
         self.assertEqual(cli.main(['close', '--pane', '%13']), 0)
         self.assertEqual(self.payload(), dict(action='close', session='%12', pane='%13'))
+
+    def test_escalate_builds_pane_body(self):
+        self.assertEqual(cli.main(['escalate', '--pane', '%13']), 0)
+        self.assertEqual(self.payload(), dict(action='escalate', session='%12', pane='%13'))
 
     def test_link_builds_pair_body(self):
         self.assertEqual(cli.main(['link', '--worker', '%13', '--reviewer', '%12']), 0)

@@ -291,6 +291,10 @@ def write_note(pid, name, text):
     return {'name': name}
 
 
+def trash_name(name):
+    return f'{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}-{name}'
+
+
 def delete_note(pid, name):
     """Move the note to notes/.trash/. Nothing is deleted for good."""
     path = _note(pid, name)
@@ -298,8 +302,9 @@ def delete_note(pid, name):
         raise ProjectError(404, 'That note is gone.')
     trash = path.parent / '.trash'
     trash.mkdir(mode=0o700, exist_ok=True)
-    os.replace(path, trash / f'{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(2)}-{name}')
-    return {'name': name}
+    kept = trash_name(name)
+    os.replace(path, trash / kept)
+    return {'name': name, 'trash': kept}
 
 
 def mark_seen(pid):
@@ -386,12 +391,13 @@ def render(pid, agent='claude', home=None, group=None, backlog_project=None):
                  'Re-arm it when it expires. Use CronCreate only for work due at a set time, never to poll.\n')
     cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
     parts.append(f'\n## New tabs and reviewers\nUse your own subagents for searches, research and side work. '
-                 'A separate task the user asks for here (not a step of yours) goes to a worker tab: a full spec, `--worktree` for code, then `wait`. '
-                 'Start other tabs only for a reviewer or advisor that watches the work, or a task the user wants to steer.\n'
+                 'Give separate user tasks to worker tabs. Send a full spec, use `--worktree` for code, then `wait`. '
+                 'Other tabs are for reviewers, advisors or work the user wants to steer.\n'
                  f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
                  'Options: `--review-it` (this tab reviews each turn of the new tab), `--reviews-me` (the new tab reviews this tab), '
                  '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, `--stack GOAL` (1–3 words; names the new tab. It opens in this tab\'s stack, or in none; `--stack Unstacked` = none). '
                  '`stop --worker %N [--reviewer %N]` ends a review; `list` shows this tab\'s links. '
+                 '`escalate --pane %N` sends a helper tab\'s paused review to Mak. '
                  '`link --worker %N --reviewer %N` makes one open tab review another. '
                  'Start your review reply with APPROVED when nothing is wrong. '
                  '`send --pane %N "text"` (`-` = stdin) steers a tab you started. '

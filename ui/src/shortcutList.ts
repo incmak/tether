@@ -20,9 +20,10 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   ] },
   { name: 'Search', items: [
     ['Search panes, commands and the backlog', '⌘K'],
-    ['Search from any Tether screen', '⌥Space'],
+    // The Claude desktop app, Raycast and Alfred can take ⌥Space for the whole Mac; ⌘K always reaches Tether.
+    ['Search, also (when no other Mac app uses the key)', '⌥Space'],
     // Global Chrome command (extension/README.md). Chrome suggests only ⌘⇧ plus a digit; ⌘Space stays with Spotlight.
-    ['Search from any app (Tether Chrome extension). Set ⌥Space at chrome://extensions/shortcuts if Raycast does not use it', '⌘⇧9'],
+    ['Search from any app (Tether Chrome extension). Set another key at chrome://extensions/shortcuts', '⌘⇧9'],
     ['Move through the results', '↑ ↓'],
     ['Open the result', '↵'],
     ['Choose where a new tab starts', '→ or Tab'],

@@ -505,7 +505,7 @@ def _apply(item, event):
         item['stage'] = event.get('stage', item['stage'])
     elif kind == 'link':
         item['tabs'] = [t for t in item['tabs'] if t['pane'] != event.get('pane')]
-        item['tabs'].append({k: event.get(k, '') for k in ('pane', 'role', 'chat', 'name', 'session', 'stack')})
+        item['tabs'].append({**{k: event.get(k, '') for k in ('pane', 'role', 'chat', 'name', 'session', 'stack')}, 'at': event.get('at')})
     elif kind == 'unlink':
         item['tabs'] = [t for t in item['tabs'] if t['pane'] != event.get('pane')]
     elif kind == 'qa':
@@ -565,6 +565,67 @@ def board():
         except ProjectError:
             continue
     return {'revision': reg['revision'], 'projects': reg['projects'], 'items': items, 'stages': list(STAGES)}
+
+
+def _triage_name(name, title):
+    """The item's triage tab name: its title, with or without a status (work_triage.LABEL). A title may contain " · "
+    itself, so the title decides where the status starts, not the last separator."""
+    import work_triage  # it imports this module
+    return name == title or name.startswith(title + ' · ') and name[len(title) + 3:] in set(work_triage.LABEL.values())
+
+
+def _same_tab(live, link, title):
+    """A live tab name names the linked tab: the same full name, or, for a triage link (no name, or a triage name),
+    any triage name of the item, since the status changes. A link with a name of its own (a fix tab) needs it."""
+    live, name = (live or '').strip(), (link.get('name') or '').strip()
+    if not live:
+        return False
+    return live == name or (not name or _triage_name(name, title)) and _triage_name(live, title)
+
+
+def live_tabs(items, entries, started):
+    """Point linked tabs, and the tab that asked, at the panes that run them now. A tmux restart gives every pane a
+    new id, so a link made before the running tmux server started names a pane that is gone, or one of another tab
+    once tmux hands the id out again. Such a link finds its tab again by its conversation (chat) when the link knows
+    it: a pane that runs another conversation never matches. A link without a chat, or whose chat no pane runs yet,
+    matches a pane in its tmux session that has the same name with or without the status. It needs exactly one pane;
+    else it shows as closed (pane ''). A pane linked twice keeps the newest link. started: the tmux server's start
+    time in whole seconds; None when it is not known, and then each link keeps its pane id. entries: the live tabs, as
+    discovery lists them (a window linked into two sessions lists its pane twice)."""
+    if not started:
+        return items
+    out = []
+    for item in items:
+        tabs = []
+        for tab in item['tabs']:
+            tab = _relink(tab, item, entries, started)
+            if tab['pane']:
+                tabs = [t for t in tabs if t['pane'] != tab['pane']]
+            tabs.append(tab)
+        ask = item.get('ask')
+        out.append({**item, 'tabs': tabs, **({'ask': _relink(ask, item, entries, started)} if ask else {})})
+    return out
+
+
+def _relink(link, item, entries, started):
+    """Resolve a link. A discovery callback runs only for a link that may predate tmux."""
+    at = link.get('at')
+    # tmux gives its start time in whole seconds, so a link from that second may be older than tmux: check it too.
+    if not started or not isinstance(at, (int, float)) or at >= started + 1:
+        return link
+    if callable(entries):
+        entries = entries()
+    return {**link, 'pane': _find_tab(link, item, entries)}
+
+
+def _find_tab(tab, item, entries):
+    chat = tab.get('chat')
+    hits = {e['id'] for e in entries if chat and e.get('thread') == chat}
+    if not hits:
+        session = tab.get('session')
+        hits = {e['id'] for e in entries if session and (e.get('label') or '').split(':')[0] == session
+                and _same_tab(e.get('full_pane_name'), tab, item['title']) and not (chat and e.get('thread'))}
+    return next(iter(hits)) if len(hits) == 1 else ''
 
 
 def find(item_id):

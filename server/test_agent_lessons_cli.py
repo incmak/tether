@@ -37,6 +37,20 @@ class Cli(unittest.TestCase):
             code = cli.main(args)
         return code, json.loads(output.getvalue())
 
+    def test_propose_makes_a_candidate_and_no_lesson(self):
+        import lesson_candidates
+        code, result = self.invoke(['propose', '--avoid', '--quote', '3 commits had no stamp',
+                                    'When a commit has no stamp, write Verified: none with the reason.'])
+        self.assertEqual((code, result['status'], result['candidate']['agent'], result['candidate']['tab']),
+                         (0, 'proposed', 'codex', 'Review'))
+        self.assertEqual(lessons.entries(PID), [])
+        self.assertEqual(len(lesson_candidates.entries(PID)), 1)
+        code, result = self.invoke(['propose', '--avoid', 'When a commit has no stamp, write Verified: none with a reason.'])
+        self.assertEqual((code, result['status']), (9, 'similar'))
+        self.assertEqual(self.invoke(['propose', '--keep', 'Too short'])[0], 2)
+        self.values['#{@tether_helper}'] = '{"owner": "%1"}'
+        self.assertEqual(self.invoke(['propose', '--keep', 'When a deploy starts, read the deploy log first.'])[0], 2)
+
     def test_add_similar_new_reinforce_and_propose(self):
         args = ['add', '--avoid', 'When checks fail, read the exact error.']
         code, result = self.invoke(args)

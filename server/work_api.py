@@ -4,8 +4,11 @@ header before it calls these. The store is work_items.py.
 An answer goes to the tab that asked, as a message, only while that pane still runs the same conversation; else it
 stays in the item's history and the reply says it was not sent."""
 import json
+import subprocess
 import threading
+import time
 
+import auto_resume
 import paths
 from projects import _read, _write
 
@@ -38,13 +41,24 @@ def _answer(handler, work):
         handler.respond(500, {'error': 'Tether could not read or write the work items.'})
 
 
-def get(handler):
-    """The board: projects and items. The page joins linked tabs with its own session list (live state and names)."""
+def tmux_started(run=subprocess.run):
+    """The running tmux server's start time in seconds, or None when tmux does not answer. Read on each board
+    request, so it never pairs new pane ids with the start time of a tmux server that has ended."""
+    kind, identifier = auto_resume.server_id(run=run)
+    return int(identifier.split(':')[1]) if kind == 'up' else None
+
+
+def get(handler, sessions=None, started=tmux_started):
+    """The board: projects and items. The page joins linked tabs with its own session list (live state and names);
+    with sessions, links made before a tmux restart point at the panes that run those tabs now (live_tabs)."""
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
         if name == 'board':
-            return {**work_items.board(), 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
+            board = work_items.board()
+            if sessions:
+                board['items'] = work_items.live_tabs(board['items'], sessions(), started())
+            return {**board, 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
                     'graph': graph_client.status(), 'backlog': work_backlog.cards()}
         raise ProjectError(404, 'Not found')
     _answer(handler, work)
@@ -57,16 +71,18 @@ def message_for(item, event_text):
 
 
 def deliver(item, ask, text, sessions, status, send):
-    """Send Mak's answer to the asking pane. Returns (sent, why). The pane must still run the conversation that asked
-    (a reused pane id or a new chat in the pane gets nothing) and must not wait on a prompt of its own."""
+    """Send the answer to a live pane with the asking chat and no pending prompt. Return (sent, why)."""
     pane, chat = ask.get('pane'), ask.get('chat')
     if not pane:
         return False, 'No tab asked this question.'
     if not chat:
         return False, f'Tether does not know which conversation in tab {pane} asked.'
-    entry = next((e for e in sessions() if e.get('id') == pane), None)
+    entries = sessions()
+    live_pane = work_items._relink(ask, item, entries, tmux_started())['pane']
+    entry = next((e for e in entries if e.get('id') == live_pane), None)
     if entry is None:
         return False, f'The asking tab {pane} is closed.'
+    pane = live_pane
     if entry.get('thread') != chat:
         return False, f'Tab {pane} runs another conversation now.'
     if not entry.get('writable', True):
@@ -100,12 +116,17 @@ def post(handler, sessions=None, status=None, send=None, run=None, lock=None):
                                      choice=body.get('choice'), text=body.get('text'))
             said = body['choice'] if body.get('choice') is not None else body.get('text', '')
             sent, why = False, 'Delivery is off.'
+            tab_name = ''
             if sessions and status and send:
+                def send_answer(entry, message, state):
+                    nonlocal tab_name
+                    send(entry, message, state)
+                    tab_name = entry['id']
+
                 try:
-                    sent, why = deliver(item, ask, said, sessions, status, send)
+                    sent, why = deliver(item, ask, said, sessions, status, send_answer)
                 except (OSError, RuntimeError, ValueError) as exc:
                     sent, why = False, str(exc) or 'The message did not go through.'
-            tab_name = ask.get('pane', '')
             item = work_items.record(item['id'], 'sent', f'Sent to tab {tab_name}' if sent else f'Not sent: {why}')
             result = {'item': item, 'sent': sent, 'why': why}
             if item['stage'] == 'ready' and (body.get('choice') or '').casefold() == 'build':

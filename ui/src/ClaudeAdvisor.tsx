@@ -83,7 +83,8 @@ export function ProjectClaudeAdvisor({ api, project }: { api: Api; project: stri
 export function TabAdvisor({ advisor }: { advisor: Footer['advisor'] }) {
   if (!advisor) return <p className="hint">Advisor: off in this tab.</p>
   if (advisor.source === 'claude') return <p className="hint">Advisor: {advisor.name}, from your Claude Code settings. Tether did not set one for this tab.</p>
-  if (!advisor.problems.length) return <p className="hint">Advisor: {advisor.name}. Claude consults it before big steps.</p>
+  // No known problem is not proof that Claude Code attached it: only Claude Code knows whether a plan needs the Fable consent.
+  if (!advisor.problems.length) return <p className="hint">Advisor: {advisor.name}, set for this tab. {advisor.model === 'fable' ? 'If your plan still needs a usage-credits consent, Claude Code shows a notice in this tab and works without the advisor.' : 'Claude consults it before big steps.'}</p>
   return <div className="provider-warning" role="status"><strong>Advisor: {advisor.name}, not attached</strong>
     <ul className="advisor-problems">{advisor.problems.map(item => <li key={item.code}>{item.text}</li>)}</ul></div>
 }

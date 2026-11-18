@@ -289,7 +289,7 @@ function BoardCard({ item, prefix, panes, now, words, onDetails }: { item: WorkI
     </span>
     <span className="work-title"><Marked text={item.title} words={hit.title} /></span>
     {links && <span className="work-links">
-      {item.tabs.map(tab => <span key={tab.pane} className="work-link-tab"><span className={`work-tab-dot${live.has(tab.pane) ? '' : ' closed'}`} aria-hidden="true" />{tabPath(tab)}{!live.has(tab.pane) && <span className="visually-hidden"> (closed)</span>}</span>)}
+      {item.tabs.map((tab, index) => <span key={`${tab.pane}:${index}`} className="work-link-tab"><span className={`work-tab-dot${live.has(tab.pane) ? '' : ' closed'}`} aria-hidden="true" />{tabPath(tab)}{!live.has(tab.pane) && <span className="visually-hidden"> (closed)</span>}</span>)}
       {item.refs.length > 0 && <span>{item.refs.join(', ')}</span>}
       {item.qa && item.stage !== 'done' && <span>needs QA</span>}
       {item.jira?.status && <span className={item.jira.status === 'failed' || item.jira.status === 'off' ? 'work-link-error' : undefined}>{JIRA_CARD[item.jira.status] ?? 'Jira'}</span>}
@@ -442,9 +442,9 @@ function ItemDrawer({ api, item, project, prefix, panes, link, answers, error, o
       <section className="work-block" aria-labelledby={`${id}-tabs`}>
         <h4 id={`${id}-tabs`}>Tabs</h4>
         {item.tabs.length
-          ? <ul className="work-tablist">{item.tabs.map(tab => {
+          ? <ul className="work-tablist">{item.tabs.map((tab, index) => {
             const pane = live(tab.pane)
-            return <li key={tab.pane}><button type="button" className="work-tab" disabled={!pane} title={pane ? `Open ${tab.name || tab.pane}` : 'This tab is closed'} onClick={() => pane && onOpen(pane)}>
+            return <li key={`${tab.pane}:${index}`}><button type="button" className="work-tab" disabled={!pane} title={pane ? `Open ${tab.name || tab.pane}` : 'This tab is closed'} onClick={() => pane && onOpen(pane)}>
               <span className={`work-tab-dot${pane ? '' : ' closed'}`} aria-hidden="true" /><span>{tabPath(tab)}</span>
               <small>{tab.role}{pane ? '' : ', closed'}</small>
             </button></li>

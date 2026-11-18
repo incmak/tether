@@ -46,6 +46,7 @@ import { inboxItems } from './needs'
 import { AskChips, OldestButton, WaitingBox } from './Attention'
 import { ActionDeck, useUrgentDeck } from './ActionDeck'
 import { LessonsReview } from './LessonsReview'
+import { CleanUp } from './Upkeep'
 import { reviewReason, useLessonsReview } from './lessonsReview'
 import { useNow, visibleAsk, waitingAsks } from './attention'
 import { Home, NoTerminal } from './Home'
@@ -173,6 +174,7 @@ function App() {
   // 'message' opens it on the "Message sessions" box (sidebar button, command menu).
   const [agentsPage, setAgentsPage] = useState<false | 'list' | 'message'>(false)
   const [factory, setFactory] = useState(false)
+  const [cleanup, setCleanup] = useState(false)  // the clean-up sheet, from its weekly notification (/chat/?go=cleanup)
   // The work page (WorkBoard.tsx): the sidebar, the command menu and /chat/?go=board open it.
   const [workSheet, setWorkSheet] = useState<false | WorkView>(false)
   // ⌘K opens the board on a search, with one item's drawer open.
@@ -347,6 +349,7 @@ function App() {
       else if (view === 'agents') setAgentsPage('list')
       else if (view === 'factory') setFactory(true)
       else if (view === 'lessons') setReviewing(true)
+      else if (view === 'cleanup') setCleanup(true)
       else return false
       return true
     })
@@ -384,7 +387,7 @@ function App() {
   const decisionAnswers = useDecisionAnswers(api, work.refresh)
   const openWork = (view: WorkView) => { setDrawer(false); setWorkSheet(view) }
   const menuWork = useMemo(() => ({ board: work.data, error: work.error, open: (query: string, item?: string) => { setDrawer(false); setWorkFind({ query, item }); setWorkSheet('board') } }), [work.data, work.error])
-  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onBoard={() => openWork('board')} />
+  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onShow={item => menuWork.open('', item.id)} onBoard={() => openWork('board')} />
   const workMarks = useMemo(() => itemsByPane(work.data), [work.data])
   const workLinks = work.data && (work.data.projects.length > 0 || work.data.items.length > 0)
     ? { open: work.data.items.filter(item => item.stage !== 'done' && item.stage !== 'hold').length, asking: decisionCount, marks: workMarks, onOpen: () => openWork('board') } : undefined
@@ -575,6 +578,7 @@ function App() {
     else if (go === 'work') { setDrawer(false); setScreen('home') }
     else if (go === 'board') { setDrawer(false); setWorkSheet('board') }
     else if (go === 'factory') { setDrawer(false); setFactory(true) }
+    else if (go === 'cleanup') { setDrawer(false); setCleanup(true) }
     else if (go === 'backlog') { setDrawer(false); setBacklog({ mode: 'page' }) }
     // A framed Tether's notification hint opens this server's own window here (SettingsControls.tsx).
     else if (go === 'notifications') { setDrawer(false); setSettings('notifications') }
@@ -1005,6 +1009,7 @@ function App() {
       } : undefined} />}
     {browserSheet && pane && <BrowserSheet api={api} pane={pane} onClose={() => setBrowserSheet(false)} />}
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
+    {cleanup && <CleanUp api={api} onClose={() => setCleanup(false)} />}
     {deck && <ActionDeck api={api} items={waiting} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
     {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={commands.filter(item => !item.label.includes('Live mode'))} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
