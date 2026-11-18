@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "areas": [
+    {
+      "name": "tests",
+      "label": "Tests",
+      "paths": [
+        "server/test_*.py",
+        "server/tests/**",
+        "server/fixtures/**",
+        "server/test_fixtures/**",
+        "scripts/test_*.py",
+        "ui/test_*.cjs"
+      ]
+    },
+    {
+      "name": "ui",
+      "label": "UI",
+      "paths": [
+        "ui/src/**",
+        "ui/public/**",
+        "ui/index.html"
+      ]
+    }
+  ]
+}

@@ -235,6 +235,40 @@ for port in $(seq 7700 7709); do tailscale serve --bg --https=$port http://127.0
 
 Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off` to turn previews off.
 
+## Auto-merge
+
+Tether can merge a worker branch into the main branch on `origin` when a reviewer tab approved it and the change is low risk.
+It starts in **Observe**: it records what it would merge in Settings › Agents › Auto-merge and merges nothing.
+Only you move it to **Enforce**, in Settings. **Off** stops the checks.
+
+A branch merges without you only when all of this holds:
+
+- The reviewer approved the exact commit at the head of the branch, and the worktree has no uncommitted changes.
+- The head commit has a `Verified:` stamp with a `tests(...)` item.
+- The main branch has `docs/auto-merge.json`. Every changed file is a regular text file in one of its areas.
+- Each area is within its trust limit (changed lines in one merge).
+- `scripts/checklist.py` finds no reliability checklist row for the diff.
+- The commit merges into the main branch with no conflict.
+
+If one check fails, or Tether cannot tell, the branch waits for you.
+
+In Enforce, Tether makes one merge commit and pushes it with a normal push. It never forces a push and never changes a
+working tree. `git revert -m 1 <merge>` undoes a merge. A merge is not a deploy.
+
+`docs/auto-merge.json` names the areas. Tether reads it from the main branch, never from the worker branch:
+
+```json
+{"version": 1, "areas": [{"name": "ui", "label": "UI", "paths": ["ui/src/**", "ui/index.html"]}]}
+```
+
+In a path, `**` crosses folders; `*` and `?` stay inside one name. A repository without the file never auto-merges.
+
+Trust is per area. Each area starts at 60 changed lines. After 5 clean merges that Tether made, the limit widens to 150,
+then to 300. A revert on the main branch of a commit that touched the area narrows it by one step. At zero, you merge
+that area until you choose **Restore trust** in Settings. Commits that agents push themselves do not widen trust.
+
+`python3 server/auto_merge.py check --cwd WORKTREE --approved SHA` prints each check for a branch. It never merges.
+
 ## Usage reports
 
 Claude Code and Antigravity supply usage through status-line hooks.

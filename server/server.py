@@ -115,6 +115,7 @@ import undo_store
 import codex_level
 import commit_gate
 import claude_advisor
+import auto_merge
 import factory
 import activity_time
 import ui_usage
@@ -247,6 +248,29 @@ def review_alert(title, body, session, review=None):
     notify(payload, True)
 
 
+def auto_merge_alert(title, body, session):
+    payload = {'title': title, 'body': body, 'tag': 'auto-merge-' + str(session), 'priority': 'important', 'silent': False}
+    if session:
+        payload.update(session=session, url='/mobile/#session=' + quote(session))
+    notify(payload, False)
+
+
+def auto_merge_roots():
+    """The repositories of the live agent tabs, for the trust ladder in Settings. Cached lookups only cost git once."""
+    roots = []
+    deadline = time.monotonic() + 2
+    for entry in sessions():
+        if entry.get('agent') not in factory.AGENTS or len(roots) >= 4:
+            continue
+        try:
+            root = factory.repository(tab_folder(entry), deadline=deadline)
+        except (OSError, KeyError, ValueError, TypeError):
+            continue
+        if root and root not in roots:
+            roots.append(root)
+    return roots
+
+
 def review_turn_source(entry):
     """Identify a delivered review prompt or the usual turn source."""
     return notification_priority.turn_source(entry.get('agent'), notification_records(entry),
@@ -351,6 +375,13 @@ def monitor_notices():
                              turn_source=review_turn_source, level=review_level,
                              parent=lambda entry: review_parent(entry, entries),
                              scope=review_scope_of, commit=review_commit, fresh=fresh_status)
+        try:
+            # B213: each commit a reviewer approved is checked once. Observe mode records the decision and merges nothing.
+            approved = getattr(review_links, 'approved_commits', None)
+            if approved is not None:
+                auto_merge.observe(entries, approved(), agent_folder, auto_merge_alert)
+        except Exception as exc:  # auto-merge must never stop the monitor
+            print(f'auto-merge observe failed: {exc!r}', file=sys.stderr)
         try:
             attention.STORE.observe(entries, shared_status, notification_reply, lambda entry: timeline(entry['id'])['finished'])
             digest = attention.STORE.digest_due()
@@ -2264,6 +2295,8 @@ class Handler(BaseHTTPRequestHandler):
                 commit_gate.get(self)
             elif claude_advisor.handles(path):
                 claude_advisor.get(self)
+            elif auto_merge.handles(path):
+                auto_merge.get(self, auto_merge_roots())
             elif activity_time.handles(path):
                 activity_time.get(self, path)
             elif ui_usage.handles(path):
@@ -2385,7 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(403, {'error': 'Reload the page and try again.'})
             return
         if not backgrounds.handles(self.path) and self.path not in ('/mobile/api/update', '/mobile/api/history/hide', '/mobile/api/file-check', '/mobile/api/preview', '/mobile/api/dev-preview', '/mobile/api/dev-preview/release', '/mobile/api/dev-preview/stop', '/mobile/api/ask-hook', '/mobile/api/ask-answer', '/mobile/api/ask-engage', '/mobile/api/message', '/mobile/api/broadcast', '/mobile/api/approval', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/prompt-action', '/mobile/api/start', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/key', '/mobile/api/dialog', '/mobile/api/clear-draft', '/mobile/api/unqueue', '/mobile/api/mode', '/mobile/api/type',
-                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path):
+                         '/mobile/api/push/subscribe', '/mobile/api/push/unsubscribe', '/mobile/api/push/test', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/shortcuts', '/mobile/api/prefs', '/mobile/api/codex-provider', '/mobile/api/task-models', '/mobile/api/model-options', '/mobile/api/model', '/mobile/api/subagent-stop', '/mobile/api/rename', '/mobile/api/merge', suggest_groups.PATH, *quick_tab.PATHS, suggest_names.PATH, '/mobile/api/shell', '/mobile/api/upload', '/mobile/api/transcribe', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') and not browser_api.handles(self.path) and not projects_api.handles(self.path) and not work_api.handles(self.path) and not groups_api.handles(self.path) and not codex_level.handles(self.path) and not commit_gate.handles(self.path) and not claude_advisor.handles(self.path) and not auto_merge.handles(self.path) and not app_identity.handles(self.path) and not codex_trust.handles(self.path) and not autonomy.handles(self.path) and not approval.handles(self.path) and not custom_layouts.handles(self.path) and not tts.handles(self.path) and not voice_log.handles(self.path) and not friday_proxy.handles(self.path) and not live_mode.handles(self.path) and not attention.handles(self.path) and not reminders.handles(self.path) and not activity_time.handles(self.path) and not ui_usage.handles(self.path) and not feedback.handles(self.path) and not undo_api.handles(self.path) and not upkeep_api.handles(self.path):
             self.respond(404, {'error': 'Not found'})
             return
         # Reject unauthenticated and cross-origin submissions.
@@ -2425,6 +2458,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if claude_advisor.handles(self.path):
             claude_advisor.post(self)
+            return
+        if auto_merge.handles(self.path):
+            auto_merge.post(self, auto_merge_roots())
             return
         if activity_time.handles(self.path):
             activity_time.post(self, self.path, sessions, tab_folder)
