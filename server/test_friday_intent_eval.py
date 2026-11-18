@@ -110,9 +110,16 @@ class IntentEvalTests(unittest.TestCase):
         follow_up['history'].pop()
         self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
 
+    def test_expected_lookup_with_a_write_fails_extra_action(self):
+        example = case('list_chats')
+        both = assistant(tool_calls=[call('list_chats'), call('switch_chat', chat='friday test')])
+        self.assertEqual(self.run_script(example, both)[0]['fails'], {'extra_action': 1})
+        self.assertEqual(self.run_script(example, assistant(tool_calls=[call('list_chats')]))[0]['passed'], 1)
+
     def test_readback_requires_send_and_the_chat_name(self):
         example = case(expect={'tool': None, 'readback_chat': 'api-server'})
-        for reply in ("I'll explain the options.", 'Shall I send the fix?', 'I can fix api-server.'):
+        for reply in ("I'll explain the options.", 'Shall I send the fix?', 'I can fix api-server.',
+                      "I won't send anything to api-server.", 'I can send that to api-server.'):
             with self.subTest(reply=reply):
                 self.assertEqual(self.run_script(example, assistant(reply))[0]['fails'], {'readback': 1})
         self.assertEqual(self.run_script(example, assistant('Shall I send the fix to api-server?'))[0]['passed'], 1)

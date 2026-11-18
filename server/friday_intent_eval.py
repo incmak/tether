@@ -28,6 +28,7 @@ CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
 
 
+ASK = re.compile(r"(?i)\b(?:shall|should|do you want|would you like|want me to|ok(?:ay)? to|can I)\b[^?]*\?")  # A read-back asks a question.
 STRAY = re.compile('[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]')  # CJK or full-width text in an English voice reply.
 
 
@@ -45,7 +46,7 @@ def _score(trace, expect, expected_tools):
     name, args = (action['name'], action['args']) if action else (None, {})
     if trace['blocked']:
         yield 'blocked'
-    if len(trace['actions']) > 1:
+    if len(trace['actions']) + (name in LOOKUPS) > 1:  # An expected lookup plus a write is also extra.
         yield 'extra_action'
     if name not in expected_tools:
         yield 'wrong_tool'
@@ -54,9 +55,9 @@ def _score(trace, expect, expected_tools):
         yield 'wrong_args'
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
-    if 'readback_chat' in expect and friday.check_tool(
+    if 'readback_chat' in expect and (friday.check_tool(
             'send_to_chat', {'chat': expect['readback_chat'], 'prompt': '\u0000readback-probe\u0000'},
-            'speech', 'yes', set(), reply):
+            'speech', 'yes', set(), reply) or not ASK.search(reply)):
         yield 'readback'
     if action is None and not expect.get('claim_ok') and CLAIM.search(reply):
         yield 'claimed_action'
