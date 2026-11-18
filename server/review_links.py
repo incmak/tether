@@ -213,9 +213,10 @@ def _round_limit(link):
 
 def _at_round_limit(link, next_round=None):
     counts = [link.get(key, 0) + (key == next_round) for key in ('rounds', 'empty_rounds')]
-    # Switching between changed and unchanged work cannot extend the grant.
+    # Switching between changed and unchanged work cannot extend the grant, and a granted task never runs more
+    # than MAX_ROUNDS + EXTRA_ROUNDS failed reviews in all.
     return max(counts) >= _round_limit(link) or (
-        'grant_rounds' in link and sum(counts) >= link['grant_rounds'] + EXTRA_ROUNDS) or (
+        'grant_rounds' in link and sum(counts) >= min(link['grant_rounds'] + EXTRA_ROUNDS, MAX_ROUNDS + EXTRA_ROUNDS)) or (
         link.get('stale_rounds', 0) >= MAX_ROUNDS)  # approvals in a row that did not match the tab's commit
 
 
@@ -380,6 +381,8 @@ def _findings_preview(findings):
 def _parent_stage(link, worker, entries, reply, level, parent):
     if 'limit' in link or level is None or parent is None:
         return None
+    if link.get('rounds', 0) + link.get('empty_rounds', 0) + 1 >= MAX_ROUNDS + EXTRA_ROUNDS:
+        return None  # no grant is left under the total cap: Mak decides now
     try:
         if level(worker) not in (4, 5):
             return None
@@ -407,19 +410,26 @@ def _send_parent_notice(link, entries, status, send, clear):
             f'Open findings: “{stage["notice"]}”\n\n'
             f'To allow 2 more rounds, send it the next step: python3 {cli} send --pane {worker} "<what to fix>". '
             f'To hand it to Mak: python3 {cli} escalate --pane {worker}.')
-    if _send_message(entry, text, status(entry)['state'], send, clear):
-        with _lock:
-            links = _read()
-            for saved in links:
-                if (isinstance(saved, dict) and saved.get('worker') == worker
-                        and saved.get('reviewer') == link['reviewer'] and saved.get('created') == link.get('created')
-                        and saved.get('parent_stage') == stage):
+    state = status(entry)['state']
+    if not _can_send(entry, state, clear):
+        return  # a busy parent gets the notice when it can take it
+    sent = _send_message(entry, text, state, send, clear)
+    with _lock:
+        links = _read()
+        for saved in links:
+            if (isinstance(saved, dict) and saved.get('worker') == worker
+                    and saved.get('reviewer') == link['reviewer'] and saved.get('created') == link.get('created')
+                    and saved.get('parent_stage') == stage):
+                if sent:
                     saved['parent_stage']['sent'] = True
+                else:  # the terminal refused it: the watcher hands the review to Mak after LOSS_TICKS refusals
+                    saved['parent_stage']['failed'] = stage.get('failed', 0) + 1
+        if sent:
             for saved in links:
                 # Tether's notice is not a prompt from Mak: it must not restart the parent's own review loop.
                 if isinstance(saved, dict) and saved.get('worker') == entry['id']:
                     saved['agent_prompt'] = time.time()
-            _write(links)
+        _write(links)
 
 
 def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sent, work_mark, review_reply,
@@ -805,7 +815,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                         copy['parent_missing'] = copy.get('parent_missing', 0) + 1
                     else:
                         copy.pop('parent_missing', None)
-                if 'escalate' in copy or copy.get('parent_missing', 0) >= LOSS_TICKS:
+                if ('escalate' in copy or copy.get('parent_missing', 0) >= LOSS_TICKS
+                        or (stage is not None and stage.get('failed', 0) >= LOSS_TICKS)):
                     copy.pop('parent_missing', None)
                     preview = copy.pop('escalate') if 'escalate' in copy else stage['notice']
                     copy.pop('parent_stage', None)

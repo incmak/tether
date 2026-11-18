@@ -1193,6 +1193,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_levels_four_and_five_send_only_to_the_worker_and_parent_at_round_three(self):
         for level in (4, 5):
             with self.subTest(level=level):
+                self.file.write_text('[]')
                 self.add()
                 self.send.reset_mock()
                 self.entries = [self.worker, self.reviewer]
@@ -1239,6 +1240,28 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe()
         self.assertEqual(self.send.call_count, 8)
         self.alert.assert_not_called()
+
+    def test_parent_notice_refused_by_the_terminal_goes_to_mak(self):
+        for error in (RuntimeError('Pane too small.'), DraftError('Keep the draft.')):
+            with self.subTest(error=type(error).__name__):
+                self.file.write_text('[]')
+                self.add()
+                self.alert.reset_mock()
+                self.send.side_effect = None
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent()
+                self.send.side_effect = lambda entry, *args: (_ for _ in ()).throw(error) if entry is parent else None
+                self.fail_to_limit()  # the first refusal comes on the limit tick
+                for _ in range(review_links.LOSS_TICKS - 2):
+                    self.observe(elapsed=review_links.SEND_GAP)
+                self.alert.assert_not_called()
+                self.assertEqual(self.links()[0]['parent_stage']['failed'], review_links.LOSS_TICKS - 1)
+                self.observe(elapsed=review_links.SEND_GAP)  # the last refusal
+                self.observe(elapsed=review_links.SEND_GAP)
+                self.assert_mak_alert()
+                link, = self.links()
+                self.assertTrue(link['paused'])
+                self.assertNotIn('parent_stage', link)
 
     def test_working_claude_parent_can_receive_notice(self):
         parent = self.add_parent()
@@ -1459,7 +1482,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(self.links()[0]['awaiting'])
         self.alert.assert_not_called()
 
-    def test_empty_round_limit_goes_to_parent_and_grants_only_two_more_reviews(self):
+    def test_empty_round_limit_goes_to_parent_and_grant_stops_at_five_in_all(self):
         for next_mark in ('same tree', 'changed tree'):
             with self.subTest(next_mark=next_mark):
                 self.add()
@@ -1475,11 +1498,27 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.links()[0]['rounds'], 1)
                 self.alert.assert_not_called()
                 review_links.agent_prompt('%13', parent['id'], parent['thread'])
-                self.work_mark.side_effect = [next_mark, next_mark]
-                for _ in range(2):
-                    self.request_review()
-                    self.finish_review(FINDINGS)
+                self.work_mark.side_effect = [next_mark]
+                self.request_review()  # 4 failed reviews so far: the grant leaves one under the cap of 5
+                self.finish_review(FINDINGS)
                 self.assert_mak_stop(rounds=5)
+
+    def test_parent_stage_is_skipped_when_no_round_is_left_under_the_total_cap(self):
+        for level in (4, 5):
+            with self.subTest(level=level):
+                self.file.write_text('[]')
+                self.add()
+                self.alert.reset_mock()
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent(level=level)
+                self.work_mark = Mock(return_value='same tree')
+                self.request_review()
+                links = self.links()
+                links[0].update(rounds=2, empty_rounds=2)  # 4 failed reviews before this one
+                self.file.write_text(json.dumps(links))
+                self.finish_review(FINDINGS)  # the 5th failed review in all
+                self.assert_mak_stop()
+                self.assertFalse(any(call.args[0] is parent for call in self.send.call_args_list))
 
     def test_stored_limit_is_clamped_for_both_counters(self):
         for key in ('rounds', 'empty_rounds'):
