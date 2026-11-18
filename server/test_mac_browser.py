@@ -237,6 +237,8 @@ const {chromium} = require('playwright-core');
 '''
 
 
+@unittest.skipUnless(os.environ.get('TETHER_REAL_BROWSER_TEST') == '1',
+                     'Set TETHER_REAL_BROWSER_TEST=1 to run the real Chromium tests')
 @unittest.skipUnless(browser.find_chrome(), 'Headless Chromium is required')
 class RealContextTests(GrantHarness, unittest.TestCase):
     transport_type = ChromiumTransport
