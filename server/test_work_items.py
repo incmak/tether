@@ -476,6 +476,11 @@ class LiveTabs(unittest.TestCase):
         literal = {**self.item(self.tab('%300', 1000, name='Invoice · ticket')), 'title': 'Invoice · ticket'}
         self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · fixed, review')]), [''])
         self.assertEqual(self.panes(literal, [self.live('%7', 'Invoice · ticket · fixed, review')]), ['%7'])
+        fix = {**self.item(self.tab('%300', 1000, name='T-020 fix')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(fix, [self.live('%7', 'Invoice · needs decision')]), [''])
+        self.assertEqual(self.panes(fix, [self.live('%7', 'Invoice · needs decision'), self.live('%8', 'T-020 fix')]), ['%8'])
+        unnamed = {**self.item(self.tab('%300', 1000, name='')), 'title': 'Invoice'}
+        self.assertEqual(self.panes(unnamed, [self.live('%7', 'Invoice · needs decision')]), ['%7'])
         other = self.item(self.tab('%300', 1000, name='Card tap fix', session='Dev'))
         self.assertEqual(self.panes(other, [self.live('%9', 'Card tap fix', session='Dev')]), ['%9'])
 

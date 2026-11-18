@@ -567,17 +567,20 @@ def board():
     return {'revision': reg['revision'], 'projects': reg['projects'], 'items': items, 'stages': list(STAGES)}
 
 
-def _same_tab(live, link, title):
-    """A live tab name names the linked tab: the same full name, or the item's title with or without a triage status
-    (work_triage names the tab "<title> · <status>", work_triage.LABEL, and the status changes). A title may contain
-    " · " itself, so the title decides where the status starts, not the last separator."""
+def _triage_name(name, title):
+    """The item's triage tab name: its title, with or without a status (work_triage.LABEL). A title may contain " · "
+    itself, so the title decides where the status starts, not the last separator."""
     import work_triage  # it imports this module
-    live = (live or '').strip()
+    return name == title or name.startswith(title + ' · ') and name[len(title) + 3:] in set(work_triage.LABEL.values())
+
+
+def _same_tab(live, link, title):
+    """A live tab name names the linked tab: the same full name, or, for a triage link (no name, or a triage name),
+    any triage name of the item, since the status changes. A link with a name of its own (a fix tab) needs it."""
+    live, name = (live or '').strip(), (link.get('name') or '').strip()
     if not live:
         return False
-    if live == (link.get('name') or '').strip():
-        return True
-    return live == title or live.startswith(title + ' · ') and live[len(title) + 3:] in set(work_triage.LABEL.values())
+    return live == name or (not name or _triage_name(name, title)) and _triage_name(live, title)
 
 
 def live_tabs(items, entries, started):
