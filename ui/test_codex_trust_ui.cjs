@@ -25,6 +25,7 @@ const fixture = {
   'browser/agents': { enabled: false, available: false, reason: 'off', agents: [], asks: [] },
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null },
   'work/board': { revision: 1, projects: [], items: [], stages: [] },
+  reminders: { reminders: [], deleted: [], now: Math.floor(Date.now() / 1000) }, feedback: { ratings: {} },
   'task-models': { claude: [], codex: [] }, worktrees: { repository: true, main: TARGET, base: '/workspace/app-wt' },
 }
 const b64 = bytes => Buffer.from(bytes).toString('base64url')
