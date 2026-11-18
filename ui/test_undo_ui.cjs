@@ -90,7 +90,8 @@ async function main() {
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'undo' && request.method() === 'GET') return route.fulfill({ json: history() })
         if (endpoint === 'undo') { const answer = runUndo(request.postDataJSON()); return route.fulfill({ status: answer.status, json: answer.json }) }
-        if (endpoint === 'prefs' && request.method() === 'POST' && armed) {
+        if (endpoint === 'prefs' && request.method() === 'POST' && armed &&
+            Object.values(request.postDataJSON()?.changes?.drafts ?? {}).some(draft => typeof draft?.text === 'string' && draft.text.length > 0)) {
           armed = false
           // A reorder the server recorded: it names the step in the answer, as undo_api.headers does.
           const step = { id: 'u000000000003', at: now(), who: { by: 'user' }, label: 'Reordered tabs `a` & “b”', state: 'done', redo: false, undone_at: null, why: null }
