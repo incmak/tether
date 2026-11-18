@@ -191,7 +191,7 @@ def _words(text):
     return set(re.findall(r'\b[^\W\d_]{3,}\b', text.lower()))
 
 
-def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane=''):
+def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane='', evict=True):
     file, text = path(pid), clean(text)
     quote, tab = _text(quote, 160), _text(tab, 60)
     if not _pane(pane, empty=True):
@@ -205,6 +205,8 @@ def add(pid, text, kind, source, agent, force_new=False, quote='', tab='', pane=
                    and len(words & _words(row['text'])) / max(1, len(words | _words(row['text']))) >= 0.5]
         if similar and not force_new:
             return {'status': 'similar', 'candidates': _ranked(similar[:3])}
+        if not evict and len(rows) >= 60:  # the caller never trades another lesson for this one
+            raise ValueError('This project has 60 lessons. Remove one in Tether first.')
         _room(rows, 60)
         identifier = secrets.token_hex(4)
         while any(row['id'] == identifier for row in rows):

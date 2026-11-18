@@ -91,14 +91,23 @@ def set_enabled(value):
         _write(settings_path(), {'enabled': value})
 
 
-def load():
+def load(strict=False):
+    """The state. A missing file is an empty state. strict: a file that is there but cannot be read or is not valid
+    raises (OSError, ValueError), so nothing that depends on the launch records runs on a guess."""
+    empty = {'version': 1, 'last_day': '', 'request': False, 'runs': [], 'launched': {}}
     try:
         data = json.loads(state_path().read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return empty
     except (OSError, ValueError):
-        data = None
+        if strict:
+            raise
+        return empty
     if (not isinstance(data, dict) or not isinstance(data.get('last_day'), str)
             or not isinstance(data.get('runs'), list) or not all(isinstance(row, dict) for row in data['runs'])):
-        return {'version': 1, 'last_day': '', 'request': False, 'runs': [], 'launched': {}}
+        if strict:
+            raise ValueError(f'The ops report state file is invalid: {state_path()}. Fix or remove it.')
+        return empty
     launched = data.get('launched') if isinstance(data.get('launched'), dict) else {}
     launched = {day: [pid for pid in pids if isinstance(pid, str)] for day, pids in launched.items()
                 if isinstance(day, str) and DAY.fullmatch(day) and isinstance(pids, list)}
@@ -108,7 +117,7 @@ def load():
 
 def _change(work):
     with _LOCK:
-        data = load()
+        data = load(strict=True)
         work(data)
         data['runs'] = data['runs'][-RUNS:]
         _write(state_path(), data)
@@ -450,7 +459,8 @@ class Ops:
 
     def __init__(self, clock=datetime.now):
         self.clock = clock
-        self.busy = False
+        self.busy = False     # the worker looks or runs
+        self.running = False  # a run is in progress (what Settings shows)
         self.next = 0.0
 
     def due(self, state, now):
@@ -459,36 +469,37 @@ class Ops:
         return enabled() and now.hour >= HOUR and state['last_day'] != now.strftime('%Y-%m-%d')
 
     def observe(self, entries, folder_of, run=subprocess.run, lock=None, sessions=None, wait=False):
-        now = self.clock()
+        """Look every 5 seconds whether a run is due, in a worker thread: the monitor thread reads no file.
+        Returns True when it started the worker. wait=True waits for it."""
         with _LOCK:
             if self.busy or time.monotonic() < self.next:
                 return False
             self.next = time.monotonic() + 5
-            state = load()
-            if not self.due(state, now):
-                return False
-            # Marked before the work: a crash must not start the tabs again on every tick. "Run now" counts as the
-            # day's run too. When the mark cannot be saved, nothing starts and busy stays off.
-            try:
-                _change(lambda data: data.update(request=False, last_day=now.strftime('%Y-%m-%d')))
-            except OSError:
-                self.next = time.monotonic() + 300  # a disk that cannot take the mark is not asked every tick
-                raise
             self.busy = True
-        day = (now - timedelta(days=1)).strftime('%Y-%m-%d')
-        thread = threading.Thread(target=self._work, args=(day, list(entries), folder_of, run, lock, sessions), daemon=True)
+        thread = threading.Thread(target=self._work, args=(list(entries), folder_of, run, lock, sessions), daemon=True)
         try:
             thread.start()
         except RuntimeError:
-            with _LOCK:
-                self.busy = False
+            self.busy = False
             raise
         if wait:
             thread.join()
         return True
 
-    def _work(self, day, entries, folder_of, run, lock, sessions):
+    def _work(self, entries, folder_of, run, lock, sessions):
         try:
+            now = self.clock()
+            try:
+                if not self.due(load(strict=True), now):
+                    return
+                # Marked before the work: a crash must not start the tabs again on every tick. "Run now" counts as
+                # the day's run too. When the state cannot be read or the mark cannot be saved, nothing starts.
+                _change(lambda data: data.update(request=False, last_day=now.strftime('%Y-%m-%d')))
+            except (OSError, ValueError):
+                self.next = time.monotonic() + 300  # a state file in trouble is not asked every tick
+                raise
+            self.running = True
+            day = (now - timedelta(days=1)).strftime('%Y-%m-%d')
             records = run_day(day, entries, folder_of, run, lock, sessions=sessions)
             if not records:
                 records = [{'day': day, 'project': '', 'project_name': '', 'at': time.time(), 'status': 'quiet',
@@ -497,8 +508,7 @@ class Ops:
         except Exception as exc:  # noqa: BLE001 - the report must never take the monitor down
             print(f'ops report failed: {exc!r}', flush=True)
         finally:
-            with _LOCK:
-                self.busy = False
+            self.busy = self.running = False
 
 
 OPS = Ops()
@@ -526,5 +536,5 @@ def state():
         runs.append({'day': row.get('day', ''), 'project': row.get('project', ''), 'project_name': row.get('project_name', ''),
                      'status': row.get('status', ''), 'why': row.get('why', ''), 'pane': row.get('pane', ''),
                      'at': row.get('at', 0), 'note': note, 'problems': row.get('problems', 0)})
-    return {'enabled': enabled(), 'hour': HOUR, 'model': MODEL_LABEL, 'tabs': TABS, 'busy': OPS.busy or data['request'],
+    return {'enabled': enabled(), 'hour': HOUR, 'model': MODEL_LABEL, 'tabs': TABS, 'busy': OPS.running or data['request'],
             'runs': runs, 'candidates': sorted(candidates, key=lambda row: -row['at']), 'skipped': skipped}

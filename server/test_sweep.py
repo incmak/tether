@@ -253,6 +253,23 @@ class SweepTests(Case):
         clock[0] += sweep.PERIOD + 1
         self.assertTrue(sweeper.observe([], None, None, wait=True))
 
+    def test_the_monitor_thread_reads_no_file_and_a_restart_keeps_the_period(self):
+        commit(self.main, 'two')
+        sweep.save(self.now - 60, [])  # a sweep ran a minute before the server restarted
+        sweeper = self.sweeper(lambda: self.now, [])
+        args = ([self.entry()], lambda entry: str(self.tree), lambda entry: {'state': 'Idle'})
+        with mock.patch.object(sweep, 'load', side_effect=AssertionError('read on the monitor thread')), \
+                mock.patch.object(sweep.threading, 'Thread') as thread:
+            self.assertTrue(sweeper.observe(*args))
+            self.assertEqual(thread.call_count, 1)
+        sweeper.busy, sweeper.tried = False, 0
+        with mock.patch.object(sweep, 'failed_checks', lambda *_: None):
+            sweeper.observe(*args, wait=True)
+            self.assertEqual(sweep.public()['lines'], [])  # not due yet: the worker read the time and did not sweep
+            sweeper.clock = lambda: self.now + sweep.PERIOD - 30
+            self.assertTrue(sweeper.observe(*args, wait=True))
+        self.assertEqual(len(sweep.public()['lines']), 1)
+
     def test_notice_caps_the_lines(self):
         lines = [{'name': f'Tab {index}', 'text': 'Idle for 3 h.'} for index in range(5)]
         payload = sweep.notice(lines)

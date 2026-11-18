@@ -234,14 +234,13 @@ class Sweeper:
         self.busy = False
         self.thread = None
         self.tried = 0  # a sweep that failed is not tried again before the next period
-
-    def due(self):
-        return self.clock() - max(load()['at'], self.tried) >= self.period
+        self.last = None  # when the last sweep ran; read from the file once, in the worker thread
 
     def observe(self, entries, folder_of, status, run=subprocess.run, wait=False):
-        """Start a sweep when one is due. Returns True when it started one. wait=True runs it before it returns."""
+        """Start the worker when a sweep may be due. Returns True when it started it. The monitor thread reads no
+        file here: the worker reads the time of the last sweep once after a start. wait=True waits for the worker."""
         with self.lock:
-            if self.busy or not self.due():
+            if self.busy or self.clock() - max(self.last or 0, self.tried) < self.period:
                 return False
             self.busy = True
             self.tried = self.clock()
@@ -253,7 +252,13 @@ class Sweeper:
 
     def _work(self, entries, folder_of, status, run):
         try:
+            if self.last is None:
+                self.last = load()['at']
+                if self.clock() - self.last < self.period:
+                    self.tried = 0  # the sweep before the restart is still fresh: the next one is due from it
+                    return
             self.sweep(entries, folder_of, status, run)
+            self.last = self.clock()
         except Exception as exc:  # noqa: BLE001 - the sweep must never take the monitor down
             print(f'worktree sweep failed: {exc!r}', flush=True)
         finally:

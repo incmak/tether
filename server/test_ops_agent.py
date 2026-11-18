@@ -317,8 +317,9 @@ class ScheduleTests(Case):
     def observe(self, ops):
         ops.next = 0.0
         with mock.patch.object(ops_agent, 'run_day', return_value=[{'day': 'x', 'status': 'quiet'}]) as run_day:
-            started = ops.observe(self.entries(), lambda entry: None, wait=True)
-        return started, [call.args[0] for call in run_day.call_args_list]
+            ops.observe(self.entries(), lambda entry: None, wait=True)
+        days = [call.args[0] for call in run_day.call_args_list]
+        return bool(days), days  # (a run started, the days it reported on)
 
     def test_off_by_default_and_the_switch_is_a_boolean(self):
         self.assertFalse(ops_agent.enabled())
@@ -348,6 +349,9 @@ class ScheduleTests(Case):
         self.assertTrue(ops_agent.state()['busy'])
         self.assertEqual(self.observe(ops), (True, [DAY]))
         self.assertFalse(ops_agent.state()['busy'])
+        ops.next = 0.0
+        ops.observe(self.entries(), lambda entry: None, wait=True)  # a look that finds nothing due
+        self.assertEqual((ops.busy, ops.running), (False, False))
         ops_agent.set_enabled(True)
         clock[0] = datetime(2026, 11, 18, 9, 0)
         self.assertEqual(self.observe(ops), (False, []))
@@ -364,11 +368,40 @@ class ScheduleTests(Case):
         ops_agent.set_enabled(True)
         ops, _ = self.ops(datetime(2026, 11, 18, 9, 0))
         ops.next = 0.0
-        with mock.patch.object(ops_agent, '_write', side_effect=OSError('disk')), mock.patch.object(ops_agent, 'run_day') as run_day:
-            with self.assertRaises(OSError):
-                ops.observe(self.entries(), lambda entry: None, wait=True)
+        with mock.patch.object(ops_agent, '_write', side_effect=OSError('disk')), mock.patch.object(ops_agent, 'run_day') as run_day, \
+                mock.patch('builtins.print'):
+            ops.observe(self.entries(), lambda entry: None, wait=True)
         self.assertEqual((ops.busy, run_day.call_count), (False, 0))
+        self.assertGreater(ops.next, time.monotonic() + 200)  # not asked again on every tick
         self.assertEqual(self.observe(ops), (True, [DAY]))
+
+    def test_a_state_file_that_cannot_be_read_starts_no_tab(self):
+        self.commit('No stamp at all', at(11))
+        args = (DAY, self.entries(), lambda entry: str(self.repo), self.run_tmux())
+        started = []
+
+        def start(anchor, body, folder, run=None, group=None):
+            started.append(body['name'])
+            return '%9', body['name']
+        self.assertEqual(ops_agent.run_day(*args, start=start)[0]['status'], 'started')
+        real = Path.read_text
+
+        def read(path, *a, **k):  # the launch records cannot be read, writes still work
+            if path == ops_agent.state_path():
+                raise PermissionError('no read')
+            return real(path, *a, **k)
+        with mock.patch.object(Path, 'read_text', read):
+            again = ops_agent.run_day(*args, start=start)
+            self.assertEqual(ops_agent.state()['runs'], [])  # Settings still opens
+        self.assertEqual((again[0]['status'], len(started)), ('failed', 1))
+        ops_agent.state_path().write_text('{"version": 1}')  # there, but not valid: also no guess
+        self.assertEqual((ops_agent.run_day(*args, start=start)[0]['status'], len(started)), ('failed', 1))
+        with self.assertRaisesRegex(ValueError, 'invalid'):
+            ops_agent.request()
+        ops_agent.set_enabled(True)
+        ops, _ = self.ops(datetime(2026, 11, 18, 9, 0))
+        with mock.patch('builtins.print'):
+            self.assertEqual(self.observe(ops), (False, []))
 
     def test_state_lists_runs_newest_first_and_reads_a_note(self):
         note = ops_agent.note_path(PID, DAY)
@@ -387,6 +420,8 @@ class ScheduleTests(Case):
 
 class CandidateTests(Case):
     TEXT = 'When a commit has no stamp, write Verified: none with the reason.'
+    WORDS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima',
+             'mike', 'november', 'oscar', 'papa', 'quebec', 'romeo', 'sierra', 'tango', 'uniform']
 
     def test_a_proposal_is_not_a_lesson_until_the_person_adds_it(self):
         result = lesson_candidates.propose(PID, self.TEXT, 'avoid', 'claude', quote='3 commits had no stamp', tab='Ops report', pane='%9')
@@ -423,8 +458,21 @@ class CandidateTests(Case):
                 lesson_candidates.accept(PID, row['id'])
         # The lesson was written and the candidate could not go: neither is lost, and a retry adds no second lesson.
         self.assertEqual((len(lesson_candidates.entries(PID)), len(lessons.entries(PID))), (1, 1))
+        lessons.keep(PID, lessons.entries(PID)[0]['id'])
+        lessons.promote(PID, lessons.entries(PID)[0]['id'])  # the person moved it to all projects before the retry
         lesson_candidates.accept(PID, row['id'])
-        self.assertEqual((lesson_candidates.entries(PID), len(lessons.entries(PID))), ([], 1))
+        self.assertEqual((lesson_candidates.entries(PID), lessons.entries(PID), len(lessons.global_entries())), ([], [], 1))
+
+    def test_add_at_the_lesson_limit_refuses_and_pushes_no_lesson_out(self):
+        for index, word in enumerate(self.WORDS[:20] * 3):
+            lessons.add(PID, f'When {word} {word}{index} happens, read {word}z{index}.', 'keep', 'agent', 'claude', True)
+        before = [row['id'] for row in lessons.entries(PID)]
+        self.assertEqual(len(before), 60)
+        row = lesson_candidates.propose(PID, self.TEXT, 'avoid', 'claude')['candidate']
+        with self.assertRaisesRegex(ValueError, 'This project has 60 lessons'):
+            lesson_candidates.accept(PID, row['id'])
+        self.assertEqual([row['id'] for row in lessons.entries(PID)], before)
+        self.assertEqual(len(lesson_candidates.entries(PID)), 1)
 
     def test_dismiss_adds_nothing(self):
         row = lesson_candidates.propose(PID, self.TEXT, 'avoid', 'claude')['candidate']

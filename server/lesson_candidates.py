@@ -100,10 +100,12 @@ def accept(pid, identifier):
             return None
         # The lesson is written first, so a failure never loses the proposal. A retry after a failed candidate save
         # finds the lesson that the first try wrote and adds no second one.
-        lesson = next((other for other in lessons.entries(pid) if other['source'] == 'agent'
+        # (also when the person moved it to the list for all projects in between) and adds no second one. A full
+        # list refuses: Add never pushes another lesson out.
+        lesson = next((other for other in lessons.entries(pid) + lessons.global_entries() if other['source'] == 'agent'
                        and other['kind'] == row['kind'] and other['text'] == row['text']), None)
         if lesson is None:
             lesson = lessons.add(pid, row['text'], row['kind'], 'agent', row['agent'], True, quote=row['quote'],
-                                 tab=row['tab'], pane=row['pane'])['lesson']
+                                 tab=row['tab'], pane=row['pane'], evict=False)['lesson']
         _save(file, [other for other in rows if other['id'] != identifier])
         return lesson

@@ -294,6 +294,58 @@ class ActionTests(Case):
         self.assertEqual((notes / 'old.md').read_text(), text)
         self.assertEqual((list((notes / '.trash').iterdir()), prune.state(self.now)['removed']), ([], []))
 
+    def test_any_failure_of_the_check_puts_the_note_back(self):
+        notes = projects.bundle(PID) / 'notes'
+        mark = prune.state(self.now)['notes'][0]['mark']
+        with mock.patch.object(prune, '_note_mark', side_effect=MemoryError()):
+            with self.assertRaisesRegex(prune.PruneError, 'could not read the note'):
+                prune.remove('note', PID, 'old.md', mark, self.now)
+        self.assertTrue((notes / 'old.md').is_file())
+        self.assertEqual(prune.state(self.now)['removed'], [])
+
+    def test_a_failure_that_leaves_the_note_in_the_trash_keeps_its_undo_record(self):
+        notes = projects.bundle(PID) / 'notes'
+        text = (notes / 'old.md').read_text()
+        mark = prune.state(self.now)['notes'][0]['mark']
+        real = prune._move_note
+
+        def move(pid, name, kept_as, mark):  # the process is stopped right after the rename
+            os.replace(notes / name, notes / '.trash' / kept_as) if (notes / '.trash').mkdir(exist_ok=True) is None else None
+            raise KeyboardInterrupt()
+        with mock.patch.object(prune, '_move_note', move):
+            with self.assertRaises(KeyboardInterrupt):
+                prune.remove('note', PID, 'old.md', mark, self.now)
+        removed = prune.state(self.now)['removed']
+        self.assertEqual(len(removed), 1)
+        prune.restore(removed[0]['token'], self.now)
+        self.assertEqual((notes / 'old.md').read_text(), text)
+        self.assertIs(real, prune._move_note)
+
+    def test_a_dispute_added_after_the_list_loaded_stops_the_old_button(self):
+        mark = next(row['mark'] for row in prune.state(self.now)['lessons'] if row['id'] == self.lesson_id)
+        lessons.dispute(PID, self.lesson_id, '%7', 'The docs say the opposite.')
+        with self.assertRaisesRegex(prune.PruneError, 'changed after the list loaded'):
+            prune.remove('lesson', PID, self.lesson_id, mark, self.now)
+        self.assertEqual(len(lessons.find(PID, self.lesson_id)['disputes']), 1)
+        self.remove('lesson', PID, self.lesson_id)  # the list as it is now can remove it
+
+    def test_a_linked_trash_folder_is_never_used(self):
+        notes = projects.bundle(PID) / 'notes'
+        outside = projects.root().parent / 'outside'
+        outside.mkdir()
+        (notes / '.trash').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(prune.PruneError, 'is a link'):
+            self.remove('note', PID, 'old.md')
+        self.assertTrue((notes / 'old.md').is_file())
+        self.assertEqual((list(outside.iterdir()), prune.state(self.now)['removed']), ([], []))
+        (notes / '.trash').unlink()
+        token = self.remove('note', PID, 'old.md')
+        (notes / '.trash').rename(outside / 'moved')
+        (notes / '.trash').symlink_to(outside / 'moved', target_is_directory=True)
+        with self.assertRaisesRegex(prune.PruneError, 'is a link'):
+            prune.restore(token, self.now)
+        self.assertFalse((notes / 'old.md').exists())
+
     def test_a_note_that_cannot_go_back_keeps_its_undo_record(self):
         notes = projects.bundle(PID) / 'notes'
         text = (notes / 'old.md').read_text()

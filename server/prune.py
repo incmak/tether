@@ -208,8 +208,22 @@ def keep(kind, pid, name, now=None):
         _save(data)
 
 
+STORED = ('id', 'text', 'kind', 'source', 'agent', 'hits', 'created', 'last_hit', 'proposed_global', 'status', 'quote',
+          'tab', 'first_pane', 'disputes', 'reviewed_at')
+
+
 def _lesson_mark(row):
-    return _mark(row['text'], row['kind'], row['hits'], row['last_hit'], row['status'], row['reviewed_at'])
+    """Every stored field of the lesson: a new dispute, an edit or a repeat gives another stamp."""
+    return _mark(json.dumps({key: row.get(key) for key in STORED}, sort_keys=True))
+
+
+def _trash(pid):
+    """The project's notes/.trash folder. Refused when a link at the project folder, notes/ or .trash would send
+    it outside the projects folder."""
+    trash = projects.bundle(pid) / 'notes' / '.trash'
+    if trash.resolve() != projects.root().resolve() / pid / 'notes' / '.trash':
+        raise PruneError(409, 'The notes folder or its trash is a link. Tether does not move notes through a link.')
+    return trash
 
 
 def _note_mark(file):
@@ -228,12 +242,12 @@ def _move_note(pid, name, kept_as, mark):
     between the two. A file with another stamp goes back to its place, and nothing is removed."""
     if not projects.NOTE.fullmatch(name):
         raise PruneError(400, 'Choose a note.')
-    folder = projects.bundle(pid) / 'notes'
-    source, trash = folder / name, folder / '.trash'
+    trash = _trash(pid)
+    source = trash.parent / name
     if source.is_symlink() or not source.is_file():
         raise PruneError(404, 'That note is gone.')
     trash.mkdir(mode=0o700, exist_ok=True)
-    target = trash / kept_as
+    target = _trash(pid) / kept_as
     if target.exists():
         raise PruneError(409, 'Tether could not move the note. Try again.')
     os.replace(source, target)
@@ -241,7 +255,7 @@ def _move_note(pid, name, kept_as, mark):
         if _note_mark(target) == mark:
             return
         problem = 'That note changed after the list loaded. Read it again, then choose.'
-    except OSError:
+    except Exception:  # noqa: BLE001 - any failure of the check (a read error, no memory): the note goes back
         problem = 'Tether could not read the note, so it did not remove it.'
     try:
         os.link(target, source)  # back in place, unless a newer note took the name in the meantime
@@ -312,7 +326,17 @@ def remove(kind, pid, name, mark, now=None):
                 _save(data)  # the record stays: it is the way back for the note
                 raise
             except BaseException:
-                forget()  # the note is in its place (or the move never happened)
+                # The record goes only when the note is in its place (the move never happened, or the note went
+                # back). When it is not there, the record is its way back from the trash.
+                try:
+                    held = not (projects.bundle(pid) / 'notes' / name).is_file()
+                except Exception:  # noqa: BLE001
+                    held = True
+                if held:
+                    data['flagged'] = [item for item in data['flagged'] if item != key]
+                    _save(data)
+                else:
+                    forget()
                 raise
         data['flagged'] = [item for item in data['flagged'] if item != key]
         _save(data)
@@ -334,8 +358,8 @@ def restore(token, now=None):
             except ValueError as exc:
                 raise PruneError(409, str(exc)) from None
         else:
-            folder = projects.bundle(pid) / 'notes'
-            source, target = folder / '.trash' / record['file'], folder / record['name']
+            trash = _trash(pid)
+            source, target = trash / record['file'], trash.parent / record['name']
             if not projects.NOTE.fullmatch(record['name']) or source.is_symlink() or not source.is_file():
                 raise PruneError(404, 'The removed note is no longer in the notes trash folder.')
             try:
