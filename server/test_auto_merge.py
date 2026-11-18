@@ -268,6 +268,46 @@ class Decision(Base):
         self.write(self.work, 'ui/src/blob.dat', 'edited\n')
         self.assertEqual(auto_merge.evaluate(self.work, head)[0]['checks'][1]['text'], auto_merge.DIRTY)
 
+    def test_a_filter_attribute_that_appears_before_git_reads_it_starts_no_program(self):
+        """The attributes change after Tether's own check and before `git status` reads them."""
+        marker = self.root / 'late-filter-ran'
+        head = self.change()
+        app = self.work / 'ui/src/App.tsx'
+        real = subprocess.run
+
+        def touch():  # Git must read the file again, not trust its cached stat data
+            found = app.stat()
+            os.utime(app, ns=(found.st_atime_ns, found.st_mtime_ns - 2_000_000_000))
+
+        cases = [(kind, target) for kind in ('clean', 'process')
+                 for target in (self.work / '.gitattributes', self.repo / '.git/info/attributes')]
+        for kind, target in cases:
+            with self.subTest(kind=kind, target=target.name):
+                self.git(self.repo, 'config', f'filter.late.{kind}', f'touch {marker}; cat')
+
+                def run(argv, **kwargs):
+                    if argv[0] == 'git' and argv[3] == 'status':
+                        target.parent.mkdir(exist_ok=True)
+                        target.write_text('* filter=late\n')
+                    return real(argv, **kwargs)
+
+                try:
+                    touch()
+                    with mock.patch.object(auto_merge, 'RUN', run):
+                        result = auto_merge._dirty(self.work)
+                    self.assertFalse(marker.exists())
+                    self.assertEqual(result, auto_merge.UNSUPPORTED)  # Git's raw comparison does not count
+                    # Control: the same change with a plain `git status` does start the program.
+                    touch()
+                    subprocess.run(['git', '-C', str(self.work), 'status', '--porcelain'], capture_output=True, timeout=20)
+                    self.assertTrue(marker.exists())
+                finally:
+                    marker.unlink(missing_ok=True)
+                    target.unlink(missing_ok=True)
+                    self.git(self.repo, 'config', '--unset', f'filter.late.{kind}')
+                    self.git(self.work, 'update-index', '-q', '--refresh')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+
     def test_the_clean_check_is_gits_own_answer(self):
         """The reviewer's cases: Tether must agree with `git status`, whatever the line-end rules are."""
         def agrees(head, expect_clean):
@@ -731,7 +771,7 @@ class Modes(Base):
                 command = argv[3:]
                 seen.append(command)
                 env = kwargs['env']
-                if command[0] in ('status', 'check-attr') or command[:2] == ['ls-files', '-s']:
+                if command[0] in ('status', 'check-attr') or command[:2] == ['ls-files', '-s'] or (command[0] == 'config' and r'^filter\.' in command):
                     # The clean check asks Git with the user's own config, and only these read-only commands.
                     self.assertEqual(env['GIT_CONFIG_GLOBAL'], global_config)
                     self.assertEqual(git_settings(env)[:1], [('core.fsmonitor', 'false')])

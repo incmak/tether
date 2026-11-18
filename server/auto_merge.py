@@ -480,9 +480,25 @@ def _status_env():
     return env
 
 
-def _has_filter(folder, env, depth=0):
+def _filter_drivers(folder, env):
+    """The names of the filter drivers that Git's config defines for this folder (system, global, repository)."""
+    listed = _git(folder, 'config', '--null', '--name-only', '--get-regexp', r'^filter\.', env=env, check=False)
+    if listed.returncode not in (0, 1):
+        raise GitError('Could not read the configured Git filters.')
+    names = set()
+    for key in listed.stdout.split('\0')[:-1]:
+        parts = key.split('.')
+        if len(parts) < 3 or '\n' in key:
+            raise GitError('Git printed a filter setting Tether does not know.')
+        names.add('.'.join(parts[1:-1]))
+    return names
+
+
+def _has_filter(folder, env, drivers, depth=0):
     """True when a tracked path, here or in a checked-out submodule, has a filter attribute. Git would run that
-    filter's program to compare the file, so Tether does not ask. check-attr and ls-files only read."""
+    filter's program to compare the file, so Tether does not ask. check-attr, config and ls-files only read.
+    drivers: collects the filter drivers configured here and in the submodules."""
+    drivers.update(_filter_drivers(folder, env))
     raw = _git(folder, 'ls-files', '-s', '-z', env=env, binary=True).stdout
     paths, links = [], []
     for line in raw.split(b'\0')[:-1]:
@@ -504,7 +520,7 @@ def _has_filter(folder, env, depth=0):
     for link in links:
         inner = Path(os.fsdecode(os.path.join(os.fsencode(str(folder)), link)))
         # Only decides where else to look for filters. Whether the submodule is clean is Git's answer below.
-        if (inner / '.git').exists() and (depth >= SUBMODULE_DEPTH or _has_filter(inner, env, depth + 1)):
+        if (inner / '.git').exists() and (depth >= SUBMODULE_DEPTH or _has_filter(inner, env, drivers, depth + 1)):
             return True
     return False
 
@@ -515,12 +531,26 @@ def _dirty(folder):
     Git itself answers: `git status --porcelain=v2` with untracked files and submodules included. Tether applies no
     rule of its own for line ends, text detection or submodules. Any status entry means not clean."""
     env = _status_env()
-    if _has_filter(folder, env):
+    drivers = set()
+    if _has_filter(folder, env, drivers):
         return UNSUPPORTED
+    # Attributes can change between the check above and Git's own read. So every configured filter driver is turned
+    # off for the status call (an empty command runs nothing), also in the submodules, which inherit these settings.
+    off = _status_env()
+    count = int(off['GIT_CONFIG_COUNT'])
+    for name in sorted(drivers):
+        for key, value in (('clean', ''), ('smudge', ''), ('process', ''), ('required', 'false')):
+            off[f'GIT_CONFIG_KEY_{count}'] = f'filter.{name}.{key}'
+            off[f'GIT_CONFIG_VALUE_{count}'] = value
+            count += 1
+    off['GIT_CONFIG_COUNT'] = str(count)
     status = _git(folder, 'status', '--porcelain=v2', '-z', '--ignore-submodules=none', '--untracked-files=all',
-                  env=env, binary=True)
+                  env=off, binary=True)
     if status.stderr.strip():
         raise GitError('git status printed a warning, so the tree is not confirmed clean.')
+    # With a filter attribute that appeared meanwhile, Git compared raw bytes: its answer does not count.
+    if _has_filter(folder, env, set()):
+        return UNSUPPORTED
     return DIRTY if status.stdout else ''
 
 
