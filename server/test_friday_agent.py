@@ -412,25 +412,37 @@ class FridayRulesTests(unittest.TestCase):
     def test_send_consent_matches_pending_tool_chat_and_turn(self):
         args = {'chat': 'Automation tether . Can we have…', 'prompt': 'Review the full context.'}
         proposal = friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 4)
-        readback = 'Shall I send a request to the automation tether chat to review the full context?'
+        readback = friday.send_readback(proposal)
 
-        def check(text='Yes, please do.', pending=proposal, turn=5, **changes):
+        def check(text='Yes, please do.', previous=readback, pending=proposal, turn=5, **changes):
             return friday.check_tool('send_to_chat', dict(args, **changes), 'speech', text,
-                                     set(), readback, pending, turn)
+                                     set(), previous, pending, turn)
 
         self.assertIsNone(check())
-        self.assertIsNone(check(turn=6))
+        self.assertIsNotNone(check(turn=6))
+        self.assertIsNotNone(check(previous='Want me to read the rest?'))
+        self.assertIsNotNone(check(previous=readback.lower()))
+        self.assertIsNotNone(check(previous=readback + ' ', chat='Automation tether'))
         self.assertIsNone(check('Yes, please do. And for the factory floor, check the alerts.',
                                 prompt='Review the full context and check the factory floor alerts.'))
         self.assertIsNotNone(check("No, don't send it."))
         self.assertIsNotNone(check('Yes, but no.'))
         self.assertIsNotNone(check(chat='Different chat'))
-        self.assertIsNotNone(check(pending=None))
+        self.assertIsNotNone(check(pending=None, chat='Automation tether'))
+        self.assertIsNotNone(check(turn=6, chat='Automation tether'))
         self.assertIsNotNone(check(turn=7))
         self.assertIsNotNone(friday.check_tool('backlog_send', dict(args, item='B12'), 'speech',
                                               'yes', set(), readback, proposal, 5))
         self.assertIsNotNone(friday.check_tool('send_to_chat', dict(args, chat='Another chat'),
             'speech', 'yes', set(), friday.send_readback(proposal), proposal, 5))
+        backlog = friday.SendProposal('backlog_send', 'Docs', 'B12', 4)
+        for previous, turn, reason in ((friday.send_readback(backlog), 5, None),
+                                       (friday.send_readback(backlog), 6, friday.READBACK_REQUIRED),
+                                       (friday.send_readback(backlog), 7, friday.READBACK_REQUIRED),
+                                       ('Want me to open the panel?', 5, friday.READBACK_REQUIRED)):
+            with self.subTest(previous=previous, turn=turn):
+                self.assertEqual(friday.check_tool('backlog_send', {'chat': 'Docs', 'item': 'B12'},
+                    'speech', 'Yes.', set(), previous, backlog, turn), reason)
         # A "no" declines only the pending send; other tools in the same turn still work.
         self.assertIsNone(friday.check_tool('switch_chat', {'chat': 'Deploy'}, 'speech',
                                             'No, switch to deploy.', set(), readback, proposal, 5))
@@ -1308,7 +1320,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
         cases = (
             ('Send this', ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'error': 'Missing chat'})),
-            (friday.EVENT_PREFIX + 'The build failed.', ('backlog_add', {'text': 'Fix docs'}, {'ok': True})),
+            ('What was the reply?', ('send_to_chat', {'chat': 'Docs', 'prompt': 'What was the reply?'}, {'ok': True})),
         )
         for user, action in cases:
             with self.subTest(action=action[0]), patch('sys.stderr') as stderr:
@@ -1322,6 +1334,34 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             ('', 1, [cases[0][1]]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
         self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                          ['The prompt was sent', ' to neither chat, not even Docs.'])
+
+    async def test_successful_send_reply_survives_blocked_second_send(self):
+        send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})
+        with patch('sys.stderr'):
+            _, frames = await self.tool_flow('Send this to Docs', [
+                ('', 1, [send, send]), ('Sent to Docs. I could only send once.', 1, [])])
+        self.assertEqual([f for f in frames if isinstance(f, tuple)], [('dispatch', 'send_to_chat')])
+        sent, blocked = [f.result for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+        self.assertTrue(sent['ok'])
+        self.assertEqual(blocked, {'error': 'Only one send_to_chat is allowed per spoken turn.'})
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                         ['Sent to Docs. I could only send once.'])
+        self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+    async def test_event_news_survives_blocked_or_failed_action(self):
+        cases = (
+            ('backlog_add', {'text': 'Fix docs'}, {'ok': True}),
+            ('open_panel', {'open': True}, {'error': 'Panel unavailable'}),
+        )
+        for action in cases:
+            with self.subTest(action=action[0]), patch('sys.stderr'):
+                _, frames = await self.tool_flow(friday.EVENT_PREFIX + 'Codex finished B318.', [
+                    ('', 1, [action]), ('Codex is done with B318.', 1, [])])
+                result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertIn('error', result.result)
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                                 ['Codex is done with B318.'])
+                self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
     async def test_stray_text_is_dropped_with_fallback_only_for_an_empty_reply(self):
         cases = (
@@ -1341,7 +1381,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         proposal = friday.SendProposal('send_to_chat', 'Automation tether . Can we have…', 'Review the context.', 0)
         messages = [
             {'role': 'user', 'content': 'Earlier speech with no.'},
-            {'role': 'assistant', 'content': 'Shall I send that to the automation tether chat?'},
+            {'role': 'assistant', 'content': friday.send_readback(proposal)},
             {'role': 'user', 'content': 'Yes, please do.'},
             {'role': 'user', 'content': friday.EVENT_PREFIX + 'No.'},
             {'role': 'user', 'content': friday.STATE_PREFIX + 'No.'},
@@ -1353,10 +1393,71 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(('dispatch', 'send_to_chat'), frames)
         self.assertIsNone(session.pending_proposal)
 
+    async def test_prepare_run_clears_proposal_after_an_intervening_question(self):
+        proposal = friday.SendProposal('send_to_chat', 'Docs', 'Run the tests', 0)
+        messages = [
+            {'role': 'assistant', 'content': friday.send_readback(proposal)},
+            {'role': 'assistant', 'content': 'Want me to read the rest?'},
+            {'role': 'user', 'content': 'Yes.'},
+        ]
+        rtvi = SimpleNamespace(handle_function_call=AsyncMock())
+        session = SimpleNamespace(pending_proposal=proposal, rtvi=rtvi)
+        service = self.rt.FridayLLM(session, friday.brain_config({}))
+        result = AsyncMock()
+        params = SimpleNamespace(function_name='send_to_chat',
+                                 arguments={'chat': 'Docs', 'prompt': 'Check the docs'},
+                                 result_callback=result)
+        service.push_frame = AsyncMock()
+        try:
+            run = service.prepare_run(messages)
+            pending_after_prepare = session.pending_proposal
+            token = service._active_run.set(run)
+            try:
+                with patch('sys.stderr'):
+                    await service.handle_browser_tool(params)
+            finally:
+                service._active_run.reset(token)
+            rtvi.handle_function_call.assert_not_awaited()
+            self.assertIsNone(pending_after_prepare)
+            self.assertIn('error', result.call_args.args[0])
+        finally:
+            await service._client.close()
+
+    async def test_proposal_expires_after_two_separate_speech_runs(self):
+        proposal = friday.SendProposal('send_to_chat', 'Docs', 'Run the tests', 0)
+        readback = {'role': 'assistant', 'content': friday.send_readback(proposal)}
+        yes = {'role': 'user', 'content': 'Yes, please do.'}
+        more = {'role': 'user', 'content': 'And for the factory floor, check the alerts.'}
+        rtvi = SimpleNamespace(handle_function_call=AsyncMock())
+        session = SimpleNamespace(pending_proposal=proposal, rtvi=rtvi)
+        service = self.rt.FridayLLM(session, friday.brain_config({}))
+        params = SimpleNamespace(function_name='send_to_chat', tool_call_id='c1',
+                                 arguments={'chat': 'Docs', 'prompt': 'Run the tests and check the factory floor alerts.'},
+                                 result_callback=AsyncMock())
+        service.push_frame = AsyncMock()
+        try:
+            service.prepare_run([readback, yes])
+            run = service.prepare_run([readback, yes, more])
+            self.assertEqual(run.user_turn - proposal.turn, 2)
+            self.assertIsNone(session.pending_proposal)
+            token = service._active_run.set(run)
+            try:
+                with patch('sys.stderr'):
+                    await service.handle_browser_tool(params)
+            finally:
+                service._active_run.reset(token)
+            rtvi.handle_function_call.assert_not_awaited()
+        finally:
+            await service._client.close()
+
     async def test_declined_pending_proposal_clears_it_and_blocks_only_the_send(self):
         proposal = friday.SendProposal('backlog_send', 'Docs', 'B12', 0)
+        messages = [
+            {'role': 'assistant', 'content': friday.send_readback(proposal)},
+            {'role': 'user', 'content': "No, don't send it."},
+        ]
         with patch('sys.stderr'):
-            session, frames = await self.tool_flow("No, don't send it.", [('', 1, [
+            session, frames = await self.tool_flow(messages, [('', 1, [
                 ('backlog_send', {'chat': 'Docs', 'item': 'B12'}, {'ok': True}),
                 ('backlog_list', {}, {'items': []}),
             ]), ('Okay.', 1, [])], proposal)
@@ -1391,13 +1492,18 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         item = {'text': 'Check usage', 'when': 'in 2h'}
         reminder = ('reminder_add', {'reminders': [item, {'text': 'Second', 'when': 'later'}]},
                     {'ok': True, 'set': [item], 'failed': [{'text': 'Second', 'error': 'Pick a time.'}]})
-        _, frames = await self.tool_flow('Remind me about both', [
-            ('', 1, [reminder]), ('I added the first reminder. I need a time for the second.', 1, [])])
-        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
-        self.assertIsNone(result.properties)
-        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
-                         ['I added the first reminder. I need a time for the second.'])
-        self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+        backlog = ('backlog_add', {'text': 'Check usage'}, {'ok': True})
+        reply = 'I added the first reminder. I need a time for the second.'
+        for calls in ([reminder], [reminder, backlog]):
+            with self.subTest(calls=len(calls)), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Remind me about both', [('', 1, calls), (reply, 1, [])])
+                saved, *blocked = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertIsNone(saved.properties)
+                self.assertEqual([f for f in frames if isinstance(f, tuple)], [('dispatch', 'reminder_add')])
+                self.assertEqual(len(blocked), len(calls) - 1)
+                self.assertTrue(all('error' in frame.result for frame in blocked))
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
+                self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
         _, frames = await self.tool_flow('What are my reminders?', [
             ('', 1, [('reminder_list', {}, {'reminders': []})])])

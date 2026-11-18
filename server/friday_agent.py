@@ -82,6 +82,7 @@ APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+SEND_READBACK_END = '. Yes or no?'
 REMINDER_INTENT = re.compile(r'\b(?:remind(?:er|ers)?|remember)\b', re.I)
 STT_FIXUPS = {'t third': 'Tether', 'tthird': 'Tether', 'teether': 'Tether',
               'tetter': 'Tether', "tether's": "Tether's",
@@ -394,12 +395,12 @@ class SendProposal:
 def send_readback(proposal):
     chat = re.split(r' \. |…', proposal.chat, maxsplit=1)[0][:40].rstrip()
     if proposal.name == 'backlog_send':
-        return f'Send {proposal.payload} to {chat}. Yes or no?'
+        return f'Send {proposal.payload} to {chat}{SEND_READBACK_END}'
     prompt = ' '.join(proposal.payload.split())
     if len(prompt) > 160:
         end = prompt.rfind(' ', 0, 160)
         prompt = prompt[:end if end > 0 else 159] + '…'
-    return f'Send to {chat}: {prompt.removesuffix(".")}. Yes or no?'
+    return f'Send to {chat}: {prompt.removesuffix(".")}{SEND_READBACK_END}'
 
 
 def false_success(text):
@@ -429,7 +430,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         return 'Event runs only report news; do not take actions.'
     if source != 'speech' and guarded_action:
         return 'No spoken user turn authorizes this action.'
-    has_proposal = pending is not None and 1 <= user_turn - pending.turn <= 2
+    has_proposal = (pending is not None and user_turn - pending.turn == 1
+                    and previous_assistant == send_readback(pending))
     if source == 'speech' and name in SEND_TOOLS and has_proposal and APPROVAL_NO.search(last_user_text):
         return 'The user declined the proposed send.'
     if name in (*SEND_TOOLS, 'answer_approval', 'backlog_add', 'reminder_add') and name in used:
@@ -458,13 +460,14 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS and not SEND_INTENT.search(last_user_text):
         prompt = str(args.get('prompt' if name == 'send_to_chat' else 'item', '')).strip().casefold()
         chat = str(args.get('chat', '')).strip().casefold()
-        readback = previous_assistant.casefold()
+        readback = previous_assistant.strip().casefold()
         proposal_matches = has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
-        legacy_matches = ((prompt and prompt in readback)
-                          or (chat and re.search(r'\bsend\b', readback)
-                              and re.search(r'(?<![\w-])' + re.escape(chat) + r'(?![\w-])', readback)))
-        if pending and readback == send_readback(pending).casefold():
-            legacy_matches = False
+        # Friday's fixed read-back requires the matching proposal, even after it expires.
+        fixed_readback = readback.startswith('send ') and readback.endswith(SEND_READBACK_END.casefold())
+        legacy_matches = (not fixed_readback
+                          and ((prompt and prompt in readback)
+                               or (chat and re.search(r'\bsend\b', readback)
+                                   and re.search(r'(?<![\w-])' + re.escape(chat) + r'(?![\w-])', readback))))
         confirmed = (APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
                      and (proposal_matches or legacy_matches))
         if not confirmed:
@@ -1042,10 +1045,12 @@ def runtime_types():
                 return None
             result = frame.result if isinstance(frame, FunctionCallResultFrame) and not frame.error else None
             ack = action_ack(call.name, call.args, result)
+            # A partial reminder batch succeeds for the items it saved and still needs a follow-up.
+            if ack or (call.name == 'reminder_add' and action_ok(result) and result.get('set')):
+                run.succeeded_action = True
+            elif run.source == 'speech':
+                run.failed_action = True
             if not ack:
-                # A batch with saved reminders still needs a reply about the items that failed.
-                if call.name != 'reminder_add' or not action_ok(result) or not result.get('set'):
-                    run.failed_action = True
                 return None
             if call.name in SEND_TOOLS:
                 self.session.pending_proposal = None
@@ -1169,16 +1174,13 @@ def runtime_types():
                           if messages[i].get('role') == 'assistant'), -1)
                 previous = (messages[i].get('content') or '') if i >= 0 else ''
                 proposal = getattr(self.session, 'pending_proposal', None)
-                if proposal and previous == send_readback(proposal):
-                    # Only the proposal's own tool, chat and expiry can authorize this read-back.
-                    previous = ''
                 declined = False
                 if self.run_source == 'speech':
                     self.user_turn += 1
                     self.last_user_text = ' '.join(m['content'].strip() for m in messages[i + 1:]
                         if is_real_user(m) and isinstance(m.get('content'), str)
                         and m['content'].strip() and not m['content'].startswith(EVENT_PREFIX))
-                    if proposal and self.user_turn - proposal.turn > 2:
+                    if proposal and (previous != send_readback(proposal) or self.user_turn - proposal.turn != 1):
                         self.session.pending_proposal = proposal = None
                     if proposal and APPROVAL_NO.search(self.last_user_text):
                         self.session.pending_proposal = None
@@ -1187,7 +1189,7 @@ def runtime_types():
                     last_user_text=self.last_user_text, used=set(),
                     previous_assistant=previous if isinstance(previous, str) else '',
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
-                    pending={}, filler_spoken=False, failed_action=False, readback_spoken=False)
+                    pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
             return self.tool_run
@@ -1205,7 +1207,7 @@ def runtime_types():
                 proposal, run.user_turn if run else 0)
             response = self._active_response.get()
             if reason:
-                if run and params.function_name in ACTION_TOOLS:
+                if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
                     run.failed_action = True
                 print(f'Friday blocked {params.function_name}: {reason}', file=sys.stderr, flush=True)
                 if reason == READBACK_REQUIRED:
@@ -1253,7 +1255,7 @@ def runtime_types():
         async def _process_context(self, context):
             run = self.prepare_run(context.get_messages())
             response = self._active_response.get()
-            if response and run and run.failed_action:
+            if response and run and run.failed_action and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
             token = self._active_run.set(run)
@@ -1288,7 +1290,8 @@ def runtime_types():
                     response.completed = True
                     self.record_llm_ttft(response)
                     if response.text and response.buffered_text is not None:
-                        if false_success(''.join(frame.text for frame in response.buffered_text)):
+                        if (not run.succeeded_action
+                                and false_success(''.join(frame.text for frame in response.buffered_text))):
                             print('Friday corrected false success', file=sys.stderr, flush=True)
                             await self.push_frame(TTSSpeakFrame('That did not go through.'))
                         else:
