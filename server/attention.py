@@ -184,11 +184,12 @@ class Attention:
         self.asks[pane] = {'pane': pane, 'thread': thread, 'since': now, 'next': _clip(text), 'kind': kind,
                            'opened': False, 'snoozed_until': None}
 
-    def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None):
+    def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None, version_of=lambda entry: None):
         """Start and clear asks from the live session list. Read (reply, turn id) from reply_of(entry) once the
-        conversation is idle or stopped. Retry empty reads, and after a successful read wait for a new
-        conversation or finished_of(entry) marker. The marker must change when the transcript changes, so a
-        record that was still being written when it was read is read again once it is complete.
+        conversation is idle or stopped. Retry empty reads. After a successful read, read again only when the
+        conversation, the live turn end finished_of(entry) or the transcript version version_of(entry) changes, so a
+        record that was still being written is read again once it is complete. A reply without a turn id can start
+        an ask only after the live turn end changed while this process runs; a file change alone is not enough.
         """
         now = self.clock()
         live = {}
@@ -254,16 +255,16 @@ class Attention:
                     changed = True
             if status.get('state') not in ENDED:
                 continue
-            marker = finished_of(entry)
+            finished, version = finished_of(entry), version_of(entry)
             checked = self.checked.get(pane)
-            if checked == (thread, marker):
+            if checked == (thread, finished, version):
                 continue
             reply, turn_id = reply_of(entry)
             if not reply:
                 continue
             first_read = checked is None or checked[0] != thread
-            self.checked[pane] = (thread, marker)
-            if turn_id is None and (first_read or marker is None):
+            self.checked[pane] = (thread, finished, version)
+            if turn_id is None and (first_read or finished is None or finished == checked[1]):
                 continue
             changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
         if changed:

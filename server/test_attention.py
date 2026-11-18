@@ -535,6 +535,19 @@ class AttentionTest(unittest.TestCase):
         self.world.observe(entry())
         self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
 
+    def test_missing_turn_id_needs_a_live_turn_end_not_a_file_change(self):
+        reply = 'Next: deploy?\nNeeds you: yes'
+        versions = iter(range(100))
+        observe = lambda: self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: (reply, None),
+                                             lambda e: self.world.finished.get('%1'), lambda e: next(versions))
+        self.world.finished['%1'] = 10
+        observe()
+        observe()  # a token-count record changes the file, not the turn end
+        self.assertEqual(self.store.waiting(), [])
+        self.world.finished['%1'] = 20
+        observe()
+        self.assertEqual([ask['next'] for ask in self.store.waiting()], ['deploy?'])
+
     def test_missing_turn_id_requires_a_live_turn_end(self):
         reply = 'Next: deploy?\nNeeds you: yes'
         self.world.turn('%1', reply, None, turn_id=None)
@@ -743,16 +756,17 @@ class TranscriptTurnTest(unittest.TestCase):
                 store = attention.Attention(path, Clock())
                 pane = entry('%1', agent='codex', transcript=transcript)
                 status = lambda e: {'state': 'Idle'}
+                finished = lambda e: None
                 with mock.patch.object(server, 'timeline', return_value={'since': None, 'finished': None}):
-                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                    store.observe([pane], status, server.notification_reply_turn, finished, server.notification_version)
                     store.act('%1', 't1', 'handled')
                     store = attention.Attention(path, Clock())  # restart
                     pane = entry(pane_id, agent='codex', transcript=transcript)
                     transcript.write_text(old + new[:40])  # the new record is still being written
-                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                    store.observe([pane], status, server.notification_reply_turn, finished, server.notification_version)
                     self.assertEqual(store.waiting(), [])
                     transcript.write_text(old + new)
-                    store.observe([pane], status, server.notification_reply_turn, server.notification_marker)
+                    store.observe([pane], status, server.notification_reply_turn, finished, server.notification_version)
                 self.assertEqual([ask['next'] for ask in store.waiting()], ['Merge?'])
 
     def test_codex_timestamp_without_payload_id_and_antigravity_step_zero(self):

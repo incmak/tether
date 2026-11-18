@@ -388,7 +388,8 @@ def monitor_notices():
         except Exception as exc:  # auto-merge must never stop the monitor
             print(f'auto-merge observe failed: {exc!r}', file=sys.stderr)
         try:
-            attention.STORE.observe(entries, shared_status, notification_reply_turn, notification_marker)
+            attention.STORE.observe(entries, shared_status, notification_reply_turn,
+                                    lambda entry: timeline(entry['id'])['finished'], notification_version)
             digest = attention.STORE.digest_due()
             if digest:
                 notify(digest, False)
@@ -1210,8 +1211,8 @@ def notification_context(entry):
     return notification_reply(entry, records), records
 
 
-def notification_marker(entry):
-    """The live turn end plus the transcript's size and change time.
+def notification_version(entry):
+    """The transcript's size and change time.
 
     A reply read while its last record was still being written is read again once the file changes.
     """
@@ -1220,7 +1221,7 @@ def notification_marker(entry):
         version = (stat.st_size, stat.st_mtime_ns)
     except (OSError, KeyError, TypeError, ValueError):
         version = None
-    return timeline(entry['id'])['finished'], version
+    return version
 
 
 def notification_reply(entry, records=None):
