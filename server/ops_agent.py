@@ -433,9 +433,7 @@ def run_day(day, entries, folder_of, run=subprocess.run, lock=None, start=delega
             facts = gather(day, item['roots'], mine, run)
             record.update(commits=len(facts['commits']), deploys=len(facts['deploys']), problems=facts['problems'])
             if not facts['commits'] and not facts['deploys'] and not mine:
-                record['why'] = 'No commits, deploys or paused reviews that day.'
-                records.append(record)
-                continue
+                continue  # no work that day: no note and no row in the run list (a row per idle project hides the rest)
             note = note_path(item['project'], day)
             record['note'] = str(note)
             if note.is_file():
@@ -527,7 +525,7 @@ class Ops:
             records = run_day(day, entries, folder_of, run, lock, sessions=sessions)
             if not records:
                 records = [{'day': day, 'project': '', 'project_name': '', 'at': time.time(), 'status': 'quiet',
-                            'why': 'No open session has a project folder and agent tabs.', 'pane': ''}]
+                            'why': 'No open project had commits, deploys or paused reviews that day.', 'pane': ''}]
             _change(lambda data: data['runs'].extend(records))
         except Exception as exc:  # noqa: BLE001 - the report must never take the monitor down
             print(f'ops report failed: {exc!r}', flush=True)

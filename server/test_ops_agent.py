@@ -167,8 +167,7 @@ class RunTests(Case):
         self.commit('Other day', at(9, '2026-11-15'))
         started, start = self.start()
         records = ops_agent.run_day(DAY, self.entries(), lambda entry: str(self.repo), self.run_tmux(), start=start)
-        self.assertEqual((records[0]['status'], records[0]['why'], started),
-                         ('quiet', 'No commits, deploys or paused reviews that day.', []))
+        self.assertEqual((records, started), ([], []))  # no row per idle project: the run list keeps the real runs
         self.assertFalse((projects.bundle(PID) / 'notes' / 'postmortems').exists())
 
     def test_a_session_without_a_project_is_skipped_and_gets_none(self):
