@@ -227,7 +227,9 @@ def deliver_reminder_push(reminder):
 
 REMINDERS = reminders.Ticker({'push': deliver_reminder_push, 'ping': urgent_ping.remind})
 HELPER_CLOSER = helper_close.Closer()
-NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings, context=lambda entry: notification_context(entry))
+NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings,
+                        context=lambda entry: notification_context(entry),
+                        finished_low=lambda entry: review_links.in_parent_stage(entry['id'], entry.get('thread')))
 WORK_WATCHER = work_api.Watcher(notify, delivery=push.delivery_settings)
 # The worktree sweep (B210), the weekly clean-up check (B211) and the daily ops report (B212).
 UPKEEP = upkeep_api.Upkeep(notify, push.delivery_settings)
@@ -246,8 +248,9 @@ def review_alert(title, body, session, review=None):
 
 
 def review_turn_source(entry):
-    """'user' or 'background' for the worker's last turn. A missing transcript counts as 'user'."""
-    return notification_priority.turn_source(entry.get('agent'), notification_records(entry))
+    """Identify a delivered review prompt or the usual turn source."""
+    return notification_priority.turn_source(entry.get('agent'), notification_records(entry),
+                                             identify=lambda text: review_links.prompt_source(continuations.unwrap(text)))
 
 
 def review_folder(entry):
@@ -298,9 +301,14 @@ def review_parent(entry, entries):
     try:
         exists, record = helper_tabs.load(entry['id'], subprocess.run)
         if exists and record is not None:
-            owner = helper_tabs._helper(entries, record['owner_pane'])
-            if owner is not None and record.get('owner_thread') in (None, owner.get('thread')):
-                return owner['id'], owner.get('thread')
+            pane, thread = record['owner_pane'], record.get('owner_thread')
+            owner = next((item for item in entries if item['id'] == pane), None)
+            if owner is None or owner.get('agent') == 'shell':
+                return pane, thread
+            if owner.get('agent') in ('claude', 'codex'):
+                live_thread = helper_tabs._thread(owner)
+                if live_thread is None or thread in (None, live_thread):
+                    return pane, live_thread or thread
     except Exception:
         pass
     return None

@@ -17,6 +17,7 @@ import threading
 import time
 import unicodedata
 
+import helper_tabs
 import paths
 from terminal_input import DraftError
 
@@ -81,6 +82,16 @@ def paused():
     return _reviewers(paused_only=True)
 
 
+def in_parent_stage(pane, thread=None):
+    try:
+        with _lock:
+            return any(isinstance(link, dict) and link.get('worker') == pane
+                       and (thread is None or link.get('worker_thread') in (None, thread))
+                       and isinstance(link.get('parent_stage'), dict) and 'escalate' not in link for link in _read())
+    except OSError:
+        return False
+
+
 def _reviewers(*, paused_only=False):
     with _lock:
         result = {}
@@ -120,8 +131,9 @@ def remove(worker, reviewer=None):
 
 
 def _from_parent(stage, pane, thread):
-    return stage is not None and pane == stage['pane'] and (
-        thread is None or stage['thread'] is None or thread == stage['thread'])
+    # The watcher binds the stage to the parent's conversation before it sends the notice. Until then, nobody decides.
+    return stage is not None and pane == stage['pane'] and stage['thread'] is not None and (
+        thread is None or thread == stage['thread'])
 
 
 def agent_prompt(worker, sender=None, sender_thread=None):
@@ -270,13 +282,15 @@ def _named_commit(reply):
 def _merge(old, updated, stored):
     """`stored` with the step's changes (old -> updated). Another writer (agent_prompt, a stalled-review action) may
     change a link while a step runs. The step's fields win: they record a message that was already sent, and a lost
-    record sends it again on the next tick. A newer agent_prompt mark is the one field the other writer keeps."""
+    record sends it again on the next tick. Keep a newer agent_prompt and a parent's decision to end its stage."""
     missing = object()
     merged = dict(stored)
     for key in set(old) | set(updated):
         if old.get(key, missing) == updated.get(key, missing):
             continue
         if key == 'agent_prompt' and stored.get(key, missing) != old.get(key, missing):
+            continue
+        if key in ('parent_stage', 'parent_missing') and 'parent_stage' in old and 'parent_stage' not in stored:
             continue
         if key in updated:
             merged[key] = updated[key]
@@ -297,7 +311,7 @@ def _linked(link):
 
 
 def _call(callback, entry):
-    """A git read for one worker. A missing callback or any error gives None: the review is then not bound."""
+    """An optional lookup for one worker. A missing callback or lookup error gives None."""
     if callback is None:
         return None
     try:
@@ -366,10 +380,37 @@ def _send_worker(link, worker, text, state, send, clear, feedback_sent):
     return True
 
 
+PARENT_SUMMARY = (f'[Tether review] {MAX_ROUNDS} review rounds still found blocking problems. '
+                  'Your parent tab decides the next step. Do not fix them in this turn.\n\nOpen findings:\n\n')
+PARENT_SUMMARY_END = ('Reply with the open findings and what you tried. End with "Needs you: no" unless '
+                      'a finding needs Mak (taste, new authority, or you disagree with the reviewer).')
+PARENT_NOTICE = re.compile(r'^\[Tether review\] “[^\n]*” \((%[0-9]+)\) still has blocking review findings after '
+                           rf'{MAX_ROUNDS} rounds\. Open findings: “')
+
+
+def _parent_options(worker):
+    cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
+    return (f'To allow 2 more rounds, send it the next step: python3 {cli} send --pane {worker} "<what to fix>". '
+            f'To hand it to Mak: python3 {cli} escalate --pane {worker}.')
+
+
+def prompt_source(text):
+    if text.startswith('[Working directory changed to '):
+        text = text.partition('. Run commands and resolve relative paths there.] ')[2]
+    if text.startswith(PARENT_SUMMARY) and text.rstrip().endswith(PARENT_SUMMARY_END):
+        return 'review-summary'
+    notice = PARENT_NOTICE.match(text)
+    if notice and text.rstrip().endswith(_parent_options(notice[1])):
+        return 'review-notice'
+    return None
+
+
 def _parent_entry(stage, entries):
     entry = entries.get(stage['pane'])
-    if entry is not None and entry.get('agent') in ('claude', 'codex') and entry.get('thread') == stage['thread']:
-        return entry
+    if entry is not None and entry.get('agent') in ('claude', 'codex'):
+        thread = helper_tabs._thread(entry)
+        if thread is not None and stage['thread'] in (None, thread):
+            return entry
     return None
 
 
@@ -378,23 +419,19 @@ def _findings_preview(findings):
     return preview[:300] + ('…' if len(preview) > 300 else '')
 
 
-def _parent_stage(link, worker, entries, reply, level, parent):
-    if 'limit' in link or level is None or parent is None:
+def _parent_stage(worker, entries, reply, parent):
+    owner = _call(parent, worker)
+    if owner is None:
         return None
-    if link.get('rounds', 0) + link.get('empty_rounds', 0) + 1 >= MAX_ROUNDS + EXTRA_ROUNDS:
-        return None  # no grant is left under the total cap: Mak decides now
-    try:
-        if level(worker) not in (4, 5):
+    pane, thread = owner
+    entry = entries.get(pane)
+    if entry is not None and entry.get('agent') != 'shell':
+        live_thread = helper_tabs._thread(entry)
+        if entry.get('agent') not in ('claude', 'codex') or (
+                live_thread is not None and thread not in (None, live_thread)):
             return None
-        owner = parent(worker)
-        if owner is not None:
-            pane, thread = owner
-            stage = dict(pane=pane, thread=thread, notice=_findings_preview(reply), sent=False)
-            if _parent_entry(stage, entries) is not None:
-                return stage
-    except Exception:  # a lookup failure keeps the existing path to Mak
-        pass
-    return None
+        thread = live_thread or thread
+    return dict(pane=pane, thread=thread, notice=_findings_preview(reply), sent=False)
 
 
 def _send_parent_notice(link, entries, status, send, clear):
@@ -404,12 +441,9 @@ def _send_parent_notice(link, entries, status, send, clear):
     entry = _parent_entry(stage, entries)
     if entry is None:
         return
-    cli = Path(__file__).resolve().with_name('agent_tab_cli.py')
     worker = link['worker']
     text = (f'[Tether review] “{link["name"]}” ({worker}) still has blocking review findings after {MAX_ROUNDS} rounds. '
-            f'Open findings: “{stage["notice"]}”\n\n'
-            f'To allow 2 more rounds, send it the next step: python3 {cli} send --pane {worker} "<what to fix>". '
-            f'To hand it to Mak: python3 {cli} escalate --pane {worker}.')
+            f'Open findings: “{stage["notice"]}”\n\n{_parent_options(worker)}')
     state = status(entry)['state']
     if not _can_send(entry, state, clear):
         return  # a busy parent gets the notice when it can take it
@@ -426,7 +460,7 @@ def _send_parent_notice(link, entries, status, send, clear):
                     saved['parent_stage']['failed'] = stage.get('failed', 0) + 1
         if sent:
             for saved in links:
-                # Tether's notice is not a prompt from Mak: it must not restart the parent's own review loop.
+                # A second guard next to prompt_source, for a transcript tail that no longer holds the notice.
                 if isinstance(saved, dict) and saved.get('worker') == entry['id']:
                     saved['agent_prompt'] = time.time()
         _write(links)
@@ -460,13 +494,17 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     link.pop('lost_ticks', None)
     link.pop('lost_reason', None)
     state = status(worker)['state']
+    source = None
+    if state == 'Idle' and ('restart' in link or link['seen_working']):
+        source = turn_source(worker) if turn_source is not None else 'user'
+    summary = source == 'review-summary'
     if state == 'Idle' and 'restart' in link:
         start = link.pop('restart')
         start = start if isinstance(start, dict) else {}
-        source = turn_source(worker) if turn_source is not None else 'user'
         # A prompt from Mak starts a new task. A background event or another agent's prompt continues this one.
         by_agent = start.get('agent', False) or _agent_prompt_fresh(link)
-        link.pop('agent_prompt', None)
+        if not summary:
+            link.pop('agent_prompt', None)
         if not by_agent and source == 'user':
             for key in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds'):
                 link.pop(key, None)
@@ -480,17 +518,17 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
             if start.get('paused') or not _at_round_limit(link):
                 link.pop('paused', None)
                 link.pop('unreadable', None)
-    if state == 'Idle' and link.pop('worker_busy_send', False):
+    if state == 'Idle' and link.pop('worker_busy_send', False) and not summary:
         return link
     feedback = _feedback_turns.get(link['worker'])
     if state == 'Idle' and feedback is not None:
-        # A grant can reach the store while the watcher records the findings turn as Working.
-        if ('limit' in link and 'agent_prompt' in link and not link.get('awaiting')
-                and link['reviewer'] in feedback['working']):
-            link['seen_working'] = True
         feedback['working'].discard(link['reviewer'])
         if not feedback['pending'] and not feedback['working']:
             _feedback_turns.pop(link['worker'], None)
+    if summary:
+        link['seen_working'] = False
+        if 'limit' in link and 'agent_prompt' in link and not _agent_prompt_fresh(link):
+            link['agent_prompt'] = time.time()  # the queued grant could not start until this summary ended
     if state == 'Working' and not link['seen_working'] and link['worker'] not in awaiting:
         if feedback is not None and link['reviewer'] in feedback['pending'] | feedback['working']:
             feedback['pending'].discard(link['reviewer'])
@@ -504,7 +542,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
     if state == 'Working' and isinstance(link.get('restart'), dict) and _agent_prompt_fresh(link):
         # Record the origin while the turn runs, so a turn longer than the TTL still counts as the agent's.
         link['restart'] = {**link['restart'], 'agent': True}  # a new dict: the saved copy must see the change
-        link.pop('agent_prompt', None)
+        if 'limit' not in link:  # a grant may be queued behind the summary (identified at Idle)
+            link.pop('agent_prompt', None)
     if link.get('awaiting', False):
         reviewer_state = status(reviewer)['state']
         anchored = review_reply is not None and link.get('request_id')
@@ -611,15 +650,14 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                 elif _at_round_limit(link, count):
                     if not _can_send(worker, state, clear):
                         return link
-                    stage = _parent_stage(link, worker, entries, reply, level, parent)
-                    limit = _round_limit(link)
+                    failed = link.get('rounds', 0) + link.get('empty_rounds', 0) + 1
+                    parent_level = 'limit' not in link and _call(level, worker) in (4, 5)
+                    capped = parent_level and failed >= MAX_ROUNDS + EXTRA_ROUNDS
+                    stage = _parent_stage(worker, entries, reply, parent) if parent_level and not capped else None
+                    limit = failed if capped else _round_limit(link)
                     findings = _bounded_reply(reply, reviewer)
                     if stage is not None:
-                        text = (f'[Tether review] {MAX_ROUNDS} review rounds still found blocking problems. '
-                                'Your parent tab decides the next step. Do not fix them in this turn.\n\n'
-                                f'Open findings:\n\n{findings}\n\n'
-                                'Reply with the open findings and what you tried. End with "Needs you: no" unless '
-                                'a finding needs Mak (taste, new authority, or you disagree with the reviewer).')
+                        text = f'{PARENT_SUMMARY}{findings}\n\n{PARENT_SUMMARY_END}'
                     else:
                         text = (f"[Tether review] Stopped after {limit} review rounds: the reviewer tab "
                                 f"({link['reviewer']}) still finds blocking problems. Do not fix them in this turn. "
@@ -632,6 +670,8 @@ def _step(link, entries, status, send, last_reply, awaiting, clear, feedback_sen
                         link.pop('stale_rounds', None)  # findings end a run of approvals that did not match
                         if stage is not None:
                             link['parent_stage'] = stage
+                            if _parent_entry(stage, entries) is None:
+                                link['parent_missing'] = 1
                         elif not link.get('paused'):
                             escalations[link['worker'], link['reviewer']] = (_findings_preview(reply), limit)
                         link['paused'] = True
@@ -811,12 +851,15 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 stage = copy.get('parent_stage')
                 if stage is not None:
                     # Discovery can miss a pane for a tick: escalate only when the parent stays gone.
-                    if _parent_entry(stage, by_pane) is None:
+                    entry = _parent_entry(stage, by_pane)
+                    if entry is None:
                         copy['parent_missing'] = copy.get('parent_missing', 0) + 1
                     else:
                         copy.pop('parent_missing', None)
-                if ('escalate' in copy or copy.get('parent_missing', 0) >= LOSS_TICKS
-                        or (stage is not None and stage.get('failed', 0) >= LOSS_TICKS)):
+                        if stage['thread'] is None:
+                            copy['parent_stage'] = {**stage, 'thread': entry['thread']}
+                if ('escalate' in copy or (stage is not None and (
+                        copy.get('parent_missing', 0) >= LOSS_TICKS or stage.get('failed', 0) >= LOSS_TICKS))):
                     copy.pop('parent_missing', None)
                     preview = copy.pop('escalate') if 'escalate' in copy else stage['notice']
                     copy.pop('parent_stage', None)
@@ -848,7 +891,10 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                     # The same link (same pair and creation time) changed during a callback: keep both changes.
                     same = [index for index, stored in enumerate(current) if _same(old, stored)]
                     if len(same) == 1:
-                        merged = _merge(old, updated, current[same[0]])
+                        stored = current[same[0]]
+                        if 'parent_stage' in old and 'parent_stage' not in stored:
+                            escalations.pop((old['worker'], old['reviewer']), None)
+                        merged = _merge(old, updated, stored)
                         current[same[0]] = merged
                         applied.append((old, merged, reason))
             if applied:

@@ -15,6 +15,7 @@ import review_scope
 import server
 import terminal_input
 from own_time import own_time
+from test_notification_priority import ASSISTANT, BACKGROUND, claude, codex
 from terminal_input import DraftError
 
 
@@ -1271,28 +1272,31 @@ class ReviewLinksTests(unittest.TestCase):
         self.assert_parent_notice(parent, state='Working')
         self.assertTrue(self.links()[0]['parent_stage']['sent'])
 
-    def test_parent_can_grant_two_rounds_before_or_during_findings_reply(self):
-        for working in (False, True):
-            with self.subTest(working=working):
+    def test_parent_can_grant_two_rounds_before_or_after_the_findings_reply(self):
+        for summary_finished in (False, True):
+            with self.subTest(summary_finished=summary_finished):
                 self.add()
                 self.alert.reset_mock()
                 self.entries = [self.worker, self.reviewer]
                 parent = self.add_parent()
                 self.turn_source = Mock(return_value='user')
                 self.fail_to_limit()
-                if working:
-                    self.observe(**{'%13': 'Working'})
-                else:
+                if summary_finished:
                     self.request_review()
                 self.assertTrue(review_links.agent_prompt('%13', parent['id'], parent['thread']))
                 link, = self.links()
                 self.assertEqual((link['rounds'], link['limit']), (3, 5))
                 self.assertNotIn('parent_stage', link)
                 self.assertNotIn('paused', link)
-                if working:
-                    self.observe(**{'%13': 'Idle'})
-                else:
-                    self.request_review()
+                if not summary_finished:
+                    summary = next(call.args[1] for call in reversed(self.send.call_args_list)
+                                   if call.args[0] == self.worker)
+                    records = [codex('user', summary), codex('assistant', 'Open findings.')]
+                    self.turn_source = server.review_turn_source
+                    with patch.object(server, 'notification_records', return_value=records):
+                        self.request_review()
+                    self.assertFalse(self.links()[0]['awaiting'])
+                self.request_review()
                 self.assertTrue(self.links()[0]['awaiting'])
                 self.finish_review()
                 self.assertEqual(self.links()[0]['rounds'], 4)
@@ -1321,6 +1325,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_parent_grant_during_watcher_tick_keeps_the_observed_working_turn(self):
         parent = self.add_parent()
         self.fail_to_limit()
+        self.request_review()  # the findings summary ends before the next step starts
         status = self.status.side_effect
 
         def grant_during_status(entry):
@@ -1335,6 +1340,117 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(self.links()[0]['awaiting'])
         self.assertEqual(self.links()[0]['rounds'], 3)
         self.alert.assert_not_called()
+
+    def test_grant_during_first_summary_idle_keeps_the_next_turn_reviewable(self):
+        parent = self.add_parent()
+        self.fail_to_limit()
+        summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
+        records = [codex('user', summary), codex('assistant', 'Open findings.')]
+        self.turn_source = server.review_turn_source
+        self.enterContext(patch.object(server, 'notification_records', return_value=records))
+        self.observe(**{'%13': 'Working'})
+        status = self.status.side_effect
+
+        def grant_on_idle(entry):
+            if entry == self.worker:
+                review_links.agent_prompt('%13', parent['id'], parent['thread'])
+            return status(entry)
+
+        self.status.side_effect = grant_on_idle
+        self.observe(**{'%13': 'Idle'})
+        self.status.side_effect = status
+        self.assertFalse(self.links()[0]['awaiting'])
+        self.assertEqual((self.links()[0]['rounds'], self.links()[0]['limit']), (3, 5))
+        self.assertNotIn('paused', self.links()[0])
+        self.observe()
+        self.assertFalse(self.links()[0]['awaiting'])
+        records.extend([codex('user', 'Fix the missing lock.'), codex('assistant', 'Fixed the lock.')])
+        self.request_review()
+        self.assertTrue(self.links()[0]['awaiting'])
+        self.finish_review()
+        self.assertEqual(self.links()[0]['rounds'], 4)
+
+    def test_grant_while_the_findings_summary_is_working_reviews_only_the_next_turn(self):
+        for agent, message in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                self.add()
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent()
+                self.worker['agent'] = agent
+                if agent == 'codex':
+                    self.work_mark = Mock(return_value='same tree')
+                    self.request_review()
+                    self.finish_review()
+                self.fail_to_limit()
+                failed = 4 if agent == 'codex' else 3
+                summary = next(call.args[1] for call in reversed(self.send.call_args_list)
+                               if call.args[0] == self.worker)
+                if agent == 'claude':
+                    records = [{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': summary}}]
+                else:
+                    records = [{'type': 'event_msg', 'payload': {'type': 'user_message', 'message': summary}}]
+                    self.work_mark.return_value = 'changed tree'
+                self.turn_source = server.review_turn_source
+                with patch.object(server, 'notification_records', return_value=records):
+                    self.observe(**{'%13': 'Working'})
+                    review_links.agent_prompt('%13', parent['id'], parent['thread'])
+                    records.append(message('assistant', 'Open findings.'))
+                    self.send.reset_mock()
+                    self.observe(**{'%13': 'Idle'})
+                    self.send.assert_not_called()
+                    self.assertFalse(self.links()[0]['awaiting'])
+                    self.assertEqual(sum(self.links()[0].get(key, 0) for key in ('rounds', 'empty_rounds')), failed)
+                    records.extend([message('user', 'Fix the missing lock.'), message('assistant', 'Fixed the lock.')])
+                    self.request_review()
+                    self.assertTrue(self.links()[0]['awaiting'])
+                    self.finish_review(FINDINGS)
+                    self.assertEqual(sum(self.links()[0].get(key, 0) for key in ('rounds', 'empty_rounds')), failed + 1)
+                    if failed == 4:
+                        self.assert_mak_stop(rounds=5)
+
+    def test_findings_summary_keeps_the_grant_after_watcher_memory_is_lost(self):
+        parent = self.add_parent()
+        self.fail_to_limit()
+        summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
+        records = [codex('user', summary)]
+        self.turn_source = server.review_turn_source
+        self.states['%13'] = 'Working'
+        review_links.agent_prompt('%13', parent['id'], parent['thread'])
+        review_links._feedback_turns.clear()  # the persisted link survives a watcher restart
+        with patch.object(server, 'notification_records', return_value=records):
+            self.observe()
+            later = time.time() + review_links.AGENT_PROMPT_TTL + 1
+            with patch.object(review_links.time, 'time', return_value=later):
+                records.append(codex('assistant', 'Open findings.'))
+                self.observe(**{'%13': 'Idle'})
+                self.assertFalse(self.links()[0]['awaiting'])
+                records.extend([codex('user', 'Fix the missing lock.'), codex('assistant', 'Fixed the lock.')])
+                self.request_review()
+                self.finish_review()
+                self.assertEqual(self.links()[0]['rounds'], 4)
+
+    def test_mak_prompt_queued_during_stopped_summary_reviews_only_the_next_turn(self):
+        for agent, message in (('claude', claude), ('codex', codex)):
+            with self.subTest(agent=agent):
+                self.add()
+                self.alert.reset_mock()
+                self.worker['agent'] = agent
+                self.fail_to_limit()
+                summary = self.send.call_args.args[1]
+                records = [message('user', summary)]
+                self.turn_source = server.review_turn_source
+                with patch.object(server, 'notification_records', return_value=records):
+                    self.observe(**{'%13': 'Working'})
+                    records.append(message('assistant', 'Open findings.'))
+                    self.send.reset_mock()
+                    self.observe(**{'%13': 'Idle'})
+                    self.send.assert_not_called()
+                    self.assertTrue(self.links()[0]['paused'])
+                    records.extend([message('user', 'Fix the missing lock.'), message('assistant', 'Fixed the lock.')])
+                    self.request_review()
+                    self.assertTrue(self.links()[0]['awaiting'])
+                    self.finish_review()
+                    self.assertEqual(self.links()[0]['rounds'], 1)
 
     def test_parent_grant_cannot_come_from_another_pane_or_a_different_thread(self):
         self.add_parent()
@@ -1384,7 +1500,7 @@ class ReviewLinksTests(unittest.TestCase):
             self.assertNotIn(key, link)
 
     def test_missing_or_stale_parent_and_callback_errors_use_mak_path(self):
-        for failure in ('no record', 'gone', 'new thread', 'unsupported agent', 'level error', 'parent error'):
+        for failure in ('no record', 'new thread', 'unsupported agent', 'level error', 'parent error'):
             with self.subTest(failure=failure):
                 self.add()
                 self.alert.reset_mock()
@@ -1392,18 +1508,103 @@ class ReviewLinksTests(unittest.TestCase):
                 parent = self.add_parent()
                 if failure == 'no record':
                     self.parent.return_value = None
-                elif failure == 'gone':
-                    self.entries.remove(parent)
                 elif failure == 'new thread':
                     parent['thread'] = THREAD
                 elif failure == 'unsupported agent':
-                    parent['agent'] = 'shell'
+                    parent['agent'] = 'antigravity'
                 elif failure == 'level error':
                     self.level.side_effect = OSError('Could not read level')
                 else:
                     self.parent.side_effect = OSError('Could not read parent')
                 self.fail_to_limit()
                 self.assert_mak_stop()
+
+    def test_parent_missing_on_limit_tick_can_return_or_time_out(self):
+        for level, returns in ((4, True), (5, False)):
+            with self.subTest(level=level, returns=returns):
+                self.file.write_text('[]')
+                self.add()
+                self.alert.reset_mock()
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent(level=level)
+                self.entries.remove(parent)
+                self.parent = lambda entry: server.review_parent(entry, self.entries)
+                with patch.object(server.helper_tabs, 'load', return_value=(True, dict(
+                        owner_pane=parent['id'], owner_thread=parent['thread']))):
+                    self.fail_to_limit()
+                self.alert.assert_not_called()
+                self.assertEqual(self.links()[0]['parent_missing'], 1)
+                self.assertFalse(self.links()[0]['parent_stage']['sent'])
+                for _ in range(review_links.LOSS_TICKS - 2):
+                    self.observe()
+                self.alert.assert_not_called()
+                if returns:
+                    self.entries.append(parent)
+                    self.observe()
+                    self.assert_parent_notice(parent)
+                    self.assertNotIn('parent_missing', self.links()[0])
+                    self.alert.assert_not_called()
+                else:
+                    self.observe()
+                    self.assert_mak_alert()
+                    self.assertNotIn('parent_stage', self.links()[0])
+
+    def test_unmatched_parent_binds_its_conversation_before_receiving_the_notice(self):
+        parent = self.add_parent()
+        parent.update(thread='pending-process', pending_conversation=True)
+        self.parent = lambda entry: server.review_parent(entry, self.entries)
+        with patch.object(server.helper_tabs, 'load', return_value=(True, dict(
+                owner_pane=parent['id'], owner_thread=None))):
+            self.fail_to_limit()
+        self.assertEqual(self.links()[0]['parent_missing'], 1)
+        self.assertFalse(self.links()[0]['parent_stage']['sent'])
+        parent.update(thread=PARENT_THREAD, pending_conversation=False)
+        self.observe()
+        self.assert_parent_notice(parent)
+        self.assertEqual(self.links()[0]['parent_stage']['thread'], PARENT_THREAD)
+        review_links.agent_prompt('%13', parent['id'], THREAD)
+        self.assertTrue(self.links()[0]['paused'])
+        self.alert.assert_not_called()
+
+    def test_grant_on_parent_discovery_recovery_does_not_restore_the_parent_stage(self):
+        parent = self.add_parent()
+        self.entries.remove(parent)
+        self.fail_to_limit()
+        self.entries.append(parent)
+        status = self.status.side_effect
+
+        def grant_on_recovery(entry):
+            if entry == self.worker:
+                review_links.agent_prompt('%13', parent['id'], parent['thread'])
+            return status(entry)
+
+        self.status.side_effect = grant_on_recovery
+        self.send.reset_mock()
+        self.observe()
+        self.send.assert_not_called()
+        self.assertNotIn('parent_stage', self.links()[0])
+        self.assertNotIn('parent_missing', self.links()[0])
+        self.assertEqual(self.links()[0]['limit'], 5)
+
+    def test_unbound_parent_stage_takes_no_grant_or_escalation(self):
+        parent = self.add_parent()
+        self.entries.remove(parent)
+        self.parent.return_value = parent['id'], None  # the helper record does not name the owner's conversation
+        self.fail_to_limit()
+        self.assertIsNone(self.links()[0]['parent_stage']['thread'])
+        for thread in (parent['thread'], 'a-replacement-conversation'):
+            review_links.agent_prompt('%13', parent['id'], thread)
+            link, = self.links()
+            self.assertNotIn('limit', link)
+            self.assertTrue(link['paused'])
+            with self.assertRaisesRegex(ValueError, 'That tab has no review waiting on this tab.'):
+                review_links.escalate('%13', parent['id'], thread)
+        self.entries.append(parent)
+        self.observe()  # the watcher binds the stage to the live parent and sends the notice
+        self.assertEqual(self.links()[0]['parent_stage']['thread'], parent['thread'])
+        self.assert_parent_notice(parent)
+        review_links.agent_prompt('%13', parent['id'], parent['thread'])
+        self.assertEqual(self.links()[0]['limit'], 5)
 
     def test_parent_leaving_or_changing_thread_escalates_once(self):
         for failure in ('pane gone', 'changed thread', 'parent also reviewer'):
@@ -1445,13 +1646,59 @@ class ReviewLinksTests(unittest.TestCase):
 
     def test_parent_notice_does_not_restart_the_parents_own_review_loop(self):
         parent = self.add_parent()
-        review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=None, name='Parent work', agent='codex')
+        parent['agent'] = 'claude'
+        reviewer = dict(id='%14', agent='codex', thread=THREAD, writable=True)
+        self.entries.append(reviewer)
+        self.states['%14'] = 'Idle'
+        review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
+                         name='Parent work', agent='claude')
+        child, own = self.links()
+        own.update(rounds=5, paused=True, limit=5)
+        self.file.write_text(json.dumps([child, own]))
         self.fail_to_limit()
         self.assert_parent_notice(parent)
-        own, = [link for link in self.links() if link['worker'] == parent['id']]
-        self.assertIsInstance(own['agent_prompt'], float)
-        child, = [link for link in self.links() if link['worker'] == '%13']
-        self.assertNotIn('agent_prompt', child)
+        notice = self.send.call_args.args[1]
+        records = [BACKGROUND, ASSISTANT]
+        self.turn_source = server.review_turn_source
+        self.send.reset_mock()
+        with patch.object(server, 'notification_records', return_value=records):
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+            self.assertTrue(self.links()[1]['paused'])
+            prefixed = '[Working directory changed to /work. Run commands and resolve relative paths there.] ' + notice
+            records.extend([{'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': prefixed}},
+                            ASSISTANT])
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+            self.send.assert_not_called()
+            self.assertEqual((self.links()[1]['paused'], self.links()[1]['limit']), (True, 5))
+            records.extend([claude('user', notice.splitlines()[0] + '\nMak sends a fresh task.'), ASSISTANT])
+            self.observe(**{'%11': 'Working'})
+            self.observe(**{'%11': 'Idle'})
+        self.assertNotIn('paused', self.links()[1])
+        self.assertNotIn('limit', self.links()[1])
+        self.assertTrue(self.links()[1]['awaiting'])
+        self.assertEqual(self.send.call_args.args[0], reviewer)
+
+    def test_parent_notice_turn_with_a_clipped_transcript_keeps_the_parents_loop_paused(self):
+        parent = self.add_parent()
+        parent['agent'] = 'claude'
+        reviewer = dict(id='%14', agent='codex', thread=THREAD, writable=True)
+        self.entries.append(reviewer)
+        self.states['%14'] = 'Idle'
+        review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
+                         name='Parent work', agent='claude')
+        child, own = self.links()
+        own.update(rounds=5, paused=True, limit=5)
+        self.file.write_text(json.dumps([child, own]))
+        self.fail_to_limit()
+        self.assert_parent_notice(parent)
+        self.turn_source = Mock(return_value='user')  # a large tool result pushed the notice out of the tail
+        self.send.reset_mock()
+        self.observe(**{'%11': 'Working'})
+        self.observe(**{'%11': 'Idle'})
+        self.send.assert_not_called()
+        self.assertEqual((self.links()[1]['paused'], self.links()[1]['limit']), (True, 5))
 
     def test_escalate_during_the_tick_stops_the_pending_parent_notice(self):
         parent = self.add_parent()
@@ -1504,7 +1751,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assert_mak_stop(rounds=5)
 
     def test_parent_stage_is_skipped_when_no_round_is_left_under_the_total_cap(self):
-        for level in (4, 5):
+        for level in (3, 4, 5):
             with self.subTest(level=level):
                 self.file.write_text('[]')
                 self.add()
@@ -1517,7 +1764,7 @@ class ReviewLinksTests(unittest.TestCase):
                 links[0].update(rounds=2, empty_rounds=2)  # 4 failed reviews before this one
                 self.file.write_text(json.dumps(links))
                 self.finish_review(FINDINGS)  # the 5th failed review in all
-                self.assert_mak_stop()
+                self.assert_mak_stop(rounds=3 if level == 3 else 5)
                 self.assertFalse(any(call.args[0] is parent for call in self.send.call_args_list))
 
     def test_stored_limit_is_clamped_for_both_counters(self):
@@ -3122,7 +3369,7 @@ class ServerWatcherTests(unittest.TestCase):
             tmux.side_effect = OSError('Could not read project')
             self.assertEqual(server.review_level(worker), 0)
 
-    def test_review_parent_requires_a_live_tab_with_the_same_conversation(self):
+    def test_review_parent_returns_known_owner_during_discovery_misses(self):
         worker = {'id': '%13'}
         parent = dict(id='%11', agent='codex', thread=PARENT_THREAD)
         with patch.object(server.helper_tabs, 'load') as load:
@@ -3132,9 +3379,14 @@ class ServerWatcherTests(unittest.TestCase):
                     load.return_value = True, dict(owner_pane='%11', owner_thread=thread)
                     self.assertEqual(server.review_parent(worker, [worker, parent]), expected)
                     load.assert_called_with('%13', subprocess.run)
-            load.return_value = True, dict(owner_pane='%11', owner_thread=None)
-            self.assertIsNone(server.review_parent(worker, [worker]))
-            self.assertIsNone(server.review_parent(worker, [worker, dict(parent, agent='shell')]))
+            for thread in (PARENT_THREAD, None):
+                load.return_value = True, dict(owner_pane='%11', owner_thread=thread)
+                self.assertEqual(server.review_parent(worker, [worker]), ('%11', thread))
+                pending = dict(parent, thread='pending-process', pending_conversation=True)
+                self.assertEqual(server.review_parent(worker, [worker, pending]), ('%11', thread))
+                self.assertEqual(server.review_parent(worker, [worker, dict(id='%11', agent='shell')]),
+                                 ('%11', thread))
+            self.assertIsNone(server.review_parent(worker, [worker, dict(parent, agent='antigravity')]))
             load.return_value = True, None
             self.assertIsNone(server.review_parent(worker, [worker, parent]))
             load.side_effect = OSError('Could not read helper')

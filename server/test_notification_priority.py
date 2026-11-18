@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import push
+import review_links
 import server
 from notification_priority import classify, turn_source
 
@@ -95,6 +96,17 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(turn_source('claude', [claude('user', 'Fix it'), ASSISTANT,
                          {'type': 'queue-operation', 'operation': 'enqueue', 'content': BACKGROUND['message']['content']}, ASSISTANT]), 'user')
 
+    def test_identified_prompt_survives_a_blocked_stop_hook(self):
+        hook = {'type': 'attachment', 'attachment': {'type': 'hook_blocking_error', 'blockingError': 'Check failed'}}
+        identify = lambda text: 'review-summary' if text == 'Summary prompt' else None
+        for prompt, expected in (('Summary prompt', 'review-summary'), ('Fix it', 'user')):
+            with self.subTest(prompt=prompt):
+                records = [claude('user', prompt), ASSISTANT, hook, ASSISTANT]
+                self.assertEqual(turn_source('claude', records, identify=identify), expected)
+                self.assertEqual(turn_source('claude', records), 'background')  # notifier behavior is unchanged
+        self.assertEqual(turn_source('claude', [BACKGROUND, ASSISTANT, hook, ASSISTANT], identify=identify), 'background')
+        self.assertEqual(turn_source('claude', [hook, ASSISTANT], identify=identify), 'background')  # a clipped tail
+
     def test_other_agents_default_to_user(self):
         for agent, records in [('codex', [{'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'Wake'}},
                                         codex('assistant', 'Reply'), {'type': 'event_msg', 'payload': {'type': 'task_complete'}}]),
@@ -142,6 +154,40 @@ class DeliveryTests(unittest.TestCase):
         send.assert_not_called()
         notifier.observe(entry, {'state': 'Approval'})
         self.assertEqual(send.call_args.args[0]['priority'], 'urgent')
+
+    def test_parent_stage_lowers_finished_priority_and_preserves_urgent_prompts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = Path(folder) / 'review-links.json'
+            entry = {'id': '%7', 'agent': 'claude'}
+            review = dict(worker='%7', reviewer='%8',
+                          parent_stage=dict(pane='%9', thread=None, notice='Still broken.'))
+            records = [claude('user', 'Summarize the findings.'), ASSISTANT]
+            notifier = server.NOTIFIER
+            send = Mock()
+            with patch.object(review_links, 'FILE', store), patch.multiple(
+                    notifier, send=send, watching=lambda _: False, settle=0, minimum_work=0,
+                    levels=lambda: {}, delivery=lambda: {priority: 'silent' for priority in push.DEFAULT_DELIVERY}), \
+                    patch.object(server, 'notification_context') as context:
+                for link, state, reply, expected in (
+                    (review, 'Idle', 'Still broken.\nNeeds you: no', 'low'),
+                    (review, 'Idle', 'Still broken.\nNeeds you: yes', 'urgent'),
+                    (review, 'Idle', 'Still broken.', 'low'),
+                    (review, 'Approval', 'Needs you: no', 'urgent'),
+                    (review, 'Input needed', 'Needs you: no', 'urgent'),
+                    (dict(review, worker='%6'), 'Idle', 'Still broken.\nNeeds you: no', 'important'),
+                    (dict(worker='%7', reviewer='%8', escalate='Still broken.'), 'Idle',
+                     'Still broken.\nNeeds you: no', 'important'),
+                ):
+                    with self.subTest(link=link, state=state, reply=reply), patch.object(notifier, 'seen', {}):
+                        store.write_text(json.dumps([link]))
+                        context.return_value = reply, records
+                        send.reset_mock()
+                        notifier.observe(entry, {'state': 'Working'})
+                        notifier.observe(entry, {'state': state})
+                        send.assert_called_once()
+                        payload, urgent = send.call_args.args
+                        self.assertEqual(payload['priority'], expected)
+                        self.assertEqual(urgent, expected == 'urgent')
 
     def test_bounded_context_uses_one_read_and_classifies_the_delivered_prompt(self):
         with tempfile.TemporaryDirectory() as folder:
