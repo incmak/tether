@@ -80,10 +80,9 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise ValueError('That session has ended. Select another tab.')
     target = next((entry for entry in entries if entry['id'] == pane), None)
     if record is not None and record['owner_pane'] == caller['id']:
-        helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
         if helper_tabs.verified_thread(target) is None:  # closing is final: only a confirmed conversation
-            raise RuntimeError("Tether cannot confirm that helper's conversation, so it does not close it. "
-                               'Close the tab in Tether.')
+            raise RuntimeError("Tether cannot confirm that helper's conversation right now. Try again in a moment.")
+        helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
     elif caller['id'] not in review_links.reviewed_by().get(pane, []):
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):
@@ -176,7 +175,7 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                 # A prompt from another agent continues the worker's current review task (B189).
                 pane = result[1]['pane']
                 worker = next((entry for entry in entries if entry['id'] == pane), {})
-                review_links.agent_prompt(pane, sender=caller['id'], sender_thread=caller.get('thread'),
+                review_links.agent_prompt(pane, sender=caller['id'], sender_thread=helper_tabs.verified_thread(caller),
                                           worker_thread=helper_tabs._thread(worker) or '')
             else:
                 handler.keep_sessions = True

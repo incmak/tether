@@ -214,7 +214,7 @@ class HelperTests(unittest.TestCase):
         self.entries[0].update(codex_binding='guess')
         self.assertIsNone(helpers.new_record(self.entries[0])['owner_thread'])
 
-    def test_unbound_codex_guess_keeps_poll_and_send_behavior(self):
+    def test_unbound_codex_guess_keeps_poll_and_send_waits_without_a_write(self):
         self.reset_record(helper_thread=None)
         self.entries[1].update(agent='codex', thread=OTHER, codex_binding='guess')
         self.status.return_value = {'state': 'Working'}
@@ -223,8 +223,11 @@ class HelperTests(unittest.TestCase):
         self.reply.return_value = 'New reply'
         self.assertEqual(self.poll(), dict(status='finished', pane='%13', reply='New reply', truncated=False))
         self.assertEqual(self.run.saves(), [])
-        self.assertEqual(self.request('send')[0], 200)
-        self.send.assert_called_once()
+        # A send writes nothing until the helper is confirmed, so a parallel wait never sees a send that fails.
+        code, payload = self.request('send')
+        self.assertEqual((code, payload['error']), (503, 'That helper is still starting. Try again in a moment.'))
+        self.send.assert_not_called()
+        self.assertEqual(self.run.saves(), [])
         self.assertIsNone(self.run.record()['helper_thread'])
 
     def test_stale_log_names_the_pane_side_and_both_verified_threads(self):
@@ -290,6 +293,12 @@ class HelperTests(unittest.TestCase):
             self.reset_record()
             self.assertEqual(self.request('send')[0], 200)
             mark.assert_called_once_with('%13', sender='%12', sender_thread=OWNER, worker_thread=HELPER)
+            # A guessed owner id is no proof for a review grant.
+            mark.reset_mock()
+            self.reset_record(owner_thread=None)
+            self.entries[0].update(agent='codex', codex_binding='guess')
+            self.assertEqual(self.request('send')[0], 200)
+            self.assertIsNone(mark.call_args.kwargs['sender_thread'])
 
     def test_send_checks_helper_availability_and_prompts(self):
         for agent in ('claude', 'codex'):

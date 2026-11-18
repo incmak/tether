@@ -170,13 +170,15 @@ class CloseHelperTabTest(unittest.TestCase):
         # Closing is final: an absent or shell pane (agent gone, or a discovery miss) and an unbound guess stay open.
         cases = (('absent', None, self.record), ('shell', dict(id='%13', agent='shell'), self.record),
                  ('unbound guess', dict(self.helper, thread=OTHER, codex_binding='guess'),
-                  dict(self.record, helper_thread=None)))
+                  dict(self.record, helper_thread=None)),
+                 ('both unbound', dict(self.helper, thread=OTHER, codex_binding='guess'),
+                  dict(self.record, owner_thread=None, helper_thread=None)))
         for name, target, record in cases:
             with self.subTest(name=name):
                 self.record = record
                 self.run.options['%13'] = json.dumps(record)
                 self.entries[:] = [self.owner] + ([target] if target else [])
-                with self.assertRaisesRegex(RuntimeError, 'does not close it'):
+                with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
                     self.close()
                 self.assert_pane_untouched()
 

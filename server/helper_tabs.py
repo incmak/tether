@@ -136,6 +136,8 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock):
         if record.get('helper_thread') is None and time.time() - record['sent_at'] < START_WAIT:
             raise RuntimeError('That helper is still starting. Try again in a moment.')
         raise ValueError('That session has ended. Select another tab.')
+    if verified_thread(helper) is None:  # no write and no delivery until its conversation is confirmed
+        raise RuntimeError('That helper is still starting. Try again in a moment.')
     if not helper.get('writable'):
         raise RuntimeError('Messaging is unavailable for that helper.')
     state = status(helper)['state']
