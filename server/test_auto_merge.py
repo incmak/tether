@@ -1543,6 +1543,45 @@ class EnforceUnavailable(Base):
                 self.assertEqual(self.origin_main(), before)
 
 
+class RealChecklist(Base):
+    """The real scripts/checklist.py (B209), read from the main branch of a disposable repository."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.object(auto_merge, 'checklist_rows', CHECKLIST_ROWS))
+        self.write(self.repo, 'docs/reliability-checklist.md',
+                   '# Reliability checklist\n\n## R1: Test helpers keep their socket\n- Paths: `^server/test_.*\\.py$`\n'
+                   '- Text: `kill-server`\n- Check: Use a private socket.\n- Incident: B1, commit 0000000\n')
+        self.commit(self.repo, 'Checklist')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'merge', '-q', '--ff-only', 'main')
+
+    def test_a_diff_that_hits_no_row_is_clear_and_a_hit_names_the_row(self):
+        head = self.change()
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+        self.git(self.work, 'reset', '-q', '--hard', 'main')
+        head = self.change('server/test_tmux.py', 'run("tmux kill-server")\n')
+        decision = auto_merge.evaluate(self.work, head)[0]
+        self.assertEqual(self.failed(decision), ['checklist'])
+        self.assertIn('R1 Test helpers keep their socket', [item for item in decision['checks'] if item['key'] == 'checklist'][0]['text'])
+        self.git(self.work, 'reset', '-q', '--hard', 'main')
+        head = self.change('server/test_tmux.py', 'run("tmux list-sessions")\n')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+
+    def test_a_branch_cannot_remove_the_row_that_applies_to_it(self):
+        self.write(self.work, 'server/test_tmux.py', 'run("tmux kill-server")\n')
+        self.git(self.work, 'rm', '-q', 'docs/reliability-checklist.md')
+        head = self.commit(self.work, 'Drop the checklist')
+        self.assertIn('checklist', self.failed(auto_merge.evaluate(self.work, head)[0]))
+
+    def test_main_without_a_checklist_counts_as_a_hit(self):
+        self.git(self.repo, 'rm', '-q', 'docs/reliability-checklist.md')
+        self.commit(self.repo, 'No checklist')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'merge', '-q', '--ff-only', 'main')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, self.change())[0]), ['checklist'])
+
+
 class Checklist(unittest.TestCase):
     """The contract of scripts/checklist.py (B209): only status "clear" with exit 0 means no row is hit."""
 
