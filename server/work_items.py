@@ -505,7 +505,7 @@ def _apply(item, event):
         item['stage'] = event.get('stage', item['stage'])
     elif kind == 'link':
         item['tabs'] = [t for t in item['tabs'] if t['pane'] != event.get('pane')]
-        item['tabs'].append({k: event.get(k, '') for k in ('pane', 'role', 'chat', 'name', 'session', 'stack')})
+        item['tabs'].append({**{k: event.get(k, '') for k in ('pane', 'role', 'chat', 'name', 'session', 'stack')}, 'at': event.get('at')})
     elif kind == 'unlink':
         item['tabs'] = [t for t in item['tabs'] if t['pane'] != event.get('pane')]
     elif kind == 'qa':
@@ -565,6 +565,48 @@ def board():
         except ProjectError:
             continue
     return {'revision': reg['revision'], 'projects': reg['projects'], 'items': items, 'stages': list(STAGES)}
+
+
+def _base(name):
+    """A tab name without its status: triage tabs are named "<title> · <status>" and the status changes."""
+    return (name or '').split(' · ')[0].strip()
+
+
+def _same_tab_name(live, base):
+    """Discovery cuts pane names at 40 characters, so a cut name matches the start of the base name and status."""
+    live = live or ''
+    return bool(base) and (_base(live) == base or len(live) >= 40 and (base + ' · ').startswith(live))
+
+
+def live_tabs(items, entries, started):
+    """Point linked tabs at the panes that run them now. A tmux restart gives every pane a new id, so a link made
+    before the running tmux server started names a pane that is gone, or one of another tab once tmux hands the id
+    out again. Such a link finds its tab again: by its conversation (chat) when the link knows it, else by its tmux
+    session and its name with or without the status. It needs exactly one match; with none it shows as closed
+    (pane ''). A pane linked twice keeps the newest link. started: the tmux server's start time in seconds; None
+    when it is not known, and then each link keeps its pane id. entries: the live tabs, as discovery lists them."""
+    if not started:
+        return items
+    out = []
+    for item in items:
+        tabs = []
+        for tab in item['tabs']:
+            if isinstance(tab.get('at'), (int, float)) and tab['at'] < started:
+                tab = {**tab, 'pane': _find_tab(tab, item, entries)}
+            if tab['pane']:
+                tabs = [t for t in tabs if t['pane'] != tab['pane']]
+            tabs.append(tab)
+        out.append({**item, 'tabs': tabs})
+    return out
+
+
+def _find_tab(tab, item, entries):
+    hits = [e['id'] for e in entries if tab.get('chat') and e.get('thread') == tab['chat']]
+    if not hits:
+        base, session = _base(tab.get('name')) or item['title'], tab.get('session')
+        hits = [e['id'] for e in entries if session and (e.get('label') or '').split(':')[0] == session
+                and _same_tab_name(e.get('tmux_pane_name'), base)]
+    return hits[0] if len(hits) == 1 else ''
 
 
 def find(item_id):

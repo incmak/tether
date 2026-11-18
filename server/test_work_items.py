@@ -406,6 +406,66 @@ class Api(unittest.TestCase):
         self.assertEqual(self.post('nope', {'version': 1})[0], 404)
 
 
+class LiveTabs(unittest.TestCase):
+    """A tmux restart gives every pane a new id; links made before it find their tab again (live_tabs)."""
+    STARTED = 2000
+
+    def item(self, *tabs):
+        return {'id': 'T-020', 'title': 'exhibits-carry-over', 'tabs': [dict(t) for t in tabs]}
+
+    def tab(self, pane, at, name='exhibits-carry-over · needs decision', session='Triage', chat=''):
+        return {'pane': pane, 'role': 'triage', 'chat': chat, 'name': name, 'session': session, 'stack': '', 'at': at}
+
+    def live(self, pane, name, session='Triage', thread='', position='64.0'):
+        return {'id': pane, 'label': session, 'position': position, 'tmux_pane_name': name, 'thread': thread}
+
+    def panes(self, item, entries, started=STARTED):
+        return [t['pane'] for t in work_items.live_tabs([item], entries, started)[0]['tabs']]
+
+    def test_an_old_link_finds_its_tab_by_session_and_name_with_a_new_status(self):
+        entries = [self.live('%195', 'exhibits-carry-over · fixed, review'), self.live('%191', 'tag-member-not-listed')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), ['%195'])
+
+    def test_an_old_link_skips_a_pane_that_now_reuses_its_id(self):
+        entries = [self.live('%300', 'another tab'), self.live('%12', 'exhibits-carry-over', session='Other')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), [''])
+
+    def test_an_old_link_with_a_conversation_follows_it(self):
+        entries = [self.live('%7', 'renamed by the agent', thread='chat-9'), self.live('%8', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%7'])
+
+    def test_two_matches_show_the_tab_as_closed(self):
+        entries = [self.live('%7', 'exhibits-carry-over'), self.live('%8', 'exhibits-carry-over · ticket', position='65.0')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), [''])
+
+    def test_a_name_cut_at_40_characters_still_matches(self):
+        title = 'a-very-long-triage-item-title-that-runs-on-and-on'
+        item = {**self.item(self.tab('%300', 1000, name=f'{title} · needs decision')), 'title': title}
+        self.assertEqual(self.panes(item, [self.live('%9', title[:40])]), ['%9'])
+
+    def test_new_links_and_an_unknown_start_keep_their_pane(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 3000)), entries), ['%300'])
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries, started=None), ['%300'])
+
+    def test_a_pane_linked_again_after_the_restart_shows_once(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000), self.tab('%195', 3000)), entries), ['%195'])
+
+    def test_the_board_route_relinks_with_live_sessions(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        with mock.patch.object(paths, 'TETHER', Path(temp.name)), mock.patch('time.time', return_value=1000):
+            work_items._CACHE.clear()
+            work_items.save_project(dict(PROJECT), 0, create=True)
+            work_items.new('shop', 'exhibits-carry-over', 'agent')
+            work_items.link('T-001', '%300', 'triage', name='exhibits-carry-over · needs decision', session='Triage')
+        with mock.patch.object(paths, 'TETHER', Path(temp.name)):
+            handler = Handler(work_api.PREFIX + 'board')
+            work_api.get(handler, sessions=lambda: [self.live('%195', 'exhibits-carry-over')], started=lambda: self.STARTED)
+        self.assertEqual(handler.sent[1]['items'][0]['tabs'][0]['pane'], '%195')
+
+
 class Watcher(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

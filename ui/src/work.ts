@@ -113,7 +113,7 @@ export function itemsByPane(board?: WorkBoard) {
   const now = Date.now() / 1000
   const marks: Record<string, { id: string; stage: Stage }> = {}
   for (const item of [...(board?.items ?? [])].filter(entry => onBoard(entry, now)).sort((a, b) => a.updated - b.updated))
-    for (const tab of item.tabs) marks[tab.pane] = { id: item.id, stage: item.stage }
+    for (const tab of item.tabs) if (tab.pane) marks[tab.pane] = { id: item.id, stage: item.stage }
   return marks
 }
 

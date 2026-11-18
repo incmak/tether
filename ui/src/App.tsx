@@ -384,7 +384,7 @@ function App() {
   const decisionAnswers = useDecisionAnswers(api, work.refresh)
   const openWork = (view: WorkView) => { setDrawer(false); setWorkSheet(view) }
   const menuWork = useMemo(() => ({ board: work.data, error: work.error, open: (query: string, item?: string) => { setDrawer(false); setWorkFind({ query, item }); setWorkSheet('board') } }), [work.data, work.error])
-  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onBoard={() => openWork('board')} />
+  const decisionsGroup = (compact?: boolean) => <DecisionsGroup board={work.data} error={work.error} panes={panes} answers={decisionAnswers} compact={compact} onRefresh={work.refresh} onOpen={openPane} onShow={item => menuWork.open('', item.id)} onBoard={() => openWork('board')} />
   const workMarks = useMemo(() => itemsByPane(work.data), [work.data])
   const workLinks = work.data && (work.data.projects.length > 0 || work.data.items.length > 0)
     ? { open: work.data.items.filter(item => item.stage !== 'done' && item.stage !== 'hold').length, asking: decisionCount, marks: workMarks, onOpen: () => openWork('board') } : undefined

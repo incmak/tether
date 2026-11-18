@@ -4,8 +4,11 @@ header before it calls these. The store is work_items.py.
 An answer goes to the tab that asked, as a message, only while that pane still runs the same conversation; else it
 stays in the item's history and the reply says it was not sent."""
 import json
+import subprocess
 import threading
+import time
 
+import auto_resume
 import paths
 from projects import _read, _write
 
@@ -38,13 +41,28 @@ def _answer(handler, work):
         handler.respond(500, {'error': 'Tether could not read or write the work items.'})
 
 
-def get(handler):
-    """The board: projects and items. The page joins linked tabs with its own session list (live state and names)."""
+_STARTED = [0.0, None]  # (when read, the tmux server's start time): the board is polled, tmux is asked once a minute
+
+
+def tmux_started(run=subprocess.run):
+    """The running tmux server's start time in seconds, or None when tmux does not answer."""
+    if time.monotonic() - _STARTED[0] > 60 or _STARTED[1] is None:
+        kind, identifier = auto_resume.server_id(run=run)
+        _STARTED[:] = [time.monotonic(), int(identifier.split(':')[1]) if kind == 'up' else None]
+    return _STARTED[1]
+
+
+def get(handler, sessions=None, started=tmux_started):
+    """The board: projects and items. The page joins linked tabs with its own session list (live state and names);
+    with sessions, links made before a tmux restart point at the panes that run those tabs now (live_tabs)."""
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
         if name == 'board':
-            return {**work_items.board(), 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
+            board = work_items.board()
+            if sessions:
+                board['items'] = work_items.live_tabs(board['items'], sessions(), started())
+            return {**board, 'jira': jira_client.status(), 'feeds': work_feeds.statuses(),
                     'graph': graph_client.status(), 'backlog': work_backlog.cards()}
         raise ProjectError(404, 'Not found')
     _answer(handler, work)

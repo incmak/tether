@@ -21,7 +21,16 @@
 .work-swatch.hue-5 { background: var(--work-hue-5); }
 
 .home-group.decisions .home-group-head h2 svg, .home-decisions-mark { flex: none; color: var(--accent-ink); }
-.work-card-body { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px 8px; }
+.work-card-body { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px 8px; }
+/* The title button opens the item's tab; its ::after covers the card body, so a tap anywhere on it opens the tab. */
+.work-open { display: inline; min-height: 0; padding: 0; font: inherit; text-align: left; color: inherit; }
+.work-open::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+.work-open:not(:disabled):hover { background: none; }
+.work-open:focus-visible { outline: none; }
+.work-open:focus-visible::after { outline: 2px solid var(--focus); outline-offset: -2px; }
+.work-card:has(.work-open:active) { transform: scale(.992); }
+@media (hover: hover) { .work-card:has(.work-open:hover) { background: color-mix(in srgb, var(--text) 4%, var(--surface)); } }
+@media (prefers-reduced-motion: reduce) { .work-card:has(.work-open:active) { transform: none; } }
 .work-time { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .work-id { flex: none; font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
 .work-sheet mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--text); }

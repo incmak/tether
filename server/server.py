@@ -2155,7 +2155,7 @@ class Handler(BaseHTTPRequestHandler):
             elif projects_api.handles(path):
                 projects_api.get(self)
             elif work_api.handles(path):
-                work_api.get(self)
+                work_api.get(self, sessions=sessions)
             elif groups_api.handles(path):
                 groups_api.get(self)
             elif app_identity.handles(path):

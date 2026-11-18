@@ -14,10 +14,12 @@ import './Work.css'
 // "Decisions on items": work items whose agent asked Mak something. Each card answers in place; the answer goes to the
 // tab that asked. Home shows it first, and the desktop Needs you panel shows it above the tabs that wait for input.
 
-export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen, onDetails, words = [] }: {
+export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpen, onDetails, onShow = onDetails, words = [] }: {
   scope: string; item: WorkItem; prefix: string; panes: Pane[]; busy: boolean
   onAnswer: (item: WorkItem, reply: { choice: string } | { text: string }) => Promise<boolean>; onOpen: (pane: Pane) => void
   onDetails?: (item: WorkItem) => void
+  /** A tap on the card opens the tab that asked, else the newest open linked tab; with no open tab it calls onShow. */
+  onShow?: (item: WorkItem) => void
   /** The search words (searchWords) to mark on the card. */
   words?: string[]
 }) {
@@ -33,6 +35,9 @@ export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpe
     if (await onAnswer(item, { text: text.trim() })) { setText(''); setReplying(false) }
   }
   const linked = item.tabs.map(tab => ({ tab, pane: panes.find(pane => pane.id === tab.pane) }))
+  const target = (ask.pane ? panes.find(pane => pane.id === ask.pane) : undefined) ?? [...linked].reverse().find(entry => entry.pane)?.pane
+  const open = target ? () => onOpen(target) : onShow ? () => onShow(item) : undefined
+  const title = <Marked text={item.title} words={hit.title} />
   return <li className="home-card work-card" data-item={item.id} aria-labelledby={titleId}>
     <div className="work-card-body">
       <span className="home-card-top">
@@ -41,7 +46,10 @@ export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpe
         <span className="home-source">{item.project}</span>
         <span className="work-time" title="Asked">{age(ask.at, now)}</span>
       </span>
-      <h3 id={titleId} className="work-title"><Marked text={item.title} words={hit.title} /></h3>
+      <h3 id={titleId} className="work-title">{open
+        ? <button type="button" className="work-open" aria-label={`${item.title}, ${target ? 'open its tab' : 'show details'}`}
+          aria-haspopup={target ? undefined : 'dialog'} onClick={open}>{title}</button>
+        : title}</h3>
       <p className="work-q"><Marked text={ask.q} words={hit.title} fuzzy={false} /></p>
     </div>
     <div className="inbox-actions" role="group" aria-label={`Answer ${item.id}`}>
@@ -56,7 +64,7 @@ export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpe
       <button type="submit" className="icon-button" aria-label="Send reply" title="Send reply" disabled={busy || !text.trim()}><Send size={16} /></button>
     </form>}
     {linked.length > 0 && <div className="work-tabs" role="group" aria-label="Linked tabs">
-      {linked.map(({ tab, pane }) => <button key={tab.pane} type="button" className="work-tab" disabled={!pane} title={pane ? `Open ${tab.name || tab.pane}` : 'This tab is closed'}
+      {linked.map(({ tab, pane }, index) => <button key={`${tab.pane}:${index}`} type="button" className="work-tab" disabled={!pane} title={pane ? `Open ${tab.name || tab.pane}` : 'This tab is closed'}
         onClick={() => pane && onOpen(pane)}>
         <span className={`work-tab-dot${pane ? '' : ' closed'}`} aria-hidden="true" />
         <span>{tab.name || tab.session || tab.pane}</span>{!pane && <span className="visually-hidden">, closed</span>}
@@ -102,9 +110,9 @@ export type DecisionAnswers = ReturnType<typeof useDecisionAnswers>
 
 /** The group. Hidden while nothing waits and no result shows; a failed load shows a retry, so a broken board does
  * not hide questions. */
-export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact, scope: named, onDetails, onBoard, words }: {
+export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen, compact, scope: named, onDetails, onShow, onBoard, words }: {
   board?: WorkBoard; error: string; panes: Pane[]; answers: DecisionAnswers; onRefresh: () => unknown; onOpen: (pane: Pane) => void; compact?: boolean
-  scope?: string; onDetails?: (item: WorkItem) => void; onBoard?: () => void; words?: string[]
+  scope?: string; onDetails?: (item: WorkItem) => void; onShow?: (item: WorkItem) => void; onBoard?: () => void; words?: string[]
 }) {
   const items = decisions(board)
   const prefixes = new Map(board?.projects.map(project => [project.name, project.prefix]))
@@ -120,6 +128,6 @@ export function DecisionsGroup({ board, error, panes, answers, onRefresh, onOpen
     <div role="status">{results.map(result => <p key={result.id} className={`work-result${result.ok ? '' : ' failed'}`}>{result.text}</p>)}</div>
     {error && <p className="work-error" role="alert"><span>{board ? 'Could not refresh work items. These questions can be out of date.' : 'Could not load work items.'} {error}</span><RetryButton onRetry={onRefresh} className="ghost sm" /></p>}
     {items.length > 0 && <ul>{items.map(item => <DecisionCard key={`${item.id}:${item.ask!.id}`} scope={scope} item={item} prefix={prefixes.get(item.project) ?? item.id.split('-')[0]}
-      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} onDetails={onDetails} words={words} />)}</ul>}
+      panes={panes} busy={answers.locked(item)} onAnswer={answers.answer} onOpen={onOpen} onDetails={onDetails} onShow={onShow ?? onDetails} words={words} />)}</ul>}
   </section>
 }
