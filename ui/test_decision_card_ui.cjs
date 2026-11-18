@@ -1,5 +1,5 @@
 // Decision cards on Home (src/WorkItems.tsx): a tap anywhere on the card body opens the item's tab, the chip opens it
-// too, an answer button only answers, and a card whose tab is closed opens the item's details instead.
+// too, an answer button only answers, a pane id that another chat now has is skipped, and a card whose tab is closed opens the item's details instead.
 // Real browser against a build: DIST (default dist). Run: node test_decision_card_ui.cjs
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs')
@@ -11,9 +11,9 @@ const ORIGIN = 'http://tether.test'
 const NOW = Date.now() / 1000
 const pane = (id, name) => ({ id, tmux_session: '$1', label: `Triage:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/shop', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null })
 const tab = (id, name) => ({ pane: id, role: 'triage', chat: '', name, session: 'Triage', stack: '', at: NOW - 60 })
-const item = (id, title, tabs) => ({
+const item = (id, title, tabs, asked = {}) => ({
   id, project: 'shop', title, stage: 'needs', qa: false, askFrom: 'triage', refs: [], tabs, history: [], source: '', created: NOW - 3600,
-  updated: NOW - 60, doneAt: null, jira: null, version: 3, ask: { id: `a-${id}`, q: `Question for ${title}`, options: ['Go ahead', 'Hold'], pane: '', chat: '', at: NOW - 600 },
+  updated: NOW - 60, doneAt: null, jira: null, version: 3, ask: { id: `a-${id}`, q: `Question for ${title}`, options: ['Go ahead', 'Hold'], pane: '', chat: '', at: NOW - 600, ...asked },
 })
 const fixtures = {
   sessions: { sessions: [pane('%1', 'Deploy fix'), pane('%195', 'exhibits-carry-over · needs decision')], default_thread: '' },
@@ -31,7 +31,8 @@ const fixtures = {
   'work/board': {
     revision: 1, stages: [], jira: { connected: false }, feeds: {}, backlog: { items: [], error: '' },
     projects: [{ name: 'shop', prefix: 'T', folder: '', triage: 'Triage', work: '', feeds: [], jira: '', qaStatus: '', jiraUser: '' }],
-    items: [item('T-020', 'exhibits-carry-over', [tab('%195', 'exhibits-carry-over · needs decision')]),
+    // T-020 asked from a pane id that another tab (%1, another chat) now has: the card follows the chat that asked.
+    items: [item('T-020', 'exhibits-carry-over', [tab('%195', 'exhibits-carry-over · needs decision')], { pane: '%1', chat: 't195' }),
       item('T-012', 'word-import-export-diff', [tab('', 'word-import-export-diff · needs decision')])],
   },
 }

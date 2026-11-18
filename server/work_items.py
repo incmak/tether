@@ -572,41 +572,48 @@ def _base(name):
     return (name or '').split(' · ')[0].strip()
 
 
-def _same_tab_name(live, base):
-    """Discovery cuts pane names at 40 characters, so a cut name matches the start of the base name and status."""
-    live = live or ''
-    return bool(base) and (_base(live) == base or len(live) >= 40 and (base + ' · ').startswith(live))
-
-
 def live_tabs(items, entries, started):
-    """Point linked tabs at the panes that run them now. A tmux restart gives every pane a new id, so a link made
-    before the running tmux server started names a pane that is gone, or one of another tab once tmux hands the id
-    out again. Such a link finds its tab again: by its conversation (chat) when the link knows it, else by its tmux
-    session and its name with or without the status. It needs exactly one match; with none it shows as closed
-    (pane ''). A pane linked twice keeps the newest link. started: the tmux server's start time in seconds; None
-    when it is not known, and then each link keeps its pane id. entries: the live tabs, as discovery lists them."""
+    """Point linked tabs, and the tab that asked, at the panes that run them now. A tmux restart gives every pane a
+    new id, so a link made before the running tmux server started names a pane that is gone, or one of another tab
+    once tmux hands the id out again. Such a link finds its tab again by its conversation (chat) when the link knows
+    it: a pane that runs another conversation never matches. A link without a chat, or whose chat no pane runs yet,
+    matches a pane in its tmux session that has the same name with or without the status. It needs exactly one pane;
+    else it shows as closed (pane ''). A pane linked twice keeps the newest link. started: the tmux server's start
+    time in whole seconds; None when it is not known, and then each link keeps its pane id. entries: the live tabs, as
+    discovery lists them (a window linked into two sessions lists its pane twice)."""
     if not started:
         return items
     out = []
     for item in items:
         tabs = []
         for tab in item['tabs']:
-            if isinstance(tab.get('at'), (int, float)) and tab['at'] < started:
-                tab = {**tab, 'pane': _find_tab(tab, item, entries)}
+            tab = _relink(tab, item, entries, started)
             if tab['pane']:
                 tabs = [t for t in tabs if t['pane'] != tab['pane']]
             tabs.append(tab)
-        out.append({**item, 'tabs': tabs})
+        ask = item.get('ask')
+        out.append({**item, 'tabs': tabs, **({'ask': _relink(ask, item, entries, started)} if ask else {})})
     return out
 
 
+def _relink(link, item, entries, started):
+    at = link.get('at')
+    if not isinstance(at, (int, float)) or at >= started + 1:
+        return link
+    pane = _find_tab(link, item, entries)
+    # tmux gives its start time in whole seconds: a link from that second may be newer than tmux. It keeps its pane
+    # when nothing else matches.
+    return {**link, 'pane': pane or (link.get('pane', '') if at >= started else '')}
+
+
 def _find_tab(tab, item, entries):
-    hits = [e['id'] for e in entries if tab.get('chat') and e.get('thread') == tab['chat']]
+    chat = tab.get('chat')
+    hits = {e['id'] for e in entries if chat and e.get('thread') == chat}
     if not hits:
         base, session = _base(tab.get('name')) or item['title'], tab.get('session')
-        hits = [e['id'] for e in entries if session and (e.get('label') or '').split(':')[0] == session
-                and _same_tab_name(e.get('tmux_pane_name'), base)]
-    return hits[0] if len(hits) == 1 else ''
+        hits = {e['id'] for e in entries if session and (e.get('label') or '').split(':')[0] == session
+                and base and _base(e.get('full_pane_name')) == base and not (chat and e.get('thread'))}
+    return next(iter(hits)) if len(hits) == 1 else ''
 
 
 def find(item_id):

@@ -617,7 +617,7 @@ def discover(config, run):
             names = {processes[p][1] for p in tree if p in processes}
             entry = {'id': pane, 'tmux_session': tmux_session, 'label': label, 'position': position,
                      'agent': 'shell', 'writable': False, 'worktree': worktree.strip()[:200], 'group': group.strip()[:16],
-                     'pane_pid': int(pid), 'pane_start': process_start(int(pid)), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'pane_icon': icon if ICON.fullmatch(icon) else '',
+                     'pane_pid': int(pid), 'pane_start': process_start(int(pid)), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
             if role in ('advisor', 'second-advisor'):
                 entry['role'] = 'advisor'

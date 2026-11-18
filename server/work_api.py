@@ -41,15 +41,11 @@ def _answer(handler, work):
         handler.respond(500, {'error': 'Tether could not read or write the work items.'})
 
 
-_STARTED = [0.0, None]  # (when read, the tmux server's start time): the board is polled, tmux is asked once a minute
-
-
 def tmux_started(run=subprocess.run):
-    """The running tmux server's start time in seconds, or None when tmux does not answer."""
-    if time.monotonic() - _STARTED[0] > 60 or _STARTED[1] is None:
-        kind, identifier = auto_resume.server_id(run=run)
-        _STARTED[:] = [time.monotonic(), int(identifier.split(':')[1]) if kind == 'up' else None]
-    return _STARTED[1]
+    """The running tmux server's start time in seconds, or None when tmux does not answer. Read on each board
+    request, so it never pairs new pane ids with the start time of a tmux server that has ended."""
+    kind, identifier = auto_resume.server_id(run=run)
+    return int(identifier.split(':')[1]) if kind == 'up' else None
 
 
 def get(handler, sessions=None, started=tmux_started):

@@ -35,7 +35,9 @@ export function DecisionCard({ scope, item, prefix, panes, busy, onAnswer, onOpe
     if (await onAnswer(item, { text: text.trim() })) { setText(''); setReplying(false) }
   }
   const linked = item.tabs.map(tab => ({ tab, pane: panes.find(pane => pane.id === tab.pane) }))
-  const target = (ask.pane ? panes.find(pane => pane.id === ask.pane) : undefined) ?? [...linked].reverse().find(entry => entry.pane)?.pane
+  // The pane that asked, while it still runs the chat that asked (a tmux restart hands its id to other tabs).
+  const asker = ask.pane ? panes.find(pane => pane.id === ask.pane && (!ask.chat || pane.thread === ask.chat)) : undefined
+  const target = asker ?? [...linked].reverse().find(entry => entry.pane)?.pane
   const open = target ? () => onOpen(target) : onShow ? () => onShow(item) : undefined
   const title = <Marked text={item.title} words={hit.title} />
   return <li className="home-card work-card" data-item={item.id} aria-labelledby={titleId}>

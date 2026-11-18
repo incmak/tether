@@ -417,7 +417,8 @@ class LiveTabs(unittest.TestCase):
         return {'pane': pane, 'role': 'triage', 'chat': chat, 'name': name, 'session': session, 'stack': '', 'at': at}
 
     def live(self, pane, name, session='Triage', thread='', position='64.0'):
-        return {'id': pane, 'label': session, 'position': position, 'tmux_pane_name': name, 'thread': thread}
+        return {'id': pane, 'label': session, 'position': position, 'tmux_pane_name': name[:40], 'full_pane_name': name,
+                'thread': thread}
 
     def panes(self, item, entries, started=STARTED):
         return [t['pane'] for t in work_items.live_tabs([item], entries, started)[0]['tabs']]
@@ -438,10 +439,32 @@ class LiveTabs(unittest.TestCase):
         entries = [self.live('%7', 'exhibits-carry-over'), self.live('%8', 'exhibits-carry-over · ticket', position='65.0')]
         self.assertEqual(self.panes(self.item(self.tab('%300', 1000)), entries), [''])
 
-    def test_a_name_cut_at_40_characters_still_matches(self):
+    def test_a_long_name_matches_in_full_not_by_its_first_40_characters(self):
         title = 'a-very-long-triage-item-title-that-runs-on-and-on'
         item = {**self.item(self.tab('%300', 1000, name=f'{title} · needs decision')), 'title': title}
-        self.assertEqual(self.panes(item, [self.live('%9', title[:40])]), ['%9'])
+        entries = [self.live('%9', f'{title} · fixed'), self.live('%10', title[:40] + '-but-another-item')]
+        self.assertEqual(self.panes(item, entries), ['%9'])
+
+    def test_an_old_link_never_takes_a_pane_that_runs_another_conversation(self):
+        entries = [self.live('%7', 'exhibits-carry-over', thread='chat-other')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), [''])
+        entries.append(self.live('%8', 'exhibits-carry-over · fixed'))  # no conversation known yet: the name decides
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%8'])
+
+    def test_a_pane_listed_under_two_sessions_is_one_match(self):
+        entries = [self.live('%7', 'renamed', thread='chat-9'), {**self.live('%7', 'renamed', thread='chat-9'), 'label': 'Linked'}]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 1000, chat='chat-9')), entries), ['%7'])
+
+    def test_a_link_from_the_second_tmux_started_is_checked_but_kept_when_nothing_matches(self):
+        entries = [self.live('%195', 'exhibits-carry-over')]
+        self.assertEqual(self.panes(self.item(self.tab('%300', 2000.5)), entries), ['%195'])
+        self.assertEqual(self.panes(self.item(self.tab('%5', 2000.5, name='new tab')), entries), ['%5'])
+
+    def test_the_tab_that_asked_follows_its_conversation(self):
+        item = {**self.item(), 'ask': {'id': 'a1', 'q': 'Go?', 'pane': '%300', 'chat': 'chat-9', 'at': 1000}}
+        entries = [self.live('%300', 'another tab', thread='chat-x'), self.live('%195', 'x', thread='chat-9')]
+        self.assertEqual(work_items.live_tabs([item], entries, self.STARTED)[0]['ask']['pane'], '%195')
+        self.assertEqual(work_items.live_tabs([{**item, 'ask': None}], entries, self.STARTED)[0]['ask'], None)
 
     def test_new_links_and_an_unknown_start_keep_their_pane(self):
         entries = [self.live('%195', 'exhibits-carry-over')]
