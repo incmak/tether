@@ -31,7 +31,7 @@
 .factory-counts .is-waits, .factory-counts .is-waits b { color: var(--attention); font-weight: 650; }
 .factory-counts .is-stuck, .factory-counts .is-stuck b { color: var(--error); font-weight: 650; }
 .factory-tour { display: inline-flex; align-items: center; gap: 0.4em; min-height: 2.4em; padding: 0 0.8em; border: 1px solid var(--line); border-radius: 999px; background: none; }
-.factory-tour.is-on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.factory-tour.is-on { border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 
 .factory-stale, .factory-touring { flex: none; margin: 0; padding: 0.5em 1em; border-bottom: 1px solid var(--line); font-size: 0.95em; }
 .factory-stale { background: color-mix(in srgb, var(--error) 12%, var(--surface)); }
