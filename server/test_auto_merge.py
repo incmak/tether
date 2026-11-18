@@ -195,7 +195,50 @@ class Decision(Base):
             self.assertEqual(self.failed(decision), ['branch'])
             self.assertEqual(decision['checks'][1]['text'], auto_merge.DIRTY)
         (self.work / 'ui/src/notes.txt').write_bytes(b'one\r\ntwo\r\n')
-        self.write(self.work / 'vendor/library', 'new.txt', 'inside the submodule\n')
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+        # Work inside the checked-out submodule is uncommitted work: untracked, edited, or another commit.
+        inside = self.work / 'vendor/library'
+        for label, change, undo in (
+                ('untracked', lambda: self.write(inside, 'new.txt', 'new\n'), lambda: (inside / 'new.txt').unlink()),
+                ('edited', lambda: self.write(inside, 'lib.txt', 'edited\n'), lambda: self.git(inside, 'checkout', '-q', '.')),
+                ('other commit', lambda: (self.write(inside, 'lib.txt', 'next\n'), self.commit(inside, 'Next')),
+                 lambda: self.git(inside, 'reset', '-q', '--hard', 'HEAD~1'))):
+            with self.subTest(label=label):
+                change()
+                self.assertNotEqual(self.git(self.work, 'status', '--porcelain'), '')
+                decision = auto_merge.evaluate(self.work, head)[0]
+                self.assertEqual(self.failed(decision), ['branch'])
+                self.assertEqual(decision['checks'][1]['text'], auto_merge.DIRTY)
+                undo()
+        self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+
+    def test_crlf_bytes_are_an_edit_when_git_does_not_convert_the_file(self):
+        self.write(self.repo, 'ui/src/plain.css', 'a {}\nb {}\n')
+        self.write(self.repo, 'ui/src/raw.dat', 'a\nb\n')
+        self.write(self.repo, '.gitattributes', '*.dat -text\n')
+        self.commit(self.repo, 'Plain files')
+        self.git(self.repo, 'push', 'origin', 'main')
+        self.git(self.work, 'merge', '-q', '--ff-only', 'main')
+        head = self.change()
+        for name, config in (('ui/src/plain.css', 'false'), ('ui/src/plain.css', None), ('ui/src/raw.dat', 'true')):
+            with self.subTest(name=name, autocrlf=config):
+                if config:
+                    self.git(self.repo, 'config', 'core.autocrlf', config)
+                else:
+                    self.git(self.repo, 'config', '--unset', 'core.autocrlf')
+                self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
+                old = (self.work / name).read_bytes()
+                (self.work / name).write_bytes(old.replace(b'\n', b'\r\n'))
+                self.assertNotEqual(self.git(self.work, 'status', '--porcelain'), '')
+                decision = auto_merge.evaluate(self.work, head)[0]
+                self.assertEqual(self.failed(decision), ['branch'])
+                self.assertEqual(decision['checks'][1]['text'], auto_merge.DIRTY)
+                (self.work / name).write_bytes(old)
+        # With core.autocrlf in the repository's own config, a CRLF checkout of a plain text file is clean.
+        self.git(self.repo, 'config', 'core.autocrlf', 'true')
+        (self.work / 'ui/src/plain.css').write_bytes(b'a {}\r\nb {}\r\n')
+        # Git has nothing to commit here: the diff is empty (status alone can still list the file by its size).
+        self.assertEqual(self.git(self.work, 'diff', '--exit-code'), '')
         self.assertEqual(self.failed(auto_merge.evaluate(self.work, head)[0]), [])
 
     def test_a_filter_that_tether_does_not_run_is_unsupported_not_dirty(self):
@@ -649,7 +692,7 @@ class Modes(Base):
     def test_observe_runs_only_the_metadata_allowlist_in_the_worker_repository(self):
         head = self.change()
         scratch = paths.CACHE / 'auto-merge-git' / (hashlib.sha256(os.fsencode(self.repo)).hexdigest()[:16] + '.git')
-        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr'}
+        local_commands = {'rev-parse', 'symbolic-ref', 'config', 'ls-files', 'check-attr', 'ls-tree'}
         object_commands = {'ls-remote', 'fetch', 'cat-file', 'ls-tree', 'merge-base', 'merge-tree', 'log', 'show'}
         for folder in (self.work, self.work / 'server'):
             with self.subTest(folder=folder), mock.patch.object(auto_merge, 'RUN', wraps=subprocess.run) as run:

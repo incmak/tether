@@ -251,8 +251,9 @@ def review_alert(title, body, session, review=None):
 def auto_merge_alert(title, body, session):
     payload = {'title': title, 'body': body, 'tag': 'auto-merge-' + str(session), 'priority': 'important', 'silent': False}
     if session:
-        # Inside the app scope /chat/, so the installed app opens it (note android-links-open-tether-app.md).
-        payload.update(session=session, url='/chat/?session=' + quote(session, safe=''))
+        # B25: a pane link is /chat/open/N, the route that brings a running installed app to that pane.
+        number = re.fullmatch(r'%(\d{1,9})', str(session))
+        payload.update(session=session, url=f'/chat/open/{number[1]}' if number else '/chat/')
     notify(payload, False)
 
 

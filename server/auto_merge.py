@@ -466,13 +466,34 @@ def _filtered(folder, name):
     return any(value not in ('unspecified', 'unset') for value in out[2::3])
 
 
-def _dirty(folder, scratch, head):
+def _crlf_checkout(folder, name, data):
+    """True when Git itself turns CRLF into LF for this file at commit: a text or eol attribute, or core.autocrlf
+    in the repository's own config. Without one, CRLF bytes are a real edit. A `-text` file is never converted."""
+    out = _git(folder, 'check-attr', '-z', 'text', 'eol', '--', name).stdout.split('\0')
+    text, eol = out[2], out[5]
+    if text == 'unset':
+        return False
+    if text == 'set' or eol in ('lf', 'crlf'):
+        return True
+    auto = _git(folder, 'config', '--get', 'core.autocrlf', check=False).stdout.strip().lower()
+    if text == 'auto' or (text == 'unspecified' and auto in ('true', 'input')):
+        return b'\0' not in data  # Git converts only what it takes for text
+    return False
+
+
+SUBMODULE_DEPTH = 3
+
+
+def _dirty(folder, scratch, head, depth=0):
     """'' for a clean worktree, DIRTY for uncommitted or untracked work, UNSUPPORTED when only a filter could tell.
 
-    It compares the index and the raw worktree bytes to HEAD and never runs a filter. A submodule entry is not
-    compared: its content is not part of this repository. A file checked out with CRLF line ends is clean when its
-    bytes match after the line ends are put back. A file with a filter attribute whose raw bytes differ cannot be
-    judged without the filter, so it is unsupported, not dirty.
+    It compares the index and the raw worktree bytes to HEAD and never runs a filter.
+    - A file with CRLF line ends is clean only when Git would convert it for this path (_crlf_checkout) and its
+      bytes match after the line ends are put back.
+    - A file with a filter attribute whose raw bytes differ cannot be judged without the filter: unsupported.
+    - A submodule that is not checked out is clean. A checked-out one must be at the recorded commit and is checked
+      the same way, from its own repository.
+    scratch: the repository to read the HEAD tree from.
     """
     raw = _git(folder, 'ls-files', '-s', '-z', '--sparse', binary=True).stdout
     if raw and not raw.endswith(b'\0'):
@@ -489,9 +510,29 @@ def _dirty(folder, scratch, head):
         return DIRTY
     unsupported = False
     for name, (mode, _, sha) in index.items():
-        if mode == '160000':
-            continue
         path = folder / name
+        if mode == '160000':
+            try:
+                if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')) \
+                        or path.is_symlink():
+                    return DIRTY
+                if not (path / '.git').exists():
+                    continue  # not checked out: Git reports nothing for it either
+            except OSError:
+                return DIRTY
+            if depth >= SUBMODULE_DEPTH:
+                unsupported = True
+                continue
+            try:
+                if _head(path) != sha:
+                    return DIRTY
+                inner = _dirty(path, path, sha, depth + 1)
+            except GitError:
+                return DIRTY
+            if inner == DIRTY:
+                return DIRTY
+            unsupported = unsupported or bool(inner)
+            continue
         try:
             if any((folder / parent).is_symlink() for parent in Path(name).parents if parent != Path('.')):
                 return DIRTY
@@ -509,8 +550,10 @@ def _dirty(folder, scratch, head):
                     hashlib.file_digest(stream, lambda: blob)
                     if blob.hexdigest() != sha and found.st_size <= 64 * 1024 * 1024:
                         stream.seek(0)
-                        data = stream.read().replace(b'\r\n', b'\n')  # what Git stores for a CRLF checkout
-                        blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
+                        data = stream.read()
+                        if b'\r\n' in data and _crlf_checkout(folder, name, data):
+                            data = data.replace(b'\r\n', b'\n')  # what Git stores for a CRLF checkout
+                            blob = hashlib.sha1(b'blob %d\0' % len(data) + data)
             else:
                 return DIRTY
         except OSError:
