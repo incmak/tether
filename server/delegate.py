@@ -219,9 +219,10 @@ def launch_command(entry, agent, path, name, *, context=False, profile=None, mod
 
 
 def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=None, worktree=None, owner=None, group=None,
-          name=None):
+          name=None, by_user=False):
     """recent: returns source messages when context or a new reviewer needs them. name: the tab name (auto_stacks.py).
-    group: None = the source tab's group; "" = Unstacked; a group id = that group (set before the launch command)."""
+    group: None = the source tab's group; "" = Unstacked; a group id = that group (set before the launch command).
+    by_user marks the tab as user-placed so auto stacks leave it alone."""
     # Call after validate, under the server's send lock. Only the new pane receives input.
     agent = body['agent']
     review = normalize_review(body.get('review', False))
@@ -238,7 +239,7 @@ def start(entry, body, folder, run=subprocess.run, recent=lambda: [], *, cwd=Non
             ('Review: ' + source_title(entry))[:60] if review == 'new' else task_name(body['message']))
     if review == 'new':
         review_links.check_cap(entry['id'], helper_tabs._thread(entry))
-    pane = new_window_after(entry['id'], run, cwd=folder, group=group)
+    pane = new_window_after(entry['id'], run, cwd=folder, group=group, by_user=by_user)
     options = [paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';',
                'set-option', '-p', '-t', pane, '@chat_name_at', str(int(time.time() * 1000))]
     if role:

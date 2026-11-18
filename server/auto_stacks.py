@@ -9,7 +9,8 @@
 - Stack name: the root's goal in Title Case (stack_name). Never a branch, folder, bare B-number or prompt fragment.
 - Tether marks the stacks it makes (groups.py "auto") and removes them when they are empty. When only the root is left
   (its last helper closed or moved out), the root goes to Unstacked and the stack goes. A user rename clears "auto".
-- A tab the user placed by hand (@group_by user) never moves."""
+- A user-placed tab (@group_by user) never moves. This includes tabs the user moved by hand or opened with
+  Delegate or Quick create."""
 import re
 import subprocess
 import time

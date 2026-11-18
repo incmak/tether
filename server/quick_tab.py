@@ -281,7 +281,7 @@ class Starter:
             self.answers.clear()
         try:
             pane, name = delegate.start(anchor, {'agent': agent, 'message': message}, folder, run=self.run,
-                                        cwd=folder, group=gid)
+                                        cwd=folder, group=gid, by_user=True)
         except ValueError:
             raise  # delegate checks its input before it makes the tab: nothing started, so a retry is safe.
         except Exception:

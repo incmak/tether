@@ -2923,7 +2923,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.respond(exc.status, {'error': str(exc)})
                         return
                 with SEND_LOCK:
-                    new_pane = new_window_after(pane, subprocess.run, group=group,
+                    new_pane = new_window_after(pane, subprocess.run, group=group, by_user=True,
                                                 **({'cwd': cwd} if cwd is not None else {}))
                 self.respond(201, {'pane': new_pane})
                 return
@@ -3018,7 +3018,7 @@ class Handler(BaseHTTPRequestHandler):
                             place['group'] = stack['id'] if stack else body['group']
                         pane, name = delegate.start(entry, body, folder if folder and os.path.isdir(folder) else str(paths.HOME),
                                                     run=subprocess.run, recent=lambda: snapshot(entry).get('messages') or [],
-                                                    **place)
+                                                    by_user=True, **place)
                     except Exception:
                         if stack:
                             try:
