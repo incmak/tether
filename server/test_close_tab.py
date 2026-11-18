@@ -93,7 +93,7 @@ class CloseTabTest(unittest.TestCase):
             for kill_fails in (True, False):
                 with self.subTest(path=path, kill_fails=kill_fails):
                     self.kill_fails = kill_fails
-                    saved = [dict(worker=pane, saved_at=time.time(), rounds=3, paused=True)
+                    saved = [dict(worker=pane, worker_thread='old-chat', saved_at=time.time(), rounds=3, paused=True)
                              for pane in ('%1', '%2', '%3')]
                     live = [dict(worker=pane, reviewer='%4') for pane in ('%1', '%2', '%3')]
                     self.review_file.write_text(json.dumps(saved + live))

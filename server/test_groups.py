@@ -146,7 +146,8 @@ class RenderTests(Bundles):
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
-        projects.set_instructions(PID, 'Use pnpm.', 0)
+        projects.set_budget(PID, projects.BUDGET_MAX, 0)
+        projects.set_instructions(PID, 'Use pnpm.', 1)
         projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
         text = projects.render(PID, 'claude', self.home)
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)

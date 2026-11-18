@@ -5,8 +5,6 @@ from pathlib import Path
 
 import paths
 
-HOME = Path.home()
-
 
 def read(path):
     try:
@@ -16,7 +14,7 @@ def read(path):
 
 
 def claude():
-    account = read(HOME / '.claude.json').get('oauthAccount') or {}
+    account = read(paths.HOME / '.claude.json').get('oauthAccount') or {}
     oauth = read(paths.CLAUDE / '.credentials.json').get('claudeAiOauth') or {}
     tier = str(oauth.get('rateLimitTier') or '')
     plan = (oauth.get('subscriptionType') or '').capitalize()

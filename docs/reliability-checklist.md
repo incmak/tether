@@ -74,3 +74,8 @@ diff is ignored.
 - Text: `rounds|paused|restart|agent_prompt|turn_source`
 - Check: A background turn or a prompt from another agent does not reset the round counts or remove the pause. The third failed review goes to the user. Run `test_review_links`.
 - Incident: B189, commit 0d540df (a review ran 14 rounds)
+
+## R11: Server tests use private state and store reads leave files unchanged
+- Paths: ^server/(paths|unittest_environment|review_links)\.py$
+- Check: Run test_xplat_paths.TestStoreIsolation and the legacy store read and backup test in test_review_links. Each store path stays outside the account home. A read leaves the original file unchanged. The first write preserves the original bytes in a rollback copy.
+- Incident: B278, 2026-11-18, two test runs rewrote the live review store during migration

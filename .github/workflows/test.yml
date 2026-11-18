@@ -20,7 +20,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Ensure tmux is installed
+        run: |
+          if ! command -v tmux >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends tmux
+          fi
       # The Python tests load ui/src TypeScript, so install the UI packages first.
       - run: cd ui && npm ci
       - run: cd server && python3 -m unittest discover -q
@@ -39,31 +44,20 @@ jobs:
   browser:
     # Match the OS supported by the pinned Playwright browser/dependency bundle.
     runs-on: ubuntu-24.04
-    # The serial browser sweep takes about 18 minutes on the runner, after setup and build.
-    timeout-minutes: 30
+    # Setup about 3 min, tests about 6 min; each browser file is killed after 5 min (run_ui_tests.cjs).
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
       - run: cd ui && npm ci && npm run build
       - uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: chromium-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ui/package-lock.json') }}
-      - name: Install Chromium system packages
-        shell: bash
-        run: |
-          cd ui
-          for attempt in 1 2 3; do
-            if npx playwright-core install-deps chromium; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep 30
-          done
       - name: Install test Chromium
         shell: bash
         run: |
@@ -77,19 +71,36 @@ jobs:
             fi
             sleep 30
           done
+      - name: Ensure a font for the CJK layout fixture
+        run: |
+          # The responsive chat sweep uses U+754C. Keep a real glyph on minimal images.
+          if [ -z "$(fc-list ':charset=754c' family)" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends fonts-unifont
+          fi
       - name: Real Chromium smoke test
         # Release checks rely on this run, so the server's own Chromium launch must run here, not skip.
+        # The hosted image supplies the shared libraries. The launch fails if a library is missing.
         shell: bash
         run: |
           chrome=$(ls -d ~/.cache/ms-playwright/chromium_headless_shell-*/chrome-*/headless_shell | sort | tail -1)
           test -x "$chrome"
+          if ldd "$chrome" | grep 'not found'; then
+            echo "The runner image lacks Chromium libraries (above). Restore 'npx playwright-core install-deps chromium'."
+            exit 1
+          fi
           cd server
           MOBILE_TMUX_CHROME="$chrome" TETHER_REAL_BROWSER_TEST=1 python3 -m unittest -v test_browser.RealChromiumSmokeTest 2>&1 | tee ../smoke.log
           grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
       - name: Browser UI tests
-        run: cd ui && node run_ui_tests.cjs --browser
+        env:
+          SHOTS: ../.release-work/ci-browser
+        run: |
+          nproc
+          cd ui
+          node run_ui_tests.cjs --browser --parallel
       - name: Upload browser test screenshots
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-browser-screenshots-${{ github.run_attempt }}

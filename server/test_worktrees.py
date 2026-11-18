@@ -7,10 +7,12 @@ import unittest
 from unittest.mock import patch
 
 import worktrees
+from unittest_environment import isolate
 
 
 class WorktreeTests(unittest.TestCase):
     def setUp(self):
+        isolate()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

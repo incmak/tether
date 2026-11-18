@@ -1,8 +1,11 @@
 """macOS discovery and host samples, forced on Linux without real processes."""
 import os
 from pathlib import Path
+import pwd
 import subprocess
+import sys
 import tempfile
+from textwrap import dedent
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -22,6 +25,101 @@ Pages wired down:                         50000.
 Pages purgeable:                           1000.
 Pages occupied by compressor:             20000.
 '''
+
+
+class TestStoreIsolation(unittest.TestCase):
+    def test_store_paths_stay_outside_the_account_home(self):
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        stores = {name: value for name, value in vars(paths).items()
+                  if name.isupper() and isinstance(value, Path)}
+        stores.update(work=paths.work(), reminders=paths.reminders(), items=paths.items(),
+                      private_file=paths.private_file('test'), path_home=Path.home(),
+                      expanduser_home=Path(os.path.expanduser('~')), tempdir=Path(tempfile.gettempdir()))
+        for name, store in stores.items():
+            with self.subTest(store=name):
+                self.assertFalse(store.resolve().is_relative_to(real_home))
+
+    def run_child(self, code, **env):
+        result = subprocess.run([sys.executable, '-S', '-c', dedent(code)],
+                                cwd=Path(__file__).resolve().parent, env={'PATH': os.defpath, **env},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_first_import_during_test_execution_isolates(self):
+        with tempfile.TemporaryDirectory() as original_home:
+            self.run_child('''
+                import os
+                from pathlib import Path
+                import unittest
+
+                original_home = Path.home()
+
+                def test():
+                    import paths
+                    assert Path.home() != original_home, 'late import left HOME unchanged'
+                    assert paths.HOME == Path.home() == Path(os.path.expanduser('~'))
+                    assert not paths.CACHE.is_relative_to(original_home)
+
+                result = unittest.FunctionTestCase(test).run()
+                assert result.wasSuccessful(), result.failures + result.errors
+            ''', HOME=original_home)
+
+    def test_tempdir_under_original_home_is_replaced_even_if_cached(self):
+        with tempfile.TemporaryDirectory() as original_home:
+            original_tmp = Path(original_home) / 'tmp'
+            original_tmp.mkdir()
+            self.run_child('''
+                import os
+                from pathlib import Path
+                import tempfile
+                import unittest
+
+                original_home = Path.home()
+                assert Path(tempfile.gettempdir()) == original_home / 'tmp'
+
+                def test():
+                    import paths
+                    tmp = Path(tempfile.gettempdir()).resolve()
+                    assert not tmp.is_relative_to(original_home.resolve()), tmp
+                    assert tmp.parent == paths.HOME.resolve().parent, tmp
+                    assert all(Path(os.environ[key]).resolve() == tmp for key in ('TMPDIR', 'TEMP', 'TMP'))
+
+                result = unittest.FunctionTestCase(test).run()
+                assert result.wasSuccessful(), result.failures + result.errors
+            ''', HOME=original_home, TMPDIR=str(original_tmp))
+
+    def test_production_import_uses_account_home_default(self):
+        self.run_child('''
+            from pathlib import Path
+            import os
+            import pwd
+            import sys
+
+            import paths
+
+            assert 'unittest' not in sys.modules
+            real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+            assert paths.HOME == Path.home() == real_home
+            assert paths.CACHE == real_home / '.cache/mobile-tmux'
+        ''')
+
+    def test_first_import_from_mock_patch_keeps_account_home_default(self):
+        self.run_child('''
+            import os
+            from pathlib import Path
+            import pwd
+            import sys
+            from unittest import mock
+
+            assert 'paths' not in sys.modules
+            # A string target imports paths from inside unittest.mock's patch setup.
+            with mock.patch('paths.SYSTEMD_RUN', None):
+                import paths
+
+                real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+                assert paths.HOME == Path.home() == real_home, paths.HOME
+                assert paths.CACHE == real_home / '.cache/mobile-tmux', paths.CACHE
+        ''')
 
 
 class XplatPathsTests(unittest.TestCase):

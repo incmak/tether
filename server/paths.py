@@ -2,6 +2,32 @@
 import os
 from pathlib import Path
 import shutil
+import sys
+
+
+def _isolate_unittest_paths():
+    """Install the test environment before any importer can capture a store path."""
+    if 'unittest' not in sys.modules:
+        return
+    # The runner can import modules while loading tests or inside a running test.
+    # Importing unittest by itself should leave ordinary tools and server imports alone.
+    main_spec = getattr(sys.modules['__main__'], '__spec__', None)
+    if getattr(main_spec, 'name', None) == 'unittest.__main__':
+        from unittest_environment import isolate
+        isolate()
+        return
+    runners = {'unittest.loader', 'unittest.case', 'unittest.suite', 'unittest.runner',
+               'unittest.main', 'unittest.async_case'}
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_globals.get('__name__') in runners:
+            from unittest_environment import isolate
+            isolate()
+            return
+        frame = frame.f_back
+
+
+_isolate_unittest_paths()
 
 
 def _find_tmux():
