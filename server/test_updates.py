@@ -156,7 +156,7 @@ const code = ts.transpileModule(source, {compilerOptions: {
   module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX
 }}).outputText;
 async function scenario(payloads, expectedCalls, disabledStorage = false) {
-  let calls = 0, subscribe, snapshot;
+  let calls = 0, reloadCalls = 0, subscribe, snapshot;
   const timers = [], listeners = [];
   const storage = new Map();
   const context = {exports: {}, setTimeout: (fn, ms) => {
@@ -176,6 +176,7 @@ async function scenario(payloads, expectedCalls, disabledStorage = false) {
     if (name === 'react/jsx-runtime') return {jsx: (type, props) => ({type, props}), jsxs: (type, props) => ({type, props})};
     if (name === 'lucide-react') return {X: 'X'};
     if (name === './Skeleton') return {Spinner: 'Spinner'};
+    if (name === './backNav') return {reloadPage: () => { reloadCalls++; }};
     throw Error(name);
   }};
   vm.runInNewContext(code, context);
@@ -198,6 +199,7 @@ async function scenario(payloads, expectedCalls, disabledStorage = false) {
   }
   unsubscribe(); subscribe(() => {}); await flush();
   assert.equal(calls, expectedCalls); // Resubscription never restarts discovery.
+  assert.equal(reloadCalls, 0);
 }
 const pending = {latest: null, available: false, url: '', mode: 'notify', checking: true};
 const complete = {latest: 'v0.2.0', available: true, url: 'https://example.invalid', mode: 'notify', checking: false};
@@ -573,13 +575,14 @@ const find = (node, name) => {
 };
 const idle = {current: '0.1.0', latest: 'v0.2.0', available: true, url: 'https://example.invalid', mode: 'notify', checking: false, can_update: true, run: null};
 async function scenario(replies, postError) {
-  let snapshot, subscribe; const timers = [], posts = [];
+  let snapshot, subscribe; const timers = [], posts = [], reloads = [];
   const context = {exports: {}, Date, setTimeout: fn => timers.push(fn), localStorage: {getItem: () => null, setItem() {}},
     require: name => {
       if (name === 'react') return {useSyncExternalStore: (sub, get) => { subscribe = sub; snapshot = get; return get(); }};
       if (name === 'react/jsx-runtime') return {jsx: (type, props) => ({type, props}), jsxs: (type, props) => ({type, props})};
       if (name === 'lucide-react') return {X: 'X'};
-    if (name === './Skeleton') return {Spinner: 'Spinner'};
+      if (name === './Skeleton') return {Spinner: 'Spinner'};
+      if (name === './backNav') return {reloadPage: () => { reloads.push('reload'); }};
       if (name === './api') return {errorText: error => error.message, request: async (path, body) => {
         if (body) { posts.push(body); if (postError) throw Error(postError); return {}; }
         const reply = replies.length > 1 ? replies.shift() : replies[0];
@@ -592,7 +595,7 @@ async function scenario(replies, postError) {
   const banner = context.exports.UpdateBanner;
   banner(); subscribe(() => {}); await flush();
   const tick = async () => { timers.shift()(); await flush(); };
-  return {banner, tick, posts, timers};
+  return {banner, tick, posts, timers, reloads};
 }
 (async () => {
   let run = await scenario([idle]);
@@ -604,7 +607,12 @@ async function scenario(replies, postError) {
   find(run.banner(), 'Update now').props.onClick(); await flush();
   await run.tick(); assert.match(text(run.banner()), /Updating/); // A failed request during the restart keeps waiting.
   await run.tick(); assert.match(text(run.banner()), /Updating/);
-  await run.tick(); assert.ok(find(run.banner(), 'Reload')); assert.equal(run.timers.length, 0);
+  await run.tick(); assert.equal(run.timers.length, 0);
+  const reload = find(run.banner(), 'Reload');
+  assert.ok(reload);
+  assert.equal(run.reloads.length, 0);
+  reload.props.onClick();
+  assert.equal(run.reloads.length, 1);
   run = await scenario([idle, {...idle, run: {state: 'failed', target: '0.2.0', error: 'Went back.'}}]);
   find(run.banner(), 'Update now').props.onClick(); await flush();
   await run.tick(); assert.match(text(run.banner()), /Update failed\. Went back\./); assert.ok(find(run.banner(), 'Try again'));
