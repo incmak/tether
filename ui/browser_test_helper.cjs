@@ -72,4 +72,10 @@ async function serveLocal(route) {
   return route.fulfill({ response })
 }
 
-module.exports = { getBrowser, sharedEndpoint, serveLocal }
+// Screenshot folder. SHOTS wins exactly as given. Otherwise a scratch folder, never a dated .release-work folder.
+function shotsDir(name, ...sub) {
+  if (process.env.SHOTS) return path.resolve(process.env.SHOTS)
+  return path.join(os.tmpdir(), 'tether-ui-shots', name, ...sub)
+}
+
+module.exports = { getBrowser, sharedEndpoint, serveLocal, shotsDir }

@@ -6,7 +6,7 @@ const http = require('node:http')
 const os = require('node:os')
 const esbuild = require('esbuild')
 const { existsSync } = require('node:fs')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
@@ -26,7 +26,8 @@ const fixture = {
 }
 
 
-const SHOTS = path.resolve(process.env.SHOTS || path.join(__dirname, '../.release-work/2026-11-16/responsive/chat/shots', (process.env.PHASE || 'after') + (process.env.COARSE ? '-touch' : '')))
+const PHASE_SUB = (process.env.PHASE || 'after') + (process.env.COARSE ? '-touch' : '')
+const SHOTS = shotsDir('responsive/chat', PHASE_SUB)
 const LONG = 'long_name_'.repeat(9).slice(0, 80)
 const ALT = '界'.repeat(80)
 const part = process.env.PART || 'all'

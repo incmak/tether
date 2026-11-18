@@ -5,11 +5,11 @@
 const http = require('node:http')
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-16/chat-drop/shots')
+const SHOTS = shotsDir('chat-drop')
 const pane = (id, name, extra) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...extra })
 const chat = (session, agent = 'claude') => ({ messages: [], busy: false, thread: `t${session.slice(1)}`, agent, writable: true, session, earlier: 0, limit: 100, state: 'Idle', approval: null })
 const fixture = {

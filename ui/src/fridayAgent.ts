@@ -30,7 +30,8 @@ export interface AgentChatList { target: string; chats: string[]; sessions: stri
 export interface AgentEvents {
   onTurn: (turn: AgentTurn) => void
   onUserText: (text: string, final: boolean) => void
-  onBotText: (text: string) => void
+  /** fresh: the text starts a new reply, not a longer version of the last one. */
+  onBotText: (text: string, fresh: boolean) => void
   onMetrics?: (metrics: AgentMetrics) => void
   onVoice?: (kind: VoiceKind | null) => void
   onClosed: (reason: string) => void
@@ -145,13 +146,14 @@ export class FridayAgent {
           if (this.voice.kind) return  // The device shows each sentence as it gets it (say).
           // Pipecat reports a sentence before and after it speaks it, with one segment_id: keep it once.
           const progress = data.spoken_progress
+          const fresh = this.botSegments.size === 0
           this.botSegments.set(data.segment_id ?? `text-${this.botSegments.size}`, progress ? `${progress.accumulated_text}${progress.remaining_text}` : data.text)
-          this.bot = [...this.botSegments.values()].join(' ').trim(); this.events.onBotText(this.bot)
+          this.bot = [...this.botSegments.values()].join(' ').trim(); this.events.onBotText(this.bot, fresh)
         },
         onServerMessage: (message: { t?: string; d?: unknown }) => {
           if (message?.t === 'metrics') this.events.onMetrics?.(message.d as AgentMetrics)
           else if (message?.t === 'ready') { if (this.voice.kind) this.mode(this.voice.kind) }
-          else if (message?.t === 'say') { const d = message.d as { turn: number; seq: number; text: string }; this.bot = d.seq ? `${this.bot} ${d.text}` : d.text; this.events.onBotText(this.bot); this.voice.say(d.turn, d.seq, d.text) }
+          else if (message?.t === 'say') { const d = message.d as { turn: number; seq: number; text: string }; this.bot = d.seq ? `${this.bot} ${d.text}` : d.text; this.events.onBotText(this.bot, !d.seq); this.voice.say(d.turn, d.seq, d.text) }
           else if (message?.t === 'say_end') { const d = message.d as { turn: number; count: number }; this.voice.end(d.turn, d.count) }
           else if (message?.t === 'stop') this.voice.stop()
           // The server heard no words (noise, echo, or a short overlap): no reply comes, so stop showing thinking.

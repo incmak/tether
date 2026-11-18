@@ -2,11 +2,11 @@
 // Unstacked, and the New stack popover with its folder picker. Every API request stays in this page's fixtures.
 const fs = require('node:fs/promises')
 const path = require('node:path')
-const { getBrowser } = require('./browser_test_helper.cjs')
+const { getBrowser, shotsDir } = require('./browser_test_helper.cjs')
 
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
-const SHOTS = process.env.SHOTS || path.resolve(__dirname, '../.release-work/2026-11-15/create-popovers/shots')
+const SHOTS = shotsDir('create-popovers')
 const pane = (id, name, group) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null, ...(group ? { group } : {}) })
 const stacks = [{ id: 'g00000001', name: 'Alpha', project: '' }, { id: 'g00000002', name: 'Beta', project: '' }, { id: 'g00000003', name: 'Gamma', project: '' }]
 const fixture = {

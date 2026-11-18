@@ -487,6 +487,7 @@ class WhenTests(unittest.TestCase):
         cases = {'in 2h': NOW + 7200, 'in 90m': NOW + 5400, 'in 1 day': NOW + 86400,
                  'tomorrow 10:00': ist(2026, 11, 19, 10, 0), 'tomorrow': ist(2026, 11, 19, 9, 0),
                  '18:00': ist(2026, 11, 18, 18, 0), '09:00': ist(2026, 11, 19, 9, 0),
+                 '2026-11-24': ist(2026, 11, 24, 10, 0),
                  '2026-11-19T10:00+00:00': datetime(2026, 11, 19, 10, tzinfo=timezone.utc).timestamp(),
                  '2026-11-19T10:00': ist(2026, 11, 19, 10, 0)}
         for text, want in cases.items():
@@ -527,6 +528,25 @@ class HttpTests(Base):
         self.assertEqual(self.call('snooze', {'id': 'R1', 'occ': 1, 'until': NOW + 600})[1]['reminder']['snoozes'], 1)
         status, body = self.call('delete', {'id': 'R1'})
         self.assertEqual((status, body), (200, {'reminder': None}))
+
+    def test_add_accepts_spoken_time_and_preserves_explicit_due(self):
+        date = datetime(2026, 11, 24, 10, tzinfo=reminders.ZONE).timestamp()
+        for when, expected in (('2026-11-24 10:00', date), ('2026-11-24', date), ('in 2h', NOW + 7200)):
+            with self.subTest(when=when):
+                status, body = self.call('add', {'text': 'Call', 'when': when})
+                self.assertEqual(status, 200)
+                self.assertEqual(body['reminder']['due'], expected)
+        status, body = self.call('add', {'text': 'Call', 'due': NOW + 600, 'when': 'later'})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['reminder']['due'], NOW + 600)
+
+    def test_add_rejects_invalid_or_past_spoken_time(self):
+        self.assertEqual(self.call('add', {'text': 'Call', 'when': 'later'}), (400, {
+            'error': 'Cannot read the time "later". Use "2026-11-19 10:00", "tomorrow 10:00" or "in 2h".'}))
+        self.assertEqual(self.call('add', {'text': 'Call', 'when': '2026-11-17 10:00'}),
+                         (400, {'error': 'Pick a time in the future.'}))
+        self.assertEqual(self.call('add', {'text': 'Call', 'when': 17}), (400, {'error': 'Pick a time.'}))
+        self.assertFalse((self.folder / 'reminders.json').exists())
 
     def test_restore_requires_an_id_from_recently_deleted(self):
         _, body = self.call('add', {'text': 'Call', 'due': NOW + 60})
