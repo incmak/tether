@@ -73,3 +73,19 @@ assert.equal(nested[1].tools.length, 5, 'the input is not changed')
 const good = [{ id: 'g', role: 'assistant', text: '', tools: [tool], members: [{ ...ask }], watches: ['w'] }]
 assert.equal(chatMessages({ messages: good }), good, 'valid nested data keeps its identity')
 console.log('Bad tools, artifacts, members and fields drop out, and the artifact reader still runs')
+
+// A rejected entry must count as a change even when it is the only bad one: null cleans to null, and a hole in a
+// sparse list is skipped by map and every. Each case has exactly one bad entry beside valid ones.
+const holes = [reply]; holes[2] = ask
+for (const [label, list, ids] of [['a lone null message', [reply, null], ['r1']], ['a lone undefined message', [undefined, reply], ['r1']],
+  ['a hole in the list', holes, ['r1', 'u1']]]) {
+  const clean = chatMessages({ messages: list })
+  same(clean.map(message => message.id), ids, label)
+  assert.equal(lastReply({ messages: list }), reply, label)
+  assert.doesNotThrow(() => preview.artifactsOf(clean), label)
+}
+const lone = chatMessages({ messages: [{ id: 'n1', role: 'assistant', text: '', tools: [null, tool], members: [null, { ...reply }] }] })
+same(lone[0].tools.map(item => item.id), ['t1'], 'a lone null tool drops out')
+same(lone[0].members.map(item => item.id), ['r1'], 'a lone null member drops out')
+same([...preview.artifactsOf(lone).keys()], [artifact.url])
+console.log('A lone null or a hole drops out of messages, tools and members')

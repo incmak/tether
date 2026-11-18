@@ -162,6 +162,18 @@ const TOOL_FIELDS: Record<string, 'string' | 'number' | 'boolean'> = {
 const isObject = (item: unknown): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
 const hasStrings = (item: Record<string, unknown>, keys: string[]) => keys.every(key => typeof item[key] === 'string')
 const isArtifact = (item: unknown) => isObject(item) && hasStrings(item, ['url', 'path', 'title'])
+/** Each entry cleaned; entries that clean to null drop out. The same array when every entry came back as itself.
+ *  A rejected entry (null in, null out) counts as a change, and so does a hole in a sparse array. */
+function cleanEach<T>(list: unknown[], clean: (item: unknown) => T | null): T[] {
+  const out: T[] = []
+  let same = true
+  for (let index = 0; index < list.length; index++) {
+    const entry = index in list ? clean(list[index]) : null
+    if (entry === null || entry !== list[index]) same = false
+    if (entry !== null) out.push(entry)
+  }
+  return same ? list as T[] : out
+}
 /** The tool itself when valid, a copy without its wrong-type fields, or null when it has no id, name and title. */
 const cleanTool = (item: unknown): ToolSummary | null => {
   if (!isObject(item) || !hasStrings(item, ['id', 'name', 'title'])) return null
@@ -183,9 +195,8 @@ const cleanMessage = (item: unknown): ChatMessage | null => {
   if (item.tools !== undefined) {
     if (!Array.isArray(item.tools)) set('tools', undefined)
     else {
-      const raw: unknown[] = item.tools
-      const tools = raw.map(cleanTool)
-      if (tools.some((tool, index) => tool !== raw[index])) set('tools', tools.filter(tool => tool !== null))
+      const tools = cleanEach(item.tools, cleanTool)
+      if (tools !== item.tools) set('tools', tools)
     }
   }
   if (item.members !== undefined) {
@@ -196,10 +207,7 @@ const cleanMessage = (item: unknown): ChatMessage | null => {
   return (copy ?? item) as unknown as ChatMessage
 }
 /** A list of clean messages. A list that is already clean comes back as the same array. */
-const cleanList = (list: unknown[]): ChatMessage[] => {
-  const clean = list.map(cleanMessage)
-  return clean.every((message, index) => message === list[index]) ? list as ChatMessage[] : clean.filter(message => message !== null)
-}
+const cleanList = (list: unknown[]): ChatMessage[] => cleanEach(list, cleanMessage)
 /** The transcript of a chat answer, without entries that are not messages. An error body or an old server can send no
  *  list or another type; read that as empty. A valid list comes back as the same array, so memos keep it. */
 export const chatMessages = (data: { messages?: unknown } | null | undefined): ChatMessage[] => {
