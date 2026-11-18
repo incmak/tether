@@ -33,7 +33,7 @@ import type { Media } from './ImageViewer'
 import { FilePane, MediaOpener, TabOpener, saveFile } from './MediaLink'
 import type { Kind } from './MediaLink'
 import { TextViewer } from './TextViewer'
-import { speak, stopSpeaking } from './speech'
+import { keepAudioUnlocked, speak, stopSpeaking } from './speech'
 import type { TextFile } from './TextViewer'
 import { OfficeViewer } from './OfficeViewer'
 import type { OfficeFile } from './OfficeViewer'
@@ -647,6 +647,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const messages = useMemo(() => data?.messages ?? [], [data?.messages])
   const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind).map(message => message.text), [messages])
   // Read a new reply aloud when its turn ends. Replies already there when the chat opens are not read.
+  useEffect(() => readAloud ? keepAudioUnlocked() : undefined, [readAloud])
   // Hands-free: when the reading ends, ask the composer to start the mic.
   const [listenRequest, setListenRequest] = useState(0)
   const lastReply = useMemo(() => [...messages].reverse().find(message => message.role === 'assistant' && !message.kind), [messages])

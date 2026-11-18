@@ -5,7 +5,7 @@ import type { Api } from './api'
 import type { Prefs } from './prefs'
 import { useModal } from './hooks'
 import { SCHEMES, schemeById } from './schemes'
-import { canSpeak } from './speech'
+import { canReadAloud } from './speech'
 import { playChime, prepareChime } from './sound'
 import { GlobalCodexLevel } from './CodexLevel'
 import { GlobalClaudeAdvisor } from './ClaudeAdvisor'
@@ -65,7 +65,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('auto-resume', 'workspace', 'Reopen tabs after a restart', 'auto resume restore restart tmux reboot', <Toggle title="Reopen tabs after a restart" note="Bring back open Claude and Codex chats when tmux or the machine restarts." scope="This server" checked={prefs.autoResume} onChange={autoResume => update(() => ({ autoResume }))} />),
     item('microphone', 'voice', 'Voice button', 'mic microphone dictate speech input keyboard', <Toggle title="Voice button" note="Show the microphone in the message box." checked={!prefs.voiceOff} onChange={on => update(() => ({ voiceOff: !on }))} />),
     item('chime', 'voice', 'Start sound', 'mic microphone ready chime volume', <Toggle title="Start sound" note="Play a chime when the microphone is ready." checked={prefs.voiceSound && !prefs.voiceOff} disabled={prefs.voiceOff} onChange={voiceSound => update(() => ({ voiceSound }))} />),
-    ...(canSpeak ? [
+    ...(canReadAloud ? [
       item('read-aloud', 'voice', 'Read replies aloud', 'speaker speech audio tts auto play', <Toggle title="Read replies aloud" note="Read each completed reply on this device." scope="This device" checked={prefs.readAloud} onChange={readAloud => update(() => ({ readAloud }))} />),
       item('hands-free', 'voice', 'Hands-free', 'automatic mic voice conversation silence pause handsfree', <Toggle title="Hands-free" note="Start the mic after speech. Pause two seconds to send." scope="This device" checked={prefs.readAloud && prefs.handsFree && !prefs.voiceOff} disabled={!prefs.readAloud || prefs.voiceOff} onChange={handsFree => update(() => ({ handsFree }))} />),
     ] : []),

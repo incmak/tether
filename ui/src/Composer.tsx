@@ -5,6 +5,7 @@ import { history, loadHistory, remember } from './history'
 import { chatTitle } from './Sidebar'
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { placeAttachLayer } from './attachLayer'
+import { useComposerMorph } from './composerMorph'
 import { ArrowUp, Blocks, Camera, ChevronRight, CornerDownLeft, FolderOpen, Smartphone, ImagePlus, Mic, Paperclip, Plus, Square, X, AtSign, Slash } from 'lucide-react'
 import { errorText } from './api'
 import type { Api, Pane } from './api'
@@ -135,6 +136,7 @@ export function Composer({ onTerminalEscape, api, pane, thread, disabled, onSend
     return () => cancelAnimationFrame(frame)
   }, [menu])
   const compact = !focused && !menu && !draft && !files.length && !pastes.length && !listening && !transcribing && !uploading && pane.agent !== 'shell'
+  useComposerMorph(form, compact)
   // Upload files in order and return how many worked. onSaved runs after each good upload.
   // A second batch (another drop during an upload) waits for the first, so Send stays off until all files are in.
   const uploadQueue = useRef<Promise<unknown>>(Promise.resolve())

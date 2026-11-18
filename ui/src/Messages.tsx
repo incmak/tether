@@ -12,7 +12,7 @@ import { ToolGroup } from './ToolGroup'
 import { SentContent, sentContent } from './SentImages'
 import { InlineCode, Link, remarkPaths } from './MediaLink'
 import { remarkTabs } from './tabLinks'
-import { canSpeak, speak, stopSpeaking, useSpeaking } from './speech'
+import { canReadAloud, speak, stopSpeaking, useSpeaking } from './speech'
 import { RateButtons } from './ReplyFeedback'
 import type { ToolSummary } from './api'
 
@@ -295,7 +295,7 @@ function ShareButton({ text }: { text: string }) {
 function SpeakButton({ text }: { text: string }) {
   // The text is the key, so the button also shows a reply that is read aloud by itself at the end of a turn.
   const reading = useSpeaking() === text
-  if (!canSpeak) return null
+  if (!canReadAloud) return null
   return <button type="button" className="icon-button" aria-label={reading ? 'Stop reading' : 'Read aloud'} title={reading ? 'Stop reading' : 'Read aloud'} aria-pressed={reading} onClick={() => reading ? stopSpeaking() : speak(text, text)}>{reading ? <Square size={14} /> : <Play size={16} />}</button>
 }
 function CodeHeader({ language, code }: { language: string | undefined; code: string }) {
