@@ -128,6 +128,16 @@ async function main() {
         await page.screenshot({ path: path.join(SHOTS, `settings-${width}-${main.split(' ')[0].toLowerCase()}-${warned ? 'problem' : 'clean'}.png`) })
       }
     }
+    // An Opus advisor with no reported problem: the same "set for this tab" wording, and no Fable consent text.
+    fixture.footer = { ...footer('Opus 5.5', []), advisor: { model: 'opus', name: 'Opus', source: 'tether', problems: [] } }
+    await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
+    const opusPill = page.locator('button.pill[aria-label^="Model and effort"]').first()
+    await opusPill.filter({ hasText: 'Opus 5.5' }).waitFor({ state: 'visible' })
+    await opusPill.click()
+    const opusSheet = page.getByRole('dialog').filter({ hasText: 'Applies to this session only.' }).first()
+    await opusSheet.waitFor()
+    const opusText = await opusSheet.innerText()
+    check('Opus advisor: Model sheet advisor state', await opusSheet.locator('.provider-warning').count() === 0 && opusText.includes('Advisor: Opus, set for this tab. Claude consults it before big steps.') && !/consent/i.test(opusText), opusText.slice(0, 300))
     check('no page errors', !pageErrors.length, pageErrors.join('; '))
   } catch (error) {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})
