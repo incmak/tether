@@ -244,10 +244,57 @@ class FridayRulesTests(unittest.TestCase):
                 friday.brain_config(env)
 
     def test_vad_stop(self):
-        self.assertEqual(friday.vad_stop({}, True), 0.5)
+        self.assertEqual(friday.vad_stop({}, True), 0.2)
         self.assertEqual(friday.vad_stop({'TETHER_FRIDAY_VAD_STOP': '0.65'}, True), 0.65)
         self.assertEqual(friday.vad_stop({}, False), 0.8)
         self.assertEqual(friday.vad_stop({'TETHER_FRIDAY_VAD_STOP': '0.65'}, False), 0.8)
+
+    def test_vad_stop_bad_values(self):
+        for value in ('', 'bad', '-0.01', 'nan', 'inf', None):
+            with self.subTest(value=value):
+                self.assertEqual(friday.vad_stop({'TETHER_FRIDAY_VAD_STOP': value}, True), 0.2)
+        self.assertEqual(friday.vad_stop({'TETHER_FRIDAY_VAD_STOP': '0'}, True), 0)
+
+    def test_stt_threads(self):
+        self.assertEqual(friday.stt_threads({}), 4)
+        for value, expected in (('8', 8), ('16', 16), ('17', 16), ('0', 1), ('-2', 1),
+                                ('', 4), ('bad', 4), ('2.5', 4), (None, 4)):
+            with self.subTest(value=value):
+                self.assertEqual(friday.stt_threads({'TETHER_FRIDAY_STT_THREADS': value}), expected)
+
+    def test_action_ack(self):
+        cases = [
+            ('send_to_chat', {}, {'chat': 'Docs'}, 'Sent to Docs.'),
+            ('answer_approval', {}, {'chat': 'Docs', 'decision': 'approve'}, 'Approved in Docs.'),
+            ('answer_approval', {}, {'chat': 'Docs', 'decision': 'deny'}, 'Denied in Docs.'),
+            ('new_chat', {}, {'chat': 'Docs'}, 'Started Docs.'),
+            ('switch_chat', {}, {'chat': 'Docs'}, 'Switched to Docs.'),
+            ('open_panel', {}, {}, 'Opened.'),
+            ('open_panel', {'open': False}, {}, 'Closed.'),
+            ('backlog_add', {}, {'id': 'B318'}, 'Added B318.'),
+            ('backlog_send', {}, {'item': 'B318', 'chat': 'Docs'}, 'Sent B318 to Docs.'),
+            ('send_to_chat', {'chat': 'Wrong'}, {'chat': None}, 'Sent.'),
+            ('answer_approval', {'decision': 'approve'}, {}, 'Approved.'),
+            ('answer_approval', {}, {'decision': 'deny'}, 'Denied.'),
+            ('answer_approval', {}, {}, None),
+            ('new_chat', {}, {}, 'Started.'),
+            ('switch_chat', {}, {'chat': ' '}, 'Switched.'),
+            ('backlog_add', {}, {}, 'Added.'),
+            ('backlog_send', {}, {'chat': 'Docs'}, 'Sent to Docs.'),
+            ('backlog_send', {}, {'item': 'B318'}, 'Sent B318.'),
+            ('backlog_send', {}, {}, 'Sent.'),
+            ('list_chats', {}, {}, None),
+        ]
+        for name, args, result, expected in cases:
+            with self.subTest(name=name, result=result):
+                self.assertEqual(friday.action_ack(name, args, dict(result, ok=True)), expected)
+
+    def test_action_ack_requires_confirmed_success(self):
+        for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
+                       {'question': 'Which chat?', 'choices': ['Docs', 'Tests']},
+                       {'ok': False}, {'ok': 1}, None, [], 'sent'):
+            with self.subTest(result=result):
+                self.assertIsNone(friday.action_ack('send_to_chat', {}, result))
 
     def test_event_tools(self):
         for name in ('send_to_chat', 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'backlog_send'):
@@ -981,6 +1028,210 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     def tool_call(self, ident):
         return {'id': ident, 'type': 'function',
                 'function': {'name': 'list_chats', 'arguments': '{}'}}
+
+    async def tool_flow(self, user, responses):
+        """Drive Pipecat completions and return the downstream frame and dispatch order."""
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.frame_processor import FrameProcessor
+        from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
+
+        session = friday.Session.__new__(friday.Session)
+        session.turn = 0
+        session.new_turn()
+        session.rtvi = RTVIProcessor()
+        session.prepare_messages = lambda messages: messages
+        llm = self.rt.FridayLLM(session, friday.brain_config({}))
+        llm._setup = SimpleNamespace(observer=None, enable_metrics=True, enable_usage_metrics=False,
+            report_only_initial_ttfb=False, pipeline_worker=SimpleNamespace(app_resources=None, worker_runner=None))
+        context = LLMContext([{'role': 'user', 'content': user}])
+        direction = self.rt.FrameDirection.DOWNSTREAM
+        frames = []
+        browser_results = {}
+        elapsed = [100.0]
+
+        async def push(processor, frame, direction=direction):
+            if direction == self.rt.FrameDirection.DOWNSTREAM:
+                if processor is session.rtvi:
+                    await llm.process_frame(frame, direction)
+                else:
+                    frames.append(frame)
+
+        async def dispatch(message, **kwargs):
+            data = message.data
+            frames.append(('dispatch', data.function_name))
+            await session.rtvi._handle_function_call_result(SimpleNamespace(
+                function_name=data.function_name, tool_call_id=data.tool_call_id,
+                arguments=data.args, result=browser_results[data.tool_call_id]))
+
+        async def run_handlers(items):
+            # Let the first browser result arrive before the second handler starts.
+            for item in items:
+                await llm._run_function_call(item)
+
+        session.rtvi.push_transport_message = dispatch
+        llm._run_parallel_function_calls = run_handlers
+
+        def completion(text, calls, delay):
+            async def chunks():
+                elapsed[0] += delay
+                if text:
+                    yield self.chunk(content=text)
+                for index, (ident, name, args) in enumerate(calls):
+                    yield self.chunk(tool_calls=[{'index': index, 'id': ident, 'type': 'function',
+                        'function': {'name': name, 'arguments': json.dumps(args)}}])
+            return AsyncMock(return_value=chunks())
+
+        try:
+            with patch.object(FrameProcessor, 'push_frame', push), patch.object(
+                    friday.time, 'time', side_effect=lambda: elapsed[0]):
+                for number, (text, delay, calls) in enumerate(responses):
+                    current = []
+                    for index, (name, args, result) in enumerate(calls):
+                        llm.register_function(name, llm.handle_browser_tool, cancel_on_interruption=False)
+                        ident = f'{number}-{index}'
+                        current.append((ident, name, args))
+                        browser_results[ident] = result
+                    with patch.object(llm, 'get_chat_completions', completion(text, current, delay)):
+                        await llm.process_frame(self.rt.LLMContextFrame(context), direction)
+                    context.add_message({'role': 'tool', 'content': '{}'})
+        finally:
+            await llm._client.close()
+        return session, frames
+
+    async def test_single_successful_action_uses_one_spoken_ack(self):
+        for name, args, result, text in (
+                ('send_to_chat', {'prompt': 'Check the docs'}, {'ok': True, 'chat': 'Docs'}, 'Sent to Docs.'),
+                ('open_panel', {'open': False}, {'ok': True}, 'Closed.')):
+            with self.subTest(name=name):
+                session, frames = await self.tool_flow('Send the prompt or close the panel', [
+                    ('', 1.25, [(name, args, result)])])
+                results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                speech = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+                self.assertEqual(len(results), 1)
+                self.assertIs(results[0].properties.run_llm, False)
+                self.assertEqual([(f.text, f.append_to_context) for f in speech], [(text, True)])
+                self.assertLess(frames.index(results[0]), frames.index(speech[0]))
+                self.assertEqual((session.llm_ttft, session.llm_calls), (1.25, 1))
+
+    async def test_action_errors_questions_and_multi_call_results_keep_llm_followup(self):
+        send = ('send_to_chat', {'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})
+        cases = (
+            [('send_to_chat', send[1], {'error': 'No chat called Docs.'})],
+            [('send_to_chat', send[1], {'error': 'Docs is a tmux session with 2 chats. Ask which one.'})],
+            [('send_to_chat', send[1], {'question': 'Which chat?'})],
+            [send, ('open_panel', {'open': True}, {'ok': True})],
+            [('answer_approval', {'decision': 'approve'}, {'ok': True}), send],
+        )
+        for calls in cases:
+            with self.subTest(calls=calls), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Send it', [('', 1.25, calls)])
+                results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertEqual(len(results), len(calls))
+                self.assertTrue(all(f.properties is None and f.run_llm is None for f in results))
+                self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+    async def test_read_fillers_are_once_per_spoken_turn_and_skip_text_and_events(self):
+        reads = [('list_chats', {}, {'chats': []}), ('read_last_reply', {}, {'text': 'Done.'}),
+                 ('backlog_list', {}, {'items': []})]
+        for call, text in zip(reads, ('Checking the chats.', 'Reading it.', 'Checking the backlog.')):
+            with self.subTest(tool=call[0]):
+                _, frames = await self.tool_flow('Check it', [('', 1, [call, reads[1]])])
+                filler, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+                self.assertEqual(filler.text, text)
+                self.assertFalse(filler.append_to_context)
+                self.assertLess(frames.index(filler), frames.index(('dispatch', call[0])))
+                results = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertTrue(all(f.properties is None and f.run_llm is None for f in results))
+
+        _, frames = await self.tool_flow('Check it', [
+            ('Let me see.', 1, [reads[0]]), ('', 2, [reads[1]]), ('', 3, [reads[2]])])
+        self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)], ['Reading it.'])
+        _, frames = await self.tool_flow(friday.EVENT_PREFIX + 'Done', [('', 1, [reads[0]])])
+        self.assertIn(('dispatch', reads[0][0]), frames)
+        self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
+
+    async def test_llm_ttft_ignores_blocked_tool_run(self):
+        session, frames = await self.tool_flow('Can you fix docs?', [
+            ('', 2.75, [('send_to_chat', {'prompt': 'Fix docs'}, {'ok': True})]),
+            ('Shall I send it?', 1.375, [])])
+        self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+        self.assertEqual((session.llm_ttft, session.llm_calls), (1.375, 2))
+
+    async def test_metrics_log_keeps_first_audio_and_counts_later_runs(self):
+        session = friday.Session.__new__(friday.Session)
+        session.turn = 0
+        session.new_turn()
+        session.tts = SimpleNamespace(voice_speaking=False)
+        session.rtvi = SimpleNamespace(send_server_message=AsyncMock())
+        session.stop_time = 10
+        session.llm_ttft, session.llm_calls = 0.75, 1
+
+        with patch('sys.stderr') as stderr, patch.object(friday.time, 'time', return_value=11.25):
+            await session.report_metrics()
+            await session.report_metrics()  # The device can start a second reply in this turn.
+            stderr.write.assert_not_called()
+            session.llm_calls += 1
+            session.new_turn()
+
+        line = stderr.write.call_args_list[0].args[0]
+        self.assertEqual(json.loads(line.removeprefix('Friday metrics ')), {
+            'turn': 1, 'stop_to_first_audio': 1.25, 'stt': 0.0, 'llm_ttft': 0.75,
+            'tts_ttfb': None, 'llm_calls': 2})
+        self.assertEqual(session.rtvi.send_server_message.await_count, 2)
+        self.assertEqual(session.llm_calls, 0)
+
+    async def test_llm_ttft_ignores_cancelled_run_before_real_output(self):
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.frame_processor import FrameProcessor
+
+        session = friday.Session.__new__(friday.Session)
+        session.turn = 0
+        session.new_turn()
+        session.prepare_messages = lambda messages: messages
+        session.wake = asyncio.Event()
+        llm = session.llm = self.rt.FridayLLM(session, friday.brain_config({}))
+        llm._setup = SimpleNamespace(observer=None, enable_metrics=True, enable_usage_metrics=False,
+                                     report_only_initial_ttfb=False)
+        observer = self.rt.FridayObserver(session)
+        started = asyncio.Event()
+        clock = [100.0]
+
+        async def push(processor, frame, direction):
+            if isinstance(frame, self.rt.MetricsFrame):
+                await observer.on_push_frame(SimpleNamespace(frame=frame, direction=direction, source=processor))
+
+        async def cancelled(_context):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def completion(_context):
+            async def chunks():
+                clock[0] += 1.25
+                yield self.chunk(content='Ready.')
+            return chunks()
+
+        def context_frame():
+            return self.rt.LLMContextFrame(LLMContext([{'role': 'user', 'content': 'Hello'}]))
+
+        direction = self.rt.FrameDirection.DOWNSTREAM
+        try:
+            with patch.object(FrameProcessor, 'push_frame', push), patch.object(
+                    friday.time, 'time', side_effect=lambda: clock[0]):
+                with patch.object(llm, 'get_chat_completions', cancelled):
+                    task = asyncio.create_task(llm.process_frame(context_frame(), direction))
+                    await started.wait()
+                    clock[0] += 0.0478
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                await llm.stop_all_metrics()
+                self.assertIsNone(session.llm_ttft)
+                with patch.object(llm, 'get_chat_completions', completion):
+                    await llm.process_frame(context_frame(), direction)
+                self.assertEqual(session.llm_ttft, 1.25)
+                self.assertEqual(session.llm_calls, 2)
+        finally:
+            await llm._client.close()
 
     async def test_gemini_stream_signatures_survive_followup_without_context_mutation(self):
         from pipecat.processors.aggregators.llm_context import LLMContext
