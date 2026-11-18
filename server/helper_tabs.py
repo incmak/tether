@@ -99,7 +99,7 @@ def check(caller_pane, caller, helper, record, run, *, pane=None):
                 raise Stale(stale)
         elif bound is None and seen is not None:
             bindings[key] = seen
-    if bindings:
+    if bindings and verified_thread(helper) is not None:  # a refused or unconfirmed call writes nothing
         record.update(bindings)
         save(pane, record, run)
 

@@ -215,7 +215,7 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(helpers.new_record(self.entries[0])['owner_thread'])
 
     def test_unbound_codex_guess_keeps_poll_and_send_waits_without_a_write(self):
-        self.reset_record(helper_thread=None)
+        self.reset_record(owner_thread=None, helper_thread=None)
         self.entries[1].update(agent='codex', thread=OTHER, codex_binding='guess')
         self.status.return_value = {'state': 'Working'}
         self.assertEqual(self.poll(), dict(status='running', pane='%13', state='Working'))
@@ -574,12 +574,16 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(self.request('wait'), (503, {'error': 'Could not read this tab. Try again.', 'draft': False}))
         self.assertEqual(self.request('send'), (400, {'error': 'That session has ended. Select another tab.'}))
 
-    def test_missing_helper_can_bind_owner_without_losing_target(self):
+    def test_missing_helper_binds_nothing_then_binds_both_on_the_target(self):
         self.reset_record(owner_thread=None, helper_thread=None)
-        self.entries.pop()
+        helper = self.entries.pop()
         self.assertEqual(self.poll()['state'], 'Starting')
-        self.assertEqual(self.run.record()['owner_thread'], OWNER)
-        self.assertEqual(len(self.run.saves()), 1)
+        self.assertIn(self.request('send')[0], (400, 503))
+        self.assertEqual(self.run.saves(), [])
+        self.entries.append(helper)
+        self.poll()
+        self.assertEqual((self.run.record()['owner_thread'], self.run.record()['helper_thread']), (OWNER, HELPER))
+        self.assertEqual([call[4] for call in self.run.saves()], ['%13'])
 
     def test_wait_keeps_sessions_and_send_invalidates_them(self):
         for action in ('wait', 'send'):

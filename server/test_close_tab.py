@@ -182,6 +182,19 @@ class CloseHelperTabTest(unittest.TestCase):
                     self.close()
                 self.assert_pane_untouched()
 
+    def test_linked_reviewer_cannot_close_an_unconfirmed_helper(self):
+        reviewer = dict(id='%14', agent='claude', thread=OTHER, registry='/fake/14.json')
+        self.entries[1] = dict(self.helper, thread=OTHER, codex_binding='guess')
+        with patch.object(server.review_links, 'reviewed_by', return_value={'%13': ['%14']}):
+            with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
+                server.agent_tabs.close_tab({'pane': '%13'}, reviewer, self.entries + [reviewer], self.run,
+                                            lambda entry: {'state': 'Idle'})
+            self.assert_pane_untouched()
+            self.entries[1] = self.helper
+            self.assertEqual(server.agent_tabs.close_tab({'pane': '%13'}, reviewer, self.entries + [reviewer],
+                                                         self.run, lambda entry: {'state': 'Idle'}),
+                             {'closed': '%13'})
+
     def test_close_binds_and_closes_an_unbound_verified_helper(self):
         self.record = dict(self.record, helper_thread=None)
         self.run.options['%13'] = json.dumps(self.record)
