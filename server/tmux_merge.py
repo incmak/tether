@@ -4,6 +4,7 @@ Sessions are named by tmux session id ($N) and panes by pane id (%N), the ids th
 page. Every move keeps the pane ids, so open chats stay attached. The terminal panel's own session
 (side_shells.SESSION) is never a source or a target."""
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -16,6 +17,8 @@ import side_shells
 PANE = re.compile(r'%[0-9]+')
 SESSION = re.compile(r'\$[0-9]+')
 GONE = 'That session or pane is gone. Refresh the list and try again.'
+BREAKOUT_MARKER = '@tether_breakout'
+BREAKOUT_IDS = re.compile(r'(\$[0-9]+)\t(%[0-9]+)')
 
 
 def _tmux(run, *args, command=None):
@@ -53,7 +56,7 @@ def _info(run, target, fmt):
 
 
 def _session(run, session_id):
-    """The session id, checked: it exists and it is not the terminal panel's session."""
+    """The id and name of a checked session outside the terminal panel."""
     if not isinstance(session_id, str) or not SESSION.fullmatch(session_id):
         raise ValueError('Choose a session.')
     found, name = _info(run, session_id + ':', '#{session_id}\t#{session_name}')
@@ -61,7 +64,7 @@ def _session(run, session_id):
         raise ValueError(GONE)
     if name == side_shells.SESSION:
         raise ValueError('Terminal panel shells cannot be moved.')
-    return session_id
+    return found, name
 
 
 def _pane(run, pane_id):
@@ -71,7 +74,7 @@ def _pane(run, pane_id):
     found, session_id = _info(run, pane_id, '#{pane_id}\t#{session_id}')
     if found != pane_id:
         raise ValueError(GONE)
-    return _session(run, session_id)
+    return _session(run, session_id)[0]
 
 
 def _check(result, message):
@@ -117,7 +120,7 @@ def _name_plan(run, source, target, panes):
 def _apply_names(run, plan):
     """No @chat_name_at is set, so the name counts as the oldest: a name given later in Claude or Codex still wins."""
     for pane, name in plan.items():
-        _tmux(run, 'set-option', '-p', '-t', pane, '@chat_name', name)
+        _check(_try_tmux(run, 'set-option', '-p', '-t', pane, '@chat_name', name), 'Could not name the pane.')
 
 
 KEEP = ('source', 'target')
@@ -149,9 +152,10 @@ def _project_plan(run, source, target, keep):
 
 
 def _apply_project(run, target, kept, dropped):
-    """The windows already moved, so a failure here does not fail the merge: an archive left in place is harmless."""
-    if kept:
-        _tmux(run, 'set-option', '-t', target, '@project', kept)
+    """Set the project's tmux option and archive the other project if possible."""
+    if not kept:
+        return
+    _check(_try_tmux(run, 'set-option', '-t', target, '@project', kept), 'Could not set the project.')
     if dropped:
         try:
             projects.archive(dropped)
@@ -163,7 +167,8 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     """Move every window of source into target, with its layout. The emptied source session closes;
     its name stays on the moved panes. keep ('source' or 'target') says whose project the merged session keeps;
     the other project's folder goes to the archive."""
-    source, target = _session(run, source), _session(run, target)
+    source, _ = _session(run, source)
+    target, name = _session(run, target)
     if source == target:
         raise ValueError('Drop the session on a different session.')
     kept, dropped = _project_plan(run, source, target, keep)
@@ -174,19 +179,26 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     for moved_count, window in enumerate(windows.stdout.split()):
         moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
         if moved is None or moved.returncode:
-            if _target_session(run, window) == target:
+            current = _target_session(run, window, gone='')
+            if current is None:
+                raise RuntimeError('Could not confirm the move. Refresh the list.')
+            if current == target:
                 continue
             if moved_count:
                 raise RuntimeError('Only part of the session moved. Check both sessions.')
             _check(moved, 'Could not move the window.')
-    _apply_names(run, plan)
-    _apply_project(run, target, kept, dropped)
-    return _moved(run, target, None)
+    try:
+        _apply_names(run, plan)
+        _apply_project(run, target, kept, dropped)
+        return _moved(run, target, None)
+    except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
+        raise RuntimeError(f'The windows moved to “{name}”, but Tether could not finish. Refresh the list.') from exc
 
 
 def move_pane(pane, target, run=subprocess.run):
     """Move one pane into a new window of target. A session left with no panes closes."""
-    source, target = _pane(run, pane), _session(run, target)
+    source = _pane(run, pane)
+    target, name = _session(run, target)
     if source == target:
         raise ValueError('The pane is already in that session.')
     plan = _name_plan(run, source, target, [pane])
@@ -197,14 +209,17 @@ def move_pane(pane, target, run=subprocess.run):
             raise RuntimeError('Could not confirm the move. Refresh the list.')
         if current != target:
             _check(moved, 'Could not move the pane.')
-    _ungroup(run, pane)
-    _apply_names(run, plan)
-    return _moved(run, target, pane)
+    try:
+        _ungroup(run, pane)
+        _apply_names(run, plan)
+        return _moved(run, target, pane)
+    except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
+        raise RuntimeError(f'The pane moved to “{name}”, but Tether could not finish. Refresh the list.') from exc
 
 
 def _ungroup(run, pane):
     """A pane that leaves its session goes to Unstacked: groups belong to one session (groups.py)."""
-    _tmux(run, 'set-option', '-p', '-u', '-t', pane, '@group')
+    _check(_try_tmux(run, 'set-option', '-p', '-u', '-t', pane, '@group'), 'Could not clear the pane group.')
 
 
 def _free_name(run, wanted=''):
@@ -237,23 +252,34 @@ def _session_open(run, session):
     return session in result.stdout.split()
 
 
-def _drop_new(run, name, started):
-    """A new-session that timed out may still have made the session. Kill it only when it is surely this call's: the
-    exact name the call chose, created at or after the call started, with one pane. Returns the text the error adds."""
-    found = _try_tmux(run, 'display-message', '-p', '-t', f'={name}:',
-                      '#{session_id}\t#{session_created}\t#{session_panes}')
-    if found is None or found.returncode:
-        return f' A session “{name}” may be left open.'
-    if not found.stdout.strip():  # tmux 3.4 prints nothing for a missing exact name: the call made no session
-        return ''
-    fields = found.stdout.strip().split('\t')
-    if (len(fields) != 3 or not SESSION.fullmatch(fields[0]) or not fields[1].isdigit()
-            or int(fields[1]) < started or fields[2] != '1'):
-        return f' A session “{name}” may be left open.'
-    killed = _try_tmux(run, 'kill-session', '-t', fields[0])
-    if killed is None or killed.returncode or _session_open(run, fields[0]) is not False:
-        return f' A session “{name}” may be left open.'
-    return ''
+def _breakout_panes(run):
+    """Read pane ids and markers across all sessions. None means the scan could not be confirmed."""
+    listed = _try_tmux(run, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_breakout}')
+    if listed is None or listed.returncode:
+        return None
+    panes = [line.split('\t', 1) for line in listed.stdout.splitlines()]
+    if any(len(fields) != 2 or not PANE.fullmatch(fields[0]) for fields in panes):
+        return None
+    return panes
+
+
+def _drop_new(run, name, token, *, placeholder=None, uncertain=False):
+    """Remove only the pane identified by the creation output or its unique marker."""
+    warning = f' A session “{name}” may be left open.'
+    if placeholder is None:
+        panes = _breakout_panes(run)
+        if panes is None:
+            return warning
+        matches = [pane for pane, marker in panes if marker == token]
+        if not matches:
+            # After a timeout the server may still create a pane.
+            return warning if uncertain else ''
+        if len(matches) != 1:
+            return warning
+        placeholder = matches[0]
+    _try_tmux(run, 'kill-pane', '-t', placeholder)
+    panes = _breakout_panes(run)
+    return warning if panes is None or any(pane == placeholder for pane, _ in panes) else ''
 
 
 def break_out(pane, run=subprocess.run):
@@ -266,36 +292,49 @@ def break_out(pane, run=subprocess.run):
     folder = _info(run, pane, '#{pane_current_path}')[0]
     wanted = _names(run, source).get(pane, '')
     name = _free_name(run, wanted)
-    started = int(time.time())
-    created = _try_tmux(run, 'new-session', '-d', '-s', name, '-c', folder, '-P', '-F',
-                        '#{session_id}\t#{pane_id}', command=paths.tmux_new_session())
-    if created is None:
-        raise RuntimeError('Could not start a session.' + _drop_new(run, name, started))
-    _check(created, 'Could not start a session.')
-    session_id, placeholder = created.stdout.strip().split('\t')
+    token = secrets.token_hex(8)
+    try:
+        created = _tmux(run, 'new-session', '-d', '-s', name, '-c', folder,
+                        '-P', '-F', '#{session_id}\t#{pane_id}', ';', 'set-option', '-p', BREAKOUT_MARKER, token,
+                        command=paths.tmux_new_session())
+    except subprocess.TimeoutExpired as exc:
+        created, output = None, exc.stdout
+    else:
+        output = created.stdout
+    if isinstance(output, bytes):
+        output = output.decode(errors='replace')  # TimeoutExpired can hold bytes even with text=True.
+    records = [record for line in (output or '').splitlines() if (record := BREAKOUT_IDS.fullmatch(line))]
+    ids = records[0] if len(records) == 1 else None
+    if created is None or created.returncode or ids is None:
+        warning = _drop_new(run, name, token, placeholder=ids[2] if ids else None,
+                            uncertain=created is None or created.returncode == 0 or bool(records))
+        raise RuntimeError('Could not start a session.' + warning)
+    session_id, placeholder = ids.groups()
     moved = _try_tmux(run, 'break-pane', '-d', '-s', pane, '-t', session_id + ':')
-    removed = False
+    recheck_move = False
     if moved is None or moved.returncode:
         current = _target_session(run, pane, gone='')
         if current not in (session_id, source, ''):
             raise RuntimeError(f'Could not confirm the move. The new session “{name}” may be left open.')
-        if current != session_id:
-            # The placeholder goes by its pane id, not the session: a break-pane that lands late keeps its pane.
-            removed = _remove_placeholder(run, placeholder)
-            if not removed:
-                raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
-            if _target_session(run, pane, gone='') != session_id:
-                left = _session_open(run, session_id)
-                if left is None:
-                    raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
-                if left:
-                    raise RuntimeError(f'Could not move the pane. The new session “{name}” was left open.')
-                _check(moved, 'Could not move the pane.')
-    removed = removed or _remove_placeholder(run, placeholder)
-    _ungroup(run, pane)
-    result = _moved(run, session_id, pane)
-    if not removed:
-        result['warning'] = 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
+        recheck_move = current != session_id
+    # Killing only the placeholder lets a move that lands during cleanup keep its pane.
+    removed = _remove_placeholder(run, placeholder)
+    if recheck_move and _target_session(run, pane, gone='') != session_id:
+        left = _session_open(run, session_id) if removed else None
+        if left is None:
+            raise RuntimeError(f'Could not move the pane. The new session “{name}” may be left open.')
+        if left:
+            raise RuntimeError(f'Could not move the pane. The new session “{name}” was left open.')
+        _check(moved, 'Could not move the pane.')
+    warning = '' if removed else 'The pane moved, but its new session kept an extra shell tab. Close it from the sidebar.'
+    try:
+        _ungroup(run, pane)
+        result = _moved(run, session_id, pane)
+    except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
+        message = f'The pane moved to “{name}”, but Tether could not finish. Refresh the list.'
+        raise RuntimeError(f'{message} {warning}' if warning else message) from exc
+    if warning:
+        result['warning'] = warning
     return result
 
 
