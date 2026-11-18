@@ -786,8 +786,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       else if (viewport.current && followBottom()) viewport.current.scrollTop = viewport.current.scrollHeight
     })
     if (content.current) observer.observe(content.current)
+    if (viewport.current) observer.observe(viewport.current)
     return () => observer.disconnect()
-  }, [followBottom])
+  }, [followBottom, term])
   const lastFailure = useRef<unknown>(null)
   const cardError = useRef(false)
   async function write(path: string, body: object) {

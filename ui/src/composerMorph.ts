@@ -6,7 +6,6 @@ import type { RefObject } from 'react'
 // - the box outline (a ::before behind the content) grows or shrinks from the old size, anchored at the bottom;
 // - the text field, + and the mic/send group slide from where they were (transforms);
 // - controls that were hidden fade in; until they show they take no taps or focus (inert).
-// - the whole box slides from its old place when the tab bar under it hides or comes back.
 // Part positions are kept relative to the box's bottom edge. The morph flag is a data attribute, not a class,
 // because React rewrites the class list when `compact` changes.
 
@@ -15,7 +14,7 @@ const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)'
 const PARTS = { field: 'textarea', attach: '.attach-container', end: '.composer-controls > div:last-child' } as const
 type Part = keyof typeof PARTS
 interface Place { left: number; right: number; bottom: number }
-interface Snapshot { bottom: number; height: number; radius: number; parts: Partial<Record<Part, Place>>; shown: Set<Element> }
+interface Snapshot { height: number; radius: number; parts: Partial<Record<Part, Place>>; shown: Set<Element> }
 
 const reduced = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
@@ -31,7 +30,7 @@ function snapshot(box: HTMLElement): Snapshot {
   const shown = new Set<Element>()
   for (const control of box.querySelectorAll('.composer-controls button, .composer-controls .pill, .composer-status')) if ((control as HTMLElement).offsetParent) shown.add(control)
   const radius = Math.min(parseFloat(getComputedStyle(box).borderTopLeftRadius) || 0, outer.height / 2)
-  return { bottom: outer.bottom, height: outer.height, radius, parts, shown }
+  return { height: outer.height, radius, parts, shown }
 }
 
 // The shape on screen during a morph: the outline's animated size, and each part's settled place plus its animated shift.
@@ -49,7 +48,7 @@ function live(box: HTMLElement, settled: Snapshot): Snapshot {
     const { x, y } = shift(box.querySelector(PARTS[name]))
     parts[name] = { left: place.left + x, right: place.right - x, bottom: place.bottom - y }
   }
-  return { bottom: settled.bottom + shift(box).y, height: Number.isFinite(height) ? height : settled.height, radius: Number.isFinite(radius) ? radius : settled.radius, parts, shown: settled.shown }
+  return { height: Number.isFinite(height) ? height : settled.height, radius: Number.isFinite(radius) ? radius : settled.radius, parts, shown: settled.shown }
 }
 
 // End a morph: the real outline comes back in one frame (no color transition from the transparent morph border),
@@ -67,24 +66,17 @@ export function useComposerMorph(form: RefObject<HTMLFormElement | null>, compac
   const was = useRef(compact)
   const running = useRef<Animation[]>([])
   // Keep the last settled shape. A ResizeObserver runs after layout, so at the next change it still holds the old shape.
-  // The box can also move without a resize (the keyboard, the tab bar), so a viewport resize and a press take a new
-  // snapshot too. The press comes before focus hides the tab bar.
   useEffect(() => {
     const box = form.current
     if (!box || typeof ResizeObserver === 'undefined') return
     const refresh = () => { if (!running.current.length) last.current = snapshot(box) }
     const observer = new ResizeObserver(refresh)
     observer.observe(box)
-    const view = window.visualViewport
     box.addEventListener('pointerdown', refresh, true)
-    window.addEventListener('resize', refresh)
-    view?.addEventListener('resize', refresh)
     last.current = snapshot(box)
     return () => {
       observer.disconnect()
       box.removeEventListener('pointerdown', refresh, true)
-      window.removeEventListener('resize', refresh)
-      view?.removeEventListener('resize', refresh)
     }
   }, [form])
   useLayoutEffect(() => {
@@ -102,8 +94,6 @@ export function useComposerMorph(form: RefObject<HTMLFormElement | null>, compac
     const timing: KeyframeAnimationOptions = { duration: compact ? COLLAPSE : EXPAND, easing: EASE }
     const animations: Animation[] = []
     box.setAttribute('data-morph', '')
-    const dy = before.bottom - after.bottom
-    if (Math.abs(dy) >= 0.5) animations.push(box.animate({ transform: [`translateY(${dy}px)`, 'none'] }, timing))
     animations.push(box.animate({ height: [`${before.height}px`, `${after.height}px`], borderRadius: [`${before.radius}px`, `${after.radius}px`] }, { ...timing, pseudoElement: '::before' }))
     for (const name of Object.keys(PARTS) as Part[]) {
       const from = before.parts[name], to = after.parts[name], element = box.querySelector<HTMLElement>(PARTS[name])

@@ -4,6 +4,8 @@
 const http = require('node:http'), fs = require('node:fs/promises'), path = require('node:path')
 const { getBrowser } = require('./browser_test_helper.cjs')
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, 'dist'))
+const phone = { width: 390, height: 844 }
+const keyboard = { ...phone, height: 544 }
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
 const pane = (id, name) => ({ id, tmux_session: '$1', label: `project:0.${id.slice(1)}`, pane_name: name, agent: 'claude', dir: '/srv/project', state: 'Idle', writable: true, thread: `t${id.slice(1)}`, approval: null, ask: null })
 const reply = 'The numbers add up across all the statements: the balance sheet balances, totals foot, and figures that appear in more than one place match.\n\nTwo things to know when you open it:\n\n- **Table of contents:** it is a Word field, so it starts empty.\n- **Page breaks:** a few tables run onto the next page.'
@@ -25,7 +27,7 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
 ;(async () => {
   const server = http.createServer((q, r) => { r.writeHead(404); r.end() }); await new Promise(r => server.listen(0, '127.0.0.1', r))
   const origin = `http://localhost:${server.address().port}`
-  const browser = await getBrowser(); const context = await browser.newContext({ viewport: { width: 390, height: 844 } }); const page = await context.newPage()
+  const browser = await getBrowser(); const context = await browser.newContext({ viewport: phone, hasTouch: true }); const page = await context.newPage()
   const posts = []
   let ratings = { a1: { rating: 'up', note: '' } }
   const ratingsT2 = { a1: { rating: 'up', note: '' } }
@@ -77,17 +79,39 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
     await box.waitFor()
     check('the idle phone composer is the one-row pill', await box.evaluate(el => el.classList.contains('compact')))
     // Sample every frame after the tap: the outline height, the field's offset and whether the box is morphing.
-    const sample = () => page.evaluate(() => new Promise(resolve => {
+    const sample = (action, pill, full) => page.evaluate(({ action, pill, full }) => {
       const el = document.querySelector('.chat-page form.composer'), input = el.querySelector('textarea')
       const frames = [], start = performance.now()
-      const step = () => {
+      let changedAt
+      const measure = () => {
         const before = getComputedStyle(el, '::before')
-        frames.push({ t: performance.now() - start, morphing: el.hasAttribute('data-morph'), outline: el.hasAttribute('data-morph') ? parseFloat(before.height) : el.getBoundingClientRect().height,
-          fieldTop: input.getBoundingClientRect().top - el.getBoundingClientRect().bottom, fieldLeft: input.getBoundingClientRect().left, fieldScreen: input.getBoundingClientRect().top })
-        if (performance.now() - start < 520) requestAnimationFrame(step); else resolve(frames)
+        const morphing = el.hasAttribute('data-morph'), outline = morphing ? parseFloat(before.height) : el.getBoundingClientRect().height
+        return { morphing, outline,
+          fieldTop: input.getBoundingClientRect().top - el.getBoundingClientRect().bottom, fieldLeft: input.getBoundingClientRect().left,
+          fieldScreen: input.getBoundingClientRect().top, shellBottom: el.closest('.app-shell').getBoundingClientRect().bottom }
       }
-      requestAnimationFrame(step)
-    }))
+      window.morphSample = new Promise(resolve => {
+        const step = t => {
+          const frame = measure()
+          if (action === 'reverse-close') {
+            if (changedAt === undefined && frame.morphing && frame.outline > pill + 2 && frame.outline < full - 2) {
+              changedAt = t
+              input.focus()
+            }
+            if (changedAt !== undefined) frames.push(frame)
+          } else {
+            if (changedAt === undefined && (document.activeElement === input) === (action === 'focus')) changedAt = t
+            frames.push(frame)
+          }
+          if (changedAt !== undefined ? t - changedAt < 360 : t - start < 1500) requestAnimationFrame(step)
+          else resolve(frames)
+        }
+        if (action === 'reverse-close') input.blur()
+        else frames.push(measure())
+        requestAnimationFrame(step)
+      })
+    }, { action, pill, full })
+    const sampled = () => page.evaluate(() => window.morphSample)
     const smooth = (name, frames, from, to) => {
       const heights = frames.map(frame => frame.outline)
       const steps = heights.slice(1).map((h, i) => h - heights[i])
@@ -99,17 +123,21 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
       check(`${name}: it ends at the new size and stops morphing`, Math.abs(heights.at(-1) - to) < 1 && !frames.at(-1).morphing, `${heights.at(-1)} vs ${to}`)
       const tops = frames.map(frame => frame.fieldTop), lefts = frames.map(frame => frame.fieldLeft)
       const screen = frames.map(frame => frame.fieldScreen)
-      check(`${name}: the field does not jump on the screen (tab bar step)`, screen.slice(1).every((v, i) => Math.abs(v - screen[i]) <= 30), JSON.stringify(screen.map(Math.round)))
+      const shell = frames.map(frame => frame.shellBottom)
+      check(`${name}: the field follows the keyboard ride`, screen.slice(1).every((v, i) => Math.abs(v - screen[i] - (shell[i + 1] - shell[i])) <= 30), JSON.stringify(screen.map(Math.round)))
       check(`${name}: the text field slides, it does not jump`, tops.slice(1).every((v, i) => Math.abs(v - tops[i]) <= 30) && lefts.slice(1).every((v, i) => Math.abs(v - lefts[i]) <= 12), JSON.stringify({ tops: tops.map(Math.round), lefts: lefts.map(Math.round) }))
     }
     const pill = (await box.boundingBox()).height
-    const sampling = sample(); await field.click(); const open = await sampling
+    await sample('focus'); await field.tap(); await page.setViewportSize(keyboard); const open = await sampled()
     const full = (await box.boundingBox()).height
     check('a tap opens the full box', !(await box.evaluate(el => el.classList.contains('compact'))) && full > pill + 20, `${pill} -> ${full}`)
     smooth('opening', open, pill, full)
     await page.screenshot({ path: path.join(process.env.SHOTS || '/tmp', 'composer-open.png') }).catch(() => {})
     // Controls that fade in take no taps until they show.
-    await field.evaluate(el => el.blur()); await page.waitForTimeout(400)
+    await page.setViewportSize(phone)
+    await field.evaluate(el => el.blur())
+    const settled = () => page.waitForFunction(() => !document.querySelector('.chat-page form.composer').hasAttribute('data-morph'))
+    await settled()
     const fading = await page.evaluate(() => new Promise(resolve => {
       const el = document.querySelector('.chat-page form.composer')
       el.querySelector('textarea').focus()
@@ -120,27 +148,32 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
       })
     }))
     check('fading controls take no taps or focus', fading.entering > 0 && fading.blocked === fading.entering && fading.inert === fading.entering, JSON.stringify(fading))
-    await page.waitForTimeout(450)
+    await settled()
     check('the controls take taps and focus after the morph', await box.evaluate(el => !el.querySelector('[data-morph-in], .composer-controls [inert]')))
-    const sampling2 = sample(); await field.evaluate(el => el.blur()); const close = await sampling2
+    await sample('blur'); await field.evaluate(el => el.blur()); const close = await sampled()
     check('leaving the empty box closes it to the pill', await box.evaluate(el => el.classList.contains('compact')))
     smooth('closing', close, full, pill)
     check('the outline and focus ring come back after the morph', await box.evaluate(el => !el.hasAttribute('data-morph') && getComputedStyle(el).borderTopColor !== 'rgba(0, 0, 0, 0)'))
-    // A tap in the middle of the close reverses it from where it is, not from the start.
-    await field.click(); await page.waitForTimeout(400); await field.evaluate(el => el.blur()); await page.waitForFunction(() => document.querySelector('.chat-page form.composer').hasAttribute('data-morph'), null, { polling: 'raf', timeout: 2000 }); await page.waitForTimeout(50)
-    const mid = await box.evaluate(el => ({ morphing: el.hasAttribute('data-morph'), compact: el.classList.contains('compact'), height: parseFloat(getComputedStyle(el, '::before').height) }))
-    check('the close is in the middle of its morph', mid.morphing && mid.compact, JSON.stringify(mid))
-    const sampling3 = sample(); await field.click(); const again = await sampling3
-    check('a tap during the close ends open with no stuck morph', !(await box.evaluate(el => el.classList.contains('compact') || el.hasAttribute('data-morph'))), JSON.stringify(again.at(-1)))
-    check('the reopen starts from the size on screen', Math.abs(again[0].outline - mid.height) < 25, `${again[0].outline} mid ${mid.height}`)
+    // Playwright waits for a stable position before tapping a moving control. Refocus on a frame in the close.
+    await field.tap(); await settled()
+    await sample('reverse-close', pill, full)
+    const again = await sampled()
+    check('the close is in the middle of its morph', again[0]?.morphing && again[0].outline > pill + 2 && again[0].outline < full - 2, JSON.stringify(again[0]))
+    check('focus during the close ends open with no stuck morph', !(await box.evaluate(el => el.classList.contains('compact') || el.hasAttribute('data-morph'))), JSON.stringify(again.at(-1)))
+    check('the reopen starts from the size on screen', again.length > 1 && Math.abs(again[1].outline - again[0].outline) < 25, JSON.stringify(again.slice(0, 2)))
     // A blur in the middle of the open reverses it from the size on screen.
-    await field.evaluate(el => el.blur()); await page.waitForTimeout(400)
+    await field.evaluate(el => el.blur()); await settled()
     // Timed in the page: a browser round trip is slower than the morph.
-    const { opening, back } = await page.evaluate(() => new Promise(resolve => {
+    const { opening, back } = await page.evaluate(({ pill, full }) => new Promise(resolve => {
       const el = document.querySelector('.chat-page form.composer'), input = el.querySelector('textarea')
+      const began = performance.now()
       input.focus()
-      setTimeout(() => {
+      const reverse = () => {
         const opening = { compact: el.classList.contains('compact'), height: parseFloat(getComputedStyle(el, '::before').height) }
+        if (!(opening.height > pill + 2 && opening.height < full - 2)) {
+          if (performance.now() - began < 300) { requestAnimationFrame(reverse); return }
+          resolve({ opening, back: [] }); return
+        }
         input.blur()
         const back = [{ outline: opening.height }], start = performance.now()
         const step = () => {
@@ -148,39 +181,42 @@ const check = (name, ok, detail = '') => { console.log(`${ok ? 'ok' : 'FAIL'} ${
           if (performance.now() - start < 450) requestAnimationFrame(step); else resolve({ opening, back })
         }
         step()
-      }, 90)
-    }))
+      }
+      requestAnimationFrame(reverse)
+    }), { pill, full })
     check('the open is in the middle of its morph', !opening.compact && opening.height > pill + 2 && opening.height < full - 2, JSON.stringify({ opening, pill, full }))
-    check('a blur during the open starts the close from the size on screen', back.slice(1).every((frame, i) => Math.abs(frame.outline - back[i].outline) < 25), JSON.stringify(back.map(frame => Math.round(frame.outline))))
+    check('a blur during the open starts the close from the size on screen', back.length > 1 && back.slice(1).every((frame, i) => Math.abs(frame.outline - back[i].outline) < 25), JSON.stringify(back.map(frame => Math.round(frame.outline))))
     check('the reversed open ends closed with no stuck morph', await box.evaluate(el => el.classList.contains('compact') && !el.hasAttribute('data-morph')))
     // A change that does not morph (here: reduced motion turned on mid-open) must still end the running morph.
-    await page.waitForTimeout(400)
     const quick = await page.evaluate(() => new Promise(resolve => {
       const el = document.querySelector('.chat-page form.composer'), input = el.querySelector('textarea'), media = window.matchMedia
+      const began = performance.now()
       input.focus()
-      setTimeout(() => {
+      const interrupt = () => {
         const morphing = el.hasAttribute('data-morph')
+        if (!morphing && performance.now() - began < 300) { requestAnimationFrame(interrupt); return }
         window.matchMedia = query => query.includes('reduced-motion') ? { matches: true } : media.call(window, query)
         input.blur()
-        setTimeout(() => {
+        requestAnimationFrame(() => {
           window.matchMedia = media
           resolve({ morphing, compact: el.classList.contains('compact'), morph: el.hasAttribute('data-morph'), border: getComputedStyle(el).borderTopColor })
-        }, 400)
-      }, 60)
+        })
+      }
+      requestAnimationFrame(interrupt)
     }))
     check('a change that skips the morph ends the running one, with the outline back', quick.morphing && quick.compact && !quick.morph && quick.border !== 'rgba(0, 0, 0, 0)', JSON.stringify(quick))
     // Reduced motion: the box changes at once.
     await page.emulateMedia({ reducedMotion: 'reduce' })
-    const sampling4 = sample(); await field.click(); const still = await sampling4
+    await sample('focus'); await field.tap(); const still = await sampled()
     check('reduced motion: no morph frames', still.every(frame => !frame.morphing))
     await page.emulateMedia({ reducedMotion: 'no-preference' })
     // Desktop width: the box has one shape, so nothing morphs.
-    await field.evaluate(el => el.blur()); await page.setViewportSize({ width: 1200, height: 800 }); await page.waitForTimeout(400)
+    await field.evaluate(el => el.blur()); await page.setViewportSize({ width: 1200, height: 800 }); await settled()
     const wide = page.locator('form.composer').first()
-    const sampling5 = sample(); await wide.locator('textarea').focus(); const desk = await sampling5
+    await sample('focus'); await wide.locator('textarea').focus(); const desk = await sampled()
     check('desktop: focus does not morph the box', desk.every(frame => !frame.morphing))
   } catch (error) { console.log("FAIL", error.stack); failed++ } finally {
-    await context.close(); server.close()
+    await context.close(); await browser.close(); server.close()
   }
   console.log(failed ? `composer morph: ${failed} failed` : 'composer morph: all checks pass')
   process.exit(failed ? 1 : 0)

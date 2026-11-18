@@ -27,7 +27,7 @@ const fixture = {
 }
 
 async function main() {
-  let browser, page, server, failed = 0, failSessions = false
+  let browser, context, page, server, failed = 0, failSessions = false
   const pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -37,8 +37,7 @@ async function main() {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
     const origin = `http://localhost:${server.address().port}`
     browser = await getBrowser()
-    const context = browser.contexts()[0]
-    if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
+    context = await browser.newContext({ hasTouch: true })
     page = await context.newPage()
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => pageErrors.push(error.stack))
@@ -85,7 +84,7 @@ async function main() {
     const menu = page.locator('.phone-more-menu')
     const row = name => menu.getByRole('menuitem', { name })
     const focused = () => page.evaluate(() => document.activeElement?.textContent?.trim() ?? '')
-    const tap = async target => { await target.tap().catch(() => target.click()) }
+    const tap = target => target.tap()
 
     for (const [width, scheme] of [[390, 'dark'], [320, 'light']]) {
       const at = `${width}px ${scheme}`
@@ -106,6 +105,16 @@ async function main() {
       check(`${at}: Chats is current, More is not`, await tab('Chats').getAttribute('aria-current') === 'page' && await more.getAttribute('aria-current') === null)
       check(`${at}: More is a closed menu button with no dot`, await more.getAttribute('aria-haspopup') === 'menu' && await more.getAttribute('aria-expanded') === 'false' && await more.getAttribute('aria-label') === null && await more.locator('.phone-tab-dot').count() === 0)
       await page.screenshot({ path: path.join(SHOTS, `bar-${width}-${scheme}.png`) })
+
+      const input = page.locator('.chat-page .composer textarea')
+      await tap(input)
+      check(`${at}: the bar stays visible on focus alone`, await bar.isVisible())
+      await page.setViewportSize({ width, height: 440 })
+      await page.locator('html[data-keyboard]').waitFor()
+      check(`${at}: the bar hides while the keyboard is open`, await bar.isHidden())
+      await page.setViewportSize({ width, height: 740 })
+      await bar.waitFor()
+      await input.evaluate(el => el.blur())
 
       // More opens a menu with the three pages.
       await tap(more)
@@ -266,7 +275,7 @@ async function main() {
     if (page) await page.screenshot({ path: path.join(SHOTS, 'error.png') }).catch(() => {})
     check('runner', false, error.message.split('\n')[0] + ' | ' + pageErrors.join('; '))
   } finally {
-    if (page) await page.close().catch(() => {})
+    if (context) await context.close().catch(() => {})
     if (browser) await browser.close().catch(() => {})
     if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
     console.log(`phone bar: ${failed ? 'FAIL' : 'PASS'}`)

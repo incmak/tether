@@ -206,6 +206,17 @@ async function main() {
       await audit(`${w}: page fits`, 'html')
       check(`${w}: empty input ignores long placeholder`, await page.locator('.composer textarea').first().evaluate(el => el.clientHeight <= 30))
       if (h <= 500) await shortChat(`${w} empty`)
+      if (process.env.COARSE && h > 500) {
+        await page.locator('.composer textarea').first().focus()
+        await page.setViewportSize({ width: w, height: h - 300 })
+        await page.locator('html[data-keyboard]').waitFor()
+        check(`${w}: the keyboard hides the phone tabs`, await page.locator('.phone-tabbar').isHidden())
+        await shortChat(`${w} keyboard open`)
+        await shot(`${w}-keyboard-open`)
+        await page.setViewportSize({ width: w, height: h })
+        await page.locator('.phone-tabbar').waitFor()
+        await page.locator('.composer textarea').first().evaluate(el => el.blur())
+      }
       await audit(`${w}: composer controls fit`, '.composer-controls', { bounds: false })
       if (w >= 390) check(`${w}: mode label has room`, await page.locator('.mode-container .pill-text').first().evaluate(el => el.scrollWidth <= el.clientWidth + 1))
       // Scrollable code and tables retain their own scrollbars; their outer boxes stay in the message column.

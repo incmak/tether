@@ -31,9 +31,14 @@
 @media (prefers-reduced-motion: no-preference) { .phone-more-menu { transform-origin: bottom right; animation: phone-more-in .14s ease-out; } }
 @keyframes phone-more-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
 /* Typing: the keyboard takes the bottom of the screen, so the tab bar steps aside. */
-.app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) { bottom: 0; }
-.app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) .phone-tabbar { display: none; }
-.app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) .composer-area { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+:root[data-keyboard] .app-shell.phone-tabs { bottom: 0; }
+:root[data-keyboard] .app-shell.phone-tabs .phone-tabbar { display: none; }
+:root[data-keyboard] .app-shell.phone-tabs .composer-area { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+@media (pointer: fine) {
+  .app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) { bottom: 0; }
+  .app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) .phone-tabbar { display: none; }
+  .app-shell.phone-tabs:has(:is(textarea, input:not([type]), input[type=text], input[type=search], iframe):focus) .composer-area { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+}
 .app-shell.phone-files .chat-panel { visibility: hidden; }
 
 /* Files screen */
