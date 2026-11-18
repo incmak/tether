@@ -15,6 +15,7 @@ import projects
 import projects_api
 
 PID = 'a1b2c3d4e5f6'
+STACK = {'pid': 'b1b2c3d4e5f6', 'name': 'Docs'}
 
 
 class Run:
@@ -181,6 +182,42 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(projects.meta(PID)['budget'], 10000)
         with self.assertRaises(projects.ProjectError):
             projects.set_budget(PID, 50000, 2)
+
+    def _content(self, group=None):
+        """The rendered text and the part of it that uses the project budget."""
+        prompt, fixed = projects._render(PID, projects.meta(PID), self.home, group)
+        return prompt, len(prompt) - fixed
+
+    def test_long_instructions_leave_room_for_the_stack_identity(self):
+        opening = 'Use the shared test fixtures.\n'
+        projects.set_instructions(PID, opening + ('x\n' * 10000)[:20000 - len(opening)], 0)
+        projects.set_instructions(STACK['pid'], 'Stack rule.', 0)
+        for budget in (1000, 4000):
+            with self.subTest(budget=budget):
+                projects.set_budget(PID, budget, projects.meta(PID)['revision'])
+                text, used = self._content(STACK)
+                self.assertLessEqual(used, budget)
+                self.assertIn('## Instructions\n' + opening, text)
+                self.assertIn('Cut to fit', text)
+                self.assertIn('## Stack: Docs\n', text)
+                self.assertIn(f'Stack folder: {projects.bundle(STACK["pid"])}\n', text)
+                self.assertIn(f'{projects.bundle(PID)}/notes/', text)
+                self.assertIn('## Backlog\n', text)  # Tether's rules stay whole
+
+    def test_large_budget_keeps_the_heading_order(self):
+        projects.set_budget(PID, 10000, 0)
+        projects.set_instructions(PID, 'Project rule.', 1)
+        projects.set_instructions(STACK['pid'], 'Stack rule.', 0)
+        (self.home / 'spec.md').write_text('Spec')
+        projects.pin(PID, '~/spec.md', 'link', 2, self.home)
+        projects.pin(STACK['pid'], '~/spec.md', 'link', 1, self.home)
+        text = projects.render(PID, home=self.home, group=STACK)
+        self.assertNotIn('Cut to fit', text)
+        self.assertEqual([line for line in text.splitlines() if line.startswith('#')], [
+            '# Tether project', '## Notes', '## Instructions', '## Pinned files',
+            '## Stack: Docs', '### Stack instructions', '### Stack pinned files',
+            '## Tab icon', '## Naming tabs', '## Claims of absence', '## Watchers', '## New tabs and reviewers', '## Backlog',
+        ])
 
     def test_state_reports_the_usable_maximum_without_rewriting_the_budget(self):
         for saved in (4000, 8000):

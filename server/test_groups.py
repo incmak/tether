@@ -142,6 +142,8 @@ class RenderTests(Bundles):
         fixed_chars = projects.state(PID, self.home)['fixed_chars']
         self.assertLessEqual(len(text) - fixed_chars, projects.BUDGET_MIN)
         self.assertIn('Session rule.', text)
+        self.assertIn('## Stack: Big', text)
+        self.assertNotIn('Group rule. ' * 1500, text)  # the stack guidance is cut, its identity is not
         self.assertIn('[Cut to fit', text)
 
     def test_no_group_is_unchanged(self):
