@@ -29,7 +29,7 @@ export function AdvisorRow({ id, advisor, time, live }: { id: string; advisor: A
     }
     case 'error':
       state = ''
-      body = <p>The advisor did not answer: {(advisor.error || 'unknown').replace(/_/g, ' ')}. Claude went on without advice.</p>
+      body = <p>The advisor{model ? ` (${model})` : ''} did not answer: {(advisor.error || 'unknown').replace(/_/g, ' ')}. Claude went on without advice.</p>
       break
     case 'pending':
       state = live ? 'Waiting for advice…' : 'No reply recorded'

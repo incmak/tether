@@ -107,7 +107,8 @@ function turnEndsOf(messages: ChatMessage[], working: boolean) {
   for (let at = messages.length - 1; at >= 0; at--) {
     const item = messages[at]
     if (item.role === 'user' && !item.kind) { open = false; continue }
-    if (item.kind === 'notice' || item.kind === 'terminal') continue
+    // An advisor call is not the agent's reply: a reply before it still ends the turn.
+    if (item.kind === 'notice' || item.kind === 'terminal' || item.kind === 'advisor') continue
     if (!open && item.role === 'assistant' && !item.kind) ends.add(item.id)
     open = true
   }
@@ -807,6 +808,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       const element = view.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(id)}"]`)
       if (!element) return
       target.current = null; sticky.current = false; setJump(true)
+      // A hit inside a fold (a scheduled run, a watch cycle) must show: open each closed fold around it.
+      for (let fold = element.parentElement?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true
       element.scrollIntoView({ block: element.offsetHeight > view.clientHeight * .6 ? 'start' : 'center' })  // a tall message starts at the top
       if (element.offsetHeight > view.clientHeight * .6) view.scrollTop -= 16
       hold.current = { top: view.scrollTop, until: Date.now() + 1500 }

@@ -43,7 +43,7 @@ async function main() {
           sessions: { sessions: [{ ...pane, state }], default_thread: pane.thread },
           chat: { ...pane, session: pane.id, state, busy: state === 'Working', messages, earlier: 0, limit: 100 },
           footer: { observed: true, notices: [] },
-          search: { total: 1, max_limit: 100, matches: [{ id: failed.id, role: failed.role, kind: failed.kind, from_end: 1, snippet: failed.text }] },
+          search: { total: 1, max_limit: 100, matches: [{ id: answered.id, role: answered.role, kind: answered.kind, from_end: 8, snippet: answered.text }] },
           catalog: { commands: [], plugins: [], mcp: [] },
           subagents: { agents: [], tasks: [] }, 'side-shells': { shells: [] },
           'browser/agents': { enabled: false, available: false, agents: [], asks: [] },
@@ -83,7 +83,7 @@ async function main() {
     assert.equal(await item('failed').locator('.tool-error').textContent(), 'No answer')
     await summary('failed').press('Space')
     assert.equal(await item('failed').locator('.advisor-call-body p').textContent(),
-      'The advisor did not answer: too many requests. Claude went on without advice.')
+      'The advisor (Opus 5.5) did not answer: too many requests. Claude went on without advice.')
     assert.equal(await meta('unknown'), 'Reply received · custom-advisor')
     assert.match(await item('unknown').locator('.advisor-call-body p').textContent(), /\(new_reply\)\.$/)
     assert.equal(await meta('timeless'), '')
@@ -100,10 +100,11 @@ async function main() {
         const meta = node.querySelector('.advisor-call-meta')
         const bounds = node.getBoundingClientRect()
         const trailing = [...node.querySelectorAll('time, .chevron')].map(child => child.getBoundingClientRect().toJSON())
-        return { overflow: getComputedStyle(meta).textOverflow, textWidth: meta.scrollWidth, metaWidth: meta.clientWidth, bounds: bounds.toJSON(), trailing }
+        const what = node.querySelector('.advisor-call-what').getBoundingClientRect()
+        return { textWidth: meta.scrollWidth, metaWidth: meta.clientWidth, below: meta.getBoundingClientRect().top >= what.bottom - 1, bounds: bounds.toJSON(), trailing }
       })
-      assert.equal(layout.overflow, 'ellipsis')
-      assert.ok(layout.textWidth > layout.metaWidth && layout.metaWidth > 13, JSON.stringify(layout))
+      // At 320 px the state and model sit on their own line and show in full.
+      assert.ok(layout.below && layout.textWidth <= layout.metaWidth && layout.metaWidth > 13, JSON.stringify(layout))
       assert.ok(layout.trailing.every(rect => rect.width > 0 && rect.left >= layout.bounds.left && rect.right <= layout.bounds.right), JSON.stringify(layout))
     }
     for (const colorScheme of ['light', 'dark']) {
@@ -136,7 +137,18 @@ async function main() {
 
     await page.getByRole('button', { name: 'Search this chat' }).click()
     await page.getByRole('searchbox', { name: 'Words to find' }).fill('advisor')
-    assert.equal(await page.locator('.search-results small').textContent(), 'Advisor')
+    assert.match(await page.locator('.search-results small').textContent(), /^Advisor/)
+    // The answered call sits inside a closed scheduled-run fold. Picking it opens the fold and shows the row.
+    assert.equal(await page.locator('.chat-page .watch-row').evaluate(node => node.open), false)
+    await page.locator('.search-results button').first().click()
+    await item('answered').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('.chat-page .watch-row').evaluate(node => node.open), true)
+
+    // An advisor call last in an idle turn does not take the reply's actions away.
+    await page.keyboard.press('Escape')
+    messages = [{ id: 'ask', role: 'user', text: 'Fixture question.' }, { id: 'done', role: 'assistant', text: 'Fixture answer.' }, row('last', 'answered', { ended: END })]
+    await load()
+    await item('done').locator('.message-actions').waitFor()
     assert.deepEqual(errors, [])
     console.log('Advisor chat renders all states, opens by keyboard, keeps ciphertext out, and labels search results')
   } finally {

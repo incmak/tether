@@ -706,6 +706,12 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .advisor-call .tool-error { margin-left: 0; }
 .advisor-call-what, .advisor-call-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .advisor-call-what { flex-shrink: 0; }
+.advisor-call { container-type: inline-size; }
+/* A narrow row puts the state and model on a line of their own, so a phone shows them in full. */
+@container (max-width: 440px) {
+  .advisor-call > summary { flex-wrap: wrap; row-gap: 0; }
+  .advisor-call-meta { order: 1; flex-basis: 100%; padding-left: 20px; font-size: 13px; }
+}
 .advisor-call-body { margin: 2px 0 8px 12px; padding-left: 15px; border-left: 1px solid var(--line); line-height: 1.5; overflow-wrap: anywhere; }
 .advisor-call-body p + p { margin-top: 6px; }
 
