@@ -60,7 +60,14 @@ async function getBrowser({ local = false } = {}) {
 // Redirects cannot work: the browser does not route the request that follows a fulfilled 3xx, and a followed one
 // would serve the final body at the first URL, so relative links break. Fail clearly instead.
 async function serveLocal(route) {
-  const response = await route.fetch()
+  let response
+  try {
+    response = await route.fetch()
+  } catch (error) {
+    // Closing the browser context can cancel an in-flight asset fetch after the page closes.
+    if (!/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) throw error
+    return route.abort()
+  }
   if (response.url() !== route.request().url()) throw new Error(`serveLocal: ${route.request().url()} redirects to ${response.url()}; serve the final URL directly`)
   return route.fulfill({ response })
 }

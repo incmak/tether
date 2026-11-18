@@ -7,7 +7,7 @@ import { RetryButton } from './Retry'
 import { rememberCount, rememberedCount } from './skeletonCounts'
 import { needsYou, isDone } from './paneState'
 import { placesOf, tabFor, topState } from './groups'
-import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Archive, CalendarClock, ArchiveRestore, ListFilter, History, Asterisk, BarChart3, BookMarked, BookOpen, Bug, Cpu, Database, FileText, FlaskConical, GitBranch, Globe, LayoutDashboard, MessageSquare, MessagesSquare, Mic, Palette, Rocket, Server, Shield, Sparkles, Wrench, Zap, ChevronRight, ChevronsDownUp, ChevronsUpDown, Code2, GripVertical, Layers, Pin, PinOff, Plus, RefreshCw, RotateCw, Search, Settings, SlidersHorizontal, Terminal, Trash2, X, Factory } from 'lucide-react'
 import { KeepChoice, keepNeeded } from './Project'
@@ -540,7 +540,7 @@ export function Sidebar({ onDeck, review, reminder, reminders, api, sessions, se
   })
   // Enter opens the first match; Down moves into the list; Escape clears the search.
   const searchKeys = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button:not(.pane-stack-head, .row-close), .archived-tab-open)')
+    const first = event.currentTarget.closest('.sidebar-inner')?.querySelector<HTMLButtonElement>('.session-groups :is(.session-main:not([aria-expanded]), .pane-children button[data-select-pane], .archived-tab-open)')
     if (event.key === 'Enter' && query.trim() && first) { event.preventDefault(); first.click(); setQuery(''); event.currentTarget.blur() }
     else if (event.key === 'ArrowDown' && first) { event.preventDefault(); first.focus() }
     else if (event.key === 'Escape' && query) { event.preventDefault(); event.stopPropagation(); setQuery('') }
@@ -627,6 +627,18 @@ function projectMark(mark: ProjectMark | undefined) {
 const STACK_DOT = { needs: 'approval', done: 'done', working: 'working', idle: 'idle' } as const
 
 function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane, tabPick }: { tabPick?: TabPickControls; now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
+  const stackListId = useId()
+  // A row with focus unmounts when its stack folds again (the selection moved out of it). Focus then goes to that stack's fold button.
+  // Only a removed row counts: a blur while the row is still in the page clears the record, so focus the user moved stays put.
+  const focusedRow = useRef<{ stack: HTMLElement, row: Element } | null>(null)
+  useLayoutEffect(() => {
+    const last = focusedRow.current
+    if (!last || last.row.isConnected && last.stack.contains(document.activeElement)) return
+    focusedRow.current = null
+    const active = document.activeElement
+    if (last.row.isConnected || !last.stack.isConnected || active && active !== document.body) return
+    if (last.stack.querySelector<HTMLElement>('.pane-stack-tabs')?.hidden) last.stack.querySelector<HTMLButtonElement>('.pane-stack-fold')?.focus()
+  })
   const list = useRef<HTMLUListElement>(null)
   const dragging = useRef<string | null>(null)
   // The open tab stays in view: its row, or its session's row when the session is folded. The list moves only when it must.
@@ -705,7 +717,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
   const slotKey = (id: string) => { const at = slots.indexOf(id); return at < 0 ? null : <kbd className="slot-key" aria-label={`In slot ${at + 1}`}>⌥{at + 1}</kbd> }
   return <ul className={`session-list ${reorder ? 'reordering' : ''}`} ref={list}>
     {/* eslint-disable-next-line react-hooks/refs -- Sample the drag marker on reorder renders; state would add visible updates on pointer down and up. */}
-    {(preview ? [...items].sort((a, b) => preview.indexOf(a.id) - preview.indexOf(b.id)) : items).map(session => {
+    {(preview ? [...items].sort((a, b) => preview.indexOf(a.id) - preview.indexOf(b.id)) : items).map((session, sessionIndex) => {
       const multi = session.panes.length > 1
       const active = session.panes.some(pane => pane.id === selected)
       const state = statusOf(session.panes)
@@ -816,16 +828,34 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
         </div>
         </div>
         {multi && open && !reorder && <ul className="pane-children">{stacked
-          // A session with stacks shows them like the chat header: each stack, then its tabs. A heading opens the stack.
-          ? stacked.map(place => { const placeWaits = waitCount(place.panes, now, prefs.attention); return <li key={place.id || 'unstacked'} className="pane-stack">
-              <button type="button" className={`pane-stack-head${place.panes.some(pane => pane.id === selected) ? ' current' : ''}`}
-                aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${placeWaits ? `, ${placeWaits} need you` : ''}. Open it`}
-                onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
-                <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
-                <span className="pane-child-name">{place.name}</span>{placeWaits > 0 && <span className="rollup" aria-hidden="true">{placeWaits}</span>}<span className="group-count" aria-hidden="true">{place.panes.length}</span>
-              </button>
-              <ul className="pane-stack-tabs">{place.shown.map(paneRow)}</ul>
-            </li> })
+          ? stacked.map((place, placeIndex) => {
+              const placeWaits = waitCount(place.panes, now, prefs.attention)
+              const containsSelected = place.panes.some(pane => pane.id === selected)
+              const placeKey = place.id || 'unstacked'
+              const key = `${session.id}:${placeKey}`
+              const stackOpen = containsSelected || (prefs.expanded[key] ?? true)
+              const tabsId = `${stackListId}-${sessionIndex}-${placeIndex}`
+              const foldLabel = containsSelected ? `Tabs of stack ${place.name} stay shown while one of them is open`
+                : `${stackOpen ? 'Fold' : 'Show'} tabs of stack ${place.name}`
+              return <li key={placeKey} className="pane-stack" onFocus={event => { focusedRow.current = { stack: event.currentTarget, row: event.target } }}
+                onBlur={event => { const row = event.target; queueMicrotask(() => { if (row.isConnected && focusedRow.current?.row === row) focusedRow.current = null }) }}>
+                <div className="pane-stack-row">
+                  <button type="button" className={`pane-stack-head${containsSelected ? ' current' : ''}`}
+                    aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${placeWaits ? `, ${placeWaits} need you` : ''}. Open it`}
+                    onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
+                    <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
+                    <span className="pane-child-name">{place.name}</span>{placeWaits > 0 && <span className="rollup" aria-hidden="true">{placeWaits}</span>}<span className="group-count" aria-hidden="true">{place.panes.length}</span>
+                  </button>
+                  <button type="button" className="pane-stack-fold" aria-expanded={stackOpen} aria-controls={tabsId}
+                    aria-disabled={containsSelected || undefined} aria-label={foldLabel} title={foldLabel}
+                    onClick={() => { if (!containsSelected) update(current => ({ expanded: { ...current.expanded, [key]: !stackOpen } })) }}>
+                    <ChevronRight size={14} className="chevron" aria-hidden="true" />
+                  </button>
+                </div>
+                {/* The folded list stays as an empty hidden node, so aria-controls always names an element. */}
+                <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && place.shown.map(paneRow)}</ul>
+              </li>
+            })
           : tabs.filter(visibleTab).map(paneRow)}
           {quietTabs.length > 0 && <li><button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietShown(list => showQuiet ? list.filter(id => id !== session.id) : [...list, session.id])}>{showQuiet ? 'Fold' : 'Show'} {quietTabs.length} quiet {quietTabs.length === 1 ? 'tab' : 'tabs'}</button></li>}</ul>}
       </li>

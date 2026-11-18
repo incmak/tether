@@ -128,6 +128,8 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ selected: '%1', theme: 'light', voiceOff: true, voiceSound: false }))
     })
     const section = page.locator('section.auto-merge')
+    // The radio and its note show a pending mode before the POST and refresh finish.
+    const waitForSavedMode = mode => section.locator(`input[name="auto-merge-mode"][value="${mode}"]:checked:enabled`).waitFor({ state: 'attached' })
     const open = async width => {
       await page.goto(`${origin}/chat/?session=%251`, { waitUntil: 'load' })
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
@@ -257,6 +259,7 @@ async function main() {
       hasKey = true; posts.length = 0
       await section.locator('.segmented label', { hasText: 'Enforce' }).click()
       await confirm.getByRole('button', { name: 'Turn on Enforce' }).click()
+      await waitForSavedMode('enforce')
       await section.getByText('Tether merges a branch into the main branch when every check passes.').waitFor()
       check(`${at} Enforce is saved only with a passkey approval`, posts.length === 2 && !approved(posts[0]) && approved(posts[1]) && posts[1].mode === 'enforce' && state.mode === 'enforce'
         && await section.getByRole('radio', { name: 'Enforce' }).isChecked(), JSON.stringify(posts.map(post => [post.mode, !!post.approval])))
@@ -266,6 +269,7 @@ async function main() {
 
       // Off and Observe save at once. A failed save says so and keeps the old mode.
       await section.locator('.segmented label', { hasText: 'Off' }).click()
+      await waitForSavedMode('off')
       await section.getByText('Tether does not check branches.').waitFor()
       check(`${at} Off saves at once, with no passkey`, JSON.stringify(posts.at(-1)) === '{"mode":"off"}' && passkeyAsks.length === 1)
       postFails = true

@@ -732,10 +732,11 @@ function App() {
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && !document.querySelector('dialog[open]')) {
         // Every row that opens a pane: one-pane sessions, the pane rows under a session with several panes, and the Catch up rows (also its working list).
-        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button:not(.pane-stack-head, .quiet-more, .row-close), .sidebar .session-groups .catchup-row:not(.catchup-review), .sidebar .session-groups .catchup .running-list button')].filter(row => row.offsetParent)
+        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button[data-select-pane], .sidebar .session-groups .catchup-row:not(.catchup-review), .sidebar .session-groups .catchup .running-list button')].filter(row => row.offsetParent)
         const at = rows.findIndex(row => row.getAttribute('aria-current') === 'page')
         const next = rows[at < 0 ? 0 : at + (event.key === 'ArrowDown' ? 1 : -1)]
-        if (next) { event.preventDefault(); next.click(); next.scrollIntoView({ block: 'nearest' }) }
+        // Focus follows a row that had focus: the old row can unmount when its folded stack closes again.
+        if (next) { const follow = !!document.activeElement?.closest('.session-groups'); event.preventDefault(); next.click(); if (follow) next.focus({ preventScroll: true }); next.scrollIntoView({ block: 'nearest' }) }
         return
       }
       if (!typing && event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey && !document.querySelector('dialog[open]')) {

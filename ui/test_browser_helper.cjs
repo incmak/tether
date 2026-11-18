@@ -3,7 +3,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const vm = require('node:vm')
-const { sharedEndpoint } = require('./browser_test_helper.cjs')
+const { sharedEndpoint, serveLocal } = require('./browser_test_helper.cjs')
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tether-browser-helper-'))
 try {
@@ -60,4 +60,19 @@ async function testConnections() {
   await assert.rejects(getBrowser, /npx playwright-core install --with-deps chromium/)
   console.log('Browser helper: shared connection, no secret leak, local fallback, and explicit failure pass (mocked browsers)')
 }
-testConnections().catch(error => { console.error(error); process.exitCode = 1 })
+async function testServingDuringTeardown() {
+  const disposed = new Error('route.fetch: Request context disposed.\nCall log:\n  - GET fixture asset')
+  let aborts = 0
+  const route = {
+    fetch: async () => { throw disposed },
+    abort: async () => { aborts++ },
+  }
+  await serveLocal(route)
+  assert.equal(aborts, 1, 'Cancel the intercepted request when its request context is disposed')
+
+  const networkError = new Error('route.fetch: read ECONNRESET')
+  await assert.rejects(serveLocal({ ...route, fetch: async () => { throw networkError } }), error => error === networkError)
+  assert.equal(aborts, 1, 'A live fetch failure must still fail the test')
+}
+
+Promise.all([testConnections(), testServingDuringTeardown()]).catch(error => { console.error(error); process.exitCode = 1 })

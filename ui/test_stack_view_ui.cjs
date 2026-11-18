@@ -76,6 +76,7 @@ async function main() {
     })
     await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
+      if (performance.getEntriesByType('navigation')[0]?.type === 'reload') return
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       const off = new URL(location.href).searchParams.has('off')
@@ -156,19 +157,138 @@ async function main() {
     const sideStacks = await page.locator(`${SIDE} .pane-stack-head .pane-child-name`).allTextContents()
     const rowStacks = await page.locator(`${ROW} .group-tab .group-name`).allTextContents()
     check('the sidebar lists the stacks in the header order', JSON.stringify(sideStacks) === JSON.stringify(rowStacks), `${sideStacks} / ${rowStacks}`)
-    const shipTabs = await page.locator(`${SIDE} .pane-stack`, { has: page.locator('.pane-stack-head', { hasText: 'Ship' }) }).locator('.pane-stack-tabs button:not(.row-close)').count()
+    const stack = (name, side = SIDE) => page.locator(`${side} .pane-stack`, { has: page.locator('.pane-stack-head .pane-child-name', { hasText: name }) })
+    const ship = stack('Ship')
+    const shipFold = ship.locator('.pane-stack-fold')
+    const shipTabs = await ship.locator('button[data-select-pane]').count()
     check('each stack holds its own tabs (Ship: 12)', shipTabs === 12, String(shipTabs))
     const marked = await page.locator(`${SIDE} .pane-stack-head.current .pane-child-name`).allTextContents()
     const openRow = await page.locator(`${SIDE} .pane-stack`, { has: page.locator('[aria-current="page"]') }).locator('.pane-stack-head .pane-child-name').allTextContents()
     check('the open tab is marked in its stack', JSON.stringify(marked) === '["Customer follow-ups"]' && JSON.stringify(openRow) === '["Customer follow-ups"]', `${marked} / ${openRow}`)
     check('the sidebar list scrolls the open tab into view', await inView(SIDE, '.pane-stack-tabs [aria-current="page"]') === true, String(await inView(SIDE, '.pane-stack-tabs [aria-current="page"]')))
     await page.screenshot({ path: path.join(SHOTS, '1280-sidebar-stacks.png') })
+
+    const openControls = await page.locator(`${SIDE} .pane-stack`).evaluateAll(stacks => {
+      const ids = new Set()
+      return stacks.every(stack => {
+        const fold = stack.querySelector('.pane-stack-fold')
+        const id = fold?.getAttribute('aria-controls')
+        const box = fold?.getBoundingClientRect()
+        const tabs = stack.querySelector('ul.pane-stack-tabs')
+        if (!id || /\s/.test(id) || ids.has(id) || !tabs || document.getElementById(id) !== tabs) return false
+        ids.add(id)
+        return fold.getAttribute('aria-expanded') === 'true' && box.width >= 24 && box.height >= 24
+      })
+    })
+    check('every stack starts open with a unique list ID and a fold target of at least 24 px', sideStacks.length > 0 && openControls)
+    await ship.locator('.pane-stack-head').focus()
+    await page.keyboard.press('Tab')
+    check('keyboard focus outlines the fold button', await shipFold.evaluate(button => button.matches(':focus-visible') && getComputedStyle(button).outlineWidth === '2px'))
+    await page.keyboard.press('Space')
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('folding Ship removes its tab rows and keeps its heading dot', await ship.locator('button[data-select-pane]').count() === 0
+      && await ship.locator('.pane-stack-head .state-dot').isVisible() && await page.locator(`[id="${await shipFold.getAttribute('aria-controls')}"]`).evaluate(list => list.hidden && list.children.length === 0)
+      && (await shipFold.getAttribute('aria-label')).startsWith('Show tabs of stack Ship'))
+    check('Release work stays open', await stack('Release work').locator('.pane-stack-fold').getAttribute('aria-expanded') === 'true'
+      && await stack('Release work').locator('button[data-select-pane]').count() === 1)
+
+    await page.reload({ waitUntil: 'load' })
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('Ship stays folded after reload', await ship.locator('button[data-select-pane]').count() === 0)
+    const customer = stack('Customer follow-ups')
+    const customerFold = customer.locator('.pane-stack-fold')
+    check('the selected stack has a disabled fold button', await customerFold.getAttribute('aria-disabled') === 'true'
+      && await customerFold.getAttribute('aria-label') === 'Tabs of stack Customer follow-ups stay shown while one of them is open')
+    await customerFold.click({ force: true })
+    check('clicking the disabled fold button keeps the selected tab visible', await customerFold.getAttribute('aria-expanded') === 'true'
+      && await customer.locator('button[data-select-pane][aria-current="page"]').isVisible())
+
+    const unstacked = stack('Unstacked')
+    await unstacked.locator('.pane-stack-fold').click()
+    await unstacked.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('Unstacked folds independently and removes Loose end', await unstacked.locator('button[data-select-pane]').count() === 0)
+
+    await page.mouse.move(640, 350)
+    for (const colorScheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme })
+      await shipFold.evaluate(button => button.scrollIntoView({ block: 'center' }))
+      await page.screenshot({ animations: 'disabled', path: path.join(SHOTS, `1280-folded-${colorScheme}.png`) })
+    }
+    await page.setViewportSize({ width: 320, height: 700 })
+    await page.locator('.mobile-menu').locator('visible=true').first().click()
+    const phoneShip = stack('Ship', '.drawer[open]')
+    const phoneFold = phoneShip.locator('.pane-stack-fold[aria-expanded="false"]')
+    await phoneFold.waitFor()
+    const phoneBox = await phoneFold.boundingBox()
+    check('320 px: the drawer shows the folded stack and its fold target fits', phoneBox.width >= 24 && phoneBox.height >= 24
+      && await page.evaluate(() => { const box = document.querySelector('.drawer .sidebar-inner'); return box.scrollWidth <= box.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth }))
+    for (const colorScheme of ['light', 'dark']) {
+      await page.emulateMedia({ colorScheme })
+      await phoneFold.evaluate(button => button.scrollIntoView({ block: 'center' }))
+      await page.screenshot({ animations: 'disabled', path: path.join(SHOTS, `320-folded-${colorScheme}.png`) })
+    }
+    await page.keyboard.press('Escape')
+    await page.locator('.drawer[open]').waitFor({ state: 'hidden' })
+    await page.setViewportSize({ width: 1280, height: 700 })
+    await page.emulateMedia({ colorScheme: null })
+
+    const search = page.locator('.sidebar input[aria-label="Search sessions"]')
+    await search.fill('Docs pass for the release notes')
+    await page.locator(`${SIDE} button[data-select-pane="%2"]`).waitFor()
+    check('search shows matching tabs from folded stacks without fold controls', await page.locator(`${SIDE} .pane-stack-fold`).count() === 0
+      && await page.locator(`${SIDE} button[data-select-pane="%2"]`).isVisible())
+    await search.fill('')
+    await ship.locator('.pane-stack-head').click()
+    await ship.locator('button[data-select-pane][aria-current="page"]').waitFor()
+    check('opening a folded stack from its heading forces its tabs open', await shipFold.getAttribute('aria-disabled') === 'true'
+      && await shipFold.getAttribute('aria-expanded') === 'true')
+    await customer.locator('.pane-stack-head').click()
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('leaving Ship restores its saved fold state', await ship.locator('button[data-select-pane]').count() === 0)
+    // Focus survives when a folded stack closes again under it.
+    await ship.locator('.pane-stack-head').click()
+    await ship.locator('button[data-select-pane][aria-current="page"]').waitFor()
+    await ship.locator('button[data-select-pane]').last().click()
+    await page.keyboard.press('Alt+ArrowDown')
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('Alt+Down out of a folded stack moves focus to the new tab row', await page.evaluate(() => document.activeElement?.matches('button[data-select-pane][aria-current="page"]')))
+    await ship.locator('.pane-stack-head').click()
+    await ship.locator('button[data-select-pane][aria-current="page"]').waitFor()
+    await ship.locator('button[data-select-pane]').last().focus()
+    await customer.locator('.pane-stack-head').evaluate(head => head.click())
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('a selection change from elsewhere moves focus to the refolded stack\'s fold button', await shipFold.evaluate(button => document.activeElement === button))
+    // Focus that left on its own is not pulled back: blur the fold button, then make the list render again.
+    await shipFold.evaluate(button => button.blur())
+    const unstackedFold = unstacked.locator('.pane-stack-fold')
+    await unstackedFold.evaluate(button => button.click())
+    await unstacked.locator('.pane-stack-fold[aria-expanded="true"]').waitFor()
+    const stayedOnBody = await page.evaluate(() => document.activeElement === document.body)
+    await unstackedFold.evaluate(button => button.click())
+    await unstacked.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('a later render does not pull focus back to a fold button', stayedOnBody && await page.evaluate(() => document.activeElement === document.body))
+    // A row the user left earlier does not count when a later shortcut removes it.
+    await ship.locator('.pane-stack-head').click()
+    await ship.locator('button[data-select-pane][aria-current="page"]').waitFor()
+    await ship.locator('button[data-select-pane]').last().click()
+    await ship.locator('button[data-select-pane]').last().evaluate(row => row.blur())
+    await page.keyboard.press('Alt+ArrowDown')
+    await ship.locator('.pane-stack-fold[aria-expanded="false"]').waitFor()
+    check('Alt+Down with focus outside the sidebar leaves focus outside', await page.evaluate(() => document.activeElement === document.body))
+    await shipFold.click()
+    await unstacked.locator('.pane-stack-fold').click()
+    await ship.locator('button[data-select-pane="%12"]').click()
+    await ship.locator('button[data-select-pane="%12"][aria-current="page"]').waitFor()
+    await page.keyboard.press('Alt+ArrowDown')
+    await page.locator(`${SIDE} button[data-select-pane="%20"][aria-current="page"]`).waitFor()
+    check('Alt+Down crosses a stack boundary to the next tab without folding a stack', await page.locator(`${SIDE} .pane-stack-fold[aria-expanded="false"]`).count() === 0)
+
     // A stack heading opens that stack, like a stack in the header.
     await page.locator(`${SIDE} .pane-stack-head`, { hasText: 'Voice and dictation' }).click()
     await page.locator('.chat-panel .group-tab[aria-current="true"]', { hasText: 'Voice and dictation' }).waitFor()
     check('a sidebar stack heading opens its stack', await current() === 'Voice and dictation')
     // Alt+Down steps through tab rows only, never onto a heading.
-    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button:not(.pane-stack-head, .row-close)')].length)
+    const rows = await page.evaluate(() => [...document.querySelectorAll('.sidebar .session-groups .pane-children button[data-select-pane]')].length)
     check('keyboard rows leave out the stack headings', rows === 22, String(rows))
 
     // 6. Phone width: no horizontal page scroll; the sidebar drawer is not part of this check.
