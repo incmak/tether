@@ -28,7 +28,7 @@ CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
 
 
-ASK = r"(?:^|[.!?]\s+|[\"'])(?:Shall|Should|Can|May) I send [^?]*?\bto (?:the )?"
+ASK = r"(?:^|[.!?]\s+|[\"'])(?:Shall|Should|Can|May) I send (?:(?![.!]\s|\bor\b)[^?])*?\bto (?:the )?"  # One sentence, one target.
 STRAY = re.compile('[\u3000-\u9fff\uac00-\ud7af\uff00-\uffef]')  # CJK or full-width text in an English voice reply.
 
 
