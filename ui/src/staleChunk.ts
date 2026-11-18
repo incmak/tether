@@ -2,6 +2,8 @@
 // lazy import fails. Vite reports this as `vite:preloadError` (https://vite.dev/guide/build#load-error-handling).
 // Reload once to get the new files. A second failure within a minute is a real fault: let it reach CrashScreen.
 
+import { reloadPage } from './backNav'
+
 const KEY = 'tether.stale-chunk-reload'
 const WINDOW_MS = 60_000
 
@@ -18,6 +20,6 @@ export function reloadOnStaleChunk() {
       sessionStorage.setItem(KEY, String(Date.now()))
     } catch { return }
     event.preventDefault()
-    location.reload()
+    reloadPage()
   })
 }

@@ -9,11 +9,19 @@ export type Place = { pane?: string; screen: Screen }
 type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string; spare?: true }
 // home: for an overlay that holds a cross-origin frame, the key of the entry under it (Navigation API).
 type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean; home?: string }
-// The Navigation API, where the browser has it (Chrome, Edge, Android Chrome).
-type Nav = { currentEntry: { key: string } | null; traverseTo: (key: string) => { finished: Promise<unknown> } }
+// The Navigation API, where the browser has it (Chrome, Edge, Android Chrome, Safari 26.2 and later).
+type NavigateEvent = { destination: { sameDocument: boolean }; hashChange: boolean; downloadRequest?: string | null; navigationType: string }
+type Nav = {
+  addEventListener(type: 'navigate', listener: (event: NavigateEvent) => void): void
+  addEventListener(type: 'navigateerror', listener: () => void): void
+  currentEntry: { key: string } | null
+  traverseTo: (key: string) => { finished: Promise<unknown> }
+}
 const nav = () => (typeof window === 'undefined' ? undefined : (window as unknown as { navigation?: Nav }).navigation)
 
 const overlays: Overlay[] = []
+// A cancelled leave can keep this set until the next Back. A closed overlay then leaves one history step.
+let leaving = false
 let pendingBacks = 0
 const queue: (() => void)[] = []
 let placeHandler: ((place: Place) => void) | null = null
@@ -96,12 +104,29 @@ function back() {
   run(() => { pendingBacks++; history.back() })
 }
 
+function markLeaving() { leaving = true }
+
+// iOS has no beforeunload, but the app knows when it starts a reload.
+export function reloadPage() {
+  markLeaving()
+  location.reload()
+}
+
 function listen() {
   if (listening) return
   listening = true
   index = state()?.index ?? 0
   top = Math.max(index, readTop())
+  window.addEventListener('pagehide', markLeaving)
+  window.addEventListener('pageshow', event => { if (event.persisted) leaving = false })
+  const navigation = nav()
+  navigation?.addEventListener('navigate', event => {
+    if (event.destination.sameDocument === false && event.hashChange === false &&
+        event.downloadRequest == null && event.navigationType !== 'traverse') markLeaving()
+  })
+  navigation?.addEventListener('navigateerror', () => { leaving = false })
   window.addEventListener('popstate', event => {
+    leaving = false
     moving = false
     clearTimeout(movingTimer)
     if (!searchRequest()) onPop(event)
@@ -128,7 +153,9 @@ function listen() {
     }
     const layer = next?.layer ?? 0
     // Remove first, so the close callback cannot go back a second time.
+    const count = overlays.length
     while (overlays.length > layer) overlays.pop()!.close()
+    if (count && !overlays.length) window.removeEventListener('beforeunload', markLeaving)
     if (layer > overlays.length) {
       // Forward into a view that Tether can open again: open it on this entry.
       if (index > from && layer === overlays.length + 1 && next?.view && viewOpener) {
@@ -193,6 +220,7 @@ export function openOverlay(close: () => void, view?: string, keepForward = fals
   const overlay: Overlay = { id: ++nextId, close, layer: overlays.length + 1, noEntry: true }
   const count = overlays.length
   overlays.push(overlay)
+  if (!count) window.addEventListener('beforeunload', markLeaving)
   // Forward opened this view again: its entry is already there.
   if (view && reopening?.view === view && reopening.layer === overlay.layer && state()?.layer === overlay.layer) {
     reopening = null
@@ -217,8 +245,8 @@ export function closeOverlay(id: number) {
   const at = overlays.findIndex(overlay => overlay.id === id)
   if (at < 0) return
   const [overlay] = overlays.splice(at, 1)
-  run(() => {
-    if (overlay.noEntry || state()?.layer !== overlay.layer) return
+  if (!leaving) run(() => {
+    if (leaving || overlay.noEntry || state()?.layer !== overlay.layer) return
     if (!overlay.home) { back(); return }
     // history.back() would step into the frame's entries, which stay after the frame closes and show nothing.
     // traverseTo skips them; the next push drops them. Without the Navigation API the entry stays, and a later
@@ -232,6 +260,7 @@ export function closeOverlay(id: number) {
       flush()
     })
   })
+  if (!overlays.length) window.removeEventListener('beforeunload', markLeaving)
 }
 
 export function setPlace(place: Place, { push: wantPush }: { push: boolean }) {

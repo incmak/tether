@@ -9,27 +9,65 @@ function compile(file) {
   return ts.transpileModule(readFileSync(`src/${file}`, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 }
 
+function makeEvents() {
+  const listeners = new Map()
+  const calls = []
+  return {
+    calls,
+    addEventListener(type, fn) {
+      calls.push(['add', type])
+      if (!listeners.has(type)) listeners.set(type, new Set())
+      listeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) {
+      calls.push(['remove', type])
+      listeners.get(type)?.delete(fn)
+    },
+    dispatch(type, event = {}) { listeners.get(type)?.forEach(fn => fn(event)) },
+    count(type) { return listeners.get(type)?.size ?? 0 },
+  }
+}
+
+function dispatchNavigate(navigation, navigationType, { sameDocument = false, hashChange = false, downloadRequest = null } = {}) {
+  navigation?.dispatchEvent(Object.assign(new Event('navigate'), {
+    destination: { sameDocument }, navigationType, hashChange, downloadRequest,
+  }))
+}
+
 // A browser history: entries, a pointer, and popstate after each traversal (async, like a browser).
-function makeHistory() {
-  const listeners = []
+function makeHistory(window) {
   const tasks = []
-  const hashListeners = []
   const base = 'https://tether.test/chat/'
   const entries = [{ state: null, url: base }]
-  let at = 0
-  const location = { get href() { return entries[at].url }, get hash() { return new URL(entries[at].url).hash } }
+  let at = 0, backs = 0, reloads = 0
+  const location = {
+    get href() { return entries[at].url },
+    get hash() { return new URL(entries[at].url).hash },
+    reload() { reloads++ },
+  }
+  const navigate = type => dispatchNavigate(window.navigation, type, { sameDocument: true })
   // Like a browser, the pointer and history.state change only when the traversal task runs.
   const go = step => tasks.push(() => {
     if (at + step < 0 || at + step >= entries.length) return
+    navigate('traverse')
     at += step
-    listeners.forEach(fn => fn({ state: entries[at].state }))
+    window.dispatch('popstate', { state: entries[at].state })
   })
   const history = {
     get state() { return entries[at].state },
     get length() { return entries.length },
-    pushState(state, _, url) { const now = entries[at].url; entries.splice(at + 1); entries.push({ state: structuredClone(state), url: url ? String(url) : now }); at++ },
-    replaceState(state, _, url) { entries[at] = { state: structuredClone(state), url: url ? String(url) : entries[at].url } },
-    back() { go(-1) },
+    pushState(state, _, url) {
+      navigate('push')
+      const now = entries[at].url
+      entries.splice(at + 1)
+      entries.push({ state: structuredClone(state), url: url ? String(url) : now })
+      at++
+    },
+    replaceState(state, _, url) {
+      navigate('replace')
+      entries[at] = { state: structuredClone(state), url: url ? String(url) : entries[at].url }
+    },
+    back() { backs++; go(-1) },
     forward() { go(1) },
   }
   // The extension's tabs.update to a new hash: a same-page navigation. A new entry with no state, Forward entries
@@ -37,29 +75,32 @@ function makeHistory() {
   const hashNav = hash => {
     const url = new URL(entries[at].url); url.hash = hash
     entries.splice(at + 1); entries.push({ state: null, url: String(url) }); at++
-    listeners.forEach(fn => fn({ state: null }))
-    hashListeners.forEach(fn => fn())
+    window.dispatch('popstate', { state: null })
+    window.dispatch('hashchange')
   }
   const settle = () => { for (let n = 0; tasks.length && n < 50; n++) tasks.shift()() }
-  return { history, location, listeners, hashListeners, hashNav, settle, entries, get at() { return at } }
+  return { history, location, hashNav, settle, entries, get at() { return at }, get backs() { return backs }, get reloads() { return reloads } }
 }
 
-function loadNav({ active = true } = {}) {
-  const h = makeHistory()
+function loadNav({ active = true, navigation } = {}) {
+  const window = Object.assign(makeEvents(), { navigation })
+  const h = makeHistory(window)
   const store = new Map()
   const exports = {}
+  let timer
   runInNewContext(compile('backNav.ts'), {
-    exports, structuredClone, Number, String, Math, Set, Error, URL, setTimeout: () => 0, clearTimeout: () => {},
+    exports, structuredClone, Number, String, Math, Set, Error, URL,
+    setTimeout: fn => { timer = fn; return 1 }, clearTimeout: () => { timer = undefined },
     history: h.history, location: h.location,
     navigator: { userActivation: { get isActive() { return active } } },
     sessionStorage: { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) },
-    window: { addEventListener: (type, fn) => { if (type === 'popstate') h.listeners.push(fn); if (type === 'hashchange') h.hashListeners.push(fn) } },
+    window,
     require(name) {
       if (name === 'react') return { useEffect() {}, useLayoutEffect() {}, useRef: value => ({ current: value }), useSyncExternalStore: (_, get) => get() }
       throw Error(`Unexpected import: ${name}`)
     },
   })
-  return { nav: exports, h }
+  return { nav: exports, h, window, expireTraversal: () => timer() }
 }
 
 const places = []
@@ -288,4 +329,169 @@ const can = nav => nav.useNavAvailability()
     assert.equal(isNavKey(key({ metaKey: true, code: 'BracketLeft' }, target), true), null)
   }
   console.log('ok keys')
+}
+
+// B33: A close during a leave keeps its entry. A later same-document Back clears the gate.
+{
+  const { nav, h, window } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  window.dispatch('beforeunload')
+  nav.closeOverlay(id)
+  assert.equal(h.backs, 0, 'the overlay close must not start a Back')
+  assert.equal(h.history.state.layer, 1)
+  h.history.back(); h.settle()
+  nav.closeOverlay(nav.openOverlay(() => {})); h.settle()
+  assert.equal(h.backs, 2, 'the close after popstate starts a Back')
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok beforeunload skips close Back and popstate restores it')
+}
+
+{
+  const navigation = Object.assign(new EventTarget(), { currentEntry: { key: 'home' } })
+  const traversals = []
+  navigation.traverseTo = key => { traversals.push(key); return { finished: Promise.resolve() } }
+  const { nav, h, window } = loadNav({ navigation })
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {}, undefined, false, true)
+  window.dispatch('beforeunload')
+  nav.closeOverlay(id)
+  assert.deepEqual(traversals, [])
+  assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 1)
+  console.log('ok beforeunload skips the frame traversal')
+}
+
+{
+  const { nav, h, window } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  window.dispatch('pagehide')
+  window.dispatch('pageshow', { persisted: false })
+  nav.closeOverlay(id)
+  assert.equal(h.backs, 0, 'a non-persisted pageshow does not clear the gate')
+  window.dispatch('pageshow', { persisted: true })
+  nav.closeOverlay(nav.openOverlay(() => {})); h.settle()
+  assert.equal(h.backs, 1, 'a bfcache restore clears the gate')
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok only a persisted pageshow restores close Back')
+}
+
+{
+  const { nav, h, window } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const event = 'beforeunload'
+  assert.equal(window.count(event), 0)
+  const first = nav.openOverlay(() => {})
+  const second = nav.openOverlay(() => {})
+  assert.equal(window.count(event), 1)
+  nav.closeOverlay(second); h.settle()
+  assert.equal(window.count(event), 1)
+  nav.closeOverlay(first); h.settle()
+  assert.equal(h.backs, 2, 'ordinary closes go Back')
+  assert.equal(window.count(event), 0)
+  assert.deepEqual(window.calls.filter(([, type]) => type === event), [['add', event], ['remove', event]])
+  nav.openOverlay(() => {})
+  h.history.back(); h.settle()
+  assert.equal(window.count(event), 0, 'Back also removes the listener after the last overlay closes')
+  console.log('ok beforeunload is registered only while overlays are open')
+}
+
+{
+  const navigation = new EventTarget()
+  const { nav, h, window } = loadNav({ navigation })
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  window.dispatch('beforeunload')
+  navigation.dispatchEvent(new Event('navigateerror'))
+  nav.closeOverlay(id); h.settle()
+  assert.equal(h.backs, 1)
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok navigateerror restores close Back')
+}
+
+{
+  const { nav, h, window, expireTraversal } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  nav.goBack() // The traversal has no popstate before its timeout.
+  nav.closeOverlay(id)
+  window.dispatch('pagehide')
+  expireTraversal()
+  assert.equal(h.backs, 1, 'the close checks the gate when its queued step runs')
+  console.log('ok queued close checks whether the page is leaving')
+}
+
+{
+  const navigation = new EventTarget()
+  const { nav, h } = loadNav({ navigation })
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  nav.closeOverlay(nav.openOverlay(() => {})); h.settle()
+  assert.equal(h.backs, 1)
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok same-document history events allow an ordinary overlay close')
+}
+
+for (const navigationType of ['push', 'reload']) {
+  for (const frame of [false, true]) {
+    const navigation = Object.assign(new EventTarget(), {
+      currentEntry: { key: 'home' },
+      traverseTo() { assert.fail('a frame close must not traverse during navigation') },
+    })
+    const { nav, h } = loadNav({ navigation })
+    nav.setPlace({ screen: 'chats' }, { push: true })
+    const id = nav.openOverlay(() => {}, undefined, false, frame)
+    dispatchNavigate(navigation, navigationType)
+    nav.closeOverlay(id); h.settle()
+    assert.equal(h.backs, 0)
+    assert.equal(h.history.state.layer, 1)
+    console.log(`ok cross-document ${navigationType} skips ${frame ? 'frame' : 'overlay'} close Back`)
+  }
+}
+
+for (const [name, navigationType, options] of [
+  ['download', 'push', { downloadRequest: 'x.zip' }],
+  ['hash change', 'push', { hashChange: true }],
+  ['traverse', 'traverse', {}],
+]) {
+  const navigation = new EventTarget()
+  const { nav, h } = loadNav({ navigation })
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  dispatchNavigate(navigation, navigationType, options)
+  nav.closeOverlay(id); h.settle()
+  assert.equal(h.backs, 1)
+  assert.equal(h.history.state.layer, 0)
+  console.log(`ok ${name} allows close Back`)
+}
+
+{
+  const { nav, h } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  nav.reloadPage()
+  assert.equal(h.reloads, 1)
+  nav.closeOverlay(id); h.settle()
+  assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 1)
+  console.log('ok reloadPage reloads and skips close Back without browser events')
+}
+
+{
+  const navigation = new EventTarget()
+  const { nav, h } = loadNav({ navigation })
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const id = nav.openOverlay(() => {})
+  const length = h.history.length
+  dispatchNavigate(navigation, 'push')
+  nav.closeOverlay(id); h.settle()
+  assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 1)
+  const reopened = nav.openOverlay(() => {})
+  assert.equal(h.history.length, length, 'reopening replaces the leftover entry')
+  navigation.dispatchEvent(new Event('navigateerror'))
+  nav.closeOverlay(reopened); h.settle()
+  assert.equal(h.backs, 1)
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok reopening reuses a leftover entry and navigateerror restores close Back')
 }
