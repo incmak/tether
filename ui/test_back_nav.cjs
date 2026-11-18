@@ -79,7 +79,8 @@ function makeHistory(window) {
     window.dispatch('hashchange')
   }
   const settle = () => { for (let n = 0; tasks.length && n < 50; n++) tasks.shift()() }
-  return { history, location, hashNav, settle, entries, get at() { return at }, get backs() { return backs }, get reloads() { return reloads } }
+  return { history, location, hashNav, settle, entries, go, userBack: () => go(-1),
+    get at() { return at }, get backs() { return backs }, get reloads() { return reloads } }
 }
 
 function loadNav({ active = true, navigation } = {}) {
@@ -403,11 +404,13 @@ const can = nav => nav.useNavAvailability()
   nav.setPlace({ screen: 'chats' }, { push: true })
   const id = nav.openOverlay(() => {})
   window.dispatch('beforeunload')
+  h.history.replaceState(h.history.state, '')
+  // A same-document history write can report an error for a pending navigation without unloading the page.
   navigation.dispatchEvent(new Event('navigateerror'))
   nav.closeOverlay(id); h.settle()
-  assert.equal(h.backs, 1)
-  assert.equal(h.history.state.layer, 0)
-  console.log('ok navigateerror restores close Back')
+  assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 1)
+  console.log('ok same-document replaceState and navigateerror keep the leave gate set')
 }
 
 {
@@ -477,21 +480,167 @@ for (const [name, navigationType, options] of [
   console.log('ok reloadPage reloads and skips close Back without browser events')
 }
 
-{
-  const navigation = new EventTarget()
-  const { nav, h } = loadNav({ navigation })
+for (const [name, keepForward, frame, escape] of [['plain', false, false], ['frame', false, true], ['keepForward', true, false], ['plain, Escape after Back', false, false, true]]) {
+  const navigation = Object.assign(new EventTarget(), {
+    currentEntry: { key: 'home' },
+    traverseTo() { assert.fail('a frame close must not traverse during a leave') },
+  })
+  const { nav, h, window } = loadNav({ navigation })
   nav.setPlace({ screen: 'chats' }, { push: true })
-  const id = nav.openOverlay(() => {})
+  const closed = []
+  const openFirst = () => nav.openOverlay(() => closed.push(1), 'first')
+  const openSecond = () => nav.openOverlay(() => closed.push(2), 'second', keepForward, frame)
+  let first = openFirst()
+  let second = openSecond()
   const length = h.history.length
-  dispatchNavigate(navigation, 'push')
-  nav.closeOverlay(id); h.settle()
+  assert.deepEqual(h.entries.map(entry => entry.state.layer), [0, 1, 2])
+  window.dispatch('beforeunload')
+  const closeBoth = () => { nav.closeOverlay(second); nav.closeOverlay(first); h.settle() }
+  closeBoth()
+  for (let cycle = 0; cycle < 5; cycle++) {
+    const leftover = h.history.state
+    first = openFirst()
+    assert.equal(h.history.state, leftover, 'opening layer 1 leaves the layer-2 entry alone')
+    second = openSecond()
+    assert.notEqual(h.history.state, leftover, 'opening layer 2 replaces the leftover entry')
+    closeBoth()
+    assert.equal(h.history.length, length, 'reopening both layers keeps the same number of entries')
+  }
   assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 2)
+  first = openFirst(); openSecond()
+  h.userBack(); h.settle()
+  assert.deepEqual(closed, [2], 'first Back closes only the upper overlay')
   assert.equal(h.history.state.layer, 1)
-  const reopened = nav.openOverlay(() => {})
-  assert.equal(h.history.length, length, 'reopening replaces the leftover entry')
-  navigation.dispatchEvent(new Event('navigateerror'))
-  nav.closeOverlay(reopened); h.settle()
+  if (escape) {
+    // The lower overlay opened with no entry of its own. After Back it owns the layer-1 entry, so its close steps back.
+    nav.closeOverlay(first); h.settle()
+    assert.equal(h.backs, 1, 'closing the lower overlay after Back steps back once')
+  } else {
+    h.userBack(); h.settle()
+    assert.deepEqual(closed, [2, 1], 'second Back closes the lower overlay')
+  }
+  assert.equal(h.history.state.layer, 0)
+  const backs = escape ? 1 : 0
+  assert.equal(h.backs, backs, 'user Back does not trigger a second Back')
+  nav.closeOverlay(openFirst()); h.settle()
+  assert.equal(h.backs, backs + 1, 'normal close after popstate starts exactly one Back')
+  assert.equal(h.history.state.layer, 0)
+  console.log(`ok ${name} nested leave keeps history stable, then Back closes each layer and restores normal close`)
+}
+
+// A frame overlay on the LOWER layer takes its entry after a cancelled leave and Back. Its close must skip the frame's
+// own entries with traverseTo (to the entry under it), and the next overlay must still get its entry.
+{
+  const traversals = []
+  let h
+  const navigation = new EventTarget()
+  Object.defineProperty(navigation, 'currentEntry', { get: () => ({ key: 'k' + h.at, index: h.at }) })
+  navigation.entries = () => h.entries.map((_, i) => ({ key: 'k' + i }))
+  navigation.traverseTo = key => { traversals.push(key); h.go(Number(key.slice(1)) - h.at); return { finished: Promise.resolve() } }
+  const loaded = loadNav({ navigation })
+  const { nav, window } = loaded
+  h = loaded.h
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const below = 'k' + h.at
+  const closed = []
+  const openFrame = () => nav.openOverlay(() => closed.push('frame'), 'host', false, true)
+  const openSheet = () => nav.openOverlay(() => closed.push('sheet'), 'sheet')
+  let frame = openFrame()
+  let sheet = openSheet()
+  const length = h.history.length
+  window.dispatch('beforeunload')
+  const closeBoth = () => { nav.closeOverlay(sheet); nav.closeOverlay(frame); h.settle() }
+  closeBoth()
+  for (let cycle = 0; cycle < 3; cycle++) { frame = openFrame(); sheet = openSheet(); closeBoth() }
+  assert.equal(h.history.length, length, 'reopening both layers keeps the same number of entries')
+  frame = openFrame(); sheet = openSheet()
+  h.userBack(); h.settle()
+  assert.deepEqual(closed, ['sheet'])
+  assert.equal(h.history.state.layer, 1)
+  // The frame's page adds its own entry after the overlay's entry. The parent's state stays the overlay's.
+  h.history.pushState(h.history.state, '')
+  nav.closeOverlay(frame); h.settle()
+  assert.deepEqual(traversals, [below], 'the frame close skips the frame entries to the entry under the overlay')
+  assert.equal(h.backs, 0, 'the frame close does not use history.back')
+  assert.equal(h.history.state.layer, 0)
+  const next = openSheet()
+  assert.equal(h.history.state.layer, 1, 'the next overlay gets its entry')
+  nav.closeOverlay(next); h.settle()
   assert.equal(h.backs, 1)
   assert.equal(h.history.state.layer, 0)
-  console.log('ok reopening reuses a leftover entry and navigateerror restores close Back')
+  console.log('ok lower frame overlay after a cancelled leave and Back closes with traverseTo; the next overlay works')
+}
+
+// The same recovery without the Navigation API: the frame overlay has no key for the entry under it, so it never
+// calls history.back() (that would step into the frame's entries). Its entry stays, and the next overlay still works.
+{
+  const { nav, h, window } = loadNav()
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const closed = []
+  const openFrame = () => nav.openOverlay(() => closed.push('frame'), 'host', false, true)
+  const openSheet = () => nav.openOverlay(() => closed.push('sheet'), 'sheet')
+  // A fresh frame overlay, no leave: its close leaves the entry instead of history.back.
+  nav.closeOverlay(openFrame()); h.settle()
+  assert.equal(h.backs, 0, 'a frame close without the Navigation API does not use history.back')
+  assert.equal(h.history.state.layer, 1)
+  h.userBack(); h.settle()
+  assert.equal(h.history.state.layer, 0)
+  let frame = openFrame()
+  let sheet = openSheet()
+  window.dispatch('beforeunload')
+  nav.closeOverlay(sheet); nav.closeOverlay(frame); h.settle()
+  frame = openFrame(); sheet = openSheet()
+  h.userBack(); h.settle()
+  assert.deepEqual(closed, ['sheet'])
+  assert.equal(h.history.state.layer, 1)
+  h.history.pushState(h.history.state, '')
+  nav.closeOverlay(frame); h.settle()
+  assert.equal(h.backs, 0, 'the recovered frame close does not use history.back')
+  // A plain sheet reuses the entry the frame left. The frame's entries follow it, so the sheet's close must not Back.
+  const reuse = openSheet()
+  assert.equal(h.history.state.frame, true, 'the reused entry keeps the frame flag')
+  nav.closeOverlay(reuse); h.settle()
+  assert.equal(h.backs, 0, 'a sheet on a frame entry does not use history.back')
+  // The user's Back leaves the frame entry; a sheet on a clean entry closes with one Back again.
+  h.userBack(); h.settle()
+  assert.equal(h.history.state.layer, 0)
+  // That Back landed on the closed frame entry and stepped over it (one history.back of its own).
+  const backs = h.backs
+  const next = openSheet()
+  assert.equal(h.history.state.layer, 1, 'the next overlay gets its entry')
+  assert.equal(h.history.state.frame, undefined, 'a new entry drops the frame flag')
+  nav.closeOverlay(next); h.settle()
+  assert.equal(h.backs, backs + 1, 'the next overlay closes with one Back')
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok frame overlay without the Navigation API never uses history.back; a sheet that reuses its entry neither')
+}
+
+// With the Navigation API: a frame entry left during a leave, then reused by a plain sheet after the mark clears. The
+// sheet's close skips the frame's entries with traverseTo, not history.back.
+{
+  const traversals = []
+  let h
+  const navigation = new EventTarget()
+  Object.defineProperty(navigation, 'currentEntry', { get: () => ({ key: 'k' + h.at, index: h.at }) })
+  navigation.entries = () => h.entries.map((_, i) => ({ key: 'k' + i }))
+  navigation.traverseTo = key => { traversals.push(key); h.go(Number(key.slice(1)) - h.at); return { finished: Promise.resolve() } }
+  const loaded = loadNav({ navigation })
+  const { nav, window } = loaded
+  h = loaded.h
+  nav.setPlace({ screen: 'chats' }, { push: true })
+  const below = 'k' + h.at
+  const frame = nav.openOverlay(() => {}, 'host', false, true)
+  // The frame's own entries are not in the parent's navigation.entries(), so this fake has none to model.
+  window.dispatch('beforeunload')
+  nav.closeOverlay(frame); h.settle()
+  assert.equal(h.history.state.layer, 1, 'during the leave the frame entry stays')
+  window.dispatch('pageshow', { persisted: true })
+  const sheet = nav.openOverlay(() => {}, 'sheet')
+  assert.equal(h.history.state.frame, true)
+  nav.closeOverlay(sheet); h.settle()
+  assert.deepEqual(traversals, [below], 'the sheet on a frame entry closes with traverseTo to the entry under it')
+  assert.equal(h.backs, 0)
+  assert.equal(h.history.state.layer, 0)
+  console.log('ok a sheet that reuses a frame entry closes with traverseTo')
 }

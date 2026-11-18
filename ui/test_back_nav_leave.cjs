@@ -59,10 +59,10 @@ async function openChat(page, url) {
   await page.evaluate(() => { window.backNavLeaveMarker = true })
 }
 
-async function openSheet(page) {
+async function openSheet(page, layer = 1) {
   await page.getByRole('button', { name: 'Add photos and files', exact: true }).click()
   await page.waitForSelector('.attach-layer:popover-open .attach-menu')
-  await page.waitForFunction(() => history.state?.layer === 1)
+  if (layer !== null) await page.waitForFunction(layer => history.state?.layer === layer, layer)
 }
 
 async function closeSheet(page) {
@@ -77,6 +77,17 @@ async function escapeSheet(page) {
 }
 
 const stateBeforeClose = 'B33 state before close: '
+const shortcuts = 'dialog.shortcuts-sheet'
+
+function waitForConsole(page, message) {
+  return page.waitForEvent('console', { predicate: event => event.text() === message }).catch(error => error)
+}
+
+async function checked(promise) {
+  const result = await promise
+  if (result instanceof Error) throw result
+  return result
+}
 
 async function holdDocument(page, url, overlay, openedState, action) {
   const { promise, resolve } = Promise.withResolvers()
@@ -86,7 +97,7 @@ async function holdDocument(page, url, overlay, openedState, action) {
     await serveLocal(route)
   }, { times: 1 })
   // Watch the old DOM before navigation starts. The browser can pause animation frames while it waits.
-  const closed = page.waitForEvent('console', { predicate: event => event.text() === 'B33 overlay closed' }).catch(error => error)
+  const closed = waitForConsole(page, 'B33 overlay closed')
   await page.evaluate(({ overlay, stateBeforeClose }) => {
     const element = document.querySelector(overlay)
     if (!element) throw new Error(`Expected ${overlay} to be open`)
@@ -132,7 +143,7 @@ async function assertNewDocument(page, url, type) {
   assert.equal(result.type, type)
 }
 
-async function navigateWithSheet(page, url, rendererInitiated = false) {
+async function navigateWithSheet(page, url, { rendererInitiated = false, replace = false } = {}) {
   if (rendererInitiated) {
     await page.addInitScript(() => {
       const add = window.addEventListener
@@ -143,6 +154,15 @@ async function navigateWithSheet(page, url, rendererInitiated = false) {
   }
   await openChat(page, url)
   await openSheet(page)
+  if (replace) {
+    await page.evaluate(() => {
+      window.addEventListener('keydown', event => {
+        if (event.code !== 'F8') return
+        history.replaceState(history.state, '')
+        console.log('B33 replaced state')
+      }, { once: true, capture: true })
+    })
+  }
   const openedState = await page.evaluate(() => history.state)
   const backdrop = await page.locator('.attach-backdrop').boundingBox()
   const otherUrl = new URL('/away', url).href
@@ -155,11 +175,57 @@ async function navigateWithSheet(page, url, rendererInitiated = false) {
       await page.evaluate(target => { location.href = target }, otherUrl)
     } else outcome = page.goto(otherUrl).catch(error => error)
     await requested()
+    if (replace) {
+      // The pending navigation can keep Playwright waiting for a new execution context.
+      const replaced = waitForConsole(page, 'B33 replaced state')
+      await page.keyboard.press('F8')
+      await checked(replaced)
+    }
     // Locator clicks wait for navigation. Send the pointer to the old page while its response is held.
     await page.mouse.click(backdrop.x + 20, backdrop.y + 20)
   })
   const result = await outcome
   if (result instanceof Error) throw result
+  await assertNewDocument(page, otherUrl, 'navigate')
+}
+
+async function pushDuringLeave(page, url) {
+  await page.addInitScript(() => {
+    const push = history.pushState
+    history.pushState = function (...args) {
+      push.apply(this, args)
+      if (history.state?.layer === 2) console.log('B33 pushed layer 2')
+    }
+    const observer = new MutationObserver(() => {
+      if (!document.querySelector('dialog.shortcuts-sheet[open]')) return
+      observer.disconnect()
+      const closed = new MutationObserver(() => {
+        if (document.querySelector('dialog.shortcuts-sheet')) return
+        closed.disconnect()
+        console.log('B33 shortcuts closed')
+      })
+      closed.observe(document.body, { childList: true, subtree: true })
+    })
+    observer.observe(document, { childList: true, subtree: true })
+  })
+  await openChat(page, url)
+  await openSheet(page)
+  const openedState = await page.evaluate(() => ({ ...history.state, layer: 2, index: history.state.index + 1 }))
+  const backdrop = await page.locator('.attach-backdrop').boundingBox()
+  const otherUrl = new URL('/away', url).href
+  const pushed = waitForConsole(page, 'B33 pushed layer 2')
+  const closed = waitForConsole(page, 'B33 shortcuts closed')
+  let outcome
+  await holdDocument(page, otherUrl, '.attach-layer', openedState, async requested => {
+    outcome = page.goto(otherUrl).catch(error => error)
+    await requested()
+    await page.keyboard.press('Control+Slash')
+    await checked(pushed)
+    await page.keyboard.press('Control+Slash')
+    await checked(closed)
+    await page.mouse.click(backdrop.x + 20, backdrop.y + 20)
+  })
+  await checked(outcome)
   await assertNewDocument(page, otherUrl, 'navigate')
 }
 
@@ -188,10 +254,33 @@ const cases = [
   }],
   ['Attach backdrop during address-bar navigation', { width: 390, height: 844 }, navigateWithSheet],
   ['Attach backdrop during renderer navigation without beforeunload', { width: 390, height: 844 },
-    (page, url) => navigateWithSheet(page, url, true)],
-  ['Attach works again after a 204 and Back', { width: 390, height: 844 }, async (page, url) => {
+    (page, url) => navigateWithSheet(page, url, { rendererInitiated: true })],
+  ['Attach backdrop after replaceState during renderer navigation', { width: 390, height: 844 },
+    (page, url) => navigateWithSheet(page, url, { rendererInitiated: true, replace: true })],
+  ['Push and close a second overlay during address-bar navigation', { width: 390, height: 844 }, pushDuringLeave],
+  ['Nested attach cycles keep history stable after a 204', { width: 390, height: 844 }, async (page, url) => {
+    await page.addInitScript(() => {
+      window.backNavNavigateErrors = 0
+      window.navigation?.addEventListener('navigateerror', () => {
+        window.backNavNavigateErrors++
+        console.log('B33 navigateerror')
+      })
+    })
     await openChat(page, url)
-    await openSheet(page)
+    const openBoth = async layer => {
+      await openSheet(page, layer)
+      await page.keyboard.press('Control+Slash')
+      await page.waitForSelector(shortcuts + '[open]')
+      await page.waitForFunction(() => history.state?.layer === 2)
+    }
+    const closeBoth = async () => {
+      await page.keyboard.press('Control+Slash')
+      await page.waitForSelector(shortcuts, { state: 'detached' })
+      await closeSheet(page)
+    }
+    await openBoth()
+    const entries = await page.evaluate(() => history.length)
+    const errorsBefore = await page.evaluate(() => window.backNavNavigateErrors)
     const noContent = new URL('/chat/no-content', url).href
     const response = page.waitForResponse(noContent).catch(error => error)
     const finished = Promise.race(['requestfinished', 'requestfailed'].map(event => page.waitForEvent(event, {
@@ -203,17 +292,70 @@ const cases = [
     assert.equal(result.status(), 204)
     const request = await finished
     if (request instanceof Error) throw request
-    await closeSheet(page)
-    assert.equal(await page.evaluate(() => history.state?.layer), 1, 'the 204 leaves the closed sheet entry in place')
+    const errors = await page.evaluate(() => window.backNavNavigateErrors) - errorsBefore
+    console.log(`204: navigateerror ${errors ? `fired (${errors})` : 'did not fire'}`)
+    await closeBoth()
+    for (let cycle = 1; cycle <= 3; cycle++) {
+      await openBoth(null)
+      await closeBoth()
+      assert.equal(await page.evaluate(() => history.length), entries, `history grew on cycle ${cycle}`)
+    }
+    assert.equal(await page.evaluate(() => history.state?.layer), 2, 'the closes leave the layer-2 entry in place')
     await page.goBack({ waitUntil: 'commit' })
     await page.waitForFunction(() => history.state?.layer === 0)
     assert.equal(await page.evaluate(() => window.backNavLeaveMarker), true, 'Back stays in the original document')
-    const entries = await page.evaluate(() => history.length)
     await openSheet(page)
     await escapeSheet(page)
-    assert.equal(await page.evaluate(() => history.length), entries)
+    assert.ok(await page.evaluate(() => history.length) <= entries)
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Add photos and files')
     await page.waitForSelector('.composer textarea:enabled')
+  }],
+  ['Back clears the leave mark after the user stops a navigation', { width: 390, height: 844 }, async (page, url) => {
+    // Chromium fires no event when a navigation ends without a new page (a 204, or Stop). The mark stays until Back.
+    await page.addInitScript(() => {
+      window.backNavNavigateErrors = 0
+      window.navigation?.addEventListener('navigateerror', () => { window.backNavNavigateErrors++ })
+    })
+    await openChat(page, url)
+    const otherUrl = new URL('/away', url).href
+    const { promise, resolve } = Promise.withResolvers()
+    await page.route(reqUrl => reqUrl.href === otherUrl, async route => {
+      await promise
+      await route.abort().catch(() => {})
+    }, { times: 1 })
+    await page.evaluate(() => {
+      window.addEventListener('keydown', event => {
+        if (event.code !== 'F9') return
+        window.stop()
+        console.log('B33 stopped')
+      }, { once: true, capture: true })
+    })
+    const request = page.waitForRequest(request => request.isNavigationRequest() && request.url() === otherUrl).catch(error => error)
+    const stopped = waitForConsole(page, 'B33 stopped')
+    try {
+      await page.evaluate(target => { location.href = target }, otherUrl)
+      const result = await request
+      if (result instanceof Error) throw result
+      await page.keyboard.press('F9')
+      await checked(stopped)
+    } finally {
+      resolve()
+    }
+    assert.equal(await page.evaluate(() => window.backNavLeaveMarker), true, 'Stop keeps the original document')
+    const errors = await page.evaluate(() => window.backNavNavigateErrors)
+    console.log(`stop: navigateerror ${errors ? `fired (${errors})` : 'did not fire'}`)
+    // The navigate event marked the page as leaving. A close now leaves its entry in place.
+    await openSheet(page)
+    await closeSheet(page)
+    assert.equal(await page.evaluate(() => history.state?.layer), 1, 'while marked, the close leaves its entry')
+    // One Back clears the mark (backNav.ts popstate listener). It lands on the view the user already sees.
+    await page.goBack({ waitUntil: 'commit' })
+    await page.waitForFunction(() => history.state?.layer === 0)
+    assert.equal(await page.evaluate(() => window.backNavLeaveMarker), true, 'Back stays in the original document')
+    // After that Back a close steps back again.
+    await openSheet(page)
+    await escapeSheet(page)
+    return `navigateerror ${errors ? 'fired' : 'did not fire'} on Stop`
   }],
   ['bfcache', { width: 390, height: 844 }, async (page, url) => {
     await openChat(page, url)

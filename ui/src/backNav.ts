@@ -5,22 +5,39 @@ import type { Screen } from './Rail'
 // open (layer), and its index in Tether's run of entries. Index 0 is the first Tether entry: Back from there would
 // leave the app, so the in-app Back stops there. view names an overlay that Forward can open again (setViewOpener).
 export type Place = { pane?: string; screen: Screen }
+// frame: a frame overlay pushed this entry. The frame's own entries may follow it, so the flag stays with the entry
+// when another overlay or place reuses it, and a new entry drops it.
 // spare: the entry the browser added for an "Open Tether search" request (#search). Tether steps back over it at once.
-type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string; spare?: true }
+type NavState = { tether: 1; layer: number; place?: Place; index?: number; view?: string; spare?: true; frame?: true }
 // home: for an overlay that holds a cross-origin frame, the key of the entry under it (Navigation API).
-type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean; home?: string }
+type Overlay = { id: number; close: () => void; layer: number; noEntry: boolean; frame: boolean; home?: string }
 // The Navigation API, where the browser has it (Chrome, Edge, Android Chrome, Safari 26.2 and later).
 type NavigateEvent = { destination: { sameDocument: boolean }; hashChange: boolean; downloadRequest?: string | null; navigationType: string }
 type Nav = {
   addEventListener(type: 'navigate', listener: (event: NavigateEvent) => void): void
-  addEventListener(type: 'navigateerror', listener: () => void): void
-  currentEntry: { key: string } | null
+  currentEntry: { key: string; index: number } | null
+  entries: () => { key: string }[]
   traverseTo: (key: string) => { finished: Promise<unknown> }
 }
 const nav = () => (typeof window === 'undefined' ? undefined : (window as unknown as { navigation?: Nav }).navigation)
 
+/** The overlay takes the current entry without pushing it (a leftover entry, Back, or Forward). An entry a frame
+ * overlay pushed makes any overlay on it a frame overlay: history.back() there would step into the frame's entries.
+ * A frame overlay needs the key of the entry under it, so its close skips the frame's entries. Without that key it
+ * does not take the entry: its close then leaves the entry, and a later Back steps over it. */
+function own(overlay: Overlay) {
+  if (state()?.frame) overlay.frame = true
+  if (overlay.frame) {
+    const navigation = nav()
+    const at = navigation?.currentEntry?.index ?? -1
+    overlay.home = navigation && at > 0 ? navigation.entries()[at - 1]?.key : undefined
+    if (!overlay.home) return
+  }
+  overlay.noEntry = false
+}
+
 const overlays: Overlay[] = []
-// A cancelled leave can keep this set until the next Back. A closed overlay then leaves one history step.
+// A cancelled leave keeps this set until the next Back. Closes leave their entries, and opens reuse them.
 let leaving = false
 let pendingBacks = 0
 const queue: (() => void)[] = []
@@ -124,7 +141,6 @@ function listen() {
     if (event.destination.sameDocument === false && event.hashChange === false &&
         event.downloadRequest == null && event.navigationType !== 'traverse') markLeaving()
   })
-  navigation?.addEventListener('navigateerror', () => { leaving = false })
   window.addEventListener('popstate', event => {
     leaving = false
     moving = false
@@ -155,6 +171,9 @@ function listen() {
     // Remove first, so the close callback cannot go back a second time.
     const count = overlays.length
     while (overlays.length > layer) overlays.pop()!.close()
+    // Back landed on the entry of the top open overlay. It may have opened with no entry during a cancelled leave;
+    // it owns this entry now, so its own close steps back once.
+    if (layer && layer === overlays.length && overlays[layer - 1].noEntry) own(overlays[layer - 1])
     if (count && !overlays.length) window.removeEventListener('beforeunload', markLeaving)
     if (layer > overlays.length) {
       // Forward into a view that Tether can open again: open it on this entry.
@@ -217,25 +236,31 @@ export function setSearchOpener(fn: (() => void) | null) {
  * frame: the overlay holds a frame whose page adds its own history entries after the overlay's entry (HostView). */
 export function openOverlay(close: () => void, view?: string, keepForward = false, frame = false): number {
   listen()
-  const overlay: Overlay = { id: ++nextId, close, layer: overlays.length + 1, noEntry: true }
+  const overlay: Overlay = { id: ++nextId, close, layer: overlays.length + 1, noEntry: true, frame }
   const count = overlays.length
   overlays.push(overlay)
   if (!count) window.addEventListener('beforeunload', markLeaving)
   // Forward opened this view again: its entry is already there.
   if (view && reopening?.view === view && reopening.layer === overlay.layer && state()?.layer === overlay.layer) {
     reopening = null
-    overlay.noEntry = false
+    own(overlay)
     return overlay.id
   }
   if (keepForward && index < top) return overlay.id
   if (activated()) run(() => {
     if (!overlays.includes(overlay)) return
-    const next: NavState = { ...state(), tether: 1, layer: overlay.layer, place: currentPlace ?? undefined, view }
-    if ((state()?.layer ?? 0) > count) replace(next)
-    else {
-      if (frame) overlay.home = nav()?.currentEntry?.key
-      push(next)
+    const previous = state()
+    const layer = previous?.layer ?? 0
+    if (leaving && layer > overlay.layer) return
+    const next: NavState = { ...previous, tether: 1, layer: overlay.layer, place: currentPlace ?? undefined, view }
+    if (leaving ? layer === overlay.layer : layer > count) {
+      if (frame) next.frame = true
+      replace(next)
+      own(overlay)
+      return
     }
+    if (frame) overlay.home = nav()?.currentEntry?.key
+    push({ ...next, frame: frame ? true : undefined })
     overlay.noEntry = false
   })
   return overlay.id
@@ -247,12 +272,12 @@ export function closeOverlay(id: number) {
   const [overlay] = overlays.splice(at, 1)
   if (!leaving) run(() => {
     if (leaving || overlay.noEntry || state()?.layer !== overlay.layer) return
-    if (!overlay.home) { back(); return }
+    if (!overlay.frame) { back(); return }
     // history.back() would step into the frame's entries, which stay after the frame closes and show nothing.
-    // traverseTo skips them; the next push drops them. Without the Navigation API the entry stays, and a later
-    // Back steps over it as over any closed overlay.
+    // traverseTo skips them; the next push drops them. Without the Navigation API or the key the entry stays, and
+    // a later Back steps over it as over any closed overlay.
     const navigation = nav()
-    if (!navigation) return
+    if (!navigation || !overlay.home) return
     pendingBacks++
     navigation.traverseTo(overlay.home).finished.catch(() => {
       // The browser refused: no popstate comes, so do not wait for one.
@@ -275,7 +300,7 @@ export function setPlace(place: Place, { push: wantPush }: { push: boolean }) {
     if (first) replace(next)
     else if (canPush) {
       if ((previous?.layer ?? 0) > overlays.length) replace(next)
-      else push(next)
+      else push({ ...next, frame: undefined })
     } else if ((previous?.layer ?? 0) === 0) replace(next)
   })
 }
