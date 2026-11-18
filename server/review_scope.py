@@ -13,14 +13,17 @@ TIMEOUT = 5
 HASH = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # SHA-1 or SHA-256 repositories
 
 
-def git(folder, *args):
-    """stdout of a read-only git command in `folder`, or None when it fails."""
+def git(folder, *args, complete=False):
+    """stdout of a read-only git command in `folder`, or None when it fails. complete: also None when git wrote a
+    warning: it can exit with 0 after it skipped a path that it could not read, and the output is then partial."""
     try:
         result = subprocess.run(['git', *args], cwd=folder, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
                                 capture_output=True, timeout=TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout.decode('utf-8', 'replace') if result.returncode == 0 else None
+    if result.returncode != 0 or complete and result.stderr:
+        return None
+    return result.stdout.decode('utf-8', 'replace')
 
 
 def head(folder):
@@ -38,7 +41,8 @@ def scope(folder):
     moment: a commit made between two reads cannot pair one commit with the status of another.
     rules: origin/main has a REVIEW.md that the reviewer can read with `git show`."""
     # --untracked-files: the repository's own settings (status.showUntrackedFiles=no) must not hide untracked files.
-    status = git(folder, 'status', '--porcelain=v2', '--branch', '--untracked-files=normal') if folder else None
+    status = git(folder, 'status', '--porcelain=v2', '--branch', '--untracked-files=normal', complete=True) \
+        if folder else None
     commit, dirty = None, None
     if status is not None:
         lines = status.splitlines()
