@@ -26,6 +26,8 @@ class SuggestGroupsTests(unittest.TestCase):
         self.which = self.enterContext(patch('suggest_groups.shutil.which', return_value=None))
         self.popen = self.enterContext(patch('suggest_groups.subprocess.Popen'))
         self.fast_model = self.enterContext(patch('suggest_groups.codex_fast_model', return_value=None))
+        self.chosen = self.enterContext(patch('suggest_groups.codex_provider.chosen', return_value='plan'))
+        self.provider = self.enterContext(patch('suggest_groups.codex_provider.default_provider', return_value='openai'))
         self.entries = [session('$6'), session('$9', '/other/project/'), session('$12', '/work/single')]
 
     def reply(self, output):
@@ -129,6 +131,16 @@ class SuggestGroupsTests(unittest.TestCase):
         self.process.communicate.assert_called_once_with(input=suggest_groups.PROMPT + '\n\n' + content, timeout=45)
         self.assertFalse(Path(folder).exists())
         self.urlopen.assert_not_called()
+
+    def test_codex_on_another_provider_sends_nothing(self):
+        self.which.return_value = '/bin/codex'
+        self.popen.side_effect = self.agent_process
+        for chosen, default in (('foundry', 'openai'), ('plan', 'azure')):
+            with self.subTest(chosen=chosen, default=default):
+                self.chosen.return_value, self.provider.return_value = chosen, default
+                self.reply('Project: 6 9')
+                self.assertEqual(suggest_groups.suggest({'sessions': self.entries, 'agent': 'codex'})['source'], 'llm')
+        self.popen.assert_not_called()
 
     def test_main_agent_not_installed_uses_local_model(self):
         for main in ('claude', 'codex'):
@@ -357,6 +369,9 @@ class SuggestGroupsTests(unittest.TestCase):
     def test_tabs_none_answer_and_leftovers_go_to_unstacked(self):
         tabs = [session('%3', name='Login'), session('%8', '/b', name='Auth'), session('%12', '/c', name='Docs')]
         self.reply('NONE')
+        self.assertEqual(suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs}),
+                         {'groups': [], 'source': 'llm', 'unstacked': ['%3', '%8', '%12']})
+        self.reply('NONE\n\nNeeds you: no')
         self.assertEqual(suggest_groups.suggest({'kind': 'tabs', 'tabs': tabs}),
                          {'groups': [], 'source': 'llm', 'unstacked': ['%3', '%8', '%12']})
         self.reply('Work: 3 8')

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import urllib.request
 
+import codex_provider
 import paths
 
 PATH = '/mobile/api/suggest-groups'
@@ -152,7 +153,9 @@ def parse_output(output, prefix='$'):
 
 
 def output_groups(output, entries, prefix='$', kind='sessions'):
-    if kind == 'tabs' and isinstance(output, str) and output.strip().strip('.').upper() == 'NONE':
+    # Only the first line counts: Codex can add a line from its AGENTS.md after the answer.
+    first = next((line for line in output.splitlines() if line.strip()), '') if isinstance(output, str) else ''
+    if kind == 'tabs' and first.strip().strip('.').upper() == 'NONE':
         return []  # the model found no useful stack: an answer, not a failure
     groups = validate(parse_output(output, prefix), entries, kind)
     if not any(group['name'] != 'Other' and len(group['sessions']) > 1 for group in groups):
@@ -196,6 +199,9 @@ def run_agent(agent, executable, prompt, content, timeout, started=None):
                        '--no-session-persistence', '--system-prompt', prompt]
             model_input_text = content
         else:
+            # The isolated command pins the ChatGPT plan. Send nothing when the user moved Codex to another provider.
+            if codex_provider.chosen() != 'plan' or codex_provider.default_provider() != 'openai':
+                raise ValueError('Codex runs on another provider.')
             command = [*isolated_codex_command(executable), '-o', str(outfile), '-']
             model_input_text = prompt + '\n\n' + content
         process = subprocess.Popen(command, cwd=folder, stdin=subprocess.PIPE,
