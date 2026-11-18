@@ -63,8 +63,10 @@ def _pane_agent(pane_pid, processes, tree, registered=()):
 
 
 def _pane_registries(claude, pane, tree):
-    """The Claude registries of processes in this pane, by pid."""
-    return {r['pid']: r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)}
+    """The Claude registries of processes in this pane, by pid. A print or SDK run (`claude -p`: entrypoint sdk-cli)
+    is a tool of the pane's agent, never the pane's own conversation."""
+    return {r['pid']: r for r in claude if r['pid'] in tree and r.get('tmux', '').endswith('.' + pane)
+            and not str(r.get('entrypoint') or '').startswith('sdk')}
 
 
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')

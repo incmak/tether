@@ -166,18 +166,25 @@ class CloseHelperTabTest(unittest.TestCase):
                     self.close()
                 self.assert_pane_untouched()
 
-    def test_close_closes_a_bound_helper_whose_agent_has_exited(self):
-        for gone in ('absent', 'shell'):
-            with self.subTest(gone=gone):
-                self.kill.reset_mock()
-                self.run.options['%13'] = json.dumps(self.record)
-                if gone == 'absent':
-                    self.entries[:] = [self.owner]
-                else:
-                    self.entries[:] = [self.owner, dict(id='%13', agent='shell')]
-                self.assertEqual(self.close(), {'closed': '%13'})
-                self.kill.assert_called_once_with('%13', self.run)
+    def test_close_refuses_a_helper_without_a_confirmed_conversation(self):
+        # Closing is final: an absent or shell pane (agent gone, or a discovery miss) and an unbound guess stay open.
+        cases = (('absent', None, self.record), ('shell', dict(id='%13', agent='shell'), self.record),
+                 ('unbound guess', dict(self.helper, thread=OTHER, codex_binding='guess'),
+                  dict(self.record, helper_thread=None)))
+        for name, target, record in cases:
+            with self.subTest(name=name):
+                self.record = record
+                self.run.options['%13'] = json.dumps(record)
+                self.entries[:] = [self.owner] + ([target] if target else [])
+                with self.assertRaisesRegex(RuntimeError, 'does not close it'):
+                    self.close()
+                self.assert_pane_untouched()
 
+    def test_close_binds_and_closes_an_unbound_verified_helper(self):
+        self.record = dict(self.record, helper_thread=None)
+        self.run.options['%13'] = json.dumps(self.record)
+        self.assertEqual(self.close(), {'closed': '%13'})
+        self.kill.assert_called_once_with('%13', self.run)
 
 if __name__ == '__main__':
     unittest.main()

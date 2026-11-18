@@ -81,6 +81,9 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     target = next((entry for entry in entries if entry['id'] == pane), None)
     if record is not None and record['owner_pane'] == caller['id']:
         helper_tabs.check(caller['id'], caller, target, record, run, pane=pane)
+        if helper_tabs.verified_thread(target) is None:  # closing is final: only a confirmed conversation
+            raise RuntimeError("Tether cannot confirm that helper's conversation, so it does not close it. "
+                               'Close the tab in Tether.')
     elif caller['id'] not in review_links.reviewed_by().get(pane, []):
         raise ValueError('That tab is not a helper of this tab, and this tab does not review it.')
     if target is not None and status(target)['state'] in ('Working', 'Approval', 'Input needed'):

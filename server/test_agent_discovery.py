@@ -63,6 +63,18 @@ class AgentDiscoveryTest(unittest.TestCase):
                 self.assertEqual((entry['agent'], entry['thread'], entry['owner_pid']), ('claude', HELPER, 200))
                 self.assertFalse(entry.get('pending_conversation'))
 
+    def test_nested_print_registry_never_owns_the_pane_when_the_outer_registry_is_missing(self):
+        # Outer Claude named node, its registry not readable this moment, a nested `claude -p` registry present.
+        self.processes[200] = (100, 'node')
+        inner = self.registry(2, OTHER, 'sdk-cli')
+        entry = self.discover(inner)
+        self.assertNotEqual(entry.get('thread'), OTHER)
+        self.assertIsNone(helper_tabs.verified_thread(entry))
+        owner = dict(id='%12', agent='claude', thread=OWNER, registry='/fake/12.json')
+        record = dict(owner_pane='%12', owner_thread=OWNER, helper_thread=HELPER, sent_at=1000)
+        with self.assertRaisesRegex(RuntimeError, 'cannot confirm that helper'):
+            helper_tabs.check('%12', owner, entry, record, Tmux(), pane='%13')
+
     def test_nested_claude_registry_cannot_change_wait_send_or_close_identity(self):
         outer = self.registry(200, HELPER, 'cli')
         inner = self.registry(2, OTHER, 'sdk-cli')
