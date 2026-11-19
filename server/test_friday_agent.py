@@ -784,6 +784,9 @@ class ShortenOldReadsTests(unittest.TestCase):
         messages += self.read(reply_id='same', offset=0)
         result = friday.shorten_old_reads(messages)
         self.assertEqual(len(self.shortened(result)), 1)
+        self.assertEqual(self.shortened(result)[0]['offset'], 0)
+        self.assertEqual(list(json.loads(result[1]['content']))[:3], ['chat', 'reply_id', 'offset'])
+        self.assertEqual(result[1]['content'], json.dumps(json.loads(result[1]['content']), separators=(',', ':')))
         self.assertEqual(result[3:], messages[3:])
         messages += self.read(reply_id='new', offset=0)
         self.assertEqual(len(self.shortened(friday.shorten_old_reads(messages))), 3)
@@ -819,13 +822,20 @@ class ShortenOldReadsTests(unittest.TestCase):
         messages += [{'role': 'user', 'content': 'Next turn'}]
         self.assertEqual(len(self.shortened(friday.shorten_old_reads(messages))), 2)
 
-    def test_budget_can_shorten_older_part_of_current_reply(self):
-        messages = [{'role': 'user', 'content': 'Read it'}]
-        messages += self.read(text='x' * 18000, reply_id='same', offset=0)
-        messages += self.read(text='y' * 18000, reply_id='same', offset=18000)
+    def test_budget_keeps_all_current_reply_parts_and_shortens_older_turn(self):
+        messages = [{'role': 'user', 'content': 'Read the other chat'}]
+        messages += self.read('B', text='old ' * 1500, reply_id='older', offset=6000)
+        messages += [{'role': 'user', 'content': 'Read it'}]
+        current_start = len(messages)
+        reply = 'x' * 30000
+        for offset in range(0, len(reply), 6000):
+            messages += self.read(text=reply[offset:offset + 6000], reply_id='same', offset=offset)
         result = friday.shorten_old_reads(messages)
         self.assertEqual(len(self.shortened(result)), 1)
-        self.assertEqual(result[-1], messages[-1])
+        self.assertEqual(self.shortened(result)[0]['chat'], 'B')
+        self.assertEqual(self.shortened(result)[0]['offset'], 6000)
+        self.assertEqual(result[current_start:], messages[current_start:])
+        self.assertEqual(friday.shorten_old_reads(result), result)
 
     def test_skips_non_reads_errors_invalid_and_already_shortened_content(self):
         messages = []

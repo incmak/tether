@@ -643,7 +643,7 @@ def shorten_old_reads(messages):
     for index, data in reversed(full):
         if total <= READ_BUDGET:
             break
-        if index == newest[data['chat']][0] and index > last_user:
+        if index > last_user:
             continue
         shorten.add(index)
         total -= len(data['text'])
@@ -658,6 +658,8 @@ def shorten_old_reads(messages):
         summary = {'chat': data['chat']}
         if 'reply_id' in data:
             summary['reply_id'] = data['reply_id']
+        if 'offset' in data:
+            summary['offset'] = data['offset']
         summary.update(total_chars=data.get('total_chars', len(data['text'])), shortened=True,
                        text=preview + '…',
                        note='Older read. Call read_last_reply again for the full text.')
