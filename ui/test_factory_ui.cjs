@@ -328,6 +328,11 @@ async function main() {
         await zoom(center, [-60, 60], [-30, 30])
         check(`${width}: squeezing at the floor leaves Factory open`, await page.locator('dialog.factory[open]').isVisible() && JSON.stringify(await crumbs()) === '["Factory"]')
 
+        // A finger that ends outside the dialog (the browser sends pointercancel to <html>) leaves no stale id.
+        await page.evaluate(({ x, y }) => {
+          document.elementFromPoint(x, y).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 31, isPrimary: true, clientX: x, clientY: y }))
+          document.documentElement.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch', pointerId: 31, isPrimary: true, clientX: x, clientY: y }))
+        }, center)
         await pointers(center, [['down', [-30, 30]], ['move', [-60, 60]]])
         await page.locator('.factory-task').waitFor()
         await zoomSettled(page)

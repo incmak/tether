@@ -301,14 +301,15 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
     }
     box.addEventListener('pointerdown', down, { passive: true })
     box.addEventListener('pointermove', move, { passive: true })
-    box.addEventListener('pointerup', end, { passive: true })
-    box.addEventListener('pointercancel', end, { passive: true })
+    // A finger can end outside the dialog (its item was removed, or it left the screen): listen on the window.
+    window.addEventListener('pointerup', end, { capture: true, passive: true })
+    window.addEventListener('pointercancel', end, { capture: true, passive: true })
     box.addEventListener('touchmove', touchmove, { passive: false })
     return () => {
       box.removeEventListener('pointerdown', down)
       box.removeEventListener('pointermove', move)
-      box.removeEventListener('pointerup', end)
-      box.removeEventListener('pointercancel', end)
+      window.removeEventListener('pointerup', end, { capture: true })
+      window.removeEventListener('pointercancel', end, { capture: true })
       box.removeEventListener('touchmove', touchmove)
     }
   }, [depth, out])
