@@ -261,7 +261,7 @@ test('advisors never lead the phase even when their tools are newest', () => {
   const result = floor([pane('%30'), advisor], tools)
   assert.deepEqual(members(byId(result, '%30')), [['%30', 'worker'], ['%31', 'advisor']])
   assert.equal(byId(result, '%30').phase, 'build')
-  assert.equal(byId(floor([advisor], tools), '%31').phase, 'build')
+  assert.equal(byId(floor([advisor], tools), '%31').phase, 'deploy', 'an advisor alone reads its own steps')
 })
 
 // Report only evidence this screen has for a phase, and keep it until the server confirms it.

@@ -297,10 +297,11 @@ function phaseOfLinked(linked: Agent[]): { phase: Phase; why: string } {
   if (reviewer) return { phase: 'review', why: `reviewer ${reviewer.name} is working` }
   const doers = linked.filter(entry => entry.role === 'worker').concat(linked.filter(entry => entry.role === 'main'))
   // The newest steps of the doer that moved last decide.
-  const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0]
-  const found = lead && phaseOfTools(lead.tools)
+  // A task with no worker (an advisor whose parent closed) reads its own steps.
+  const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0] ?? linked[0]
+  const found = phaseOfTools(lead.tools)
   if (found) return { phase: found.phase, why: `${lead.name}: ${found.why}` }
-  return { phase: 'build', why: `guessed: ${(lead ?? linked[0]).name} is open, no step read` }
+  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read` }
 }
 
 function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Task {
