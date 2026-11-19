@@ -103,18 +103,18 @@ async function main() {
     }
 
     // 2. Keyboard: Tab reaches the link with a visible focus ring; Enter saves the zip under the server's name.
-    for (const width of [320, 1280]) {
-      const { context, page, errors, hits } = await open({ width })
+    for (const width of [320, 1280]) for (const scheme of ['light', 'dark']) {
+      const { context, page, errors, hits } = await open({ width, scheme })
       const link = page.getByRole('link', { name: 'Download extension (.zip)' })
       await page.keyboard.press('Tab')
       assert.ok(await link.evaluate(node => node === document.activeElement), 'the first Tab stop is the download link')
       assert.ok(await link.evaluate(node => node.matches(':focus-visible') && getComputedStyle(node).outlineStyle !== 'none'), 'focus ring shows')
-      await shot(page, `focus-${width}`)
+      await shot(page, `focus-${width}-${scheme}`)
       const [download] = await Promise.all([page.waitForEvent('download'), page.keyboard.press('Enter')])
       assert.equal(download.suggestedFilename(), NAME)
       await page.getByRole('status').filter({ hasText: `Downloaded ${NAME}.` }).waitFor()
       assert.equal(hits.length, 1, 'one fetch, no second navigation download')
-      await shot(page, `downloaded-${width}`)
+      await shot(page, `downloaded-${width}-${scheme}`)
       assert.deepEqual(errors, [])
       await context.close()
     }
@@ -135,16 +135,16 @@ async function main() {
 
     // 4. Errors: signed out, a server failure, and a 200 sign-in page from a proxy show an alert in the panel and save nothing.
     for (const [answer, text] of [['401', 'Your sign-in ended. Reload Tether, sign in, and download again.'], ['500', 'Could not build the extension zip. No manifest.json.'], ['html', 'The server did not send a zip file. Reload Tether, sign in, and download again.']]) {
-      for (const width of [320, 1280]) {
-        const { context, page, errors } = await open({ width, answer })
+      for (const width of [320, 1280]) for (const scheme of ['light', 'dark']) {
+        const { context, page, errors } = await open({ width, scheme, answer })
         let saved = false
         page.on('download', () => { saved = true })
         await page.getByRole('link', { name: 'Download extension (.zip)' }).click()
         await page.getByRole('alert').filter({ hasText: text }).waitFor()
         assert.equal(saved, false)
         assert.ok(await page.getByRole('link', { name: 'Download extension (.zip)' }).isVisible(), 'the link stays for a retry')
-        await noOverflow(page, `error ${answer} ${width}`)
-        await shot(page, `error-${answer}-${width}`)
+        await noOverflow(page, `error ${answer} ${width} ${scheme}`)
+        await shot(page, `error-${answer}-${width}-${scheme}`)
         assert.deepEqual(errors, [])
         await context.close()
       }
