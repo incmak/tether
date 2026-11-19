@@ -1914,7 +1914,7 @@ class ReviewLinksTests(unittest.TestCase):
 
                             approval = f'APPROVED {self.HASH}'
                             expected_alert = (
-                                f'“Fix the bug”: 3 approvals in a row did not match the commit the tab was at. '
+                                '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
                                 'Answer in that tab to restart reviews.' if count == 'stale_rounds' else
                                 f'“Fix the bug”: the reviewer still found blocking problems after {limit} rounds. '
                                 f'Answer in that tab to restart reviews. Open findings: “{blocking_reply}”'
@@ -4647,6 +4647,47 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertNotIn('was not forwarded', self.send.call_args.args[1])
         self.assertNotIn('stale_delivered', self.links()[0])
 
+    def test_commit_unreadable_after_delivery_asks_for_confirmation(self):
+        for failure in (None, subprocess.TimeoutExpired('git', 5)):
+            with self.subTest(failure=failure):
+                self.add()
+                self.send.reset_mock()
+                self.bind()
+                self.request_review()
+                self.commit = Mock(side_effect=[self.HASH, failure])
+                self.finish_review(f'APPROVED {self.HASH}')
+                self.assertEqual(self.send.call_count, 2)
+                self.assertEqual(self.send.call_args.args[0], self.worker)
+                self.assertEqual(review_links.approved_commits(), {})
+
+                scope = self.scope
+                self.scope = lambda entry: None
+                self.observe()  # the retry waits for a readable scope
+                self.assertEqual(self.send.call_count, 2)
+                self.scope = scope  # git can read the same commit again
+                self.observe()
+                self.assertEqual(self.send.call_count, 3)
+                self.assertEqual(self.send.call_args.args[0], self.reviewer)
+                text = self.send.call_args.args[1]
+                self.assertIn(f'Commit under review: {self.HASH} in', text)
+                self.assertIn(f'Your approval of {self.HASH[:12]} reached the tab. Tether could not read the tab\'s '
+                              'commit after delivery. Review the current commit and confirm it if it passes.', text)
+                self.assertNotIn('moved to another commit', text)
+
+    def test_commit_unreadable_after_delivery_at_the_round_limit_asks_the_user(self):
+        self.bind()
+        self.request_review()
+        for _ in range(review_links.MAX_ROUNDS):
+            self.commit = Mock(side_effect=[self.HASH, None])
+            self.finish_review(f'APPROVED {self.HASH}')
+            self.observe()
+        self.assertEqual(self.send.call_count, 2 * review_links.MAX_ROUNDS)
+        self.assertEqual(review_links.paused(), {'%13': ['%12']})
+        self.alert.assert_called_once_with('Review needs you',
+            '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
+            'Tether could not read the tab\'s commit for the latest approval. Answer in that tab to restart reviews.',
+            '%13')
+
     def test_unbound_approval_that_names_a_commit_needs_a_readable_commit(self):
         # Review round 5, finding 2: the request was not bound and git cannot read HEAD at the reply.
         self.scope = lambda entry: None
@@ -4656,7 +4697,8 @@ class ReviewLinksTests(unittest.TestCase):
         for _ in range(review_links.VERIFY_TICKS):
             self.observe()
         self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))  # never the worker
-        self.assertIn(f'Your approval of {self.HASH[:12]} was not forwarded', self.send.call_args.args[1])
+        self.assertIn(f'Your approval of {self.HASH[:12]} was not forwarded because Tether could not read the tab\'s '
+                      'commit. Check the current commit before approving this review.', self.send.call_args.args[1])
         self.add()
         self.send.reset_mock()
         self.request_review()
@@ -5048,7 +5090,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(link['paused'])
         self.assertEqual(self.send.call_count, review_links.MAX_ROUNDS)  # 3 requests, no 4th, nothing to the worker
         self.alert.assert_called_once_with('Review needs you',
-            '“Fix the bug”: 3 approvals in a row did not match the commit the tab was at. '
+            '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
             'Answer in that tab to restart reviews.', '%13')
         self.turn_source = lambda entry: 'user'
         self.request_review()  # a prompt from Mak restarts
@@ -5123,10 +5165,10 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe()
                 self.assertTrue(all(link.get('paused') for link in self.links()))
                 self.alert.assert_called_once_with('Review needs you',
-                    '“Fix the bug”: 3 approvals in a row did not match the commit the tab was at. '
+                    '“Fix the bug”: 3 approvals in a row could not be verified for the current commit. '
                     'Answer in that tab to restart reviews.', '%13')
 
-    def test_unreadable_commit_at_approval_waits_then_counts_as_not_matching(self):
+    def test_unreadable_commit_at_approval_waits_then_requests_verification(self):
         self.bind()
         self.request_review()
         self.commit = Mock(return_value=None)
@@ -5152,6 +5194,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))  # never the worker
         self.assertNotIn('approved_commit', self.links()[0])
         self.assertEqual(self.links()[0]['stale_rounds'], 1)
+        self.assertIn(f'Your approval of {self.HASH[:12]} was not forwarded because Tether could not read the tab\'s '
+                      'commit. Check the current commit before approving this review.', self.send.call_args.args[1])
 
     def test_link_from_before_the_restart_without_a_commit_forwards_approval(self):
         self.request_review()  # no scope: the stored link has no review_commit

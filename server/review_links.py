@@ -30,7 +30,7 @@ MAX_SAVED_CAPS = 100
 MAX_ROUNDS = 3
 EXTRA_ROUNDS = 2
 # Counts that pause a review at MAX_ROUNDS: failed reviews, reviews of turns that changed nothing, and approvals
-# that did not match the commit the tab was at.
+# that could not be verified for the current commit.
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 CAP_DECISION = ('counts', 'limit', 'grant_rounds', 'paused', 'unreadable', 'parent_stage', 'parent_missing',
                 'escalate', 'cap_reset')
@@ -42,7 +42,7 @@ CAP_ERROR = 'This worker reached the review round cap. Mak or the parent must de
 UPGRADE_PAUSE = 'upgrade'
 UPGRADE_ERROR = 'The review state from the upgrade needs attention. Stop any existing review link, then link the tabs again in the browser.'
 DELIVERY_ERROR = 'Review feedback is being delivered. Try linking again.'
-VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as not matching
+VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as unverified
 SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
 MENTIONED_COMMIT = re.compile(r'\bcommit\s+[`*]*([0-9a-f]{7,64})\b', re.I)
@@ -120,7 +120,8 @@ def _sanitize(row):
           'scope_ticks', 'verify_ticks'), lambda value: type(value) is int and value >= 0),
         (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
          lambda value: type(value) in (int, float)),
-        (('unreadable', 'pending_reset', 'seen_working', 'upgrade_alerted'), lambda value: type(value) is bool),
+        (('unreadable', 'pending_reset', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
+         lambda value: type(value) is bool),
         (('name', 'escalate', 'cap_reset'), lambda value: isinstance(value, str)),
     ):
         for field in fields:
@@ -611,7 +612,7 @@ def _counts_at_limit(cap, counts, next_round=None):
     # than MAX_ROUNDS + EXTRA_ROUNDS failed reviews for one reviewer.
     return max(failed) >= _round_limit(cap) or (
         'grant_rounds' in cap and sum(failed) >= min(cap['grant_rounds'] + EXTRA_ROUNDS, MAX_ROUNDS + EXTRA_ROUNDS)) or (
-        counts.get('stale_rounds', 0) >= MAX_ROUNDS)  # approvals in a row that did not match the tab's commit
+        counts.get('stale_rounds', 0) >= MAX_ROUNDS)  # approvals in a row that could not be verified
 
 
 def _at_round_limit(cap):
@@ -1243,7 +1244,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     # The worker's commit is unreadable now (a slow git, a folder that moved). Ask again next tick.
                     link['verify_ticks'] = link.get('verify_ticks', 0) + 1
                     return link
-                # stale: the commit that the approval is for, when the tab is not at it ('' = it names none).
+                # stale: the commit that the approval is for, when we cannot accept it ('' = it names none).
                 stale = None
                 if bound and (current != bound or misnamed):
                     stale = (named if named and FULL.fullmatch(named) else '') if misnamed else bound
@@ -1253,6 +1254,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     # Not an approval of the current work and not a finding either: ask for a review of the current
                     # commit. The count stops a loop.
                     link['stale_commit'] = stale
+                    link['stale_unreadable'] = bool(stale) and current is None
                     _record_round(cap, link, 'stale_rounds')
                     link['seen_working'] = True
                     link['awaiting'] = False
@@ -1268,11 +1270,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     forwarded = _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery)
                     if not forwarded:
                         pass  # not delivered: the same checks run again on the next tick
-                    elif bound and _call(commit, worker) != bound:
-                        # The commit moved between the read above and the delivery. The tab has the approval text
-                        # (it names the commit), but its current work is not reviewed: ask for a review of it.
+                    elif bound and (after_send := _call(commit, worker)) != bound:
+                        # The tab has the approval text. A different commit or a failed read needs a new review.
                         link['stale_commit'] = bound
                         link['stale_delivered'] = True
+                        link['stale_unreadable'] = not isinstance(after_send, str)
                         _record_round(cap, link, 'stale_rounds')
                         link['seen_working'] = True
                         link['awaiting'] = False
@@ -1282,7 +1284,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                          if owner != reviewer_key}
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
                         for key in ('stale_commit', 'approved_commit', 'approved_at',
-                                    'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered'):
+                                    'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered',
+                                    'stale_unreadable'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
@@ -1394,17 +1397,26 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if target is None and was_bound:
                 # Still unreadable. A timeout does not show that an approval is for the current commit: the review
                 # stops and the user decides. The user's next prompt restarts reviews without the old binding.
-                for key in ('review_commit', 'review_clean', 'stale_commit', 'scope_ticks'):
+                for key in ('review_commit', 'review_clean', 'stale_commit', 'stale_delivered', 'stale_unreadable',
+                            'scope_ticks'):
                     link.pop(key, None)
                 cap['unreadable'] = True
                 link['seen_working'] = False
                 return link
             stale = link.get('stale_commit')
-            binding = '' if not isinstance(stale, str) else (
-                f'Your approval of {stale[:12]} reached the tab after it had moved to another commit, so it does not '
-                'count for the current work. ' if stale and link.get('stale_delivered') else
-                f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
-                else 'Your approval was not forwarded: it did not name the full commit hash right after APPROVED. ')
+            if isinstance(stale, str) and stale and link.get('stale_unreadable'):
+                if link.get('stale_delivered'):
+                    binding = (f'Your approval of {stale[:12]} reached the tab. Tether could not read the tab\'s '
+                               'commit after delivery. Review the current commit and confirm it if it passes. ')
+                else:
+                    binding = (f'Your approval of {stale[:12]} was not forwarded because Tether could not read the '
+                               "tab's commit. Check the current commit before approving this review. ")
+            else:
+                binding = '' if not isinstance(stale, str) else (
+                    f'Your approval of {stale[:12]} reached the tab after it had moved to another commit, so it does not '
+                    'count for the current work. ' if stale and link.get('stale_delivered') else
+                    f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
+                    else 'Your approval was not forwarded: it did not name the full commit hash right after APPROVED. ')
             if target is not None:
                 folder = shlex.quote(_request_text(str(target.get('folder') or '')))
                 binding = (
@@ -1457,6 +1469,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link['request_id'] = request_id
             link.pop('stale_commit', None)
             link.pop('stale_delivered', None)
+            link.pop('stale_unreadable', None)
             link.pop('confirm_commit', None)
             link.pop('scope_ticks', None)
             if target is not None:
@@ -1479,7 +1492,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     return link
 
 
-def _cap_alert(cap, preview=None, limit=None):
+def _cap_alert(cap, preview=None, limit=None, *, unreadable=False):
     if preview is not None:
         restart = ('Link the tabs again from Tether to restart reviews.' if _saved(cap)
                    else 'Answer in that tab to restart reviews.')
@@ -1487,9 +1500,10 @@ def _cap_alert(cap, preview=None, limit=None):
                 f'“{cap["name"]}”: the reviewer still found blocking problems after {limit or _round_limit(cap)} rounds. '
                 f'{restart} Open findings: “{preview}”')
     if any(counts.get('stale_rounds', 0) >= MAX_ROUNDS for counts in cap.get('counts', {}).values()):
+        reason = "Tether could not read the tab's commit for the latest approval. " if unreadable else ''
         return ('Review needs you',
-                f'“{cap["name"]}”: {MAX_ROUNDS} approvals in a row did not match the commit the tab '
-                'was at. Answer in that tab to restart reviews.')
+                f'“{cap["name"]}”: {MAX_ROUNDS} approvals in a row could not be verified for the current commit. '
+                f'{reason}Answer in that tab to restart reviews.')
     if 'parent_stage' not in cap and 'escalate' not in cap:
         return ('Review paused', f'“{cap["name"]}” reached the round limit. Answer in that tab to restart reviews.')
     return None
@@ -1631,7 +1645,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                       file=sys.stderr, flush=True)
                 notify(key, ('Review link lost', f'“{name}”: {reason}. Tether no longer reviews this tab.'))
             elif merged.get('paused') and (not snapshot.get('paused') or 'alert' in reply_effect):
-                notify(key, _cap_alert(merged, *reply_effect.get('alert', ())))
+                notify(key, _cap_alert(merged, *reply_effect.get('alert', ()),
+                                       unreadable=updated.get('stale_unreadable', False)))
             elif merged.get('unreadable') and not snapshot.get('unreadable'):
                 notify(key, ('Review needs you',
                              f'“{name}”: Tether cannot read the commit in the folder of that tab, so it cannot '
