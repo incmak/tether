@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import antigravity
 import factory
+import server
 from agents import claude_consume
 
 
@@ -20,6 +22,11 @@ def claude_readers():
 
 def tool_use(name, data, stamp='2026-11-17T08:00:00Z'):
     return {'type': 'assistant', 'timestamp': stamp, 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'u-' + name, 'name': name, 'input': data}]}}
+
+
+def agy_step(position, **fields):
+    # Synthetic Antigravity rows from the shape antigravity.py parses. No live agy capture.
+    return {'type': 'PLANNER_RESPONSE', 'step_index': position, 'content': '', **fields}
 
 
 class DeployedTests(unittest.TestCase):
@@ -84,8 +91,59 @@ class ToolTests(unittest.TestCase):
                 stream.write(json.dumps(tool_use('Edit', {'file_path': 'c.py'})) + '\n')
             self.assertEqual(factory.recent_tools(entry, claude_readers())[-1]['title'], 'c.py')
 
+    def test_recent_tools_reads_antigravity_calls_and_titles(self):
+        stamp = '2026-11-19T09:00:00Z'
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.write(folder, [
+                {'type': 'USER_INPUT', 'step_index': 1, 'content': 'Run the tests'},
+                agy_step(2, created_at=stamp, tool_calls=[
+                    {'name': 'run_command', 'args': {'CommandLine': '"python3 -m unittest -q"'}},
+                    {'name': 'view_file', 'args': {'AbsolutePath': '"/repo/test_factory.py"'}},
+                ]),
+            ])
+            entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(path)}
+            self.assertEqual(factory.recent_tools(entry, server.FACTORY_READERS), [
+                {'name': 'run_command', 'title': 'python3 -m unittest -q', 'at': stamp, 'error': False, 'done': False},
+                {'name': 'view_file', 'title': '/repo/test_factory.py', 'at': stamp, 'error': False, 'done': False},
+            ])
+
+    def test_recent_tools_orders_and_replaces_antigravity_steps(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.write(folder, [
+                agy_step(3, tool_calls=[{'name': 'old_step_3'}]),
+                agy_step(2, tool_calls=[{'name': 'step_2'}]),
+                agy_step(3, tool_calls=[{'name': 'new_step_3_first'}, {'name': 'new_step_3_second'}]),
+                agy_step(3, content='Text-only rewrite'),
+            ])
+            entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(path)}
+            tools = factory.recent_tools(entry, server.FACTORY_READERS)
+            self.assertEqual([tool['name'] for tool in tools], ['step_2', 'new_step_3_first', 'new_step_3_second'])
+
+    def test_recent_tools_handles_empty_rewrites_and_invalid_antigravity_calls(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.write(folder, [
+                agy_step(2, tool_calls=[{'name': 'removed'}]),
+                agy_step(8, tool_calls=[{'name': 'later'}]),
+                agy_step(2, tool_calls=[]),
+                agy_step('9', tool_calls=[None, {'name': 42}, {'args': {'toolSummary': '"Inspect file"'}}]),
+            ])
+            entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(path)}
+            tools = factory.recent_tools(entry, server.FACTORY_READERS)
+            self.assertEqual([(tool['name'], tool['title']) for tool in tools], [('tool', 'Inspect file'), ('later', '')])
+
+    def test_agy_tool_line_preserves_activity_text(self):
+        for args, expected in [
+            ({'CommandLine': '"pwd\nls"', 'toolAction': 'Inspect directory'}, 'Ran pwd'),
+            ({'toolAction': '"Inspect file"', 'toolSummary': 'Read it'}, 'Inspect file'),
+            ({'toolSummary': '"Read it"'}, 'Read it'),
+            ({'AbsolutePath': '/repo/test_factory.py'}, 'view_file'),
+            ({}, 'view_file'),
+        ]:
+            with self.subTest(args=args):
+                self.assertEqual(antigravity.agy_tool_line({'name': 'view_file', 'args': args}), expected)
+
     def test_no_tools_for_unread_agents_missing_files_or_odd_records(self):
-        self.assertEqual(factory.recent_tools({'id': '%1', 'agent': 'antigravity', 'transcript': '/x'}, claude_readers()), [])
+        self.assertEqual(factory.recent_tools({'id': '%1', 'agent': 'shell', 'transcript': '/x'}, claude_readers()), [])
         self.assertEqual(factory.recent_tools({'id': '%1', 'agent': 'claude', 'transcript': '/no/such/file'}, claude_readers()), [])
         def broken(state, index, record):
             raise KeyError('odd')
@@ -119,9 +177,11 @@ class PayloadTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout='/srv/repo/.git\n')
             return SimpleNamespace(returncode=0, stdout='abc1234\t1794884700\tLaunch: pass folders (B188)\nbad line\n')
         factory._root_cache.clear(); factory._commit_cache.clear()
-        entries = [{'id': '%1', 'agent': 'claude', 'transcript': ''}, {'id': '%2', 'agent': 'claude', 'transcript': ''}, {'id': '%3', 'agent': 'shell'}]
+        entries = [{'id': '%1', 'agent': 'claude', 'transcript': ''}, {'id': '%2', 'agent': 'claude', 'transcript': ''},
+                   {'id': '%3', 'agent': 'shell'}, {'id': '%4', 'agent': 'antigravity'}]
         data = factory.payload(entries, lambda entry: '/srv/repo/wt-' + entry['id'], claude_readers(), run=run, now=1794884800)
-        self.assertEqual(set(data['tools']), {'%1', '%2'})
+        self.assertEqual(set(data['tools']), {'%1', '%2', '%4'})
+        self.assertIn(['git', '-C', '/srv/repo/wt-%4', 'rev-parse', '--path-format=absolute', '--git-common-dir'], runs)
         self.assertEqual(data['commits'], [{'hash': 'abc1234', 'at': 1794884700, 'subject': 'Launch: pass folders (B188)', 'refs': ['B188'], 'repo': 'repo'}])
         self.assertEqual(sum('log' in command for command in runs), 1)
         self.assertIn('deployed', data)

@@ -212,7 +212,7 @@ function phaseOfLinked(linked: Agent[]): { phase: Phase; why: string } {
   const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0] ?? linked[0]
   const found = phaseOfTools(lead.tools)
   if (found) return { phase: found.phase, why: `${lead.name}: ${found.why}` }
-  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read${lead.pane.agent === 'antigravity' ? ' (Tether reads no Antigravity steps)' : ''}` }
+  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read` }
 }
 
 function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Task {

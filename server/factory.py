@@ -7,8 +7,7 @@ things, all read-only:
 - tools:    each agent tab's latest tool calls, from the end of its transcript. The UI guesses Spec, Build, Verify and
             Deploy from them (ui/src/factoryModel.ts). Only the last TAIL_BYTES of a transcript are read, and the
             result is kept until the file changes, so a big screen that asks every few seconds costs little.
-            The agents' own parsers turn records into tool summaries (claude_consume, codex_consume), so this module
-            has no parser of its own. Antigravity transcripts have no tool records that Tether reads: no tools.
+            The agents' own parsers turn records into tool summaries, so this module has no parser of its own.
 - deployed: lines of DEPLOYED.md (the deploy log at the top of the Tether checkout) from the last DEPLOYED_DAYS days.
 - commits:  recent commits of the git repositories that the tabs work in, so a task can show the commits that name it.
 - sweep:    the last worktree sweep's lines (sweep.py, B210): behind main, failing checks, idle. Read from its file.
@@ -37,7 +36,7 @@ COMMIT_TTL = 30      # seconds
 GIT_TIMEOUT = 5
 GIT_BUDGET = 3       # seconds of uncached git work per request; the rest fills in on later polls
 REPOSITORIES = 12
-AGENTS = ('claude', 'codex')
+AGENTS = ('claude', 'codex', 'antigravity')
 
 _tail_cache = {}     # path -> (inode, size, mtime_ns, tools)
 _tail_lock = threading.Lock()

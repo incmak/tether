@@ -29,6 +29,7 @@ import codex_messages
 import continuations
 import coordinator
 import pane_icons
+import antigravity
 from antigravity import snapshot as antigravity_snapshot, transcript_message as antigravity_message, window_active
 from terminal_input import NAME_HELP, valid_name, fork_chat, new_window_after, DraftError, card_key, menu_choose, picker_choose, unqueue, clear_draft as terminal_clear_draft, type_text, live_status, capture, capture_screen, submit as terminal_submit, respond_approval, plan_menu, start_agent, create_session, shell_snapshot, shell_submit, verify
 from quota_notices import error_message, merge as merge_quota_notices
@@ -859,6 +860,7 @@ def codex_action_lines(payload):
 FACTORY_READERS = {
     'claude': (lambda: {'messages': []}, lambda state, index, record: claude_consume(state['messages'], index, record, display_text)),
     'codex': (lambda: codex_state(), lambda state, index, record: codex_consume(state, index, record)),
+    'antigravity': (antigravity.factory_state, antigravity.factory_consume),
 }
 
 

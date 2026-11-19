@@ -163,14 +163,51 @@ def live_entry(pids, cwd=None):
 
 
 
+def _agy_tool_parts(call):
+    args = call.get('args') if isinstance(call, dict) and isinstance(call.get('args'), dict) else {}
+
+    def value(key):
+        return str(args.get(key, '')).strip().strip('"')
+
+    name = call.get('name', 'tool') if isinstance(call, dict) else 'tool'
+    command = value('CommandLine')
+    first_line = command.split('\n', 1)[0] if command else None
+    return name, first_line, value('toolAction') or value('toolSummary'), value('AbsolutePath')
+
+
 def agy_tool_line(call):
     """A short description of one Antigravity tool call."""
-    args = call.get('args') if isinstance(call, dict) and isinstance(call.get('args'), dict) else {}
-    value = lambda key: str(args.get(key, '')).strip().strip('"')
-    name = call.get('name', 'tool') if isinstance(call, dict) else 'tool'
-    if value('CommandLine'):
-        return 'Ran ' + value('CommandLine').split('\n')[0]
-    return value('toolAction') or value('toolSummary') or name
+    name, command, action, _ = _agy_tool_parts(call)
+    return 'Ran ' + command if command is not None else action or name
+
+
+def factory_state():
+    steps = {}
+
+    def messages():
+        # Factory consumes the full tail before it reads messages.
+        for position in sorted(steps):
+            yield from steps[position]
+
+    return {'steps': steps, 'messages': messages()}
+
+
+def factory_consume(state, index, record):
+    calls = record.get('tool_calls')
+    if record.get('type') != 'PLANNER_RESPONSE' or not isinstance(calls, list):
+        return
+    step = record.get('step_index')
+    position = step if isinstance(step, int) else index
+    messages = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        name, command, action, path = _agy_tool_parts(call)
+        if not isinstance(name, str):
+            continue
+        messages.append({'tool': {'name': name or 'tool', 'title': command if command is not None else action or path,
+                                  'started': record.get('created_at'), 'status': 'pending', 'is_error': False}})
+    state['steps'][position] = messages
 
 
 def bucket_for(model_name):

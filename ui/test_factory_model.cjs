@@ -69,7 +69,8 @@ const byId = (result, id) => result.tasks.find(task => task.id === id)
   const none = at([])
   assert.equal(none.phase, 'build')
   assert.match(none.why, /guessed: B20 work is open, no step read/)
-  assert.match(at([], { agent: 'antigravity' }).why, /Tether reads no Antigravity steps/)
+  assert.equal(at([], { agent: 'antigravity' }).why, none.why)
+  assert.equal(at([tool('run_command', 'python3 -m unittest -q')], { agent: 'antigravity' }).phase, 'verify')
 }
 
 // A working reviewer puts the task in Review; a DEPLOYED.md line puts an open item in Deploy.
