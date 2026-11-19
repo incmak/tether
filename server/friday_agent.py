@@ -1225,8 +1225,12 @@ def runtime_types():
                     print('Friday tts ' + json.dumps(data, separators=(',', ':')), file=sys.stderr, flush=True)
 
     @dataclass
-    class FridayToolAckCompleteFrame(DataFrame):
+    class FridayToolSpeechCompleteFrame(DataFrame):
         tool_call_id: str
+
+    @dataclass(kw_only=True)
+    class FridaySpokenToolResult(FunctionCallResultProperties):
+        text: str
 
     class FridayLLM(OpenAILLMService):
         supports_developer_role = False
@@ -1249,8 +1253,14 @@ def runtime_types():
             self._request_messages = ContextVar('friday_request_messages', default=None)
             self._last_reply = (None, ())
             self.tools_in_flight = set()
+            # An aggregated result awaiting inference, or the context frame that runs it.
+            self.tool_followup = None
             self._thought_signatures = {}
             self._request_roles = ''
+
+        @property
+        def tool_work_pending(self):
+            return bool(self.tools_in_flight) or self.tool_followup is not None
 
         def _token_usage(self, usage):
             # Usage is metrics only. A provider may send null counts; that must not fail the reply.
@@ -1263,13 +1273,16 @@ def runtime_types():
                     and frame.friday_event_generation != self.session.event_generation):
                 return
             if isinstance(frame, LLMContextFrame):
+                if isinstance(self.tool_followup, FunctionCallResultFrame):
+                    # A new user turn can pick up a deferred result.
+                    self.tool_followup = frame
                 turn = getattr(self.session, 'turn', None)
                 if turn is not None:
                     self.session.llm_calls += 1
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
                                            ttfb=None, completed=False, call_count=0, buffered_text=None,
-                                           request_messages=())
+                                           request_messages=(), context_frame=frame)
                 token = self._active_response.set(response)
                 try:
                     await super().process_frame(frame, direction)
@@ -1303,18 +1316,19 @@ def runtime_types():
                 self.session.pending_proposal = None
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
-                frame.properties = FunctionCallResultProperties(run_llm=False)
-                return ack
-            return None
+                frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
             response = self._active_response.get()
-            ack = None
+            speech = None
             if direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, FunctionCallsStartedFrame):
                     self.tools_in_flight.update(call.tool_call_id for call in frame.function_calls)
                 elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
-                    ack = self.finish_browser_tool(frame)
+                    self.finish_browser_tool(frame)
+                    if (isinstance(frame, FunctionCallResultFrame)
+                            and isinstance(frame.properties, FridaySpokenToolResult)):
+                        speech = frame.properties.text
             if response and direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, LLMFullResponseStartFrame):
                     frame.friday_response = response
@@ -1329,24 +1343,23 @@ def runtime_types():
                 elif isinstance(frame, MetricsFrame) and response.ttfb is None:
                     response.ttfb = next((m.value for m in frame.data if isinstance(m, TTFBMetricsData)
                                           and m.processor == self.name and m.value > 0), None)
-            if ack:
-                frame.friday_spoken_ack = True
             await super().push_frame(frame, direction)
-            if ack:
-                await self.push_frame(TTSSpeakFrame(ack))
-                # TTS and the output transport serialize this behind the ack.
-                await self.push_frame(FridayToolAckCompleteFrame(frame.tool_call_id))
+            if speech:
+                await self.push_frame(TTSSpeakFrame(speech))
+                # TTS and the output transport serialize this behind the spoken result.
+                await self.push_frame(FridayToolSpeechCompleteFrame(frame.tool_call_id))
 
         def track_assistant(self, assistant, context):
             response = None
             speech_snapshot = ()
-            previous_tail = None
+            # Pipecat can process a system frame while a data frame is in progress.
+            processing = ContextVar('friday_assistant_frame', default=(None, None))
 
             @assistant.event_handler('on_before_process_frame')
             async def before_process(processor, frame):
-                nonlocal response, speech_snapshot, previous_tail
+                nonlocal response, speech_snapshot
                 messages = context.get_messages()
-                previous_tail = messages[-1] if messages else None
+                processing.set((frame, messages[-1] if messages else None))
                 if isinstance(frame, LLMFullResponseStartFrame):
                     response = getattr(frame, 'friday_response', None)
                 elif isinstance(frame, TTSStartedFrame) and frame.append_to_context and response is None:
@@ -1356,6 +1369,14 @@ def runtime_types():
             async def before_push(processor, frame):
                 if not isinstance(frame, LLMContextFrame):
                     return
+                cause, previous_tail = processing.get()
+                # These paths push context upstream to run inference. Take over the
+                # tool gate before the result settles or the request reaches the LLM.
+                if ((isinstance(cause, (FunctionCallResultFrame, FunctionCallCancelFrame))
+                        and cause.tool_call_id in self.tools_in_flight)
+                        or (isinstance(cause, BotStoppedSpeakingFrame)
+                            and isinstance(self.tool_followup, FunctionCallResultFrame))):
+                    self.tool_followup = frame
                 messages = context.get_messages()
                 if messages:
                     reply = messages[-1]
@@ -1367,17 +1388,27 @@ def runtime_types():
             @assistant.event_handler('on_after_process_frame')
             async def after_process(processor, frame):
                 nonlocal response, speech_snapshot
+                processing.set((None, None))
+                s = self.session
+                if (isinstance(frame, LLMFullResponseEndFrame) and response is not None
+                        and self.tool_followup is response.context_frame):
+                    self.tool_followup = None
+                    s.wake.set()
                 if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, LLMAssistantPushAggregationFrame)):
                     response, speech_snapshot = None, ()
                 if isinstance(frame, InterruptionFrame):
                     self.tools_in_flight.clear()
-                    self.session.wake.set()
-                elif isinstance(frame, (FunctionCallCancelFrame, FridayToolAckCompleteFrame)) or (
+                    self.tool_followup = None
+                    s.wake.set()
+                elif (isinstance(frame, FunctionCallResultFrame) and frame.tool_call_id in self.tools_in_flight
+                        and processor._context_push_owed):
+                    # Pipecat 1.15 leaves this set when it defers a result's inference.
+                    self.tool_followup = frame
+                if isinstance(frame, (FunctionCallCancelFrame, FridayToolSpeechCompleteFrame)) or (
                         isinstance(frame, FunctionCallResultFrame)
                         and (frame.properties is None or frame.properties.is_final)
-                        and not getattr(frame, 'friday_spoken_ack', False)):
-                    s = self.session
-                    if (isinstance(frame, FridayToolAckCompleteFrame)
+                        and not isinstance(frame.properties, FridaySpokenToolResult)):
+                    if (isinstance(frame, FridayToolSpeechCompleteFrame)
                             and frame.tool_call_id in self.tools_in_flight and s.tts.device_voice_pending()):
                         s.busy = True
                     self.tools_in_flight.discard(frame.tool_call_id)
@@ -1527,10 +1558,10 @@ def runtime_types():
                                                 str(params.arguments.get(key) or ''), run.user_turn)
                         run.readback_spoken = True
                         self.session.pending_proposal = proposal
+                    properties = (FridaySpokenToolResult(run_llm=False, text=send_readback(proposal))
+                                  if speak else FunctionCallResultProperties(run_llm=False))
                     await params.result_callback({'error': 'Not sent yet. Friday asked the user to confirm.'},
-                        properties=FunctionCallResultProperties(run_llm=False))
-                    if speak:
-                        await self.push_frame(TTSSpeakFrame(send_readback(proposal)))
+                                                 properties=properties)
                     return
                 await params.result_callback({'error': reason})
                 return
@@ -1934,7 +1965,7 @@ class Session:
             pending_voice = (not self.tts.voice_cancelled and (
                 self.tts.voice_open or (self.tts.voice_client and self.tts.voice_count
                                        and not self.tts.voice_playback_ended)))
-            acted = bool(self.bot_speaking or self.llm_running or pending_voice
+            acted = bool(self.bot_speaking or self.llm_running or pending_voice or self.llm.tool_work_pending
                          or (self.busy and not self.user_speaking))
             details = {key: data[key] if isinstance(data.get(key), str) and len(data[key]) <= 20
                        else None for key in ('source', 'phase')}
@@ -1984,7 +2015,7 @@ class Session:
             except asyncio.TimeoutError:
                 continue
             self.wake.clear()
-            busy = self.busy or self.reply_open or bool(self.llm.tools_in_flight)
+            busy = self.busy or self.reply_open or self.llm.tool_work_pending
             item = self.events.pop(self.user_speaking, self.bot_speaking, busy)
             if not item:
                 continue

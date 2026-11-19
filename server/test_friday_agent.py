@@ -1102,6 +1102,7 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
                                      voice_turn=0)
         session.turn = 1
         session.event_generation = 0
+        session.llm = SimpleNamespace(tool_work_pending=False)
         user = SimpleNamespace(broadcast_interruption=AsyncMock())
         session.aggregators = SimpleNamespace(user=lambda: user)
         session.rtvi = SimpleNamespace(send_server_message=AsyncMock())
@@ -2222,12 +2223,185 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(session.llm.tools_in_flight, set(ids))
             await send(self.rt.FunctionCallResultFrame('list_chats', 'finished', {}, {'count': 2}, run_llm=False))
             self.assertEqual(session.llm.tools_in_flight, {'cancelled', 'interrupted'})
+            self.assertIsNone(session.llm.tool_followup)
             await send(self.rt.FunctionCallCancelFrame('list_chats', 'cancelled'))
             self.assertEqual(session.llm.tools_in_flight, {'interrupted'})
             await send(self.rt.InterruptionFrame())
-            self.assertEqual(session.llm.tools_in_flight, set())
+            self.assertFalse(session.llm.tool_work_pending)
 
         await self.voice_pipeline('server', [exercise], llm_calls=[])
+
+    async def test_tap_interrupts_a_tool_without_reply_or_speech(self):
+        from pipecat.frames.frames import FunctionCallFromLLM
+
+        async def exercise(session):
+            started, interrupted = asyncio.Event(), asyncio.Event()
+            assistant = session.aggregators.assistant()
+
+            @assistant.event_handler('on_after_process_frame')
+            async def processed(processor, frame):
+                if isinstance(frame, self.rt.FunctionCallsStartedFrame):
+                    started.set()
+                elif isinstance(frame, self.rt.InterruptionFrame):
+                    interrupted.set()
+
+            call = FunctionCallFromLLM('list_chats', 'call', {}, session.context)
+            await session.llm.push_frame(self.rt.FunctionCallsStartedFrame([call]))
+            await started.wait()
+            self.assertFalse(session.busy or session.bot_speaking or session.llm_running)
+            await session.client_message('interrupt', {'source': 'tap'})
+            session.rtvi.send_server_message.assert_awaited_once_with({'t': 'interrupted', 'd': {'turn': 1}})
+            await interrupted.wait()
+            self.assertFalse(session.llm.tool_work_pending)
+
+        await self.voice_pipeline('server', [exercise], llm_calls=[])
+
+    async def event_after_tool_followup(self, user_text, tools, pretext=None, readback=None):
+        requests = []
+        dispatched = asyncio.Queue()
+        first_end, results_committed = asyncio.Event(), asyncio.Event()
+        followup_waiting, release_followup = asyncio.Event(), asyncio.Event()
+        output_end, commit_waiting, release_commit = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        pump_checked, event_requested = asyncio.Event(), asyncio.Event()
+        results = {str(index): result for index, (_, _, result) in enumerate(tools)}
+        followup = readback or 'Here is the tool result.'
+        ends_at_output = 0
+
+        def respond(number):
+            if number == 1:
+                calls = [{'index': index, 'id': str(index), 'type': 'function',
+                          'function': {'name': name, 'arguments': json.dumps(args)}}
+                         for index, (name, args, _) in enumerate(tools)]
+                return ([self.chunk(content=pretext)] if pretext else []) + [
+                    self.chunk(tool_calls=[call]) for call in calls]
+            if number == (2 if readback else 3):
+                event_requested.set()
+                return self.chunk(content='Docs is done.')
+            return self.chunk(content=followup)
+
+        async def watch(session, data):
+            nonlocal ends_at_output
+            if data.source is session.output and isinstance(data.frame, self.rt.LLMFullResponseEndFrame):
+                ends_at_output += 1
+                if ends_at_output == 2:
+                    output_end.set()
+
+        async def exercise(session):
+            assistant = session.aggregators.assistant()
+            started = False
+
+            @session.llm.event_handler('on_before_process_frame')
+            async def before_request(processor, frame):
+                nonlocal started
+                if isinstance(frame, self.rt.LLMContextFrame):
+                    if started and not readback and not followup_waiting.is_set():
+                        followup_waiting.set()
+                        await release_followup.wait()
+                    started = True
+
+            @assistant.event_handler('on_after_process_frame')
+            async def committed(processor, frame):
+                if isinstance(frame, self.rt.LLMFullResponseEndFrame):
+                    first_end.set()
+                elif isinstance(frame, self.rt.FunctionCallResultFrame):
+                    results.pop(frame.tool_call_id)
+                    if not results:
+                        results_committed.set()
+
+            @assistant.event_handler('on_before_process_frame')
+            async def before_commit(processor, frame):
+                if ((readback and isinstance(frame, self.rt.LLMAssistantPushAggregationFrame))
+                        or (not readback and first_end.is_set()
+                            and isinstance(frame, self.rt.LLMFullResponseEndFrame))):
+                    commit_waiting.set()
+                    await release_commit.wait()
+
+            session.models = SimpleNamespace(llm_health=AsyncMock(return_value=True))
+            session.rtvi.handle_function_call = AsyncMock(side_effect=dispatched.put)
+            for name, _, _ in tools:
+                session.llm.register_function(name, session.llm.handle_browser_tool, cancel_on_interruption=False)
+
+            user = session.aggregators.user()
+            session.worker.queue_frame = user.push_frame
+            session.context.add_message({'role': 'user', 'content': user_text})
+            session.events.put('event', {'id': 'e1', 'chat': 'docs', 'kind': 'done',
+                                         'priority': 'idle', 'text': 'Docs is done.'})
+            await user.push_frame(self.rt.LLMContextFrame(session.context))
+            await first_end.wait()
+            callbacks = {}
+            for _ in range(sum(result is not None for result in results.values())):
+                params = await dispatched.get()
+                callbacks[params.tool_call_id] = params.result_callback
+            for ident, callback in sorted(callbacks.items()):
+                await callback(results[ident])
+            await results_committed.wait()
+            await (commit_waiting if readback else followup_waiting).wait()
+
+            pop = session.events.pop
+
+            def check(*args):
+                item = pop(*args)
+                pump_checked.set()
+                return item
+
+            session.events.pop = check
+            pump = asyncio.create_task(session.pump())
+            try:
+                session.wake.set()
+                await pump_checked.wait()
+                self.assertEqual(len(session.events.items), 1, 'Event popped before the follow-up committed')
+                release_followup.set()
+                if not readback:
+                    await commit_waiting.wait()
+                    await output_end.wait()
+                    pump_checked.clear()
+                    session.wake.set()
+                    await pump_checked.wait()
+                    self.assertEqual(len(session.events.items), 1, 'Event popped before the reply committed')
+                release_commit.set()
+                await event_requested.wait()
+            finally:
+                release_followup.set()
+                release_commit.set()
+                pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+
+        await self.voice_pipeline('server', [exercise], llm_calls=requests, respond=respond, watch=watch)
+        self.assertEqual(len(requests), 2 if readback else 3)
+        if not readback:
+            self.assertEqual(requests[1][-1]['role'], 'tool')
+            tool_results = [json.loads(m['content']) for m in requests[1] if m['role'] == 'tool']
+            self.assertEqual(len(tool_results), len(tools))
+            for (_, _, result), actual in zip(tools, tool_results):
+                if result is None:
+                    self.assertIn('error', actual)
+                else:
+                    self.assertEqual(actual, result)
+        self.assertEqual(requests[-1][-2], {'role': 'assistant', 'content': followup})
+        self.assertTrue(requests[-1][-1]['content'].startswith(friday.EVENT_PREFIX))
+
+    async def test_event_waits_for_failed_action_followup(self):
+        await self.event_after_tool_followup('Switch to api server', [
+            ('switch_chat', {'chat': 'api server'}, {'ok': False, 'error': 'No chat has that name.'})])
+
+    async def test_event_waits_for_refused_action_followup(self):
+        await self.event_after_tool_followup('Hello there', [
+            ('backlog_add', {'text': 'Fix the header'}, None)])
+
+    async def test_event_waits_for_parallel_tool_followup(self):
+        await self.event_after_tool_followup('Switch to api server and close the panel', [
+            ('switch_chat', {'chat': 'api server'}, {'ok': True, 'chat': 'api server'}),
+            ('open_panel', {'panel': 'files', 'open': False}, {'ok': True})])
+
+    async def test_event_waits_for_read_followup_after_pretext(self):
+        await self.event_after_tool_followup('What did docs say?', [
+            ('read_last_reply', {'chat': 'docs'}, {'ok': True, 'chat': 'docs', 'text': 'All done.'})],
+            pretext='One moment.')
+
+    async def test_event_waits_for_tool_readback_to_commit(self):
+        await self.event_after_tool_followup('The docs chat should fix the header', [
+            ('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header'}, None)],
+            readback='Not sent yet. Should I send this to docs? Fix the header. Yes or no?')
 
     async def request_messages(self, messages, during_auth=None, during_reply=None):
         from openai import BadRequestError
@@ -2992,7 +3166,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.stop_time = friday.time.time() - 0.1
         session.wake = asyncio.Event()
         session.user_speaking = session.bot_speaking = session.busy = session.llm_running = session.reply_open = False
-        session.llm = Mock(name='llm')
+        session.llm = Mock(name='llm', tool_work_pending=False)
         session.context = LLMContext([])
         session.tts = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
         captured = []
@@ -3069,7 +3243,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 llm_calls.append(copy.deepcopy(kwargs['messages']))
 
                 async def chunks():
-                    yield respond(len(llm_calls)) if respond else self.chunk(content='A reply.')
+                    response = respond(len(llm_calls)) if respond else self.chunk(content='A reply.')
+                    for chunk in response if isinstance(response, list) else [response]:
+                        yield chunk
 
                 return chunks()
 
@@ -3571,7 +3747,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.user_speaking = session.bot_speaking = session.busy = session.reply_open = False
         session.event_generation, session.offline_spoken = 0, False
         session.new_turn, session.context = Mock(), Mock()
-        session.llm = SimpleNamespace(tools_in_flight=set())
+        session.llm = SimpleNamespace(tool_work_pending=False)
         session.worker = Mock(queue_frame=AsyncMock())
         session.rt = SimpleNamespace(TTSSpeakFrame=lambda text: SimpleNamespace(text=text),
                                      LLMContextFrame=lambda context: SimpleNamespace(context=context))
