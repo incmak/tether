@@ -409,6 +409,41 @@ test('Reminders in Chromium', async t => {
     assert.equal(await row.locator('.reminder-repeat').count(), 0)
   })
 
+  await t.test('Edit of a snoozed weekly copy names the series weekday in the Repeat menu, blank or re-typed', async t => {
+    const weekly = reminder('R1', 'Review weekly reports', { due: TOMORROW + 86400, snoozes: 1, repeat: repeatRule('week', TOMORROW) })
+    const { sheet } = await open(t, browser, origin, phone, { records: [weekly] })
+    await button(sheet, `Edit: ${weekly.text}`).click()
+    const edit = sheet.getByRole('form', { name: `Edit reminder: ${weekly.text}` })
+    await button(edit, 'Repeat: Every week').click()
+    const list = sheet.getByRole('listbox', { name: 'Repeat' })
+    assert.match(await list.getByRole('option', { name: /^Every week(?!day)/ }).textContent(), /On Thursdays/)
+    await list.press('Escape')
+    // Re-typing the current (snoozed) due keeps the series day; a new time moves it.
+    const when = edit.getByRole('textbox', { name: /^When/ })
+    for (const [typed, day] of [['fri 10:00', 'Thursdays'], ['sat 10:00', 'Saturdays']]) {
+      await when.fill(typed)
+      await button(edit, 'Repeat: Every week').click()
+      assert.match(await list.getByRole('option', { name: /^Every week(?!day)/ }).textContent(), new RegExp(`On ${day}`))
+      await list.press('Escape')
+    }
+  })
+
+  await t.test('a text-only edit keeps a repeat change that another tab made', async t => {
+    const daily = reminder('R1', 'Review reports', { repeat: repeatRule('day', TOMORROW) })
+    const { page, sheet } = await open(t, browser, origin, phone, { records: [daily] })
+    await button(sheet, `Edit: ${daily.text}`).click()
+    const edit = sheet.getByRole('form', { name: `Edit reminder: ${daily.text}` })
+    assert.ok(await button(edit, 'Repeat: Every day').isVisible())
+    // Another tab stops the rule; this tab's next load shows it while the edit stays open.
+    assert.equal((await fixtureWrite(page, 'edit', { id: daily.id, repeat: null })).status, 200)
+    await page.evaluate(() => window.dispatchEvent(new Event('tether-reminders-changed')))
+    await button(edit, 'Repeat: Never').waitFor()
+    await edit.getByRole('textbox', { name: 'Reminder' }).fill('Review the reports')
+    assert.deepEqual(await post(page, 'edit', () => button(edit, 'Save').click()), { id: daily.id, text: 'Review the reports' })
+    const row = sheet.getByRole('listitem').filter({ hasText: 'Review the reports' })
+    assert.equal(await row.locator('.reminder-repeat').count(), 0)
+  })
+
   await t.test('Done moves the repeat label to the next Upcoming copy', async t => {
     const daily = { ...late, repeat: repeatRule('day', late.due) }
     const { page, sheet } = await open(t, browser, origin, phone, { records: [daily] })

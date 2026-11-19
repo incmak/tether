@@ -9,7 +9,7 @@ import { usePolling } from './hooks'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
 export type Repeat = 'day' | 'weekday' | 'week'
-export interface RepeatRule { every: Repeat; anchor: number; zone: string }
+export interface RepeatRule { every: Repeat; anchor: number; zone: string; origin?: number }
 export interface ReminderLink { pane?: string; thread?: string; project?: string; item?: string }
 export interface Reminder {
   id: string; text: string; due: number; created: number; by: string; state: ReminderState

@@ -144,6 +144,9 @@ def _load(now, *, prune_deleted=True):
             anchor = repeat.get('anchor')
             if (repeat.get('every') in RULES and type(anchor) in (int, float) and -inf < anchor < inf
                     and isinstance(repeat.get('zone'), str)):
+                origin = repeat.get('origin')
+                if not (type(origin) in (int, float) and -inf < origin < inf):
+                    repeat.pop('origin', None)
                 continue
         record['repeat'] = None
     nxt = data.get('next') if isinstance(data.get('next'), int) and data.get('next') > top else top + 1
@@ -219,14 +222,18 @@ def public(record):
 
 
 def next_due(rule, now):
-    """The first future occurrence after the anchor, at the same local wall time."""
+    """The first future occurrence after the anchor, at the series wall time.
+
+    The anchor is this copy's occurrence. The optional origin is the first occurrence of the series: its
+    wall time survives a copy whose time a skipped daylight-saving hour moved (02:30 shown as 03:30).
+    """
     try:
         zone = ZoneInfo(rule['zone'])
     except (ZoneInfoNotFoundError, ValueError):
         zone = ZONE
     anchor = datetime.fromtimestamp(rule['anchor'], zone)
     today = datetime.fromtimestamp(now, zone).date()
-    wall_time = anchor.time()
+    wall_time = datetime.fromtimestamp(rule.get('origin', rule['anchor']), zone).time()
     every = rule['every']
     step = 7 if every == 'week' else 1
     # Jump near today in whole steps from the anchor to keep weekly rules on the same weekday.
@@ -291,10 +298,13 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                 repeat = body['repeat']
                 if repeat is not None and repeat not in RULES:
                     raise ReminderError('Pick a repeat: never, day, weekday or week.')
-                anchor = rule['anchor'] if rule and not due_changed else record['due']
-                record['repeat'] = {'every': repeat, 'anchor': anchor, 'zone': ZONE.key} if repeat is not None else None
+                keep = rule if rule and not due_changed else {'anchor': record['due']}
+                record['repeat'] = None if repeat is None else {
+                    'every': repeat, 'zone': ZONE.key,
+                    **{key: keep[key] for key in ('anchor', 'origin') if key in keep}}
             elif due_changed and rule:
                 rule['anchor'] = record['due']
+                rule.pop('origin', None)
         elif action == 'done':
             if record['state'] == 'done':
                 return public(record)
@@ -304,7 +314,7 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                 due = next_due(rule, now)
                 next_id = f'R{data["next"]}'
                 upcoming = {'id': next_id, 'text': record['text'], 'link': record.get('link'), 'by': record.get('by'),
-                            'created': now, 'occ': 0, 'snoozes': 0, 'done_at': None, 'repeat': dict(rule, anchor=due)}
+                            'created': now, 'occ': 0, 'snoozes': 0, 'done_at': None, 'repeat': dict(rule, anchor=due, origin=rule.get('origin', rule['anchor']))}
                 _schedule(upcoming, due)
                 data['next'] += 1
                 data['reminders'].append(upcoming)

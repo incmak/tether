@@ -935,10 +935,6 @@ class CliTests(Base):
         self.assertIsNone(self.stored()['reminders'][0]['link'])
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class RepeatTests(Base):
     @staticmethod
     def ist(day, hour=10, minute=0):
@@ -963,7 +959,7 @@ class RepeatTests(Base):
         self.assertNotEqual(item['id'], upcoming['id'])
         self.assertEqual((upcoming['text'], upcoming['link'], upcoming['by']), (item['text'], link, 'codex'))
         self.assertEqual((upcoming['created'], upcoming['due']), (now, self.ist(20)))
-        self.assertEqual(upcoming['repeat'], {**item['repeat'], 'anchor': self.ist(20)})
+        self.assertEqual(upcoming['repeat'], {**item['repeat'], 'anchor': self.ist(20), 'origin': anchor})
         self.assertEqual((upcoming['state'], upcoming['occ'], upcoming['snoozes']), ('scheduled', 1, 0))
 
     def test_weekday_moves_from_friday_to_monday(self):
@@ -1117,6 +1113,18 @@ class RepeatTests(Base):
             self.assertEqual(item['repeat']['zone'], zone.key)
             self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
 
+    def test_wall_clock_survives_a_skipped_hour(self):
+        zone = ZoneInfo('America/New_York')
+        at = lambda day, hour=2: datetime(2026, 3, day, hour, 30, tzinfo=zone).timestamp()
+        for every, first, gap, after in (('day', 7, 8, 9), ('week', 1, 8, 15)):
+            with self.subTest(every=every), mock.patch.object(reminders, 'ZONE', zone):
+                item = reminders.add('Across spring-forward', at(first), now=at(first) - 3600, repeat=every)
+                shifted = self.following(self.complete(item, at(first)), at(first))
+                self.assertEqual(shifted['due'], at(gap, 3))
+                # A rule edit on the moved copy keeps the series wall time.
+                shifted = reminders.change(shifted['id'], 'edit', {'repeat': every}, now=at(first))
+                self.assertEqual(self.following(self.complete(shifted, at(gap, 4)), at(gap, 4))['due'], at(after))
+
     def test_unknown_stored_zone_falls_back_to_default(self):
         anchor = self.ist(19)
         item = self.add(due=anchor, repeat='day')
@@ -1159,3 +1167,7 @@ class RepeatTests(Base):
             self.assertEqual(len(self.stored()['reminders']), 2)
             run('add', 'Weekly report', '--at', '2026-11-19 10:00', '--every', 'week', '--no-project')
             self.assertIn('scheduled  every week (Thu)  Weekly report', run('list'))
+
+
+if __name__ == '__main__':
+    unittest.main()

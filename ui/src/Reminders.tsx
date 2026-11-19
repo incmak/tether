@@ -58,7 +58,9 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(item.text)
   const [when, setWhen] = useState<When>(EMPTY)
-  const [repeat, setRepeat] = useState<'never' | Repeat>(item.repeat?.every ?? 'never')
+  // null until the user picks: the picker then follows the latest polled rule, and Save leaves the rule alone.
+  const [repeatDraft, setRepeatDraft] = useState<'never' | Repeat | null>(null)
+  const repeat = repeatDraft ?? item.repeat?.every ?? 'never'
   const [busy, setBusy] = useState(false)
   const formId = useId()
   const run = async (work: () => Promise<unknown>) => {
@@ -78,7 +80,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
       const body: Record<string, unknown> = { id: item.id }
       if (text.trim() !== item.text) body.text = text.trim()
       if (at !== null) body.due = at
-      if (repeat !== (item.repeat?.every ?? 'never')) body.repeat = repeat === 'never' ? null : repeat
+      if (repeatDraft !== null && repeatDraft !== (item.repeat?.every ?? 'never')) body.repeat = repeatDraft === 'never' ? null : repeatDraft
       if (Object.keys(body).length === 1 || await run(() => act(api, 'edit', body))) setEditing(false)
     }
     return <li className="reminder-row editing">
@@ -87,9 +89,10 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
         <textarea id={`${formId}-text`} rows={2} maxLength={TEXT_LIMIT} value={text} onChange={event => setText(event.target.value)} autoFocus />
         <WhenField id={`${formId}-when`} when={when} onChange={setWhen} now={now} picks={false} />
         <p className="reminder-keep">{typed ? '' : `Leave When empty to keep ${whenLabel(item.due, now)}.`}</p>
-        <RepeatField id={`${formId}-repeat`} value={repeat} at={at ?? item.due} onChange={setRepeat} />
+        {/* A kept due (blank or re-typed) can be a snoozed time; the server keeps the rule's own occurrence then. */}
+        <RepeatField id={`${formId}-repeat`} value={repeat} at={at !== null && at !== item.due ? at : item.repeat?.anchor ?? item.due} onChange={setRepeatDraft} />
         {item.repeat && (repeat !== 'never'
-          ? <button type="button" className="link-button reminder-stop-repeat" onClick={() => setRepeat('never')}>Stop repeating</button>
+          ? <button type="button" className="link-button reminder-stop-repeat" onClick={() => setRepeatDraft('never')}>Stop repeating</button>
           : <p className="reminder-keep">Repeating stops when you save.</p>)}
         <div className="sheet-buttons">
           <button type="button" className="secondary" onClick={() => { setEditing(false); setText(item.text); setWhen(EMPTY) }}>Cancel</button>
@@ -133,7 +136,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
           <SelectMenu value="" label="Snooze" triggerLabel="" triggerTitle={item.text} className="icon-button reminder-snooze" minWidth={180} disabled={busy}
             icon={<AlarmClock size={16} aria-hidden="true" />} onChange={snooze}
             options={snoozePicks(now).map((pick, index) => ({ value: String(index), label: pick.label, detail: whenLabel(pick.at, now) }))} />
-          <button type="button" className="icon-button" aria-label={`Edit: ${item.text}`} title="Edit" disabled={busy} onClick={() => { setText(item.text); setWhen(EMPTY); setRepeat(item.repeat?.every ?? 'never'); setEditing(true) }}><Pencil size={15} /></button>
+          <button type="button" className="icon-button" aria-label={`Edit: ${item.text}`} title="Edit" disabled={busy} onClick={() => { setText(item.text); setWhen(EMPTY); setRepeatDraft(null); setEditing(true) }}><Pencil size={15} /></button>
         </>}
       <button type="button" className="icon-button" aria-label={`Delete: ${item.text}`} title="Delete" disabled={busy} onClick={() => onDelete(item)}><Trash2 size={15} /></button>
     </div>
