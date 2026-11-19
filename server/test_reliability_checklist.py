@@ -336,7 +336,9 @@ class RepositoryTests(unittest.TestCase):
         self.commit('Stop script')
         run(self.repo, 'mv', 'tools/stop.sh', 'tools/old.sh')
         self.write('tools/stop.sh', 'echo stop\n')
-        self.assertIn('R1', [row['id'] for row in self.check()['rows']])
+        # tools/old.sh holds the trigger too: the hit must still name the committed path, not only the moved copy.
+        rows = {row['id']: row['files'] for row in self.check()['rows']}
+        self.assertIn('tools/stop.sh', rows.get('R1', []), rows)
         run(self.repo, 'reset', '-q', '--hard')
         run(self.repo, 'rm', '-q', '--cached', 'tools/stop.sh')  # the same, with git rm --cached
         self.write('tools/stop.sh', 'echo stop\n')
