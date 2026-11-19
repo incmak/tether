@@ -172,6 +172,22 @@ sys.exit(main(sys.argv[2:]))
         self.assertEqual(self.git('rev-list', '--count', 'HEAD').stdout.strip(), '2')
         self.assertEqual([row['verdict'] for row in self.rows()], ['block'] * 3 + ['pass', 'pass'])
 
+    def test_hook_message_file_requires_valid_utf8_for_a_verdict(self):
+        self.mode('enforce')
+        message = self.repo / '.git' / 'COMMIT_EDITMSG'
+        for content, verdict, reason in (
+            (b'Legacy\n\nVerified: none\xa0\n', 'unknown', 'encoding'),
+            (b'Legacy: \xc3\n\nVerified: none\n', 'unknown', 'encoding'),
+            ('Café\n\nVerified: none (café)\n'.encode(), 'pass', ''),
+            ('Café\n\nVerified: café\n'.encode(), 'block', 'no-line'),
+        ):
+            with self.subTest(content=content):
+                message.write_bytes(content)
+                result = self.git(str(HELPER), str(message), self.python, str(GATE), command=('/bin/sh',), check=False)
+                self.assertEqual(result.returncode, int(verdict == 'block'), result.stderr)
+                row = self.rows()[-1]
+                self.assertEqual((row['mode'], row['verdict'], row['reason']), ('enforce', verdict, reason))
+
     def test_off_has_no_row(self):
         self.mode('off')
         self.install()
@@ -621,9 +637,13 @@ time.sleep(20)
         self.install(gate=self.gate_with_import_error(), python=sys.executable)
         self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
         claude = self.agent('claude', '/bin/sh')
+        self.git('config', 'i18n.commitEncoding', 'ISO-8859-1')
+        self.git('config', 'i18n.logOutputEncoding', 'ISO-8859-1')
+        (self.repo / 'msg.txt').write_bytes(b'Legacy\n\nVerified: none\xa0\n')
         for args, status, verdict in (
             (f'-m subject -m {shlex.quote(STAMP)}', 'verified', 'pass'),
             ("--allow-empty-message -m ''", 'missing', 'would_block'),
+            ('-F msg.txt', 'unknown', 'unknown'),
         ):
             with self.subTest(status=status):
                 command = f'git commit --allow-empty {args}'

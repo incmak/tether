@@ -314,10 +314,23 @@ class Evaluate(unittest.TestCase):
                 self.assertEqual(self.verdict('git commit -F msg.txt', folder), ('unknown', 'file'))
 
     def test_later_input_redirect_can_replace_a_heredoc_message(self):
-        for redirect in ('< msg.txt', '0< msg.txt', '0\\\n>&1'):
+        for redirect in ('< msg.txt', '0< msg.txt', '0\\\n>&1', "<<< 'new input'", "00<<< 'new input'"):
             command = f"git commit -F - <<'EOF' {redirect}\nFix\nEOF"
             with self.subTest(redirect=redirect):
                 self.assertEqual(self.verdict(command), ('unknown', 'file'))
+
+    def test_heredocs_follow_their_file_descriptors(self):
+        cases = (
+            (f"<<MSG 10<<OTHER\n{STAMP}\nMSG\nOther text\nOTHER", ('pass', '')),
+            (f"<<MSG 10<<OTHER\nNo stamp\nMSG\n{STAMP}\nOTHER", ('missing', 'no-line')),
+            (f"3<<OTHER 0<<-MSG\nOther text\nOTHER\n\t{STAMP}\n\tMSG", ('pass', '')),
+            (f"1\\\n0<<OTHER 00<<MSG\nOther text\nOTHER\n{STAMP}\nMSG", ('pass', '')),
+            (f"<<MSG 10<<<other\n{STAMP}\nMSG", ('pass', '')),
+            (f"<<MSG 10<other.txt\n{STAMP}\nMSG", ('pass', '')),
+        )
+        for redirects, expected in cases:
+            with self.subTest(redirects=redirects):
+                self.assertEqual(self.verdict(f'git commit -F - {redirects}'), expected)
 
     def test_heredoc_delimiter_uses_shell_quoting_and_whitespace(self):
         for command in (heredoc(f'Fix\n EOF\n\n{STAMP}'),
@@ -621,6 +634,33 @@ class Check(Base):
         for command in ('git commit -m "$MSG"', 'git commit --amend --no-edit', 'git commit -m "Fix'):
             self.assertEqual(self.pre(command)[1], '', command)
         self.assertEqual({row['verdict'] for row in self.rows()}, {'unknown'})
+
+    def test_unstamped_heredoc_on_fd_10_does_not_block_a_stamped_commit(self):
+        commit_gate.set_global('enforce')
+        command = f'git commit -F - <<MSG 10<<OTHER\n{STAMP}\nMSG\nNo stamp\nOTHER'
+        self.assertEqual(self.pre(command)[1], '')
+        self.assertEqual(self.rows()[-1]['verdict'], 'pass')
+
+    def test_invalid_utf8_message_files_are_unknown_in_enforce_mode(self):
+        commit_gate.set_global('enforce')
+        message = self.repo / 'msg.txt'
+        for content in (b'Legacy\n\nVerified: none\xa0\n', b'Legacy: \xc3\n\nVerified: none\n'):
+            message.write_bytes(content)
+            for command in ('git commit -F msg.txt', 'git commit -F - < msg.txt'):
+                with self.subTest(content=content, command=command):
+                    self.assertEqual(self.pre(command)[1], '')
+                    row = self.rows()[-1]
+                    self.assertEqual((row['verdict'], row['reason']), ('unknown', 'file'))
+
+    def test_utf8_message_files_still_use_the_stamp(self):
+        commit_gate.set_global('enforce')
+        message = self.repo / 'msg.txt'
+        for ending, verdict in (('Verified: none (café)', 'pass'), ('Verified: café', 'block')):
+            with self.subTest(ending=ending):
+                message.write_text(f'Café\n\n{ending}\n', encoding='utf-8')
+                _, output = self.pre('git commit -F msg.txt')
+                self.assertEqual(bool(output), verdict == 'block')
+                self.assertEqual(self.rows()[-1]['verdict'], verdict)
 
     def test_message_hooks_that_can_run_make_the_verdict_unknown(self):
         commit_gate.set_global('enforce')

@@ -167,7 +167,8 @@ PUNCTUATION = '();<>|&\n'
 # Every other character is itself, also a letter such as é. `=` is special only at the start of a word (zsh).
 SHELL_SPECIAL = set('$`*?[]{}~!#^')
 LINE_JOIN = r'(?:\\\n)*'
-REDIRECTION = re.compile(rf'(?:[0-9]{LINE_JOIN})?(?:>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
+REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
+                         rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
 COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}[&>]|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
 FOLDER_SEPARATORS = {None, '&&', ';', '\n'}
 HEREDOC_MARK = '@@TETHER-HEREDOC-{}@@'
@@ -307,7 +308,7 @@ def _tokens(command, bodies, *, for_hook=False):
         elif redirect := REDIRECTION.match(command, index):
             operator = redirect[0].replace('\\\n', '')
             start = redirect.end() - 1
-            if operator.endswith('<') and (doc := _heredocs(command, start, bodies, cat=False)) is not None:
+            if redirect['op'] == '<' and (doc := _heredocs(command, start, bodies, cat=False)) is not None:
                 mark, end, tail = doc
                 yield operator
                 yield _Word(mark, False, True, True)
@@ -337,14 +338,15 @@ def _segments(tokens):
         if isinstance(token, _Word):
             uncertain = uncertain or (token.bare and token.text in ('{', '}'))
             words.append(token)
-        elif REDIRECTION.fullmatch(token):
+        elif redirect := REDIRECTION.fullmatch(token):
             redirected = True
             if index >= len(tokens) or not isinstance(tokens[index], _Word):
                 uncertain = True
                 continue
             target = tokens[index]
             index += 1
-            on_stdin = token.startswith('0') or token.startswith('<')
+            fd = redirect['fd']
+            on_stdin = not fd.strip('0') if fd else redirect['op'].startswith('<')
             mark = HEREDOC_FOUND.fullmatch(target.text) if target.fill and target.bare else None
             if on_stdin:
                 stdin = int(mark[1]) if mark else None
@@ -495,7 +497,7 @@ def _fill(text, bodies):
 
 
 def _read_message_file(folder, name):
-    """The text of a message file, or None. Regular files only: a pipe would hold the hook."""
+    """The UTF-8 text of a message file, or None. Regular files only: a pipe would hold the hook."""
     try:
         path = Path(folder) / name
         with open(path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as source:
@@ -503,7 +505,7 @@ def _read_message_file(folder, name):
             if not stat_module.S_ISREG(found.st_mode) or found.st_size > FILE_BYTES:
                 return None
             content = source.read(FILE_BYTES + 1)
-            return content.decode('utf-8', errors='replace') if len(content) <= FILE_BYTES else None
+            return content.decode('utf-8') if len(content) <= FILE_BYTES else None
     except (OSError, ValueError):
         return None
 
@@ -724,7 +726,7 @@ def _normalize_message(lines):
 
 
 def _message_digest(key, normalized):
-    return hmac.new(key, normalized.encode('utf-8', errors='surrogateescape'), 'sha256').hexdigest()[:32]
+    return hmac.new(key, normalized.encode('utf-8'), 'sha256').hexdigest()[:32]
 
 
 class _Lock:
@@ -885,7 +887,7 @@ class _LandedCommit(NamedTuple):
     tree: str
     parent: str | None
     status: str
-    body: str
+    body: str | None
 
 
 def _landed(folder, head):
@@ -894,12 +896,18 @@ def _landed(folder, head):
                  f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    fields = shown.stdout.decode('utf-8', errors='surrogateescape').split('\0')[:-1]
+    fields = shown.stdout.split(b'\0')[:-1]
     commits = []
     for index in range(0, len(fields), 4):
-        oid, tree, parents, body = fields[index:index + 4]
-        status = stamp.message_status(body.replace('\r\n', '\n').replace('\r', '\n'))
-        commits.append(_LandedCommit(oid, tree, parents.partition(' ')[0] or None, status, body))
+        oid, tree, parents, raw = fields[index:index + 4]
+        try:
+            body = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            body, status = None, 'unknown'
+        else:
+            status = stamp.message_status(body.replace('\r\n', '\n').replace('\r', '\n'))
+        parent = parents.partition(b' ')[0].decode('ascii') or None
+        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, status, body))
     return commits
 
 
@@ -1194,7 +1202,7 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
     uncovered, amend_parents = [], {}
     for commit in commits:
         candidates = rows_by_tree.get(commit.tree)
-        if not candidates:
+        if not candidates or commit.body is None:
             uncovered.append(commit)
             continue
         digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
@@ -1238,10 +1246,11 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
     for commit in uncovered:
         if commit.oid in logged:
             continue
+        verdict = {'missing': 'would_block', 'unknown': 'unknown'}.get(commit.status, 'pass')
         _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
               'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': worktree,
               'commit': commit.oid, 'reason': 'hook-silent', 'count': 1,
-              'verdict': 'would_block' if commit.status == 'missing' else 'pass'}, locked=True)
+              'verdict': verdict}, locked=True)
 
 
 def landed(data, now=None):
@@ -1273,7 +1282,7 @@ def landed(data, now=None):
     if commits is None or waiting is None:
         return
     statuses = {commit.status for commit in commits}
-    worst = next((kind for kind in ('missing', 'none', 'verified') if kind in statuses), 'no-commit')
+    worst = next((kind for kind in ('missing', 'unknown', 'none', 'verified') if kind in statuses), 'no-commit')
     record = {'at': round(now, 3), 'event': 'landed', 'id': tool, 'session': session, 'project': waiting.get('project'),
               'landed': worst, 'count': len(commits)}
     if waiting.get('shared') or 'tree' not in waiting:
@@ -1393,12 +1402,15 @@ def _final_verdict(path, cwd):
         message = stream.read(HOOK_MESSAGE_BYTES + 1)
     if len(message) > HOOK_MESSAGE_BYTES:
         return 'unknown', 'size', ()
+    try:
+        lines = message.decode('utf-8').split('\n')
+    except UnicodeDecodeError:
+        return 'unknown', 'encoding', ()
     config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
     if config is None or config.returncode not in (0, 1):
         raise GateError(400, 'Git could not read the commit comment configuration.')
     comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
                 for item in config.stdout.split(b'\0') if item}
-    lines = message.decode('utf-8', errors='surrogateescape').split('\n')
     chars = {'#'} | {char for char in comments if len(char) == 1}
     cuts = {}
     for index, line in enumerate(lines):
