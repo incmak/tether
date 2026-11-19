@@ -387,6 +387,9 @@ def guard(root, dist):
     sys.addaudithook(hook)
 
 
+REVIEW_COMMIT = '3f9c2a7b41d6e8f05a1c9b2d7e4f6a8c0b1d2e3f'
+
+
 def seed(root, pane, pane_pid):
     """Fixture data, written with the server's own modules: one Claude chat on the fixture pane and a backlog."""
     import backlog
@@ -399,7 +402,20 @@ def seed(root, pane, pane_pid):
                                     'name': 'Fixture chat', 'nameSource': 'user', 'nameSince': 1}))
     transcript = paths.CLAUDE / 'projects' / ''.join(c if c.isalnum() else '-' for c in work) / f'{SESSION}.jsonl'
     transcript.parent.mkdir(parents=True, exist_ok=True)
-    turns = [('user', 'Check the Settings page at phone width.'),
+    # A review request as server/review_links.py sends it to a reviewer tab (the chat-review surface).
+    review = ("[Tether review] The codex tab \u201cFixture worker\u201d (%7) finished a turn. "
+              "Review its work: check the changes and the claims, then list what is wrong or missing. "
+              "Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. Review id: 5e1f0c2a. "
+              f"Commit under review: {REVIEW_COMMIT} in /work/tether. "
+              "Read the review rules first: `git -C /work/tether show origin/main:REVIEW.md`. "
+              f"An approval counts only for this commit: start it with `APPROVED {REVIEW_COMMIT}` (the full hash). "
+              "This diff changes the UI (1 file(s), for example ui/src/Messages.tsx). Do not approve without before and "
+              "after screenshots at 320 px and 1280 px for each changed screen: the worker's reply must name the folder "
+              "that holds them. Open the screenshots and check them against the claims. "
+              "Its last reply:\n\nThe review card now shows the commit and the reply format.\n\n"
+              "Transcript: /work/.codex/sessions/fixture.jsonl")
+    turns = [('user', review),
+             ('user', 'Check the Settings page at phone width.'),
              ('assistant', 'The Settings page fits a 320 px screen. Each control keeps a 44 px touch target.'),
              ('user', 'Where does this conversation go?'),
              ('assistant', CHAT_LINE)]

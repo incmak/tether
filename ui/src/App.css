@@ -1178,6 +1178,8 @@ button.live-chip:active { background: var(--line); }
 .peer-message .assistant-message { margin: 4px 0 8px; }
 .review-message summary .badge { flex: none; }
 .review-meta { margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
+.review-meta code { overflow-wrap: anywhere; font-size: 12px; }
+.review-terms { white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-path { margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
 .review-quote { max-height: 50vh; overflow: auto; padding: 10px 12px; border-radius: var(--radius); background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
 .chip-view { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 !important; color: inherit; }

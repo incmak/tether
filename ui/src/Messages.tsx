@@ -1,4 +1,5 @@
 import { terminalText } from './terminalText'
+import { parseReview, type Review } from './reviewText'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
@@ -168,15 +169,6 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
     {role === 'user' ? <MessagePrimitive.Parts /> : <><MessagePrimitive.Parts components={{ Text: Markdown }} />{actions && <MessageActions id={id} text={text} time={time} />}</>}
   </MessagePrimitive.Root>
 }
-type Review = { feedback: boolean; tab: string; agent?: string; name?: string; reply: string; transcript?: string; last?: boolean }
-const REVIEW_REQUEST = /^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)( This is the last round: your reply stays here\.)?\s*$/
-const REVIEW_FEEDBACK = /^\[Tether review\] Feedback from the reviewer tab \((%\d+)\):\s*([\s\S]*?)\s*Fix what it raises, then stop and wait\.\s*$/
-function parseReview(text: string): Review | null {
-  const request = REVIEW_REQUEST.exec(text)
-  if (request) return { feedback: false, agent: request[1], name: request[2], tab: request[3], reply: request[4], transcript: request[5], last: !!request[6] }
-  const feedback = REVIEW_FEEDBACK.exec(text)
-  return feedback ? { feedback: true, tab: feedback[1], reply: feedback[2] } : null
-}
 // A request starts folded: its body is the other tab's reply, which that tab already shows. Feedback starts open: it is what this tab acts on.
 function ReviewCard({ id, review }: { id: string; review: Review }) {
   const preview = review.reply.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '')
@@ -184,7 +176,10 @@ function ReviewCard({ id, review }: { id: string; review: Review }) {
     <summary><Eye size={15} /><strong>{review.feedback ? `Review from ${review.tab}` : `Review request · ${review.name || review.tab}`}</strong>{review.last && <span className="badge">Last round</span>}<span className="peer-preview">{preview}</span><ChevronRight size={15} /></summary>
     <p className="review-meta">{review.feedback
       ? 'Tether sent the reviewer tab’s reply here. This tab fixes what it raises.'
-      : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.`}</p>
+      : review.commit
+        ? <>The {review.agent} tab {review.tab} finished a turn. Reply <code>APPROVED {review.commit}</code> (the full hash), or list what is wrong. Tether sends your reply to that tab.</>
+        : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.`}</p>
+    {review.terms && <p className="review-meta review-terms">{review.terms.map((part, index) => part.code ? <code key={index}>{part.text}</code> : part.text)}</p>}
     <div className="review-quote"><Linked text={review.reply} /></div>
     {review.transcript && <p className="review-meta review-path" title={review.transcript}>{review.transcript}</p>}
   </details>

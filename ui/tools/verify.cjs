@@ -38,6 +38,15 @@ const SURFACES = {
     },
     landmark: '.chat-page .advisor-call[open] .advisor-call-body',
   },
+  'chat-review': {
+    about: 'A review request card, opened: the commit, the reply format and the rules',
+    open: async page => {
+      const card = page.locator('.chat-page details.review-message').first()
+      await card.locator('summary').press('Enter')
+      await card.locator('.review-meta code').first().scrollIntoViewIfNeeded()
+    },
+    landmark: '.chat-page details.review-message[open] .review-meta code >> nth=0',
+  },
   settings: {
     about: 'The Settings dialog',
     open: async (page, ctx) => {

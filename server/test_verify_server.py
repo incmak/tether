@@ -757,13 +757,14 @@ class Boot(unittest.TestCase):
         self.assertEqual(status, 200, body)
         messages = json.loads(body)['messages']
         self.assertEqual([(message['role'], message.get('kind')) for message in messages], [
-            ('user', None), ('assistant', None), ('user', None), ('assistant', None),
+            ('user', None), ('user', None), ('assistant', None), ('user', None), ('assistant', None),
             ('assistant', 'advisor'), ('assistant', 'actions'), ('assistant', 'advisor'),
         ])
         self.assertEqual([message['advisor']['status'] for message in messages if message.get('kind') == 'advisor'],
                          ['answered', 'error'])
         self.assertNotIn(b'encrypted_content', body)
         self.assertIn(verify_server.CHAT_LINE.encode(), body)
+        self.assertIn(f'start it with `APPROVED {verify_server.REVIEW_COMMIT}`'.encode(), body)  # the chat-review surface
         for title in (b'Write the release notes', b'Fix the flaky share test', b'Add backlog search', b'Draw the new icon set'):
             self.assertNotIn(title, body)
         status, body = self.request(info, '/mobile/api/projects/backlog')
