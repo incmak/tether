@@ -63,6 +63,7 @@ async function main() {
         if (answer === 'hold') await held
         if (answer === '401') return route.fulfill({ status: 401, json: { error: 'Sign in required.' } })
         if (answer === '500') return route.fulfill({ status: 500, json: { error: 'Could not build the extension zip. No manifest.json.' } })
+        if (answer === 'html') return route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Sign in</title>' })
         return route.fulfill({ status: 200, body: Buffer.from('PK\x05\x06' + '\0'.repeat(18), 'binary'), headers: {
           'Content-Type': 'application/zip', 'Cache-Control': 'no-store',
           'Content-Disposition': `attachment; filename="${NAME}"; filename*=UTF-8''${NAME}` } })
@@ -132,8 +133,8 @@ async function main() {
       await context.close()
     }
 
-    // 4. Errors: signed out and a server failure show an alert in the panel and save nothing.
-    for (const [answer, text] of [['401', 'Your sign-in ended. Reload Tether, sign in, and download again.'], ['500', 'Could not build the extension zip. No manifest.json.']]) {
+    // 4. Errors: signed out, a server failure, and a 200 sign-in page from a proxy show an alert in the panel and save nothing.
+    for (const [answer, text] of [['401', 'Your sign-in ended. Reload Tether, sign in, and download again.'], ['500', 'Could not build the extension zip. No manifest.json.'], ['html', 'The server did not send a zip file. Reload Tether, sign in, and download again.']]) {
       for (const width of [320, 1280]) {
         const { context, page, errors } = await open({ width, answer })
         let saved = false

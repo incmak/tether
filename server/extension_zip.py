@@ -129,6 +129,9 @@ def _archive(entries):
                 path = name.decode('utf-8')
             except UnicodeDecodeError:
                 raise ExtensionZipError('The extension contains a path that is not UTF-8.') from None
+            if '\\' in path or ':' in path:
+                # Windows extractors read these as a separator, a drive or a data stream.
+                raise ExtensionZipError('The extension contains a file name with a backslash or a colon.')
             info = zipfile.ZipInfo('tether-extension/' + path, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.create_system = 3

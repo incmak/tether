@@ -32,6 +32,10 @@ async function saveExtension() {
     const data = await response.json().catch(() => ({}))
     throw new ApiError(response.status, data.error || `The download failed (${response.status}). Try again.`)
   }
+  // A proxy or captive portal can answer 200 with a sign-in page: never save that as the zip.
+  if (!/^application\/zip\s*(;|$)/i.test(response.headers.get('Content-Type') || '')) {
+    throw new ApiError(response.status, 'The server did not send a zip file. Reload Tether, sign in, and download again.')
+  }
   const blob = await response.blob()
   const name = savedName(response.headers.get('Content-Disposition')) || `${FOLDER}.zip`
   const url = URL.createObjectURL(blob)

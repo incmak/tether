@@ -182,6 +182,25 @@ class ExtensionZipTests(unittest.TestCase):
         with self.assertRaises(extension_zip.ExtensionZipError):
             extension_zip.build(self.root)
 
+    def test_names_that_change_meaning_on_windows_are_refused(self):
+        # A backslash is a separator and a colon names a drive or data stream on Windows extractors,
+        # so two distinct files could extract to one path.
+        for name in ('sub\\b.css', 'a:b.js'):
+            with self.subTest(name=name):
+                bad = self.extension / name
+                bad.write_bytes(b'x')
+                with self.assertRaises(extension_zip.ExtensionZipError):
+                    extension_zip.build(self.root)
+                git(self.root, 'init', '-q')
+                git(self.root, 'add', '.')
+                git(self.root, 'commit', '-qm', 'Add ' + name)
+                with self.assertRaises(extension_zip.ExtensionZipError):
+                    extension_zip.build(self.root, use_cache=False)
+                git(self.root, 'rm', '-q', 'extension/' + name)
+                git(self.root, 'commit', '-qm', 'Remove ' + name)
+                extension_zip.build(self.root, use_cache=False)
+                (self.root / '.git').rename(self.root / f'old-git-{len(name)}')
+
     def test_total_size_cap_in_release_and_checkout(self):
         for name in ('a', 'b'):
             (self.extension / name).write_bytes(b'x' * (3 * 1024 * 1024))
