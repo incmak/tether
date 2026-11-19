@@ -204,7 +204,7 @@ class Evaluate(unittest.TestCase):
                 heredoc(f'Fix the "quoted" thing, it\'s done (really)\n\n{STAMP}\nCo-Authored-By: x <x@example.com>'),
                 heredoc(f'Fix\n\n{STAMP}', tag='EOF'),
                 f'git add -A && {heredoc("Fix" + chr(10) + chr(10) + "Verified: none (docs only)")} && git push',
-                "git commit -m Subject#123 -m 'Verified: none'",
+                "git commit -m 'Subject#123' -m 'Verified: none'",
                 f'cd sub && GIT_EDITOR=true git -c user.name=x --no-pager commit -q --amend -m "Fix\n\n{STAMP}"',
                 f"git commit -F - <<'EOF'\nFix it's\n\n{STAMP}\nEOF\ngit log -1",
                 f'git commit -m "Fix\n\n{STAMP}" 2>&1 | tail -3; git status',
@@ -223,6 +223,7 @@ class Evaluate(unittest.TestCase):
                 "git add . && git commit -qm 'wip' && git push",
                 "git commit -F - <<'EOF'\nFix\nEOF",
                 'echo "Verified: tests(ok)"; git commit -m "Fix"',
+                'git commit -m subject --cleanup=strip',
                 'git -C sub commit --message=Fix',
                 'git commit -m first && git commit -m second'):
             with self.subTest(command=command):
@@ -253,7 +254,6 @@ class Evaluate(unittest.TestCase):
                 ("git commit --amend --no-edit --trailer 'Reviewed-by: A'", 'reuse'),
                 ('git commit -m subject --edit', 'open'),
                 ('git commit -em subject', 'editor'),
-                ('git commit -m subject --cleanup=strip', 'open'),
                 ('git commit --mess=subject', 'editor'),
                 ('git commit --frobnicate -m subject', 'open'),
                 ('git commit -m x # note', 'parse'),
@@ -353,13 +353,13 @@ class Evaluate(unittest.TestCase):
         self.assertIsNone(commit_gate.evaluate(good, 'relative')['folder'])
 
     def test_folder_requires_plain_cd_commands_and_safe_separators(self):
-        for prefix in ('cd sub &&\n', 'cd sub;\n', 'cd sub\n\n'):
+        for prefix in ('cd sub &&\n', 'cd sub;\n', 'cd sub\n\n', 'cd -P sub && ', 'cd sub || exit 1; '):
             with self.subTest(prefix=prefix):
                 self.assertEqual(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))['folder'],
                                  str(self.cwd / 'sub'))
         for prefix in ('false || cd sub;', 'cd sub ||\n', 'cd sub |\n', 'cd sub |& ', 'cd sub &\n',
-                       'cd -P sub && ', 'cd -P; ', 'cd "$HERE"; ', 'cd; ',
-                       'cd sub >/dev/null; ', 'pushd sub; ', 'popd; ', 'cd sub || exit 1; ', 'true | cd sub; '):
+                       'cd -P; ', 'cd "$HERE"; ', 'cd; ', 'cd sub >/dev/null; ', 'pushd sub; ', 'popd; ',
+                       'true | cd sub; '):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.cwd))['folder'])
         # An ordinary command before the commit does not move the shell: the usual `git add . && git commit` form.
@@ -395,8 +395,139 @@ class Evaluate(unittest.TestCase):
                 self.assertIsNone(commit_gate.evaluate(command, str(self.cwd))['folder'])
         self.assertIsNone(commit_gate.evaluate('git commit -m Title', str(self.cwd / 'missing'))['folder'])
 
+    def test_cd_keeps_logical_path_across_symlink_steps(self):
+        deep = self.cwd / 'real/deep'
+        (deep / 'sub').mkdir(parents=True)
+        (self.cwd / 'alias').symlink_to(deep, target_is_directory=True)
+        (self.cwd / 'msg.txt').write_text(STAMP)
+        (deep / 'sub/msg.txt').write_text('Unstamped')
+        (deep.parent / 'only-physical').mkdir()
+        cases = (('cd alias && cd ..', self.cwd, 'pass'),
+                 ('cd alias && cd sub', deep / 'sub', 'missing'),
+                 ('cd alias/..', self.cwd, 'pass'),
+                 ('cd alias && cd ../only-physical', None, 'unknown'),
+                 ('cd alias && cd missing/../sub', None, 'unknown'))
+        for prefix, folder, verdict in cases:
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix} && git commit -F msg.txt', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (folder and str(folder), verdict))
+
+    def test_ansi_c_messages_require_exact_escape_decoding(self):
+        cases = (
+            (r"git commit -m $'Fix\tlabels\\\'\"\e\E\a\b\f\v\?\n\x56\u0065\U00000072ified: none'", 'pass'),
+            (r"git commit --message=$'Caf\xC3\xA9\012\126erified: tests(ok)'", 'pass'),
+            (r"git commit -qm$'Expansion \$HOME\t\rword only'", 'unknown'),
+            (r"git commit -qm$'Preserve $HOME\t\rword only'", 'missing'),
+            (r"git commit -qm$'Subject\rVerified: none'", 'unknown'),
+            (r"git commit -m $'Msg\xA\x56erified: none'", 'pass'),
+            (r"git commit -m $'Fix\nVerified: none\z'", 'unknown'),
+            (r"git commit -m $'Fix\nVerified: none\cA'", 'unknown'),
+            (r"git commit -m $'Fix\0\nVerified: none'", 'unknown'),
+            (r"git commit -m $'Fix\xFF\nVerified: none'", 'unknown'),
+            (r"git commit -m $'Fix\u00E9\nVerified: none'", 'unknown'),
+        )
+        for command, verdict in cases:
+            with self.subTest(command=command):
+                self.assertEqual(self.verdict(command)[0], verdict)
+
+    def test_cd_option_terminator_and_physical_resolution(self):
+        deep = self.cwd / 'real/deep'
+        deep.mkdir(parents=True)
+        (self.cwd / 'alias').symlink_to(deep, target_is_directory=True)
+        (self.cwd / '-target').mkdir()
+        cases = (('cd -- -target', self.cwd / '-target'), ('cd -P alias && cd ..', deep.parent),
+                 ('cd alias && cd -P ..', deep.parent), ('cd -P -- alias/..', deep.parent),
+                 ('cd -L alias', None), ('cd -Pe alias', None), ('cd -- -', None),
+                 ('cd -- +1', None), ('cd -P -target', None))
+        for prefix, folder in cases:
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix} && git commit -m Title', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']),
+                                 (str(folder), 'missing') if folder else (None, 'unknown'))
+
+    def test_unquoted_nbsp_is_literal_but_shell_specific_paths_are_unknown(self):
+        for name, folder_known in (('a\N{NO-BREAK SPACE}b', True), ('a!b', False), ('a^b', False), ('=git', False)):
+            folder = self.cwd / name
+            folder.mkdir()
+            (folder / 'msg.txt').write_text(STAMP)
+            with self.subTest(name=name):
+                found = commit_gate.evaluate(f'cd {name} && git commit -F msg.txt', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']),
+                                 (str(folder), 'pass') if folder_known else (None, 'unknown'))
+
+    def test_double_quoted_arithmetic_and_joined_dollar_are_unknown(self):
+        for command in ('git commit -m "$[2 + 3]"', 'git commit -m "$\\\nMSG"',
+                        'git commit -m "$\\\n\\\n[4 * 2]"',
+                        'git commit -m "Verified: none ($[2 + 3])"',
+                        'git commit -m "Verified: none ($\\\nMSG)"'):
+            with self.subTest(command=command):
+                self.assertEqual(self.verdict(command), ('unknown', 'shell'))
+
+    def test_cd_guard_and_builtin_keep_the_message_file_readable(self):
+        folder = self.cwd / 'sub'
+        (folder / 'msg.txt').write_text(STAMP)
+        for prefix in ('cd sub || exit 1;', 'cd sub || return\n', 'cd sub ||\nexit\n',
+                       'builtin cd sub &&', 'builtin cd -- sub || exit;'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix} git commit -F msg.txt', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (str(folder), 'pass'))
+        for prefix in ('cd sub || true;', 'cd sub || exit 1 | cat;', 'cd sub || exit >log;',
+                       'cd sub || exit 1 &&', 'false || cd sub || exit 1;', 'cd missing || return;',
+                       'builtin cd sub >log;', 'builtin cd sub &'):
+            with self.subTest(prefix=prefix):
+                found = commit_gate.evaluate(f'{prefix} git commit -F msg.txt', str(self.cwd))
+                self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
+        with self.subTest(prefix='redirection alone'):
+            found = commit_gate.evaluate('>sub/msg.txt; builtin cd sub && git commit -F msg.txt', str(self.cwd))
+            self.assertEqual((found['folder'], found['verdict'], found['reason']), (str(folder), 'unknown', 'file'))
+
+    def test_new_cd_forms_refuse_a_possible_cdpath_redirect(self):
+        elsewhere = self.cwd / 'elsewhere'
+        (elsewhere / 'sub').mkdir(parents=True)
+        with mock.patch.dict(os.environ, {'CDPATH': str(elsewhere)}):
+            for target in ('sub', './sub'):
+                with self.subTest(target=target):
+                    found = commit_gate.evaluate(f'cd -- {target} && git commit -m Title', str(self.cwd))
+                    self.assertEqual(found['folder'], None if target == 'sub' else str(self.cwd / 'sub'))
+
 
 class Check(Base):
+    def test_cleanup_reads_the_commit_repository_and_command_overrides(self):
+        sub = self.repo / 'sub'
+        sub.mkdir()
+        subject = f'-m Change -m "{STAMP}"'
+        for repo_cleanup, option, comment, cleanup, verdict in (
+                ('strip', '', 'V', '', 'unknown'),
+                ('default', '', 'V', '', 'pass'),
+                ('scissors', '', 'V', '', 'pass'),
+                ('whitespace', '-c commit.cleanup=strip', 'V', '', 'unknown'),
+                ('strip', '-c core.commentChar=V', '#', '', 'unknown'),
+                ('strip', '-c core.commentChar=V -c core.commentChar=Q', '#', '', 'pass'),
+                ('strip', '', 'V', '--cleanup=verbatim', 'pass'),
+                ('strip', '-c commit.cleanup=strip', 'V', '--cleanup default', 'pass'),
+                ('whitespace', '', 'V', '--cleanup=strip', 'unknown'),
+                ('whitespace', '', 'V', '--cleanup strip', 'unknown'),
+                ('strip', '', 'auto', '', 'pass'),
+                ('strip', '', 'V', '--cleanup=unrecognized', 'unknown')):
+            with self.subTest(repo_cleanup=repo_cleanup, option=option, comment=comment, cleanup=cleanup):
+                self.git('config', 'commit.cleanup', repo_cleanup)
+                self.git('config', 'core.commentChar', comment)
+                command = f'git -C repo/sub {option} commit --allow-empty {subject} {cleanup}'
+                result = commit_gate.evaluate(command, str(self.root))
+                self.assertEqual((result['folder'], result['verdict']), (str(sub), verdict))
+                if cleanup != '--cleanup=unrecognized':
+                    subprocess.run(['bash', '-c', command], cwd=self.root, check=True, capture_output=True)
+                    landed = stamp.message_status(self.git('log', '-1', '--format=%B'))
+                    self.assertEqual(landed, 'verified' if verdict == 'pass' else 'missing')
+
+    def test_cleanup_keeps_a_potential_comment_string_unknown(self):
+        self.git('config', 'commit.cleanup', 'strip')
+        for prefix, message in (('Verified: tests(', STAMP), ('Verified: pending', f'{STAMP}\nVerified: pending')):
+            with self.subTest(prefix=prefix):
+                self.git('config', 'core.commentString', prefix)
+                self.assertEqual(self.pre(heredoc(f'Change\n\n{message}'))[1], '')
+                self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
+
     def test_cd_or_fallback_does_not_read_backup_message(self):
         backup = self.root / 'backup'
         backup.mkdir()
@@ -419,9 +550,9 @@ class Check(Base):
         (self.root / 'commit.txt').write_text('Wrong message\n')
         (self.repo / 'app').mkdir()
         (self.root / 'link').symlink_to(self.repo / 'app', target_is_directory=True)
-        # The shell follows `cd ..` by name and git by the real path, so a link on a cd path is unknown.
+        # The shell follows cd .. by name, while git -C follows the real path.
         found = commit_gate.evaluate('cd link && cd .. && git commit --allow-empty -F commit.txt', str(self.root))
-        self.assertEqual((found['verdict'], found['folder']), ('unknown', None))
+        self.assertEqual((found['verdict'], found['folder']), ('missing', str(self.root)))
         for command, folder in (('git -C link/../app commit --allow-empty -F commit.txt', self.repo / 'app'),
                                 ('git -C link -C .. commit --allow-empty -F commit.txt', self.repo)):
             with self.subTest(command=command):
@@ -583,7 +714,7 @@ class Check(Base):
                        'export HOME=/alternate; cd ~/repo && ', 'HOME=/alternate\ncd ~ && ', 'eval "$GO"; '):
             with self.subTest(prefix=prefix):
                 self.assertIsNone(commit_gate.evaluate(prefix + 'git commit -m Title', str(self.repo))['folder'])
-        for command in ('export HOME=/alternate; git -C ~/repo commit -m Title', 'builtin cd ../other; git commit -m Title',
+        for command in ('export HOME=/alternate; git -C ~/repo commit -m Title',
                         'command cd ../other && git commit -m Title'):
             with self.subTest(command=command):
                 self.assertIsNone(commit_gate.evaluate(command, str(self.repo))['folder'])
@@ -605,9 +736,9 @@ class Check(Base):
         data = self.pre("cd 'repo link' && git commit --allow-empty -m 'Refresh the index'", cwd=str(self.root))
         self.assertEqual(json.loads(data[1])['hookSpecificOutput']['permissionDecision'], 'deny')
         self.assertEqual(self.rows()[-1]['folder'], str(self.repo))
-        # After a link, a second cd is not followed: `cd ..` would go by name.
+        # After a link, cd .. goes to the logical parent.
         found = commit_gate.evaluate("cd 'repo link' && cd .. && git commit -m x", str(self.root))
-        self.assertIsNone(found['folder'])
+        self.assertEqual(found['folder'], str(self.root))
 
     def test_other_trailers_do_not_change_the_verdict(self):
         good = f'git commit -m "s\n\n{STAMP}" --trailer "Reviewed-by: A <a@example.com>"'

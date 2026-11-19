@@ -167,6 +167,10 @@ PUNCTUATION = '();<>|&\n'
 # Every other character is itself, also a letter such as é. `=` is special only at the start of a word (zsh).
 SHELL_SPECIAL = set('$`*?[]{}~!#^')
 LINE_JOIN = r'(?:\\\n)*'
+DOUBLE_EXPANSION = re.compile(rf'{LINE_JOIN}[A-Za-z0-9_{{(\[!#?*@$^=+%-]')
+ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\[\s\S])*)'")
+ANSI_ESCAPE = re.compile(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)', re.S)
+ANSI_BYTES = dict(zip(b"""abefnrtvE\\'"?""", b"""\a\b\x1b\f\n\r\t\v\x1b\\'"?"""))
 REDIRECTION = re.compile(rf'(?P<fd>(?:[0-9]{LINE_JOIN})*)'
                          rf'(?P<op><{LINE_JOIN}<{LINE_JOIN}<|>{LINE_JOIN}[>&]|<{LINE_JOIN}&|[<>])')
 COMPOUND_OPERATOR = re.compile(rf'&{LINE_JOIN}[&>]|\|{LINE_JOIN}[|&]|;{LINE_JOIN}[;&]')
@@ -187,6 +191,8 @@ KEYWORD_PREFIXES = {'if', 'then', 'else', 'elif', 'while', 'until', 'do', 'time'
 SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
+CLEANUP_CONFIG = ('commit.cleanup', 'core.commentchar', 'core.commentstring')
+GIT_CONFIG_ENV = re.compile(r'GIT_CONFIG.*|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|HOME|XDG_CONFIG_HOME')
 # `git commit` options that cannot change the message. An option that is not listed here makes the verdict unknown.
 COMMIT_VALUE_OPTIONS = {'--author', '--date', '--pathspec-from-file'}
 COMMIT_FLAGS = {'--all', '--patch', '--signoff', '--no-signoff', '--no-verify', '--verify', '--allow-empty',
@@ -198,8 +204,27 @@ FILE_BYTES = 65536
 MESSAGE_HOOKS = ('prepare-commit-msg', 'commit-msg')
 
 
-def _literal(text):
-    return not re.search(r'[$`]', text)
+def _ansi_text(text):
+    """Decode the bytes Bash and zsh agree on, or return None."""
+    def escape(found):
+        code = found[1]
+        first = code[0]
+        if first in ANSI_BYTES:
+            return bytes([ANSI_BYTES[first]])
+        if first in b'01234567':
+            return bytes([int(code, 8) & 255])
+        if first in b'xuU' and len(code) > 1:
+            value = int(code[1:], 16)
+            # Non-ASCII Unicode escapes depend on the command's locale.
+            if first == ord('x') or value < 128:
+                return bytes([value])
+        raise ValueError('unsupported ANSI-C escape')
+
+    try:
+        decoded = ANSI_ESCAPE.sub(escape, text.encode('utf-8')).decode('utf-8')
+        return decoded if '\0' not in decoded else None
+    except ValueError:
+        return None
 
 
 def _heredocs(command, index, bodies, *, cat):
@@ -238,6 +263,15 @@ def _word(command, start, bodies, *, for_hook):
             break
         if char == quote:
             quote = ''
+        elif not quote and pair == "$'":
+            doc = ANSI_QUOTE.match(command, index)
+            if doc is None:
+                raise ValueError('unclosed ANSI-C quote')
+            decoded = _ansi_text(doc[1])
+            parts.append(doc[0] if decoded is None else decoded)
+            plain, bare = plain and decoded is not None, False
+            index = doc.end()
+            continue
         elif not quote and char in ('"', "'"):
             quote, bare = char, False
         elif pair == '\\\n':
@@ -273,8 +307,7 @@ def _word(command, start, bodies, *, for_hook):
         else:
             if quote == '"':
                 # A dollar sign starts an expansion only before a name, a digit or one of these characters.
-                expands = char == '$' and (
-                    for_hook or re.match(r'[A-Za-z0-9_{(!#?*@$-]', command[index + 1:index + 2] or ' '))
+                expands = char == '$' and (for_hook or DOUBLE_EXPANSION.match(command, index + 1))
                 plain = plain and char != '`' and not expands
             elif (not for_hook and not quote and char == '~' and index == start and 'HOME=' not in command
                   and command[index + 1:index + 2] in ('', '/', ' ', '\t', '\n', ';', '&', '|', ')')):
@@ -282,7 +315,8 @@ def _word(command, start, bodies, *, for_hook):
                 index += 1
                 continue
             elif not quote:
-                plain = plain and char not in SHELL_SPECIAL and char.isprintable() and not (char == '=' and not parts)
+                plain = (plain and char not in SHELL_SPECIAL and (char.isprintable() or char == '\N{NO-BREAK SPACE}')
+                         and not (char == '=' and not parts))
                 if char == '@' and HEREDOC_FOUND.match(command, index):
                     plain = False
             parts.append(char)
@@ -369,18 +403,18 @@ def _segments(tokens):
 
 
 def _git_commit(words):
-    """For `git ... commit`, return its arguments, global options, -C folders and whether the folder is known."""
+    """For git commit, collect arguments, global options, -C folders and readable config overrides."""
     text = [word.text for word in words]
     index, known = 0, True
     while index < len(text) and (ASSIGNMENT.fullmatch(text[index]) or text[index] in WRAPPERS):
         name = text[index].split('=', 1)[0]
-        if name.startswith('GIT_CONFIG') or name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'):
+        if GIT_CONFIG_ENV.fullmatch(name):
             known = False  # a command-local repository or config is not the one the hook probes
         index += 1
     if index >= len(text) or os.path.basename(text[index]) != 'git':
         return None
     index += 1
-    options, folders = [], []
+    options, folders, config = [], [], []
     while index < len(text) and text[index].startswith('-'):
         option = text[index]
         options.append(option)
@@ -391,19 +425,26 @@ def _git_commit(words):
             index += 2
         else:
             name = option.split('=', 1)[0]
-            if name in GIT_PLACE_OPTIONS or name in ('-c', '--config-env'):
+            if option == '-c' and index + 1 < len(words):
+                entry = words[index + 1]
+                key = entry.text.partition('=')[0].lower()
+                if entry.plain and '=' in entry.text and key in (*CLEANUP_CONFIG, 'user.name', 'user.email'):
+                    config.extend(('-c', entry.text))
+                else:
+                    known = False
+            elif name in GIT_PLACE_OPTIONS or name in ('--config-env', '--bare'):
                 known = False
             index += 2 if option in GIT_VALUE_OPTIONS or option in GIT_PLACE_OPTIONS else 1
     if index >= len(text) or text[index] != 'commit':
         return None
-    return words[index + 1:], options, folders, known
+    return words[index + 1:], options, folders, known, config
 
 
 def _commit_arguments(args, *, for_hook=False):
     """Extract commit messages, files, trailers, their options and the flags that affect checks.
 
     The 'open' flag means Git or an editor can still change the message, or the gate does not know the option."""
-    found = {'messages': [], 'files': [], 'trailers': [], 'flags': set(), 'message_words': set()}
+    found = {'messages': [], 'files': [], 'trailers': [], 'flags': set(), 'message_words': set(), 'cleanup': None}
     index = 0
 
     def value():
@@ -441,14 +482,18 @@ def _commit_arguments(args, *, for_hook=False):
                     value()
             elif arg.startswith('--no-v') and '--no-verify'.startswith(arg):
                 found['flags'].add('no-verify')
-            elif for_hook and name in ('--template', '--cleanup'):
+            elif name == '--cleanup':
+                mode = word._replace(text=attached) if equals else value()
+                if mode is not None:
+                    found['cleanup'] = mode
+            elif for_hook and name == '--template':
                 found['flags'].add('open')
                 if not equals:
                     value()
             elif name in COMMIT_FLAGS:
                 if name in ('--amend', '--no-edit'):
                     found['flags'].add(name[2:])
-            else:  # --edit, --template, --cleanup, a short form of a long option, a new option
+            else:  # --edit, --template, a short form of a long option, a new option
                 found['flags'].add('open')
         elif arg.startswith('-') and len(arg) > 1:
             letters = arg[1:]
@@ -510,7 +555,40 @@ def _read_message_file(folder, name):
         return None
 
 
-def _one_commit(args, stdin, bodies, folder):
+def _cleanup_uncertain(text, mode, folder, config):
+    """Could Git remove a Verified line? Caller has a literal message and no editor."""
+    def setting(key):
+        if os.environ.get('GIT_CONFIG') is not None:  # git config alone honors this override
+            raise ValueError('git config override')
+        shown = _git(folder, *config, 'config', '--null', '--get', key, text=False)
+        if shown is not None and shown.returncode == 1 and not shown.stdout and not shown.stderr:
+            return None
+        if shown is None or shown.returncode != 0 or not shown.stdout.endswith(b'\0'):
+            raise ValueError('unreadable git config')
+        return shown.stdout[:-1].decode('utf-8')
+
+    if mode is not None and (not mode.plain or mode.text not in ('strip', 'whitespace', 'verbatim', 'scissors', 'default')):
+        return True
+    lines = [line for line in text.split('\n') if line.startswith('Verified:')]
+    if not lines:
+        return False
+    if folder is None:
+        return True
+    try:
+        cleanup = mode.text if mode is not None else setting(CLEANUP_CONFIG[0])
+        if cleanup in (None, 'default', 'whitespace', 'verbatim', 'scissors'):
+            return False
+        if cleanup != 'strip':
+            return True
+        # Git 2.45+ treats these keys as aliases in config order. Consider either possible prefix:
+        # older Git ignores commentString, and only a possible deletion matters here.
+        return any(line.startswith(prefix) for key in CLEANUP_CONFIG[1:]
+                   if (prefix := setting(key)) and prefix.lower() != 'auto' for line in lines)
+    except ValueError:
+        return True
+
+
+def _one_commit(args, stdin, bodies, folder, *, read_file, config):
     """('pass' | 'missing' | 'unknown' | 'skip', reason) for one `git commit`."""
     found = _commit_arguments(args)
     flags = found['flags']
@@ -523,7 +601,7 @@ def _one_commit(args, stdin, bodies, folder):
         return 'unknown', 'open'
     text = None
     if found['messages']:
-        if not all(part.plain or (_literal(part.text) and '\\\n' not in part.text) for part in found['messages']):
+        if not all(part.plain for part in found['messages']):
             return 'unknown', 'shell'
         parts = [_fill(part.text, bodies) if part.fill else part.text for part in found['messages']]
         if any(part is None for part in parts):
@@ -534,7 +612,7 @@ def _one_commit(args, stdin, bodies, folder):
         name = word.text
         if word.plain and name == '-':
             text = bodies[stdin] if stdin is not None and stdin < len(bodies) else None
-        elif word.plain and not HEREDOC_FOUND.search(name) and folder is not None:
+        elif word.plain and not HEREDOC_FOUND.search(name) and read_file and folder is not None:
             text = _read_message_file(folder, name)
         if text is None:
             return 'unknown', 'file'
@@ -542,9 +620,16 @@ def _one_commit(args, stdin, bodies, folder):
         return 'unknown', 'reuse'
     else:
         return 'unknown', 'editor'
-    if stamp.message_status(text) != 'missing':
+    if 'open' in flags or 'reuse' in flags:
+        return 'unknown', 'open'
+    status = stamp.message_status(text)
+    if '\r' in text and stamp.message_status(text.replace('\r\n', '\n').replace('\r', '\n')) != status:
+        return 'unknown', 'encoding'  # a CR inside a Git line can look like a new line to the landed reader
+    if _cleanup_uncertain(text, found['cleanup'], folder, config):
+        return 'unknown', 'cleanup' if folder is not None else 'folder'
+    if status != 'missing':
         return 'pass', ''
-    if 'open' in flags or found['trailers'] or 'reuse' in flags:
+    if found['trailers']:
         return 'unknown', 'open'  # git, an editor or an option the gate does not know can still add the line
     return 'missing', 'no-line'
 
@@ -571,29 +656,59 @@ def _shell_launcher(words):
 def _real_directory(path):
     try:
         # Check the original path too: realpath can simplify a path such as file/.. that chdir rejects.
-        return os.path.realpath(path, strict=True) if os.path.isdir(path) else None
+        if os.path.isdir(path) and os.access(path, os.X_OK):
+            return os.path.realpath(path, strict=True)
     except OSError:
-        return None
+        pass
+    return None
 
 
-def _cd(folder, target):
-    """(where a plain `cd target` leads from `folder`, went through a link), or (None, True).
-
-    The shell follows `..` by name and git by the real path. Without `..` the two agree, so a link is fine there;
-    a later cd from a linked folder is not followed. With `..`, every step must be a real folder: the shell refuses
-    `cd missing/..`."""
-    if '..' not in target.split('/'):
-        logical = os.path.normpath(os.path.join(folder, target))
-        real = _real_directory(logical)
-        return real, real != logical
-    path = '/' if target.startswith('/') else folder
+def _cd(folder, logical, target, *, physical):
+    """Return the real folder and the shell's logical name, or (None, None)."""
+    if os.environ.get('CDPATH') and not (target.startswith('/') or target.split('/')[0] in ('.', '..')):
+        return None, None
+    if physical:
+        real = _real_directory(os.path.join(folder, target))
+        return real, real
+    path = '/' if target.startswith('/') else logical
+    if path is None:
+        return None, None
     for part in target.split('/'):
         if part in ('', '.'):
             continue
-        path = os.path.dirname(path) if part == '..' else os.path.join(path, part)
-        if _real_directory(path) != path:
-            return None, True
-    return path, False
+        if part == '..':
+            if _real_directory(path) is None:
+                return None, None  # cd missing/.. does not simply drop the missing component
+            path = os.path.dirname(path)
+        else:
+            path = os.path.join(path, part)
+    real = _real_directory(path)
+    return (real, path) if real is not None else (None, None)
+
+
+def _cd_target(words):
+    """Recognize one literal target and the options common to Bash and zsh."""
+    if not all(word.plain and not word.fill for word in words):
+        return None
+    args = [word.text for word in words]
+    physical = args[:1] == ['-P']
+    if physical:
+        args = args[1:]
+    explicit = args[:1] == ['--']
+    if explicit:
+        args = args[1:]
+    if len(args) != 1:
+        return None
+    target = args[0]
+    if not target or (target.startswith('-') and not explicit) or re.fullmatch(r'-(?:[0-9]+)?|\+[0-9]+', target):
+        return None
+    return target, physical
+
+
+def _cd_guard(segment):
+    preceding, words, _, _, redirected = segment
+    return (preceding == '||' and not redirected and all(word.plain and word.bare for word in words)
+            and [word.text for word in words] in (['exit'], ['exit', '1'], ['return']))
 
 
 def evaluate(command, cwd=None):
@@ -608,10 +723,11 @@ def evaluate(command, cwd=None):
         return None
     folder = _real_directory(cwd) if isinstance(cwd, str) and cwd.startswith('/') else None
     # The shell's own folder name can go through a link. git runs in the real folder, but a `cd ..` would not.
-    linked = folder is not None and folder != os.path.normpath(cwd)
+    logical = folder if folder is not None and folder == os.path.normpath(cwd) else None
     bodies = []
     try:
-        segments, uncertain = _segments(list(_tokens(command, bodies)))
+        tokens = list(_tokens(command, bodies))
+        segments, uncertain = _segments(tokens)
     except ValueError:
         # Quotes that do not close. Report it only when the text looks like a commit at all.
         if re.search(r'(?:^|[\s;&|(])git\s[^\n;|&]*\bcommit(?:\s|$)', command):
@@ -624,26 +740,33 @@ def evaluate(command, cwd=None):
     # - not when the command sets HOME (the gate's ~ would be the old one);
     # - not after `x &&` unless x is a cd too (`test -f a && cd b; git commit` can skip the cd);
     # - not after || or in a pipe (`cd a || cd b`, `cd a | x`).
-    steady = not any(segment[0] == '&' for segment in segments) and 'HOME=' not in command
+    steady = '&' not in tokens and not any(name in joined for name in ('HOME=', 'CDPATH=', 'PWD='))
     chained = True  # every command so far was a followed cd
+    guard = None
+    config_changed = False
     for number, (preceding, words, stdin, redirects_plain, redirected) in enumerate(segments):
+        if number == guard:
+            continue
         if not words:
-            chained = False
+            chained = alone = False  # a redirection alone can write a message file
             continue
         first = words[0]
         uncertain = uncertain or (first.bare and first.text in KEYWORDS)
         all_plain = redirects_plain and all(word.plain for word in words)
-        if first.text == 'cd' and len(words) == 2 and all_plain and not redirected:
-            # Only a cd moves the shell. It is followed when it runs for certain and in the shell itself: not after
-            # || or in a pipe or in the background (`cd a || cd b`, `cd a | x`, `cd a &`).
+        cd = first.text == 'cd' or (first.text == 'builtin' and len(words) > 1 and words[1].text == 'cd')
+        if cd:
             following = segments[number + 1][0] if number + 1 < len(segments) else None
-            target = words[1]
-            if (folder is not None and not linked and steady and following in FOLDER_SEPARATORS
-                    and (preceding in (None, ';', '\n') or (preceding == '&&' and chained))
-                    and not target.fill and target.text and not target.text.startswith('-')):
-                folder, linked = _cd(folder, target.text)
+            if following == '||' and _cd_guard(segments[number + 1]):
+                after_guard = segments[number + 2][0] if number + 2 < len(segments) else None
+                if after_guard in (None, ';', '\n'):
+                    guard, following = number + 1, after_guard
+            target = _cd_target(words[1 if first.text == 'cd' else 2:])
+            if (folder is not None and steady and not uncertain and all_plain and not redirected
+                    and following in FOLDER_SEPARATORS and target is not None
+                    and (preceding in (None, ';', '\n') or (preceding == '&&' and chained))):
+                folder, logical = _cd(folder, logical, target[0], physical=target[1])
             else:
-                folder = None
+                folder = logical = None
             chained = chained and folder is not None
             continue
         chained = False
@@ -652,27 +775,39 @@ def evaluate(command, cwd=None):
         uncertain = uncertain or _shell_launcher(words)
         commit = _git_commit(words) if words else None
         if commit:
-            args, _, folders, known = commit
-            here = folder if known else None
+            args, _, folders, known, config = commit
+            here = folder if known and not config_changed else None
             for item in folders:
                 here = (_real_directory(os.path.join(here, item.text))
                         if here is not None and item.plain and not item.fill else None)
-            verdict, reason = _one_commit(args, stdin, bodies, here if alone else None)
+            verdict, reason = _one_commit(args, stdin, bodies, here, read_file=alone, config=config)
             if verdict != 'skip':
-                if verdict != 'pass' and not all_plain:
+                if not all_plain:
                     verdict, reason = 'unknown', 'shell'
+                elif here is None and verdict == 'missing':
+                    verdict, reason = 'unknown', 'folder'
                 verdicts.append((verdict, reason))
                 where = here if len(verdicts) == 1 or where == here else None
         # A simple command cannot move the shell, except these. Any command can write a message file.
         moving = ('cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin')  # these can move the shell; not followed
         if first.text in moving or (first.text == 'command' and len(words) > 1 and words[1].text in moving):
-            folder = None
+            folder = logical = None
+        if first.text in ('set', 'setopt', 'unsetopt'):
+            steady = False  # later cd and glob behavior can depend on shell options
+        if commit is None:
+            # A config write or an environment change can invalidate a probe before the shell runs.
+            config_changed = config_changed or (
+                any(os.path.basename(word.text) == 'git' for word in words[:-1])
+                and any(word.text == 'config' for word in words[1:]))
+            if ASSIGNMENT.fullmatch(first.text) or first.text in ('export', 'unset'):
+                config_changed = config_changed or any(
+                    GIT_CONFIG_ENV.fullmatch(word.text.split('=', 1)[0]) for word in words)
         alone = False
     if not verdicts:
         return None
     kinds = {verdict for verdict, _ in verdicts}
     result = {'count': len(verdicts), 'folder': where}
-    if kinds == {'pass'}:
+    if kinds == {'pass'} and not uncertain:
         return dict(result, verdict='pass', reason='')
     if kinds == {'missing'} and not uncertain:
         return dict(result, verdict='missing', reason='no-line')
@@ -1046,7 +1181,7 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
             return False
         if os.path.basename(words[0].text) != 'git' or (commit := _git_commit(words)) is None:
             return False
-        args, options, _, known = commit
+        args, options, _, known, _ = commit
         if not known or any(HOOK_GIT_OPTIONS.fullmatch(option) for option in options):
             return False
         if cwd_fallback and '-C' in options:
