@@ -12,13 +12,17 @@ type Drag = { id: number; target: HTMLElement; element: HTMLElement; vx: number;
 
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 const translate = (point: Point) => `${point.x}px ${point.y}px`
-// Where the element shows now: its translate position plus any transform a running motion adds. Open and bloom
-// keyframes set translate to none and carry the whole position in transform; snap and settle add an offset.
+// Where the element is placed now. Open and bloom keyframes set translate to none and carry the whole position in
+// transform. A relative motion (settle) keeps its offset in transform on top of translate; it keeps running after a
+// grab, so reading it here would count it twice.
 const position = (element: HTMLElement): Point => {
   const style = getComputedStyle(element)
-  const [x, y] = style.translate === 'none' ? [] : style.translate.split(/\s+/)
-  const matrix = new DOMMatrix(style.transform === 'none' ? undefined : style.transform)
-  return { x: (parseFloat(x) || 0) + matrix.m41, y: (parseFloat(y) || 0) + matrix.m42 }
+  if (style.translate === 'none') {
+    const matrix = new DOMMatrix(style.transform === 'none' ? undefined : style.transform)
+    return { x: matrix.m41, y: matrix.m42 }
+  }
+  const [x, y] = style.translate.split(/\s+/)
+  return { x: parseFloat(x) || 0, y: parseFloat(y) || 0 }
 }
 const elastic = (point: Point, fitted: Point): Point => ({ x: fitted.x + (point.x - fitted.x) * 0.25, y: fitted.y + (point.y - fitted.y) * 0.25 })
 const MARGIN = 8
