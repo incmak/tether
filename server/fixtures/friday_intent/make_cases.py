@@ -341,10 +341,13 @@ case("log-automation-data", "misheard", "dev", "Okay what about the automation d
      history=say("Hi Friday.", "Hi, I am listening."), state=dict(STATE, busy=[AUTO]))
 case("log-echo-ignore", "no_tool", "dev",
      "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
-     {"tool": None}, "log")
+     {"tool": None, "reply_not": r"(?i)image|filing|gap|book|tell me more"}, "log")
 case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that?",
-     {"tool": None, "reply": r"(?i)recommend|suggest|propos|advis|it says|its next step"}, "log",
+     {"tool": None, "reply": r"(?is)(?=.*(\bC\b|observe))(?=.*(recommend|suggest|propos|advis|it says|next step))"}, "log",
      history=C_CTX[:-2], state=AUTO_STATE)
+case("log-answer-it-keep-c", "send_direct", "dev", "Well like answer it like let's keep option C",
+     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bC\b"}, "prompt_not": r"(?i)\ball\b"}, "log",
+     history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
 case("log-ask-friday-test-new-tab", "send_direct", "dev",
      "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",

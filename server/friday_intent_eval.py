@@ -68,6 +68,8 @@ def _score(trace, expect, expected_tools):
         yield 'wrong_args'
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
+    if 'reply_not' in expect and re.search(expect['reply_not'], reply):
+        yield 'reply'
     if readback_chat is not None:
         if proposal is None:
             matches = _asks_send_to(reply, readback_chat)
@@ -187,8 +189,9 @@ def run_case(case, fixture, complete, runs=1, brain=None):
         passed += not reasons
         prompt_tokens += trace.pop('prompt_tokens')
         llm_calls += trace['steps']
-        if len(samples) < 2:
-            samples.append(trace)
+        # Keep the first two runs, plus up to two failed runs, so a failure can be read.
+        if len(samples) < 2 or (reasons and sum(bool(item.get('fails')) for item in samples) < 2):
+            samples.append(dict(trace, fails=reasons))
     return dict(id=case['id'], group=case['group'], split=case['split'], runs=runs, passed=passed,
                 fails=dict(fails), samples=samples, prompt_tokens=prompt_tokens, llm_calls=llm_calls)
 
@@ -268,7 +271,7 @@ def _validate_expectation(expect, label, names):
     if not isinstance(args, dict):
         raise ValueError(f'{label}: expect.args must be an object')
     try:
-        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'prompt_not') if key in expect]:
+        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'reply_not', 'prompt_not') if key in expect]:
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None

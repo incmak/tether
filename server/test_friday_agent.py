@@ -397,17 +397,25 @@ class FridayRulesTests(unittest.TestCase):
         for text in ('tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it',
                      'instruct it', 'message ci-audit', 'forward this', 'have it fix it',
                      'have them fix it', 'have ci-audit fix it', 'get it to fix it',
-                     'get them to fix it', 'answer it, keep option C', 'reply to it with C',
-                     'reply with C'):
+                     'get them to fix it', 'answer it, keep option C', 'well like answer it like keep C',
+                     'Reply to it with C.'):
             self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
         for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish',
-                     'what was the answer', 'did it reply'):
+                     'what was the answer', 'did it reply', "Don't answer it yet.",
+                     'Should I reply to it now?', 'What should I reply with?', 'answer it?',
+                     'You sent the wrong message.', 'You sent the wrong text.', 'my prompt was longer'):
             self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
         for readback in ('Shall I send ci-audit the fix?', 'Should I ask it: Fix the flake.?'):
             for yes in ('yes', 'YEP!', 'go ahead'):
                 self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', yes, set(), readback))
             for no in ('no', 'yes but no', "yes, don't", 'yesterday'):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', no, set(), readback), refusal)
+        # "Okay" after a statement that holds the prompt text is not a yes to a send.
+        short = {'chat': 'ci-audit', 'prompt': 'C'}
+        self.assertEqual(friday.check_tool('send_to_chat', short, 'speech', 'Okay', set(),
+                                           'Option C keeps Observe mode active.'), refusal)
+        self.assertIsNone(friday.check_tool('send_to_chat', short, 'speech', 'Okay', set(),
+                                            'Should I send C to ci-audit?'))
         for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Should I send this elsewhere?'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'yes', set(), readback), refusal)
 

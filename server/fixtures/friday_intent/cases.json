@@ -2323,7 +2323,8 @@
    "history": [],
    "user": "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
    "expect": {
-    "tool": null
+    "tool": null,
+    "reply_not": "(?i)image|filing|gap|book|tell me more"
    }
   },
   {
@@ -2371,7 +2372,88 @@
    "user": "Do you think we should keep that?",
    "expect": {
     "tool": null,
-    "reply": "(?i)recommend|suggest|propos|advis|it says|its next step"
+    "reply": "(?is)(?=.*(\\bC\\b|observe))(?=.*(recommend|suggest|propos|advis|it says|next step))"
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
+   "id": "log-answer-it-keep-c",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Automation tether . Can we have\\u2026\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "{\"chat\": \"Automation tether . Can we have\\u2026\", \"text\": \"B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\\n\\nYou still have 2 open decisions:\\nAuto-merge: \\\"C\\\" keeps Observe mode.\\nFactory floor: grill questions Q1 to Q5.\\n\\nNext: reply \\\"C, yes to all\\\", or give the numbers you want changed.\\n\\nNeeds you: yes\", \"truncated\": false}"
+    },
+    {
+     "role": "assistant",
+     "content": "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions."
+    },
+    {
+     "role": "user",
+     "content": "So what is the auto-most question?"
+    },
+    {
+     "role": "assistant",
+     "content": "It asks whether to keep Observe mode with option C."
+    },
+    {
+     "role": "user",
+     "content": "Do you think we should keep that?"
+    },
+    {
+     "role": "assistant",
+     "content": "I cannot judge your design choices, but option C keeps Observe mode active."
+    },
+    {
+     "role": "user",
+     "content": "Okay, let's keep that."
+    },
+    {
+     "role": "assistant",
+     "content": "Should I send C to the automation tether chat?"
+    }
+   ],
+   "user": "Well like answer it like let's keep option C",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
+     "prompt": "(?i)\\bC\\b"
+    },
+    "prompt_not": "(?i)\\ball\\b"
    },
    "state": {
     "busy": [
