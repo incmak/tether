@@ -98,6 +98,11 @@ class GateMeasuresTests(unittest.TestCase):
         self.assertEqual(gate.latency_measures(2.01, 2.09, 2.3451, 2.4567, 2.4581),
                          {'local_processing_latency_s': .448, 'stt_s': .255, 'tts_s': .112})
 
+    def test_audible_latency_subtracts_reply_duration_from_server_times(self):
+        reply = gate.make_wav([0.0] * 32000, 16000)  # 2 s of audio
+        # Reply audio started at 13.5 s, 3.5 s after the recording ended at 10 s.
+        self.assertEqual(gate.audible_latency({'at': 10_000}, {'at': 15_500}, reply), 3.5)
+
     def test_report_omits_credentials_and_keeps_diagnostics(self):
         location = 'https://recordings.example/secret.wav'
         post_token = 'fake-post-token'
