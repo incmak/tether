@@ -593,6 +593,14 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .signin .primary { min-width: 150px; }
 @media (min-width: 600px) {
   .sheet { inset: 0; margin: auto; height: fit-content; border-radius: var(--radius-xl); border: 1px solid var(--line); padding: 26px; }
+  .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 200ms var(--motion-out), scale 200ms var(--motion-out); }
+  @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { opacity: 0; scale: .97; } }
+  dialog.sheet:not(.popover, .command-menu)::backdrop { transition: opacity 200ms var(--motion-out); }
+  @starting-style { dialog.sheet:not(.popover, .command-menu)[open]::backdrop { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 150ms ease-out; }
+    @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { scale: none; } }
+  }
   .messages { padding: 36px 34px 16px; }
   .chat-header { padding-left: 24px; padding-right: 24px; }
   .composer-area { padding-bottom: max(22px, env(safe-area-inset-bottom)); }
