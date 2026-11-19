@@ -13,6 +13,7 @@ from agents import BOUND
 from terminal_input import UUID
 
 OPTION = '@tether_helper'
+PANE = re.compile(r'%[0-9]+')
 AGENTS = ('claude', 'codex', 'antigravity')
 MAX_REPLY = 100000
 MAX_PROMPT = 8000
@@ -55,25 +56,55 @@ def save(pane, record, run):
         check=True, capture_output=True, timeout=5)
 
 
+def _record(raw):
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        return None
+    if (not isinstance(record, dict) or not isinstance(record.get('owner_pane'), str)
+            or not PANE.fullmatch(record['owner_pane'])
+            or not isinstance(record.get('sent_at'), (int, float))
+            or isinstance(record.get('sent_at'), bool)):
+        return None
+    return record
+
+
 def load(pane, run):
     try:
         result = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{@tether_helper}'],
                      capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError('Could not read the helper tab.') from exc
-    fields = result.stdout.rstrip('\n').split('\t', 1)
-    if result.returncode or fields[0] != pane:
+    found, _, raw = result.stdout.rstrip('\n').partition('\t')
+    if result.returncode or found != pane:
         return False, None
-    try:
-        record = json.loads(fields[1])
-    except (ValueError, IndexError):
-        return True, None
-    if (not isinstance(record, dict) or not isinstance(record.get('owner_pane'), str)
-            or not re.fullmatch(r'%[0-9]+', record['owner_pane'])
-            or not isinstance(record.get('sent_at'), (int, float))
-            or isinstance(record.get('sent_at'), bool)):
-        record = None
-    return True, record
+    return True, _record(raw)
+
+
+def parents(run, entries):
+    """Read the helper-to-owner pane IDs for this session listing in one tmux call."""
+    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_helper}'],
+                 capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        return {}
+    by_id = {entry['id']: entry for entry in entries}
+    links = {}
+    for line in result.stdout.split('\n'):
+        pane, _, raw = line.partition('\t')
+        if not raw or pane not in by_id or not PANE.fullmatch(pane):
+            continue
+        record = _record(raw)
+        if record is None:
+            continue
+        owner_pane = record['owner_pane']
+        owner = by_id.get(owner_pane)
+        if owner is None or owner_pane == pane or owner.get('agent') == 'shell':
+            continue
+        bound, current = record.get('owner_thread'), _thread(owner)
+        if bound and current and bound != current:
+            continue
+        links[pane] = owner_pane
+    return links
 
 
 def check(caller_pane, caller, helper, record, run, *, pane=None):
@@ -106,7 +137,7 @@ def check(caller_pane, caller, helper, record, run, *, pane=None):
 
 def _pane(body):
     pane = body.get('pane')
-    if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
+    if not isinstance(pane, str) or not PANE.fullmatch(pane):
         raise ValueError('Select a helper tab.')
     return pane
 

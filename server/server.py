@@ -662,17 +662,24 @@ def forget_sessions():
 
 
 def build_listing():
-    rows = session_rows(sessions())
+    entries = sessions()
+    rows = session_rows(entries)
     try:
         links = review_links.reviewed_by()
         paused = review_links.paused()
     except Exception:  # a review-store read error must not hide the session list
         links = {}
         paused = {}
+    try:
+        parents = helper_tabs.parents(subprocess.run, entries)
+    except Exception:  # a helper record read error must not hide the session list
+        parents = {}
     for row in rows:
         if links.get(row['id']):
             row['reviewers'] = links[row['id']]
         row['reviewers_paused'] = paused.get(row['id'], [])
+        if row['id'] in parents:
+            row['parent'] = parents[row['id']]
     listing = {'sessions': rows, 'default_thread': settings()['thread']}
     try:
         found_groups = groups.all_groups()

@@ -25,6 +25,8 @@ const panes = [
   pane('%7', 'Docs pass', { agent: 'codex', state: 'Working' }),
   pane('%8', 'Release notes', { finished: NOW / 1000 - 3 * 3600 }),
   pane('%9', 'Login fix', { agent: 'antigravity', state: 'Working' }),
+  pane('%11', 'Factory helper', { agent: 'codex', parent: '%2' }),
+  pane('%12', 'Factory advisor', { role: 'advisor', parent: '%11' }),
 ]
 const backlog = [
   '## tether',
@@ -500,6 +502,22 @@ async function main() {
       check(`${width}: no sideways scroll on the floor`, !(await overflow()))
       const small = await page.evaluate(() => [...document.querySelectorAll('.factory button')].filter(el => el.getClientRects().length).map(el => el.getBoundingClientRect()).filter(r => r.width < 24 || r.height < 24).length)
       check(`${width}: every button is 24 px or more`, small === 0, `${small} small`)
+      if (width === 320 || width === 1280) {
+        await station('verify').locator('[data-key="task:B191"]').click()
+        await page.locator('.factory-task').waitFor()
+        await zoomSettled(page)
+        const roles = await page.locator('.factory-agents .factory-card-meta').allInnerTexts()
+        check(`${width}: B191 shows main, worker and advisor roles for its linked agents`,
+          JSON.stringify(roles.map(text => text.split(' · ')[0])) === '["main","worker","reviewer","worker","advisor"]', JSON.stringify(roles))
+        check(`${width}: the linked worker and advisor fit in the task view`, !(await overflow()))
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `parent-links-${width}.png`) })
+        await page.locator('[data-key="agent:%11"]').focus()
+        await page.keyboard.press('Enter')
+        await page.locator('.factory-agent').waitFor()
+        check(`${width}: Enter opens the linked worker`, (await crumbs()).at(-1) === 'Factory helper')
+        await page.locator('.factory-crumbs button', { hasText: 'Factory', exact: true }).first().click()
+        await page.locator('.factory-floor').waitFor()
+      }
       await page.locator('[data-key="task:B71"]').click()
       await page.locator('.factory-agents button').first().click()
       await page.locator('.factory-screen').waitFor()

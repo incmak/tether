@@ -2,6 +2,7 @@
 // that arrow keys and TV remotes use. Pure functions, no browser.
 const { strict: assert } = require('node:assert')
 const { readFileSync } = require('node:fs')
+const { test } = require('node:test')
 const ts = require('typescript')
 
 const load = (file, deps = {}) => {
@@ -39,6 +40,8 @@ function floor(panes, tools = {}, extra = {}) {
   return m.buildFloor({ panes, rows: items.parseBacklog(backlog), data: { now: NOW / 1000, tools, deployed: [], commits: [], ...extra }, now: NOW })
 }
 const byId = (result, id) => result.tasks.find(task => task.id === id)
+const members = task => task.agents.map(agent => [agent.pane.id, agent.role])
+const visiblePanes = result => result.tasks.flatMap(task => task.agents.map(agent => agent.pane.id)).sort()
 
 // Inbox, Done and links from the item.
 {
@@ -120,6 +123,146 @@ const byId = (result, id) => result.tasks.find(task => task.id === id)
   assert.equal(slow.stuck, true, 'an open task whose tabs have not moved for 90 min is stuck')
   assert.equal(result.tasks.some(task => task.id === '%40'), false, 'shell tabs are not agents')
 }
+
+test('a missing or shell parent leaves the child alone', () => {
+  const child = pane('%2', { parent: '%1', state: 'Working' })
+  for (const panes of [[child], [pane('%1', { agent: 'shell' }), child]]) {
+    const result = floor(panes)
+    assert.deepEqual(members(byId(result, '%2')), [['%2', 'worker']])
+    assert.deepEqual(visiblePanes(result), ['%2'])
+  }
+})
+
+test('direct item links win over parent links for every item', () => {
+  const result = floor([
+    pane('%30', { pane_name: 'B12 root', state: 'Working' }),
+    pane('%2', { pane_name: 'Factory View', parent: '%30', state: 'Working' }),
+    pane('%3', { brief: { name: 'B20 worker' }, parent: '%30', state: 'Working' }),
+    pane('%5', { parent: '%30', state: 'Working' }),
+  ])
+  assert.deepEqual(members(byId(result, 'B191')), [['%2', 'worker']])
+  assert.deepEqual(members(byId(result, 'B20')), [['%3', 'worker']])
+  assert.deepEqual(members(byId(result, 'B12')), [['%30', 'main'], ['%5', 'worker']])
+  assert.deepEqual(visiblePanes(result), ['%2', '%3', '%30', '%5'])
+
+  const started = floor([pane('%1', { state: 'Working' }), pane('%4', { parent: '%1', state: 'Working' })])
+  assert.deepEqual(members(byId(started, 'B191')), [['%1', 'main'], ['%4', 'worker']], "an item's Doing tab that started a worker is main")
+
+  const doing = floor([pane('%1', { parent: '%2' }), pane('%2', { pane_name: 'B12 root' })])
+  assert.deepEqual(members(byId(doing, 'B191')), [['%1', 'worker']])
+  assert.deepEqual(members(byId(doing, 'B12')), [['%2', 'worker']])
+
+  const repeated = floor([pane('%3', { pane_name: 'B12 work', brief: { name: 'B20 work' } })])
+  assert.deepEqual(members(byId(repeated, 'B12')), [['%3', 'worker']])
+  assert.equal(byId(repeated, 'B20').phase, 'inbox')
+})
+
+test('a different backlog ref keeps a child and its descendants separate', () => {
+  for (const name of [{ pane_name: 'B15 follow-up' }, { brief: { name: 'B16 follow-up' } }]) {
+    const result = floor([
+      pane('%30', { pane_name: 'B12 root', state: 'Working' }),
+      pane('%3', { parent: '%2', state: 'Working' }),
+      pane('%2', { ...name, parent: '%30', state: 'Working' }),
+    ])
+    assert.deepEqual(members(byId(result, 'B12')), [['%30', 'worker']])
+    assert.deepEqual(members(byId(result, '%2')), [['%2', 'main'], ['%3', 'worker']])
+  }
+
+  const same = floor([
+    pane('%30', { pane_name: 'B15 follow-up' }),
+    pane('%2', { brief: { name: 'B15 helper' }, parent: '%30', state: 'Working' }),
+  ])
+  assert.deepEqual(members(byId(same, '%30')), [['%30', 'main'], ['%2', 'worker']])
+})
+
+test('an item includes all descendants of its linked Claude and Codex tabs', () => {
+  const result = floor([
+    pane('%6', { pane_name: 'Advisor', parent: '%4', role: 'advisor' }),
+    pane('%5', { pane_name: 'Claude grandchild', parent: '%4', state: 'Working' }),
+    pane('%4', { agent: 'codex', pane_name: 'Codex child', parent: '%2', reviewers: ['%7'] }),
+    pane('%2', { pane_name: 'Factory View' }),
+    pane('%7', { pane_name: 'Reviewer', parent: '%8' }),
+    pane('%8', { pane_name: 'Elsewhere', state: 'Working' }),
+  ])
+  const task = byId(result, 'B191')
+  assert.deepEqual(members(task).sort(), [['%2', 'main'], ['%4', 'worker'], ['%5', 'worker'], ['%6', 'advisor'], ['%7', 'reviewer']])
+  assert.match(task.why, /Codex child was started by Factory View/)
+  assert.match(task.why, /Claude grandchild was started by Codex child/)
+  assert.match(task.why, /Reviewer reviews Codex child/)
+  assert.deepEqual(visiblePanes(result), ['%2', '%4', '%5', '%6', '%7', '%8'])
+})
+
+test('an unclaimed Antigravity root groups its Claude workers, advisors and reviewers', () => {
+  const result = floor([
+    pane('%31', { pane_name: 'Claude child', parent: '%30', reviewers_paused: ['%33'], state: 'Working' }),
+    pane('%30', { pane_name: 'Antigravity root', agent: 'antigravity' }),
+    pane('%32', { parent: '%31', pane_name: 'Advisor', role: 'advisor' }),
+    pane('%33', { pane_name: 'Reviewer' }),
+  ])
+  const task = byId(result, '%30')
+  assert.deepEqual(members(task), [['%30', 'main'], ['%31', 'worker'], ['%32', 'advisor'], ['%33', 'reviewer']])
+  assert.match(task.why, /linked: Claude child was started by Antigravity root/)
+  assert.match(task.why, /Advisor was started by Claude child/)
+  assert.match(task.why, /Reviewer reviews Claude child/)
+  assert.deepEqual(visiblePanes(result), ['%30', '%31', '%32', '%33'])
+})
+
+test('review-it follows the reviewed tab and gives each pane one task', () => {
+  const caller = pane('%30', { pane_name: 'Caller', state: 'Working' })
+  const reviewed = pane('%31', { pane_name: 'New worker', parent: '%30', reviewers: ['%30'] })
+  const standalone = floor([caller, reviewed])
+  assert.deepEqual(members(byId(standalone, '%31')), [['%31', 'worker'], ['%30', 'reviewer']])
+  assert.deepEqual(visiblePanes(standalone), ['%30', '%31'])
+
+  const linked = floor([{ ...caller, id: '%1' }, { ...reviewed, parent: '%1', reviewers: ['%1'], pane_name: 'B20 work' }])
+  assert.deepEqual(members(byId(linked, 'B20')), [['%31', 'worker'], ['%1', 'reviewer']])
+  assert.equal(byId(linked, 'B191').phase, 'inbox')
+  assert.deepEqual(visiblePanes(linked), ['%1', '%31'])
+
+  const inherited = floor([{ ...caller, id: '%1' }, { ...reviewed, parent: '%1', reviewers: ['%1'] }])
+  assert.deepEqual(members(byId(inherited, 'B191')), [['%1', 'reviewer'], ['%31', 'worker']])
+
+  const repeated = floor([caller, { ...caller, tmux_session: '$2' }, reviewed])
+  assert.deepEqual(visiblePanes(repeated), ['%30', '%31'])
+})
+
+test('a parent cycle shows each tab once', () => {
+  const a = pane('%30', { parent: '%31', state: 'Working' })
+  const b = pane('%31', { parent: '%30', state: 'Working' })
+  const child = pane('%32', { parent: '%31', state: 'Working' })
+  for (const panes of [[a, b, child], [child, b, a]]) {
+    const result = floor(panes)
+    assert.equal(result.tasks.filter(task => task.id.startsWith('%')).length, 1)
+    assert.deepEqual(visiblePanes(result), ['%30', '%31', '%32'])
+  }
+})
+
+test('busy state, last activity and parking use all members', () => {
+  const root = pane('%30', { finished: NOW / 1000 - 2 * 3600 })
+  const child = pane('%31', { parent: '%30', state: 'Working' })
+  const result = floor([root, child])
+  assert.equal(byId(result, '%30').phase, 'build')
+  assert.equal(byId(result, '%30').last, NOW)
+  assert.equal(result.parked, 0)
+
+  const recent = floor([{ ...root, finished: 0 }, { ...child, state: 'Idle', finished: NOW / 1000 - 3600 }])
+  assert.equal(byId(recent, '%30').phase, 'done')
+  assert.equal(byId(recent, '%30').last, NOW - 3600000)
+  assert.equal(recent.parked, 0)
+
+  const parked = floor([{ ...root, finished: 0 }, { ...child, state: 'Idle' }])
+  assert.equal(byId(parked, '%30'), undefined)
+  assert.equal(parked.parked, 1)
+})
+
+test('advisors never lead the phase even when their tools are newest', () => {
+  const tools = { '%30': [tool('Edit', 'x', 10)], '%31': [tool('Bash', 'python3 scripts/deploy-ui.py /tmp/b ui/dist')] }
+  const advisor = pane('%31', { parent: '%30', role: 'advisor', state: 'Working' })
+  const result = floor([pane('%30'), advisor], tools)
+  assert.deepEqual(members(byId(result, '%30')), [['%30', 'worker'], ['%31', 'advisor']])
+  assert.equal(byId(result, '%30').phase, 'build')
+  assert.equal(byId(floor([advisor], tools), '%31').phase, 'build')
+})
 
 // Report only evidence this screen has for a phase, and keep it until the server confirms it.
 {

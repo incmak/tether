@@ -1,9 +1,12 @@
 // The Factory view's model: every agent tab and backlog item as a task that moves through phases.
 // Pure functions only, so the phase rules can be tested without a browser (ui/test_factory_model.cjs).
 //
+// Direct backlog links come first. Parent links group the remaining tabs under their root unless their backlog
+// refs differ. Reviewers follow the tab they review even when a parent link points elsewhere.
+//
 // Phase rules, first match wins. Each task carries `why`: the evidence the phase was guessed from.
 //   Done    a backlog item checked off (or named on a DEPLOYED.md line) in the last 24 h,
-//           or a tab with no item whose last turn ended in the last 24 h.
+//           or an idle task with no item whose latest activity was in the last 24 h.
 //   Inbox   an open backlog item that no open tab works on.
 //   Deploy  an open item that a DEPLOYED.md line of the last 24 h names, or a tab whose latest steps run a deploy.
 //   Review  a reviewer tab of the task is working, or the worker's latest step waits on a review (codex-lane, wait).
@@ -124,52 +127,135 @@ interface Input {
   now: number                       // ms
 }
 
-/** Every task on the floor. Tabs with no item that ended over 24 h ago and wait for nothing are "parked": counted, not shown. */
+interface Links { ref?: string; agents: Agent[]; reasons: string[] }
+const withLinks = (why: string, reasons: string[]) => reasons.length ? `${why} · linked: ${reasons.join('; ')}` : why
+
+/** Tasks with no item and no activity in the past 24 h count as parked while all members are idle. */
 export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor {
-  const agents = panes.filter(pane => pane.agent !== 'shell')
-  const byId = new Map(agents.map(pane => [pane.id, pane]))
+  const byId = new Map(panes.filter(pane => pane.agent !== 'shell').map(pane => [pane.id, pane]))
+  const agents = [...byId.values()]
   const toolsOf = (pane: Pane) => data?.tools[pane.id] ?? []
   const lastOf = (pane: Pane) => Math.max(toolMs(toolsOf(pane)), toMs(pane.finished ?? 0), pane.state === 'Working' ? now : 0)
-  const reviewerOf = new Map<string, string>()   // reviewer pane -> the pane it reviews
-  for (const pane of agents) for (const reviewer of [...(pane.reviewers ?? []), ...(pane.reviewers_paused ?? [])]) if (!reviewerOf.has(reviewer)) reviewerOf.set(reviewer, pane.id)
+  const reviewerOf = new Map<Pane, Pane>()   // reviewer pane -> the pane it reviews
+  for (const pane of agents) {
+    for (const id of [...(pane.reviewers ?? []), ...(pane.reviewers_paused ?? [])]) {
+      const reviewer = byId.get(id)
+      if (reviewer && reviewer !== pane && !reviewerOf.has(reviewer)) reviewerOf.set(reviewer, pane)
+    }
+  }
   const agent = (pane: Pane, role: Role): Agent => ({ pane, name: paneName(pane), role, state: agentState(pane), step: stepOf(pane, toolsOf(pane)), tools: toolsOf(pane), last: lastOf(pane), sweep: (data?.sweep?.lines ?? []).filter(line => line.pane === pane.id) })
 
+  // Resolve reviews before parent links. In --review-it, the new tab's parent is its reviewer.
+  const reviewRoots = new Map<Pane, Pane>()
+  for (const pane of agents) {
+    const visited = new Set<Pane>()
+    let root = pane
+    while (!reviewRoots.has(root) && !visited.has(root)) {
+      visited.add(root)
+      const reviewed = reviewerOf.get(root)
+      if (!reviewed) break
+      root = reviewed
+    }
+    root = reviewRoots.get(root) ?? root
+    for (const member of visited) reviewRoots.set(member, root)
+  }
+  const reviewRoot = (pane: Pane) => reviewRoots.get(pane)!
+  const roleOf = (pane: Pane, role: Role = 'worker'): Role =>
+    pane.role === 'advisor' ? 'advisor' : reviewRoot(pane) === pane ? role : 'reviewer'
+
   // Backlog items, with the project heading each sits under.
-  const items: { item: Item; project: string }[] = []
+  const items: { item: Item; project: string; links: Links }[] = []
   let project = ''
   for (const row of rows) {
     if (row.kind === 'note' && row.heading) project = row.text
-    else if (row.kind === 'item' && row.ref) items.push({ item: row, project })
+    else if (row.kind === 'item' && row.ref) items.push({ item: row, project, links: { ref: row.ref, agents: [], reasons: [] } })
   }
   const deploysOf = (ref?: string) => ref ? (data?.deployed ?? []).filter(line => line.refs.includes(ref)) : []
   const commitsOf = (ref?: string) => ref ? (data?.commits ?? []).filter(commit => commit.refs.includes(ref)) : []
 
   // Which tabs work on which item: the item's "Doing:" tab, and tabs whose name carries the item's number or that the
   // item's notes name ("Worker tab: Factory View").
-  const claimed = new Set<string>()
-  const tasks: Task[] = []
-  for (const { item, project } of items) {
-    const ref = item.ref!
-    const recentDone = item.done ? Math.max(doneAt(item), ...deploysOf(ref).map(line => line.at * 1000)) : 0
-    if (item.done && now - recentDone > DAY) continue
-    const linked: Agent[] = []
-    const reasons: string[] = []
+  const direct = new Map<Pane, { links: Links; role: Role; reason: string }>()
+  for (const { item, links } of items) {
+    if (item.done) continue
+    const ref = links.ref
     const add = (pane: Pane | undefined, role: Role, reason: string) => {
-      if (!pane || linked.some(entry => entry.pane.id === pane.id)) return
-      linked.push(agent(pane, role)); claimed.add(pane.id); reasons.push(reason)
+      if (pane && !direct.has(pane)) direct.set(pane, { links, role: roleOf(pane, role), reason })
     }
     const named = agents.filter(pane => pane.id !== item.status?.source?.pane && pane.role !== 'advisor'
       && (refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref
         || item.details.some(detail => !!pane.pane_name && detail.text.toLowerCase().includes(`tab: ${pane.pane_name.toLowerCase()}`))))
     const doing = item.status?.kind === 'doing' ? byId.get(item.status.source?.pane ?? '') : undefined
-    if (!item.done) {
-      add(doing, named.length ? 'main' : 'worker', `the item's Doing line names ${doing ? paneName(doing) : ''}`)
-      for (const pane of named) add(pane, reviewerOf.has(pane.id) ? 'reviewer' : 'worker', refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref ? `tab name ${paneName(pane)} carries ${ref}` : `the item's notes name tab ${paneName(pane)}`)
-      for (const entry of [...linked]) for (const [reviewer, of] of reviewerOf) {
-        const pane = byId.get(reviewer)
-        if (of === entry.pane.id && pane) add(pane, 'reviewer', `${paneName(pane)} reviews ${entry.name}`)
+    if (doing) add(doing, named.length ? 'main' : 'worker', `the item's Doing line names ${paneName(doing)}`)
+    for (const pane of named) add(pane, 'worker', refOf(pane.pane_name) === ref || refOf(pane.brief?.name) === ref ? `tab name ${paneName(pane)} carries ${ref}` : `the item's notes name tab ${paneName(pane)}`)
+  }
+
+  // A review group follows the reviewed tab's direct link, or inherits a reviewer's link if it has none.
+  const assigned = new Map<Pane, Links>()
+  for (const [pane, claim] of direct) {
+    const root = reviewRoot(pane)
+    if (root === pane || !assigned.has(root)) assigned.set(root, claim.links)
+  }
+  const standalone = new Map<Pane, Links>()
+  const startTask = (pane: Pane) => {
+    const links = { ref: refOf(pane.pane_name) ?? refOf(pane.brief?.name), agents: [agent(pane, roleOf(pane))], reasons: [] }
+    assigned.set(pane, links)
+    standalone.set(pane, links)
+  }
+  const startedBy = new Map<Pane, Pane>()
+  for (const pane of agents) {
+    const chain = new Map<Pane, Pane>()
+    let root = reviewRoot(pane)
+    while (!assigned.has(root) && !chain.has(root)) {
+      const parent = byId.get(root.parent ?? '')
+      if (!parent) break
+      chain.set(root, parent)
+      root = reviewRoot(parent)
+    }
+    if (!assigned.has(root)) startTask(root)
+    // Walk back toward the child so a ref conflict becomes a new root for its descendants.
+    for (const [child, parent] of [...chain].reverse()) {
+      if (assigned.has(child)) continue
+      const links = assigned.get(reviewRoot(parent))!
+      const refs = [refOf(child.pane_name), refOf(child.brief?.name)]
+      if (refs.some(ref => ref && ref !== links.ref)) startTask(child)
+      else {
+        assigned.set(child, links)
+        startedBy.set(child, parent)
       }
     }
+  }
+
+  // Keep the direct members first, then append the remaining members to their one assigned task.
+  const added = new Set<Pane>(standalone.keys())
+  for (const [pane, claim] of direct) {
+    if (assigned.get(reviewRoot(pane)) !== claim.links) continue
+    claim.links.agents.push(agent(pane, claim.role))
+    claim.links.reasons.push(claim.reason)
+    added.add(pane)
+  }
+  for (const pane of agents) {
+    if (added.has(pane)) continue
+    const links = assigned.get(reviewRoot(pane))!
+    links.agents.push(agent(pane, roleOf(pane)))
+    const reviewed = reviewerOf.get(pane)
+    const parent = startedBy.get(pane)
+    if (reviewed && reviewRoot(pane) !== pane) links.reasons.push(`${paneName(pane)} reviews ${paneName(reviewed)}`)
+    else if (parent) links.reasons.push(`${paneName(pane)} was started by ${paneName(parent)}`)
+  }
+
+  // The lead tab of a task is "main" when it has started a worker there.
+  const promote = (linked: Agent[]) => {
+    const head = linked[0]
+    if (head?.role === 'worker' && linked.some(entry => entry !== head && entry.role === 'worker' && startedBy.has(entry.pane))) head.role = 'main'
+  }
+  const tasks: Task[] = []
+  for (const { item, project, links } of items) {
+    const ref = item.ref!
+    const recentDone = item.done ? Math.max(doneAt(item), ...deploysOf(ref).map(line => line.at * 1000)) : 0
+    if (item.done && now - recentDone > DAY) continue
+    const { agents: linked, reasons } = links
+    promote(linked)
     const deploys = deploysOf(ref)
     let phase: Phase
     let why: string
@@ -181,25 +267,27 @@ export function buildFloor({ panes, rows, data, groupName, now }: Input): Floor 
       phase = 'deploy'; why = `DEPLOYED.md line ${clock(deploys[0].at * 1000)} names ${ref}; the item is still open`
     } else ({ phase, why } = phaseOfLinked(linked))
     const last = Math.max(0, ...linked.map(entry => entry.last), recentDone)
-    tasks.push(finish({ id: ref, ref, title: item.text, group: project || 'Inbox', phase, why: reasons.length && phase !== 'inbox' ? `${why} · linked: ${reasons.join('; ')}` : why, agents: linked, item, last, deploys, commits: commitsOf(ref) }, now))
+    tasks.push(finish({ id: ref, ref, title: item.text, group: project || 'Inbox', phase, why: withLinks(why, reasons), agents: linked, item, last, deploys, commits: commitsOf(ref) }, now))
   }
 
-  // Tabs with no item are tasks of their own. Reviewers and advisors join the task of the tab they serve.
+  // Each unclaimed root and its members make one task. A quiet task with old activity is parked.
   let parked = 0
   for (const pane of agents) {
-    if (claimed.has(pane.id) || reviewerOf.has(pane.id)) continue
-    const own = agent(pane, pane.role === 'advisor' ? 'advisor' : 'worker')
-    const helpers = agents.filter(other => !claimed.has(other.id) && reviewerOf.get(other.id) === pane.id).map(other => agent(other, 'reviewer'))
-    const linked = [own, ...helpers]
-    const ref = refOf(pane.pane_name) ?? refOf(pane.brief?.name)
+    const links = standalone.get(pane)
+    if (!links) continue
+    const { agents: linked, ref, reasons } = links
+    const own = linked[0]
+    promote(linked)
     const busy = linked.some(entry => entry.state !== 'idle')
+    const last = Math.max(...linked.map(entry => entry.last))
     let phase: Phase
     let why: string
     if (!busy) {
-      if (now - own.last > DAY || !own.last) { parked += 1; continue }
-      phase = 'done'; why = `tab idle; its last turn ended ${clock(own.last)}; no backlog item`
+      if (now - last > DAY || !last) { parked += 1; continue }
+      phase = 'done'
+      why = linked.length === 1 ? `tab idle; its last turn ended ${clock(last)}; no backlog item` : `tabs idle; last activity ${clock(last)}; no backlog item`
     } else ({ phase, why } = phaseOfLinked(linked))
-    tasks.push(finish({ id: pane.id, ref, title: own.name, group: groupName?.(pane) || folderName(pane.dir), phase, why, agents: linked, last: Math.max(...linked.map(entry => entry.last)), deploys: deploysOf(ref), commits: commitsOf(ref) }, now))
+    tasks.push(finish({ id: pane.id, ref, title: own.name, group: groupName?.(pane) || folderName(pane.dir), phase, why: withLinks(why, reasons), agents: linked, last, deploys: deploysOf(ref), commits: commitsOf(ref) }, now))
   }
   return { tasks, parked }
 }
@@ -209,10 +297,10 @@ function phaseOfLinked(linked: Agent[]): { phase: Phase; why: string } {
   if (reviewer) return { phase: 'review', why: `reviewer ${reviewer.name} is working` }
   const doers = linked.filter(entry => entry.role === 'worker').concat(linked.filter(entry => entry.role === 'main'))
   // The newest steps of the doer that moved last decide.
-  const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0] ?? linked[0]
-  const found = phaseOfTools(lead.tools)
+  const lead = [...doers].sort((a, b) => toolMs(b.tools) - toolMs(a.tools) || b.last - a.last)[0]
+  const found = lead && phaseOfTools(lead.tools)
   if (found) return { phase: found.phase, why: `${lead.name}: ${found.why}` }
-  return { phase: 'build', why: `guessed: ${lead.name} is open, no step read` }
+  return { phase: 'build', why: `guessed: ${(lead ?? linked[0]).name} is open, no step read` }
 }
 
 function finish(task: Omit<Task, 'waits' | 'stuck' | 'sweep'>, now: number): Task {

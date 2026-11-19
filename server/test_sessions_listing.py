@@ -1,12 +1,84 @@
 """Session list sharing and ETag tests: mocked discovery, no tmux, no terminals."""
 import io
 import json
+import subprocess
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
+import paths
 import server
 from own_time import own_time
+
+
+class ListingParentsTests(unittest.TestCase):
+    def setUp(self):
+        thread = '0f8fad5b-d9cb-469f-a165-70867728950e'
+        self.entries = [
+            {'id': '%1', 'agent': 'claude', 'thread': thread},
+            {'id': '%2', 'agent': 'codex'},
+            {'id': '%3', 'agent': 'shell'},
+            {'id': '%4', 'agent': 'antigravity', 'thread': '1f8fad5b-d9cb-469f-a165-70867728950e',
+             'pending_conversation': True},
+            {'id': '%5', 'agent': 'claude'},
+        ]
+        self.record = {'owner_pane': '%1', 'owner_thread': thread, 'sent_at': 1000}
+        self.run = self.enterContext(patch.object(server.subprocess, 'run'))
+        self.enterContext(patch.object(server, 'sessions', return_value=self.entries))
+        self.enterContext(patch.object(server, 'session_row', side_effect=lambda entry: {'id': entry['id']}))
+        self.enterContext(patch.object(server, 'settings', return_value={'thread': None}))
+        self.enterContext(patch.object(server.groups, 'all_groups', return_value={}))
+        self.enterContext(patch.object(server.auto_resume, 'notice', return_value={'failed': False}))
+        self.enterContext(patch.object(server.review_links, 'reviewed_by', return_value={'%1': ['%5']}))
+        self.enterContext(patch.object(server.review_links, 'paused', return_value={}))
+
+    def listing(self):
+        return {row['id']: row for row in server.build_listing()['sessions']}
+
+    def tmux_rows(self, rows, returncode=0):
+        self.run.return_value = subprocess.CompletedProcess(
+            [], returncode, stdout=''.join(f'{pane}\t{raw}\n' for pane, raw in rows))
+
+    def test_valid_parent_records_use_one_tmux_call(self):
+        self.tmux_rows([('%2', json.dumps(self.record)), ('%5', json.dumps(dict(self.record, owner_pane='%2')))])
+        rows = self.listing()
+        self.assertEqual(rows['%2']['parent'], '%1')
+        self.assertEqual(rows['%5']['parent'], '%2')
+        self.assertEqual(rows['%1']['reviewers'], ['%5'])
+        self.assertNotIn('parent', rows['%1'])
+        self.run.assert_called_once_with([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_helper}'],
+                                         capture_output=True, text=True, timeout=5)
+
+    def test_invalid_parent_records_are_ignored(self):
+        for raw in ('{', '[]', json.dumps(dict(self.record, sent_at=True)),
+                    json.dumps(dict(self.record, owner_pane='2')), json.dumps(dict(self.record, owner_pane='%99')),
+                    json.dumps(dict(self.record, owner_pane='%3')), json.dumps(dict(self.record, owner_pane='%2')),
+                    json.dumps(dict(self.record, owner_thread='1f8fad5b-d9cb-469f-a165-70867728950e'))):
+            with self.subTest(raw=raw):
+                self.tmux_rows([('%2', raw), ('%5', json.dumps(self.record))])
+                rows = self.listing()
+                self.assertNotIn('parent', rows['%2'])
+                self.assertEqual(rows['%5']['parent'], '%1')
+        self.entries.append({'id': '5', 'agent': 'claude'})
+        self.tmux_rows([('5', json.dumps(self.record))])
+        self.assertNotIn('parent', self.listing()['5'])
+
+    def test_unknown_owner_thread_keeps_parent(self):
+        for changes in ({'owner_thread': None}, {'owner_pane': '%4'}, {'owner_pane': '%5'}):
+            with self.subTest(changes=changes):
+                record = dict(self.record, **changes)
+                self.tmux_rows([('%2', json.dumps(record))])
+                self.assertEqual(self.listing()['%2']['parent'], record['owner_pane'])
+
+    def test_tmux_read_error_keeps_listing_and_reviewers(self):
+        self.tmux_rows([('%2', json.dumps(self.record))], returncode=1)
+        for error in (None, subprocess.TimeoutExpired([], 5), OSError()):
+            with self.subTest(error=error):
+                self.run.side_effect = error
+                rows = self.listing()
+                self.assertEqual(list(rows), ['%1', '%2', '%3', '%4', '%5'])
+                self.assertEqual(rows['%1']['reviewers'], ['%5'])
+                self.assertNotIn('parent', rows['%2'])
 
 
 class SessionsListingTests(unittest.TestCase):

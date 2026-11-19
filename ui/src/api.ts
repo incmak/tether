@@ -95,6 +95,7 @@ export interface Pane {
   ask?: Ask | null  // Attention mode: the ask that waits on you until you answer it (server/attention.py)
   reviewers?: string[]
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
+  parent?: string  // the tab that started this one, from @tether_helper (server/helper_tabs.py)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
 /** A session cron job. every: the schedule in words; next: the next run in Unix seconds, approximate (Claude Code adds jitter). */

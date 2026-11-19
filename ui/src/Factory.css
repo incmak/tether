@@ -104,7 +104,7 @@
 .factory-task { grid-template-columns: repeat(auto-fit, minmax(min(100%, 26em), 1fr)); align-items: start; }
 .factory-task-head { grid-column: 1 / -1; }
 .factory-task-head h2 { display: flex; align-items: center; gap: 0.3em; margin: 0.1em 0 0.3em; font-size: 1.7em; line-height: 1.2; overflow-wrap: anywhere; }
-.factory-task-head h2 b { margin-right: 0.2em; }
+.factory-task-head h2 b { flex: none; margin-right: 0.2em; }
 .factory-kicker { margin: 0; color: var(--muted); font-size: 0.95em; }
 .factory-kicker::first-letter { text-transform: uppercase; }
 .factory-flags { display: flex; flex-wrap: wrap; gap: 0.5em; margin: 0 0 0.4em; }
