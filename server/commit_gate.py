@@ -10,12 +10,12 @@ The person sets the mode in Settings. Nothing else changes it.
   paths.CONFIG/commit-gate                  the global mode: one word. Missing or bad: observe.
   paths.TETHER/projects/<id>/commit-gate    a project override: {"override": true, "mode": "enforce"}.
   paths.COMMIT_GATE_LOG                     one JSON line per check and per landed commit. No message text.
-  paths.CACHE/commit-gate/<session>.json    denial count, pending commits and claimed hook rows.
+  paths.CACHE/commit-gate/<session>.json    denial count and pending commits.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse claims one
-hook row per landed commit in the worktree and logs a check from the landed messages if there is a shortfall.
+Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse matches
+hook rows by worktree, tree and parent and checks the landed message for each uncovered commit.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -41,7 +41,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 from typing import NamedTuple
 
@@ -80,8 +80,9 @@ SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
 HOOK_MARK = '# tether-commit-gate-hook v1'
 CALL_MARK = '# tether-commit-gate-call v1'
 HOOK_MESSAGE_BYTES = 1_000_000
-HOOK_COMMENT_CHARS = 64
+FIXUP_PREFIXES = ('fixup! ', 'squash! ', 'amend! ')
 SCISSORS = re.compile(r'. -{24} >8 -{24}')
+GIT_OID = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
 
 
 class GateError(Exception):
@@ -717,11 +718,11 @@ class _Lock:
         self.stream.close()
 
 
-def _log(record):
+def _log(record, *, locked=False):
     path = log_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     line = (json.dumps(record, separators=(',', ':')) + '\n').encode()
-    with _Lock():
+    with nullcontext() if locked else _Lock():
         try:
             if path.stat().st_size > LOG_BYTES:
                 os.replace(path, path.with_name(path.name + '.1'))
@@ -743,11 +744,11 @@ def _invalid_json_constant(value):
 
 
 def _read_session(session, now):
-    """{'blocks': int, 'pending': {tool id: {...}}, 'claimed': [[at, folder], ...]}. Call with the lock held."""
+    """{'blocks': int, 'pending': {tool id: {...}}}. Call with the lock held."""
     try:
         data = json.loads(_session_path(session).read_text(encoding='utf-8'), parse_constant=_invalid_json_constant)
     except FileNotFoundError:
-        return {'blocks': 0, 'pending': {}, 'claimed': []}
+        return {'blocks': 0, 'pending': {}}
     if not isinstance(data, dict) or type(data.get('blocks')) is not int or data['blocks'] < 0:
         raise ValueError('invalid commit gate block count')
     pending = data.get('pending')
@@ -763,13 +764,8 @@ def _read_session(session, now):
                 or (value.get('deferred') and value.get('mode') not in NAMES)
                 or type(value.get('closing', False)) is not bool):
             raise ValueError('invalid commit gate pending call')
-    claimed = data.get('claimed', [])
-    if not isinstance(claimed, list) or any(
-            not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) not in (int, float)
-            or not math.isfinite(pair[0]) or not isinstance(pair[1], str) for pair in claimed):
-        raise ValueError('invalid commit gate claimed rows')
     return {'blocks': data['blocks'], 'pending': {key: value for key, value in pending.items()
-                                                  if now - value['at'] < PENDING_SECONDS}, 'claimed': claimed}
+                                                  if now - value['at'] < PENDING_SECONDS}}
 
 
 def _write_session(session, state, now):
@@ -791,9 +787,6 @@ def _write_session(session, state, now):
             pass
     while len(state['pending']) > PENDING_MAX:
         del state['pending'][min(state['pending'], key=lambda key: state['pending'][key]['at'])]
-    keep_since = min((value['at'] - LOG_TIME_TOLERANCE for value in state['pending'].values()),
-                     default=now - PENDING_SECONDS)
-    state['claimed'] = [pair for pair in state['claimed'] if pair[0] >= keep_since]
     _write(path, json.dumps(state))
 
 
@@ -845,13 +838,25 @@ def _message_hook(folder):
         return None
 
 
+class _LandedCommit(NamedTuple):
+    oid: str
+    tree: str
+    parent: str | None
+    status: str
+
+
 def _landed(folder, head):
-    """[status] for the commits made since `head`, newest first: 'verified', 'none' or 'missing' each. [] when no
-    commit landed. None when git cannot tell."""
-    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--format=%B', f'{head}..HEAD' if head else 'HEAD')
+    """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
+    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--format=%H%x00%T%x00%P%x00%B',
+                 f'{head}..HEAD' if head else 'HEAD')
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    return [stamp.message_status(body) for body in shown.stdout.split('\0')[:-1]]
+    fields = shown.stdout.split('\0')[:-1]
+    commits = []
+    for index in range(0, len(fields), 4):
+        oid, tree, parents, body = fields[index:index + 4]
+        commits.append(_LandedCommit(oid, tree, parents.partition(' ')[0] or None, stamp.message_status(body)))
+    return commits
 
 
 # ---- the hook ----
@@ -1080,25 +1085,58 @@ def check(data, env=os.environ, now=None):
                                               'permissionDecisionReason': deny_reason(blocks)}})
 
 
-def _claim_hook_rows(session, state, waiting, count):
-    """Claim the oldest eligible rows and return the shortfall. Call with the session lock held."""
+def _uncovered_commits(waiting, commits):
+    """Find landed commits without a hook row for their worktree, tree and parent."""
     if not waiting.get('tree'):
-        return count
-    tree = os.path.realpath(waiting['tree'])
+        yield from commits
+        return
+    worktree = os.path.realpath(waiting['tree'])
     since = waiting['at'] - LOG_TIME_TOLERANCE
-    matches = [(row['at'], folder) for row in _rows(locked=True)
-               if row.get('via') == 'commit-msg' and row.get('session') == session and since <= row['at'] < math.inf
-               and isinstance(folder := row.get('folder'), str) and os.path.realpath(folder) == tree]
-    used = Counter(map(tuple, state['claimed']))
-    for at, folder in sorted(matches, key=lambda match: match[0]):
-        if used[at, folder]:
-            used[at, folder] -= 1
+    trees = {commit.tree for commit in commits}
+    heads_by_tree = {}
+    for row in _rows():
+        if row.get('via') != 'commit-msg' or row.get('verdict') == 'block' or not since <= row['at'] < math.inf:
             continue
-        state['claimed'].append([at, folder])
-        count -= 1
-        if count == 0:
-            break
-    return count
+        tree, folder = row.get('tree'), row.get('folder')
+        if not isinstance(tree, str) or tree not in trees or not isinstance(folder, str):
+            continue
+        if os.path.realpath(folder) != worktree or 'head' not in row:
+            continue
+        head = row['head']
+        if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
+            heads_by_tree.setdefault(tree, set()).add(head)
+
+    parents = {commit.oid: commit.parent for commit in commits}
+    for commit in commits:
+        heads = heads_by_tree.get(commit.tree, ())
+        if commit.parent in heads:
+            continue
+        for head in heads:
+            if head is None:
+                continue
+            # An amend replaces the hook's HEAD and keeps its first parent.
+            if head not in parents:
+                shown = _git(waiting['folder'], 'show', '-s', '--format=%P', head)
+                parents[head] = ''  # Keep failures distinct from a root commit's None.
+                if shown is not None and shown.returncode == 0:
+                    parents[head] = shown.stdout.strip().partition(' ')[0] or None
+            if parents[head] == commit.parent:
+                break
+        else:
+            yield commit
+
+
+def _log_hook_silent(commits, waiting, session, tool, now):
+    """Check and append under the same lock so overlapping PostToolUse calls log each hash once."""
+    logged = {row['commit'] for row in _rows(locked=True)
+              if row.get('reason') == 'hook-silent' and isinstance(row.get('commit'), str)}
+    for commit in commits:
+        if commit.oid in logged:
+            continue
+        _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
+              'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': waiting['folder'],
+              'commit': commit.oid, 'reason': 'hook-silent', 'count': 1,
+              'verdict': 'would_block' if commit.status == 'missing' else 'pass'}, locked=True)
 
 
 def landed(data, now=None):
@@ -1116,28 +1154,27 @@ def landed(data, now=None):
             return
         waiting['closing'] = True
         _write_session(session, state, now)
-    statuses, shortfall = None, 0
+    uncovered = []
     try:
-        statuses = _landed(waiting['folder'], waiting['head'])
+        commits = _landed(waiting['folder'], waiting['head'])
+        if commits and waiting.get('deferred'):
+            uncovered = list(_uncovered_commits(waiting, commits))
     finally:
         with _Lock():
             state = _read_session(session, now)
             waiting = state['pending'].pop(tool, None)
             if waiting is not None:
-                if statuses and waiting.get('deferred'):
-                    shortfall = _claim_hook_rows(session, state, waiting, len(statuses))
                 _write_session(session, state, now)
-    if statuses is None or waiting is None:
+                if uncovered:
+                    _log_hook_silent(uncovered, waiting, session, tool, now)
+    if commits is None or waiting is None:
         return
+    statuses = {commit.status for commit in commits}
     worst = next((kind for kind in ('missing', 'none', 'verified') if kind in statuses), 'no-commit')
     record = {'at': round(now, 3), 'event': 'landed', 'id': tool, 'session': session, 'project': waiting.get('project'),
-              'landed': worst, 'count': len(statuses)}
+              'landed': worst, 'count': len(commits)}
     if waiting.get('shared') or 'tree' not in waiting:
         record['shared'] = True
-    if shortfall:
-        _log({'at': record['at'], 'event': 'check', 'id': tool, 'session': session, 'project': record['project'],
-              'mode': waiting['mode'], 'verdict': 'would_block' if worst == 'missing' else 'pass',
-              'reason': 'hook-silent', 'count': shortfall, 'folder': waiting['folder']})
     _log(record)
 
 
@@ -1234,7 +1271,7 @@ def _source_session(ancestors, env):
 
 def _message_verdict(lines):
     subject = next((line for line in lines if line.strip()), '')
-    if subject.startswith(('fixup! ', 'squash! ', 'amend! ')):
+    if subject.startswith(FIXUP_PREFIXES):
         return 'skip', 'fixup'
     return ('would_block', 'no-line') if stamp.message_status('\n'.join(lines)) == 'missing' else ('pass', '')
 
@@ -1259,13 +1296,7 @@ def _final_verdict(path, cwd):
     comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
                 for item in config.stdout.split(b'\0') if item}
     lines = message.decode('utf-8', errors='replace').split('\n')
-    chars = {'#'} | {char for char in comments if len(char) == 1} | {line[0] for line in lines if line}
-    # Treating V as a comment character would strip the Verified: line and make every stamped message unknown.
-    # Leaving it out can cause a false pass, but never a false block from losing the stamp.
-    vee = 'V' in chars
-    chars.discard('V')
-    if len(chars) > HOOK_COMMENT_CHARS:
-        return 'unknown', 'cleanup'
+    chars = {'#'} | {char for char in comments if len(char) == 1}
     cuts = {}
     for index, line in enumerate(lines):
         if SCISSORS.fullmatch(line):
@@ -1279,14 +1310,27 @@ def _final_verdict(path, cwd):
                         [line for line in truncated if not line.startswith(char)]):
             if _message_verdict(reading) != verdict:
                 return 'unknown', 'cleanup'
-    if vee and verdict[0] == 'would_block':
-        # V can still hide a line above an autosquash subject. Check that reading only to avoid a false block.
-        truncated = lines[:cuts.get('V', len(lines))]
-        for reading in ([line for line in lines if not line.startswith('V')],
-                        [line for line in truncated if not line.startswith('V')]):
-            if _message_verdict(reading)[0] == 'skip':
-                return 'unknown', 'cleanup'
+    # Git cleanup only deletes lines and trailing whitespace.
+    # A landed stamp or autosquash subject must already be present on a raw line.
+    if verdict[0] == 'would_block' and any(line.startswith(FIXUP_PREFIXES)
+                                         or stamp.message_status(line.rstrip()) != 'missing' for line in lines):
+        return 'unknown', 'cleanup'
     return verdict
+
+
+def _hook_identity(cwd):
+    # Git supplies GIT_INDEX_FILE to the hook, including the temporary index for partial commits.
+    tree = _git(cwd, 'write-tree')
+    if tree is None or tree.returncode or not GIT_OID.fullmatch(tree.stdout.strip()):
+        return {}
+    head = _git(cwd, 'rev-parse', '--verify', '-q', 'HEAD')
+    if head is None:
+        return {}
+    if not head.returncode and GIT_OID.fullmatch(head.stdout.strip()):
+        return {'tree': tree.stdout.strip(), 'head': head.stdout.strip()}
+    if head.returncode == 1 and not (head.stdout or head.stderr):
+        return {'tree': tree.stdout.strip(), 'head': None}
+    return {}
 
 
 def commit_msg(path, env=os.environ, cwd=None, now=None):
@@ -1309,6 +1353,7 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         record['mode'] = mode
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
+        record.update(_hook_identity(cwd))
         verdict, reason = _final_verdict(path, cwd)
         blocks = None
         if verdict == 'would_block' and mode == 'enforce' and source != 'terminal' and session is None:
@@ -1491,7 +1536,7 @@ def stats(pid=None, days=DAYS, now=None):
         if row['verdict'] not in counts:
             continue
         counts[row['verdict']] += 1
-        if row.get('via') == 'commit-msg':
+        if row.get('via') in ('commit-msg', 'landed'):
             stamped += row['verdict'] == 'pass'
             unstamped += row['verdict'] in ('would_block', 'let_through')
             continue

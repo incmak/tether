@@ -243,15 +243,15 @@ own `commit-msg` hook, the installer gives you a line to add before the hook exi
 `--uninstall` to remove the Tether hook. Both forms let the commit through if the gate takes more than 10 seconds.
 For the line in your own hook, the helper uses `python3` unless you set `TETHER_PYTHON`.
 
-The gate compares possible cleanup results using the first character of each message line as a candidate comment
-character, along with `#` and the configured character. It excludes `V` so the `Verified:` line remains visible.
-If the results disagree or there are more than 64 candidates, the gate lets the commit through and records `unknown`
-with reason `cleanup`. In enforce mode, an agent without a session key can commit and the log records `let_through`
-with reason `no-session`.
+The gate compares possible cleanup results for `#` and any single configured comment character. If the results
+disagree, the gate lets the commit through and records `unknown` with reason `cleanup`. It also records `unknown`
+when the result is `would_block` but any raw message line is a valid stamp or starts with `fixup! `, `squash! `
+or `amend! `. In enforce mode, an agent without a session key can commit and the log records `let_through` with
+reason `no-session`.
 
-When Claude defers its check to the Git hook, Tether claims one hook verdict per landed commit from the same session
-and worktree. Each hook verdict can count once. If there are fewer verdicts than landed commits, Tether logs one
-check with reason `hook-silent`, the number of missing verdicts and the worst status of the landed commit messages.
+When Claude defers its check to the Git hook, Tether matches each landed commit to a hook verdict by worktree,
+tree and parent. A hook verdict from any session can cover the commit if the hook ran after the call started. For each
+uncovered commit, Tether checks the landed message and logs one `hook-silent` row with the commit's hash.
 
 ## Auto-merge
 
