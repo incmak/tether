@@ -152,7 +152,7 @@ export function TodosPanel({ api, polled, onOpenItem }: { api: Api; polled: Poll
       {data && <section className="reminder-section todo-sources" aria-label="Task apps">
         <h3>Task apps</h3>
         <ul>{sources.map(source => <SourceRow key={source.id} source={source} now={now} api={api} onChanged={changed} onError={setProblem} />)}</ul>
-        <p className="reminder-deleted-note">Planner shows tasks assigned to you. Private tasks show through To Do. Todoist and Google Tasks come later.</p>
+        <p className="reminder-deleted-note">Planner shows tasks assigned to you. Planner private tasks made before December 2026 show through To Do. From December, Microsoft moves new private tasks to a private plan, and they may not show here. Todoist and Google Tasks come later.</p>
       </section>}
     </div>
   </div>

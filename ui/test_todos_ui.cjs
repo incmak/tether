@@ -303,6 +303,13 @@ test('Todos in Chromium', async t => {
       assert.equal(posts.filter(post => post.endpoint === 'tasks/backlog').length, 1)
     })
 
+    await t.test(`${width}px the note says new Planner private tasks may not show`, async t => {
+      const { page, sheet } = await open(t, browser, origin, viewport)
+      await toTodos(page, sheet)
+      await sheet.getByText(/From December, Microsoft moves new private tasks to a private plan/).waitFor()
+      assert.equal(await sheet.getByText('Private tasks show through To Do.').count(), 0)
+    })
+
     await t.test(`${width}px a GET error offers Retry`, async t => {
       const { page, sheet } = await open(t, browser, origin, viewport, { failFirst: true })
       await toTodos(page, sheet)
