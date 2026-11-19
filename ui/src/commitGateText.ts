@@ -8,7 +8,7 @@ export interface GateStats {
 }
 export interface CommitGateState {
   modes: GateModeInfo[]; global: GateMode; mode: GateMode; source: 'global' | 'project'
-  project: { override: boolean; mode: GateMode } | null; stats: GateStats; max_blocks: number
+  project: { override: boolean; mode: GateMode } | null; stats: GateStats | null; max_blocks: number
 }
 
 const count = (value: number, one: string, many: string) => `${value.toLocaleString('en-US')} ${value === 1 ? one : many}`

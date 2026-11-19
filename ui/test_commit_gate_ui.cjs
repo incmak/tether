@@ -141,6 +141,14 @@ async function main() {
       await section.scrollIntoViewIfNeeded()
       await page.screenshot({ path: path.join(SHOTS, `commit-gate-empty-${width}.png`) })
 
+      gate = { ...gate, stats: null }
+      await open(width, height, 'light')
+      await section.getByRole('status').filter({ hasText: 'Commit gate stats are temporarily unavailable.' }).waitFor()
+      check(`${at} unavailable stats keep the mode controls`, await observe.isChecked() && await observe.isEnabled())
+      check(`${at} unavailable stats: no page overflow`, !(await overflow()) && await inside())
+      await section.scrollIntoViewIfNeeded()
+      await page.screenshot({ path: path.join(SHOTS, `commit-gate-unavailable-${width}.png`) })
+
       // The numbers, a mode change by keyboard, and a failed save.
       gate = { ...gate, stats: busy }
       await open(width, height, 'light')

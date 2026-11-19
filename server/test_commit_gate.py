@@ -1115,10 +1115,64 @@ class Stats(Base):
                 mock.patch.object(commit_gate, '_Lock', return_value=lock):
             self.assertEqual(list(commit_gate._rows()), [{'at': 1000}] * 2)
             self.assertEqual(events, ['lock', rotated, current, 'unlock', 'parse', 'parse'])
-            events.clear()
-            lock.__enter__.side_effect = TimeoutError
-            self.assertEqual(list(commit_gate._rows()), [{'at': 1000}] * 2)
-            self.assertEqual(events, [rotated, current, 'parse', 'parse'])
+
+    def test_stats_read_both_log_generations_if_rotation_interrupts_an_unlocked_read(self):
+        read = Path.read_bytes
+
+        def record(verdict):
+            return {'at': 1000, 'event': 'check', 'via': 'commit-msg', 'verdict': verdict}
+
+        for has_rotated in (True, False):
+            with self.subTest(has_rotated=has_rotated):
+                current = self.root / f'gate-{has_rotated}.log'
+                rotated = current.with_name(current.name + '.1')
+                if has_rotated:
+                    rotated.write_text(json.dumps(record('unknown')) + '\n')
+                current.write_text(''.join(json.dumps(record(verdict)) + '\n' for verdict in ('pass', 'would_block')))
+                did_rotate = False
+
+                def read_then_rotate(source):
+                    nonlocal did_rotate
+                    try:
+                        return read(source)
+                    finally:
+                        if source == rotated and not did_rotate:
+                            did_rotate = True
+                            commit_gate._log(record('pass'), locked=True)
+
+                with mock.patch.object(paths, 'COMMIT_GATE_LOG', current), \
+                        mock.patch.object(commit_gate, 'LOG_BYTES', 0), \
+                        mock.patch.object(commit_gate._Lock, '__enter__', side_effect=TimeoutError), \
+                        mock.patch.object(Path, 'read_bytes', read_then_rotate):
+                    stats = commit_gate.stats(now=1000)
+                self.assertTrue(did_rotate)
+                self.assertEqual((stats['commits'], stats['passed'], stats['would_block'], stats['unknown']),
+                                 (3, 2, 1, 0))
+
+    def test_stats_are_unavailable_if_the_log_keeps_rotating(self):
+        read = Path.read_bytes
+        current = paths.COMMIT_GATE_LOG
+        rotated = current.with_name(current.name + '.1')
+        row = {'at': time.time(), 'event': 'check', 'via': 'commit-msg', 'verdict': 'pass'}
+        rotations = 0
+        with mock.patch.object(commit_gate, 'LOG_BYTES', 0):
+            commit_gate._log(row)
+            commit_gate._log(row)
+
+            def read_then_rotate(source):
+                nonlocal rotations
+                content = read(source)
+                if source == rotated:
+                    commit_gate._log(row, locked=True)
+                    rotations += 1
+                return content
+
+            with mock.patch.object(commit_gate._Lock, '__enter__', side_effect=TimeoutError), \
+                    mock.patch.object(Path, 'read_bytes', read_then_rotate):
+                self.assertIsNone(commit_gate.state()['stats'])
+
+        self.assertEqual(rotations, 3)
+        self.assertEqual(commit_gate.state()['stats']['commits'], 2)
 
     def test_unknown_with_a_stamped_result_is_excluded_from_the_rate(self):
         data, _ = self.pre('git commit -m "$MSG"')

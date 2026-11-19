@@ -1,4 +1,4 @@
-"""B206: run_tests.py labels a failure as flaky or failed, and never turns it into a pass. Real runs in temp folders."""
+"""Run real suites in temp folders to check the rerun labels and exit status of run_tests.py."""
 from pathlib import Path
 import subprocess
 import sys
@@ -26,6 +26,30 @@ class T(unittest.TestCase):
             raise RuntimeError('first run')
 '''
 ALWAYS = 'import unittest\n\nclass T(unittest.TestCase):\n    def test_never(self):\n        self.fail("always")\n'
+SKIPPED = '''import unittest
+from pathlib import Path
+
+class T(unittest.TestCase):
+    def test_skips_alone(self):
+        marker = Path(__file__).with_name('ran-once')
+        if marker.exists():
+            self.skipTest('needs the suite')
+        marker.touch()
+        self.fail('first run')
+'''
+EMPTY_RERUN = '''import unittest
+from pathlib import Path
+from types import SimpleNamespace
+
+marker = Path(__file__).with_name('ran-once')
+if marker.exists():
+    T = SimpleNamespace(test_empty_alone=unittest.TestSuite)
+else:
+    class T(unittest.TestCase):
+        def test_empty_alone(self):
+            marker.touch()
+            self.fail('first run')
+'''
 SUBTESTS = '''import unittest
 from pathlib import Path
 
@@ -74,6 +98,14 @@ class RunTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertRegex(out, r'failed\s+test_always\.T\.test_never\s+\(failed in the full run and alone\)')
         self.assertIn('Result: FAILED. 3 failed in the full run; 2 of them flaky.', out)
+
+    def test_a_skipped_or_empty_rerun_is_labelled_skipped_alone(self):
+        for test, fixture in (('test_skips_alone', SKIPPED), ('test_empty_alone', EMPTY_RERUN)):
+            with self.subTest(test=test):
+                code, out = self.run_folder({'test_incomplete.py': fixture}, '--label-flaky')
+                self.assertEqual(code, 1, out)
+                self.assertRegex(out, rf'(?m)^  skipped alone +test_incomplete\.T\.{test} +\(')
+                self.assertIn('Result: FAILED. 1 failed in the full run; 0 of them flaky.', out)
 
     def assert_subtest_label(self, *, always, label):
         with tempfile.TemporaryDirectory() as temp:
