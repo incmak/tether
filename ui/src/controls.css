@@ -70,6 +70,8 @@
 .icon-button.sm { width: var(--control-sm); height: var(--control-sm); border-radius: var(--radius-sm); }
 .icon-button.lg { width: var(--control-lg); height: var(--control-lg); }
 .icon-button[aria-pressed="true"] { background: var(--hover); color: var(--text); }
+/* A pressed toggle already has the hover fill, so a mouse needs a stronger fill to see the hover (B271). */
+@media (hover: hover) { :is(.icon-button, .rich-tool)[aria-pressed="true"]:not(:disabled):hover { background: color-mix(in srgb, var(--text) 10%, var(--hover)); } }
 
 /* Field: a search box or one-line input. The frame shows focus, not the input. */
 .text-field, .sidebar-search, .search-field {

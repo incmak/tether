@@ -1430,7 +1430,8 @@ button.live-chip:active { background: var(--line); }
 .workspace .chat-header[draggable="true"] { cursor: grab; }
 .workspace .chat-header[draggable="true"] :is(button, kbd) { cursor: pointer; }
 @container (max-width: 560px) {
-  .workspace .chat-title { flex-direction: column; align-items: stretch; gap: 2px; }
+  /* nowrap: a wrapping flex line is as wide as its longest child, so the title ran under the header buttons (B271). */
+  .workspace .chat-title { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 2px; }
 }
 /* Drop hints while dragging a pane, a session or a slot. */
 .drop-hint { position: absolute; inset: 6px; z-index: 5; display: flex; align-items: center; justify-content: center; border: 2px dashed var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
