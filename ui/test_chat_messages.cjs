@@ -9,13 +9,16 @@ const compile = text => ts.transpileModule(text, { compilerOptions: { target: ts
 const api = {}
 runInNewContext(compile(readFileSync('src/api.ts', 'utf8')), { exports: api, require: () => new Proxy({}, { get: (_, key) => key }) })
 const { chatMessages, cleanChat } = api
+// Live's lastReply uses the real isReply from fridayReply.ts, which reads messages through the same api.ts.
+const friday = {}
+runInNewContext(compile(readFileSync('src/fridayReply.ts', 'utf8')), { exports: friday, require: name => name === './api' ? api : {} })
 
-// The real lastReply from Live.tsx, run with the real chatMessages.
+// The real lastReply from Live.tsx, run with the real chatMessages and isReply.
 const live = ts.createSourceFile('Live.tsx', readFileSync('src/Live.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 const declaration = live.statements.find(node => ts.isVariableStatement(node)
   && node.declarationList.declarations.some(item => item.name.getText(live) === 'lastReply'))
 assert.ok(declaration, 'Live.tsx declares lastReply')
-const scope = { chatMessages }
+const scope = { chatMessages, isReply: friday.isReply }
 runInNewContext(compile(declaration.getText(live)) + '\nthis.lastReply = lastReply', scope)
 const { lastReply } = scope
 // The sandbox builds arrays and objects with its own prototypes; compare values as JSON.
