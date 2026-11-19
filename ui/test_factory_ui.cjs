@@ -84,7 +84,15 @@ async function main() {
   const pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   // What the fake server answers. Tests change these between steps.
-  const state = { panes, moved: false, factory: 'ok', delay: 0 }
+  const history = Object.fromEntries(Object.entries({
+    B191: 'verify', B190: 'build', B192: 'inbox', B193: 'inbox', B194: 'inbox', B188: 'done', B168: 'build',
+    '%7': 'spec', '%8': 'done', '%9': 'build',
+  }).map(([id, phase]) => [id, [{ phase, at: NOW - 60000 }]]))
+  history.B71 = [{ phase: 'inbox', at: NOW - 26 * 3600000 }, { phase: 'build', at: NOW - 2 * 3600000 }]
+  const state = { panes, moved: false, factory: 'ok', delay: 0, factoryPoll: 0, rejectHistory: false, reports: [], history }
+  const reportsDeploy = body => body.moves.some(move => move.task === 'B71' && move.phase === 'deploy')
+  const deployReports = () => state.reports.filter(({ body }) => reportsDeploy(body))
+  let sessionGate, historyRetryGate
   try {
     if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
     browser = await getBrowser()
@@ -102,12 +110,33 @@ async function main() {
       if (url.pathname.includes('/api/')) {
         const endpoint = url.pathname.split('/api/')[1]
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { selected: '%1' }, version: 1 } })
+        if (endpoint === 'factory/history' && request.method() === 'POST') {
+          const body = request.postDataJSON()
+          state.reports.push({ body, poll: state.factoryPoll, header: request.headers()['x-codex-mobile'] })
+          if (reportsDeploy(body)) {
+            if (state.rejectHistory) {
+              state.rejectHistory = false
+              return route.fulfill({ status: 503, json: { error: 'Phase history is unavailable' } })
+            }
+            await historyRetryGate
+          }
+          for (const { task, phase } of body.moves) {
+            const entries = state.history[task] ??= []
+            if (entries.at(-1)?.phase !== phase) entries.push({ phase, at: NOW })
+          }
+          return route.fulfill({ json: { ok: true } })
+        }
         if (request.method() !== 'GET') return route.fulfill({ json: { ok: true } })
-        if (endpoint === 'sessions') return route.fulfill({ json: { sessions: state.panes, default_thread: '%1' } })
+        if (endpoint === 'sessions') {
+          await sessionGate
+          return route.fulfill({ json: { sessions: state.panes, default_thread: '%1' } })
+        }
         if (endpoint === 'factory') {
           if (state.delay) await new Promise(resolve => setTimeout(resolve, state.delay))
           if (state.factory === 'down') return route.fulfill({ status: 502, json: { error: 'Bad gateway' } })
-          return route.fulfill({ json: state.factory === 'empty' ? { now: NOW / 1000, tools: {}, deployed: [], commits: [] } : factoryData(state.moved) })
+          state.factoryPoll++
+          const facts = state.factory === 'empty' ? { now: NOW / 1000, tools: {}, deployed: [], commits: [] } : factoryData(state.moved)
+          return route.fulfill({ json: { ...facts, history: state.history } })
         }
         if (endpoint === 'projects/backlog') return route.fulfill({ json: { text: state.factory === 'empty' ? '' : backlog } })
         if (endpoint === 'screen') return route.fulfill({ json: { text: screenText, session: url.searchParams.get('session'), agent: 'claude' } })
@@ -120,17 +149,16 @@ async function main() {
       if (!(file === path.join(DIST, 'index.html') || file.startsWith(DIST + path.sep))) return route.fulfill({ status: 404, body: '' })
       try { return route.fulfill({ body: await fs.readFile(file), contentType: mime[path.extname(file)] || 'application/octet-stream' }) } catch { return route.fulfill({ status: 404, body: '' }) }
     })
-    // The task timeline: B71 sat in the Inbox, then moved to Build two hours ago.
-    const seeded = { B71: [{ phase: 'inbox', at: NOW - 26 * 3600000 }, { phase: 'build', at: NOW - 2 * 3600000 }] }
-    await page.addInitScript(([history]) => {
+    // Old browser history conflicts with the server history and should be removed on first open.
+    await page.addInitScript(() => {
       if ('serviceWorker' in navigator) navigator.serviceWorker.register = () => Promise.reject(new Error('off'))
       if (sessionStorage.getItem('factory-test-seeded')) return
       sessionStorage.setItem('factory-test-seeded', '1')
       localStorage.clear()
       localStorage.setItem('tmux-chat.prefs.synced', '1')
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, selected: '%1' }))
-      localStorage.setItem('tether-factory-history', JSON.stringify(history))
-    }, [seeded])
+      localStorage.setItem('tether-factory-history', JSON.stringify({ B71: [{ phase: 'done', at: Date.now() }] }))
+    })
 
     const view = page.locator('dialog.factory')
     const crumbs = () => page.locator('.factory-crumbs li').allInnerTexts()
@@ -177,7 +205,9 @@ async function main() {
     await page.locator('.factory-task').waitFor()
     check('Enter on a token zooms to the task', JSON.stringify(await crumbs()) === '["Factory","Build","B71"]', JSON.stringify(await crumbs()))
     check('task view says why the phase is a guess', /Phase guessed from:/.test(await page.locator('.factory-why').innerText()))
-    check('task view shows the phase history', /Inbox.*Build/s.test(await page.locator('.factory-timeline').innerText()), await page.locator('.factory-timeline').innerText())
+    const timeline = page.locator('.factory-timeline')
+    check('task view shows the server timeline', JSON.stringify(await timeline.locator('b').allInnerTexts()) === '["Inbox","Build"]')
+    check('the old browser history key is removed', await page.evaluate(() => localStorage.getItem('tether-factory-history')) === null)
     check('task view shows the commit', (await page.locator('.factory-task').innerText()).includes('4c1e9a0'))
     await page.keyboard.press('Enter')
     await page.locator('.factory-agent').waitFor()
@@ -224,13 +254,36 @@ async function main() {
     await page.keyboard.press('Escape')
     await page.locator('.factory-floor').waitFor()
 
-    // A task changes phase: its token moves to the new station, and the live region says so (at most every 15 s).
+    // A task changes phase while its history write fails. A fresh floor prompts another attempt.
+    const deployReport = (status, count = 1) => page.waitForResponse(response => response.url().endsWith('/factory/history') &&
+      response.status() === status && reportsDeploy(response.request().postDataJSON()) && deployReports().length >= count,
+    { timeout: 12000 })
+    let saveRetry
+    historyRetryGate = new Promise(resolve => { saveRetry = resolve })
+    state.rejectHistory = true
+    const rejected = deployReport(503)
     state.moved = true
     await station('deploy').locator('[data-token="B71"]').waitFor({ timeout: 12000 })
     check('B71 moves to Deploy on the next poll', await station('deploy').locator('[data-token="B71"].is-moved').count() === 1)
+    await rejected
+    await station('deploy').locator('[data-key="task:B71"]').click()
+    await timeline.waitFor()
+    const afterFailure = await timeline.locator('b').allInnerTexts()
+    check('a failed write leaves the displayed server timeline intact', JSON.stringify(afterFailure) === '["Inbox","Build"]', JSON.stringify(afterFailure))
+    const accepted = deployReport(200, 2)
+    saveRetry()
+    await accepted
+    const reports = deployReports()
+    check('a fresh floor retries with just the phase move and the write header', reports.length === 2 &&
+      reports[1].poll > reports[0].poll && reports.every(({ body, header }) =>
+        JSON.stringify(body) === '{"moves":[{"task":"B71","phase":"deploy"}]}' && header === '1'), JSON.stringify(reports))
+    await timeline.getByText('Deploy', { exact: true }).waitFor({ timeout: 12000 })
+    check('the next poll shows the phase saved by the server', JSON.stringify(await timeline.locator('b').allInnerTexts()) === '["Inbox","Build","Deploy"]')
     await page.waitForFunction(() => /B71 .* moved to Deploy/.test(document.querySelector('.factory [aria-live="polite"]')?.textContent || ''), null, { timeout: 20000 })
     check('the live region announces the move', true)
     state.moved = false
+    await page.locator('.factory-crumbs button', { hasText: 'Factory' }).click()
+    await page.locator('.factory-floor').waitFor()
 
     // Esc on the floor closes the view.
     await page.keyboard.press('Escape')
@@ -238,11 +291,16 @@ async function main() {
     check('Esc on the floor closes the view', !(await view.count()))
 
     // The command menu opens it, behind no setting.
+    const beforeReopen = state.reports.length
     await page.keyboard.press('Alt+Space')
     await page.keyboard.type('Factory')
     await page.locator('.command-menu').getByText('Factory view', { exact: true }).first().click()
     await station('inbox').waitFor()
     check('command menu entry opens the view', await view.evaluate(box => box.open))
+    await station('build').locator('[data-token="B71"]').waitFor()
+    await page.waitForResponse(response => response.url().endsWith('/api/factory') && response.ok())
+    check('a stale floor leaves a recently saved phase alone', !state.reports.slice(beforeReopen).some(({ body }) =>
+      body.moves.some(move => move.task === 'B71' && move.phase === 'build')))
 
     // Error with stale data, then the server with no data at all, then the empty floor.
     state.factory = 'down'
@@ -259,6 +317,21 @@ async function main() {
     check('no agents and no items: the empty state', true)
     if (SHOTS) await page.screenshot({ path: path.join(SHOTS, 'state-empty-1280-light.png') })
     state.factory = 'ok'; state.panes = panes
+
+    // Session data can arrive after Factory and the backlog. Only report phases from the complete floor.
+    const beforeOpen = state.reports.length
+    state.history.B71 = [{ phase: 'build', at: NOW - 60001 }]
+    state.moved = true
+    let showSessions
+    sessionGate = new Promise(resolve => { showSessions = resolve })
+    await page.goto(`${ORIGIN}/chat/?go=factory`)
+    await station('inbox').locator('[data-token="B71"]').waitFor()
+    const afterSessions = deployReport(200)
+    showSessions()
+    await afterSessions
+    check('only the complete floor reports a phase for B71', !state.reports.slice(beforeOpen).some(({ body }) =>
+      body.moves.some(move => move.task === 'B71' && move.phase === 'inbox')))
+    state.moved = false
 
     // Every width from 320 px: no sideways scroll at any level; targets stay 24 px or more.
     for (const [width, height] of [[320, 640], [390, 844], [1280, 800], [1920, 1080], [3840, 2160]]) {

@@ -1,7 +1,7 @@
 """Read-only facts for the Factory view (ui/src/Factory.tsx) that no other endpoint gives.
 
 The Factory view shows every agent tab as work that moves through phases (Inbox, Spec, Build, Review, Verify, Deploy,
-Done). The UI already has the tabs (/api/sessions) and the backlog (/api/projects/backlog). This module adds four
+Done). The UI already has the tabs (/api/sessions) and the backlog (/api/projects/backlog). This module adds five
 things, all read-only:
 
 - tools:    each agent tab's latest tool calls, from the end of its transcript. The UI guesses Spec, Build, Verify and
@@ -12,6 +12,7 @@ things, all read-only:
 - deployed: lines of DEPLOYED.md (the deploy log at the top of the Tether checkout) from the last DEPLOYED_DAYS days.
 - commits:  recent commits of the git repositories that the tabs work in, so a task can show the commits that name it.
 - sweep:    the last worktree sweep's lines (sweep.py, B210): behind main, failing checks, idle. Read from its file.
+- history:  shared phase history (factory_history.py), as reported by the screens.
 """
 import json
 import os
@@ -22,6 +23,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import factory_history
 import paths
 import sweep
 
@@ -250,4 +252,9 @@ def payload(entries, folder_of, readers, run=subprocess.run, now=None):
         swept = sweep.public({entry['id'] for entry in entries})
     except Exception:  # noqa: BLE001 - the sweep file must never break the view
         swept = {'at': 0, 'every': sweep.PERIOD, 'lines': []}
-    return {'now': int(now), 'tools': tools, 'deployed': deployed(now), 'commits': commits[:COMMITS], 'sweep': swept}
+    try:
+        shared = factory_history.history()
+    except OSError:  # an unreadable history file must never break the view; the next write replaces it
+        shared = {}
+    return {'now': int(now), 'tools': tools, 'deployed': deployed(now), 'commits': commits[:COMMITS],
+            'sweep': swept, 'history': shared}

@@ -120,24 +120,62 @@ const byId = (result, id) => result.tasks.find(task => task.id === id)
   assert.equal(result.tasks.some(task => task.id === '%40'), false, 'shell tabs are not agents')
 }
 
-// History: the first time each phase is seen; a change is reported once.
+// Report only evidence this screen has for a phase, and keep it until the server confirms it.
 {
-  const task = { id: 'B1', phase: 'build' }
-  const first = m.recordHistory({}, [task], 1000)
-  assert.deepEqual(first.history.B1, [{ phase: 'build', at: 1000 }])
-  assert.equal(first.moved.length, 0)
-  const same = m.recordHistory(first.history, [task], 2000)
-  assert.equal(same.history.B1.length, 1)
-  const moved = m.recordHistory(same.history, [{ id: 'B1', phase: 'verify' }], 3000)
-  assert.deepEqual(moved.history.B1.map(entry => entry.phase), ['build', 'verify'])
-  assert.equal(moved.moved[0].id, 'B1')
-  assert.equal(m.phaseSince(moved.history, { id: 'B1' }), 3000)
-  // A poll with no tasks keeps the history; entries older than a week go.
-  const empty = m.recordHistory(moved.history, [], 4000)
-  assert.deepEqual(empty.history, moved.history)
-  const old = m.recordHistory({ B2: [{ phase: 'done', at: 0 }], B1: moved.history.B1 }, [], 8 * 24 * 3600000)
-  assert.deepEqual(Object.keys(old.history), [])
-  assert.deepEqual(Object.keys(m.recordHistory({ B2: [{ phase: 'done', at: 0 }] }, [], 6 * 24 * 3600000).history), ['B2'])
+  const history = { B1: [{ phase: 'build', at: 1000 }, { phase: 'verify', at: 2000 }], B2: [{ phase: 'done', at: 3000 }] }
+  const build = { id: 'B1', phase: 'build' }, verify = { ...build, phase: 'verify' }
+  const spec = { id: '%4', phase: 'spec' }, deploy = { id: 'B2', phase: 'deploy' }
+  const buildMove = { task: 'B1', phase: 'build' }
+  const seen = new Set(['B1', 'B2'])
+  const moves = (now, previous, observed, tasks, pending = new Map()) =>
+    m.historyMoves(history, now, previous, observed, tasks, pending)
+
+  assert.deepEqual(moves(4000, null, new Set(), [build, spec]).moves, [{ task: '%4', phase: 'spec' }],
+    'first observation reports the missing task and leaves the recent entry alone')
+  assert.deepEqual(moves(4000, new Map([['B1', 'verify'], ['B2', 'deploy']]), seen, [build, deploy]).moves, [buildMove],
+    'own move reports the changed task and leaves the unchanged task alone')
+  assert.deepEqual(moves(62001, new Map(), new Set(), [build, deploy]).moves, [buildMove],
+    'catch-up reports an old entry for a task new to this screen')
+  assert.deepEqual(moves(62000, null, new Set(), [build]).moves, [],
+    'catch-up waits until the last entry is older than 60 seconds')
+  assert.deepEqual(moves(62001, new Map(), seen, [build]).moves, [],
+    'catch-up cannot run when a previously seen task returns to the floor')
+
+  const pending = new Map([['B1', 'build']])
+  const retry = moves(5000, new Map([['B1', 'build']]), seen, [build], pending)
+  assert.deepEqual(retry, { moves: [buildMove], pending }, 'an unchanged floor retries a pending move after failure')
+  const saved = moves(5000, new Map([['B1', 'verify']]), seen, [verify], new Map([['B1', 'verify']]))
+  assert.deepEqual(saved, { moves: [], pending: new Map() }, 'the server confirms the pending phase')
+  assert.deepEqual(moves(5000, new Map([['B1', 'build']]), seen, [build], saved.pending).moves, [],
+    'a later disagreement cannot revive a confirmed report')
+  const review = { ...build, phase: 'review' }
+  assert.deepEqual(moves(5000, new Map([['B1', 'build']]), seen, [review], pending),
+    { moves: [{ task: 'B1', phase: 'review' }], pending: new Map([['B1', 'review']]) },
+    'a newer own move replaces a pending move')
+  assert.deepEqual(moves(5000, new Map([['B1', 'build']]), seen, [], pending).pending, new Map(),
+    'a task that leaves the floor loses its pending move')
+  assert.deepEqual(pending, new Map([['B1', 'build']]), 'the decision leaves its input pending map intact')
+  assert.equal(m.phaseSince(history, verify), 2000)
+  assert.equal(m.phaseSince(history, build), 0)
+}
+
+// A second screen arrives just after the first screen reports a move and never gets a fresh backlog.
+{
+  const history = { B12: [{ phase: 'build', at: NOW - 600000 }] }
+  const screen = phase => ({ tasks: [{ id: 'B12', phase }], previous: null, seen: new Set(), pending: new Map() })
+  const fresh = screen('done'), stale = screen('build')
+  for (let poll = 0; poll < 25; poll++) {
+    for (const view of [fresh, stale]) {
+      const now = NOW + poll * 5000
+      const { moves, pending } = m.historyMoves(history, now, view.previous, view.seen, view.tasks, view.pending)
+      for (const { task, phase } of moves) history[task].push({ phase, at: now })
+      view.pending = pending
+      view.previous = new Map(view.tasks.map(task => [task.id, task.phase]))
+      for (const task of view.tasks) view.seen.add(task.id)
+    }
+  }
+  assert.deepEqual(history.B12.slice(1), [{ phase: 'done', at: NOW }],
+    '25 Factory polls add exactly one Done entry despite a stale second screen')
 }
 
 // The worktree sweep (B210): each finding goes to its tab's agent and task; a tab with none has an empty list.

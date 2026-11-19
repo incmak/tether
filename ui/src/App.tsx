@@ -1084,7 +1084,7 @@ function App() {
     <UndoCenter api={api} onChanged={() => void refresh()} history={undoHistory} onHistory={setUndoHistory} />
     {workSheet && <WorkSheet api={api} board={work.data} error={work.error} panes={panes} answers={decisionAnswers} start={workSheet} find={workFind} onRefresh={work.refresh} onOpen={openPane} onClose={() => { setWorkSheet(false); setWorkFind(undefined) }}
       onBacklog={query => setBacklog({ mode: 'page', query })} />}
-    {factory && <Factory api={api} panes={panes ?? []} groups={data?.groups} onOpen={openPane} onClose={() => setFactory(false)} />}
+    {factory && <Factory api={api} panes={data?.sessions} groups={data?.groups} onOpen={openPane} onClose={() => setFactory(false)} />}
     {agentsPage && <AgentsPage api={api} sessions={sessions} seen={prefs.seen} selected={openId} onOpen={openPane} onMarkRead={markRead} startMessaging={agentsPage === 'message'} onClose={() => setAgentsPage(false)} />}
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}
     {updated && <div className="update-banner" role="status"><span>A new version of Tether is ready.</span><button type="button" onClick={reload}>Reload</button></div>}

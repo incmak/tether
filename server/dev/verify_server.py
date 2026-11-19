@@ -55,13 +55,19 @@ ALLOWED = {
         'update', 'prefs', 'layouts', 'app-identity', 'push/config', 'shortcuts',
         'browser/agents', 'browser/signed/access', 'ui-usage',
     },
-    # Edits to the fixture's preferences, backlog and UI usage log.
-    'POST': {'prefs', 'projects/backlog', 'ui-usage'},
+    # Edits to the fixture's preferences, backlog, Factory history and UI usage log.
+    'POST': {'prefs', 'projects/backlog', 'factory/history', 'ui-usage'},
 }
+def factory_fixture(_pane):
+    import factory_history
+    return {'now': int(time.time()), 'tools': {}, 'deployed': [], 'commits': [], 'history': factory_history.history()}
+
+
 FIXTURES = {
     'codex-runs': lambda pane: {'pane': pane, 'running': 0, 'runs': []},
     'host': lambda _pane: {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False},
     'reminders': lambda _pane: {'reminders': [], 'deleted': [], 'now': time.time()},
+    'factory': factory_fixture,
 }
 # The UI calls these routes, but the fixture server leaves them off. This list
 # documents the decision for the source scan. The request gate stays default-deny.
@@ -84,7 +90,7 @@ REFUSED = {
         # Optional panels and detail views have no fixture contract. The verify
         # browser relay answers the chat stream with 204 so the UI polls instead.
         'activity', 'activity/export', 'attention', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
-        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'factory', 'groups/context',
+        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
     },
@@ -460,6 +466,7 @@ REVIEW_COMMIT = '3f9c2a7b41d6e8f05a1c9b2d7e4f6a8c0b1d2e3f'
 def seed(root, pane, pane_pid):
     """Fixture data, written with the server's own modules: one Claude chat on the fixture pane and a backlog."""
     import backlog
+    import factory_history
     import paths
     work = str(Path(root) / 'work')
     registry = paths.CLAUDE / 'sessions' / f'{pane_pid}.json'
@@ -496,10 +503,13 @@ def seed(root, pane, pane_pid):
         for name in ('answered.jsonl', 'error.jsonl'):
             stream.write((advisor / name).read_text().rstrip('\n') + '\n')
     backlog.add('Write the release notes')
-    backlog.add('Fix the flaky share test', source='codex', project='tether', details=['The teardown races the HTTP worker'])
-    backlog.add('Add backlog search', source='claude', project='tether')
+    inbox = backlog.add('Fix the flaky share test', source='codex', project='tether', details=['The teardown races the HTTP worker'])
+    done = backlog.add('Add backlog search', source='claude', project='tether')
     backlog.add('Draw the new icon set with a very long title that must wrap on a narrow phone screen without a sideways scroll', project='design')
     backlog.mark_done('Add backlog search', project='tether', result='Search added')
+    inbox_id, done_id = (line.rsplit('#', 1)[1] for line in (inbox, done))
+    factory_history.record({'moves': [{'task': inbox_id, 'phase': 'inbox'},
+                                      {'task': done_id, 'phase': 'build'}, {'task': done_id, 'phase': 'done'}]})
 
 
 def use_fixture_folders(root):

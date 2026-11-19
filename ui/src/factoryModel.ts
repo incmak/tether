@@ -26,7 +26,7 @@ export type SweepKind = 'behind' | 'checks' | 'idle'
 export interface SweepLine { pane: string; name: string; branch: string; kind: SweepKind; text: string }
 export interface Sweep { at: number; every: number; lines: SweepLine[] }
 export const SWEEP_NAMES: Record<SweepKind, string> = { behind: 'Behind main', checks: 'Checks fail', idle: 'Idle worktree' }
-export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[]; sweep?: Sweep }
+export interface FactoryData { now: number; tools: Record<string, FactoryTool[]>; deployed: Deploy[]; commits: Commit[]; sweep?: Sweep; history: History }
 
 export type Role = 'main' | 'worker' | 'reviewer' | 'advisor'
 /** working: the agent runs a turn. prompt: a permission, question or plan on screen waits for Mak. waits: the turn ended with a question for Mak. idle: nothing. */
@@ -239,26 +239,38 @@ export function groupsOf(tasks: Task[]) {
   return [...groups].map(([name, list]) => ({ name, tasks: list })).sort((a, b) => attentionOrder(a.tasks[0], b.tasks[0]) || b.tasks.length - a.tasks.length)
 }
 
-// Phase history, kept by this screen: the first time it saw each task in each phase. Nothing on the server records
-// phase changes, so the history starts when the screen first loads and says so.
 export type History = Record<string, { phase: Phase; at: number }[]>
-// Tasks that leave the floor keep their history for a week, so an empty or failed poll does not erase it.
-const HISTORY_DAYS = 7
-export function recordHistory(history: History, tasks: Task[], now: number, keep = 40): { history: History; moved: Task[] } {
-  const next: History = {}
-  const moved: Task[] = []
-  for (const [id, seen] of Object.entries(history)) if (seen.length && now - seen[seen.length - 1].at < HISTORY_DAYS * DAY) next[id] = seen
-  for (const task of tasks) {
-    const seen = history[task.id] ?? []
-    const last = seen[seen.length - 1]
-    if (!last) next[task.id] = [{ phase: task.phase, at: now }]
-    else if (last.phase !== task.phase) { next[task.id] = [...seen, { phase: task.phase, at: now }].slice(-keep); moved.push(task) }
-    else next[task.id] = seen
-  }
-  return { history: next, moved }
+const CATCH_UP_MS = 60_000
+const lastPhase = (history: History, id: string) => {
+  const entries = history[id]
+  return entries?.[entries.length - 1]
 }
-/** How long the task has been in its phase, as far as this screen saw. */
-export const phaseSince = (history: History, task: Task) => history[task.id]?.[history[task.id].length - 1]?.at ?? 0
+
+/** A different server phase needs a local move, a first observation, or a one-time catch-up. */
+export function historyMoves(
+  history: History,
+  serverNowMs: number,
+  previous: ReadonlyMap<string, Phase> | null,
+  seen: ReadonlySet<string>,
+  tasks: readonly Pick<Task, 'id' | 'phase'>[],
+  pending: ReadonlyMap<string, Phase>,
+) {
+  const next = new Map<string, Phase>()
+  for (const { id, phase } of tasks) {
+    const last = lastPhase(history, id)
+    if (last?.phase === phase) continue
+    const before = previous?.get(id)
+    const changed = before !== undefined && before !== phase
+    const catchUp = last && !seen.has(id) && serverNowMs - last.at > CATCH_UP_MS
+    if (!last || changed || catchUp || pending.get(id) === phase) next.set(id, phase)
+  }
+  return { moves: Array.from(next, ([task, phase]) => ({ task, phase })), pending: next }
+}
+/** When the server first recorded the current phase. */
+export function phaseSince(history: History, task: Task) {
+  const last = lastPhase(history, task.id)
+  return last?.phase === task.phase ? last.at : 0
+}
 
 // Spatial focus for arrow keys and TV remotes: the nearest target in the pressed direction. Rows count first, so
 // Down from a station goes to the item under it, not to a far one beside it.

@@ -8,7 +8,7 @@ import type { Row } from './backlogItems'
 import { BACKLOG_PATH } from './backlogNews'
 import { useBackStep } from './backNav'
 import { formatElapsed } from './paneState'
-import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, nearest, phaseSince, recordHistory, toMs } from './factoryModel'
+import { PHASES, PHASE_NAMES, STATE_NAMES, SWEEP_NAMES, attentionOrder, buildFloor, clock, groupsOf, historyMoves, nearest, phaseSince, toMs } from './factoryModel'
 import type { Agent, Direction, FactoryData, History, Phase, Sweep, SweepKind, SweepLine, Task } from './factoryModel'
 import './Factory.css'
 
@@ -28,16 +28,17 @@ const TOUR_MS = 12000          // and shows each task this long
 const ANNOUNCE_MS = 15000      // at most one live-region message this often
 const FLOOR_TOKENS = 10        // tokens a station shows before "+N more"
 const HISTORY_KEY = 'tether-factory-history'
+const HISTORY_BATCH = 256 // factory_history.MAX_MOVES
 const TOUR_KEY = 'tether-factory-tour'
 const BACK_KEYS = new Set(['Escape', 'Backspace', 'BrowserBack', 'GoBack'])
 const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }
 
 type Level = { phase?: Phase; task?: string; agent?: string }
-type Props = { api: Api; panes: Pane[]; groups?: Record<string, GroupInfo[]>; onOpen: (pane: Pane) => void; onClose: () => void }
+type Props = { api: Api; panes?: Pane[]; groups?: Record<string, GroupInfo[]>; onOpen: (pane: Pane) => void; onClose: () => void }
 
 const reduced = () => typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 const load = <T,>(key: string, fallback: T): T => { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback } catch { return fallback } }
-const save = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private mode: history lasts this visit */ } }
+const save = (key: string, value: unknown) => { try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* private mode: preference lasts this visit */ } }
 const ago = (ms: number, now: number) => ms ? formatElapsed((now - ms) / 1000) : 'unknown'
 /** A time, with the day when it is not today. */
 const when = (ms: number) => new Date(ms).toDateString() === new Date().toDateString() ? clock(ms) : `${new Date(ms).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${clock(ms)}`
@@ -76,29 +77,58 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer) }, [])
   const stackName = useCallback((pane: Pane) => Object.values(groups ?? {}).flat().find(group => group.id === pane.group)?.name, [groups])
   const ready = !!factory.data && !!backlog.data
-  const floor = useMemo(() => ready ? buildFloor({ panes, rows, data: factory.data, groupName: stackName, now }) : null, [ready, panes, rows, factory.data, stackName, now])
+  const floor = useMemo(() => ready ? buildFloor({ panes: panes ?? [], rows, data: factory.data, groupName: stackName, now }) : null, [ready, panes, rows, factory.data, stackName, now])
 
-  // Phase history and announcements.
-  const [history, setHistory] = useState<History>(() => load(HISTORY_KEY, {}))
-  const [opened] = useState(() => Date.now())
+  const history = factory.data?.history ?? {}
+  const report = useRef<{ data: FactoryData; inFlight: boolean } | null>(null)
+  const pending = useRef(new Map<string, Phase>())
+  const seen = useRef(new Set<string>())
+  useEffect(() => {
+    try { localStorage.removeItem(HISTORY_KEY) } catch { /* storage can be disabled */ }
+  }, [])
+
+  // Announce transitions observed on this screen once, even while a history write is pending.
   const [announce, setAnnounce] = useState('')
   const queue = useRef<string[]>([])
+  const phases = useRef<Map<string, Phase> | null>(null)
   const waited = useRef<Set<string> | null>(null)
   const [moved, setMoved] = useState<Set<string>>(new Set())
   useEffect(() => {
-    if (!floor) return
-    const result = recordHistory(history, floor.tasks, Date.now())
-    const changed = result.moved.length || Object.keys(result.history).length !== Object.keys(history).length
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- each new floor from the server extends the stored history once
-    if (changed) { setHistory(result.history); save(HISTORY_KEY, result.history) }
-    setMoved(new Set(result.moved.map(task => task.id)))
-    for (const task of result.moved) queue.current.push(`${label(task)} moved to ${PHASE_NAMES[task.phase]}.`)
+    // The open backlog alone can look like every task moved back to Inbox while sessions load.
+    if (!floor || !panes) return
+    const data = factory.data
+    const previous = phases.current
+    const decision = data?.history
+      ? historyMoves(data.history, data.now * 1000, previous, seen.current, floor.tasks, pending.current)
+      : null
+    if (decision) pending.current = decision.pending
+    for (const task of floor.tasks) seen.current.add(task.id)
+
+    const changes = floor.tasks.filter(task => previous?.has(task.id) && previous.get(task.id) !== task.phase)
+    phases.current = new Map(floor.tasks.map(task => [task.id, task.phase]))
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mark transitions between successive floors
+    setMoved(new Set(changes.map(task => task.id)))
+    for (const task of changes) queue.current.push(`${label(task)} moved to ${PHASE_NAMES[task.phase]}.`)
     const waiting = new Set(floor.tasks.filter(task => task.waits).map(task => task.id))
     if (waited.current) for (const task of floor.tasks) if (task.waits && !waited.current.has(task.id)) queue.current.push(`${label(task)} waits for you.`)
     waited.current = waiting
-    // history is read here, not watched: this runs once per new floor
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [floor])
+
+    // Record evidence on every complete floor. Send at most one attempt per Factory response.
+    if (!data || !decision || report.current?.data === data || report.current?.inFlight) return
+    const { moves } = decision
+    const attempt = { data, inFlight: moves.length > 0 }
+    report.current = attempt
+    if (!attempt.inFlight) return
+    void (async () => {
+      try {
+        for (let start = 0; start < moves.length; start += HISTORY_BATCH) {
+          const batch = moves.slice(start, start + HISTORY_BATCH).filter(move => pending.current.get(move.task) === move.phase)
+          if (batch.length) await api('factory/history', { moves: batch })
+        }
+      } catch { /* keep pending moves for the next Factory poll */ }
+      finally { attempt.inFlight = false }
+    })()
+  }, [api, factory.data, floor, panes])
   useEffect(() => {
     const timer = setInterval(() => {
       if (!queue.current.length) return
@@ -246,7 +276,7 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
   else if (!floor) content = <p className="factory-loading" role="status">Loading the factory…</p>
   else if (!floor.tasks.length) content = <Problem title="No work on the floor" text={`No agent tab is open and no backlog item is open.${floor.parked ? ` ${floor.parked} idle tabs ended over a day ago.` : ''} Start a tab with New session.`} />
   else if (agent && task) content = <AgentLevel api={api} agent={agent} task={task} now={now} onOpen={pane => { onOpen(pane); onClose() }} />
-  else if (task) content = <TaskLevel task={task} history={history[task.id] ?? []} opened={opened} now={now} zoom={next => setLevel({ phase: shown.phase, task: task.id, agent: next.pane.id })} />
+  else if (task) content = <TaskLevel task={task} history={history[task.id] ?? []} now={now} zoom={next => setLevel({ phase: shown.phase, task: task.id, agent: next.pane.id })} />
   else if (shown.phase) content = <PhaseLevel phase={shown.phase} tasks={floor.tasks.filter(entry => entry.phase === shown.phase)} history={history} now={now} zoom={next => setLevel({ phase: shown.phase, task: next.id })} />
   else content = <FloorLevel floor={floor.tasks} parked={floor.parked} now={now} moved={moved} zoomPhase={phase => setLevel({ phase })} zoomTask={next => setLevel({ phase: next.phase, task: next.id })} />
 
@@ -362,7 +392,7 @@ function PhaseLevel({ phase, tasks, history, now, zoom }: { phase: Phase; tasks:
   </div>
 }
 
-function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: History[string]; opened: number; now: number; zoom: (agent: Agent) => void }) {
+function TaskLevel({ task, history, now, zoom }: { task: Task; history: History[string]; now: number; zoom: (agent: Agent) => void }) {
   const proof = task.agents.flatMap(agent => agent.tools.filter(tool => /(test|unittest|tsc -b|eslint|screenshot|SHOTS=|playwright)/i.test(`${tool.name} ${tool.title}`)).map(tool => ({ agent: agent.name, tool })))
   return <div className="factory-task">
     <div className="factory-task-head">
@@ -385,8 +415,9 @@ function TaskLevel({ task, history, opened, now, zoom }: { task: Task; history: 
       <p className="factory-note">Tether only reports. It does not rebase or change a branch.</p>
     </section>}
     <section aria-labelledby="factory-history"><h3 id="factory-history">Phase history</h3>
-      <ol className="factory-timeline">{history.map((entry, index) => <li key={index}><b>{PHASE_NAMES[entry.phase]}</b> from {when(entry.at)}</li>)}</ol>
-      <p className="factory-note">This screen keeps the history itself. It starts {history.length ? '' : 'now, '}from the first time a screen saw the task{opened ? ` (this one opened ${clock(opened)})` : ''}.</p>
+      {history.length ? <ol className="factory-timeline">{history.map((entry, index) => <li key={index}><b>{PHASE_NAMES[entry.phase]}</b> from {when(entry.at)}</li>)}</ol>
+        : <p className="factory-none">No phases recorded yet.</p>}
+      <p className="factory-note">Tether shares this history across screens. It starts when any screen first sees the task.</p>
     </section>
     <section aria-labelledby="factory-commits"><h3 id="factory-commits">Commits</h3>
       {task.commits.length ? <ul className="factory-list">{task.commits.map(commit => <li key={commit.hash + commit.repo}><code>{commit.hash}</code> {commit.subject} <span>{commit.repo} · {clock(commit.at * 1000)}</span></li>)}</ul>
