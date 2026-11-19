@@ -402,6 +402,14 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
 .sheet-buttons { display: flex; gap: 10px; justify-content: flex-end; }
 .app-toast { --toast-bottom: 110px; position: fixed; left: 50%; bottom: var(--toast-bottom); transform: translateX(-50%); z-index: 20; max-width: calc(100% - 32px); margin: 0; }
+.app-toast, .update-banner, .heads-up { transition: opacity 200ms var(--motion-out), translate 200ms var(--motion-out); }
+@starting-style {
+  .app-toast, .heads-up { opacity: 0; translate: 0 8px; }
+  .update-banner { opacity: 0; translate: 0 -8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @starting-style { .app-toast, .update-banner, .heads-up { translate: none; } }
+}
 .state-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .state-dot.working { width: 10px; height: 10px; background: none; border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: spin .9s linear infinite; }
 .state-dot.approval { background: var(--attention); width: 8px; height: 8px; }
