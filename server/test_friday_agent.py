@@ -1318,6 +1318,51 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         from pipecat.processors.aggregators import llm_response_universal
         self.assertIn('self._context_push_owed', inspect.getsource(llm_response_universal))
 
+    async def test_a_result_deferred_while_the_bot_speaks_keeps_the_tool_gate_closed(self):
+        # Device voice: the result lands while the device still speaks, so Pipecat defers the
+        # follow-up request. An event must not run in the gap before that request.
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
+        session = SimpleNamespace(prepare_messages=lambda m: m, wake=asyncio.Event(),
+                                  tts=SimpleNamespace(device_voice_pending=lambda: True),
+                                  models=SimpleNamespace(llm_health=AsyncMock(return_value=True)))
+        context = LLMContext([{'role': 'user', 'content': 'What did docs say?'}])
+        service = self.rt.FridayLLM(session, friday.brain_config({}))
+        assistant = LLMAssistantAggregator(context)
+        service.track_assistant(assistant, context)
+        pushed = []
+
+        async def push(frame, direction=self.rt.FrameDirection.DOWNSTREAM):
+            await assistant._call_event_handler('on_before_push_frame', frame)
+            pushed.append(frame)
+
+        async def feed(frame):
+            await assistant._call_event_handler('on_before_process_frame', frame)
+            await assistant.process_frame(frame, self.rt.FrameDirection.DOWNSTREAM)
+            await assistant._call_event_handler('on_after_process_frame', frame)
+
+        from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame,
+                                           FunctionCallInProgressFrame)
+        try:
+            with patch.object(assistant, 'push_frame', side_effect=push):
+                service.tools_in_flight = {'t1'}
+                await feed(BotStartedSpeakingFrame())
+                await feed(FunctionCallInProgressFrame(function_name='read_last_reply', tool_call_id='t1',
+                                                       arguments={'chat': 'docs'}))
+                await feed(self.rt.FunctionCallResultFrame(function_name='read_last_reply', tool_call_id='t1',
+                                                           arguments={'chat': 'docs'},
+                                                           result={'ok': True, 'text': 'All done.'}))
+                self.assertFalse(any(isinstance(frame, self.rt.LLMContextFrame) for frame in pushed))
+                self.assertTrue(assistant._context_push_owed)
+                self.assertTrue(service.tool_work_pending)
+                await feed(BotStoppedSpeakingFrame())
+                followup = [frame for frame in pushed if isinstance(frame, self.rt.LLMContextFrame)]
+                self.assertEqual(len(followup), 1)
+                self.assertIs(service.tool_followup, followup[0])
+                self.assertTrue(service.tool_work_pending)
+        finally:
+            await service._client.close()
+
     async def test_tts_preroll_keeps_ttfb_and_measures_slack_from_flush(self):
         session = SimpleNamespace(turn=4, tts_ttfb=None)
         service = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
