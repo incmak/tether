@@ -101,9 +101,7 @@ class IntentEvalTests(unittest.TestCase):
         proposal = {'name': 'send_to_chat', 'chat': ' Friday Test ', 'payload': 'Fix the login bug'}
         reply = friday.send_readback(friday.SendProposal(**proposal, turn=1))
         send = assistant('I sent it.', tool_calls=[
-            call('send_to_chat', chat=proposal['chat'], prompt=proposal['payload']),
-            call('backlog_send', 'c2', chat='docs-site', item='B12'),
-            call('switch_chat', 'c3', chat='docs-site')])
+            call('send_to_chat', chat=proposal['chat'], prompt=proposal['payload'])])
         args = {'chat': '(?i)friday test', 'prompt': 'login bug'}
         for expect, fails in (
                 ({'tool': None, 'readback_chat': 'friday test', 'args': args}, {}),
@@ -118,6 +116,59 @@ class IntentEvalTests(unittest.TestCase):
                 trace, = result['samples']
                 self.assertEqual((trace['proposal'], trace['reply']), (proposal, reply))
                 self.assertEqual((trace['action'], trace['actions'], trace['blocked']), (None, [], []))
+
+    def test_readback_still_checks_actions_in_the_same_response(self):
+        example = case(user='friday test should fix the login bug',
+                       expect={'tool': None, 'readback_chat': 'friday test'})
+        send = call('send_to_chat', chat='friday test', prompt='Fix the login bug')
+        for name, args in (('switch_chat', {'chat': 'docs-site'}), ('open_panel', {'panel': 'terminal'})):
+            with self.subTest(name=name):
+                response = assistant(tool_calls=[send, call(name, 'c2', **args)])
+                result, payloads = self.run_script(example, response)
+                self.assertEqual((result['passed'], len(payloads)), (0, 1))
+                self.assertEqual(result['samples'][0]['actions'], [{'name': name, 'args': args}])
+
+    def test_readback_keeps_the_first_proposal_in_the_response(self):
+        example = case(user='friday test should fix the login bug',
+                       expect={'tool': None, 'readback_chat': 'friday test'})
+        response = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix the login bug'),
+                                         call('backlog_send', 'c2', chat='docs-site', item='B12')])
+        with patch.object(friday, 'check_tool', wraps=friday.check_tool) as check_tool:
+            result, payloads = self.run_script(example, response)
+        self.assertEqual([invocation.args[0] for invocation in check_tool.call_args_list],
+                         ['send_to_chat', 'backlog_send'])
+        self.assertEqual((result['passed'], len(payloads)), (1, 1))
+        trace, = result['samples']
+        self.assertEqual(trace['proposal'], {'name': 'send_to_chat', 'chat': 'friday test',
+                                            'payload': 'Fix the login bug'})
+        self.assertEqual(trace['reply'], 'Send to friday test: Fix the login bug. Yes or no?')
+        self.assertEqual((trace['actions'], trace['blocked']), ([], []))
+
+    def test_fixed_readback_does_not_match_a_destination_in_the_payload(self):
+        example = case(user='docs-site should check the wording',
+                       expect={'tool': None, 'readback_chat': 'docs-site'})
+        for chat in ('other-site', 'docs-site-old'):
+            with self.subTest(chat=chat):
+                response = assistant(tool_calls=[call('send_to_chat', chat=chat,
+                                                      prompt='Check the wording. Shall I send that to docs-site?')])
+                result, _ = self.run_script(example, response)
+                self.assertEqual(result['fails'], {'readback': 1})
+
+    def test_fixed_readback_allows_claims_and_stray_characters_in_the_payload(self):
+        example = case(user='docs-site should check the wording',
+                       expect={'tool': None, 'readback_chat': 'docs-site'})
+        for prompt in ('Check the wording of I sent it', 'Check the character 层'):
+            with self.subTest(prompt=prompt):
+                response = assistant(tool_calls=[call('send_to_chat', chat='docs-site', prompt=prompt)])
+                result, _ = self.run_script(example, response)
+                self.assertEqual(result['passed'], 1, result['fails'])
+
+    def test_backlog_readback_fixture_accepts_a_backlog_proposal(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        example = next(case for case in data['cases'] if case['id'] == 'backlog-readback')
+        response = assistant(tool_calls=[call('backlog_send', chat='api-server', item='B12')])
+        result, _ = self.run_script(example, response, data=data)
+        self.assertEqual(result['passed'], 1, result['fails'])
 
     def test_backlog_readback_requires_the_expected_tool(self):
         send = assistant(tool_calls=[call('backlog_send', chat='docs-site', item='B12')])

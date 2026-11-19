@@ -67,16 +67,20 @@ def _score(trace, expect, expected_tools):
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
     if readback_chat is not None:
-        fixed = (proposal and proposal['name'] == expect.get('readback_tool', 'send_to_chat')
-                 and proposal['chat'].strip().casefold() == readback_chat.casefold())
-        if not fixed and not _asks_send_to(reply, readback_chat):
+        if proposal is None:
+            matches = _asks_send_to(reply, readback_chat)
+        else:
+            matches = (proposal['name'] == expect.get('readback_tool', 'send_to_chat')
+                       and proposal['chat'].strip().casefold() == readback_chat.casefold())
+        if not matches:
             yield 'readback'
     elif proposal and None in expected_tools:
         yield 'unwanted_readback'
-    if action is None and not expect.get('claim_ok') and CLAIM.search(reply):
-        yield 'claimed_action'
-    if action is None and (not reply.strip() or STRAY.search(reply)):
-        yield 'stray_text'
+    if proposal is None and action is None:
+        if not expect.get('claim_ok') and CLAIM.search(reply):
+            yield 'claimed_action'
+        if not reply.strip() or STRAY.search(reply):
+            yield 'stray_text'
 
 
 def _tool_args(call):
@@ -134,10 +138,12 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
                                        pending=pending or declined, user_turn=user_turn)
             if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:
-                key = 'prompt' if name == 'send_to_chat' else 'item'
-                proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''), user_turn)
-                trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
-                trace['reply'] = friday.send_readback(proposal)
+                if trace['proposal'] is None:
+                    key = 'prompt' if name == 'send_to_chat' else 'item'
+                    proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''),
+                                                   user_turn)
+                    trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                    trace['reply'] = friday.send_readback(proposal)
                 result = {'error': 'Not sent yet. Friday asked the user to confirm.'}
             elif reason:
                 trace['blocked'].append({'name': name, 'args': args, 'blocked': reason})
@@ -151,9 +157,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     continue
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
-            if trace['proposal'] is not None:
-                return
-        if trace['action'] is not None:
+        if trace['proposal'] is not None or trace['action'] is not None:
             return
 
 

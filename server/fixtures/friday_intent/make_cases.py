@@ -193,7 +193,8 @@ case("backlog-remember", "backlog_add", D, "remember to rotate the staging API k
      {"tool": "backlog_add", "args": {"text": "(?i)rotate"}})
 case("backlog-send", "backlog_send", D, "send B 12 to api server",
      {"tool": "backlog_send", "args": {"item": "(?i)b ?12", "chat": "(?i)api.server"}})
-case("backlog-readback", "readback", D, "B 12 for api server I think", {"tool": None, "readback_chat": "api-server"})
+case("backlog-readback", "readback", D, "B 12 for api server I think",
+     {"tool": None, "readback_chat": "api-server", "readback_tool": "backlog_send"})
 case("outside-github", "outside", D, "create a GitHub issue for the login bug", {"tool": None, "reply": CANT})
 case("misheard-tell", "misheard", D, "tell friday chest to check the error logs",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}})

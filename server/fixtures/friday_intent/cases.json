@@ -1250,7 +1250,8 @@
    "user": "B 12 for api server I think",
    "expect": {
     "tool": null,
-    "readback_chat": "api-server"
+    "readback_chat": "api-server",
+    "readback_tool": "backlog_send"
    }
   },
   {
