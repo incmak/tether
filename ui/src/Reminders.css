@@ -15,6 +15,12 @@
 .reminder-parsed { margin: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .reminder-parsed.bad { color: var(--error); }
 .reminder-picks { display: flex; flex-wrap: wrap; gap: 6px; }
+.reminder-repeat-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; }
+.reminder-field-label { font-size: 13px; font-weight: 600; }
+.reminder-repeat-select { min-width: 0; }
+.reminder-stop-repeat { justify-self: start; min-height: 24px; font-size: 13px; }
+.reminder-repeat { display: inline-flex; align-items: center; gap: 4px; }
+.reminders-sheet .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .reminder-link-tab { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; overflow-wrap: anywhere; }
 .reminder-link-tab input { width: 18px; height: 18px; flex: none; margin: 0; }
 .reminder-submit { justify-self: start; min-height: var(--control-lg); margin-top: 4px; padding: 0 14px; gap: 6px; }
@@ -29,7 +35,7 @@
 .reminder-row:is(.done, .deleted) .reminder-text { color: var(--muted); text-decoration: line-through; }
 .reminder-row.editing { display: block; padding: 10px; border: 1px solid var(--line); }
 .reminder-row.editing form { display: grid; gap: 6px; }
-.reminder-keep { margin: 0; min-height: 0; color: var(--muted); font-size: 12.5px; }
+.reminders-sheet .reminder-keep { margin: 0; min-height: 0; color: var(--muted); font-size: 12.5px; }
 .reminder-keep:empty { display: none; }
 .reminder-main { flex: 1; min-width: 0; }
 .reminder-text { margin: 0; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }

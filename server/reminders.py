@@ -16,6 +16,10 @@ A lost Web Push answer (read timeout, the service closed the connection) also co
 browser. Only errors that prove the request never left retry (push.NOT_SENT: connect timeout, refused, DNS, TLS).
 After eight failures the channel stops retrying and is listed in `failed`. Deleted reminders keep their full
 delivery state for restore by ID for 30 days.
+
+A repeat rule moves to the next copy on Done. Its anchor keeps the scheduled wall time even after a snooze.
+Catch-up makes a single future copy. Deleting the open copy stops the series until restore.
+
 Times are UTC epoch seconds.
 """
 import contextlib
@@ -29,7 +33,8 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from math import inf
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     from . import paths
@@ -39,6 +44,7 @@ except ImportError:
 PREFIX = '/mobile/api/reminders'
 ACTIONS = ('add', 'edit', 'done', 'reopen', 'snooze', 'delete', 'restore')
 ZONE = ZoneInfo(os.environ.get('TETHER_REMINDER_ZONE') or 'Asia/Kolkata')
+RULES = ('day', 'weekday', 'week')
 TEXT_LIMIT = 500
 LATE = 120  # fired this many seconds after its time (server down or busy): the notice says late
 DONE_KEPT = 50  # finished reminders kept; older ones are dropped
@@ -133,8 +139,15 @@ def _load(now, *, prune_deleted=True):
         record.setdefault('retry_at', {})
         record.setdefault('sending', {})
         record.setdefault('failed', [])
+        repeat = record.setdefault('repeat', None)
+        if isinstance(repeat, dict):
+            anchor = repeat.get('anchor')
+            if (repeat.get('every') in RULES and type(anchor) in (int, float) and -inf < anchor < inf
+                    and isinstance(repeat.get('zone'), str)):
+                continue
+        record['repeat'] = None
     nxt = data.get('next') if isinstance(data.get('next'), int) and data.get('next') > top else top + 1
-    return {'version': 1, 'next': nxt, 'reminders': items, 'deleted': deleted}
+    return {'version': 2, 'next': nxt, 'reminders': items, 'deleted': deleted}
 
 
 def _save(data, restored_id=None):
@@ -201,15 +214,42 @@ def listing(now=None):
 
 def public(record):
     keys = ('id', 'text', 'due', 'created', 'by', 'state', 'fired_at', 'late', 'snoozes', 'done_at', 'link',
-            'occ', 'failed')
+            'occ', 'failed', 'repeat', 'next_id')
     return {key: record.get(key) for key in keys}
 
 
-def add(text, due, by='you', link=None, now=None):
+def next_due(rule, now):
+    """The first future occurrence after the anchor, at the same local wall time."""
+    try:
+        zone = ZoneInfo(rule['zone'])
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZONE
+    anchor = datetime.fromtimestamp(rule['anchor'], zone)
+    today = datetime.fromtimestamp(now, zone).date()
+    wall_time = anchor.time()
+    every = rule['every']
+    step = 7 if every == 'week' else 1
+    # Jump near today in whole steps from the anchor to keep weekly rules on the same weekday.
+    count = max(1, (today - anchor.date()).days // step)
+    day = anchor.date() + timedelta(days=count * step)
+    while True:
+        if every != 'weekday' or day.weekday() < 5:
+            due = datetime.combine(day, wall_time, tzinfo=zone).timestamp()
+            if due > max(rule['anchor'], now):
+                return due
+        day += timedelta(days=step)
+
+
+def add(text, due, by='you', link=None, now=None, repeat=None):
     now = time.time() if now is None else now
-    record = {'text': _text(text), 'due': _due(due, now), 'created': now, 'by': str(by or 'you')[:200],
+    if repeat is not None and repeat not in RULES:
+        raise ReminderError('Pick a repeat: never, day, weekday or week.')
+    text = _text(text)
+    due = _due(due, now)
+    record = {'text': text, 'due': due, 'created': now, 'by': str(by or 'you')[:200],
               'state': 'scheduled', 'fired_at': None, 'late': False, 'snoozes': 0, 'done_at': None,
-              'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': []}
+              'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': [],
+              'repeat': {'every': repeat, 'anchor': due, 'zone': ZONE.key} if repeat is not None else None}
     with _locked():
         data = _load(now)
         record['id'] = f'R{data["next"]}'
@@ -237,14 +277,38 @@ def change(rid, action, body=None, now=None, *, by_id=False):
         if occ is not None and occ != record['occ']:
             raise ReminderError('This reminder changed after that notice. Open Reminders to see it.', 409)
         if action == 'edit':
+            if 'repeat' in body and record['state'] == 'done':
+                raise ReminderError('That reminder is done. Reopen it first.', 409)
             if 'text' in body:
                 record['text'] = _text(body['text'])
             if 'link' in body:
                 record['link'] = _clean_link(body['link'])
-            if 'due' in body and body['due'] != record['due']:
+            due_changed = 'due' in body and body['due'] != record['due']
+            if due_changed:
                 _schedule(record, _due(body['due'], now))
+            rule = record['repeat']
+            if 'repeat' in body:
+                repeat = body['repeat']
+                if repeat is not None and repeat not in RULES:
+                    raise ReminderError('Pick a repeat: never, day, weekday or week.')
+                anchor = rule['anchor'] if rule and not due_changed else record['due']
+                record['repeat'] = {'every': repeat, 'anchor': anchor, 'zone': ZONE.key} if repeat is not None else None
+            elif due_changed and rule:
+                rule['anchor'] = record['due']
         elif action == 'done':
+            if record['state'] == 'done':
+                return public(record)
             record.update(state='done', done_at=now)
+            rule = record['repeat']
+            if rule:
+                due = next_due(rule, now)
+                next_id = f'R{data["next"]}'
+                upcoming = {'id': next_id, 'text': record['text'], 'link': record.get('link'), 'by': record.get('by'),
+                            'created': now, 'occ': 0, 'snoozes': 0, 'done_at': None, 'repeat': dict(rule, anchor=due)}
+                _schedule(upcoming, due)
+                data['next'] += 1
+                data['reminders'].append(upcoming)
+                record.update(repeat=None, next_id=next_id)
         elif action == 'reopen':
             if record['state'] != 'done':
                 return public(record)
@@ -481,7 +545,7 @@ def get(handler):
 
 
 def serve(handler, body):
-    """POST /mobile/api/reminders/add {text, due or when, link?}, or /{action} {id, ...}."""
+    """POST /mobile/api/reminders/add {text, due or when, link?, repeat?}, or /{action} {id, ...}."""
     action = handler.path.split('?', 1)[0][len(PREFIX) + 1:]
     try:
         if action == 'add':
@@ -490,7 +554,7 @@ def serve(handler, body):
             when = body.get('when')
             if 'due' not in body and isinstance(when, str):
                 due = parse_when(when, now)
-            result = add(body.get('text'), due, 'you', body.get('link'), now=now)
+            result = add(body.get('text'), due, 'you', body.get('link'), now=now, repeat=body.get('repeat'))
         elif action == 'restore':
             result = restore(body.get('id'))
         elif action in ACTIONS:

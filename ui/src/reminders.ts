@@ -1,12 +1,15 @@
-// Reminders (server/reminders.py): one-off reminders that Tether delivers at their time on the urgent channels
+// Reminders (server/reminders.py): Tether delivers reminders at their time on the urgent channels
 // (push, urgent ping, Waiting on you). Times are UTC epoch seconds on the wire and show in India Standard Time.
 // IST has no daylight saving time, so a fixed +05:30 offset converts both ways.
 import { useCallback, useEffect } from 'react'
 import { parse as parseDate } from 'chrono-node'
 import type { Api } from './api'
+import type { MenuOption } from './SelectMenu'
 import { usePolling } from './hooks'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
+export type Repeat = 'day' | 'weekday' | 'week'
+export interface RepeatRule { every: Repeat; anchor: number; zone: string }
 export interface ReminderLink { pane?: string; thread?: string; project?: string; item?: string }
 export interface Reminder {
   id: string; text: string; due: number; created: number; by: string; state: ReminderState
@@ -15,6 +18,8 @@ export interface Reminder {
   occ?: number
   /** Channels that gave up after their retries. */
   failed?: string[]
+  repeat?: RepeatRule | null
+  next_id?: string | null
 }
 /** A deleted reminder, kept for 30 days in Recently deleted. */
 export interface Deleted extends Reminder { deleted_at: number }
@@ -43,7 +48,24 @@ const dayNumber = (at: number) => Math.floor((at + OFFSET) / 86400)
 const pad = (value: number) => String(value).padStart(2, '0')
 const clock = (at: number) => { const p = parts(at); return `${pad(p.hour)}:${pad(p.minute)}` }
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+export function repeatLabel(rule: RepeatRule | null | undefined): string {
+  if (!rule) return ''
+  if (rule.every === 'day') return 'Every day'
+  if (rule.every === 'weekday') return 'Every weekday'
+  return `Every ${WEEKDAYS[parts(rule.anchor).weekday]}`
+}
+
+export function repeatOptions(at: number | null): MenuOption[] {
+  return [
+    { value: 'never', label: 'Never' },
+    { value: 'day', label: 'Every day' },
+    { value: 'weekday', label: 'Every weekday', detail: 'Mon–Fri' },
+    { value: 'week', label: 'Every week', detail: at === null ? 'Same day each week' : `On ${WEEKDAYS[parts(at).weekday]}s` },
+  ]
+}
 
 /** "Today 10:00", "Tomorrow 10:00", "Yesterday 18:00", "Wed 25 Nov 10:00", "Wed 25 Nov 2027 10:00". */
 export function whenLabel(at: number, now: number) {

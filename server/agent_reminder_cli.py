@@ -1,7 +1,9 @@
 """Set and manage reminders for Mak from an agent's tab. Tether delivers each one at its time (push, urgent ping,
 Waiting on you). It works on the reminder file directly: a Codex sandbox blocks the Tether port, not that folder.
 
-Times: "2026-11-19 10:00" (Asia/Kolkata unless it has an offset), "10:00" (next), "tomorrow 10:00", "in 90m", "in 2h"."""
+Times: "2026-11-19 10:00" (Asia/Kolkata unless it has an offset), "10:00" (next), "tomorrow 10:00", "in 90m", "in 2h".
+Add --every day|weekday|week to repeat a reminder each time you mark it Done.
+"""
 import argparse
 import os
 import sys
@@ -16,6 +18,12 @@ def shown(record, now=None):
     zone = datetime.fromtimestamp(record['due'], reminders.ZONE).strftime('%Y-%m-%d %H:%M %Z')
     utc = datetime.fromtimestamp(record['due'], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     state = record['state'] + (' (late)' if record.get('late') and record['state'] == 'due' else '')
+    rule = record.get('repeat')
+    if rule:
+        state += f'  every {rule["every"]}'
+        if rule['every'] == 'week':
+            weekday = datetime.fromtimestamp(rule['anchor'], reminders.ZONE).strftime('%a')
+            state += f' ({weekday})'
     link = ' · '.join(f'{key} {value}' for key, value in (record.get('link') or {}).items() if key != 'thread')
     return f'{record["id"]}  {zone} ({utc})  {state}  {record["text"]}' + (f'  [{link}]' if link else '')
 
@@ -26,6 +34,7 @@ def main(argv=None):
     add = commands.add_parser('add', help='set a reminder for Mak')
     add.add_argument('text', help=f'what to remind Mak about, {reminders.TEXT_LIMIT} characters at most')
     add.add_argument('--at', required=True, help='when: "2026-11-19 10:00", "tomorrow 10:00", "in 2h"')
+    add.add_argument('--every', choices=reminders.RULES, help='repeat each time the reminder is marked done')
     add.add_argument('--project', help="link a project (its repository folder name); this tab's project when left out")
     add.add_argument('--no-project', action='store_true', help='link no project')
     add.add_argument('--pane', help='link a tab, like %%12; use "$TMUX_PANE" for this tab')
@@ -49,7 +58,7 @@ def main(argv=None):
                     agent = agent_backlog_cli.guess_agent()
                     link['thread'] = os.environ.get(agent_backlog_cli.CHAT_ENV[agent]) or None
             who = agent_backlog_cli.source(agent_backlog_cli.guess_agent())
-            record = reminders.add(args.text, reminders.parse_when(args.at), who, link)
+            record = reminders.add(args.text, reminders.parse_when(args.at), who, link, repeat=args.every)
             print('Added: ' + shown(record))
         elif args.command == 'list':
             items = reminders.listing()['reminders']
@@ -59,7 +68,12 @@ def main(argv=None):
             record = reminders.change(args.id, 'snooze', {'until': reminders.parse_when(args.until)}, by_id=True)
             print('Snoozed: ' + shown(record))
         elif args.command == 'done':
-            print('Done: ' + shown(reminders.change(args.id, 'done', by_id=True)))
+            record = reminders.change(args.id, 'done', by_id=True)
+            print('Done: ' + shown(record))
+            if record['next_id']:
+                upcoming = next((item for item in reminders.listing()['reminders'] if item['id'] == record['next_id']), None)
+                if upcoming:
+                    print('Next: ' + shown(upcoming))
         else:
             reminders.change(args.id, 'delete')
             print(f'Deleted {args.id.upper()}.')

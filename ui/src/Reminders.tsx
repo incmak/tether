@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AlarmClock, BellRing, Check, ClipboardList, Pencil, RotateCcw, SquareTerminal, Trash2, Undo2, X } from 'lucide-react'
+import { AlarmClock, BellRing, Check, ClipboardList, Pencil, Repeat as RepeatIcon, RotateCcw, SquareTerminal, Trash2, Undo2, X } from 'lucide-react'
 import type { Api } from './api'
 import { errorText } from './api'
 import type { Pane } from './api'
@@ -8,8 +8,8 @@ import { useModal } from './hooks'
 import { Bone } from './Skeleton'
 import { SelectMenu } from './SelectMenu'
 import { chatTitle } from './Sidebar'
-import { act, fullLabel, groupReminders, parseWhen, quickPicks, snoozePicks, TEXT_LIMIT, whenLabel, ZONE_LABEL } from './reminders'
-import type { Listing, Reminder, useReminders } from './reminders'
+import { act, fullLabel, groupReminders, parseWhen, quickPicks, repeatLabel, repeatOptions, snoozePicks, TEXT_LIMIT, whenLabel, ZONE_LABEL } from './reminders'
+import type { Listing, Reminder, Repeat, useReminders } from './reminders'
 import './Reminders.css'
 
 type Polled = ReturnType<typeof useReminders>
@@ -42,6 +42,14 @@ function WhenField({ id, when, onChange, now, picks = true }: { id: string; when
   </div>
 }
 
+function RepeatField({ id, value, at, onChange }: { id: string; value: 'never' | Repeat; at: number | null; onChange: (value: 'never' | Repeat) => void }) {
+  return <div className="reminder-repeat-field">
+    <span className="reminder-field-label" id={`${id}-label`}>Repeat</span>
+    <SelectMenu id={id} value={value} label="Repeat" minWidth={200} className="sm-field reminder-repeat-select"
+      icon={<RepeatIcon size={14} aria-hidden="true" />} options={repeatOptions(at)} onChange={next => onChange(next as 'never' | Repeat)} />
+  </div>
+}
+
 /** One reminder: text, time, links and actions. Editing swaps the row for a small form. */
 function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError }: {
   item: Reminder; now: number; panes: Pane[]; api: Api; onOpenPane?: (pane: Pane) => void; onOpenItem?: (ref: string) => void
@@ -50,6 +58,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(item.text)
   const [when, setWhen] = useState<When>(EMPTY)
+  const [repeat, setRepeat] = useState<'never' | Repeat>(item.repeat?.every ?? 'never')
   const [busy, setBusy] = useState(false)
   const formId = useId()
   const run = async (work: () => Promise<unknown>) => {
@@ -69,6 +78,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
       const body: Record<string, unknown> = { id: item.id }
       if (text.trim() !== item.text) body.text = text.trim()
       if (at !== null) body.due = at
+      if (repeat !== (item.repeat?.every ?? 'never')) body.repeat = repeat === 'never' ? null : repeat
       if (Object.keys(body).length === 1 || await run(() => act(api, 'edit', body))) setEditing(false)
     }
     return <li className="reminder-row editing">
@@ -77,6 +87,10 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
         <textarea id={`${formId}-text`} rows={2} maxLength={TEXT_LIMIT} value={text} onChange={event => setText(event.target.value)} autoFocus />
         <WhenField id={`${formId}-when`} when={when} onChange={setWhen} now={now} picks={false} />
         <p className="reminder-keep">{typed ? '' : `Leave When empty to keep ${whenLabel(item.due, now)}.`}</p>
+        <RepeatField id={`${formId}-repeat`} value={repeat} at={at ?? item.due} onChange={setRepeat} />
+        {item.repeat && (repeat !== 'never'
+          ? <button type="button" className="link-button reminder-stop-repeat" onClick={() => setRepeat('never')}>Stop repeating</button>
+          : <p className="reminder-keep">Repeating stops when you save.</p>)}
         <div className="sheet-buttons">
           <button type="button" className="secondary" onClick={() => { setEditing(false); setText(item.text); setWhen(EMPTY) }}>Cancel</button>
           <button type="submit" className="primary" disabled={busy || !text.trim() || (typed && (at === null || at <= now))}>Save</button>
@@ -90,11 +104,13 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
     if (pick) void run(() => act(api, 'snooze', { id: item.id, occ: item.occ, ...(index < 2 ? { for: index ? 3600 : 600 } : { until: pick.at }) }))
   }
   const who = byLabel(item.by)
+  const label = repeatLabel(item.repeat)
   return <li className={`reminder-row ${item.state}`}>
     <div className="reminder-main">
       <p className="reminder-text">{item.text}</p>
       <p className="reminder-meta">
         <time dateTime={new Date(item.due * 1000).toISOString()} title={fullLabel(item.due)} aria-label={fullLabel(item.due)}>{whenLabel(item.due, now)}</time>
+        {label && <span className="reminder-repeat" title={`Repeats: ${label}`}><RepeatIcon size={12} aria-hidden="true" /><span className="visually-hidden">Repeats: </span>{label}</span>}
         {item.state === 'due' && item.late && <span className="reminder-late">Sent late</span>}
         {item.snoozes > 0 && !done && <span>Snoozed {item.snoozes}×</span>}
         {who && <span>{who}</span>}
@@ -117,7 +133,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
           <SelectMenu value="" label="Snooze" triggerLabel="" triggerTitle={item.text} className="icon-button reminder-snooze" minWidth={180} disabled={busy}
             icon={<AlarmClock size={16} aria-hidden="true" />} onChange={snooze}
             options={snoozePicks(now).map((pick, index) => ({ value: String(index), label: pick.label, detail: whenLabel(pick.at, now) }))} />
-          <button type="button" className="icon-button" aria-label={`Edit: ${item.text}`} title="Edit" disabled={busy} onClick={() => { setText(item.text); setWhen(EMPTY); setEditing(true) }}><Pencil size={15} /></button>
+          <button type="button" className="icon-button" aria-label={`Edit: ${item.text}`} title="Edit" disabled={busy} onClick={() => { setText(item.text); setWhen(EMPTY); setRepeat(item.repeat?.every ?? 'never'); setEditing(true) }}><Pencil size={15} /></button>
         </>}
       <button type="button" className="icon-button" aria-label={`Delete: ${item.text}`} title="Delete" disabled={busy} onClick={() => onDelete(item)}><Trash2 size={15} /></button>
     </div>
@@ -147,6 +163,7 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
   useEffect(() => { const timer = setInterval(() => setNow(nowSeconds()), 15000); return () => clearInterval(timer) }, [])
   const [text, setText] = useState('')
   const [when, setWhen] = useState<When>(EMPTY)
+  const [repeat, setRepeat] = useState<'never' | Repeat>('never')
   const [linkTab, setLinkTab] = useState(false)
   const [saving, setSaving] = useState(false)
   const [problem, setProblem] = useState('')
@@ -167,8 +184,8 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
     setSaving(true); setProblem('')
     try {
       const link = linkTab && current ? { pane: current.id, thread: current.thread || undefined } : undefined
-      await act(api, 'add', { text: text.trim(), due: at, link })
-      setText(''); setWhen(EMPTY); setLinkTab(false)
+      await act(api, 'add', { text: text.trim(), due: at, link, repeat: repeat === 'never' ? null : repeat })
+      setText(''); setWhen(EMPTY); setRepeat('never'); setLinkTab(false)
       textRef.current?.focus()
     } catch (error) { setProblem(errorText(error)) } finally { setSaving(false) }
   }
@@ -199,6 +216,7 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
         onChange={event => setText(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void add(event) }} />
       <WhenField id={`${ids}-when`} when={when} onChange={setWhen} now={now} />
+      <RepeatField id={`${ids}-repeat`} value={repeat} at={at} onChange={setRepeat} />
       {current && <label className="reminder-link-tab"><input type="checkbox" checked={linkTab} onChange={event => setLinkTab(event.target.checked)} />
         <span>Link to this tab: {chatTitle(current)}</span></label>}
       <button type="submit" className="primary reminder-submit" disabled={!ready || saving}><BellRing size={15} aria-hidden="true" />{saving ? 'Adding…' : 'Add reminder'}</button>

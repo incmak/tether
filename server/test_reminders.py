@@ -12,6 +12,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import agent_reminder_cli
 import paths
@@ -59,7 +60,7 @@ class StoreTests(Base):
         self.assertEqual(first['occ'], 1)
         self.assertEqual(first['link'], {'pane': '%12', 'thread': 'abc-1', 'item': 'B224', 'project': 'tether'})
         data = self.stored()
-        self.assertEqual((data['version'], data['next']), (1, 3))
+        self.assertEqual((data['version'], data['next']), (2, 3))
         self.assertEqual(data['reminders'][0]['due'], NOW + 3600)
         self.assertEqual(os.stat(self.folder).st_mode & 0o777, 0o700)
 
@@ -936,3 +937,225 @@ class CliTests(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RepeatTests(Base):
+    @staticmethod
+    def ist(day, hour=10, minute=0):
+        return datetime(2026, 11, day, hour, minute, tzinfo=ZoneInfo('Asia/Kolkata')).timestamp()
+
+    def complete(self, item, now):
+        return reminders.change(item['id'], 'done', {'occ': item['occ']}, now=now)
+
+    def following(self, done, now):
+        return next(item for item in reminders.listing(now=now)['reminders'] if item['id'] == done['next_id'])
+
+    def test_daily_done_before_due_moves_the_rule_to_a_fresh_copy(self):
+        anchor = self.ist(19)
+        link = {'pane': '%5', 'item': 'B227'}
+        item = self.add('Read the report', due=anchor, by='codex', link=link, repeat='day')
+        self.assertEqual(item['repeat'], {'every': 'day', 'anchor': anchor, 'zone': 'Asia/Kolkata'})
+        self.assertIsNone(item['next_id'])
+        now = self.ist(19, 9)
+        done = self.complete(item, now)
+        upcoming = self.following(done, now)
+        self.assertEqual((done['state'], done['repeat'], done['next_id']), ('done', None, 'R2'))
+        self.assertNotEqual(item['id'], upcoming['id'])
+        self.assertEqual((upcoming['text'], upcoming['link'], upcoming['by']), (item['text'], link, 'codex'))
+        self.assertEqual((upcoming['created'], upcoming['due']), (now, self.ist(20)))
+        self.assertEqual(upcoming['repeat'], {**item['repeat'], 'anchor': self.ist(20)})
+        self.assertEqual((upcoming['state'], upcoming['occ'], upcoming['snoozes']), ('scheduled', 1, 0))
+
+    def test_weekday_moves_from_friday_to_monday(self):
+        item = self.add(due=self.ist(20), repeat='weekday')
+        self.assertEqual(self.following(self.complete(item, self.ist(20)), self.ist(20))['due'], self.ist(23))
+
+    def test_weekly_moves_to_the_same_weekday(self):
+        item = self.add(due=self.ist(19), repeat='week')
+        self.assertEqual(self.following(self.complete(item, self.ist(19)), self.ist(19))['due'], self.ist(26))
+
+    def test_weekday_keeps_a_saturday_first_due(self):
+        anchor = self.ist(21)
+        item = self.add(due=anchor, repeat='weekday')
+        sent = []
+        reminders.tick({'push': lambda item: sent.append(item['due']) or True}, now=anchor)
+        self.assertEqual(sent, [anchor])
+        done = self.complete(item, anchor)
+        upcoming = self.following(done, anchor)
+        self.assertEqual(upcoming['due'], self.ist(23))
+        stored = next(record for record in self.stored()['reminders'] if record['id'] == upcoming['id'])
+        self.assertEqual([stored[key] for key in ('sent', 'tries', 'retry_at', 'sending', 'failed', 'fired_at', 'late')],
+                         [[], {}, {}, {}, [], None, False])
+
+    def test_catch_up_creates_only_one_strictly_future_copy(self):
+        anchor = self.ist(9)
+        item = reminders.add('Late report', anchor, now=self.ist(8), repeat='day')
+        now = self.ist(19)
+        count = len(reminders.listing(now=now)['reminders'])
+        done = self.complete(item, now)
+        self.assertEqual(len(reminders.listing(now=now)['reminders']), count + 1)
+        self.assertEqual(self.following(done, now)['due'], self.ist(20))
+        weekly = reminders.add('Old weekly report', anchor, now=self.ist(8), repeat='week')
+        self.assertEqual(self.following(self.complete(weekly, now), now)['due'], self.ist(23))
+
+    def test_snooze_keeps_the_anchor_for_short_and_long_snoozes(self):
+        anchor = self.ist(19)
+        for day, next_day in ((19, 20), (21, 22)):
+            with self.subTest(day=day):
+                item = self.add(due=anchor, repeat='day')
+                until, now = self.ist(day, 18), self.ist(day, 18, 5)
+                snoozed = reminders.change(item['id'], 'snooze', {'occ': item['occ'], 'until': until}, now=anchor)
+                self.assertEqual((snoozed['due'], snoozed['repeat']['anchor']), (until, anchor))
+                self.assertEqual(self.following(self.complete(snoozed, now), now)['due'], self.ist(next_day))
+
+    def test_done_is_idempotent_and_reopened_copy_is_one_off(self):
+        item = self.add(due=self.ist(19), repeat='day')
+        now = self.ist(19, 9)
+        done = self.complete(item, now)
+        stored = self.stored()
+        self.assertEqual(self.complete(item, now + 1), done)
+        self.assertEqual(self.stored(), stored)
+        reopened = reminders.change(item['id'], 'reopen', now=now + 2)
+        self.assertIsNone(reopened['repeat'])
+        self.complete(reopened, now + 3)
+        self.assertEqual(len(self.stored()['reminders']), 2)
+
+    def test_delete_and_restore_preserve_the_open_rule(self):
+        item = self.add(due=self.ist(19), repeat='day')
+        now = self.ist(19)
+        reminders.change(item['id'], 'delete', now=now)
+        listed = reminders.listing(now=now)
+        self.assertEqual(listed['reminders'], [])
+        self.assertEqual(listed['deleted'][0]['repeat'], item['repeat'])
+        self.assertEqual(reminders.restore(item['id'], now=now), item)
+        done = self.complete(item, now)
+        reminders.change(done['id'], 'delete', now=now)
+        self.assertEqual(self.following(done, now)['due'], self.ist(20))
+
+    def test_rule_only_edit_keeps_schedule_and_delivery_state(self):
+        anchor = self.ist(19)
+        item = self.add(due=anchor, repeat='day')
+        snoozed = reminders.change(item['id'], 'snooze', {'occ': 1, 'for': 3600}, now=anchor)
+        reminders.tick({'push': lambda _: False, 'ping': lambda _: True}, now=snoozed['due'])
+        before = self.stored()['reminders'][0]
+        edited = reminders.change(item['id'], 'edit', {'repeat': 'week'}, now=snoozed['due'])
+        rule = {'every': 'week', 'anchor': anchor, 'zone': 'Asia/Kolkata'}
+        self.assertEqual(edited['repeat'], rule)
+        self.assertEqual(self.stored()['reminders'][0], {**before, 'repeat': rule})
+
+    def test_edit_due_reanchors_and_stop_repeating_creates_no_copy(self):
+        item = self.add(due=self.ist(19))
+        rid = item['id']
+        edited = reminders.change(rid, 'edit', {'repeat': 'day'}, now=NOW)
+        self.assertEqual(edited['repeat']['anchor'], self.ist(19))
+        edited = reminders.change(rid, 'edit', {'due': self.ist(20)}, now=NOW)
+        self.assertEqual(edited['repeat']['anchor'], self.ist(20))
+        edited = reminders.change(rid, 'edit', {'due': self.ist(21), 'repeat': 'weekday'}, now=NOW)
+        self.assertEqual(edited['repeat'], {'every': 'weekday', 'anchor': self.ist(21), 'zone': 'Asia/Kolkata'})
+        stopped = reminders.change(rid, 'edit', {'repeat': None}, now=NOW)
+        self.assertIsNone(stopped['repeat'])
+        self.assertIsNone(self.complete(stopped, NOW)['next_id'])
+        self.assertEqual(len(self.stored()['reminders']), 1)
+
+    def test_repeat_edits_on_done_and_bad_rules_are_rejected(self):
+        for rule in ('month', 'never', True, []):
+            with self.subTest(rule=rule):
+                with self.assertRaises(reminders.ReminderError) as error:
+                    self.add(repeat=rule)
+                self.assertEqual((error.exception.status, str(error.exception)),
+                                 (400, 'Pick a repeat: never, day, weekday or week.'))
+        item = self.add()
+        with self.assertRaises(reminders.ReminderError) as error:
+            reminders.change(item['id'], 'edit', {'repeat': 'month'}, now=NOW)
+        self.assertEqual(error.exception.status, 400)
+        self.complete(item, NOW)
+        for rule in ('day', None):
+            with self.subTest(rule=rule):
+                with self.assertRaises(reminders.ReminderError) as error:
+                    reminders.change(item['id'], 'edit', {'repeat': rule}, now=NOW)
+                self.assertEqual((error.exception.status, str(error.exception)),
+                                 (409, 'That reminder is done. Reopen it first.'))
+
+    def test_v1_upgrade_keeps_all_fields_and_clears_invalid_rules(self):
+        self.folder.mkdir()
+        source = self.folder / 'reminders.json'
+        full = {
+            'id': 'R2', 'text': 'Keep delivery state', 'due': self.ist(19), 'created': NOW - 600, 'by': 'claude',
+            'state': 'due', 'fired_at': NOW, 'late': True, 'snoozes': 2, 'done_at': None, 'link': {'pane': '%5'},
+            'occ': 3, 'sent': ['ping'], 'tries': {'push': 2}, 'retry_at': {'push': NOW + 60},
+            'sending': {'push': {'until': NOW + 120}}, 'failed': ['ping'],
+            'push': {'audience': ['a', 'b'], 'to': ['a']},
+        }
+        records = [dict(full, id='R1', text='Keep this too'), full]
+        deleted = [dict(full, id='R3', deleted_at=NOW)]
+        source.write_text(json.dumps({'version': 1, 'next': 4, 'reminders': records, 'deleted': deleted}))
+        listed = reminders.listing(now=NOW)
+        private = {'sent', 'tries', 'retry_at', 'sending', 'push'}
+        for stored, item in zip(records + deleted, listed['reminders'] + listed['deleted'], strict=True):
+            self.assertEqual(item, {key: value for key, value in stored.items() if key not in private}
+                             | {'repeat': None, 'next_id': None})
+        self.add()
+        saved = self.stored()
+        self.assertEqual((saved['version'], saved['next']), (2, 5))
+        for original, migrated in zip(records + deleted, saved['reminders'][:2] + saved['deleted'], strict=True):
+            self.assertIsNone(migrated.pop('repeat'))
+            self.assertEqual(json.dumps(migrated), json.dumps(original))
+
+        valid = {'every': 'day', 'anchor': self.ist(19), 'zone': 'Asia/Kolkata'}
+        rules = [{'every': 'month'}, 'day', {**valid, 'anchor': True}, {**valid, 'anchor': float('inf')},
+                 {**valid, 'anchor': float('nan')}, {**valid, 'zone': 5}]
+        saved['reminders'] = [dict(full, id=f'R{i}', repeat=rule) for i, rule in enumerate(rules, 10)]
+        source.write_text(json.dumps(saved))
+        self.assertEqual([item['repeat'] for item in reminders.listing(now=NOW)['reminders']], [None] * len(rules))
+
+    def test_wall_clock_survives_dst(self):
+        zone = ZoneInfo('America/New_York')
+        anchor = datetime(2026, 10, 31, 9, tzinfo=zone).timestamp()
+        expected = datetime(2026, 11, 1, 9, tzinfo=zone).timestamp()
+        with mock.patch.object(reminders, 'ZONE', zone):
+            item = reminders.add('Across DST', anchor, now=anchor - 3600, repeat='day')
+            self.assertEqual(item['repeat']['zone'], zone.key)
+            self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], expected)
+
+    def test_unknown_stored_zone_falls_back_to_default(self):
+        anchor = self.ist(19)
+        item = self.add(due=anchor, repeat='day')
+        stored = self.stored()
+        stored['reminders'][0]['repeat']['zone'] = 'Unknown/Zone'
+        (self.folder / 'reminders.json').write_text(json.dumps(stored))
+        self.assertEqual(self.following(self.complete(item, anchor), anchor)['due'], self.ist(20))
+
+    def test_http_add_and_edit_round_trip(self):
+        anchor = self.ist(19)
+
+        def call(action, body):
+            handler = Handler(f'{reminders.PREFIX}/{action}')
+            reminders.serve(handler, body)
+            status, data = handler.sent
+            self.assertEqual(status, 200)
+            return data['reminder']
+
+        with mock.patch.object(reminders.time, 'time', return_value=NOW):
+            item = call('add', {'text': 'Read the report', 'due': anchor, 'repeat': 'weekday'})
+            self.assertEqual(item['repeat'], {'every': 'weekday', 'anchor': anchor, 'zone': 'Asia/Kolkata'})
+            item = call('edit', {'id': item['id'], 'repeat': 'week'})
+            self.assertEqual(item['repeat'], {'every': 'week', 'anchor': anchor, 'zone': 'Asia/Kolkata'})
+            self.assertIsNone(call('edit', {'id': item['id'], 'repeat': None})['repeat'])
+
+    def test_cli_add_list_and_done_show_the_rule(self):
+        def run(*argv):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(agent_reminder_cli.main(argv), 0)
+            return out.getvalue()
+
+        with mock.patch.object(reminders.time, 'time', return_value=NOW), \
+                mock.patch.object(agent_reminder_cli.agent_backlog_cli, 'guess_agent', return_value='claude'):
+            run('add', 'Read the report', '--at', '2026-11-19 10:00', '--every', 'weekday', '--no-project')
+            self.assertEqual(self.stored()['reminders'][0]['repeat']['every'], 'weekday')
+            self.assertIn('scheduled  every weekday  Read the report', run('list'))
+            self.assertIn('Next: R2  2026-11-20 10:00 IST', run('done', 'R1'))
+            self.assertIn('Next: R2  2026-11-20 10:00 IST', run('done', 'R1'))
+            self.assertEqual(len(self.stored()['reminders']), 2)
+            run('add', 'Weekly report', '--at', '2026-11-19 10:00', '--every', 'week', '--no-project')
+            self.assertIn('scheduled  every week (Thu)  Weekly report', run('list'))

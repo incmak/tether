@@ -53,6 +53,28 @@ test('labels use the IST day and include the year only when needed', () => {
   assert.equal(fullLabel(TOMORROW), 'Thu 19 Nov 2026, 10:00 IST')
 })
 
+test('repeat labels use the anchor weekday in IST', () => {
+  const { repeatLabel } = loadReminders()
+  const rule = { anchor: seconds('2026-11-18T19:00:00Z'), zone: 'Asia/Kolkata' }
+  assert.equal(repeatLabel(null), '')
+  assert.equal(repeatLabel(undefined), '')
+  assert.equal(repeatLabel({ ...rule, every: 'day' }), 'Every day')
+  assert.equal(repeatLabel({ ...rule, every: 'weekday' }), 'Every weekday')
+  assert.equal(repeatLabel({ ...rule, every: 'week' }), 'Every Thursday')
+  assert.equal(repeatLabel({ ...rule, every: 'week', anchor: seconds('2026-11-23T04:30:00Z') }), 'Every Monday')
+})
+
+test('repeat options give a weekly hint when the time is set', () => {
+  const { repeatOptions } = loadReminders()
+  const first = [
+    { value: 'never', label: 'Never' },
+    { value: 'day', label: 'Every day' },
+    { value: 'weekday', label: 'Every weekday', detail: 'Mon–Fri' },
+  ]
+  assert.deepEqual(repeatOptions(null), [...first, { value: 'week', label: 'Every week', detail: 'Same day each week' }])
+  assert.deepEqual(repeatOptions(TOMORROW), [...first, { value: 'week', label: 'Every week', detail: 'On Thursdays' }])
+})
+
 test('quick picks respect the evening cutoff and round-trip across month end', () => {
   const { quickPicks, parseWhen } = loadReminders()
   const late = seconds('2026-11-18T12:00:00Z')

@@ -31,8 +31,10 @@ const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 
 function reminder(id, text, extra = {}) {
   return { id, text, due: TOMORROW, created: NOW - 7200, by: 'you', state: 'scheduled', fired_at: null,
-    late: false, snoozes: 0, done_at: null, link: null, occ: 1, ...extra }
+    late: false, snoozes: 0, done_at: null, link: null, occ: 1, repeat: null, next_id: null, ...extra }
 }
+
+const repeatRule = (every, anchor) => ({ every, anchor, zone: 'Asia/Kolkata' })
 
 async function fixtureServer(t) {
   await readFile(path.join(DIST, 'index.html'))
@@ -93,8 +95,23 @@ async function open(t, browser, origin, viewport, {
         }
         let item
         switch (action) {
-          case 'add': item = reminder(`R${nextId++}`, body.text, { due: body.due, link: body.link ?? null }); break
-          case 'done': item = { ...old, state: 'done', done_at: NOW }; break
+          case 'add': {
+            item = reminder(`R${nextId++}`, body.text, {
+              due: body.due, link: body.link ?? null, repeat: body.repeat ? repeatRule(body.repeat, body.due) : null,
+            })
+            break
+          }
+          case 'done': {
+            item = old.state === 'done' ? old : { ...old, state: 'done', done_at: NOW }
+            if (item !== old && old.repeat) {
+              const due = old.repeat.anchor + 86400
+              const next = reminder(`R${nextId++}`, old.text, { due, created: NOW, by: old.by, link: old.link,
+                repeat: { ...old.repeat, anchor: due } })
+              live.set(next.id, next)
+              item = { ...item, repeat: null, next_id: next.id }
+            }
+            break
+          }
           case 'reopen': item = { ...old, state: 'due', done_at: null }; break
           case 'snooze': {
             if (old.state === 'done') return reject(409, 'That reminder is done. Reopen it first.')
@@ -102,7 +119,13 @@ async function open(t, browser, origin, viewport, {
             item = { ...old, state: 'scheduled', due, fired_at: null, late: false, occ: old.occ + 1, snoozes: old.snoozes + 1 }
             break
           }
-          case 'edit': item = { ...old, ...('text' in body && { text: body.text }), ...('due' in body && { due: body.due, occ: old.occ + 1 }) }; break
+          case 'edit': {
+            const changedDue = 'due' in body && body.due !== old.due
+            item = { ...old, ...('text' in body && { text: body.text }), ...(changedDue && { due: body.due, occ: old.occ + 1 }) }
+            if ('repeat' in body) item.repeat = body.repeat ? repeatRule(body.repeat, old.repeat?.anchor ?? old.due) : null
+            if (changedDue && item.repeat) item.repeat = { ...item.repeat, anchor: item.due }
+            break
+          }
           case 'delete': {
             live.delete(old.id)
             deleted.set(old.id, { ...old, deleted_at: NOW })
@@ -218,12 +241,12 @@ test('Reminders in Chromium', async t => {
       await button(sheet, 'Tomorrow 10:00').click()
       assert.equal(await when.inputValue(), 'tomorrow 10:00')
       await sheet.getByText('Thu 19 Nov 2026, 10:00 IST', { exact: true }).waitFor()
-      assert.deepEqual(await post(page, 'add', () => add.click()), { text: 'Send the invoice', due: TOMORROW })
+      assert.deepEqual(await post(page, 'add', () => add.click()), { text: 'Send the invoice', due: TOMORROW, repeat: null })
       await sheet.getByText('Send the invoice', { exact: true }).waitFor()
       await text.fill('Check the deployment')
       await button(sheet, 'Tomorrow 10:00').click()
       await link.check()
-      assert.deepEqual(await post(page, 'add', () => add.click()), { text: 'Check the deployment', due: TOMORROW, link: { pane: PANE.id, thread: PANE.thread } })
+      assert.deepEqual(await post(page, 'add', () => add.click()), { text: 'Check the deployment', due: TOMORROW, link: { pane: PANE.id, thread: PANE.thread }, repeat: null })
       const linked = sheet.getByRole('listitem').filter({ hasText: 'Check the deployment' })
       await button(linked, 'Deploy check').click()
       await sheet.waitFor({ state: 'hidden' })
@@ -348,6 +371,73 @@ test('Reminders in Chromium', async t => {
 
   const phone = { width: 360, height: 780 }
 
+  await t.test('adds a weekday reminder using the Repeat picker keyboard controls', async t => {
+    const { page, sheet } = await open(t, browser, origin, { width: 1280, height: 800 })
+    await sheet.getByRole('textbox', { name: 'Remind me to' }).fill('Check weekday reports')
+    await button(sheet, 'Tomorrow 10:00').click()
+    await button(sheet, 'Repeat: Never').focus()
+    for (const key of ['Enter', 'ArrowDown', 'ArrowDown', 'Enter']) await page.keyboard.press(key)
+    assert.equal(await button(sheet, 'Repeat: Every weekday').getAttribute('aria-expanded'), 'false')
+    assert.deepEqual(await post(page, 'add', () => button(sheet, 'Add reminder').click()), {
+      text: 'Check weekday reports', due: TOMORROW, repeat: 'weekday',
+    })
+    const row = sheet.getByRole('listitem').filter({ hasText: 'Check weekday reports' })
+    const label = row.locator('.reminder-repeat')
+    assert.match(await label.ariaSnapshot(), /Repeats:\s+Every weekday/)
+    assert.equal(await label.evaluate(element => element.lastChild.textContent), 'Every weekday')
+    assert.ok(await label.isVisible())
+    assert.ok(await button(sheet, 'Repeat: Never').isVisible())
+  })
+
+  await t.test('weekly label uses the anchor even when the copy was snoozed', async t => {
+    const weekly = reminder('R1', 'Review weekly reports', { due: TOMORROW + 86400, repeat: repeatRule('week', TOMORROW) })
+    const { sheet } = await open(t, browser, origin, phone, { records: [weekly] })
+    const row = sheet.getByRole('listitem').filter({ hasText: weekly.text })
+    assert.match(await row.locator('.reminder-repeat').ariaSnapshot(), /Repeats:\s+Every Thursday/)
+  })
+
+  await t.test('Stop repeating saves a rule-only edit and removes the label', async t => {
+    const daily = reminder('R1', 'Review reports', { repeat: repeatRule('day', TOMORROW) })
+    const { page, sheet } = await open(t, browser, origin, phone, { records: [daily] })
+    await button(sheet, `Edit: ${daily.text}`).click()
+    const edit = sheet.getByRole('form', { name: `Edit reminder: ${daily.text}` })
+    await button(edit, 'Stop repeating').click()
+    assert.ok(await edit.getByText('Repeating stops when you save.').isVisible())
+    assert.deepEqual(await post(page, 'edit', () => button(edit, 'Save').click()), { id: daily.id, repeat: null })
+    const row = sheet.getByRole('listitem').filter({ hasText: daily.text })
+    assert.equal(await row.locator('.reminder-text').textContent(), daily.text)
+    assert.equal(await row.locator('.reminder-repeat').count(), 0)
+  })
+
+  await t.test('Done moves the repeat label to the next Upcoming copy', async t => {
+    const daily = { ...late, repeat: repeatRule('day', late.due) }
+    const { page, sheet } = await open(t, browser, origin, phone, { records: [daily] })
+    assert.deepEqual(await post(page, 'done', () => button(sheet, `Done: ${daily.text}`).click()), { id: daily.id, occ: daily.occ })
+    const upcoming = sheet.getByRole('region', { name: 'Upcoming 1', exact: true })
+    assert.match(await upcoming.locator('.reminder-repeat').ariaSnapshot(), /Repeats:\s+Every day/)
+    await button(sheet, 'Done 1').click()
+    const finished = sheet.getByRole('region', { name: 'Done 1', exact: true }).getByRole('listitem')
+    assert.equal(await finished.locator('.reminder-text').textContent(), daily.text)
+    assert.equal(await finished.locator('.reminder-repeat').count(), 0)
+  })
+
+  await t.test('320px add form fits and the Repeat trigger names its selected value', async t => {
+    const { sheet } = await open(t, browser, origin, { width: 320, height: 780 })
+    const form = sheet.getByRole('form', { name: 'New reminder' })
+    const repeat = button(form, 'Repeat: Never')
+    await repeat.focus()
+    await repeat.press('ArrowDown')
+    const list = sheet.getByRole('listbox', { name: 'Repeat' })
+    assert.equal(await list.getByRole('option').count(), 4)
+    await list.press('Escape')
+    const layout = await form.evaluate(form => ({
+      viewport: innerWidth, page: document.documentElement.scrollWidth, form: form.clientWidth, content: form.scrollWidth,
+    }))
+    assert.equal(layout.viewport, 320)
+    assert.ok(layout.page <= layout.viewport)
+    assert.ok(layout.content <= layout.form)
+  })
+
   for (const [label, clickTime, expected, eveningBefore] of [
     ['In 1 h', Date.parse('2026-11-18T11:29:00Z') / 1000, Date.parse('2026-11-18T12:29:00Z') / 1000, true],
     ['Tomorrow 10:00', Date.parse('2026-11-18T18:29:00Z') / 1000, TOMORROW, false],
@@ -363,7 +453,7 @@ test('Reminders in Chromium', async t => {
       // Crossing 17:00 or midnight changes the evening pick only after the sheet reads the new time.
       await evening.waitFor({ state: eveningBefore ? 'hidden' : 'visible' })
       assert.deepEqual(await post(page, 'add', () => button(sheet, 'Add reminder').click()), {
-        text: 'Keep the time I picked', due: expected,
+        text: 'Keep the time I picked', due: expected, repeat: null,
       })
     })
   }
