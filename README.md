@@ -240,9 +240,11 @@ Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off
 Install the Git commit gate from the worktree with `python3 server/commit_gate.py install-hook`. It checks the final
 `Verified:` line for Claude, Codex and terminal commits, using the mode in Settings › Agents. If you already have your
 own `commit-msg` hook, the installer gives you a line to add before the hook exits with status 0. Add
-`--uninstall` to remove the Tether hook.
+`--uninstall` to remove the Tether hook. Both forms let the commit through if the gate takes more than 10 seconds.
+For the line in your own hook, the helper uses `python3` unless you set `TETHER_PYTHON`.
 
-The gate lets the commit through if it needs Git's cleanup mode and cannot determine it. In enforce mode,
+If cleanup can change the verdict, the gate uses the explicit Git options. It records `unknown` with reason
+`cleanup` and lets the commit through when those options leave the verdict uncertain. In enforce mode,
 an agent without a session key can commit and the log records `let_through` with reason `no-session`.
 
 ## Auto-merge

@@ -907,24 +907,21 @@ def _project(cwd, env, tmux=_tmux):
     return _project_id(pid)
 
 
-HOOK_ENV_WORDS = set('export env unset alias set declare typeset local readonly source . eval exec'.split())
-HOOK_CWD_WORDS = {'-C', 'cd', 'pushd', 'popd', 'builtin'}
-HOOK_GIT_OPTIONS = re.compile(r'-c|--(?:git-dir|work-tree|config-env).*', re.S)
+HOOK_GIT_OPTIONS = re.compile(r'-c|--bare|--(?:git-dir|work-tree|config-env).*', re.S)
 HOOK_CONFIG_WORD = re.compile(r'GIT_|hooksPath', re.I)
 
 
-def _has_gate_marker(hook, *, allow_call=False):
+def _owned_hook(hook):
     try:
         if not stat_module.S_ISREG(hook.lstat().st_mode):
-            return False
+            return None
         with open(hook, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)) as stream:
             if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                return False
-            lines = stream.read().splitlines()
-        return HOOK_MARK.encode() in lines or (allow_call and any(
-            line.rstrip().endswith(CALL_MARK.encode()) and not line.lstrip().startswith(b'#') for line in lines))
+                return None
+            contents = stream.read()
+        return contents if HOOK_MARK.encode() in contents.splitlines() else None
     except OSError:
-        return False
+        return None
 
 
 def _defer_to_hook(tree, command, *, cwd_fallback=False):
@@ -935,39 +932,46 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
         return False
     hook = hooks / 'commit-msg'
     try:
-        if not os.access(hook, os.X_OK) or not _has_gate_marker(hook, allow_call=True):
+        if not os.access(hook, os.X_OK) or _owned_hook(hook) is None:
             return False
         tokens = list(_tokens(command, [], for_hook=True))
-        segments, uncertain = _segments(tokens)
-        if uncertain:
+        if any(isinstance(token, str) and token not in ('&&', '\n') for token in tokens):
             return False
-        message_words, found_commit = set(), False
-        for _, words, _, _, _ in segments:
-            if words and words[0].bare and words[0].text in KEYWORDS:
+        segments, uncertain = _segments(tokens)
+        if uncertain or len(segments) != 1 + tokens.count('&&'):
+            return False
+        if any(segment[0] != '&&' for segment in segments[1:]):
+            return False
+
+        # Only an optional literal cd, an optional literal git add, and the commit itself may run.
+        *prefix, words = [segment[1] for segment in segments]
+        if prefix and prefix[0][0].text == 'cd':
+            if cwd_fallback or len(prefix[0]) != 2:
                 return False
-            if commit := _git_commit(words):
-                args, options, _, _ = commit
-                parsed = _commit_arguments(args, for_hook=True)
-                if 'no-verify' in parsed['flags'] or any(HOOK_GIT_OPTIONS.fullmatch(option) for option in options):
-                    return False
-                message_words.update(parsed['message_words'])
-                found_commit = True
+            prefix = prefix[1:]
+        if prefix and (len(prefix) != 1 or [word.text for word in prefix[0][:2]] != ['git', 'add']):
+            return False
+        if os.path.basename(words[0].text) != 'git' or (commit := _git_commit(words)) is None:
+            return False
+        args, options, _, known = commit
+        if not known or any(HOOK_GIT_OPTIONS.fullmatch(option) for option in options):
+            return False
+        if cwd_fallback and '-C' in options:
+            return False
+        parsed = _commit_arguments(args, for_hook=True)
+        if 'no-verify' in parsed['flags']:
+            return False
         for word in tokens:
             if not isinstance(word, _Word):
                 continue
-            message = id(word) in message_words
+            message = id(word) in parsed['message_words']
             if not word.plain or (word.fill and not message):
                 return False
-            if message:
-                continue
-            arg = word.text
-            if ASSIGNMENT.fullmatch(arg) or arg in HOOK_ENV_WORDS or HOOK_CONFIG_WORD.search(arg):
+            if not message and HOOK_CONFIG_WORD.search(word.text):
                 return False
-            if cwd_fallback and arg in HOOK_CWD_WORDS:
-                return False  # evaluate could not follow a change of directory
     except (OSError, ValueError):
         return False
-    return found_commit
+    return True
 
 
 def check(data, env=os.environ, now=None):
@@ -1265,7 +1269,7 @@ def _cleanup_options(args, *, exact_argv):
     return options
 
 
-def _cleanup_mode(cwd, ancestors, env):
+def _cleanup_modes(ancestors, env):
     git_commands = [
         (entry, _commit_argv(entry)) for entry in ancestors
         if entry.argv and os.path.basename(entry.argv[0]) == 'git'
@@ -1294,22 +1298,16 @@ def _cleanup_mode(cwd, ancestors, env):
         elif fixup is not None and not fixup.startswith(('amend:', 'reword:')):
             use_editor = False
     cleanup = options.get('cleanup')
-    if 'cleanup' not in options:
-        shown = _git(cwd, 'config', '--get', 'commit.cleanup')
-        if shown is None or shown.returncode not in (0, 1):
-            return None
-        cleanup = shown.stdout.removesuffix('\n') if shown.returncode == 0 else None
-    if cleanup not in (None, 'default', 'strip', 'whitespace', 'scissors'):
+    supported = ('default', 'strip', 'whitespace', 'scissors')
+    if cleanup is not None and cleanup not in supported:
         return None
-    verbose = options.get('verbose')
-    if verbose is None:
-        shown = _git(cwd, 'config', '--bool', '--get', 'commit.verbose')
-        if shown is None or shown.returncode not in (0, 1):
-            return None
-        verbose = shown.stdout == 'true\n'
-    truncate = verbose or (cleanup == 'scissors' and use_editor)
-    strip = cleanup == 'strip' or (cleanup in (None, 'default') and use_editor)
-    return truncate, strip
+    # Git reads commit.verbose and commit.cleanup before hooks run. A hook can change that config.
+    cleanups = supported if cleanup is None else (cleanup,)
+    verbosity = (options['verbose'],) if 'verbose' in options else (False, True)
+    return {
+        (verbose or (mode == 'scissors' and use_editor), mode == 'strip' or (mode == 'default' and use_editor))
+        for mode in cleanups for verbose in verbosity
+    }
 
 
 def _message_verdict(lines):
@@ -1346,7 +1344,11 @@ def _final_verdict(path, cwd, ancestors, env):
         verdicts[truncate, True] = _message_verdict([line for line in part if not line.startswith('#')])
     if len(set(verdicts.values())) == 1:
         return verdicts[False, False]
-    return verdicts.get(_cleanup_mode(cwd, ancestors, env), ('unknown', 'cleanup'))
+    modes = _cleanup_modes(ancestors, env)
+    possible = {verdicts[mode] for mode in modes} if modes else set()
+    if len(possible) == 1:
+        return possible.pop()
+    return 'unknown', 'cleanup'
 
 
 def commit_msg(path, env=os.environ, cwd=None, now=None):
@@ -1417,42 +1419,22 @@ def install_hook(repo, uninstall=False, gate=None, python=None, *, deadline=10):
     lock = hooks / '.tether-commit-msg.lock'
     gate = shlex.quote(str(Path(__file__).resolve() if gate is None else Path(gate).absolute()))
     python = shlex.quote(str(Path(sys.executable if python is None else python).absolute()))
+    helper = shlex.quote(str(HERE / 'commit_msg_hook.sh'))
+    call = f'/bin/sh {helper} "$1"'
     refusal = (f'Tether cannot replace {hook}. Before the hook exits with status 0, add this line to your hook:\n'
-               f'{python} {gate} commit-msg "$1" || [ $? -ne 3 ] || exit 1  {CALL_MARK}')
+               f'{call} || [ $? -ne 1 ] || exit 1  {CALL_MARK}')
     script = f'''#!/bin/sh
 {HOOK_MARK}
 # Written by Tether (server/commit_gate.py install-hook).
-gate={gate}
-py={python}
-[ -f "$gate" ] && [ -x "$py" ] || exit 0
-"$py" "$gate" commit-msg "$1" &
-child=$!
-(
-    timer= cancelled=
-    stop_timer() {{
-        kill "$timer" 2>/dev/null
-        wait "$timer" 2>/dev/null
-        exit 0
-    }}
-    trap 'cancelled=1; [ -z "$timer" ] || stop_timer' TERM
-    sleep {deadline} &
-    timer=$!
-    [ -z "$cancelled" ] || stop_timer
-    wait "$timer"
-    kill -KILL "$child" 2>/dev/null
-) </dev/null >/dev/null 2>&1 &
-watcher=$!
-wait "$child"; rc=$?
-kill "$watcher" 2>/dev/null
-wait "$watcher" 2>/dev/null
-[ "$rc" -eq 3 ] && exit 1
-exit 0
+[ -f {helper} ] && [ -r {helper} ] || exit 0
+exec {call} {python} {gate} {deadline}
 '''
     hooks.mkdir(parents=True, exist_ok=True)
     try:
         with _Lock(lock, HOOK_LOCK_SECONDS):
             exists = os.path.lexists(hook)
-            ours = exists and _has_gate_marker(hook)
+            existing = _owned_hook(hook) if exists else None
+            ours = existing is not None
             if uninstall:
                 if not ours:
                     return 'No Tether commit-msg hook to uninstall.'
@@ -1460,6 +1442,8 @@ exit 0
                 return 'Uninstalled the Tether commit-msg hook.'
             if exists and not ours:
                 raise GateError(400, refusal)
+            if existing == script.encode():
+                return 'The Tether commit-msg hook is already installed.'
             with tempfile.NamedTemporaryFile(dir=hooks, prefix='.commit-msg.', mode='w', encoding='utf-8',
                                              delete=False) as out:
                 temp = Path(out.name)
@@ -1467,15 +1451,32 @@ exit 0
                     out.write(script)
                     os.fchmod(out.fileno(), 0o755)
                     out.close()
+                    backup = None
                     if ours:
-                        if not _has_gate_marker(hook):
+                        backup = hook.with_name(f'{hook.name}.tether-old.{os.getpid()}')
+                        if os.path.lexists(backup):
+                            raise GateError(400, f'Tether cannot update {hook} while {backup} exists.')
+                        # A commit between the rename and the link runs without the hook (fail-open).
+                        os.rename(hook, backup)
+                        if _owned_hook(backup) is None:
+                            try:
+                                os.link(backup, hook, follow_symlinks=False)
+                            except OSError as exc:
+                                raise GateError(400, f'Tether could not restore {hook}. The hook is at {backup}.') from exc
+                            backup.unlink()
                             raise GateError(400, refusal)
-                        os.replace(temp, hook)
-                    else:
-                        try:
-                            os.link(temp, hook)
-                        except FileExistsError:
-                            raise GateError(400, refusal) from None
+                    try:
+                        os.link(temp, hook)
+                    except FileExistsError:
+                        if backup is not None:
+                            backup.unlink()
+                        raise GateError(400, refusal) from None
+                    except OSError as exc:
+                        if backup is not None:
+                            raise GateError(400, f'Tether could not update {hook}. The hook is at {backup}.') from exc
+                        raise
+                    if backup is not None:
+                        backup.unlink()
                 finally:
                     temp.unlink(missing_ok=True)
             return ('Updated' if ours else 'Installed') + ' the Tether commit-msg hook.'
