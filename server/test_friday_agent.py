@@ -791,6 +791,31 @@ class ShortenOldReadsTests(unittest.TestCase):
         messages += self.read(reply_id='new', offset=0)
         self.assertEqual(len(self.shortened(friday.shorten_old_reads(messages))), 3)
 
+    def test_superseded_short_reads_stay_byte_identical(self):
+        for length in (277, 300):
+            with self.subTest(length=length):
+                messages = self.read(text='x' * length) + self.read()
+                original = messages[1]['content'].encode()
+                result = friday.shorten_old_reads(messages)
+                self.assertEqual(result[1]['content'].encode(), original)
+                self.assertEqual(self.shortened(result), [])
+
+    def test_superseded_long_read_keeps_preview_and_ellipsis(self):
+        messages = self.read(text='x' * 6000) + self.read()
+        result = friday.shorten_old_reads(messages)
+        self.assertEqual(self.shortened(result)[0]['text'], 'x' * 300 + '…')
+        self.assertEqual(result[3], messages[3])
+
+    def test_budget_does_not_shorten_short_reads(self):
+        for length in (277, 300):
+            with self.subTest(length=length):
+                messages = self.read(text='x' * length)
+                messages += [{'role': 'user', 'content': 'Read B'}]
+                messages += self.read('B', text='y' * 6000)
+                with patch.object(friday, 'READ_BUDGET', 6000):
+                    result = friday.shorten_old_reads(messages)
+                self.assertEqual(result, messages)
+
     def test_budget_shortens_oldest_reads_and_keeps_current_turn_newest(self):
         messages = []
         for i in range(6):

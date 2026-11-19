@@ -635,7 +635,8 @@ def shorten_old_reads(messages):
               and data.get('offset', 0) not in offsets[chat]):
             offsets[chat].append(data.get('offset', 0))
         else:
-            shorten.add(index)
+            if len(data['text']) > 300:
+                shorten.add(index)
             continue
         full.append((index, data))
 
@@ -643,7 +644,7 @@ def shorten_old_reads(messages):
     for index, data in reversed(full):
         if total <= READ_BUDGET:
             break
-        if index > last_user:
+        if index > last_user or len(data['text']) <= 300:
             continue
         shorten.add(index)
         total -= len(data['text'])
@@ -653,7 +654,7 @@ def shorten_old_reads(messages):
         if index not in shorten:
             continue
         preview = data['text'][:300]
-        if len(data['text']) > 300 and not data['text'][300].isspace():
+        if not data['text'][300].isspace():
             preview = preview.rsplit(' ', 1)[0] if ' ' in preview else preview
         summary = {'chat': data['chat']}
         if 'reply_id' in data:
