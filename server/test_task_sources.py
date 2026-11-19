@@ -370,6 +370,33 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.poll(todo('task', at))['tasks'][0]['reminder'], first)
         self.assertEqual([(r['id'], r['state'], r['due']) for r in self.active()], [(first, 'scheduled', at)])
 
+    def test_a_closed_linked_reminder_stays_linked_over_a_newer_closed_one(self):
+        # Review round 4: creation time outranked the saved link, so the link moved to an older history record.
+        for close_second in ('done', 'delete'):
+            with self.subTest(second=close_second):
+                key = f'task-{close_second}'
+                clock = iter(NOW + step for step in range(100))
+                self.enterContext(mock.patch.object(task_sources, 'time', SimpleNamespace(time=lambda: next(clock))))
+                self.alert()
+                at = NOW + 3600
+                first = self.poll(todo(key, at))['tasks'][0]['reminder']
+                reminders.change(first, 'delete', now=NOW)
+                second = self.poll(todo(key, at + 60))['tasks'][0]['reminder']
+                occ = next(r['occ'] for r in self.active() if r['id'] == second)
+                if close_second == 'done':
+                    reminders.change(second, 'done', {'occ': occ}, now=NOW)
+                else:
+                    reminders.change(second, 'delete', now=NOW)
+                reminders.restore(first, now=NOW)
+                self.assertEqual(self.poll(todo(key, at + 60))['tasks'][0]['reminder'], first)
+                occ = next(r['occ'] for r in self.active() if r['id'] == first)
+                reminders.change(first, 'done', {'occ': occ}, now=NOW)
+                self.assertEqual(self.poll(todo(key, at + 60))['tasks'][0]['reminder'], first)
+                self.assertEqual(self.poll(todo(key, at + 120))['tasks'][0]['reminder'], first)
+                mine = [(r['id'], r['state'], r['due']) for r in self.active() if r['state'] != 'done']
+                self.assertEqual(mine, [(first, 'scheduled', at + 120)])
+                self.pages[LIST] = page()
+
     def test_planner_reads_assigned_open_tasks_and_caches_plan_names(self):
         task_sources.settings_for('planner', alerts=True)
         self.pages[PLANNER] = page({'id': 'a/b', 'planId': 'plan-5', 'title': 'First', 'percentComplete': 0,
