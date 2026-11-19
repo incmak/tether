@@ -1,6 +1,8 @@
 // Motion for the Friday window: the window folds into its bubble and the bubble blooms back into the window.
-// Only transform, opacity and clip-path move. Nothing waits for an animation to show content: every
+// Only transform, translate, opacity and clip-path move. Nothing waits for an animation to show content: every
 // animation runs without fill, so if it never runs the element sits in its normal, visible state.
+// The element's position lives in the CSS translate property. Keyframes with an absolute transform set translate
+// to none, so the position is not applied twice.
 import type { Point, Size } from './floatingWindow'
 
 const EASE_OUT = 'cubic-bezier(0.23, 1, 0.32, 1)'
@@ -28,9 +30,9 @@ const atBubble = (box: DOMRect, bubble: Point, size: Size) => {
   const x = bubble.x + size.w / 2 - s * box.width / 2
   const y = bubble.y + size.h / 2 - s * box.height / 2
   const insetY = (box.height - size.h / s) / 2, insetX = (box.width - size.w / s) / 2
-  return { transform: `translate(${x}px, ${y}px) scale(${s})`, clipPath: `inset(${insetY}px ${insetX}px round ${size.h / s / 2}px)` }
+  return { translate: 'none', transform: `translate(${x}px, ${y}px) scale(${s})`, clipPath: `inset(${insetY}px ${insetX}px round ${size.h / s / 2}px)` }
 }
-const atBox = (el: HTMLElement, box: DOMRect) => ({ transform: `translate(${box.left}px, ${box.top}px) scale(1)`, clipPath: `inset(0px 0px round ${parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0}px)` })
+const atBox = (el: HTMLElement, box: DOMRect) => ({ translate: 'none', transform: `translate(${box.left}px, ${box.top}px) scale(1)`, clipPath: `inset(0px 0px round ${parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0}px)` })
 
 /** Window or full screen folds into a capsule and slides into the bubble's place. */
 export function foldToBubble(el: HTMLElement | null, bubble: Point, size: Size): Animation | null {
@@ -39,7 +41,7 @@ export function foldToBubble(el: HTMLElement | null, bubble: Point, size: Size):
   const from = atBox(el, box), to = atBubble(box, bubble, size)
   return el.animate([
     { ...from, transformOrigin: '0 0', opacity: 1 },
-    { opacity: 1, offset: 0.55 },
+    { translate: 'none', opacity: 1, offset: 0.55 },
     { ...to, transformOrigin: '0 0', opacity: 0.5 },
   ], { duration: 260, easing: EASE_IN_OUT, fill: 'forwards' })
 }
@@ -59,7 +61,7 @@ export function bloomFromBubble(el: HTMLElement | null, bubble: Point, size: Siz
   const from = atBubble(box, bubble, size), to = atBox(el, box)
   el.animate([
     { ...from, transformOrigin: '0 0', opacity: 0.5 },
-    { opacity: 1, offset: 0.35 },
+    { translate: 'none', opacity: 1, offset: 0.35 },
     { ...to, transformOrigin: '0 0', opacity: 1 },
   ], { duration: 300, easing: EASE_DRAWER })
 }
@@ -73,7 +75,7 @@ export function openFrom(el: HTMLElement | null, from: { left: number; top: numb
   const start = atBubble(box, { x: from.left + (from.width - size) / 2, y: from.top + (from.height - size) / 2 }, { w: size, h: size })
   el.animate([
     { ...start, transformOrigin: '0 0', opacity: 0 },
-    { opacity: 1, offset: 0.3 },
+    { translate: 'none', opacity: 1, offset: 0.3 },
     { ...atBox(el, box), transformOrigin: '0 0', opacity: 1 },
   ], { duration: 340, easing: EASE_DRAWER })
 }
@@ -83,7 +85,7 @@ export function settle(el: HTMLElement | null, opening = false) {
   if (!can(el)) return
   if (reducedMotion()) { el.animate([{ opacity: 0.4 }, { opacity: 1 }], { duration: 150, easing: 'ease' }); return }
   el.animate(opening
-    ? [{ scale: 0.96, translate: '0 10px', opacity: 0 }, { scale: 1, translate: '0 0', opacity: 1 }]
+    ? [{ scale: 0.96, transform: 'translateY(10px)', opacity: 0 }, { scale: 1, transform: 'none', opacity: 1 }]
     : [{ scale: 0.97, opacity: 0.6 }, { scale: 1, opacity: 1 }], { duration: opening ? 260 : 200, easing: EASE_OUT })
 }
 
@@ -91,5 +93,5 @@ export function settle(el: HTMLElement | null, opening = false) {
 export function snapBubble(el: HTMLElement | null, from: Point, to: Point) {
   const dx = from.x - to.x, dy = from.y - to.y
   if (!can(el) || reducedMotion() || Math.hypot(dx, dy) < 24) return
-  el.animate([{ translate: `${dx}px ${dy}px` }, { translate: '0 0' }], { duration: 460, easing: SPRING_SNAP })
+  el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: 460, easing: SPRING_SNAP })
 }
