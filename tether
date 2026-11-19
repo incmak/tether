@@ -41,10 +41,19 @@ def run(command, quiet=False):
     if not quiet:
         subprocess.run(command, check=True, timeout=600)
         return
-    # Hide the long plan on success; show it when the command fails. Warnings stay on stderr.
+    # Keep the JSON plan quiet; show failed checks or plain text on failure.
     result = subprocess.run(command, stdout=subprocess.PIPE, text=True, timeout=600)
     if result.returncode:
-        sys.stdout.write(result.stdout)
+        try:
+            plan = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            plan = None
+        if isinstance(plan, dict) and isinstance(plan.get('checks'), list):
+            for check in plan['checks']:
+                if isinstance(check, dict) and check.get('ok') is False and 'name' in check:
+                    print(f'FAIL: {check["name"]}')
+        else:
+            sys.stdout.write(result.stdout)
         raise subprocess.CalledProcessError(result.returncode, command)
 
 
@@ -253,17 +262,25 @@ def migrate(args, root, state_file, state):
             shutil.rmtree(target)
         raise RuntimeError(f'{error}; rolled back to checkout {checkout}') from error
     print(f'Migrated to v{target.name}. Checkout {checkout} is no longer used and can be removed by you.')
+    print(f'Result: PASS (migrated to v{target.name})')
     return 0
 
 
-def activate(root, target, state_file, state):
+def activate(root, target, state_file, state, verbose=False):
     link = root / 'current'
     old = link.resolve(strict=True)
     backup = snapshot(state_file)
     try:
         # Stage stable unit paths before changing the running release.
-        run([sys.executable, str(target / 'install.py'), '--apply', '--no-build-ui',
-             '--release-current', str(link), '--defer-restart'])
+        installer = target / 'install.py'
+        command = [sys.executable, str(installer), '--apply', '--no-build-ui',
+                   '--release-current', str(link), '--defer-restart']
+        if verbose:
+            if '--verbose' in installer.read_text():
+                command.append('--verbose')
+            else:
+                print(f'Note: v{target.name} install.py has no --verbose; showing its default output.', flush=True)
+        run(command)
         switch(link, target)
         new_state = json.loads(state_file.read_text())
         restart(new_state)
@@ -438,8 +455,10 @@ def main(argv=None):
     update.add_argument('--yes', action='store_true')
     update.add_argument('--auto', action='store_true')
     update.add_argument('--report', action='store_true', help='Save the update result for the web UI.')
+    update.add_argument('--verbose', action='store_true')
     update.add_argument('--to')
-    commands.add_parser('rollback')
+    rollback = commands.add_parser('rollback')
+    rollback.add_argument('--verbose', action='store_true')
     for name in ('install', 'migrate'):
         command = commands.add_parser(name, help='Prepare a release' if name == 'install' else 'Move a checkout install to a release')
         command.add_argument('--to')
@@ -490,8 +509,8 @@ def main(argv=None):
                 target = releases / previous
                 if not target.is_dir() or target.is_symlink() or target == old:
                     raise ValueError('No previous release is available')
-                activate(root, target, state_file, state)
-                print('Rolled back to v' + target.name)
+                activate(root, target, state_file, state, verbose=args.verbose)
+                print(f'Result: PASS (rolled back to v{target.name})')
                 return 0
             if args.auto and updates.mode() != 'auto':
                 print('Automatic updates are disabled')
@@ -524,7 +543,7 @@ def main(argv=None):
                 try:
                     shutil.copytree(stage, partial)
                     partial.rename(target)
-                    activate(root, target, state_file, state)
+                    activate(root, target, state_file, state, verbose=args.verbose)
                 except Exception:
                     if partial.exists():
                         shutil.rmtree(partial)
@@ -532,10 +551,11 @@ def main(argv=None):
                         if target.exists():
                             shutil.rmtree(target)
                     raise
-            print('Updated to v' + ver)
+            print(f'Result: PASS (updated to v{ver})')
             return 0
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, subprocess.SubprocessError, tarfile.TarError) as error:
         print(str(error), file=sys.stderr)
+        print('Result: FAIL (see the error above)')
         return 1
 
 

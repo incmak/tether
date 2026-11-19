@@ -276,11 +276,15 @@ class TermuxInstallTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as output:
             installer.print_plan(plan)
         text = output.getvalue()
-        self.assertIn('Write $PREFIX/var/service/tether/run:', text)
+        self.assertIn('Write $PREFIX/var/service/tether/run', text.splitlines())
         self.assertIn('Remove $PREFIX/var/service/tether-terminal\n', text)
         self.assertIn('Termux services run while Termux runs. Run termux-wake-lock so Android does not stop them. '
                       'Install the Termux:Boot app to start them after a reboot.', text)
         self.assertNotIn('loginctl', text)
+        self.assertNotIn('#!', text)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            installer.print_plan(plan, verbose=True)
+        self.assertIn(plan['units']['tether.service'], output.getvalue())
 
     def test_linux_plan_has_no_runit_paths_or_commands(self):
         with mock.patch.object(installer, 'TERMUX', False):

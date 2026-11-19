@@ -700,8 +700,45 @@ class ReleaseTests(unittest.TestCase):
 
     def update(self, *args):
         with mock.patch.object(updates, 'fetch_release', return_value=self.release), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return cli.main(['update', '--yes', *args])
+                contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            result = cli.main(['update', '--yes', *args])
+        self.output, self.errors = output.getvalue(), errors.getvalue()
+        return result
+
+    def test_activate_verbose_requires_requested_flag_and_installer_support(self):
+        self.prepare()
+        target = self.releases / '0.2.0'
+        target.mkdir()
+        script = target / 'install.py'
+        state = json.loads(self.state.read_text())
+        for requested, supported in ((False, True), (True, True), (True, False), (False, False)):
+            script.write_text('supports --verbose' if supported else 'old installer')
+            with self.subTest(requested=requested, supported=supported), \
+                    mock.patch.object(cli, 'run') as run, mock.patch.object(cli, 'switch'), \
+                    mock.patch.object(cli, 'restart'), mock.patch.object(cli, 'healthy', return_value=True), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                cli.activate(self.root, target, self.state, state, verbose=requested)
+            self.assertEqual('--verbose' in run.call_args.args[0], requested and supported)
+            note = 'Note: v0.2.0 install.py has no --verbose; showing its default output.\n'
+            self.assertEqual(output.getvalue(), note if requested and not supported else '')
+
+    def test_quiet_run_only_prints_failed_check_names_for_json_plans(self):
+        checks = [dict(name='first', ok=False, fix='private details'), dict(name='passed', ok=True),
+                  dict(name='second', ok=False)]
+        units = {'tether.service': '[Unit]\nFull unit text'}
+        command = ['installer', '--apply', '--json']
+        for stdout, expected in ((json.dumps(dict(checks=checks, units=units)), 'FAIL: first\nFAIL: second\n'),
+                                 (json.dumps(dict(checks=checks[1:2], units=units)), ''),
+                                 ('plain output\n', 'plain output\n'), ('[1, 2]\n', '[1, 2]\n'),
+                                 ('{"checks": null}\n', '{"checks": null}\n')):
+            result = subprocess.CompletedProcess(command, 1, stdout=stdout)
+            with self.subTest(stdout=stdout), mock.patch.object(cli.subprocess, 'run', return_value=result), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaises(subprocess.CalledProcessError) as error:
+                    cli.run(command, quiet=True)
+            self.assertEqual(error.exception.returncode, 1)
+            self.assertEqual(error.exception.cmd, command)
+            self.assertEqual(output.getvalue(), expected)
 
     def prepare_report(self):
         self.prepare()
@@ -761,9 +798,12 @@ class ReleaseTests(unittest.TestCase):
         self.prepare('auto')
         (self.releases / '0.0.1').mkdir()
         (self.releases / '0.0.1/VERSION').write_text('0.0.1\n')
-        with mock.patch.object(cli, 'healthy', return_value=True) as health:
-            self.assertEqual(self.update(), 0)
+        with mock.patch.object(cli, 'healthy', return_value=True) as health, \
+                mock.patch.object(cli, 'activate', wraps=cli.activate) as activate:
+            self.assertEqual(self.update('--verbose'), 0)
             health.assert_called_once_with(self.port, host='127.0.0.1')
+            self.assertTrue(activate.call_args.kwargs['verbose'])
+        self.assertEqual(self.output.splitlines()[-1], 'Result: PASS (updated to v0.2.0)')
         self.assertEqual(self.link.resolve(), self.releases / '0.2.0')
         self.assertEqual(sorted(p.name for p in self.releases.iterdir()), ['0.1.0', '0.2.0'])
         state = json.loads(self.state.read_text())
@@ -772,8 +812,11 @@ class ReleaseTests(unittest.TestCase):
         unit = (self.home / '.config/systemd/user/tether.service').read_text()
         self.assertIn(str(self.link / 'server/server.py'), unit)
         self.assertIn(['systemctl', '--user', 'restart', 'tether.service'], self.calls())
-        with mock.patch.object(cli, 'healthy', return_value=True), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(['rollback']), 0)
+        with mock.patch.object(cli, 'healthy', return_value=True), \
+                mock.patch.object(cli, 'activate', wraps=cli.activate) as activate, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(['rollback', '--verbose']), 0)
+            self.assertTrue(activate.call_args.kwargs['verbose'])
+        self.assertEqual(output.getvalue().splitlines()[-1], 'Result: PASS (rolled back to v0.1.0)')
         self.assertEqual(self.link.resolve(), self.old)
 
     def test_cleanup_deletes_only_owned_releases(self):
@@ -848,6 +891,8 @@ class ReleaseTests(unittest.TestCase):
         backup = cli.snapshot(self.state)
         with mock.patch.object(cli, 'healthy', return_value=False):
             self.assertEqual(self.update(), 1)
+        self.assertEqual(self.errors.splitlines()[-1], 'Health check failed; rolled back to 0.1.0')
+        self.assertEqual(self.output.splitlines()[-1], 'Result: FAIL (see the error above)')
         self.assertEqual(self.link.resolve(), self.old)
         self.assertEqual(cli.snapshot(self.state), backup)
         self.assertFalse((self.releases / '0.2.0').exists())
@@ -905,6 +950,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(self.update('--check', '--to', 'v0.2.0'), 0)
             download.assert_not_called()
             run.assert_not_called()
+        self.assertNotIn('Result:', self.output)
 
     def test_auto_respects_saved_mode(self):
         self.prepare()

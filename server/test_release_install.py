@@ -205,6 +205,7 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(self.invoke('migrate', '--from', str(self.repo), *args, '--to', 'v0.2.0'), 0, self.errors)
         self.assertIn('Warning:', self.output)
         self.assertIn('no longer used', self.output)
+        self.assertEqual(self.output.splitlines()[-1], 'Result: PASS (migrated to v0.2.0)')
         health.assert_called_once_with(self.port, host='127.0.0.2')
         self.assert_data_kept()
         state = json.loads(self.state.read_text())
@@ -269,7 +270,8 @@ class ReleaseInstallTests(unittest.TestCase):
         before = cli.snapshot(self.state)
         with mock.patch.object(cli, 'healthy', return_value=False):
             self.assertEqual(self.invoke('migrate', *args), 1)
-        self.assertIn('rolled back to checkout', self.errors)
+        self.assertEqual(self.errors.splitlines()[-1], f'Health check failed; rolled back to checkout {self.repo}')
+        self.assertEqual(self.output.splitlines()[-1], 'Result: FAIL (see the error above)')
         self.assertEqual(cli.snapshot(self.state), before)
         self.assertFalse(self.link.is_symlink())
         self.assertFalse((self.root / 'releases/0.2.0').exists())
