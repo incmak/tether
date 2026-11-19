@@ -1401,7 +1401,7 @@ def runtime_types():
                     self.tool_followup = None
                     s.wake.set()
                 elif (isinstance(frame, FunctionCallResultFrame) and frame.tool_call_id in self.tools_in_flight
-                        and processor._context_push_owed):
+                        and getattr(processor, '_context_push_owed', False)):
                     # Pipecat 1.15 leaves this set when it defers a result's inference.
                     self.tool_followup = frame
                 if isinstance(frame, (FunctionCallCancelFrame, FridayToolSpeechCompleteFrame)) or (
