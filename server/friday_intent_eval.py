@@ -70,6 +70,9 @@ def _score(trace, expect, expected_tools):
         yield 'reply'
     if 'reply_not' in expect and re.search(expect['reply_not'], reply):
         yield 'reply'
+    # Every read_last_reply must name an allowed chat, even a read the case does not expect.
+    if 'read_chat' in expect and not all(re.search(expect['read_chat'], chat) for chat in trace.get('reads', [])):
+        yield 'wrong_read'
     if readback_chat is not None:
         if proposal is None:
             matches = _asks_send_to(reply, readback_chat)
@@ -156,6 +159,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 result = {'error': reason}
             else:
                 used.add(name)
+                if name == 'read_last_reply':
+                    trace['reads'].append(str(args.get('chat') or ''))
                 if trace['action'] is None and (name not in LOOKUPS or name in expected_tools):
                     trace['action'] = {'name': name, 'args': args}
                 if name not in LOOKUPS:
@@ -176,7 +181,7 @@ def run_case(case, fixture, complete, runs=1, brain=None):
     fails, samples = Counter(), []
     passed = prompt_tokens = llm_calls = 0
     for _ in range(runs):
-        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [],
+        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [], 'reads': [],
                  'proposal': None, 'prompt_tokens': 0}
         try:
             _run_once(case, fixture, complete, brain, expected_tools, trace)
@@ -271,7 +276,7 @@ def _validate_expectation(expect, label, names):
     if not isinstance(args, dict):
         raise ValueError(f'{label}: expect.args must be an object')
     try:
-        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'reply_not', 'prompt_not') if key in expect]:
+        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'reply_not', 'prompt_not', 'read_chat') if key in expect]:
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None

@@ -198,6 +198,21 @@ class IntentEvalTests(unittest.TestCase):
         extra_answer = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt='C. Also, yes to all.')])
         result, _ = self.run_script(cases['log-answer-only-c'], extra_answer, data=data)
         self.assertEqual(result['fails'], {'wrong_args': 1})
+        for extra in ('Keep option C and approve the factory floor', 'Keep option C and say yes to the factory floor'):
+            with self.subTest(extra=extra):
+                result, _ = self.run_script(cases['log-answer-only-c'], assistant(
+                    tool_calls=[call('send_to_chat', chat=chat, prompt=extra)]), data=data)
+                self.assertEqual(result['fails'], {'wrong_args': 1})
+
+    def test_unexpected_read_of_another_chat_fails_read_chat(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        example = next(item for item in data['cases'] if item['id'] == 'log-unknown-session')
+        honest = assistant("I couldn't find the predicta session. Which one do you mean?")
+        result, _ = self.run_script(example, honest, data=data)
+        self.assertEqual(result['passed'], 1, result['fails'])
+        result, _ = self.run_script(example, assistant(tool_calls=[call('read_last_reply', chat='api-server')]),
+                                    honest, data=data)
+        self.assertEqual(result['fails'], {'wrong_read': 1})
 
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
@@ -265,6 +280,9 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(self.run_script(follow_up, sent)[0]['fails'], {'readback_instead': 1})
         follow_up['history'].pop()
         self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
+        # A yes binds the text the read-back named: another task needs Friday's exact read-back first.
+        other = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Delete the old branches')])
+        self.assertEqual(self.run_script(follow_up, other)[0]['fails'], {'readback_instead': 1})
 
     def test_expected_lookup_with_a_write_fails_extra_action(self):
         example = case('list_chats')

@@ -75,8 +75,9 @@ case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh res
 case("log-urgent-feature-ask", "send_direct", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
+# The read-back named other text than the model sends, so Friday reads back the exact text before it sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}}, "log",
+     {"tool": None, "readback_chat": "friday test"}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
@@ -124,14 +125,14 @@ case("log-not-approval", "no_tool", "dev",
                                            "I am sorry, there was a technical block. Shall I send that prompt to the automation tether chat now?"))
 case("log-unknown-session", "misheard", "dev",
      "Okay, okay. Now hold on, I'll see what's happening in The teeth. Sorry in the predicta session.",
-     {"tool": None, "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find"}, "log",
+     {"tool": None, "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find",
+      "read_chat": "(?i)predicta"}, "log",
      tool_results={"list_chats": {"error": "No session called predicta. Sessions: Tether, Backend, Docs, Automation, Friday chats"}})
 
 # ---- From the 19 Nov 2026 13:51-13:52 call (user evidence) ----
 AUTO_CHAT = r"(?i)^Automation tether \. Can we have…$"
 case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bC\b"},
-      "prompt_not": r"(?i)\ball\b|approv|\boption [ABD]\b"}, "log", state=AUTO_STATE,
+     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?is)^(?=.{1,60}$)(?!.*(\ball\b|approv|\byes\b|\bno\b|\band\b|\balso\b|\boption [ABD]\b)).*\bC\b"}}, "log", state=AUTO_STATE,
      history=turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
                   "read_last_reply", {"chat": AUTO}, {"chat": AUTO, "text":
                       'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
@@ -143,7 +144,7 @@ case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
      + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
 case("log-answer-only-q7", "send_direct", "dev", "tell it yes to Q7 only",
      {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bQ?7\b"},
-      "prompt_not": r"(?i)\ball\b|approv|\boption [ABD]\b"}, "log", state=AUTO_STATE,
+      "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
      history=turn("What did it say about the Factory floor?", "read_last_reply", {"chat": AUTO},
                   {"chat": AUTO, "text": 'Factory floor, round 2: questions Q6 to Q9.\n\n'
                                         'Next: reply "yes to all", or give the numbers you want changed.'},
@@ -315,7 +316,7 @@ C_CTX = (turn("Uh so like what's happening in automation Ther? Like can you chec
          + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
          + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
 case("log-keep-that-readback", "readback", "dev", "Okay, let's keep that.",
-     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?is)^(?!.*(\ball\b|approv|\boption [ABD]\b)).*\bC\b"}}, "log",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?is)^(?=.{1,60}$)(?!.*(\ball\b|approv|\byes\b|\bno\b|\band\b|\balso\b|\boption [ABD]\b)).*\bC\b"}}, "log",
      history=C_CTX, state=AUTO_STATE)
 case("log-resend-long-text", "send_direct", "dev",
      "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
@@ -350,7 +351,7 @@ case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that
      history=C_CTX[:-2], state=AUTO_STATE)
 # "Answer it" is not a send word: Friday reads back the answer and sends only after a yes.
 case("log-answer-it-keep-c", "readback", "dev", "Well like answer it like let's keep option C",
-     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?is)^(?!.*(\ball\b|approv|\boption [ABD]\b)).*\bC\b"}}, "log",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?is)^(?=.{1,60}$)(?!.*(\ball\b|approv|\byes\b|\bno\b|\band\b|\balso\b|\boption [ABD]\b)).*\bC\b"}}, "log",
      history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
 case("log-ask-friday-test-new-tab", "send_direct", "dev",
      "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",

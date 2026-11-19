@@ -303,10 +303,8 @@
    ],
    "user": "Yes, please.",
    "expect": {
-    "tool": "send_to_chat",
-    "args": {
-     "chat": "(?i)friday test"
-    }
+    "tool": null,
+    "readback_chat": "friday test"
    }
   },
   {
@@ -746,7 +744,8 @@
    "user": "Okay, okay. Now hold on, I'll see what's happening in The teeth. Sorry in the predicta session.",
    "expect": {
     "tool": null,
-    "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find"
+    "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find",
+    "read_chat": "(?i)predicta"
    },
    "tool_results": {
     "list_chats": {
@@ -809,9 +808,8 @@
     "tool": "send_to_chat",
     "args": {
      "chat": "(?i)^Automation tether \\. Can we have\u2026$",
-     "prompt": "(?i)\\bC\\b"
-    },
-    "prompt_not": "(?i)\\ball\\b|approv|\\boption [ABD]\\b"
+     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
+    }
    },
    "state": {
     "busy": [
@@ -868,7 +866,7 @@
      "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)\\bQ?7\\b"
     },
-    "prompt_not": "(?i)\\ball\\b|approv|\\boption [ABD]\\b"
+    "prompt_not": "(?i)yes to all"
    },
    "state": {
     "busy": [
@@ -2154,7 +2152,7 @@
     "tool": null,
     "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "prompt": "(?is)^(?!.*(\\ball\\b|approv|\\boption [ABD]\\b)).*\\bC\\b"
+     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
     }
    },
    "state": {
@@ -2453,7 +2451,7 @@
     "tool": null,
     "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "prompt": "(?is)^(?!.*(\\ball\\b|approv|\\boption [ABD]\\b)).*\\bC\\b"
+     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
     }
    },
    "state": {

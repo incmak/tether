@@ -104,8 +104,10 @@ MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|instruct|forward)\b'
-    # Prompt and message are send words only as verbs with an object: "the draft message was longer" is not.
-    r'|\b(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)+)\b'
+    # Prompt and message are send words only as a verb that starts a clause: "message ci-audit" or
+    # "please prompt it", not "the prompt ci-audit got" or "did you message them".
+    r'|(?:^|[.,!;:]\s*|\b(?:please|just|and|then|now|so|(?:can|could|would) you)\s+)'
+    r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
@@ -464,6 +466,62 @@ def norm(text):
     return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
 
 
+LINK_WORDS = {'a', 'an', 'the', 'to', 'and', 'also', 'please', 'it', 'this', 'that', 'of', 'for', 'on', 'in', 'with'}
+FREEFORM_SEND = re.compile(
+    r'(?:^|(?:shall|should|can|may) i )(?:(?:send|forward) (?P<chat3>[\w-]+): (?P<payload3>.+?)'
+    r'|(?:send|forward) (?P<payload>.+?) to (?P<chat>.+?)'
+    r'|(?:ask|tell) (?P<chat2>.+?)(?: to|:) (?P<payload2>.+?))\W*\?$', re.I | re.S)
+# "I will tell api-server to add a test." followed by "Shall I send that?"
+FREEFORM_PLAN = re.compile(r"\bi(?: will|'ll| can| would) (?:ask|tell) (?P<chat>.+?)(?: to|:) (?P<payload>.+?)[.!]?$",
+                           re.I | re.S)
+FREEFORM_THAT = re.compile(r'(?:shall|should|can|may) i (?:send|do) (?:that|this|it)(?: prompt)?'
+                           r'(?: to (?P<chat>.+?))?(?: now)?\W*\?$', re.I | re.S)
+
+
+def freeform_proposal(readback):
+    """(payload, chat) of the one send that Friday's own words propose, else None."""
+    sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', readback) if part.strip()]
+    found = []
+    for index, part in enumerate(sentences):
+        if not part.endswith('?'):
+            continue
+        if match := FREEFORM_THAT.search(part):
+            plans = [plan for earlier in sentences[:index] if (plan := FREEFORM_PLAN.search(earlier))]
+            if len(plans) != 1:
+                return None
+            chat = plans[0]['chat']
+            if match['chat'] and norm(clean_chat(match['chat'])) != norm(clean_chat(chat)):
+                return None
+            found.append((plans[0]['payload'], chat))
+        elif match := FREEFORM_SEND.search(part):
+            found.append((match['payload'] or match['payload2'] or match['payload3'],
+                          match['chat'] or match['chat2'] or match['chat3']))
+    if len(found) != 1:
+        return None
+    payload, chat = found[0]
+    chat = clean_chat(chat)
+    # "B12 or B99" or "docs and deploy" proposes more than one send.
+    if re.search(r'\b(?:or|and)\b', chat, re.I) or re.search(r'\bor\b', payload, re.I):
+        return None
+    return norm(payload), norm(chat)
+
+
+def clean_chat(chat):
+    return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
+
+
+def covers(payload, proposed, speech, chat=''):
+    """True when the sent text is the proposed text: every ID-like word and 80% of the words were said."""
+    said = set(proposed.split()) | set(norm(speech).split()) | set(norm(chat).split()) | LINK_WORDS
+    words = norm(payload).split()
+    if not words:
+        return False
+    # IDs and letters (B12, Q7, C) name the decision itself, so each one must have been said.
+    if any(word not in said for word in words if len(word) == 1 or any(ch.isdigit() for ch in word)):
+        return False
+    return sum(word in said for word in words) >= 0.8 * len(words)
+
+
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
                *, suggestions=()):
     """Return a short refusal, without changing the originating turn's state."""
@@ -504,7 +562,12 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS:
         payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
-        proposal_matches = has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
+        # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text plus
+        # only words the user said in this turn ("yes, and check the alerts" may extend it; "okay" adds nothing).
+        added = (set(norm(payload).split()) - set(norm(pending.payload).split())
+                 - set(norm(last_user_text).split()) - LINK_WORDS) if has_proposal else ()
+        proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
+                            and not added)
         yes = APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
         if suggestions:
             normalized_payload = norm(payload)
@@ -519,17 +582,14 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         if SEND_INTENT.search(last_user_text):
             return None
-        prompt = payload.strip().casefold()
-        readback = previous_assistant.strip().casefold()
+        readback = previous_assistant.strip()
         # Friday's fixed read-back requires the matching proposal, even after it expires.
-        fixed_readback = (readback.startswith(SEND_READBACK_START.casefold())
-                          and readback.endswith((SEND_READBACK_END.casefold(), SEND_READBACK_QUESTION_END.casefold())))
-        # A free-form read-back counts only when it asked to send this exact text to this exact chat.
-        def said(text):
-            return bool(text) and re.search(r'(?<![\w-])' + re.escape(text) + r'(?![\w-])', readback)
-        legacy_matches = (not fixed_readback and '?' in readback
-                          and re.search(r'\b(?:send|ask|tell|forward|message)\b', readback)
-                          and said(prompt.rstrip('.!?')) and said(chat))
+        fixed_readback = (readback.casefold().startswith(SEND_READBACK_START.casefold())
+                          and readback.casefold().endswith((SEND_READBACK_END.casefold(),
+                                                            SEND_READBACK_QUESTION_END.casefold())))
+        proposed = None if fixed_readback else freeform_proposal(readback)
+        legacy_matches = (proposed is not None and proposed[1] == norm(clean_chat(chat))
+                          and covers(payload, proposed[0], last_user_text, proposed[1]))
         if not (yes and (proposal_matches or legacy_matches)):
             return READBACK_REQUIRED
     return None
