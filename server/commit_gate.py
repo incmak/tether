@@ -1606,24 +1606,50 @@ exec {call} {python} {gate} {deadline}
 
 def _rows(*, locked=False):
     path = log_path()
+    sources = (path.with_name(path.name + '.1'), path)
 
-    def snapshot():
+    def snapshot(*, strict=False):
         files = []
-        for source in (path.with_name(path.name + '.1'), path):
+        for source in sources:
             try:
                 files.append(source.read_bytes())
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError:
+                if strict:
+                    raise
         return files
 
-    if locked:
-        files = snapshot()
-    else:
+    def marks():
+        found = []
+        for source in sources:
+            try:
+                info = source.stat()
+            except FileNotFoundError:
+                found.append(None)
+            else:
+                found.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+        return found
+
+    try:
+        with nullcontext() if locked else _Lock():
+            return _parse_rows(snapshot())
+    except TimeoutError:
+        pass
+
+    # Rotation can move the current file over .1 between the reads. Check the whole pair before parsing it.
+    for _ in range(3):
         try:
-            with _Lock():
-                files = snapshot()
-        except TimeoutError:
-            files = snapshot()
+            before = marks()
+            files = snapshot(strict=True)
+            if before == marks():
+                return _parse_rows(files)
+        except OSError:
+            break
+    return None
+
+
+def _parse_rows(files):
     for content in files:
         for line in content.splitlines():
             try:
@@ -1635,7 +1661,7 @@ def _rows(*, locked=False):
 
 
 def stats(pid=None, days=DAYS, now=None):
-    """The last `days` days of the log, for one project or for all.
+    """The last `days` days of the log, for one project or for all. None when no consistent snapshot is available.
 
     The counts cover final-message checks and Bash commit calls. Skip rows are excluded. Final-message checks
     count passes as stamped and would_block or let_through as unstamped. They need no landed row.
@@ -1645,8 +1671,11 @@ def stats(pid=None, days=DAYS, now=None):
     rate: false_blocks / stamped (such commits with a valid line), or None with no such commit yet."""
     now = time.time() if now is None else now
     since = now - days * 86400
+    rows = _rows()
+    if rows is None:
+        return None
     checks, results = [], {}
-    for row in _rows():
+    for row in rows:
         if row['at'] < since or (pid and row.get('project') != pid):
             continue
         if row.get('event') == 'check' and isinstance(row.get('verdict'), str):
@@ -1697,6 +1726,8 @@ def cached_stats(pid=None):
         if kept and kept[0] == marks and clock - kept[1] < 60:
             return kept[2]
         value = stats(pid)
+        if value is None:
+            return None
         if len(_stats_cache) > 64:
             _stats_cache.clear()
         _stats_cache[key] = (marks, clock, value)
