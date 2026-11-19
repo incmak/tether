@@ -68,6 +68,16 @@ const lastReply = (data: ChatData) => [...chatMessages(data)].reverse().find(isR
 const shortText = (text: string, limit: number) => { const plain = speakable(text); return plain.length > limit ? `${plain.slice(0, limit).replace(/\s+\S*$/, '')}…` : plain }
 const yesOption = (approval: Approval) => approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0]
 const noOption = (approval: Approval) => { const options = approval.options!; return options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1] }
+// eslint-disable-next-line react-refresh/only-export-components -- The approval selector is exported for unit tests.
+export function approvalTarget(agents: Pane[], chat: string): Pane | { error: string } {
+  const waiting = agents.filter(approvalOf)
+  const wanted = spokenName(chat)
+  const matches = chat ? waiting.filter(pane => spokenForm(paneTitle(pane)) === wanted) : waiting
+  if (matches.length === 1) return matches[0]
+  if (matches.length > 1) return { error: `Multiple chats are waiting for approval: ${matches.map(paneTitle).join(', ')}. Ask which one.` }
+  if (chat) return { error: `No chat called ${chat} is waiting for approval. Waiting: ${waiting.map(paneTitle).join(', ') || 'none'}.` }
+  return { error: 'No chat is waiting for approval.' }
+}
 const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.needs ? `needs ${pane.needs.kind}` : pane.state.toLowerCase()
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -221,8 +231,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
   const queue = useRef<{ who: string; text: string }[]>([])
   const watches = useRef(new Map<string, Watch>())
   const announced = useRef(new Set<string>())
-  const live = useRef({ agents, panes, target, approval, approvalPane, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
-  useLayoutEffect(() => { live.current = { agents, panes, target, approval, approvalPane, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
+  const live = useRef({ agents, panes, target, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
+  useLayoutEffect(() => { live.current = { agents, panes, target, approval, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
   const go = (next: Phase) => { phaseNow.current = next; setPhase(next) }
 
   // Every step reads the latest panes and commands through `live`, so the voice callbacks never go stale.
@@ -284,19 +294,22 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
     },
     /** Commands Live mode runs itself; anything else goes to the target pane. */
     async act(text: string) {
-      const { agents, target, approval, approvalPane } = live.current
+      const { agents, target } = live.current
       const words = text.toLowerCase().replace(/[.!?,]/g, '').trim()
       if (/^(stop|cancel|quiet|be quiet|never ?mind|shh+)$/.test(words)) { flow.current.rest(); return }
       if (/^(end|exit|close|stop) (live|live mode|session)$|^(goodbye|bye)\b/.test(words)) { live.current.onClose(); return }
       if (/\b(what'?s|what is) (running|happening|going on)\b|^(status|brief me|catch me up|briefing)$/.test(words)) { await flow.current.brief(); return }
-      if (approval && approvalPane && /^(approve|approved|yes|yeah|yep|allow|go ahead|do it|accept|ok(ay)?)\b/.test(words)) {
-        await flow.current.choose(approvalPane, approval, approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0], 'Approved.')
-        return
-      }
-      if (approval && approvalPane && /^(deny|denied|no|nope|reject|don'?t|do not|decline)\b/.test(words)) {
-        const options = approval.options!
-        await flow.current.choose(approvalPane, approval, options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1], 'Denied.')
-        return
+      const approvalPane = approvalTarget(agents, '')
+      if (!('error' in approvalPane)) {
+        const approval = approvalOf(approvalPane)!
+        if (/^(approve|approved|yes|yeah|yep|allow|go ahead|do it|accept|ok(ay)?)\b/.test(words)) {
+          await flow.current.choose(approvalPane, approval, yesOption(approval), 'Approved.')
+          return
+        }
+        if (/^(deny|denied|no|nope|reject|don'?t|do not|decline)\b/.test(words)) {
+          await flow.current.choose(approvalPane, approval, noOption(approval), 'Denied.')
+          return
+        }
       }
       const panel = words.match(/\b(open|show|close|hide)\b.*?\b(preview|browser|terminal|changes|diff|files?|sidebar|backlog)\b/)
       if (panel) { flow.current.panel(panel[1], PANELS[panel[2]]); return }
@@ -428,11 +441,13 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       return { ok: true, chat: paneTitle(pane), delivery }
     },
     answer_approval: async ({ chat, decision }) => {
-      const choice = sessionChoice(live.current.agents, String(chat ?? ''))
+      const { agents } = live.current
+      const wanted = String(chat ?? '')
+      const choice = sessionChoice(agents, wanted)
       if (choice) return choice
-      const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.approvalPane)
-      const approval = pane && approvalOf(pane)
-      if (!pane || !approval) return { error: 'No chat is waiting for approval.' }
+      const pane = approvalTarget(agents, wanted)
+      if ('error' in pane) return pane
+      const approval = approvalOf(pane)!
       await flow.current.answer(pane, approval, decision === 'approve' ? yesOption(approval) : noOption(approval))
       return { ok: true, chat: paneTitle(pane), decision: decision === 'approve' ? 'approve' : 'deny' }
     },
