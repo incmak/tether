@@ -12,7 +12,8 @@ if (![undefined, '--unit', '--browser'].includes(mode) || (option && !parallel) 
 }
 
 const tests = fs.readdirSync(__dirname).filter(name => /^test_.*\.cjs$/.test(name)).sort().filter(name => {
-  const browser = /const\s*\{\s*getBrowser\b[^}]*\}\s*=\s*require\(['"]\.\/browser_test_helper\.cjs['"]\)/.test(fs.readFileSync(path.join(__dirname, name), 'utf8'))
+  // The extension test uses its own MCP-managed Chrome with extension debugging enabled.
+  const browser = name === 'test_extension_search.cjs' || /const\s*\{\s*getBrowser\b[^}]*\}\s*=\s*require\(['"]\.\/browser_test_helper\.cjs['"]\)/.test(fs.readFileSync(path.join(__dirname, name), 'utf8'))
   return !mode || (mode === '--browser' ? browser : !browser)
 })
 

@@ -108,6 +108,13 @@ jobs:
           grep -q 'test_launch_load_and_get_one_frame .* ok$' ../smoke.log
           # Release checks require all real Chromium tests. A skip produces 'OK (skipped=N)'.
           grep -Fxq 'OK' ../smoke.log
+      - name: Install Chrome for Testing for the extension check
+        shell: bash
+        run: |
+          chrome=$(npx --yes @puppeteer/browsers@3.2.6 install chrome@147.0.7727.15 \
+            --path "$RUNNER_TEMP/tether-test-chrome" --format '{{path}}')
+          test -x "$chrome"
+          echo "TETHER_EXTENSION_CHROME=$chrome" >> "$GITHUB_ENV"
       - name: Browser UI tests
         env:
           SHOTS: ../.release-work/ci-browser
