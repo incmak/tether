@@ -95,15 +95,16 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 const isTime = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 const isDue = (value: unknown): value is TaskDue => isObject(value) && typeof value.date === 'string' && /^\d{4}-\d\d-\d\d$/.test(value.date) && (value.at === null || isTime(value.at))
 const isRef = (value: unknown) => value === null || value === undefined || typeof value === 'string'
+const isSourceId = (value: unknown): value is SourceId => value === 'todo' || value === 'planner'
 
 /** Keep only well-formed sources and tasks. A bad server body must never break the Reminders sheet. */
 export function cleanListing(body: unknown): TaskListing {
   if (!isObject(body) || !Array.isArray(body.sources) || !Array.isArray(body.tasks)) throw new Error('Tether returned an unreadable todo list.')
-  const sources = body.sources.filter((source): source is TaskSource => isObject(source) && typeof source.id === 'string' && typeof source.label === 'string'
+  const sources = body.sources.filter((source): source is TaskSource => isObject(source) && isSourceId(source.id) && typeof source.label === 'string'
     && typeof source.enabled === 'boolean' && typeof source.alerts === 'boolean' && typeof source.state === 'string'
     && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean' && isTime(source.count)
     && (source.why === undefined || typeof source.why === 'string') && (source.command === undefined || source.command === null || typeof source.command === 'string'))
-  const tasks = body.tasks.filter((task): task is ExternalTask => isObject(task) && typeof task.key === 'string' && typeof task.source === 'string'
+  const tasks = body.tasks.filter((task): task is ExternalTask => isObject(task) && typeof task.key === 'string' && isSourceId(task.source)
     && typeof task.title === 'string' && typeof task.list === 'string' && typeof task.link === 'string'
     && (task.due === null || isDue(task.due)) && (task.reminderAt === null || isTime(task.reminderAt))
     && isRef(task.backlog) && isRef(task.reminder))

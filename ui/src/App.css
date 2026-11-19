@@ -301,6 +301,15 @@ label.broadcast-row:hover { background: var(--hover); }
 .switch-row input:checked::after { background: #fff; box-shadow: 0 1px 2px #0003; transform: translateX(18px); }
 .switch-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .switch-row input, .switch-row input::after { transition: none; } }
+/* Forced colors drop box shadows and author colors: draw the track and thumb in system colors. */
+@media (forced-colors: active) {
+  .switch-row input { forced-color-adjust: none; border: 2px solid ButtonText; box-shadow: none; background: Canvas; }
+  .switch-row input::after { top: 1px; left: 1px; background: ButtonText; forced-color-adjust: none; }
+  .switch-row input:checked { background: Highlight; border-color: Highlight; }
+  .switch-row input:checked::after { background: HighlightText; }
+  .switch-row input:disabled { border-color: GrayText; }
+  .switch-row input:disabled::after { background: GrayText; }
+}
 /* Pane tabs under the chat header: one tab per tmux pane, + splits. */
 .pane-tabs { display: flex; gap: 4px; overflow-x: auto; padding: 6px max(12px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); scrollbar-width: none; }
 .pane-tabs button { display: flex; align-items: center; gap: 6px; flex-shrink: 0; min-height: var(--control); padding: 0 12px; border-radius: var(--radius); font-size: 13px; color: var(--muted); border: 1px solid transparent; }

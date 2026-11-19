@@ -67,7 +67,7 @@ async function fixtureServer(t) {
   return `http://127.0.0.1:${server.address().port}`
 }
 
-async function open(t, browser, origin, viewport, { listing = LIVE(), failFirst = false } = {}) {
+async function open(t, browser, origin, viewport, { listing = LIVE(), failFirst = false, slowBacklog = false } = {}) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block', reducedMotion: 'reduce' })
   const errors = [], posts = []
   let reads = 0, closing = false, nextId = 500
@@ -87,6 +87,7 @@ async function open(t, browser, origin, viewport, { listing = LIVE(), failFirst 
         const body = request.postDataJSON()
         posts.push({ endpoint, body })
         if (endpoint === 'tasks/backlog') {
+          if (slowBacklog) await new Promise(resolve => setTimeout(resolve, 800))
           const item = listing.tasks.find(entry => entry.key === body.key)
           if (!item) return route.fulfill({ status: 404, json: { error: 'No such task' } })
           const created = !item.backlog
@@ -180,7 +181,8 @@ test('Todos in Chromium', async t => {
       await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Add to backlog: Book venue')
       assert.equal(posts.length, 0, 'Cancel posts nothing')
       await page.keyboard.press('Enter')
-      await page.keyboard.press('Enter')  // focus is on Add
+      await page.waitForFunction(() => document.activeElement?.textContent === 'Add')
+      await page.keyboard.press('Enter')
       const item = sheet.getByRole('button', { name: 'B500' }).or(sheet.getByText('B500')).first()
       await item.waitFor()
       await page.waitForFunction(() => document.activeElement?.textContent?.includes('B500'))
@@ -251,6 +253,54 @@ test('Todos in Chromium', async t => {
       const row = await sheet.locator('.todo-row').nth(1).boundingBox()
       const box = await sheet.boundingBox()
       assert.ok(row.x + row.width <= box.x + box.width + 1, 'the row stays inside the sheet')
+    })
+
+    await t.test(`${width}px switches stay visible in forced colors`, async t => {
+      const { page, sheet } = await open(t, browser, origin, viewport)
+      await page.emulateMedia({ forcedColors: 'active' })
+      await toTodos(page, sheet)
+      const looks = await sheet.evaluate(node => [...node.querySelectorAll('[role=switch]')].map(input => {
+        const track = getComputedStyle(input), thumb = getComputedStyle(input, '::after'), sheetBg = getComputedStyle(node).backgroundColor
+        return { checked: input.checked, border: track.borderTopWidth, thumb: thumb.backgroundColor, track: track.backgroundColor, sheetBg }
+      }))
+      assert.ok(looks.length >= 3)
+      for (const look of looks) {
+        assert.notEqual(look.border, '0px', 'the track has an outline')
+        assert.notEqual(look.thumb, look.track, 'the thumb differs from the track')
+      }
+    })
+
+    await t.test(`${width}px one source read empty and one failed is not "No open tasks"`, async t => {
+      const listing = { sources: [source('todo', 'Microsoft To Do'),
+        source('planner', 'Planner', { state: 'error', syncedAt: null, why: 'Microsoft could not sync this source (HTTP 429).' })], tasks: [] }
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing })
+      await toTodos(page, sheet)
+      await sheet.getByText('Tether could not read Planner yet. See Task apps below.').waitFor()
+      assert.equal(await sheet.getByText(/^No open tasks/).count(), 0)
+    })
+
+    await t.test(`${width}px an unknown source id is dropped, not rendered`, async t => {
+      const listing = LIVE()
+      listing.sources.push({ ...source('__proto__', 'Bad'), id: '__proto__' })
+      listing.tasks.push({ ...listing.tasks[0], key: '__proto__:1', source: '__proto__', title: 'Proto task' })
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing })
+      await toTodos(page, sheet)
+      await sheet.getByText('Pay electricity bill').waitFor()
+      assert.equal(await sheet.getByText('Proto task').count(), 0)
+    })
+
+    await t.test(`${width}px Cancel does nothing while a copy is in flight`, async t => {
+      const { page, sheet, posts } = await open(t, browser, origin, viewport, { slowBacklog: true })
+      await toTodos(page, sheet)
+      await button(sheet, 'Add to backlog: Book venue').click()
+      const confirm = sheet.getByRole('group', { name: 'Add to backlog: Book venue' })
+      await button(confirm, 'Add').click()
+      await button(confirm, 'Adding…').waitFor()
+      assert.equal(await button(confirm, 'Cancel').getAttribute('aria-disabled'), 'true')
+      await button(confirm, 'Cancel').dispatchEvent('click')  // Playwright will not click an aria-disabled button; a user can
+      assert.equal(await confirm.count(), 1, 'the confirmation stays open while the copy runs')
+      await sheet.getByRole('button', { name: 'B500' }).or(sheet.getByText('B500')).first().waitFor()
+      assert.equal(posts.filter(post => post.endpoint === 'tasks/backlog').length, 1)
     })
 
     await t.test(`${width}px a GET error offers Retry`, async t => {
