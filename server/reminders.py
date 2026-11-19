@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from math import inf
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -284,33 +285,41 @@ def _append(data, record):
     data['reminders'].append(record)
 
 
+def _check_open_source(records, record):
+    source = record.get('source')
+    if not isinstance(source, dict) or not isinstance(source.get('key'), str):
+        return
+    for other in records:
+        other_source = other.get('source')
+        if (other['id'] != record.get('id') and other['state'] != 'done'
+                and isinstance(other_source, dict) and other_source.get('key') == source['key']
+                and other.get('source_account') == record.get('source_account')):
+            raise ReminderError('This task already has an open reminder.', 409)
+
+
 def add(text, due, by='you', link=None, now=None, repeat=None, *, source=None):
     now = time.time() if now is None else now
     record = _new(text, due, by, link, now, repeat, source)
     with _locked():
         data = _load(now)
+        _check_open_source(data['reminders'], record)
         _append(data, record)
         _save(data)
     return public(record)
 
 
-def sync_source(label, account, links, present, now, *, suppressed, moved):
+def sync_source(label, account, links, present, now):
     """Reconcile a complete source read in one reminder save. Return links with their upstream times.
 
-    Suppress the new key during a move overlap. Re-key the linked occurrence when the old key disappears.
-    Keep the upstream time even when it is past or off, or when the user snoozes, marks Done or deletes.
-    A retry after the mirror write fails uses the last occurrence from this account, including a deleted one.
+    Keep the upstream time even when it is past or off. Keep it on older records too, so restoring one
+    preserves its schedule and still lets the next poll detect a change. The store can recover the link
+    if the mirror write fails.
     """
     links = links.copy()
-    rekey = {}
-    for old, new in moved.items():
-        previous = links.pop(old, None)
-        if previous:
-            links[new] = previous
-            rekey[previous['id']] = old, new
     with _locked():
         data = _load(now)
-        latest, changed = {}, False
+        history = defaultdict(list)
+        changed = False
         for deleted, records in ((False, data['reminders']), (True, data['deleted'])):
             for record in records:
                 source = record.get('source')
@@ -318,53 +327,34 @@ def sync_source(label, account, links, present, now, *, suppressed, moved):
                         or not isinstance(source.get('key'), str) or record.get('source_account') != account):
                     continue
                 key = source['key']
-                move = rekey.get(record['id'])
-                if move and key == move[0]:
-                    key = move[1]
-                    record['source'] = dict(source, key=key)
-                    # The transferred record takes precedence over any older history for this key.
-                    record['source_order'] = data['next'] - 1
-                    changed = True
-                sequence = int(record['id'][1:])
-                linked = record['id'] == links.get(key, {}).get('id')
-                order = record.get('source_order', sequence), linked, sequence
-                if key not in latest or order > latest[key][2]:
-                    latest[key] = record, deleted, order
-                if not deleted and key not in present and record['state'] != 'done':
+                opened = not deleted and record['state'] != 'done'
+                if key in present:
+                    # An older restored reminder can be the only open reminder for this key.
+                    order = opened, record.get('created', 0), record['id'] == links.get(key, {}).get('id')
+                    history[key].append((record, deleted, order))
+                elif opened:
                     record.update(state='done', done_at=now)
                     changed = True
         for key, row in present.items():
             at = row['reminderAt']
-            record, deleted, _ = latest.get(key, (None, False, ()))
-            previous = links.get(key)
-            future = at is not None and at > now
-            duplicate = key in suppressed
-            if not future or duplicate:
-                if record is not None and record['source_at'] != at:
-                    record['source_at'] = at
-                    if future:
-                        # Record the change now. Only the selected task can schedule it in this poll.
-                        record['source_pending'] = True
-                    changed = True
-                if duplicate:
-                    links.pop(key, None)
-                elif previous:
-                    links[key] = {'id': previous['id'], 'at': at}
-                continue
-            current = record is not None and record['source_at'] == at and not record.get('source_pending')
-            if previous and at == previous['at'] and (record is None or current):
-                continue
-            if not current:
+            records = history.get(key, [])
+            record, deleted, _ = max(records, key=lambda item: item[2], default=(None, False, ()))
+            previous = links.get(key, {})
+            observed = record['source_at'] if record is not None else previous.get('at')
+            if at is not None and at > now and at != observed:
                 if record is None or deleted:
                     record = _new(row['title'], at, label, None, now, None, {'key': key, 'label': label})
                     record['source_account'] = account
                     _append(data, record)
                 else:
                     _schedule(record, _due(at, now, sourced=True))
-                    record['source_at'] = at
-                    record.pop('source_pending', None)
                 changed = True
-            links[key] = {'id': record['id'], 'at': at}
+            for earlier, _, _ in records:
+                if earlier['source_at'] != at:
+                    earlier['source_at'] = at
+                    changed = True
+            if record is not None or previous:
+                links[key] = {'id': record['id'] if record is not None else previous['id'], 'at': at}
         if changed:
             _save(data)
     return links
@@ -396,6 +386,7 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                 record['link'] = _clean_link(body['link'])
             due_changed = 'due' in body and body['due'] != record['due']
             if due_changed:
+                _check_open_source(data['reminders'], record)
                 _schedule(record, _due(body['due'], now))
             rule = record['repeat']
             if 'repeat' in body:
@@ -428,6 +419,7 @@ def change(rid, action, body=None, now=None, *, by_id=False):
         elif action == 'reopen':
             if record['state'] != 'done':
                 return public(record)
+            _check_open_source(data['reminders'], record)
             record['done_at'] = None
             if record['due'] > now:
                 _schedule(record, record['due'])
@@ -459,7 +451,7 @@ def change(rid, action, body=None, now=None, *, by_id=False):
 
 
 def restore(rid, now=None):
-    """Move a recently deleted reminder back, preserving its schedule and delivery state."""
+    """Restore the schedule and delivery state. Return 409 if this would open a second reminder for the task."""
     now = time.time() if now is None else now
     rid = _id(rid)
     with _locked():
@@ -470,11 +462,8 @@ def restore(rid, now=None):
         record = _find(data['deleted'], rid)
         if record is None:
             raise ReminderError('That reminder is no longer in Recently deleted.', 404)
-        if record.get('source') and any(other.get('source') == record['source']
-                                        and other.get('source_account') == record.get('source_account')
-                                        and int(other['id'][1:]) > int(rid[1:])
-                                        for other in data['reminders'] + data['deleted']):
-            raise ReminderError('This task has a newer reminder.', 409)
+        if record['state'] != 'done':
+            _check_open_source(data['reminders'], record)
         data['deleted'].remove(record)
         del record['deleted_at']
         data['reminders'].append(record)

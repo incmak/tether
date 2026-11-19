@@ -83,6 +83,36 @@ class StoreTests(Base):
         self.assertEqual(self.add(source=source)['source'], source)
         self.assertEqual(reminders.listing(NOW)['reminders'][0]['source'], source)
 
+    def test_add_refuses_a_second_open_reminder_for_the_same_key(self):
+        source = {'key': 'todo:task', 'label': 'Microsoft To Do'}
+        first = self.add(source=source)
+        with self.assertRaises(reminders.ReminderError) as duplicate:
+            self.add(source=dict(source, label='To Do'))
+        self.assertEqual(duplicate.exception.status, 409)
+        self.assertEqual(reminders.listing(NOW)['reminders'], [first])
+
+    def test_open_reminder_blocks_restore_of_a_newer_id_and_reopening_done_history(self):
+        source = {'key': 'todo:task', 'label': 'Microsoft To Do'}
+        first = self.add(source=source)
+        reminders.change(first['id'], 'delete', now=NOW)
+        second = self.add(source=source)
+        reminders.change(second['id'], 'delete', now=NOW)
+        self.assertEqual(reminders.restore(first['id'], now=NOW), first)
+        with self.assertRaises(reminders.ReminderError) as conflict:
+            reminders.restore(second['id'], now=NOW)
+        self.assertEqual((conflict.exception.status, str(conflict.exception)),
+                         (409, 'This task already has an open reminder.'))
+        self.assertEqual([r['id'] for r in reminders.listing(NOW)['deleted']], [second['id']])
+
+        reminders.change(first['id'], 'done', {'occ': first['occ']}, now=NOW)
+        self.assertEqual(reminders.restore(second['id'], now=NOW), second)
+        for action, body in (('reopen', {}), ('edit', {'due': NOW + 7200})):
+            with self.subTest(action=action), self.assertRaises(reminders.ReminderError) as blocked:
+                reminders.change(first['id'], action, body, now=NOW)
+            self.assertEqual(blocked.exception.status, 409)
+        self.assertEqual([(r['id'], r['state']) for r in reminders.listing(NOW)['reminders']],
+                         [(first['id'], 'done'), (second['id'], 'scheduled')])
+
     def test_sourced_reminders_skip_ping_but_still_fire_and_push(self):
         when = NOW + 60
         linked = self.add(due=when, source={'key': 'todo:a', 'label': 'Microsoft To Do'})

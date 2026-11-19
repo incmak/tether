@@ -18,7 +18,6 @@ import sys
 import tempfile
 import threading
 import time
-from collections import defaultdict
 from datetime import date, datetime, timezone
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -206,7 +205,7 @@ def _todo(client):
         for item in _pages(client, _query(path, filter=TODO_FILTER, select=TODO_FIELDS),
                            alternatives=(_query(path, select=TODO_FIELDS),)):
             if item.get('status') != 'completed':
-                yield dict(_task('todo', item, name, TODO_HOME), listId=list_id)
+                yield _task('todo', item, name, TODO_HOME)
 
 
 _PLAN_NAMES = {}  # (tenant, app, account, plan) -> (expires, title), only used under the sync lock
@@ -261,31 +260,12 @@ def _account(config):
     return tuple(config.get(field) for field in ('tenant', 'client', 'account'))
 
 
-def _overlapping_moves(rows, previous):
-    """Match a known and a new key in different lists with the same title and reminder time.
-
-    A move plus a rename inside one poll cannot be detected. Leave ambiguous matches as separate tasks.
-    """
-    old_keys = {row['key'] for row in previous}
-    groups = defaultdict(list)
-    for row in rows.values():
-        if row['reminderAt'] is not None:
-            groups[row['title'], row['reminderAt']].append(row)
-    moves = {}
-    for group in groups.values():
-        old = [row for row in group if row['key'] in old_keys]
-        new = [row for row in group if row['key'] not in old_keys]
-        for before in old:
-            candidates = [row for row in new if row['listId'] != before['listId']]
-            if len(candidates) == 1:
-                after = candidates[0]
-                if sum(row['listId'] != after['listId'] for row in old) == 1:
-                    moves[before['key']] = after['key']
-    return moves
-
-
 def sync():
-    """Run one poll here. Another server or CLI with a poll in progress already covers this request."""
+    """Run one poll unless another server or CLI already has a poll in progress.
+
+    Reminders link by task key. A move read with both keys in one poll can alert twice if the reminder
+    time falls before the next complete poll closes the old key.
+    """
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(_lock('.sync', blocking=False))
@@ -327,19 +307,11 @@ def sync():
                 saved = _snapshot(snapshots, source)
                 complete = not error
                 if complete and source == 'todo' and current['alerts']:
-                    moves = _overlapping_moves(rows, saved['tasks'])
-                    resolved = {old: new for old, new in saved.get('moves', {}).items()
-                                if old not in rows and new in rows}
                     try:
-                        saved['reminder'] = reminders.sync_source(
-                            LABELS[source], account, saved['reminder'], rows, time.time(),
-                            suppressed=set(moves.values()), moved=resolved)
+                        saved['reminder'] = reminders.sync_source(LABELS[source], account, saved['reminder'],
+                                                                  rows, time.time())
                     except (reminders.ReminderError, OSError):
                         error = 'Tether could not update the linked reminders.'
-                    else:
-                        saved['moves'] = moves
-                elif complete:
-                    saved.pop('moves', None)
                 if not error:
                     saved.update(tasks=list(rows.values()), syncedAt=time.time())
                 saved.update(complete=complete, error=error)

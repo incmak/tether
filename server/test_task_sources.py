@@ -260,43 +260,37 @@ class TaskTests(unittest.TestCase):
 
     def test_moving_list_with_new_id_closes_old_and_only_adds_future(self):
         self.alert()
-        self.poll(todo('old', NOW + 3600), todo('another-old', NOW + 3600, title='another old'))
+        at = NOW + 3600
+        self.poll(todo('old', at, title='Task'), todo('past-old', at, title='Past task'))
         self.pages[LISTS] = page({'id': 'shared', 'displayName': 'Shared'})
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', NOW + 3600), todo('past-new', NOW - 1))
+        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Task'),
+                                                  todo('past-new', NOW - 1, title='Past task'))
         moved = self.poll()
-        self.assertEqual([(r['text'], r['state']) for r in self.active()],
-                         [('old', 'done'), ('another old', 'done'), ('new', 'scheduled')])
-        self.assertEqual([r['list'] for r in moved['tasks']], ['Shared', 'Shared'])
+        self.assertEqual({row['key']: row['reminder'] for row in moved['tasks']},
+                         {'todo:new': 'R3', 'todo:past-new': None})
+        self.assertEqual([(r['source']['key'], r['state']) for r in self.active()],
+                         [('todo:old', 'done'), ('todo:past-old', 'done'), ('todo:new', 'scheduled')])
 
-    def test_move_seen_in_both_lists_preserves_reminder_when_old_key_disappears(self):
+    def test_move_overlap_keeps_both_links_until_a_complete_poll_closes_the_old_key(self):
         self.alert()
         at = NOW + 3600
-        self.poll(todo('old', at, title='Moving task'))
-        old_id = self.active()[0]['id']
-        reminders.change(old_id, 'snooze', {'occ': 1, 'until': NOW + 1800}, NOW)
-        old_reminder = self.active()[0]
-        self.pages[LISTS] = page({'id': 'shared', 'displayName': 'Shared'}, {'id': 'personal'})
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Moving task'), todo('first', at))
-        shown = self.poll(todo('old', at, title='Moving task'), todo('second', at, title='first'),
-                          todo('later', at + 1, title='Moving task'), todo('other', at))
-        linked = {row['key']: row['reminder'] for row in shown['tasks']}
-        self.assertEqual(len(linked), 6)
-        self.assertEqual(linked['todo:old'], old_id)
-        self.assertIsNone(linked['todo:new'])
-        self.assertTrue(all(linked[f'todo:{key}'] for key in ('first', 'second', 'later', 'other')))
-        self.assertEqual(len(self.active()), 5)
+        old = todo('old', at, title='Task')
+        self.poll(old)
+        self.pages[LISTS] = page({'id': 'personal'}, {'id': 'shared'})
+        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Task'))
+        shown = self.poll(old)
+        self.assertEqual({row['key']: row['reminder'] for row in shown['tasks']},
+                         {'todo:old': 'R1', 'todo:new': 'R2'})
 
         self.pages[LISTS + '/shared/tasks'] = page(next_link='/busy')
         self.pages['/busy'] = graph_client.GraphError('Busy', 429)
         self.assertEqual(self.poll()['tasks'], shown['tasks'])
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Moving task'), todo('first', at))
-        moved = self.poll()
-        self.assertEqual(next(row['reminder'] for row in moved['tasks'] if row['key'] == 'todo:new'), old_id)
-        self.assertEqual(len(self.active()), 5)
-        self.assertEqual(self.active()[0], dict(old_reminder, source=dict(old_reminder['source'], key='todo:new')))
-        self.pages[LISTS + '/shared/tasks'] = page()
-        self.poll()
-        self.assertEqual(self.active()[0]['state'], 'done')
+        self.assertEqual([r['state'] for r in self.active()], ['scheduled', 'scheduled'])
+
+        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Task'))
+        self.assertEqual(self.poll()['tasks'][0]['reminder'], 'R2')
+        self.assertEqual([(r['source']['key'], r['state']) for r in self.active()],
+                         [('todo:old', 'done'), ('todo:new', 'scheduled')])
 
     def test_two_known_tasks_keep_separate_reminders_when_times_match(self):
         self.alert()
@@ -314,59 +308,67 @@ class TaskTests(unittest.TestCase):
         self.assertEqual((record['id'], record['due'], record['state'], record['occ']),
                          (two['id'], first, 'scheduled', 2))
 
-    def test_new_key_in_same_list_is_a_separate_task(self):
+    def test_distinct_tasks_with_same_title_and_time_get_separate_reminders(self):
         self.alert()
         at = NOW + 3600
         original = todo('old', at, title='Task')
         self.poll(original)
-        shown = self.poll(original, todo('new', at, title='Task'))
-        self.assertEqual({row['key']: row['reminder'] for row in shown['tasks']},
-                         {'todo:old': 'R1', 'todo:new': 'R2'})
+        for task_id, same_list in (('local', True), ('shared', False)):
+            with self.subTest(same_list=same_list):
+                new = todo(task_id, at, title='Task')
+                if same_list:
+                    shown = self.poll(original, new)
+                else:
+                    self.pages[LISTS] = page({'id': 'personal'}, {'id': 'shared'})
+                    self.pages[LISTS + '/shared/tasks'] = page(new)
+                    shown = self.poll(original)
+                links = {row['key']: row['reminder'] for row in shown['tasks']}
+                self.assertEqual(links['todo:old'], 'R1')
+                self.assertTrue(links[f'todo:{task_id}'])
+                self.assertNotEqual(links[f'todo:{task_id}'], 'R1')
+                self.assertEqual({r['source']['key']: r['id'] for r in self.active() if r['state'] == 'scheduled'},
+                                 links)
 
-    def test_move_is_rekeyed_once_if_the_mirror_write_fails(self):
+    def test_new_task_keeps_its_reminder_when_matching_task_is_closed_locally_and_upstream(self):
         self.alert()
         at = NOW + 3600
-        old = todo('old', at, title='Task')
-        self.poll(old)
-        original = self.active()[0]
-        self.pages[LISTS] = page({'id': 'personal', 'displayName': 'Tasks'}, {'id': 'shared', 'displayName': 'Tasks'})
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Task'))
-        overlap = self.poll(old)
-        self.assertIsNone(next(row['reminder'] for row in overlap['tasks'] if row['key'] == 'todo:new'))
-        self.pages[LIST] = page()
-        with mock.patch.object(task_sources, '_save', side_effect=OSError('mirror write failed')):
-            with self.assertRaises(OSError):
-                task_sources.sync()
-        moved = self.poll()
-        self.assertEqual(moved['tasks'][0]['reminder'], original['id'])
-        self.assertEqual(self.active(), [dict(original, source=dict(original['source'], key='todo:new'))])
-
-    def test_transferred_reminder_takes_precedence_over_history_for_the_new_key(self):
-        self.alert()
-        at = NOW + 3600
-        old = todo('old', at, title='Task')
         self.pages[LISTS] = page({'id': 'personal'}, {'id': 'shared'})
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at + 1, title='Task'))
-        self.poll(old)
         self.pages[LISTS + '/shared/tasks'] = page()
-        self.poll(old)
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Task'))
-        self.poll(old)
-        self.poll()
-        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at + 1, title='Task'))
-        self.assertEqual(self.poll()['tasks'][0]['reminder'], 'R1')
-        self.assertEqual([(r['id'], r['due'], r['state'], r['occ']) for r in self.active()],
-                         [('R1', at + 1, 'scheduled', 2), ('R2', at + 1, 'done', 1)])
+        for action in ('done', 'delete'):
+            with self.subTest(action=action):
+                old = todo(f'{action}-old', at, title=action)
+                new = todo(f'{action}-new', at, title=action)
+                old_id = self.poll(old)['tasks'][0]['reminder']
+                reminders.change(old_id, action, {'occ': 1}, now=NOW)
+                self.pages[LISTS + '/shared/tasks'] = page(new)
+                self.poll(old)
+                shown = self.poll(dict(old, status='completed'))
+                new_id = shown['tasks'][0]['reminder']
+                self.assertNotEqual(new_id, old_id)
+                self.assertEqual([(r['id'], r['source']['key']) for r in self.active() if r['state'] == 'scheduled'],
+                                 [(new_id, f"todo:{new['id']}")])
+                self.pages[LISTS + '/shared/tasks'] = page()
 
-    def test_ambiguous_overlap_keeps_three_separate_reminders(self):
+    def test_restore_after_a_time_change_uses_the_open_reminder_for_the_key(self):
         self.alert()
         at = NOW + 3600
-        old = todo('old', at, title='Task')
-        self.poll(old)
-        self.pages[LISTS] = page({'id': 'personal'}, {'id': 'shared'})
-        self.pages[LISTS + '/shared/tasks'] = page(todo('one', at, title='Task'), todo('two', at, title='Task'))
-        shown = self.poll(old)
-        self.assertEqual({row['reminder'] for row in shown['tasks']}, {'R1', 'R2', 'R3'})
+        first = self.poll(todo('task', at))['tasks'][0]['reminder']
+        reminders.change(first, 'delete', now=NOW)
+        second = self.poll(todo('task', at + 60))['tasks'][0]['reminder']
+        self.assertNotEqual(first, second)
+        with self.assertRaises(reminders.ReminderError) as conflict:
+            reminders.restore(first, now=NOW)
+        self.assertEqual(conflict.exception.status, 409)
+        self.assertEqual([(r['id'], r['state']) for r in self.active()], [(second, 'scheduled')])
+
+        reminders.change(second, 'delete', now=NOW)
+        self.assertEqual(reminders.restore(first, now=NOW)['state'], 'scheduled')
+        shown = self.poll(todo('task', at + 60))
+        self.assertEqual(shown['tasks'][0]['reminder'], first)
+        self.assertEqual([(r['id'], r['state'], r['due']) for r in self.active()], [(first, 'scheduled', at)])
+        reminders.change(first, 'snooze', {'occ': 1, 'until': at + 120}, now=NOW)
+        self.assertEqual(self.poll(todo('task', at))['tasks'][0]['reminder'], first)
+        self.assertEqual([(r['id'], r['state'], r['due']) for r in self.active()], [(first, 'scheduled', at)])
 
     def test_planner_reads_assigned_open_tasks_and_caches_plan_names(self):
         task_sources.settings_for('planner', alerts=True)
