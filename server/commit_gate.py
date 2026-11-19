@@ -4,8 +4,8 @@
 The person sets the mode in Settings. Nothing else changes it.
   off      no check, no log.
   observe  the default. Each commit is checked and logged; none is blocked.
-  enforce  a commit with no valid line is denied, with the reason. Agents get two denials per session.
-           The third such commit passes and is logged, so a wrong gate cannot hold a session.
+  enforce  a commit with no valid line is denied, with the reason. Agents with a session get two denials.
+           The third such commit passes and is logged. Agents without a session key also pass and are logged.
 
   paths.CONFIG/commit-gate                  the global mode: one word. Missing or bad: observe.
   paths.TETHER/projects/<id>/commit-gate    a project override: {"override": true, "mode": "enforce"}.
@@ -33,6 +33,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import stat as stat_module
 import subprocess
 import sys
@@ -58,7 +59,8 @@ MODES = (
     ('off', 'Off', 'Commits are not checked.'),
     ('observe', 'Observe', 'Each commit is checked and logged. No commit is blocked.'),
     ('enforce', 'Enforce', 'A commit with no valid "Verified:" line is blocked. '
-                           'An agent gets 2 blocks per session; the next one passes.'),
+                           'An agent with a session gets 2 blocks per session. The next one passes. '
+                           'An agent without a session passes.'),
 )
 NAMES = tuple(mode for mode, _, _ in MODES)
 DEFAULT = 'observe'
@@ -66,14 +68,16 @@ MAX_BLOCKS = 2  # denials in one session; the next commit with no line passes
 DAYS = 7
 LOG_BYTES = 2_000_000  # the log moves to commit-gate.log.1 above this size
 LOCK_SECONDS = 0.3
+HOOK_LOCK_SECONDS = 5
 PENDING_SECONDS = 3600  # a commit command that has not ended after this long gets no result
 PENDING_MAX = 50
 STATE_DAYS = 45  # cleanup age for sessions with no blocks
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
 SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
 HOOK_MARK = '# tether-commit-gate-hook v1'
+CALL_MARK = '# tether-commit-gate-call v1'
 HOOK_MESSAGE_BYTES = 1_000_000
-SCISSORS = re.compile(r'^. ------------------------ >8 ------------------------\r?$', re.M)
+SCISSORS = '# ------------------------ >8 ------------------------'
 
 
 class GateError(Exception):
@@ -214,7 +218,7 @@ class _Word(NamedTuple):
     fill: bool = False
 
 
-def _word(command, start, bodies):
+def _word(command, start, bodies, *, for_hook):
     parts, plain, bare, quote = [], True, True, ''
     literal_doc, fill = None, False
     index = start
@@ -260,9 +264,10 @@ def _word(command, start, bodies):
         else:
             if quote == '"':
                 # A dollar sign starts an expansion only before a name, a digit or one of these characters.
-                expands = char == '$' and re.match(r'[A-Za-z0-9_{(!#?*@$-]', command[index + 1:index + 2] or ' ')
+                expands = char == '$' and (
+                    for_hook or re.match(r'[A-Za-z0-9_{(!#?*@$-]', command[index + 1:index + 2] or ' '))
                 plain = plain and char != '`' and not expands
-            elif (not quote and char == '~' and index == start and 'HOME=' not in command
+            elif (not for_hook and not quote and char == '~' and index == start and 'HOME=' not in command
                   and command[index + 1:index + 2] in ('', '/', ' ', '\t', '\n', ';', '&', '|', ')')):
                 parts.append(os.path.expanduser('~'))  # the home folder, as the shell writes it for ~ and ~/x
                 index += 1
@@ -278,7 +283,7 @@ def _word(command, start, bodies):
     return _Word(''.join(parts), plain or index == literal_doc, bare, fill), index
 
 
-def _tokens(command, bodies):
+def _tokens(command, bodies, *, for_hook=False):
     index = 0
     while index < len(command):
         char = command[index]
@@ -310,13 +315,12 @@ def _tokens(command, bodies):
             yield char
             index += 1
         else:
-            word, index = _word(command, index, bodies)
+            word, index = _word(command, index, bodies, for_hook=for_hook)
             yield word
 
 
-def _segments(command, bodies):
+def _segments(tokens):
     """Return simple commands with the preceding operator, stdin and redirections, and flag uncertain syntax."""
-    tokens = list(_tokens(command, bodies))
     segments, words, stdin, index, uncertain, redirects_plain = [], [], None, 0, False, True
     preceding, redirected = None, False
     while index < len(tokens):
@@ -355,7 +359,7 @@ def _segments(command, bodies):
 
 
 def _git_commit(words):
-    """None when `words` is not `git ... commit`. Else (commit arguments, [-C folders], folder known)."""
+    """For `git ... commit`, return its arguments, global options, -C folders and whether the folder is known."""
     text = [word.text for word in words]
     index, known = 0, True
     while index < len(text) and (ASSIGNMENT.fullmatch(text[index]) or text[index] in WRAPPERS):
@@ -366,9 +370,10 @@ def _git_commit(words):
     if index >= len(text) or os.path.basename(text[index]) != 'git':
         return None
     index += 1
-    folders = []
+    options, folders = [], []
     while index < len(text) and text[index].startswith('-'):
         option = text[index]
+        options.append(option)
         if option == '-C':
             if index + 1 >= len(words):
                 return None
@@ -381,15 +386,14 @@ def _git_commit(words):
             index += 2 if option in GIT_VALUE_OPTIONS or option in GIT_PLACE_OPTIONS else 1
     if index >= len(text) or text[index] != 'commit':
         return None
-    return words[index + 1:], folders, known
+    return words[index + 1:], options, folders, known
 
 
-def _commit_arguments(args):
-    """{'messages': [...], 'files': [...], 'trailers': [...], 'flags': set()} from the words after `git commit`.
+def _commit_arguments(args, *, for_hook=False):
+    """Extract commit messages, files, trailers, their options and the flags that affect checks.
 
-    Flags: 'skip' (no commit), 'reuse', 'fixup', 'amend', 'no-edit', and 'open': git or an editor can still change
-    the message, or the gate does not know the option."""
-    found = {'messages': [], 'files': [], 'trailers': [], 'flags': set()}
+    The 'open' flag means Git or an editor can still change the message, or the gate does not know the option."""
+    found = {'messages': [], 'files': [], 'trailers': [], 'flags': set(), 'message_words': set()}
     index = 0
 
     def value():
@@ -403,6 +407,8 @@ def _commit_arguments(args):
     def take(kind, text):
         if text is not None:
             found[kind].append(text)
+            if kind in ('messages', 'files'):
+                found['message_words'].add(id(args[index]))
 
     while index < len(args):
         word = args[index]
@@ -423,6 +429,12 @@ def _commit_arguments(args):
             elif name in COMMIT_VALUE_OPTIONS:
                 if not equals:
                     value()
+            elif arg.startswith('--no-v') and '--no-verify'.startswith(arg):
+                found['flags'].add('no-verify')
+            elif for_hook and name in ('--template', '--cleanup'):
+                found['flags'].add('open')
+                if not equals:
+                    value()
             elif name in COMMIT_FLAGS:
                 if name in ('--amend', '--no-edit'):
                     found['flags'].add(name[2:])
@@ -440,11 +452,20 @@ def _commit_arguments(args):
                     if not rest:
                         value()
                     break
+                if for_hook and letter == 't':
+                    found['flags'].add('open')
+                    if not rest:
+                        value()
+                    break
                 if letter in 'uS':  # an optional value, attached only
                     break
                 if letter == 'h':
                     found['flags'].add('skip')
-                elif letter not in SHORT_FLAGS:  # -e, -t, an unknown letter
+                elif letter == 'n':
+                    found['flags'].add('no-verify')
+                elif for_hook and letter == 'e':
+                    found['flags'].add('open')
+                elif letter not in SHORT_FLAGS:
                     found['flags'].add('open')
                     break
         index += 1
@@ -580,7 +601,7 @@ def evaluate(command, cwd=None):
     linked = folder is not None and folder != os.path.normpath(cwd)
     bodies = []
     try:
-        segments, uncertain = _segments(command, bodies)
+        segments, uncertain = _segments(list(_tokens(command, bodies)))
     except ValueError:
         # Quotes that do not close. Report it only when the text looks like a commit at all.
         if re.search(r'(?:^|[\s;&|(])git\s[^\n;|&]*\bcommit(?:\s|$)', command):
@@ -621,7 +642,7 @@ def evaluate(command, cwd=None):
         uncertain = uncertain or _shell_launcher(words)
         commit = _git_commit(words) if words else None
         if commit:
-            args, folders, known = commit
+            args, _, folders, known = commit
             here = folder if known else None
             for item in folders:
                 here = (_real_directory(os.path.join(here, item.text))
@@ -660,23 +681,33 @@ def _state_folder():
 
 
 class _Lock:
-    """One lock for the session files, their cleanup and the log rotation. It waits LOCK_SECONDS at most; then
-    TimeoutError goes up to the hook, which lets the commit through."""
+    """An exclusive file lock with a deadline. The default protects the session files and log rotation."""
+
+    def __init__(self, path=None, seconds=LOCK_SECONDS):
+        self.path = path
+        self.seconds = seconds
 
     def __enter__(self):
-        folder = _state_folder()
-        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.stream = open(folder / '.lock', 'a')
-        deadline = time.monotonic() + LOCK_SECONDS
-        while True:
-            try:
-                fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    self.stream.close()
-                    raise TimeoutError('commit gate lock') from None
-                time.sleep(0.005)
+        path = self.path
+        if path is None:
+            folder = _state_folder()
+            folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = folder / '.lock'
+        self.stream = open(path, 'a')
+        deadline = time.monotonic() + self.seconds
+        try:
+            while True:
+                try:
+                    fcntl.flock(self.stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError('commit gate lock') from None
+                    time.sleep(min(0.005, remaining))
+        except BaseException:
+            self.stream.close()
+            raise
 
     def __exit__(self, kind, error, trace):
         self.stream.close()
@@ -876,39 +907,67 @@ def _project(cwd, env, tmux=_tmux):
     return _project_id(pid)
 
 
-HOOK_OVERRIDE = re.compile(r'--no-verify|--config-env|core\.hooksPath|GIT_CONFIG|'
-                           r'--git-dir|GIT_DIR|--work-tree|GIT_WORK_TREE|GIT_COMMON_DIR|(?<![\w-])-[cn](?![\w-])',
-                           re.I)
-SHORT_NO_VERIFY = re.compile(r'^-[apsvqzioeh]*n')
+HOOK_ENV_WORDS = set('export env unset alias set declare typeset local readonly source . eval exec'.split())
+HOOK_CWD_WORDS = {'-C', 'cd', 'pushd', 'popd', 'builtin'}
+HOOK_GIT_OPTIONS = re.compile(r'-c|--(?:git-dir|work-tree|config-env).*', re.S)
+HOOK_CONFIG_WORD = re.compile(r'GIT_|hooksPath', re.I)
 
 
-def _has_gate_marker(hook):
-    return HOOK_MARK.encode() in hook.read_bytes().splitlines()
+def _has_gate_marker(hook, *, allow_call=False):
+    try:
+        if not stat_module.S_ISREG(hook.lstat().st_mode):
+            return False
+        with open(hook, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)) as stream:
+            if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False
+            lines = stream.read().splitlines()
+        return HOOK_MARK.encode() in lines or (allow_call and any(
+            line.rstrip().endswith(CALL_MARK.encode()) and not line.lstrip().startswith(b'#') for line in lines))
+    except OSError:
+        return False
 
 
 def _defer_to_hook(tree, command, *, cwd_fallback=False):
-    if tree is None or HOOK_OVERRIDE.search(command):
+    if tree is None:
         return False
     hooks = _git_path(tree, '--git-path', 'hooks')
     if hooks is None:
         return False
     hook = hooks / 'commit-msg'
     try:
-        if not os.access(hook, os.X_OK) or not hook.is_file() or not _has_gate_marker(hook):
+        if not os.access(hook, os.X_OK) or not _has_gate_marker(hook, allow_call=True):
             return False
-        # Inspect assembled words too. A quoted cluster or a line join can hide a bypass in the raw text.
-        for word in _tokens(command, []):
+        tokens = list(_tokens(command, [], for_hook=True))
+        segments, uncertain = _segments(tokens)
+        if uncertain:
+            return False
+        message_words, found_commit = set(), False
+        for _, words, _, _, _ in segments:
+            if words and words[0].bare and words[0].text in KEYWORDS:
+                return False
+            if commit := _git_commit(words):
+                args, options, _, _ = commit
+                parsed = _commit_arguments(args, for_hook=True)
+                if 'no-verify' in parsed['flags'] or any(HOOK_GIT_OPTIONS.fullmatch(option) for option in options):
+                    return False
+                message_words.update(parsed['message_words'])
+                found_commit = True
+        for word in tokens:
             if not isinstance(word, _Word):
                 continue
-            arg = word.text
-            if (HOOK_OVERRIDE.search(arg) or SHORT_NO_VERIFY.match(arg)
-                    or (arg.startswith('--no-v') and '--no-verify'.startswith(arg))):
+            message = id(word) in message_words
+            if not word.plain or (word.fill and not message):
                 return False
-            if cwd_fallback and arg in ('-C', 'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'):
+            if message:
+                continue
+            arg = word.text
+            if ASSIGNMENT.fullmatch(arg) or arg in HOOK_ENV_WORDS or HOOK_CONFIG_WORD.search(arg):
+                return False
+            if cwd_fallback and arg in HOOK_CWD_WORDS:
                 return False  # evaluate could not follow a change of directory
     except (OSError, ValueError):
         return False
-    return True
+    return found_commit
 
 
 def check(data, env=os.environ, now=None):
@@ -1017,6 +1076,32 @@ def hook(data, env=os.environ):
 
 # ---- Git's commit-msg hook ----
 
+class _Ancestor(NamedTuple):
+    pid: int
+    comm: str
+    argv: list[str]
+    exact_argv: bool
+
+
+def _process_argv(pid, comm, deadline):
+    if sys.platform.startswith('linux'):
+        try:
+            raw = Path(f'/proc/{pid}/cmdline').read_bytes()
+            if raw.endswith(b'\0'):
+                return os.fsdecode(raw[:-1]).split('\0'), True
+        except OSError:
+            pass
+    remaining = deadline - time.monotonic()
+    if comm == 'git' and remaining > 0:
+        try:
+            shown = subprocess.run(['ps', '-ww', '-o', 'args=', '-p', str(pid)], capture_output=True,
+                                   text=True, errors='replace', check=True, timeout=remaining)
+            return shown.stdout.split(), False
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return [], False
+
+
 def _ancestors():
     """Nearest parents first. A vanished process or a slow ps ends the walk."""
     pid = os.getppid()
@@ -1038,7 +1123,7 @@ def _ancestors():
                 ppid, comm = int(parent), os.path.basename(comm)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             break
-        yield pid, comm
+        yield _Ancestor(pid, comm, *_process_argv(pid, comm, deadline))
         if ppid == pid:
             break
         pid = ppid
@@ -1058,14 +1143,14 @@ def _project_for_hook(cwd, env, ancestors=None):
         pane, tab, project = line.partition('\t')
         if tab:
             panes.setdefault(pane, set()).add(project)
-    for pid, _ in _ancestors() if ancestors is None else ancestors:
-        if projects := panes.get(str(pid)):
+    for ancestor in _ancestors() if ancestors is None else ancestors:
+        if projects := panes.get(str(ancestor.pid)):
             return _project_id(next(iter(projects))) if len(projects) == 1 else (None, False)
     return _project(cwd, env)
 
 
 def _source_session(ancestors, env):
-    for pid, comm in ancestors:
+    for pid, comm, _, _ in ancestors:
         if comm == 'claude':
             source = 'claude'
             break
@@ -1079,12 +1164,162 @@ def _source_session(ancestors, env):
             source = 'claude'
         else:
             return 'terminal', None
-        pid = os.getppid()
+        pid = None
     session = env.get('CLAUDE_CODE_SESSION_ID' if source == 'claude' else 'CODEX_THREAD_ID', '')
-    return source, session if SESSION.fullmatch(session) else f'{source}-pid-{pid}'
+    if SESSION.fullmatch(session):
+        return source, session
+    claude_pid = env.get('CLAUDE_PID', '')
+    if source == 'claude' and re.fullmatch(r'[0-9]+', claude_pid):
+        return source, f'claude-pid-{claude_pid}'
+    if pid is not None:
+        return source, f'{source}-pid-{pid}'
+    if pane := re.fullmatch(r'%([0-9]+)', env.get('TMUX_PANE', '')):
+        return source, f'{source}-pane-{pane[1]}'
+    return source, None
 
 
-def _final_verdict(path, cwd):
+GIT_GLOBAL_VALUES = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--shallow-file'}
+GIT_GLOBAL_FLAGS = set((
+    '-p -P --paginate --no-pager --no-replace-objects --bare --literal-pathspecs --no-literal-pathspecs '
+    '--glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice'
+).split())
+GIT_GLOBAL_ATTACHED = {'--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path'}
+COMMIT_REQUIRED_VALUES = {name[2:] for name in COMMIT_VALUE_OPTIONS} | {
+    'message', 'file', 'reuse-message', 'reedit-message', 'fixup', 'squash', 'template', 'cleanup', 'trailer',
+}
+COMMIT_OPTIONAL_VALUES = {'gpg-sign', 'untracked-files'}
+COMMIT_CLEANUP_FLAGS = {name[2:] for name in COMMIT_FLAGS} | {
+    'edit', 'interactive', 'dry-run', 'short', 'branch', 'ahead-behind', 'porcelain', 'long', 'null',
+}
+COMMIT_SHORT_NAMES = {
+    'm': 'message', 'F': 'file', 'C': 'reuse-message', 'c': 'reedit-message', 't': 'template',
+    'e': 'edit', 'v': 'verbose', 'u': 'untracked-files', 'S': 'gpg-sign',
+    'a': 'all', 'p': 'patch', 's': 'signoff', 'q': 'quiet', 'n': 'no-verify',
+    'z': 'null', 'i': 'include', 'o': 'only',
+}
+
+
+def _commit_argv(ancestor):
+    args = iter(ancestor.argv[1:])
+    for arg in args:
+        if arg == 'commit':
+            return args
+        if arg in GIT_GLOBAL_FLAGS:
+            continue
+        if not ancestor.exact_argv:
+            return None  # ps may have joined the option, its value and later arguments
+        if arg in GIT_GLOBAL_VALUES and next(args, None) is not None:
+            continue
+        name, equals, _ = arg.partition('=')
+        if equals and name in GIT_GLOBAL_ATTACHED:
+            continue
+        return None
+    return None
+
+
+def _cleanup_options(args, *, exact_argv):
+    """Parse the Git 2.43 commit options that affect the final message cleanup."""
+    options = {}
+    for arg in args:
+        if arg == '--':
+            break
+        if arg.startswith('--'):
+            name, equals, value = arg[2:].partition('=')
+            negated = not equals and name.startswith('no-') and name not in ('no-verify', 'no-post-rewrite')
+            if negated:
+                name = name[3:]
+            if name in COMMIT_CLEANUP_FLAGS and name not in COMMIT_OPTIONAL_VALUES and not equals:
+                options[name] = not negated
+            elif name in COMMIT_REQUIRED_VALUES or name in COMMIT_OPTIONAL_VALUES:
+                if not exact_argv:
+                    return None
+                if negated:
+                    if name == 'trailer':
+                        return None
+                    value = None
+                elif not equals and name in COMMIT_REQUIRED_VALUES:
+                    value = next(args, None)
+                if not negated and value is None:
+                    return None
+                options[name] = value
+            else:
+                return None
+        elif arg.startswith('-') and len(arg) > 1:
+            for index, letter in enumerate(arg[1:], start=2):
+                name = COMMIT_SHORT_NAMES.get(letter)
+                if name is None:
+                    return None
+                if name in COMMIT_REQUIRED_VALUES or name in COMMIT_OPTIONAL_VALUES:
+                    if not exact_argv:
+                        return None
+                    value = arg[index:]
+                    if not value and name in COMMIT_REQUIRED_VALUES:
+                        value = next(args, None)
+                        if value is None:
+                            return None
+                    options[name] = value
+                    break
+                options[name] = True
+        elif not exact_argv:
+            return None  # a pathspec from ps could contain a word that looks like an option
+    return options
+
+
+def _cleanup_mode(cwd, ancestors, env):
+    git_commands = [
+        (entry, _commit_argv(entry)) for entry in ancestors
+        if entry.argv and os.path.basename(entry.argv[0]) == 'git'
+    ]
+    # Git runs a second Git process for a builtin alias. Its parent still names the alias.
+    if not git_commands or any(args is None for _, args in git_commands):
+        return None
+    git, args = git_commands[0]
+    if (options := _cleanup_options(args, exact_argv=git.exact_argv)) is None:
+        return None
+    use_editor = options.get('edit')
+    if use_editor is None:
+        use_editor = all(options.get(name) is None for name in ('message', 'file', 'reuse-message'))
+        fixup = options.get('fixup')
+        if use_editor and fixup in ('amend', 'reword'):
+            # Git 2.43 replaces the colon with NUL in argv. A ref named "amend" or "reword"
+            # can look the same. Git sets GIT_EDITOR=: in the hook if it skipped the editor.
+            use_editor = env.get('GIT_EDITOR') != ':'
+            if not use_editor:
+                try:
+                    original_env = Path(f'/proc/{git.pid}/environ').read_bytes().split(b'\0')
+                except OSError:
+                    return None
+                if b'GIT_EDITOR=:' in original_env:
+                    return None  # the original editor and Git's no-editor signal are identical
+        elif fixup is not None and not fixup.startswith(('amend:', 'reword:')):
+            use_editor = False
+    cleanup = options.get('cleanup')
+    if 'cleanup' not in options:
+        shown = _git(cwd, 'config', '--get', 'commit.cleanup')
+        if shown is None or shown.returncode not in (0, 1):
+            return None
+        cleanup = shown.stdout.removesuffix('\n') if shown.returncode == 0 else None
+    if cleanup not in (None, 'default', 'strip', 'whitespace', 'scissors'):
+        return None
+    verbose = options.get('verbose')
+    if verbose is None:
+        shown = _git(cwd, 'config', '--bool', '--get', 'commit.verbose')
+        if shown is None or shown.returncode not in (0, 1):
+            return None
+        verbose = shown.stdout == 'true\n'
+    truncate = verbose or (cleanup == 'scissors' and use_editor)
+    strip = cleanup == 'strip' or (cleanup in (None, 'default') and use_editor)
+    return truncate, strip
+
+
+def _message_verdict(lines):
+    subject = next((line for line in lines if line.strip()), '')
+    if subject.startswith(('fixup! ', 'squash! ', 'amend! ')):
+        return 'skip', 'fixup'
+    return ('would_block', 'no-line') if stamp.message_status('\n'.join(lines)) == 'missing' else ('pass', '')
+
+
+def _final_verdict(path, cwd, ancestors, env):
     git_dir = _git_path(cwd, '--git-dir')
     if git_dir is None:
         raise GateError(400, 'Git could not find the repository for the commit message.')
@@ -1096,8 +1331,6 @@ def _final_verdict(path, cwd):
         if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError('Git commit message is not a regular file')
         message = stream.read(HOOK_MESSAGE_BYTES + 1)
-    if message.lstrip(b'\r\n').startswith((b'fixup! ', b'squash! ', b'amend! ')):
-        return 'skip', 'fixup'
     if len(message) > HOOK_MESSAGE_BYTES:
         return 'unknown', 'size'
     config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
@@ -1105,8 +1338,15 @@ def _final_verdict(path, cwd):
         raise GateError(400, 'Git could not read the commit comment configuration.')
     if any(item.partition(b'\n')[2] != b'#' for item in config.stdout.split(b'\0') if item):
         return 'unknown', 'comment-char'
-    text = SCISSORS.split(message.decode('utf-8', errors='replace'), maxsplit=1)[0]
-    return ('would_block', 'no-line') if stamp.message_status(text) == 'missing' else ('pass', '')
+    lines = message.decode('utf-8', errors='replace').split('\n')
+    cut = next((index for index, line in enumerate(lines) if line == SCISSORS), len(lines))
+    verdicts = {}
+    for truncate, part in ((False, lines), (True, lines[:cut])):
+        verdicts[truncate, False] = _message_verdict(part)
+        verdicts[truncate, True] = _message_verdict([line for line in part if not line.startswith('#')])
+    if len(set(verdicts.values())) == 1:
+        return verdicts[False, False]
+    return verdicts.get(_cleanup_mode(cwd, ancestors, env), ('unknown', 'cleanup'))
 
 
 def commit_msg(path, env=os.environ, cwd=None, now=None):
@@ -1129,9 +1369,11 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         record['mode'] = mode
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
-        verdict, reason = _final_verdict(path, cwd)
+        verdict, reason = _final_verdict(path, cwd, ancestors, env)
         blocks = None
-        if verdict == 'would_block' and mode == 'enforce' and sure:
+        if verdict == 'would_block' and mode == 'enforce' and source != 'terminal' and session is None:
+            verdict, reason = 'let_through', 'no-session'
+        elif verdict == 'would_block' and mode == 'enforce' and sure:
             verdict = 'block'
             if session is not None:
                 with _Lock():
@@ -1157,8 +1399,10 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
     return 0, ''
 
 
-def install_hook(repo, uninstall=False, gate=None, python=None):
+def install_hook(repo, uninstall=False, gate=None, python=None, *, deadline=10):
     """Install the hook in Git's metadata or an external hooks directory."""
+    if type(deadline) is not int or deadline <= 0:
+        raise ValueError('Hook deadline must be a positive number of seconds.')
     tree = _tree(repo)
     if tree is None:
         raise GateError(400, 'Choose a Git work tree.')
@@ -1169,59 +1413,74 @@ def install_hook(repo, uninstall=False, gate=None, python=None):
     hooks = hooks.resolve()
     if hooks.is_relative_to(Path(tree).resolve()) and not hooks.is_relative_to(common.resolve()):
         raise GateError(400, 'The hooks directory is inside the work tree. Choose a hooks directory outside it.')
-    hook, local = hooks / 'commit-msg', hooks / 'commit-msg.local'
-    if hook.is_symlink():
-        raise GateError(400, 'The commit-msg hook is a symlink. Choose a regular hook file.')
-    exists = hook.exists()
-    if exists and not hook.is_file():
-        raise GateError(400, 'The commit-msg hook must be a regular file.')
-    ours = exists and _has_gate_marker(hook)
-    has_local = os.path.lexists(local)
-    if uninstall:
-        if not ours:
-            return 'No Tether commit-msg hook to uninstall.'
-        if has_local:
-            os.replace(local, hook)
-            return 'Uninstalled the Tether commit-msg hook and restored commit-msg.local to commit-msg.'
-        hook.unlink()
-        return 'Uninstalled the Tether commit-msg hook.'
-    foreign = exists and not ours
-    if foreign and has_local:
-        raise GateError(400, 'Both commit-msg and commit-msg.local exist. Move one before installing the hook.')
-    gate = Path(__file__).resolve() if gate is None else Path(gate).absolute()
-    python = Path(sys.executable if python is None else python).absolute()
+    hook = hooks / 'commit-msg'
+    lock = hooks / '.tether-commit-msg.lock'
+    gate = shlex.quote(str(Path(__file__).resolve() if gate is None else Path(gate).absolute()))
+    python = shlex.quote(str(Path(sys.executable if python is None else python).absolute()))
+    refusal = (f'Tether cannot replace {hook}. Before the hook exits with status 0, add this line to your hook:\n'
+               f'{python} {gate} commit-msg "$1" || [ $? -ne 3 ] || exit 1  {CALL_MARK}')
     script = f'''#!/bin/sh
 {HOOK_MARK}
-# Written by Tether (server/commit_gate.py install-hook). Your own commit-msg hook goes in commit-msg.local.
-hooks=$(dirname "$0")
-if [ -x "$hooks/commit-msg.local" ]; then "$hooks/commit-msg.local" "$@" || exit $?; fi
-gate={shlex.quote(str(gate))}
-py={shlex.quote(str(python))}
+# Written by Tether (server/commit_gate.py install-hook).
+gate={gate}
+py={python}
 [ -f "$gate" ] && [ -x "$py" ] || exit 0
-if command -v timeout >/dev/null 2>&1; then timeout 10 "$py" "$gate" commit-msg "$1"; else "$py" "$gate" commit-msg "$1"; fi
-[ $? -eq 3 ] && exit 1
+"$py" "$gate" commit-msg "$1" &
+child=$!
+(
+    timer= cancelled=
+    stop_timer() {{
+        kill "$timer" 2>/dev/null
+        wait "$timer" 2>/dev/null
+        exit 0
+    }}
+    trap 'cancelled=1; [ -z "$timer" ] || stop_timer' TERM
+    sleep {deadline} &
+    timer=$!
+    [ -z "$cancelled" ] || stop_timer
+    wait "$timer"
+    kill -KILL "$child" 2>/dev/null
+) </dev/null >/dev/null 2>&1 &
+watcher=$!
+wait "$child"; rc=$?
+kill "$watcher" 2>/dev/null
+wait "$watcher" 2>/dev/null
+[ "$rc" -eq 3 ] && exit 1
 exit 0
 '''
     hooks.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=hooks, prefix='.commit-msg.', mode='w', encoding='utf-8', delete=False) as out:
-        temp = Path(out.name)
-        try:
-            out.write(script)
-            os.fchmod(out.fileno(), 0o755)
-            out.close()
-            if foreign:
-                hook.rename(local)
-            try:
-                os.replace(temp, hook)
-            except OSError:
-                if foreign:
-                    local.rename(hook)
-                raise
-        finally:
-            temp.unlink(missing_ok=True)
-    if foreign:
-        return 'Installed the Tether commit-msg hook. Moved the existing hook to commit-msg.local.'
-    return ('Updated' if ours else 'Installed') + ' the Tether commit-msg hook.'
+    try:
+        with _Lock(lock, HOOK_LOCK_SECONDS):
+            exists = os.path.lexists(hook)
+            ours = exists and _has_gate_marker(hook)
+            if uninstall:
+                if not ours:
+                    return 'No Tether commit-msg hook to uninstall.'
+                hook.unlink()
+                return 'Uninstalled the Tether commit-msg hook.'
+            if exists and not ours:
+                raise GateError(400, refusal)
+            with tempfile.NamedTemporaryFile(dir=hooks, prefix='.commit-msg.', mode='w', encoding='utf-8',
+                                             delete=False) as out:
+                temp = Path(out.name)
+                try:
+                    out.write(script)
+                    os.fchmod(out.fileno(), 0o755)
+                    out.close()
+                    if ours:
+                        if not _has_gate_marker(hook):
+                            raise GateError(400, refusal)
+                        os.replace(temp, hook)
+                    else:
+                        try:
+                            os.link(temp, hook)
+                        except FileExistsError:
+                            raise GateError(400, refusal) from None
+                finally:
+                    temp.unlink(missing_ok=True)
+            return ('Updated' if ours else 'Installed') + ' the Tether commit-msg hook.'
+    except TimeoutError:
+        raise GateError(400, f'Timed out waiting for {lock}.') from None
 
 
 # ---- the numbers for Settings ----
@@ -1375,6 +1634,9 @@ def post(handler):
 def _main(args):
     if args[:1] == ['commit-msg']:
         try:
+            if hasattr(signal, 'SIGALRM') and hasattr(signal, 'alarm'):
+                signal.signal(signal.SIGALRM, lambda *a: os._exit(0))
+                signal.alarm(5)
             if len(args) == 2:
                 code, message = commit_msg(args[1], cwd=os.getcwd())
                 if message:
