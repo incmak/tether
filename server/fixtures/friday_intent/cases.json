@@ -811,7 +811,7 @@
      "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)\\bC\\b"
     },
-    "prompt_not": "(?i)yes to all"
+    "prompt_not": "(?i)\\ball\\b|approv|\\boption [ABD]\\b"
    },
    "state": {
     "busy": [
@@ -868,7 +868,7 @@
      "chat": "(?i)^Automation tether \\. Can we have\u2026$",
      "prompt": "(?i)\\bQ?7\\b"
     },
-    "prompt_not": "(?i)yes to all"
+    "prompt_not": "(?i)\\ball\\b|approv|\\boption [ABD]\\b"
    },
    "state": {
     "busy": [
@@ -2154,7 +2154,7 @@
     "tool": null,
     "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "prompt": "(?is)^(?!.*\\ball\\b).*\\bC\\b"
+     "prompt": "(?is)^(?!.*(\\ball\\b|approv|\\boption [ABD]\\b)).*\\bC\\b"
     }
    },
    "state": {
@@ -2324,7 +2324,8 @@
    "user": "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
    "expect": {
     "tool": null,
-    "reply_not": "(?i)image|filing|gap|book|tell me more"
+    "reply": "(?s)^.{0,120}$",
+    "reply_not": "(?i)image|filing|gap|book|tell me more|regression|edition|affected|fix"
    }
   },
   {
@@ -2372,7 +2373,8 @@
    "user": "Do you think we should keep that?",
    "expect": {
     "tool": null,
-    "reply": "(?is)(?=.*(\\bC\\b|observe))(?=.*(recommend|suggest|propos|advis|it says|next step))"
+    "reply": "(?is)(?=.*(\\bC\\b|observe))(?=.*(recommend|suggest|propos|advis|it says|next step))",
+    "reply_not": "(?i)(over|instead of|rather than|not) (option )?C\\b|option [ABD]\\b"
    },
    "state": {
     "busy": [
@@ -2390,7 +2392,7 @@
   },
   {
    "id": "log-answer-it-keep-c",
-   "group": "send_direct",
+   "group": "readback",
    "split": "dev",
    "source": "log",
    "history": [
@@ -2448,12 +2450,11 @@
    ],
    "user": "Well like answer it like let's keep option C",
    "expect": {
-    "tool": "send_to_chat",
+    "tool": null,
+    "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
-     "prompt": "(?i)\\bC\\b"
-    },
-    "prompt_not": "(?i)\\ball\\b"
+     "prompt": "(?is)^(?!.*(\\ball\\b|approv|\\boption [ABD]\\b)).*\\bC\\b"
+    }
    },
    "state": {
     "busy": [

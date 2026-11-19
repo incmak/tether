@@ -104,13 +104,10 @@ MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|instruct|forward)\b'
-    # "the wrong message" or "my prompt" is a noun, not a send word.
-    r'|(?<!\bthe )(?<!\bmy )(?<!\bwrong )(?<!\bthat )(?<!\bthis )(?<!\byour )\b(?:prompt|message)\b'
+    # Prompt and message are send words only as verbs with an object: "the draft message was longer" is not.
+    r'|\b(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)+)\b'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
-    r'|\bget\s+(?:it|them)\s+to\b'
-    # "answer it" counts only as an order: "don't answer it" and "should I reply to it?" do not.
-    r'|(?:^|[.,!;:]\s*|\b(?:please|just|so|now|like|then|and|okay|ok|yes|go ahead and)\s+)'
-    r'(?:answer\s+(?:it|them)|reply\s+to\s+(?:it|them))\b(?![^.!]*\?)', re.I)
+    r'|\bget\s+(?:it|them)\s+to\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
@@ -527,12 +524,12 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # Friday's fixed read-back requires the matching proposal, even after it expires.
         fixed_readback = (readback.startswith(SEND_READBACK_START.casefold())
                           and readback.endswith((SEND_READBACK_END.casefold(), SEND_READBACK_QUESTION_END.casefold())))
-        # A free-form read-back counts only when it asked to send something.
-        asked_send = '?' in readback and re.search(r'\b(?:send|ask|tell|forward|message)\b', readback)
-        legacy_matches = (not fixed_readback and asked_send
-                          and ((prompt and prompt in readback)
-                               or (chat and re.search(r'\bsend\b', readback)
-                                   and re.search(r'(?<![\w-])' + re.escape(chat) + r'(?![\w-])', readback))))
+        # A free-form read-back counts only when it asked to send this exact text to this exact chat.
+        def said(text):
+            return bool(text) and re.search(r'(?<![\w-])' + re.escape(text) + r'(?![\w-])', readback)
+        legacy_matches = (not fixed_readback and '?' in readback
+                          and re.search(r'\b(?:send|ask|tell|forward|message)\b', readback)
+                          and said(prompt.rstrip('.!?')) and said(chat))
         if not (yes and (proposal_matches or legacy_matches)):
             return READBACK_REQUIRED
     return None

@@ -397,15 +397,17 @@ class FridayRulesTests(unittest.TestCase):
         for text in ('tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it',
                      'instruct it', 'message ci-audit', 'forward this', 'have it fix it',
                      'have them fix it', 'have ci-audit fix it', 'get it to fix it',
-                     'get them to fix it', 'answer it, keep option C', 'well like answer it like keep C',
-                     'Reply to it with C.'):
+                     'get them to fix it'):
             self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
         for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish',
                      'what was the answer', 'did it reply', "Don't answer it yet.",
-                     'Should I reply to it now?', 'What should I reply with?', 'answer it?',
-                     'You sent the wrong message.', 'You sent the wrong text.', 'my prompt was longer'):
+                     'Should I reply to it now?', 'What should I reply with?', 'answer it',
+                     "Don't, like, answer it yet", 'I can just answer it myself',
+                     "Why don't I just reply to it myself", 'well like answer it like keep C',
+                     'You sent the wrong message.', 'You sent the wrong text.', 'my prompt was longer',
+                     'The draft message was longer'):
             self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
-        for readback in ('Shall I send ci-audit the fix?', 'Should I ask it: Fix the flake.?'):
+        for readback in ('Should I send Fix the flake to ci-audit?', 'Shall I ask ci-audit: Fix the flake.?'):
             for yes in ('yes', 'YEP!', 'go ahead'):
                 self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', yes, set(), readback))
             for no in ('no', 'yes but no', "yes, don't", 'yesterday'):
@@ -416,7 +418,16 @@ class FridayRulesTests(unittest.TestCase):
                                            'Option C keeps Observe mode active.'), refusal)
         self.assertIsNone(friday.check_tool('send_to_chat', short, 'speech', 'Okay', set(),
                                             'Should I send C to ci-audit?'))
-        for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Should I send this elsewhere?'):
+        self.assertEqual(friday.check_tool('send_to_chat', dict(short, chat='deploy'), 'speech', 'Okay', set(),
+                                           'Should I send C to docs?'), refusal)
+        self.assertEqual(friday.check_tool('backlog_send', {'chat': 'deploy', 'item': 'B99'}, 'speech', 'Okay',
+                                           set(), 'Should I send B12 to deploy?'), refusal)
+        self.assertIsNone(friday.check_tool('backlog_send', {'chat': 'deploy', 'item': 'B12'}, 'speech', 'Okay',
+                                            set(), 'Should I send B12 to deploy?'))
+        # A free-form read-back binds both the text and the chat.
+        for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Should I send this elsewhere?',
+                         'Shall I send ci-audit the fix?', 'Should I ask it: Fix the flake.?',
+                         'Should I send Fix the flake to deploy?', 'Should I send Fix the flake to ci-audit-old?'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'yes', set(), readback), refusal)
 
     def test_send_consent_matches_pending_tool_chat_and_turn(self):
