@@ -329,10 +329,11 @@ def sync_source(label, account, links, present, now):
                 key = source['key']
                 opened = not deleted and record['state'] != 'done'
                 if key in present:
-                    # Pick the reminder for this key: the open one (at most one), else the saved link, else a
-                    # live record over a deleted one, else the newest. The saved link outranks creation time,
-                    # so closing a restored reminder never moves the link to older history.
-                    order = (opened, record['id'] == links.get(key, {}).get('id'), not deleted,
+                    # Pick the reminder for this key: the open one (at most one), else a live record over a
+                    # deleted one, else the saved link, else the newest. The saved link outranks creation time,
+                    # so closing a restored reminder keeps its link. A live record outranks the link, so a link
+                    # left stale by a failed mirror write never points at a deleted reminder.
+                    order = (opened, not deleted, record['id'] == links.get(key, {}).get('id'),
                              record.get('created', 0))
                     history[key].append((record, deleted, order))
                 elif opened:

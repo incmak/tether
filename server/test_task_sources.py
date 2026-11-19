@@ -397,6 +397,41 @@ class TaskTests(unittest.TestCase):
                 self.assertEqual(mine, [(first, 'scheduled', at + 120)])
                 self.pages[LIST] = page()
 
+    def test_a_live_reminder_beats_a_stale_link_to_a_deleted_one(self):
+        # Review round 5: the mirror write failed after sync made R2, so the saved link still named deleted R1.
+        for close_new in ('done', 'snooze-then-done'):
+            with self.subTest(new=close_new):
+                key = f'stale-{close_new}'
+                clock = iter(NOW + step for step in range(100))
+                self.enterContext(mock.patch.object(task_sources, 'time', SimpleNamespace(time=lambda: next(clock))))
+                self.alert()
+                at = NOW + 3600
+                first = self.poll(todo(key, at))['tasks'][0]['reminder']
+                reminders.change(first, 'delete', now=NOW)
+                real_save = task_sources._save
+                failed = []
+
+                def fail_mirror_once(name, data):
+                    if name == 'mirror.json' and not failed:
+                        failed.append(name)
+                        raise OSError('disk full')
+                    return real_save(name, data)
+                with mock.patch.object(task_sources, '_save', fail_mirror_once):
+                    with self.assertRaises(OSError):
+                        self.poll(todo(key, at + 60))
+                second = next(r['id'] for r in self.active() if r['id'] != first and r['state'] != 'done'
+                              and r['due'] == at + 60)
+                occ = next(r['occ'] for r in self.active() if r['id'] == second)
+                if close_new == 'snooze-then-done':
+                    reminders.change(second, 'snooze', {'occ': occ, 'until': at + 90}, now=NOW)
+                    occ = next(r['occ'] for r in self.active() if r['id'] == second)
+                reminders.change(second, 'done', {'occ': occ}, now=NOW)
+                self.assertEqual(self.poll(todo(key, at + 60))['tasks'][0]['reminder'], second)
+                self.assertEqual(self.poll(todo(key, at + 120))['tasks'][0]['reminder'], second)
+                mine = [(r['id'], r['state'], r['due']) for r in self.active() if r['state'] != 'done']
+                self.assertEqual(mine, [(second, 'scheduled', at + 120)])
+                self.pages[LIST] = page()
+
     def test_planner_reads_assigned_open_tasks_and_caches_plan_names(self):
         task_sources.settings_for('planner', alerts=True)
         self.pages[PLANNER] = page({'id': 'a/b', 'planId': 'plan-5', 'title': 'First', 'percentComplete': 0,
