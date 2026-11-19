@@ -251,6 +251,27 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.calls.count('/planner/plans/plan-5?$select=title'), 1)
         self.assertEqual(self.active(), [])
 
+    def test_planner_plan_without_access_keeps_other_tasks(self):
+        self.pages[PLANNER] = page({'id': '1', 'planId': 'gone', 'title': 'Old plan task', 'percentComplete': 0},
+                                   {'id': '2', 'planId': 'ok', 'title': 'Live task', 'percentComplete': 0})
+        self.pages['/planner/plans/gone'] = graph_client.GraphError('Forbidden', 403)
+        self.pages['/planner/plans/ok'] = {'title': 'Launch'}
+        listed = self.poll()
+        planner = next(source for source in listed['sources'] if source['id'] == 'planner')
+        self.assertEqual(planner['state'], 'ok')
+        self.assertEqual(sorted((row['title'], row['list']) for row in listed['tasks'] if row['source'] == 'planner'),
+                         [('Live task', 'Launch'), ('Old plan task', task_sources.UNNAMED_PLAN)])
+        self.pages['/planner/plans/ok'] = graph_client.GraphError('Server busy', 503)
+        task_sources._PLAN_NAMES.clear()
+        self.assertEqual(next(s for s in self.poll()['sources'] if s['id'] == 'planner')['state'], 'error')
+
+    def test_unexpected_error_does_not_end_the_poller(self):
+        with mock.patch.object(task_sources, 'sync', side_effect=KeyError('private title')), \
+                mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+            task_sources._tick()
+        self.assertIn('KeyError', err.getvalue())
+        self.assertNotIn('private title', err.getvalue())
+
     def test_missing_scope_lists_exact_reconnect_command(self):
         self.grant('mail', 'teams')
         task_sources.sync()

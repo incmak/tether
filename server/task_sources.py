@@ -34,6 +34,7 @@ DEFAULTS = {'enabled': True, 'alerts': False}
 EVERY = 300
 TODO_HOME = 'https://to-do.office.com/tasks/'
 PLANNER_HOME = 'https://planner.cloud.microsoft/'
+UNNAMED_PLAN = 'Plan without access'
 TODO_FIELDS = 'id,title,status,importance,dueDateTime,reminderDateTime,isReminderOn,lastModifiedDateTime'
 TODO_FILTER = "status ne 'completed'"
 WINDOWS_ZONES = {'India Standard Time': 'Asia/Kolkata', 'GMT Standard Time': 'Europe/London',
@@ -208,11 +209,17 @@ def _planner(client, config, now):
         if cache_key not in _PLAN_NAMES:
             path = f'/planner/plans/{plan}'
             try:
-                found = client.get(_query(path, select='title'))
+                try:
+                    found = client.get(_query(path, select='title'))
+                except graph_client.GraphError as exc:
+                    if exc.status not in (400, 501):
+                        raise
+                    found = client.get(path)
             except graph_client.GraphError as exc:
-                if exc.status not in (400, 501):
+                # A plan Mak can no longer open (left the group, plan deleted) must not hide his other tasks.
+                if exc.status not in (403, 404):
                     raise
-                found = client.get(path)
+                found = {'title': UNNAMED_PLAN}
             name = _one_line(found.get('title') if isinstance(found, dict) else None)
             if not name:
                 raise TaskError('Microsoft returned a Planner plan without a title.', 502)
@@ -296,13 +303,20 @@ _START = threading.Lock()
 _THREAD = None
 
 
+def _tick():
+    """One poll that never ends the thread. Log only the error type: a message can hold task data."""
+    try:
+        sync()
+    except (TaskError, OSError):
+        print('Task sources could not read or save their local files.', file=sys.stderr, flush=True)
+    except Exception as exc:  # noqa: BLE001 - a daemon poller must survive an unexpected Graph body or bug
+        print(f'Task sources sync failed ({type(exc).__name__}). The next poll tries again.', file=sys.stderr, flush=True)
+
+
 def _run():
     while True:
         _WAKE.clear()
-        try:
-            sync()
-        except (TaskError, OSError):
-            print('Task sources could not read or save their local files.', file=sys.stderr, flush=True)
+        _tick()
         _WAKE.wait(EVERY)
 
 
