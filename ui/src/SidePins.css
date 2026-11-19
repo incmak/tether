@@ -7,7 +7,7 @@
 .side-pin-bubble.docked.right .side-pin-count { translate: 2px 0; }
 .side-pin-bubble.docked.left .side-pin-count { translate: -2px 0; }
 .side-pin-bubble.unread .side-pin-count::after { content: ''; position: absolute; top: -5px; right: -5px; width: 7px; height: 7px; border-radius: 50%; background: var(--pin); box-shadow: 0 0 0 2px var(--surface); }
-.side-pin-bubble.open.unread .side-pin-count::after { top: -4px; right: -8px; }
+.side-pin-bubble.open.unread:not(.docked) .side-pin-count::after { top: -4px; right: -8px; }
 .agent-pop-head.side-pin-head { gap: 4px; flex: none; }
 .side-pin-head .icon-button { color: var(--muted); }
 .side-pin-edit { min-height: 32px; padding: 0 10px; border-radius: var(--radius); color: var(--pin); font-size: 13px; font-weight: 600; }
