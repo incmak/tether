@@ -945,6 +945,11 @@ def _idle_source(link, cap, worker, turn_source):
             cap['feedback_turn'] = {**feedback, 'phase': 'pending'}
         elif after_send and (feedback['phase'] == 'working' or source == 'user' and started_at is not None):
             cap.pop('feedback_turn')
+            # The correction's turn ended unmatched (Antigravity has no prompt time). Its marker must not outlive it.
+            if (stuck := ['review-correction', sent_at]) in cap.get('review_prompts', ()):
+                cap['review_prompts'] = [marker for marker in cap['review_prompts'] if marker != stuck]
+                if not cap['review_prompts']:
+                    cap.pop('review_prompts')
             if source == 'user' and started_at is not None:
                 cap.setdefault('restart', _restart_state(cap))
             elif source == 'user' or clipped:
@@ -1186,7 +1191,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     state = status(worker)['state']
     key = _cap_key(link)
     turn = key, cap.get('cap_reset')
-    correction_turn = any(_prompt_kind(marker) == 'review-correction' for marker in cap.get('review_prompts', ()))
+    # Only the correction's own pending turn is not a work turn. A marker left by another turn must not block reviews.
+    correction_turn = ((feedback := cap.get('feedback_turn')) is not None
+                       and ['review-correction', feedback['sent_at']] in cap.get('review_prompts', ()))
     source = None
     if state == 'Idle' and ('restart' in cap or link['seen_working'] or cap.get('review_prompts')
                             or cap.get('feedback_turn') or turn in sources):

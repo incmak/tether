@@ -4899,6 +4899,34 @@ class ReviewLinksTests(unittest.TestCase):
                     self.assertNotIn(key, link)
                 self.assertEqual(self.send.call_count, approved + 2)
 
+    def test_unmatched_correction_turn_does_not_block_later_reviews(self):
+        # Antigravity gives no prompt start time, so a correction turn can end with the source read as 'user'.
+        for agent in ('antigravity', 'codex'):
+            with self.subTest(agent=agent):
+                self.add(agent=agent)
+                self.bind()
+                self.worker['agent'] = agent
+                self.request_review()
+                self.commit = Mock(side_effect=[self.HASH, self.NEXT])
+                self.finish_review(f'APPROVED {self.HASH}')
+                self.head = self.NEXT
+                self.anchored_reply = None
+                self.observe(elapsed=0)
+                self.observe()
+                self.assertTrue(self.send.call_args.args[1].startswith('[Tether review] Correction'))
+                self.turn_source = lambda entry: ('user', None, None)
+                self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertFalse(any(marker[0] == 'review-correction'
+                                     for marker in self.links()[0].get('review_prompts', ())))
+                self.turn_source = None
+                self.finish_review('Needs a regression test.')
+                before = self.send.call_count
+                for state in ('Working', 'Idle', 'Working', 'Idle'):
+                    self.observe(**{'%13': state})
+                sent = [call.args[0]['id'] for call in self.send.call_args_list[before:]]
+                self.assertIn('%12', sent)  # the fix turn is reviewed again
+
     def test_newer_verdict_retires_a_pending_correction(self):
         for reply in (f'APPROVED {self.NEXT}', 'The race still exists.'):
             with self.subTest(reply=reply):
