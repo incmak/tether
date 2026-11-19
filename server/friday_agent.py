@@ -53,8 +53,9 @@ SYSTEM_PROMPT = (
     'Speak about chats only from current state or tool results. Never invent a status, result, or file. '
     'If unsure, say you do not know or use the relevant tool. '
     'If the user asks what a chat said or replied, call read_last_reply. '
-    'If read_last_reply returns truncated, call it again with next_offset before answering about the missing part; '
+    'If read_last_reply returns truncated, call it again with next_offset and reply_id before answering about the missing part; '
     'never say the reply cut off while truncated is true. '
+    'If it returns new_reply, the chat replied again; use the new text. '
     'Before send_to_chat, turn the user request into a clear, complete prompt for the coding agent. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
@@ -522,7 +523,8 @@ def tool_schemas():
          {'chat': string, 'decision': {'type': 'string', 'enum': ['approve', 'deny']}}, ['chat', 'decision']),
         ('read_last_reply', 'Read the last assistant reply from a named chat. Long replies come in parts.',
          {'chat': string, 'offset': {'type': 'integer',
-          'description': "Character offset from a previous result's next_offset, to read the rest of a long reply."}},
+          'description': "Character offset from a previous result's next_offset, to read the rest of a long reply."},
+          'reply_id': {'type': 'string', 'description': 'reply_id from the previous part; send it with offset.'}},
          ['chat']),
         ('new_chat', 'Create a chat only when the user asks for a new chat or session. '
          'Created chats go to the tmux session "Friday chats", one tab each.',
@@ -590,6 +592,79 @@ def with_state_time(messages):
     state['now'] = datetime.fromtimestamp(time.time(), reminders.ZONE).strftime('%a %d %b %Y %H:%M %Z')
     current = {'role': 'user', 'content': STATE_PREFIX + json.dumps(state, separators=(',', ':'), sort_keys=True)}
     return messages[:index] + [current] + messages[end:]
+
+
+READ_BUDGET = 24000
+
+
+def shorten_old_reads(messages):
+    """Keep the latest reply parts per chat, then bound older reads without changing them twice."""
+    calls = set()
+    reads = []
+    last_user = -1
+    for index, message in enumerate(messages):
+        if is_real_user(message):
+            last_user = index
+        if message.get('role') == 'assistant':
+            calls.update(call.get('id') for call in message.get('tool_calls', [])
+                         if call.get('function', {}).get('name') == 'read_last_reply')
+        if message.get('role') != 'tool' or message.get('tool_call_id') not in calls:
+            continue
+        content = message.get('content')
+        if not isinstance(content, str):
+            continue
+        try:
+            data = json.loads(content)
+        except ValueError:
+            continue
+        if (not isinstance(data, dict) or data.get('shortened') or 'error' in data
+                or not isinstance(data.get('text'), str) or not isinstance(data.get('chat'), str)):
+            continue
+        reads.append((index, data))
+
+    newest = {}
+    offsets = {}
+    full = []
+    shorten = set()
+    for index, data in reversed(reads):
+        chat = data['chat']
+        if chat not in newest:
+            newest[chat] = (index, data)
+            offsets[chat] = [data.get('offset', 0)]
+        elif ('reply_id' in data and data['reply_id'] == newest[chat][1].get('reply_id')
+              and data.get('offset', 0) not in offsets[chat]):
+            offsets[chat].append(data.get('offset', 0))
+        else:
+            shorten.add(index)
+            continue
+        full.append((index, data))
+
+    total = sum(len(data['text']) for _, data in full)
+    for index, data in reversed(full):
+        if total <= READ_BUDGET:
+            break
+        if index == newest[data['chat']][0] and index > last_user:
+            continue
+        shorten.add(index)
+        total -= len(data['text'])
+
+    result = list(messages)
+    for index, data in reads:
+        if index not in shorten:
+            continue
+        preview = data['text'][:300]
+        if len(data['text']) > 300 and not data['text'][300].isspace():
+            preview = preview.rsplit(' ', 1)[0] if ' ' in preview else preview
+        summary = {'chat': data['chat']}
+        if 'reply_id' in data:
+            summary['reply_id'] = data['reply_id']
+        summary.update(total_chars=data.get('total_chars', len(data['text'])), shortened=True,
+                       text=preview + '…',
+                       note='Older read. Call read_last_reply again for the full text.')
+        result[index] = {**messages[index], 'content': json.dumps(summary, separators=(',', ':'))}
+    if shorten:
+        print(f'Friday context shortened {len(shorten)} old reads', file=sys.stderr, flush=True)
+    return result
 
 
 def trim_context(messages):
@@ -1523,7 +1598,7 @@ class Session:
         if sent != self.last_sent:
             self.notes.clear()
             self.last_sent = sent
-        return trim_context(messages)
+        return trim_context(shorten_old_reads(messages))
 
     def new_turn(self):
         self.log_metrics()

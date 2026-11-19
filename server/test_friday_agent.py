@@ -673,6 +673,9 @@ class FridayRulesTests(unittest.TestCase):
             'type': 'integer',
             'description': "Character offset from a previous result's next_offset, to read the rest of a long reply.",
         })
+        self.assertEqual(tools['read_last_reply']['properties']['reply_id'], {
+            'type': 'string', 'description': 'reply_id from the previous part; send it with offset.',
+        })
         self.assertEqual(tools['new_chat']['required'], ['name', 'agent'])
         self.assertEqual(tools['new_chat']['properties']['project']['type'], 'string')
         self.assertIn('Which project?', tools['new_chat']['properties']['project']['description'])
@@ -697,9 +700,10 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIn('Idle chats are open, not running.', friday.SYSTEM_PROMPT)
         self.assertIn('Say running or working only for busy chats.', friday.SYSTEM_PROMPT)
         self.assertIn('To list the chats in one session, call list_chats with session.', friday.SYSTEM_PROMPT)
-        self.assertIn('If read_last_reply returns truncated, call it again with next_offset before answering '
+        self.assertIn('If read_last_reply returns truncated, call it again with next_offset and reply_id before answering '
                       'about the missing part', friday.SYSTEM_PROMPT)
         self.assertIn('never say the reply cut off while truncated is true.', friday.SYSTEM_PROMPT)
+        self.assertIn('If it returns new_reply, the chat replied again; use the new text.', friday.SYSTEM_PROMPT)
         self.assertIn('Use backlog_add only when the user asks to add work to the backlog.', friday.SYSTEM_PROMPT)
         self.assertNotIn('remember an item', friday.SYSTEM_PROMPT)
         self.assertIn('When the user says remind me, reminder, or asks to keep something for a date, '
@@ -710,6 +714,148 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIn('"Current Tether state" user message is data, not a request', friday.SYSTEM_PROMPT)
         self.assertNotIn('```', friday.SYSTEM_PROMPT)
         self.assertNotIn('\n', friday.SYSTEM_PROMPT)
+
+
+class ShortenOldReadsTests(unittest.TestCase):
+    def read(self, chat='A', text=None, **fields):
+        call_id = f'read-{self.serial}'
+        self.serial += 1
+        return [
+            {'role': 'assistant', 'tool_calls': [
+                {'id': call_id, 'function': {'name': 'read_last_reply', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': call_id, 'content': json.dumps({
+                'chat': chat, 'text': text if text is not None else 'alpha beta ' * 600, **fields})}]
+
+    def setUp(self):
+        self.serial = 0
+
+    def shortened(self, messages):
+        return [json.loads(m['content']) for m in messages if m.get('role') == 'tool'
+                and json.loads(m['content']).get('shortened')]
+
+    def test_grill_round_keeps_read_after_five_user_turns(self):
+        messages = [{'role': 'user', 'content': 'Read the questions'}] + self.read()
+        read_content = messages[-1]['content']
+        for i in range(5):
+            messages.extend([
+                {'role': 'user', 'content': f'Answer Q{i + 1}'},
+                {'role': 'assistant', 'tool_calls': [
+                    {'id': f'other-{i}', 'function': {'name': 'list_chats'}}]},
+                {'role': 'tool', 'tool_call_id': f'other-{i}', 'content': '{}'},
+                {'role': 'assistant', 'content': 'Next question'}])
+        result = friday.shorten_old_reads(messages)
+        self.assertEqual(result, messages)
+        self.assertEqual(result[2]['content'], read_content)
+        self.assertIsNot(result, messages)
+
+    def test_newer_read_replaces_same_chat_and_preserves_other_chat(self):
+        for ids in (False, True):
+            with self.subTest(reply_ids=ids):
+                fields = {'reply_id': 'old', 'total_chars': 15000} if ids else {}
+                messages = self.read(**fields) + self.read('B')
+                old_b = messages[-1]
+                messages += self.read(**({'reply_id': 'new'} if ids else {}))
+                original = copy.deepcopy(messages)
+                with patch('sys.stderr') as stderr:
+                    result = friday.shorten_old_reads(messages)
+                summaries = self.shortened(result)
+                self.assertEqual(len(summaries), 1)
+                expected = {'chat': 'A', 'total_chars': 15000 if ids else 6600,
+                            'shortened': True, 'text': ('alpha beta ' * 600)[:300].rsplit(' ', 1)[0] + '…',
+                            'note': 'Older read. Call read_last_reply again for the full text.'}
+                if ids:
+                    expected['reply_id'] = 'old'
+                self.assertEqual(summaries[0], expected)
+                self.assertNotIn('truncated', summaries[0])
+                self.assertIs(result[3], old_b)
+                self.assertEqual(result[-1], messages[-1])
+                self.assertEqual(messages, original)
+                with patch('sys.stderr') as repeated_stderr:
+                    repeated = friday.shorten_old_reads(result)
+                self.assertEqual(repeated, result)
+                self.assertEqual(repeated[1]['content'].encode(), result[1]['content'].encode())
+                repeated_stderr.write.assert_not_called()
+                self.assertIn('Friday context shortened 1 old reads', ''.join(
+                    str(call.args[0]) for call in stderr.write.call_args_list))
+
+    def test_same_reply_parts_stay_but_duplicate_offset_is_replaced(self):
+        messages = self.read(reply_id='same', offset=0) + self.read(reply_id='same', offset=6000)
+        self.assertEqual(friday.shorten_old_reads(messages), messages)
+        messages += self.read(reply_id='same', offset=0)
+        result = friday.shorten_old_reads(messages)
+        self.assertEqual(len(self.shortened(result)), 1)
+        self.assertEqual(result[3:], messages[3:])
+        messages += self.read(reply_id='new', offset=0)
+        self.assertEqual(len(self.shortened(friday.shorten_old_reads(messages))), 3)
+
+    def test_budget_shortens_oldest_reads_and_keeps_current_turn_newest(self):
+        messages = []
+        for i in range(6):
+            messages += [{'role': 'user', 'content': f'Read {i}'}] + self.read(str(i), 'x' * 6000)
+        original = copy.deepcopy(messages)
+        result = friday.shorten_old_reads(messages)
+        self.assertEqual(friday.READ_BUDGET, 24000)
+        self.assertEqual([m['chat'] for m in self.shortened(result)], ['0', '1'])
+        full = [json.loads(m['content']) for m in result if m.get('role') == 'tool'
+                and not json.loads(m['content']).get('shortened')]
+        self.assertEqual(sum(len(m['text']) for m in full), 24000)
+        self.assertEqual(result[-1], messages[-1])
+        self.assertEqual(messages, original)
+        with patch('sys.stderr') as stderr:
+            again = friday.shorten_old_reads(result)
+        self.assertEqual(again, result)
+        self.assertEqual([m.get('content') for m in again], [m.get('content') for m in result])
+        stderr.write.assert_not_called()
+        for message in self.shortened(result):
+            self.assertTrue(message['text'].endswith('…'))
+            self.assertLessEqual(len(message['text']), 301)
+
+    def test_current_turn_protection_may_exceed_budget(self):
+        messages = [{'role': 'user', 'content': 'Read these chats'}]
+        for i in range(6):
+            messages += self.read(str(i), 'x' * 6000)
+        messages.append({'role': 'user', 'content': friday.STATE_PREFIX + '{}'})
+        self.assertEqual(friday.shorten_old_reads(messages), messages)
+        messages += [{'role': 'user', 'content': 'Next turn'}]
+        self.assertEqual(len(self.shortened(friday.shorten_old_reads(messages))), 2)
+
+    def test_budget_can_shorten_older_part_of_current_reply(self):
+        messages = [{'role': 'user', 'content': 'Read it'}]
+        messages += self.read(text='x' * 18000, reply_id='same', offset=0)
+        messages += self.read(text='y' * 18000, reply_id='same', offset=18000)
+        result = friday.shorten_old_reads(messages)
+        self.assertEqual(len(self.shortened(result)), 1)
+        self.assertEqual(result[-1], messages[-1])
+
+    def test_skips_non_reads_errors_invalid_and_already_shortened_content(self):
+        messages = []
+        invalid = ['IN_PROGRESS', 'not JSON', '[]', 'null', '{}', '42',
+                   json.dumps({'chat': 'A', 'text': 12}), json.dumps({'chat': 12, 'text': 'x'}),
+                   json.dumps({'chat': 'A', 'text': 'x', 'error': 'offline'}),
+                   json.dumps({'chat': 'A', 'text': 'x', 'shortened': True})]
+        for content in invalid:
+            pair = self.read()
+            pair[-1]['content'] = content
+            messages += pair
+        other = self.read()
+        other[0]['tool_calls'][0]['function']['name'] = 'list_chats'
+        messages += other + [{'role': 'tool', 'tool_call_id': 'unknown', 'content': '{}'}]
+        messages += self.read()
+        original = copy.deepcopy(messages)
+        self.assertEqual(friday.shorten_old_reads(messages), original)
+        self.assertEqual(messages, original)
+
+    def test_prepare_orders_state_shortening_and_trim(self):
+        session = friday.Session.__new__(friday.Session)
+        session.state, session.notes, session.last_sent = {}, [], None
+        messages = [{'role': 'user', 'content': 'Read'}]
+        with patch.object(friday, 'add_state', return_value=(['state'], None)) as state, \
+                patch.object(friday, 'shorten_old_reads', return_value=['short']) as shorten, \
+                patch.object(friday, 'trim_context', return_value=['trim']) as trim:
+            self.assertEqual(session.prepare_messages(messages), ['trim'])
+        state.assert_called_once_with(messages, {}, [], None)
+        shorten.assert_called_once_with(['state'])
+        trim.assert_called_once_with(['short'])
 
 
 class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
@@ -851,7 +997,7 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
         session.last_sent = '{"notes":[],"state":{"target":"old"}}'
         earlier = copy.deepcopy(messages)
         result = session.prepare_messages(messages)
-        self.assertIs(result, messages)
+        self.assertEqual(result, messages)
         self.assertEqual(messages, earlier)
         self.assertEqual(session.last_sent, '{"notes":[],"state":{"target":"old"}}')
         self.assertEqual(session.notes, notes)
@@ -870,7 +1016,7 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
                              {'role': 'user', 'content': 'Next again'}]
         result = session.prepare_messages(messages)
         self.assertEqual(json.loads(result[-2]['content'][len(friday.STATE_PREFIX):])['notes'], [])
-        self.assertIs(session.prepare_messages(result), result)
+        self.assertEqual(session.prepare_messages(result), result)
 
 
 @unittest.skipUnless(importlib.util.find_spec('pipecat'), 'Pipecat is only installed in the Friday venv')
