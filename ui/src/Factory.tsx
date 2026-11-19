@@ -108,9 +108,10 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
     for (const task of floor.tasks) seen.current.add(task.id)
 
     const changes = floor.tasks.filter(task => previous?.has(task.id) && previous.get(task.id) !== task.phase)
+    // The clock rebuilds the floor every tick: keep the marks until the tasks or their phases change.
+    const same = !!previous && previous.size === floor.tasks.length && floor.tasks.every(task => previous.get(task.id) === task.phase)
     phases.current = new Map(floor.tasks.map(task => [task.id, task.phase]))
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- mark transitions between successive floors
-    setMoved(new Set(changes.map(task => task.id)))
+    if (!same) setMoved(new Set(changes.map(task => task.id)))
     for (const task of changes) queue.current.push(`${label(task)} moved to ${PHASE_NAMES[task.phase]}.`)
     const waiting = new Set(floor.tasks.filter(task => task.waits).map(task => task.id))
     if (waited.current) for (const task of floor.tasks) if (task.waits && !waited.current.has(task.id)) queue.current.push(`${label(task)} waits for you.`)

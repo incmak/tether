@@ -416,7 +416,9 @@ async function main() {
     const rejected = deployReport(503)
     state.moved = true
     await station('deploy').locator('[data-token="B71"]').waitFor({ timeout: 12000 })
-    check('B71 moves to Deploy on the next poll', await station('deploy').locator('[data-token="B71"].is-moved').count() === 1)
+    // The token renders in Deploy one render before the effect marks it moved: wait for the mark, do not read it at once.
+    const marked = await station('deploy').locator('[data-token="B71"].is-moved').waitFor({ timeout: 5000 }).then(() => true, () => false)
+    check('B71 moves to Deploy on the next poll', marked)
     await rejected
     await station('deploy').locator('[data-key="task:B71"]').click()
     await timeline.waitFor()
