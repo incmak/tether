@@ -249,9 +249,11 @@ when the result is `would_block` but any raw message line is a valid stamp or st
 or `amend! `. In enforce mode, an agent without a session key can commit and the log records `let_through` with
 reason `no-session`.
 
-When Claude defers its check to the Git hook, Tether matches each landed commit to a hook verdict by worktree,
-tree and parent. A hook verdict from any session can cover the commit if the hook ran after the call started. For each
-uncovered commit, Tether checks the landed message and logs one `hook-silent` row with the commit's hash.
+When Claude defers its check to the Git hook, Tether matches each landed commit by worktree, tree, parent and a keyed
+digest of the normalized message. A hook verdict from any session can cover one commit if the hook ran after the call
+started. For an amend, the hook can refer to the replaced commit if it shares the landed commit's first parent and is
+no longer reachable from `HEAD`. Rows without a message digest leave the commit uncovered. Tether checks the landed
+message of each uncovered commit and logs one `hook-silent` row per worktree and commit hash.
 
 ## Auto-merge
 

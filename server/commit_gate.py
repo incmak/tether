@@ -15,7 +15,7 @@ The person sets the mode in Settings. Nothing else changes it.
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
 Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse matches
-hook rows by worktree, tree and parent and checks the landed message for each uncovered commit.
+each hook row to one landed commit by worktree, tree, parent and a message HMAC. It checks uncovered commits.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -29,6 +29,8 @@ whose commit has a valid line. The rate in Settings is false blocks / landed com
 calls where git can say which commit the call made (see stats()). Two sessions that commit in one working tree at
 the same moment can still mix their results; sessions use their own worktrees."""
 import fcntl
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -74,6 +76,7 @@ HOOK_LOCK_SECONDS = 5
 PENDING_SECONDS = 3600  # a commit command that has not ended after this long gets no result
 PENDING_MAX = 50
 LOG_TIME_TOLERANCE = 0.001  # allow for log timestamps rounded to milliseconds
+CLAIM_SECONDS = 86400  # keep hook row claims for one day
 STATE_DAYS = 45  # cleanup age for sessions with no blocks
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
 SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
@@ -685,8 +688,47 @@ def _state_folder():
     return paths.CACHE / 'commit-gate'
 
 
+def _message_key(*, create=False):
+    path = _state_folder() / 'commit-gate.key'
+    try:
+        if create:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(descriptor, 'wb') as stream:
+                    key = os.urandom(32)
+                    stream.write(key)
+                return key
+        with open(path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as stream:
+            if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return None
+            key = stream.read(33)
+    except OSError:
+        return None
+    return key if len(key) == 32 else None
+
+
+def _normalize_message(lines):
+    """Git stripspace without comment removal or a final newline."""
+    normalized = []
+    for line in lines:
+        line = line.rstrip(' \t\r')  # Git's ASCII whitespace, with LF already split off.
+        if line or (normalized and normalized[-1]):
+            normalized.append(line)
+    if normalized and not normalized[-1]:
+        normalized.pop()
+    return '\n'.join(normalized)
+
+
+def _message_digest(key, normalized):
+    return hmac.new(key, normalized.encode('utf-8', errors='surrogateescape'), 'sha256').hexdigest()[:32]
+
+
 class _Lock:
-    """An exclusive file lock with a deadline. The default protects the session files and log rotation."""
+    """An exclusive file lock with a deadline. The default protects sessions, claims and log rotation."""
 
     def __init__(self, path=None, seconds=LOCK_SECONDS):
         self.path = path
@@ -843,19 +885,21 @@ class _LandedCommit(NamedTuple):
     tree: str
     parent: str | None
     status: str
+    body: str
 
 
 def _landed(folder, head):
     """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
     shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--format=%H%x00%T%x00%P%x00%B',
-                 f'{head}..HEAD' if head else 'HEAD')
+                 f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    fields = shown.stdout.split('\0')[:-1]
+    fields = shown.stdout.decode('utf-8', errors='surrogateescape').split('\0')[:-1]
     commits = []
     for index in range(0, len(fields), 4):
         oid, tree, parents, body = fields[index:index + 4]
-        commits.append(_LandedCommit(oid, tree, parents.partition(' ')[0] or None, stamp.message_status(body)))
+        status = stamp.message_status(body.replace('\r\n', '\n').replace('\r', '\n'))
+        commits.append(_LandedCommit(oid, tree, parents.partition(' ')[0] or None, status, body))
     return commits
 
 
@@ -1085,56 +1129,117 @@ def check(data, env=os.environ, now=None):
                                               'permissionDecisionReason': deny_reason(blocks)}})
 
 
-def _uncovered_commits(waiting, commits):
-    """Find landed commits without a hook row for their worktree, tree and parent."""
+def _read_claims(path):
+    try:
+        claims = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(claims, dict):
+        raise ValueError('invalid commit gate claims')
+    return claims
+
+
+def _amend_parent(folder, head):
+    """An amend replaced head. Return its first parent, or '' when it cannot prove coverage."""
+    ancestor = _git(folder, 'merge-base', '--is-ancestor', head, 'HEAD')
+    if ancestor is None or ancestor.returncode != 1:
+        return ''
+    shown = _git(folder, 'show', '-s', '--format=%P', head)
+    if shown is None or shown.returncode != 0:
+        return ''
+    return shown.stdout.strip().partition(' ')[0] or None
+
+
+def _uncovered_commits(waiting, commits, worktree, rows, now):
+    """Claim covering hook rows and return uncovered commits. Call with the lock held."""
+    commits = list(reversed(commits))
     if not waiting.get('tree'):
-        yield from commits
-        return
-    worktree = os.path.realpath(waiting['tree'])
+        return commits
+    ledger = _state_folder() / f'claims.{hashlib.sha256(os.fsencode(worktree)).hexdigest()}.json'
+    try:
+        previous = _read_claims(ledger)
+        claims = {row_key: oid for row_key, oid in previous.items()
+                  if now - CLAIM_SECONDS <= float(row_key.partition(':')[0]) < math.inf}
+    except (OSError, ValueError, RecursionError):
+        return commits
+
+    key = _message_key()
+    uncovered = commits if key is None else _claim_covering_rows(waiting, commits, worktree, rows, key, claims)
+    if claims != previous:
+        try:
+            _write(ledger, json.dumps(claims))
+        except OSError:
+            return commits
+    return uncovered
+
+
+def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
     since = waiting['at'] - LOG_TIME_TOLERANCE
     trees = {commit.tree for commit in commits}
-    heads_by_tree = {}
-    for row in _rows():
+    rows_by_tree = {}
+    for row in rows:
         if row.get('via') != 'commit-msg' or row.get('verdict') == 'block' or not since <= row['at'] < math.inf:
             continue
-        tree, folder = row.get('tree'), row.get('folder')
+        tree, folder, messages = row.get('tree'), row.get('folder'), row.get('messages')
         if not isinstance(tree, str) or tree not in trees or not isinstance(folder, str):
             continue
-        if os.path.realpath(folder) != worktree or 'head' not in row:
+        if not isinstance(messages, list) or not messages or 'head' not in row or os.path.realpath(folder) != worktree:
             continue
         head = row['head']
         if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
-            heads_by_tree.setdefault(tree, set()).add(head)
+            rows_by_tree.setdefault(tree, []).append((row['at'], f"{row['at']}:{folder}", head, messages))
+    for candidates in rows_by_tree.values():
+        candidates.sort(key=lambda row: row[0])
 
-    parents = {commit.oid: commit.parent for commit in commits}
+    uncovered, amend_parents = [], {}
     for commit in commits:
-        heads = heads_by_tree.get(commit.tree, ())
-        if commit.parent in heads:
+        candidates = rows_by_tree.get(commit.tree)
+        if not candidates:
+            uncovered.append(commit)
             continue
-        for head in heads:
-            if head is None:
+        digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
+        match = None
+        for _, row_key, head, messages in candidates:
+            claimed = claims.get(row_key)
+            if claimed not in (None, commit.oid) or digest not in messages:
                 continue
-            # An amend replaces the hook's HEAD and keeps its first parent.
-            if head not in parents:
-                shown = _git(waiting['folder'], 'show', '-s', '--format=%P', head)
-                parents[head] = ''  # Keep failures distinct from a root commit's None.
-                if shown is not None and shown.returncode == 0:
-                    parents[head] = shown.stdout.strip().partition(' ')[0] or None
-            if parents[head] == commit.parent:
+            if match is not None and claimed is None:
+                continue  # Keep the oldest eligible row unless a covering claim already exists.
+            if head != commit.parent:
+                if head is None:
+                    continue
+                if head not in amend_parents:
+                    amend_parents[head] = _amend_parent(waiting['folder'], head)
+                if amend_parents[head] != commit.parent:
+                    continue
+            if claimed == commit.oid:
+                match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
                 break
+            if match is None:
+                match = row_key
+        if match is None:
+            uncovered.append(commit)
         else:
-            yield commit
+            claims[match] = commit.oid
+    return uncovered
 
 
-def _log_hook_silent(commits, waiting, session, tool, now):
-    """Check and append under the same lock so overlapping PostToolUse calls log each hash once."""
-    logged = {row['commit'] for row in _rows(locked=True)
-              if row.get('reason') == 'hook-silent' and isinstance(row.get('commit'), str)}
-    for commit in commits:
+def _log_deferred_checks(commits, waiting, session, tool, now):
+    """Claim hook rows and dedupe hook-silent rows under the same lock."""
+    worktree = os.path.realpath(waiting.get('tree') or waiting['folder'])
+    rows = list(_rows(locked=True))
+    uncovered = _uncovered_commits(waiting, commits, worktree, rows, now)
+    if not uncovered:
+        return
+    logged = {row['commit'] for row in rows if row.get('reason') == 'hook-silent'
+              and isinstance(row.get('commit'), str) and isinstance(row.get('folder'), str)
+              and os.path.realpath(row['folder']) == worktree}
+    # When coverage cannot be proved, a duplicate check is acceptable. Zero checks are not.
+    for commit in uncovered:
         if commit.oid in logged:
             continue
         _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
-              'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': waiting['folder'],
+              'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': worktree,
               'commit': commit.oid, 'reason': 'hook-silent', 'count': 1,
               'verdict': 'would_block' if commit.status == 'missing' else 'pass'}, locked=True)
 
@@ -1154,19 +1259,17 @@ def landed(data, now=None):
             return
         waiting['closing'] = True
         _write_session(session, state, now)
-    uncovered = []
+    commits = None
     try:
         commits = _landed(waiting['folder'], waiting['head'])
-        if commits and waiting.get('deferred'):
-            uncovered = list(_uncovered_commits(waiting, commits))
     finally:
         with _Lock():
             state = _read_session(session, now)
             waiting = state['pending'].pop(tool, None)
             if waiting is not None:
                 _write_session(session, state, now)
-                if uncovered:
-                    _log_hook_silent(uncovered, waiting, session, tool, now)
+                if commits and waiting.get('deferred'):
+                    _log_deferred_checks(commits, waiting, session, tool, now)
     if commits is None or waiting is None:
         return
     statuses = {commit.status for commit in commits}
@@ -1281,41 +1384,46 @@ def _final_verdict(path, cwd):
     if git_dir is None:
         raise GateError(400, 'Git could not find the repository for the commit message.')
     if (git_dir / 'MERGE_HEAD').exists():
-        return 'skip', 'merge'
+        return 'skip', 'merge', ()
     if any((git_dir / name).exists() for name in ('CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply')):
-        return 'skip', 'replay'
+        return 'skip', 'replay', ()
     with open(Path(cwd) / path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as stream:
         if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError('Git commit message is not a regular file')
         message = stream.read(HOOK_MESSAGE_BYTES + 1)
     if len(message) > HOOK_MESSAGE_BYTES:
-        return 'unknown', 'size'
+        return 'unknown', 'size', ()
     config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
     if config is None or config.returncode not in (0, 1):
         raise GateError(400, 'Git could not read the commit comment configuration.')
     comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
                 for item in config.stdout.split(b'\0') if item}
-    lines = message.decode('utf-8', errors='replace').split('\n')
+    lines = message.decode('utf-8', errors='surrogateescape').split('\n')
     chars = {'#'} | {char for char in comments if len(char) == 1}
     cuts = {}
     for index, line in enumerate(lines):
         if SCISSORS.fullmatch(line):
             cuts.setdefault(line[0], index)
+    readings = [lines]
+    for char in chars:
+        stripped = [line for line in lines if not line.startswith(char)]
+        if len(stripped) != len(lines):
+            readings.append(stripped)
+        if char in cuts:
+            truncated = lines[:cuts[char]]
+            readings.extend((truncated, [line for line in truncated if not line.startswith(char)]))
+
     verdict = _message_verdict(lines)
     # Git reads cleanup and comment settings before prepare-commit-msg can change them. Use a verdict only
     # when every reading agrees. An unknown verdict never counts as stamped or unstamped.
-    for char in chars:
-        truncated = lines[:cuts.get(char, len(lines))]
-        for reading in (truncated, [line for line in lines if not line.startswith(char)],
-                        [line for line in truncated if not line.startswith(char)]):
-            if _message_verdict(reading) != verdict:
-                return 'unknown', 'cleanup'
+    if any(_message_verdict(reading) != verdict for reading in readings[1:]):
+        return 'unknown', 'cleanup', readings
     # Git cleanup only deletes lines and trailing whitespace.
     # A landed stamp or autosquash subject must already be present on a raw line.
     if verdict[0] == 'would_block' and any(line.startswith(FIXUP_PREFIXES)
                                          or stamp.message_status(line.rstrip()) != 'missing' for line in lines):
-        return 'unknown', 'cleanup'
-    return verdict
+        return 'unknown', 'cleanup', readings
+    return *verdict, readings
 
 
 def _hook_identity(cwd):
@@ -1354,7 +1462,10 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
         record.update(_hook_identity(cwd))
-        verdict, reason = _final_verdict(path, cwd)
+        verdict, reason, readings = _final_verdict(path, cwd)
+        if 'tree' in record and readings and (key := _message_key(create=True)) is not None:
+            normalized = {_normalize_message(reading) for reading in readings}
+            record['messages'] = sorted(_message_digest(key, message) for message in normalized)
         blocks = None
         if verdict == 'would_block' and mode == 'enforce' and source != 'terminal' and session is None:
             verdict, reason = 'let_through', 'no-session'

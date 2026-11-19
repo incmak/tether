@@ -1,8 +1,11 @@
 """B231: exercise the installed commit-msg hook with real Git and isolated state."""
+import hashlib
+import hmac
 import json
 import os
 import shlex
 import shutil
+import stat
 import string
 import subprocess
 import sys
@@ -124,21 +127,32 @@ sys.exit(main(sys.argv[2:]))
         path = self.script(self.root / 'bin' / name, f'{shlex.quote(child)} "$@"\nexit $?')
         return (path,)
 
-    def pre(self, command, event='PreToolUse', tool='tool-1', session=SESSION):
+    def pre(self, command, event='PreToolUse', tool='tool-1', session=SESSION, *, now=None):
         data = {'hook_event_name': event, 'tool_name': 'Bash', 'session_id': session, 'cwd': str(self.repo),
                 'tool_use_id': tool, 'tool_input': {'command': command}}
-        return subprocess.run([sys.executable, str(GATE.with_name('claude_hooks.py'))], input=json.dumps(data),
+        cli = [sys.executable]
+        if now is not None:
+            cli += ['-c', 'import runpy, sys, time; now = float(sys.argv.pop(1)); time.time = lambda: now; '
+                    'runpy.run_path(sys.argv[1], run_name="__main__")', str(now)]
+        return subprocess.run([*cli, str(GATE.with_name('claude_hooks.py'))], input=json.dumps(data),
                               cwd=self.repo, env=self.env, capture_output=True, text=True, check=True, timeout=20)
 
     def test_observe_logs_one_terminal_verdict_without_message_text(self):
         self.install()
         self.commit('-m', 'private test message')
         check, = self.rows()
+        key_path = self.cache / 'commit-gate' / 'commit-gate.key'
+        self.assertEqual(stat.S_IMODE(key_path.stat().st_mode), 0o600)
+        key = key_path.read_bytes()
+        self.assertEqual(len(key), 32)
+        digest = hmac.digest(key, b'private test message', 'sha256').hex()[:32]
+        self.assertRegex(check['messages'][0], r'^[0-9a-f]{32}$')
         self.assertEqual({key: value for key, value in check.items() if key != 'at'}, {
             'event': 'check', 'via': 'commit-msg', 'source': 'terminal', 'id': None, 'session': None,
             'project': None, 'mode': 'observe', 'verdict': 'would_block', 'reason': 'no-line',
             'count': 1, 'folder': str(self.repo), 'head': None,
             'tree': self.git('rev-parse', 'HEAD^{tree}').stdout.strip(),
+            'messages': [digest],
         })
         self.assertNotIn('private test message', self.log.read_text())
 
@@ -717,16 +731,18 @@ time.sleep(20)
         self.install(gate=self.gate_with_import_error(), python=sys.executable)
         self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
         command = 'git commit --allow-empty -m silent'
-        for tool in ('first', 'second'):
-            self.pre(command, tool=tool)
+        (self.repo / 'subdir').mkdir()
+        calls = {'first': command, 'second': 'git -C subdir commit --allow-empty -m silent'}
+        for tool, call in calls.items():
+            self.pre(call, tool=tool)
         self.assertEqual(self.rows(), [])
         self.git('-c', command, command=self.agent('claude', '/bin/sh'))
         with ThreadPoolExecutor(max_workers=2) as pool:
-            for future in [pool.submit(self.pre, command, 'PostToolUse', tool=tool) for tool in ('first', 'second')]:
+            for future in [pool.submit(self.pre, call, 'PostToolUse', tool=tool) for tool, call in calls.items()]:
                 future.result()
         row, = [row for row in self.rows() if row['event'] == 'check']
-        self.assertEqual((row['reason'], row['commit'], row['count']),
-                         ('hook-silent', self.git('rev-parse', 'HEAD').stdout.strip(), 1))
+        self.assertEqual((row['reason'], row['folder'], row['commit'], row['count']),
+                         ('hook-silent', str(self.repo), self.git('rev-parse', 'HEAD').stdout.strip(), 1))
         self.assertEqual({row['id'] for row in self.rows() if row['event'] == 'landed'}, {'first', 'second'})
 
     def test_claude_matches_a_hook_check_from_another_session(self):
@@ -750,7 +766,7 @@ time.sleep(20)
         (self.repo / 'file').write_text('amend only this file\n')
         (self.repo / 'other').write_text('keep this file staged\n')
         self.git('add', 'other')
-        for args in ('--amend --only -m amended -- file', '--allow-empty -m empty'):
+        for args in ('--amend --only -m amended -- file', '--allow-empty -m empty', '--amend --allow-empty -m new'):
             with self.subTest(args=args):
                 if args.startswith('--allow-empty'):
                     self.git('restore', '--staged', 'other')
@@ -766,6 +782,155 @@ time.sleep(20)
                                  ('commit-msg', head, self.git('rev-parse', 'HEAD^{tree}').stdout.strip()))
                 self.assertEqual((landed['event'], landed['count']), ('landed', 1))
                 self.assertEqual(self.git('ls-tree', '--name-only', 'HEAD').stdout.strip(), 'file')
+
+    def test_claude_logs_a_silent_message_only_amend(self):
+        self.install()
+        self.write_file('tracked content')
+        claude = self.agent('claude', '/bin/sh')
+        first = 'git commit --allow-empty -m old'
+        self.pre(first, tool='first')
+        self.git('-c', first, command=claude)
+        check, = self.rows()
+        self.pre(first, 'PostToolUse', tool='first')
+        amend = 'git commit --amend -m new'
+        # Keep the first row in the second call's timestamp window, without relying on wall-clock timing.
+        self.pre(amend, tool='amend', now=check['at'])
+        self.assertEqual([row['event'] for row in self.rows()], ['check', 'landed'])
+        self.install(gate=self.gate_with_import_error(), python=sys.executable)
+        self.git('-c', amend, command=claude)
+        self.assertEqual(self.git('rev-parse', 'HEAD^{tree}').stdout.strip(), check['tree'])
+        self.pre(amend, 'PostToolUse', tool='amend')
+        fallback, = [row for row in self.rows() if row.get('reason') == 'hook-silent']
+        self.assertEqual((fallback['id'], fallback['commit']), ('amend', self.git('rev-parse', 'HEAD').stdout.strip()))
+
+    def test_claude_does_not_use_a_later_empty_commit_row_for_its_parent(self):
+        self.commit('-m', 'base')
+        self.install()
+        working = self.hook.with_name('commit-msg.working')
+        working.write_bytes(self.hook.read_bytes())
+        working.chmod(0o755)
+        command = 'git commit --allow-empty -m same'
+        self.script(self.hooks / 'post-commit',
+                    'rm .git/hooks/post-commit\n'
+                    'mv .git/hooks/commit-msg.working .git/hooks/commit-msg\n'
+                    f'{command}')
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.install(gate=self.gate_with_import_error(), python=sys.executable)
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.pre(command, 'PostToolUse')
+        check, fallback, landed = self.rows()
+        self.assertEqual((check['via'], check['head']),
+                         ('commit-msg', self.git('rev-parse', 'HEAD^').stdout.strip()))
+        self.assertEqual((fallback['reason'], fallback['commit']), ('hook-silent', check['head']))
+        self.assertEqual((landed['event'], landed['count']), ('landed', 2))
+
+    def test_claude_logs_identical_silent_root_commits_in_separate_repos(self):
+        other = self.root / 'other'
+        other.mkdir()
+        self.git('init', '-q', '-b', 'main', '--template=', cwd=other)
+        gate = self.gate_with_import_error()
+        self.install(gate=gate, python=sys.executable)
+        self.install(repo=other, gate=gate, python=sys.executable)
+        date = '2001-01-01T00:00:00+00:00'
+        self.env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        claude = self.agent('claude', '/bin/sh')
+        for repo in (self.repo, other):
+            command = f'git -C {shlex.quote(str(repo))} commit --allow-empty -m identical'
+            before = len(self.rows())
+            self.pre(command)
+            self.assertEqual(len(self.rows()), before)
+            self.git('-c', command, command=claude)
+            self.pre(command, 'PostToolUse')
+        oid = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=other).stdout.strip(), oid)
+        self.assertEqual([(row['folder'], row['commit']) for row in self.rows() if row.get('reason') == 'hook-silent'],
+                         [(str(self.repo), oid), (str(other), oid)])
+
+    def test_claude_does_not_reuse_a_claimed_row_for_a_different_commit(self):
+        self.install()
+        self.write_file('tracked content')
+        claude = self.agent('claude', '/bin/sh')
+        first = 'git commit --allow-empty -m same'
+        amend = 'git commit --amend --no-edit'
+        self.pre(first, tool='first')
+        self.pre(amend, tool='amend', session='another-session')
+        self.assertEqual(self.rows(), [])
+        self.env['GIT_COMMITTER_DATE'] = '2001-01-01T00:00:00+00:00'
+        self.git('-c', first, command=claude)
+        old = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.pre(first, 'PostToolUse', tool='first')
+        self.install(gate=self.gate_with_import_error(), python=sys.executable)
+        self.env['GIT_COMMITTER_DATE'] = '2001-01-02T00:00:00+00:00'
+        self.git('-c', amend, command=claude)
+        new = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.assertNotEqual(old, new)
+        self.pre(amend, 'PostToolUse', tool='amend', session='another-session')
+        fallback, = [row for row in self.rows() if row.get('reason') == 'hook-silent']
+        self.assertEqual((fallback['id'], fallback['commit']), ('amend', new))
+
+    def test_claude_uses_landed_message_when_commit_msg_hook_rewrites_it_after_gate(self):
+        line = self.user_hook_line()
+        self.script(self.hook, f'{line}\nprintf "rewritten\\n" > "$1"')
+        # A deferred call sees the installed wrapper and Git later runs the composed hook.
+        wrapper = self.hook.with_name('commit-msg.composed')
+        self.hook.rename(wrapper)
+        self.install()
+        command = f'git commit --allow-empty -m original -m {shlex.quote(STAMP)}'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        wrapper.replace(self.hook)
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.pre(command, 'PostToolUse')
+        check, fallback, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict']), ('commit-msg', 'pass'))
+        self.assertEqual((fallback['reason'], fallback['verdict']), ('hook-silent', 'would_block'))
+        self.assertEqual(landed['landed'], 'missing')
+
+    def test_claude_uses_landed_message_when_gate_key_is_short(self):
+        self.commit('-m', 'base')
+        oid = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.install()
+        key = self.cache / 'commit-gate' / 'commit-gate.key'
+        key.parent.mkdir(parents=True)
+        key.write_bytes(b'short')
+        ledger = key.with_name(f'claims.{hashlib.sha256(os.fsencode(self.repo)).hexdigest()}.json')
+        now = time.time()
+        fresh = f'{now}:{self.repo}'
+        old = f'{now - 90000}:{self.repo}'
+        ledger.write_text(json.dumps({old: oid, fresh: oid}))
+        command = 'git commit --allow-empty -m subject'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.pre(command, 'PostToolUse')
+        check, fallback, landed = self.rows()
+        self.assertEqual(check['via'], 'commit-msg')
+        self.assertNotIn('messages', check)
+        self.assertEqual(key.read_bytes(), b'short')
+        self.assertEqual(json.loads(ledger.read_text()), {fresh: oid})
+        self.assertEqual((fallback['reason'], landed['landed']), ('hook-silent', 'missing'))
+
+    def test_claude_matches_normalized_cleanup_readings(self):
+        self.install()
+        self.git('config', 'core.commentChar', ';')
+        cut = SCISSORS.replace('#', ';', 1)
+        trailer = 'trailer\u00a0'  # Git stripspace keeps the non-breaking space.
+        (self.repo / 'draft').write_text(f'\n\nsubject \t\n\n\n# hash \t\n; comment \t\n{cut}\n\n{trailer} \t\n\n')
+        self.script(self.hooks / 'prepare-commit-msg', 'cat draft > "$1"')
+        command = 'git commit --allow-empty --cleanup=strip -m ignored'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.pre(command, 'PostToolUse')
+        check, landed = self.rows()
+        self.assertEqual((check['via'], landed['event']), ('commit-msg', 'landed'))
+        self.assertEqual(self.git('log', '-1', '--format=%B').stdout.rstrip('\n'), f'subject\n\n# hash\n\n{trailer}')
+        key = (self.cache / 'commit-gate' / 'commit-gate.key').read_bytes()
+        messages = (f'subject\n\n# hash\n; comment\n{cut}\n\n{trailer}', f'subject\n\n; comment\n{cut}\n\n{trailer}',
+                    'subject\n\n# hash\n; comment', f'subject\n\n# hash\n\n{trailer}', 'subject\n\n# hash')
+        self.assertEqual(check['messages'], sorted(hmac.digest(key, message.encode(), 'sha256').hex()[:32]
+                                                   for message in messages))
 
     def test_claude_counts_commits_without_hook_checks_in_one_deferred_call(self):
         self.install()
