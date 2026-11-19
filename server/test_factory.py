@@ -119,6 +119,16 @@ class ToolTests(unittest.TestCase):
             tools = factory.recent_tools(entry, server.FACTORY_READERS)
             self.assertEqual([tool['name'] for tool in tools], ['step_2', 'new_step_3_first', 'new_step_3_second'])
 
+    def test_numbered_and_unnumbered_antigravity_steps_keep_their_calls(self):
+        unnumbered = lambda name: {'type': 'PLANNER_RESPONSE', 'content': '', 'tool_calls': [{'name': name}]}
+        for rows, expected in [
+            ([agy_step(1, tool_calls=[{'name': 'step_1'}]), unnumbered('row_1')], ['step_1', 'row_1']),
+            ([unnumbered('row_0'), agy_step(0, tool_calls=[{'name': 'step_0'}])], ['step_0', 'row_0']),
+        ]:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as folder:
+                entry = {'id': '%1', 'agent': 'antigravity', 'transcript': str(self.write(folder, rows))}
+                self.assertEqual([tool['name'] for tool in factory.recent_tools(entry, server.FACTORY_READERS)], expected)
+
     def test_recent_tools_handles_empty_rewrites_and_invalid_antigravity_calls(self):
         with tempfile.TemporaryDirectory() as folder:
             path = self.write(folder, [

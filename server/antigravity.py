@@ -197,7 +197,8 @@ def factory_consume(state, index, record):
     if record.get('type') != 'PLANNER_RESPONSE' or not isinstance(calls, list):
         return
     step = record.get('step_index')
-    position = step if isinstance(step, int) else index
+    # A numbered step is rewritten by its number; an unnumbered record is its own step at its row. Keep the two apart.
+    key = (step, 0) if isinstance(step, int) else (index, 1)
     messages = []
     for call in calls:
         if not isinstance(call, dict):
@@ -207,7 +208,7 @@ def factory_consume(state, index, record):
             continue
         messages.append({'tool': {'name': name or 'tool', 'title': command if command is not None else action or path,
                                   'started': record.get('created_at'), 'status': 'pending', 'is_error': False}})
-    state['steps'][position] = messages
+    state['steps'][key] = messages
 
 
 def bucket_for(model_name):
