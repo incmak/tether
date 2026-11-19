@@ -13,13 +13,15 @@ async function main() {
   let browser, page, failed = 0
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
-    const assets = path.join(DIST, 'assets')
-    const css = fs.readdirSync(assets).filter(name => name.endsWith('.css')).map(name => fs.readFileSync(path.join(assets, name), 'utf8')).join('\n')
+    // Only this build's stylesheets: a deployed dist keeps old chunks, and an old rule later in the cascade would win.
+    const html = fs.readFileSync(path.join(DIST, 'index.html'), 'utf8')
+    const entry = html.match(/assets\/index-[^"']+\.js/)[0]
+    const names = new Set(`${html}\n${fs.readFileSync(path.join(DIST, entry), 'utf8')}`.match(/assets\/[^"'\s]+\.css/g))
+    const css = [...names].map(name => fs.readFileSync(path.join(DIST, name), 'utf8')).join('\n')
     browser = await getBrowser()
     const context = browser.contexts()[0] || await browser.newContext()
     page = await context.newPage()
     // A background tab of the shared browser runs no animation frames, so the waits poll on a timer.
-    await page.bringToFront()
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.setContent(`<!doctype html><style>${css}</style><div style="padding:40px;display:flex;gap:12px">
       <button id="pressed" class="icon-button" aria-pressed="true">A</button>
