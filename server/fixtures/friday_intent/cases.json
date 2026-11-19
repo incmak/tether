@@ -755,6 +755,26 @@
    }
   },
   {
+   "id": "reminder-not-backlog",
+   "group": "reminder",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "remind me to call the bank tomorrow and to renew the domain"
+    },
+    {
+     "role": "assistant",
+     "content": "Do you want those as reminders or as backlog items?"
+    }
+   ],
+   "user": "keep those all in reminders",
+   "expect": {
+    "tool": "reminder_add"
+   }
+  },
+  {
    "id": "neg-dont-send",
    "group": "no_tool",
    "split": "dev",
@@ -928,6 +948,90 @@
    "user": "no, wait, not yet",
    "expect": {
     "tool": null
+   }
+  },
+  {
+   "id": "fixed-yes",
+   "group": "confirm",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "the api server should add rate limiting to the upload endpoint"
+    },
+    {
+     "role": "assistant",
+     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+    }
+   ],
+   "user": "yes please",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "api-server"
+    }
+   },
+   "pending": {
+    "name": "send_to_chat",
+    "chat": "api-server",
+    "payload": "Add rate limiting to the upload endpoint"
+   }
+  },
+  {
+   "id": "fixed-no",
+   "group": "deny",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "the api server should add rate limiting to the upload endpoint"
+    },
+    {
+     "role": "assistant",
+     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+    }
+   ],
+   "user": "no, not now",
+   "expect": {
+    "tool": null
+   },
+   "pending": {
+    "name": "send_to_chat",
+    "chat": "api-server",
+    "payload": "Add rate limiting to the upload endpoint"
+   }
+  },
+  {
+   "id": "fixed-yes-plus-more",
+   "group": "split_turn",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "the api server should add rate limiting to the upload endpoint"
+    },
+    {
+     "role": "assistant",
+     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+    }
+   ],
+   "user": [
+    "Yes, please do.",
+    "And also check the logs after."
+   ],
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "api-server"
+    }
+   },
+   "pending": {
+    "name": "send_to_chat",
+    "chat": "api-server",
+    "payload": "Add rate limiting to the upload endpoint"
    }
   },
   {
@@ -1324,6 +1428,34 @@
     "args": {
      "chat": "(?i)docs.site"
     }
+   }
+  },
+  {
+   "id": "h-fixed-yes",
+   "group": "confirm",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "docs site should update the changelog for the new release"
+    },
+    {
+     "role": "assistant",
+     "content": "Send to docs-site: Update the changelog for the new release. Yes or no?"
+    }
+   ],
+   "user": "yeah go ahead",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "docs-site"
+    }
+   },
+   "pending": {
+    "name": "send_to_chat",
+    "chat": "docs-site",
+    "payload": "Update the changelog for the new release"
    }
   },
   {

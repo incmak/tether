@@ -86,18 +86,85 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(blocked, {'name': 'send_to_chat', 'args': {'chat': 'Other chat', 'prompt': 'Check it'},
                                    'blocked': 'Only one send_to_chat is allowed per spoken turn.'})
 
-    def test_split_speech_uses_only_final_fragment_for_guard(self):
+    def test_split_speech_joins_fragments_for_guard(self):
         example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
         result, payloads = self.run_script(
-            example, assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')]),
-            assistant('Shall I send that?'))
-        self.assertEqual(result['fails'], {'blocked': 1, 'wrong_tool': 1})
+            example, assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix logs')]))
+        # Consent in the first fragment applies to the whole spoken turn.
+        self.assertEqual((result['passed'], len(payloads)), (1, 1))
         trace, = result['samples']
-        self.assertIsNone(trace['action'])
+        self.assertEqual(trace['action']['name'], 'send_to_chat')
         self.assertEqual(payloads[0]['messages'][1]['content'], example['user'][0])
         self.assertEqual(payloads[0]['messages'][-1]['content'], example['user'][1])
-        reason = trace['blocked'][0]['blocked']
-        self.assertEqual(json.loads(payloads[1]['messages'][-1]['content']), {'error': reason})
+
+    def test_friday_readback_scores_by_expectation_and_ends_the_run(self):
+        proposal = {'name': 'send_to_chat', 'chat': ' Friday Test ', 'payload': 'Fix the login bug'}
+        reply = friday.send_readback(friday.SendProposal(**proposal, turn=1))
+        send = assistant('I sent it.', tool_calls=[
+            call('send_to_chat', chat=proposal['chat'], prompt=proposal['payload']),
+            call('backlog_send', 'c2', chat='docs-site', item='B12'),
+            call('switch_chat', 'c3', chat='docs-site')])
+        args = {'chat': '(?i)friday test', 'prompt': 'login bug'}
+        for expect, fails in (
+                ({'tool': None, 'readback_chat': 'friday test', 'args': args}, {}),
+                ({'tool': 'send_to_chat', 'args': args}, {'readback_instead': 1}),
+                ({'tool': None}, {'unwanted_readback': 1}),
+                ({'tool': None, 'readback_chat': 'docs-site'}, {'readback': 1}),
+                ({'tool': None, 'readback_chat': 'friday test', 'args': {'prompt': 'logout'}}, {'wrong_args': 1})):
+            with self.subTest(expect=expect):
+                result, payloads = self.run_script(case(user='friday test should fix the login bug',
+                                                        expect=expect), send)
+                self.assertEqual((result['passed'], result['fails'], len(payloads)), (int(not fails), fails, 1))
+                trace, = result['samples']
+                self.assertEqual((trace['proposal'], trace['reply']), (proposal, reply))
+                self.assertEqual((trace['action'], trace['actions'], trace['blocked']), (None, [], []))
+
+    def test_backlog_readback_requires_the_expected_tool(self):
+        send = assistant(tool_calls=[call('backlog_send', chat='docs-site', item='B12')])
+        expect = {'tool': None, 'readback_chat': 'docs-site'}
+        example = case(user='B12 for docs-site', expect=expect)
+        result, _ = self.run_script(example, send)
+        self.assertEqual(result['fails'], {'readback': 1})
+        expect['readback_tool'] = 'backlog_send'
+        result, _ = self.run_script(example, send)
+        self.assertEqual(result['passed'], 1)
+        self.assertEqual(result['samples'][0]['reply'], 'Send B12 to docs-site. Yes or no?')
+
+    def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
+        pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
+        readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
+        example = case('send_to_chat', user=[' Yes, please do. ', ' And also check the logs after. '],
+                       history=[assistant(readback)], pending=pending)
+        for chat, last_reply, fails in (
+                ('friday test', readback, {}),
+                ('docs-site', readback, {'readback_instead': 1}),
+                ('friday test', 'Send to friday test: Fix the logout bug. Yes or no?', {'readback_instead': 1})):
+            with self.subTest(chat=chat, last_reply=last_reply):
+                example['history'][-1] = assistant(last_reply)
+                sent = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=pending['payload'])])
+                result, _ = self.run_script(example, sent)
+                self.assertEqual((result['passed'], result['fails']), (int(not fails), fails))
+                trace, = result['samples']
+                if fails:
+                    self.assertEqual(trace['proposal'], dict(pending, chat=chat))
+                else:
+                    self.assertIsNone(trace['proposal'])
+                    self.assertEqual(trace['action']['name'], 'send_to_chat')
+
+    def test_declined_pending_proposal_still_blocks_send(self):
+        pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
+        readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
+        sent = assistant(tool_calls=[call('send_to_chat', chat=pending['chat'], prompt=pending['payload'])])
+        reason = 'The user declined the proposed send.'
+        for user in ('no, not now', "no, don't send it"):
+            with self.subTest(user=user):
+                example = case(user=user, history=[assistant(readback)], pending=pending)
+                result, payloads = self.run_script(example, sent, assistant('Okay.'))
+                self.assertEqual(result['fails'], {'blocked': 1})
+                trace, = result['samples']
+                self.assertIsNone(trace['proposal'])
+                self.assertEqual(trace['blocked'][0]['blocked'], reason)
+                self.assertEqual(json.loads(payloads[1]['messages'][-1]['content']), {'error': reason})
 
     def test_readback_must_authorize_a_follow_up_yes(self):
         example = case(expect={'tool': None, 'readback_chat': 'friday test'})
@@ -106,7 +173,8 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(self.run_script(example, assistant('Okay.'))[0]['fails'], {'readback': 1})
         follow_up = case('send_to_chat', user='yes', history=[assistant(good), assistant(None)])
         sent = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Fix the login bug')])
-        self.assertIn('blocked', self.run_script(follow_up, sent, assistant())[0]['fails'])
+        # Friday speaks a fresh read-back when the last assistant message cannot authorize the send.
+        self.assertEqual(self.run_script(follow_up, sent)[0]['fails'], {'readback_instead': 1})
         follow_up['history'].pop()
         self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
 
@@ -203,11 +271,13 @@ class IntentEvalTests(unittest.TestCase):
         self.assertNotIn('_usage', payloads[1]['messages'][-2])
         self.assertEqual(json.loads(payloads[1]['messages'][-1]['content']), {'ok': True})
 
-    def test_offline_cli_rejects_duplicate_id_unknown_tool_group_and_invalid_regex(self):
+    def test_offline_cli_rejects_invalid_fixtures(self):
         for data, message in ((fixture(case(), case()), 'duplicate id'),
                               (fixture(case('unknown_tool')), 'unknown tool'),
                               (fixture(case(group='typo')), 'unknown group'),
-                              (fixture(case(expect={'tool': None, 'reply': '['})), 'regex')):
+                              (fixture(case(expect={'tool': None, 'reply': '['})), 'regex'),
+                              (fixture(case(pending={'name': 'send_to_chat', 'chat': 'friday test'})), 'pending'),
+                              (fixture(case(expect={'tool': None, 'readback_tool': 'switch_chat'})), 'readback_tool')):
             with self.subTest(message=message), TemporaryDirectory() as folder:
                 path = Path(folder) / 'cases.json'
                 path.write_text(json.dumps(data), encoding='utf-8')

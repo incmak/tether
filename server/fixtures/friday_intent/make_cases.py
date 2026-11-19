@@ -2,7 +2,7 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from friday_agent import tool_schemas  # noqa: E402
+from friday_agent import SendProposal, send_readback, tool_schemas  # noqa: E402
 TOOLS = {t['function']['name'] for t in tool_schemas()}
 
 STATE = {"busy": ["login-fix"], "idle": 5,
@@ -161,6 +161,14 @@ case("confirm-go-ahead", "confirm", D, "yeah go ahead",
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
 case("deny-no-wait", "deny", D, "no, wait, not yet", {"tool": None},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
+PENDING_API = {"name": "send_to_chat", "chat": "api-server", "payload": "Add rate limiting to the upload endpoint"}
+FIXED_API = say("the api server should add rate limiting to the upload endpoint",
+                send_readback(SendProposal(**PENDING_API, turn=0)))
+case("fixed-yes", "confirm", D, "yes please",
+     {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
+case("fixed-no", "deny", D, "no, not now", {"tool": None}, history=FIXED_API, pending=PENDING_API)
+case("fixed-yes-plus-more", "split_turn", D, ["Yes, please do.", "And also check the logs after."],
+     {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
 case("approve", "approval", D, "approve it",
      {"tool": "answer_approval", "args": {"chat": "(?i)deploy", "decision": "approve"}})
 case("deny-approval", "approval", D, "deny that request",
@@ -211,6 +219,11 @@ case("h-readback-idea", "readback", H, "docs site needs a page about the new set
 RB_DOCS = "I will ask docs-site to add a page about the new settings screen. Shall I send that?"
 case("h-confirm-sure", "confirm", H, "sure, do it", {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site"}},
      history=say("docs site needs a page about the new settings screen", RB_DOCS))
+PENDING_DOCS = {"name": "send_to_chat", "chat": "docs-site", "payload": "Update the changelog for the new release"}
+case("h-fixed-yes", "confirm", H, "yeah go ahead",
+     {"tool": "send_to_chat", "args": {"chat": "docs-site"}}, pending=PENDING_DOCS,
+     history=say("docs site should update the changelog for the new release",
+                 send_readback(SendProposal(**PENDING_DOCS, turn=0))))
 case("h-deny-dont", "deny", H, "actually no, don't", {"tool": None},
      history=say("docs site needs a page about the new settings screen", RB_DOCS))
 case("h-approve-allow", "approval", H, "yes allow it",

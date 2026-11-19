@@ -47,23 +47,32 @@ def _asks_send_to(reply, chat):
 
 
 def _score(trace, expect, expected_tools):
-    action, reply = trace['action'], trace['reply']
+    action, reply, proposal = trace['action'], trace['reply'], trace['proposal']
     name, args = (action['name'], action['args']) if action else (None, {})
+    readback_chat = expect.get('readback_chat')
+    readback_instead = proposal is not None and action is None and None not in expected_tools
     if trace['blocked']:
         yield 'blocked'
     if len(trace['actions']) + (name in LOOKUPS) > 1:  # An expected lookup plus a write is also extra.
         yield 'extra_action'
-    if name not in expected_tools:
+    if readback_instead:
+        yield 'readback_instead'
+    elif name not in expected_tools:
         yield 'wrong_tool'
-    if any(key not in args or not re.search(pattern, str(args[key]))
-           for key, pattern in expect.get('args', {}).items()):
+    if proposal and readback_chat is not None:
+        args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
+    if not readback_instead and any(key not in args or not re.search(pattern, str(args[key]))
+                                    for key, pattern in expect.get('args', {}).items()):
         yield 'wrong_args'
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
-    if 'readback_chat' in expect and (friday.check_tool(
-            'send_to_chat', {'chat': expect['readback_chat'], 'prompt': '\u0000readback-probe\u0000'},
-            'speech', 'yes', set(), reply) or not _asks_send_to(reply, expect['readback_chat'])):
-        yield 'readback'
+    if readback_chat is not None:
+        fixed = (proposal and proposal['name'] == expect.get('readback_tool', 'send_to_chat')
+                 and proposal['chat'].strip().casefold() == readback_chat.casefold())
+        if not fixed and not _asks_send_to(reply, readback_chat):
+            yield 'readback'
+    elif proposal and None in expected_tools:
+        yield 'unwanted_readback'
     if action is None and not expect.get('claim_ok') and CLAIM.search(reply):
         yield 'claimed_action'
     if action is None and (not reply.strip() or STRAY.search(reply)):
@@ -86,11 +95,26 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         text = friday.EVENT_PREFIX + fragment if case.get('event') else friday.fix_transcript(fragment)
         messages.append({'role': 'user', 'content': text})
     messages, _ = friday.add_state(messages, case.get('state', fixture.get('state', {})), [], None)
-    text = messages[-1]['content']
-    source = 'event' if text.startswith(friday.EVENT_PREFIX) else 'speech'
-    last_user_text = text if source == 'speech' else ''
-    previous = next((m for m in reversed(messages[:-1]) if m['role'] == 'assistant'), {})
-    previous_assistant = previous.get('content') or ''
+    message = messages[-1]
+    source = 'event' if message['content'].startswith(friday.EVENT_PREFIX) else 'speech'
+    if not friday.is_real_user(message):
+        source = 'tool'
+    i = next((i for i in range(len(messages) - 2, -1, -1)
+              if messages[i].get('role') == 'assistant'), -1)
+    previous_assistant = (messages[i].get('content') or '') if i >= 0 else ''
+    last_user_text = ''
+    if source == 'speech':
+        last_user_text = ' '.join(m['content'].strip() for m in messages[i + 1:]
+            if friday.is_real_user(m) and isinstance(m.get('content'), str)
+            and m['content'].strip() and not m['content'].startswith(friday.EVENT_PREFIX))
+    user_turn = 1
+    pending = friday.SendProposal(**case['pending'], turn=0) if 'pending' in case else None
+    if pending and previous_assistant != friday.send_readback(pending):
+        pending = None
+    declined = None
+    if pending and friday.APPROVAL_NO.search(last_user_text):
+        # Clear the pending proposal but keep it for guards in this run.
+        declined, pending = pending, None
     used = set()
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
 
@@ -107,8 +131,15 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         messages.append(message)
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
-            reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant)
-            if reason:
+            reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
+                                       pending=pending or declined, user_turn=user_turn)
+            if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:
+                key = 'prompt' if name == 'send_to_chat' else 'item'
+                proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''), user_turn)
+                trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                trace['reply'] = friday.send_readback(proposal)
+                result = {'error': 'Not sent yet. Friday asked the user to confirm.'}
+            elif reason:
                 trace['blocked'].append({'name': name, 'args': args, 'blocked': reason})
                 result = {'error': reason}
             else:
@@ -120,6 +151,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     continue
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
+            if trace['proposal'] is not None:
+                return
         if trace['action'] is not None:
             return
 
@@ -133,7 +166,8 @@ def run_case(case, fixture, complete, runs=1, brain=None):
     fails, samples = Counter(), []
     passed = prompt_tokens = llm_calls = 0
     for _ in range(runs):
-        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [], 'prompt_tokens': 0}
+        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [],
+                 'proposal': None, 'prompt_tokens': 0}
         try:
             _run_once(case, fixture, complete, brain, expected_tools, trace)
         except LiveError as exc:
@@ -180,6 +214,12 @@ def load_fixture(path):
             raise ValueError(f'{label}: user must be text or a nonempty list of text fragments')
         if not isinstance(case.get('event', False), bool):
             raise ValueError(f'{label}: event must be a boolean')
+        if 'pending' in case:
+            pending = case['pending']
+            if (not isinstance(pending, dict) or pending.keys() != {'name', 'chat', 'payload'}
+                    or pending['name'] not in friday.SEND_TOOLS
+                    or not all(isinstance(value, str) for value in pending.values())):
+                raise ValueError(f'{label}: pending must specify a send tool name, chat and payload')
         _validate_context(case, label, names)
         _validate_expectation(case.get('expect'), label, names)
     return fixture
@@ -226,6 +266,8 @@ def _validate_expectation(expect, label, names):
         raise ValueError(f'{label}: invalid regex ({exc})') from None
     if 'readback_chat' in expect and not isinstance(expect['readback_chat'], str):
         raise ValueError(f'{label}: readback_chat must be text')
+    if 'readback_tool' in expect and expect['readback_tool'] not in friday.SEND_TOOLS:
+        raise ValueError(f'{label}: readback_tool must be a send tool')
 
 
 class LiveError(RuntimeError):
