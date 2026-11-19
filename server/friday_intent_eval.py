@@ -147,6 +147,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         messages.append(message)
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
+            args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
                                        pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
             if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:

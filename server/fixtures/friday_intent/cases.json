@@ -254,6 +254,7 @@
    ],
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
      "prompt": "(?i)318|three one eight"
@@ -304,10 +305,9 @@
    "user": "Yes, please.",
    "expect": {
     "tool": "send_to_chat",
-    "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
-     "prompt": "(?i)^[^.!?;]*\\bspec\\b[^.!?;]*\\b(?:urgent|critical|blocker|call)[^.!?;]*[.!?]?$|^[^.!?;]*\\b(?:urgent|critical|blocker)\\b[^.!?;]*\\bspec\\b[^.!?;]*[.!?]?$"
+     "prompt": "(?i)^spin up a new tab and write a spec for an urgent voice call feature\\W*$"
     }
    }
   },
@@ -1156,6 +1156,7 @@
    ],
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "api-server"
     }
@@ -2490,6 +2491,7 @@
    "user": "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
      "prompt": "(?i)read|reply|response|cut|trunc"

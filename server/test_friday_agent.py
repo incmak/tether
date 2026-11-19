@@ -3,6 +3,7 @@ import copy
 import asyncio
 from datetime import datetime, timezone
 import importlib.util
+import inspect
 import json
 import threading
 import unittest
@@ -498,11 +499,61 @@ class FridayRulesTests(unittest.TestCase):
                     self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', 'Yes.', set(),
                                                         readback, pending, 5))
 
+    def test_an_answer_to_a_send_question_confirms_only_the_read_back_text(self):
+        # 20 Nov review round 5: send words in the answer never open the direct-send path.
+        proposal = friday.SendProposal('send_to_chat', 'docs', 'Keep option C.', 4)
+        questions = ((friday.send_readback(proposal), proposal),
+                     ('Should I tell docs to keep option C?', None),
+                     ('I will tell docs to keep option C. Shall I send that?', None),
+                     ('Should I tell docs to archive the draft? Should I wait instead?', None))
+        for previous, pending in questions:
+            for answer in ('Yes, and can you tell me when the chat replies?', 'Yes, please do not send it yet.',
+                           'Yes, and tell docs to archive the draft too.', 'Yes.'):
+                with self.subTest(previous=previous, answer=answer):
+                    self.assertIsNotNone(friday.check_tool(
+                        'send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C. Archive the draft.'},
+                        'speech', answer, set(), previous, pending, 5))
+        self.assertIsNone(friday.freeform_proposal('Should I tell docs to archive the draft? Should I wait instead?'))
+        for previous, pending in questions[:3]:
+            with self.subTest(previous=previous):
+                self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C.'},
+                                                    'speech', 'Yes.', set(), previous, pending, 5))
+                self.assertIsNotNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C.'},
+                                                       'speech', 'Yes, please do not send it yet.', set(),
+                                                       previous, pending, 5))
+
+    def test_only_a_plain_yes_confirms_and_it_sends_the_heard_text(self):
+        proposal = friday.SendProposal('send_to_chat', 'docs', 'Keep option C.', 4)
+        readback = friday.send_readback(proposal)
+        for answer in ('Yes, but later.', 'Okay, once the tests pass.', 'Sure, but make it D.',
+                       'Yes, please do not send it yet.', 'Yes, why not ask deploy instead.'):
+            with self.subTest(answer=answer):
+                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Keep option C.'},
+                                             answer, readback, proposal, 5)
+                self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
+                                                       readback, proposal, 5))
+        for answer in ('Yes.', 'Yes, please do.', 'Okay, go ahead.', 'Sure, send it to docs.', 'Yeah, do it. Thanks.'):
+            for previous, pending in ((readback, proposal), ('Should I tell docs to keep option C?', None)):
+                with self.subTest(answer=answer, previous=previous):
+                    self.assertTrue(friday.plain_yes(answer, 'docs'))
+                    args = friday.confirmed_args('send_to_chat', {'chat': 'docs', 'prompt': 'Archive the draft.'},
+                                                 answer, previous, pending, 5)
+                    self.assertEqual(same := friday.same_text(args['prompt']), 'keep option c')
+                    self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
+                                                        previous, pending, 5), same)
+        # Another chat keeps the model's text, and the guard refuses it.
+        args = friday.confirmed_args('send_to_chat', {'chat': 'deploy', 'prompt': 'Archive the draft.'},
+                                     'Yes.', readback, proposal, 5)
+        self.assertEqual(args['prompt'], 'Archive the draft.')
+
     def test_a_question_about_the_users_own_send_is_not_a_request(self):
         for text in ('Should I just message ci-audit myself', 'Should I ask ci-audit myself',
                      "I'll tell docs myself", 'I’ll just send it later', 'We could message them later',
                      'did you tell docs', 'have you sent it', 'Did you already tell docs',
-                     'Have you just asked ci-audit'):
+                     'Have you just asked ci-audit', 'Did you by any chance tell docs',
+                     'Yes, please do not send it yet', "Don't tell docs", 'Can you tell me when the chat replies',
+                     'Tell us when it is done'):
             with self.subTest(text):
                 self.assertFalse(friday.send_intent(text))
         for text in ('Just message ci-audit with the fix', 'Can you tell docs to rerun it',
@@ -1262,6 +1313,11 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.rt = friday.runtime_types()
 
+    async def test_installed_pipecat_still_defers_tool_pushes_with_the_flag_friday_reads(self):
+        # friday_agent reads this private flag; a Pipecat update that drops it must fail here.
+        from pipecat.processors.aggregators import llm_response_universal
+        self.assertIn('self._context_push_owed', inspect.getsource(llm_response_universal))
+
     async def test_tts_preroll_keeps_ttfb_and_measures_slack_from_flush(self):
         session = SimpleNamespace(turn=4, tts_ttfb=None)
         service = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
@@ -1821,7 +1877,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             {'role': 'user', 'content': 'Yes, please do.'},
             {'role': 'user', 'content': friday.EVENT_PREFIX + 'No.'},
             {'role': 'user', 'content': friday.STATE_PREFIX + 'No.'},
-            {'role': 'user', 'content': 'And for the factory floor, check the alerts.'},
+            {'role': 'user', 'content': 'Go ahead.'},
         ]
         args = {'chat': proposal.chat, 'prompt': 'Review the context.'}
         session, frames = await self.tool_flow(messages, [

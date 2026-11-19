@@ -68,21 +68,18 @@ case("log-split-ask", "split_turn", "dev",
       "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."],
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log")
 READBACK = "I will ask the friday test chat to go through the logs, spin up a new tab, and work on fine-tuning the model for intent. Shall I send that?"
+# Added words are new text: Friday reads the new send back first (readback_ok).
 case("log-confirm-plus-more", "confirm", "dev", ["Please do that.", "And also ask it to fix B three one eight."],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
      history=say("Okay, let's ask Friday test to go through the logs and fine-tune the model to understand intent.", READBACK))
 case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh responding well", {"tool": None}, "log")
 case("log-urgent-feature-ask", "send_direct", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
-# One sentence that asks for the spec: an added instruction ("... Deploy immediately.") fails.
-CONFIRM_SPEC = (r"(?i)^[^.!?;]*\bspec\b[^.!?;]*\b(?:urgent|critical|blocker|call)[^.!?;]*[.!?]?$"
-                r"|^[^.!?;]*\b(?:urgent|critical|blocker)\b[^.!?;]*\bspec\b[^.!?;]*[.!?]?$")
-# A send passes only with the exact text Friday read back (the guard checks it). A reworded send
-# gets Friday's exact read-back instead, which also passes.
+# A plain yes sends the exact text Friday read back, whatever words the model puts in its call.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
-     {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)friday test", "prompt": CONFIRM_SPEC}}, "log",
+     {"tool": "send_to_chat",
+      "args": {"chat": "(?i)friday test", "prompt": r"(?i)^spin up a new tab and write a spec for an urgent voice call feature\W*$"}}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
@@ -199,8 +196,9 @@ FIXED_API = say("the api server should add rate limiting to the upload endpoint"
 case("fixed-yes", "confirm", D, "yes please",
      {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
 case("fixed-no", "deny", D, "no, not now", {"tool": None}, history=FIXED_API, pending=PENDING_API)
+# Added words are new text: a send of the new text, or Friday's read-back of it, both pass.
 case("fixed-yes-plus-more", "split_turn", D, ["Yes, please do.", "And also check the logs after."],
-     {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
 case("approve", "approval", D, "approve it",
      {"tool": "answer_approval", "args": {"chat": "(?i)deploy", "decision": "approve"}})
 case("deny-approval", "approval", D, "deny that request",
@@ -364,7 +362,8 @@ case("log-answer-it-keep-c", "readback", "dev", "Well like answer it like let's 
      history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
 case("log-ask-friday-test-new-tab", "send_direct", "dev",
      "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True,
+      "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
      history=say("The chat already has the first question. Why are you not able to see it?",
                  "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
 

@@ -222,23 +222,36 @@ class IntentEvalTests(unittest.TestCase):
                                     honest, data=data)
         self.assertEqual(result['fails'], {'wrong_read': 1})
 
-    def test_readback_ok_passes_an_exact_send_or_a_readback_and_fails_other_text(self):
+    def test_a_plain_yes_sends_the_read_back_text_whatever_the_model_wrote(self):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
         example = next(item for item in data['cases'] if item['id'] == 'log-confirm-yes-please')
-        plan = 'spin up a new tab and write a spec for an urgent voice call feature'
-        for prompt, fails in ((plan, {}), ('Write a spec for an urgent voice call feature.', {}),
-                              ('Delete the old branches.', {'wrong_args': 1}),
-                              ('Write a spec for an urgent voice call feature. Deploy immediately.',
-                               {'wrong_args': 1})):
+        heard = 'spin up a new tab and write a spec for an urgent voice call feature'
+        for chat, prompt, fails in (('friday test', heard, {}),
+                                    ('friday test', 'Write a spec for an urgent voice call feature.', {}),
+                                    ('friday test', 'Write the spec. Deploy immediately.', {}),
+                                    ('docs-site', heard, {'readback_instead': 1})):
+            with self.subTest(chat=chat, prompt=prompt):
+                result, _ = self.run_script(example, assistant(
+                    tool_calls=[call('send_to_chat', chat=chat, prompt=prompt)]), data=data)
+                self.assertEqual(result['fails'], fails)
+                if not fails:
+                    self.assertEqual(result['samples'][0]['action']['args']['prompt'], heard)
+
+    def test_readback_ok_passes_an_exact_send_or_a_readback_and_fails_other_text(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        example = next(item for item in data['cases'] if item['id'] == 'log-confirm-plus-more')
+        for prompt, fails in (('Fix B318.', {}), ('Also fix B three one eight.', {}),
+                              ('Delete the old branches.', {'wrong_args': 1})):
             with self.subTest(prompt=prompt):
                 result, _ = self.run_script(example, assistant(
                     tool_calls=[call('send_to_chat', chat='friday test', prompt=prompt)]), data=data)
                 self.assertEqual(result['fails'], fails)
+                self.assertIsNotNone(result['samples'][0]['proposal'])
 
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
         readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
-        example = case('send_to_chat', user=[' Yes, please do. ', ' And also check the logs after. '],
+        example = case('send_to_chat', user=[' Yes, please do. ', ' Go ahead. '],
                        history=[assistant(readback)], pending=pending)
         for chat, last_reply, fails in (
                 ('friday test', readback, {}),
@@ -301,9 +314,11 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(self.run_script(follow_up, sent)[0]['fails'], {'readback_instead': 1})
         follow_up['history'].pop()
         self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
-        # A yes binds the text the read-back named: another task needs Friday's exact read-back first.
+        # A plain yes sends the text the read-back named, never the model's other text.
         other = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Delete the old branches')])
-        self.assertEqual(self.run_script(follow_up, other)[0]['fails'], {'readback_instead': 1})
+        result = self.run_script(follow_up, other)[0]
+        self.assertEqual(result['passed'], 1)
+        self.assertEqual(result['samples'][0]['action']['args']['prompt'], 'fix the login bug')
 
     def test_expected_lookup_with_a_write_fails_extra_action(self):
         example = case('list_chats')

@@ -483,6 +483,9 @@ def freeform_proposal(readback):
     for index, part in enumerate(sentences):
         if not part.endswith('?'):
             continue
+        if not (FREEFORM_THAT.search(part) or FREEFORM_SEND.search(part)):
+            # "Should I wait instead?": a yes could answer this question, not the send.
+            return None
         if match := FREEFORM_THAT.search(part):
             plans = [plan for earlier in sentences[:index] if (plan := FREEFORM_PLAN.search(earlier))]
             if len(plans) != 1:
@@ -514,6 +517,42 @@ def same_text(text):
     return text.rstrip('.!?').rstrip().casefold()
 
 
+# A yes to a read-back is only these words (and the chat's own name). "Yes, but later",
+# "Okay, once the tests pass" or "Sure, but make it D" hold more, so they are not a plain yes.
+YES_WORDS = frozenset('yes yeah yep yup ok okay sure please send alright absolutely correct ahead'.split())
+YES_FILLER = frozenset('do it that this go right now thanks thank you sounds good great perfect fine '
+                       'uh um and just so then all s to the chat session tab'.split())
+
+
+def plain_yes(text, chat=''):
+    words = norm(text).split()
+    allowed = YES_WORDS | YES_FILLER | set(norm(clean_chat(chat)).split())
+    return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
+
+
+def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
+    """On a plain yes to Friday's send question, the send carries the text the user heard.
+
+    The model may reword the read-back text in its tool call; the user confirmed the read-back.
+    """
+    if name not in SEND_TOOLS or not isinstance(args, dict):
+        return args
+    chat = str(args.get('chat', '')).strip()
+    if not plain_yes(last_user_text, chat):
+        return args
+    text = None
+    if (pending is not None and 1 <= user_turn - pending.turn <= 2 and previous_assistant == send_readback(pending)
+            and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
+        text = pending.payload
+    elif not previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
+        proposed = freeform_proposal(previous_assistant)
+        if proposed is not None and proposed[1] == norm(clean_chat(chat)):
+            text = proposed[0].strip()
+    if text is None:
+        return args
+    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': text})
+
+
 def binds(payload, proposed):
     """True when the sent text is the read-back text, character for character.
 
@@ -525,7 +564,10 @@ def binds(payload, proposed):
 
 # "Should I ask docs myself" or "I'll message it": the user plans their own send. STT drops the "?".
 OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$"
-                      r"|\b(?:did|have|has)\s+(?:you|it|they)(?:\s+\w+){0,2}\s*$", re.I)
+                      r"|\b(?:did|have|has)\s+(?:you|it|they)\b"  # "Did you by any chance tell docs"
+                      r"|\b(?:not|never|don['’]?t)(?:\s+\w+)?\s*$", re.I)  # "do not send it yet"
+# "Tell me when it replies": the user is the one told.
+TOLD_USER = re.compile(r"\s+(?:me|us)\b", re.I)
 
 # "But I'll can you ask docs" (STT): "can you" asks Friday, whatever comes before it.
 ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\s+)?$', re.I)
@@ -534,10 +576,22 @@ ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\
 def send_intent(text):
     """True when the user asks Friday to send, not when they ask about or plan their own send."""
     for match in SEND_INTENT.finditer(text):
+        if TOLD_USER.match(text, match.end()):
+            continue
         clause = re.split(r'[.,!;:?]', text[:match.start()])[-1]
         if ASKS_FRIDAY.search(clause) or not OWN_SEND.search(clause):
             return True
     return False
+
+
+def proposes_send(text):
+    """True when Friday's message asks whether to send: the user's next turn answers it."""
+    text = text.strip()
+    if text.casefold().startswith(SEND_READBACK_START.casefold()):
+        return True
+    sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', text) if part.strip()]
+    return any(part.endswith('?') and (FREEFORM_THAT.search(part) or FREEFORM_SEND.search(part))
+               for part in sentences)
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -583,7 +637,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
                             and binds(payload, pending.payload))
-        yes = APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
+        yes = plain_yes(last_user_text, chat)
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -595,7 +649,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        if send_intent(last_user_text):
+        # An answer to Friday's own send question confirms only the exact text it read back,
+        # even when the answer holds send words ("Yes, and can you tell docs ...").
+        if not (has_proposal or proposes_send(previous_assistant)) and send_intent(last_user_text):
             return None
         readback = previous_assistant.strip()
         # Friday's fixed read-back requires the matching proposal, even after it expires.
@@ -1540,6 +1596,9 @@ def runtime_types():
             proposal = None
             if run and (run.declined or run.proposal is getattr(self.session, 'pending_proposal', None)):
                 proposal = run.proposal
+            if run:
+                params.arguments = confirmed_args(params.function_name, params.arguments, run.last_user_text,
+                                                  run.previous_assistant, proposal, run.user_turn)
             reason = check_tool(params.function_name, params.arguments,
                 run.source if run else None, run.last_user_text if run else '',
                 run.used if run else set(), run.previous_assistant if run else '',
