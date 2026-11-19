@@ -167,7 +167,8 @@ PUNCTUATION = '();<>|&\n'
 # Every other character is itself, also a letter such as é. `=` is special only at the start of a word (zsh).
 SHELL_SPECIAL = set('$`*?[]{}~!#^')
 LINE_JOIN = r'(?:\\\n)*'
-DOUBLE_EXPANSION = re.compile(rf'{LINE_JOIN}[A-Za-z0-9_{{(\[!#?*@$^=+%-]')
+# zsh also accepts non-ASCII names and the unbraced modifiers ^, =, ~, + and #.
+DOUBLE_EXPANSION = re.compile(rf'{LINE_JOIN}[\w{{(\[!#?*@$^=~+%-]')
 ANSI_QUOTE = re.compile(r"\$'((?:[^'\\]|\\[\s\S])*)'")
 ANSI_ESCAPE = re.compile(rb'\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)', re.S)
 ANSI_BYTES = dict(zip(b"""abefnrtvE\\'"?""", b"""\a\b\x1b\f\n\r\t\v\x1b\\'"?"""))
@@ -192,6 +193,7 @@ SHELL_COMMANDS = {'eval', 'source', '.', 'exec', 'xargs', 'sh', 'bash', 'zsh'}
 GIT_VALUE_OPTIONS = {'-c', '--namespace', '--super-prefix', '--config-env', '--exec-path'}
 GIT_PLACE_OPTIONS = {'--git-dir', '--work-tree'}  # they move the repository: the folder is then not known
 CLEANUP_CONFIG = ('commit.cleanup', 'core.commentchar', 'core.commentstring')
+CLEANUP_PATTERN = '^(' + '|'.join(re.escape(key) for key in CLEANUP_CONFIG) + ')$'
 GIT_CONFIG_ENV = re.compile(r'GIT_CONFIG.*|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|HOME|XDG_CONFIG_HOME')
 # `git commit` options that cannot change the message. An option that is not listed here makes the verdict unknown.
 COMMIT_VALUE_OPTIONS = {'--author', '--date', '--pathspec-from-file'}
@@ -555,40 +557,41 @@ def _read_message_file(folder, name):
         return None
 
 
-def _cleanup_uncertain(text, mode, folder, config):
+def _cleanup_uncertain(text, mode, folder, config, *, alone):
     """Could Git remove a Verified line? Caller has a literal message and no editor."""
-    def setting(key):
-        if os.environ.get('GIT_CONFIG') is not None:  # git config alone honors this override
-            raise ValueError('git config override')
-        shown = _git(folder, *config, 'config', '--null', '--get', key, text=False)
-        if shown is not None and shown.returncode == 1 and not shown.stdout and not shown.stderr:
-            return None
-        if shown is None or shown.returncode != 0 or not shown.stdout.endswith(b'\0'):
-            raise ValueError('unreadable git config')
-        return shown.stdout[:-1].decode('utf-8')
-
     if mode is not None and (not mode.plain or mode.text not in ('strip', 'whitespace', 'verbatim', 'scissors', 'default')):
         return True
     lines = [line for line in text.split('\n') if line.startswith('Verified:')]
     if not lines:
         return False
-    if folder is None:
+    # Earlier commands can change any of these settings. Only git config honors the GIT_CONFIG override.
+    if not alone or folder is None or os.environ.get('GIT_CONFIG') is not None:
+        return True
+    shown = _git(folder, *config, 'config', '--null', '--get-regexp', CLEANUP_PATTERN, text=False)
+    if shown is not None and shown.returncode == 1 and not shown.stdout and not shown.stderr:
+        return False  # no matching keys and the default comment prefix cannot remove a Verified line
+    if shown is None or shown.returncode != 0 or not shown.stdout.endswith(b'\0'):
         return True
     try:
-        cleanup = mode.text if mode is not None else setting(CLEANUP_CONFIG[0])
-        if cleanup in (None, 'default', 'whitespace', 'verbatim', 'scissors'):
-            return False
-        if cleanup != 'strip':
-            return True
-        # Git 2.45+ treats these keys as aliases in config order. Consider either possible prefix:
-        # older Git ignores commentString, and only a possible deletion matters here.
-        return any(line.startswith(prefix) for key in CLEANUP_CONFIG[1:]
-                   if (prefix := setting(key)) and prefix.lower() != 'auto' for line in lines)
+        settings = {}
+        for entry in shown.stdout[:-1].decode('utf-8').split('\0'):
+            key, _, value = entry.partition('\n')
+            if key in CLEANUP_CONFIG[1:] and not value:
+                return True  # Git can reject an empty comment prefix before it applies cleanup or later overrides.
+            settings[key] = value
     except ValueError:
         return True
+    cleanup = mode.text if mode is not None else settings.get(CLEANUP_CONFIG[0])
+    if cleanup in (None, 'default', 'whitespace', 'verbatim', 'scissors'):
+        return False
+    if cleanup != 'strip':
+        return True
+    # Git 2.45+ treats these keys as aliases in config order. Consider either possible prefix.
+    return any(line.startswith(prefix) for key in CLEANUP_CONFIG[1:]
+               if (prefix := settings.get(key)) and prefix.lower() != 'auto' for line in lines)
 
 
-def _one_commit(args, stdin, bodies, folder, *, read_file, config):
+def _one_commit(args, stdin, bodies, folder, *, alone, config):
     """('pass' | 'missing' | 'unknown' | 'skip', reason) for one `git commit`."""
     found = _commit_arguments(args)
     flags = found['flags']
@@ -612,7 +615,7 @@ def _one_commit(args, stdin, bodies, folder, *, read_file, config):
         name = word.text
         if word.plain and name == '-':
             text = bodies[stdin] if stdin is not None and stdin < len(bodies) else None
-        elif word.plain and not HEREDOC_FOUND.search(name) and read_file and folder is not None:
+        elif word.plain and not HEREDOC_FOUND.search(name) and alone and folder is not None:
             text = _read_message_file(folder, name)
         if text is None:
             return 'unknown', 'file'
@@ -625,7 +628,7 @@ def _one_commit(args, stdin, bodies, folder, *, read_file, config):
     status = stamp.message_status(text)
     if '\r' in text and stamp.message_status(text.replace('\r\n', '\n').replace('\r', '\n')) != status:
         return 'unknown', 'encoding'  # a CR inside a Git line can look like a new line to the landed reader
-    if _cleanup_uncertain(text, found['cleanup'], folder, config):
+    if _cleanup_uncertain(text, found['cleanup'], folder, config, alone=alone):
         return 'unknown', 'cleanup' if folder is not None else 'folder'
     if status != 'missing':
         return 'pass', ''
@@ -663,9 +666,9 @@ def _real_directory(path):
     return None
 
 
-def _cd(folder, logical, target, *, physical):
+def _cd(folder, logical, target, *, physical, alone):
     """Return the real folder and the shell's logical name, or (None, None)."""
-    if os.environ.get('CDPATH') and not (target.startswith('/') or target.split('/')[0] in ('.', '..')):
+    if (not alone or os.environ.get('CDPATH')) and not (target.startswith('/') or target.split('/')[0] in ('.', '..')):
         return None, None
     if physical:
         real = _real_directory(os.path.join(folder, target))
@@ -733,22 +736,21 @@ def evaluate(command, cwd=None):
         if re.search(r'(?:^|[\s;&|(])git\s[^\n;|&]*\bcommit(?:\s|$)', command):
             return {'verdict': 'unknown', 'reason': 'parse', 'count': 1, 'folder': None}
         return None
-    # `alone`: only plain `cd` commands ran before. Then no earlier command can have written a message file.
+    # `alone`: only followed cd commands ran before. Other commands can change a message file, config or CDPATH.
     verdicts, where, alone = [], None, True
     # A cd is followed only when it runs for certain, in the shell itself, to a folder the gate can name:
     # - not when the command has a background `&` (bash can put a whole && list in the background);
     # - not when the command sets HOME (the gate's ~ would be the old one);
     # - not after `x &&` unless x is a cd too (`test -f a && cd b; git commit` can skip the cd);
     # - not after || or in a pipe (`cd a || cd b`, `cd a | x`).
-    steady = '&' not in tokens and not any(name in joined for name in ('HOME=', 'CDPATH=', 'PWD='))
-    chained = True  # every command so far was a followed cd
+    steady = '&' not in tokens and not any(name in joined for name in ('HOME=', 'PWD='))
     guard = None
-    config_changed = False
+    git_context_changed = False
     for number, (preceding, words, stdin, redirects_plain, redirected) in enumerate(segments):
         if number == guard:
             continue
         if not words:
-            chained = alone = False  # a redirection alone can write a message file
+            alone = False  # a redirection alone can write a message file
             continue
         first = words[0]
         uncertain = uncertain or (first.bare and first.text in KEYWORDS)
@@ -763,24 +765,23 @@ def evaluate(command, cwd=None):
             target = _cd_target(words[1 if first.text == 'cd' else 2:])
             if (folder is not None and steady and not uncertain and all_plain and not redirected
                     and following in FOLDER_SEPARATORS and target is not None
-                    and (preceding in (None, ';', '\n') or (preceding == '&&' and chained))):
-                folder, logical = _cd(folder, logical, target[0], physical=target[1])
+                    and (preceding in (None, ';', '\n') or (preceding == '&&' and alone))):
+                folder, logical = _cd(folder, logical, target[0], physical=target[1], alone=alone)
             else:
                 folder = logical = None
-            chained = chained and folder is not None
+            alone = alone and folder is not None
             continue
-        chained = False
         while words and words[0].bare and words[0].text in KEYWORD_PREFIXES:
             words = words[1:]
         uncertain = uncertain or _shell_launcher(words)
         commit = _git_commit(words) if words else None
         if commit:
             args, _, folders, known, config = commit
-            here = folder if known and not config_changed else None
+            here = folder if known and not git_context_changed else None
             for item in folders:
                 here = (_real_directory(os.path.join(here, item.text))
                         if here is not None and item.plain and not item.fill else None)
-            verdict, reason = _one_commit(args, stdin, bodies, here, read_file=alone, config=config)
+            verdict, reason = _one_commit(args, stdin, bodies, here, alone=alone, config=config)
             if verdict != 'skip':
                 if not all_plain:
                     verdict, reason = 'unknown', 'shell'
@@ -795,12 +796,12 @@ def evaluate(command, cwd=None):
         if first.text in ('set', 'setopt', 'unsetopt'):
             steady = False  # later cd and glob behavior can depend on shell options
         if commit is None:
-            # A config write or an environment change can invalidate a probe before the shell runs.
-            config_changed = config_changed or (
+            # These commands can explicitly change the Git worktree or hooks. Keep the folder unknown for probes.
+            git_context_changed = git_context_changed or (
                 any(os.path.basename(word.text) == 'git' for word in words[:-1])
                 and any(word.text == 'config' for word in words[1:]))
             if ASSIGNMENT.fullmatch(first.text) or first.text in ('export', 'unset'):
-                config_changed = config_changed or any(
+                git_context_changed = git_context_changed or any(
                     GIT_CONFIG_ENV.fullmatch(word.text.split('=', 1)[0]) for word in words)
         alone = False
     if not verdicts:

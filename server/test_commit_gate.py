@@ -203,7 +203,7 @@ class Evaluate(unittest.TestCase):
                 f"git commit -qam 'Fix\n\n{STAMP}'",
                 heredoc(f'Fix the "quoted" thing, it\'s done (really)\n\n{STAMP}\nCo-Authored-By: x <x@example.com>'),
                 heredoc(f'Fix\n\n{STAMP}', tag='EOF'),
-                f'git add -A && {heredoc("Fix" + chr(10) + chr(10) + "Verified: none (docs only)")} && git push',
+                f'cd sub && {heredoc("Fix" + chr(10) + chr(10) + "Verified: none (docs only)")} && git push',
                 "git commit -m 'Subject#123' -m 'Verified: none'",
                 f'cd sub && GIT_EDITOR=true git -c user.name=x --no-pager commit -q --amend -m "Fix\n\n{STAMP}"',
                 f"git commit -F - <<'EOF'\nFix it's\n\n{STAMP}\nEOF\ngit log -1",
@@ -258,7 +258,7 @@ class Evaluate(unittest.TestCase):
                 ('git commit --frobnicate -m subject', 'open'),
                 ('git commit -m x # note', 'parse'),
                 ('# it is a note\ngit commit -m x', 'parse'),
-                ("true || git commit -m skipped; git commit -m 'Verified: none'", 'mixed'),
+                ("true || git commit -m skipped; git commit -m 'Verified: none'", 'cleanup'),
                 ('git commit -m', 'editor'),
                 ('git commit -Zm "Fix"', 'editor'),
                 ('git commit -m "Fix', 'parse')):
@@ -463,6 +463,19 @@ class Evaluate(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.verdict(command), ('unknown', 'shell'))
 
+    def test_double_quoted_zsh_parameter_modifiers_are_unknown(self):
+        for modifier in ('^', '=', '~', '+', '#', '^^', '==', '~~', '++', '##', '^=~#'):
+            for expression in (f'${modifier}X', f'${{{modifier}X}}'):
+                with self.subTest(expression=expression):
+                    self.assertEqual(self.verdict(f'git commit -m "Verified: none (a{expression})"'),
+                                     ('unknown', 'shell'))
+        for expression in ('$~X', '$\\\n~X', '$é'):
+            with self.subTest(expression=expression):
+                self.assertEqual(self.verdict(f'git commit -m "Verified: {expression}"'), ('unknown', 'shell'))
+        for quoted in ("$'Verified: none ($~X)'", '"Verified: none (\\$~X)"'):
+            with self.subTest(quoted=quoted):
+                self.assertEqual(self.verdict(f'git commit -m {quoted}'), ('pass', ''))
+
     def test_cd_guard_and_builtin_keep_the_message_file_readable(self):
         folder = self.cwd / 'sub'
         (folder / 'msg.txt').write_text(STAMP)
@@ -478,7 +491,7 @@ class Evaluate(unittest.TestCase):
                 found = commit_gate.evaluate(f'{prefix} git commit -F msg.txt', str(self.cwd))
                 self.assertEqual((found['folder'], found['verdict']), (None, 'unknown'))
         with self.subTest(prefix='redirection alone'):
-            found = commit_gate.evaluate('>sub/msg.txt; builtin cd sub && git commit -F msg.txt', str(self.cwd))
+            found = commit_gate.evaluate('>sub/msg.txt; builtin cd ./sub && git commit -F msg.txt', str(self.cwd))
             self.assertEqual((found['folder'], found['verdict'], found['reason']), (str(folder), 'unknown', 'file'))
 
     def test_new_cd_forms_refuse_a_possible_cdpath_redirect(self):
@@ -490,8 +503,46 @@ class Evaluate(unittest.TestCase):
                     found = commit_gate.evaluate(f'cd -- {target} && git commit -m Title', str(self.cwd))
                     self.assertEqual(found['folder'], None if target == 'sub' else str(self.cwd / 'sub'))
 
+    def test_earlier_commands_can_set_cdpath_before_a_bare_relative_cd(self):
+        elsewhere = self.cwd / 'elsewhere'
+        (elsewhere / 'sub').mkdir(parents=True)
+        with mock.patch.dict(os.environ):
+            os.environ.pop('CDPATH', None)
+            for prefix in (f'CDPATH+={elsewhere}', f'printf -v CDPATH %s {elsewhere}',
+                           f': ${{CDPATH:={elsewhere}}}', f'CDPATH={elsewhere}', ':'):
+                for target in ('sub', './sub'):
+                    with self.subTest(prefix=prefix, target=target):
+                        found = commit_gate.evaluate(f'{prefix}; cd {target} && git commit -m Title', str(self.cwd))
+                        expected = (None, 'unknown') if target == 'sub' else (str(self.cwd / 'sub'), 'missing')
+                        self.assertEqual((found['folder'], found['verdict']), expected)
+            found = commit_gate.evaluate(f'cd sub && git commit -m Title; CDPATH={elsewhere}', str(self.cwd))
+            self.assertEqual((found['folder'], found['verdict']), (str(self.cwd / 'sub'), 'missing'))
+
 
 class Check(Base):
+    def test_cleanup_is_unknown_after_commands_that_can_change_config(self):
+        commit = 'git commit -q --allow-empty -m "Msg\n\nVerified: none (x)"'
+        write = r"printf '\n[commit]\n\tcleanup = strip\n[core]\n\tcommentChar = V\n' >> .git/config"
+        for prefix in (write, '> .git/config', 'cp other.config .git/config',
+                       'declare -x GIT_CONFIG_GLOBAL=other.config', 'git add -A'):
+            with self.subTest(prefix=prefix):
+                result = commit_gate.evaluate(f'{prefix}; {commit}', str(self.repo))
+                self.assertEqual((result['verdict'], result['reason']), ('unknown', 'cleanup'))
+        malformed = commit.replace('none (x)', 'pending')
+        result = commit_gate.evaluate(f'{write}; {malformed}', str(self.repo))
+        self.assertEqual((result['verdict'], result['reason']), ('unknown', 'cleanup'))
+        for command in (f'{commit}; {write}', f'cd . && {commit}'):
+            with self.subTest(command=command):
+                result = commit_gate.evaluate(command, str(self.repo))
+                self.assertEqual((result['verdict'], result['reason']), ('pass', ''))
+
+    def test_empty_comment_char_makes_cleanup_unknown(self):
+        for cleanup in ('default', 'strip', 'verbatim'):
+            with self.subTest(cleanup=cleanup):
+                command = f'git -c core.commentChar= commit --cleanup={cleanup} -m Msg -m "{STAMP}"'
+                result = commit_gate.evaluate(command, str(self.repo))
+                self.assertEqual((result['verdict'], result['reason']), ('unknown', 'cleanup'))
+
     def test_cleanup_reads_the_commit_repository_and_command_overrides(self):
         sub = self.repo / 'sub'
         sub.mkdir()
