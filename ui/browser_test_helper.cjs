@@ -59,14 +59,21 @@ async function getBrowser({ local = false } = {}) {
 // Fetch a request to the test's local server from this process instead, so tests work in every browser.
 // Redirects cannot work: the browser does not route the request that follows a fulfilled 3xx, and a followed one
 // would serve the final body at the first URL, so relative links break. Fail clearly instead.
+function pageClosed(route) {
+  try { return route.request().frame().page().isClosed() } catch { return false }  // a service worker request has no page
+}
+
 async function serveLocal(route) {
   let response
   try {
     response = await route.fetch()
   } catch (error) {
     // Closing the browser context can cancel an in-flight asset fetch after the page closes.
-    if (!/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) throw error
-    return route.abort()
+    if (/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) return route.abort()
+    // Teardown closes the page, then the test's server resets open sockets. A fetch still in flight (often a
+    // prefetch) then fails after the test is over: that is teardown, not a failure. An open page still fails.
+    if (pageClosed(route)) return route.abort().catch(() => {})
+    throw error
   }
   if (response.url() !== route.request().url()) throw new Error(`serveLocal: ${route.request().url()} redirects to ${response.url()}; serve the final URL directly`)
   return route.fulfill({ response })

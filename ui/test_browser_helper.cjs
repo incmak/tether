@@ -73,6 +73,18 @@ async function testServingDuringTeardown() {
   const networkError = new Error('route.fetch: read ECONNRESET')
   await assert.rejects(serveLocal({ ...route, fetch: async () => { throw networkError } }), error => error === networkError)
   assert.equal(aborts, 1, 'A live fetch failure must still fail the test')
+
+  // Teardown closes the page, then resets the local server: a fetch still in flight (often a prefetch) fails late.
+  const closedPage = { isClosed: () => true }, livePage = { isClosed: () => false }
+  const late = { fetch: async () => { throw networkError }, abort: async () => { aborts++; throw new Error('route.abort: Target closed') },
+    request: () => ({ frame: () => ({ page: () => closedPage }) }) }
+  await serveLocal(late)
+  assert.equal(aborts, 2, 'A fetch error after the page closed is teardown, not a test failure')
+  const live = { ...late, request: () => ({ frame: () => ({ page: () => livePage }) }) }
+  await assert.rejects(serveLocal(live), error => error === networkError)
+  const worker = { ...late, request: () => ({ frame: () => { throw new Error('Service Worker requests do not have an associated frame.') } }) }
+  await assert.rejects(serveLocal(worker), error => error === networkError)
+  assert.equal(aborts, 2, 'An open page or a request with no page still fails the test')
 }
 
 Promise.all([testConnections(), testServingDuringTeardown()]).catch(error => { console.error(error); process.exitCode = 1 })
