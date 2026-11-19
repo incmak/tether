@@ -431,7 +431,8 @@ class SendProposal:
 
 
 def send_readback(proposal):
-    chat = re.split(r' \. |…', proposal.chat, maxsplit=1)[0][:40].rstrip()
+    # The whole name: "Release . Staging" and "Release . Production" must sound different.
+    chat = ' '.join(proposal.chat.replace(' . ', ', ').split())
     if proposal.name == 'backlog_send':
         return f'{SEND_READBACK_START}{proposal.payload} to {chat}{SEND_READBACK_QUESTION_END}'
     # The whole prompt, never a cut: a yes confirms only the words the user heard.
@@ -500,29 +501,31 @@ def freeform_proposal(readback):
     # "B12 or B99" or "docs and deploy" proposes more than one send.
     if re.search(r'\b(?:or|and)\b', chat, re.I) or re.search(r'\bor\b', payload, re.I):
         return None
-    return norm(payload), norm(chat)
+    return payload, norm(chat)
 
 
 def clean_chat(chat):
     return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
 
 
-def binds(payload, proposed, speech):
-    """True when the sent text is the proposed text word for word, in order.
+def same_text(text):
+    """Text as compared for consent: case, spacing, quotes and the end mark do not count; all else does ("-10")."""
+    text = ' '.join(text.split()).strip('"“”\'‘’ ')
+    return text.rstrip('.!?').rstrip().casefold()
 
-    The one extension is a run of words the user said in this turn, after the proposed text:
-    "yes, and B99 too" lets "B12" become "B12 and B99". A word set cannot do this check,
-    because it misses a removed "not" and reordered words.
+
+def binds(payload, proposed):
+    """True when the sent text is the read-back text, character for character.
+
+    No added words: "Yes, but do not archive the draft" holds the words "archive the draft",
+    so any change gets a fresh read-back of the whole new text instead.
     """
-    sent, base, said = norm(payload).split(), proposed.split(), norm(speech).split()
-    if not base or sent[:len(base)] != base:
-        return False
-    rest = sent[len(base):]
-    return not rest or any(said[i:i + len(rest)] == rest for i in range(len(said) - len(rest) + 1))
+    return bool(same_text(proposed)) and same_text(payload) == same_text(proposed)
 
 
 # "Should I ask docs myself" or "I'll message it": the user plans their own send. STT drops the "?".
-OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$|\b(?:did|have|has)\s+(?:you|it|they)\s*$", re.I)
+OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$"
+                      r"|\b(?:did|have|has)\s+(?:you|it|they)(?:\s+\w+){0,2}\s*$", re.I)
 
 # "But I'll can you ask docs" (STT): "can you" asks Friday, whatever comes before it.
 ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\s+)?$', re.I)
@@ -577,10 +580,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS:
         payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
-        # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text word
-        # for word ("yes, and check the alerts" may add the user's own words at the end; "okay" adds nothing).
+        # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
-                            and binds(payload, norm(pending.payload), last_user_text))
+                            and binds(payload, pending.payload))
         yes = APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
         if suggestions:
             normalized_payload = norm(payload)
@@ -602,7 +604,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                                                             SEND_READBACK_QUESTION_END.casefold())))
         proposed = None if fixed_readback else freeform_proposal(readback)
         legacy_matches = (proposed is not None and proposed[1] == norm(clean_chat(chat))
-                          and binds(payload, proposed[0], last_user_text))
+                          and binds(payload, proposed[0]))
         if not (yes and (proposal_matches or legacy_matches)):
             return READBACK_REQUIRED
     return None

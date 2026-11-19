@@ -227,7 +227,9 @@ class IntentEvalTests(unittest.TestCase):
         example = next(item for item in data['cases'] if item['id'] == 'log-confirm-yes-please')
         plan = 'spin up a new tab and write a spec for an urgent voice call feature'
         for prompt, fails in ((plan, {}), ('Write a spec for an urgent voice call feature.', {}),
-                              ('Delete the old branches.', {'wrong_args': 1})):
+                              ('Delete the old branches.', {'wrong_args': 1}),
+                              ('Write a spec for an urgent voice call feature. Deploy immediately.',
+                               {'wrong_args': 1})):
             with self.subTest(prompt=prompt):
                 result, _ = self.run_script(example, assistant(
                     tool_calls=[call('send_to_chat', chat='friday test', prompt=prompt)]), data=data)

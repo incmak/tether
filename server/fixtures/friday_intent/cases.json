@@ -307,7 +307,7 @@
     "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
-     "prompt": "(?is)spec.*\\b(urgent|critical|blocker)|\\b(urgent|critical|blocker).*spec"
+     "prompt": "(?i)^[^.!?;]*\\bspec\\b[^.!?;]*\\b(?:urgent|critical|blocker|call)[^.!?;]*[.!?]?$|^[^.!?;]*\\b(?:urgent|critical|blocker)\\b[^.!?;]*\\bspec\\b[^.!?;]*[.!?]?$"
     }
    }
   },

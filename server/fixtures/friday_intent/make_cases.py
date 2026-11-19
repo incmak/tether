@@ -75,11 +75,14 @@ case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh res
 case("log-urgent-feature-ask", "send_direct", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
+# One sentence that asks for the spec: an added instruction ("... Deploy immediately.") fails.
+CONFIRM_SPEC = (r"(?i)^[^.!?;]*\bspec\b[^.!?;]*\b(?:urgent|critical|blocker|call)[^.!?;]*[.!?]?$"
+                r"|^[^.!?;]*\b(?:urgent|critical|blocker)\b[^.!?;]*\bspec\b[^.!?;]*[.!?]?$")
 # A send passes only with the exact text Friday read back (the guard checks it). A reworded send
 # gets Friday's exact read-back instead, which also passes.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
      {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)friday test", "prompt": r"(?is)spec.*\b(urgent|critical|blocker)|\b(urgent|critical|blocker).*spec"}}, "log",
+      "args": {"chat": "(?i)friday test", "prompt": CONFIRM_SPEC}}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
