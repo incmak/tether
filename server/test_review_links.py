@@ -5272,6 +5272,29 @@ class ReviewLinksTests(unittest.TestCase):
             self.assertFalse(link['awaiting'])
             self.assertTrue({'scope_ticks', 'scope_since', 'scope_retry_at'}.isdisjoint(link))
 
+    def test_clock_rollback_cannot_stretch_the_scope_wait(self):
+        self.bind()
+        self.request_review()
+        self.head = self.NEXT
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.scope = Mock(return_value=None)
+        with own_time(review_links, time=Mock(return_value=1000)) as clock:
+            self.observe()
+            self.assertEqual(self.links()[0]['scope_since'], 1000)
+            clock.return_value = 500  # the clock moves back by 500 s
+            self.observe()
+            self.assertEqual(self.links()[0]['scope_since'], 500)
+            for now in range(515, 560, 15):
+                clock.return_value = now
+                self.observe()
+                self.assertEqual(self.links()[0]['review_commit'], self.HASH)
+            clock.return_value = 560
+            self.observe()
+            link = self.links()[0]
+            self.assertNotIn('review_commit', link)
+            self.assertTrue({'scope_ticks', 'scope_since', 'scope_retry_at'}.isdisjoint(link))
+            self.alert.assert_called()
+
     def test_sanitizer_validates_scope_retry_timestamps(self):
         for field in ('scope_since', 'scope_retry_at'):
             for value in (True, None, '1000', [], -1, -0.25, float('inf'), float('-inf'), float('nan')):

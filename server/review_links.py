@@ -1480,7 +1480,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             target = target if isinstance(target, dict) and isinstance(target.get('commit'), str) else None
             if target is None and was_bound:
                 now = time.time()
-                since = link.get('scope_since', now)
+                since = min(link.get('scope_since', now), now)  # a clock moved back must not stretch the wait
                 deadline = since + SCOPE_WAIT
                 if now < deadline:
                     # A legacy count has no timestamp. Start a fresh wait on its first failed read.
