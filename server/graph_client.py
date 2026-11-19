@@ -32,12 +32,14 @@ from jira_client import MAX_BODY, TIMEOUT, _Cut, opener
 FILE_NAME = 'graph.json'
 LOCK_NAME = 'graph.lock'  # one writer of graph.json at a time, across the server and the command line
 DEADLINE = 90
+PAGE_LIMIT = 5
 LOGIN = 'https://login.microsoftonline.com'
 GRAPH = 'https://graph.microsoft.com/v1.0'
 TENANT = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9][a-z0-9-]{0,62}(\.[a-z0-9-]{1,63})+')
 CLIENT = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 SCOPES = {'mail': ['Mail.ReadBasic'],  # subject, sender, time, links: no body, no admin consent
-          'teams': ['Team.ReadBasic.All', 'Channel.ReadBasic.All', 'ChannelMessage.Read.All']}
+          'teams': ['Team.ReadBasic.All', 'Channel.ReadBasic.All', 'ChannelMessage.Read.All'],
+          'tasks': ['Tasks.Read']}
 BASE_SCOPES = ['offline_access', 'User.Read']
 NOT_CONNECTED = 'Microsoft 365 is not connected. Run: tether graph connect --tenant <tenant id> --client <app id>'
 EXPIRED = 'The Microsoft sign-in expired or was revoked. Run: tether graph connect'
@@ -71,7 +73,7 @@ def locked():
 
 
 def scopes_for(kinds):
-    return BASE_SCOPES + [scope for kind in ('mail', 'teams') if kind in kinds for scope in SCOPES[kind]]
+    return BASE_SCOPES + [scope for kind in SCOPES if kind in kinds for scope in SCOPES[kind]]
 
 
 def check(tenant, client):
@@ -144,14 +146,15 @@ def remove():
         _ACCESS.clear()
 
 
-def status():
+def status(connection=None):
     """What the board shows: connected or not, the account, and which feeds the scopes allow. Never a token."""
-    config, why = load()
+    config, why = load() if connection is None else connection
     if not config:
-        return {'connected': False, 'why': why}
+        return {'connected': False, 'tasks': False, 'why': why}
     granted = {s.casefold() for s in config.get('granted') or config['scopes']}
     return {'connected': True, 'account': config.get('name') or config.get('account') or '',
-            'mail': 'mail.readbasic' in granted or 'mail.read' in granted, 'teams': 'channelmessage.read.all' in granted}
+            'mail': 'mail.readbasic' in granted or 'mail.read' in granted, 'teams': 'channelmessage.read.all' in granted,
+            'tasks': 'tasks.read' in granted}
 
 
 def _error(raw, code):
@@ -159,6 +162,8 @@ def _error(raw, code):
         data = json.loads(raw or b'{}')
     except ValueError:
         data = {}
+    if not isinstance(data, dict):
+        return f'HTTP {code}'
     if isinstance(data.get('error'), dict):  # Graph: {"error": {"code", "message"}}
         found = data['error'].get('message') or data['error'].get('code')
     else:  # login: {"error": "invalid_grant", "error_description": "AADSTS…"}
@@ -263,7 +268,7 @@ class Client:
                 access, self.wall() + max(60, int(data.get('expires_in') or 3600)))
             return access
 
-    def get(self, path_or_link):
+    def get(self, path_or_link, *, access=None):
         """GET a Graph path (/me/...) or an @odata.nextLink that Graph gave."""
         url = path_or_link if path_or_link.startswith(GRAPH + '/') else GRAPH + path_or_link
         if not url.startswith(GRAPH + '/') or '\\' in url or '@' in urllib.parse.urlsplit(url).netloc:
@@ -271,7 +276,9 @@ class Client:
         if re.search(r'[\s\x00-\x1f\x7f]', url):  # a space or a control character: the caller did not encode it
             raise GraphError('Tether built a Graph address with a space in it. Nothing was sent.')
         try:
-            return self._call(url, headers={'Authorization': 'Bearer ' + self.token()})
+            access = self.token() if access is None else access
+            self._secrets.add(access)
+            return self._call(url, headers={'Authorization': 'Bearer ' + access})
         except GraphError as exc:
             if exc.status == 401:
                 _ACCESS.clear()
@@ -280,7 +287,7 @@ class Client:
                 raise GraphError(f'Microsoft refused: {exc}. Check the app permissions and admin consent.', 403) from None
             raise
 
-    def pages(self, path, limit=5):
+    def pages(self, path, limit=PAGE_LIMIT):
         """The items of up to limit pages."""
         out, link = [], path
         for _ in range(limit):

@@ -181,7 +181,7 @@ def _archive(text, everything=False):
     return '\n'.join(line for at, line in enumerate(lines) if at not in drop)
 
 
-def _replace(current, text, everything=False, audit_before=None):
+def _replace(current, text, everything=False, audit_before=None, before_write=None):
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
@@ -190,6 +190,8 @@ def _replace(current, text, everything=False, audit_before=None):
     if len(text) > LIMIT:
         raise invalid(f'The backlog is full ({LIMIT:,} characters). Delete some items first.')
     _keep(current)  # an agent may have edited the file directly since the last copy
+    if before_write:
+        before_write()
     _write(_path(), text)
     _keep(text)
     if audit_before is not None:
@@ -283,30 +285,44 @@ def _insert_at_end(lines, start, end, new):
         lines.insert(after, '')
 
 
-def _change(change, audit_action=True):
+def _change(change, audit_action=True, before_write=None):
     with _locked():
         current = read()['text']
         lines = _lines(current)
         result = change(lines)
-        _replace(current, with_ids('\n'.join(lines) + '\n', current), audit_before=current if audit_action else None)
+        _replace(current, with_ids('\n'.join(lines) + '\n', current), audit_before=current if audit_action else None,
+                 before_write=(lambda: before_write(result)) if before_write else None)
     return result
 
 
-def add(item, source='', project='', details=()):
-    """Add an open item to a project's section, or to the inbox with no project. details: lines to put under it."""
+def add(item, source='', project='', details=(), *, literal=False, before_write=None):
+    """Add to a project or the inbox. before_write records the reserved item ID before the atomic save."""
     item = _one_line(item)
     if not item:
         raise invalid('Write the item text.')
     below = [f'  - {text}' for text in map(_one_line, details) if text]
     def change(lines):
-        line = with_ids('\n'.join(lines + [f'- [ ] {item}{f" ({source})" if source else ""}'])).split('\n')[-1]
+        title = f'- [ ] {item}{f" ({source})" if source else ""}'
+        # External titles are data. A trailing #B12 in one cannot pick the item's ID.
+        if literal and ID.search(title):
+            suffix = with_ids('\n'.join([*lines, '- [ ] New item'])).split('\n')[-1]
+            line = title + ID.search(suffix)[0]
+        else:
+            line = with_ids('\n'.join([*lines, title])).split('\n')[-1]
         start, end = _section(lines, project)
         if start is None:
             lines.extend([''] * bool(lines) + [f'## {project}', line, *below])
         else:
             _insert_at_end(lines, start, end, [line, *below])
         return line
-    return _change(change)
+    return _change(change, before_write=before_write)
+
+
+def has_id(ref):
+    """Read a reserved ID without changing the backlog, including items that moved to the archive."""
+    number = int(ref[1:])
+    with _locked():
+        return number in _ids(read()['text']) or number in _ids(_read(folder() / 'DONE.md'))
 
 
 def _open_items(lines, project):

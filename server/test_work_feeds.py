@@ -986,7 +986,7 @@ class GraphClient(Home):
         self.assertFalse(graph_client.status()['connected'])
         graph_client.save(dict(GRAPH))
         shown = graph_client.status()
-        self.assertEqual(shown, {'connected': True, 'account': 'Mak', 'mail': True, 'teams': True})
+        self.assertEqual(shown, {'connected': True, 'account': 'Mak', 'mail': True, 'teams': True, 'tasks': False})
         os.chmod(graph_client.config_path(), 0o644)
         self.assertIn('readable by you only', graph_client.load()[1])
         os.chmod(graph_client.config_path(), 0o600)

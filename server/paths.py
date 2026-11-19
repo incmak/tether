@@ -85,6 +85,11 @@ def reminders():
     return Path(os.environ.get('TETHER_REMINDERS') or TETHER / 'reminders')
 
 
+def task_sources():
+    """Settings and last complete Microsoft task snapshots (task_sources.py)."""
+    return Path(os.environ.get('TETHER_TASK_SOURCES') or TETHER / 'task-sources')
+
+
 def items():
     """Work items, by project prefix. Codex tabs get write access to this folder only (project_launch.py)."""
     return TETHER / 'items'

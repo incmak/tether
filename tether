@@ -2,7 +2,8 @@
 """Apply tagged Tether releases with a health check and automatic rollback; message many agent panes (broadcast);
 change work board items (item: run `tether item --help`), keep a triage ledger as items (triage: run `tether triage
 --project P --view FILE help`), connect Jira (jira: run `tether jira --help`), connect
-Microsoft 365 for feeds (graph: run `tether graph --help`) and show the feeds (feed: run `tether feed --help`)."""
+Microsoft 365 for feeds (graph: run `tether graph --help`), show the feeds (feed: run `tether feed --help`),
+and read Microsoft task sources (tasks: run `tether tasks --help`)."""
 import argparse
 import contextlib
 import fcntl
@@ -445,9 +446,12 @@ def main(argv=None):
     if argv[:1] == ['jira']:  # Jira on Done for the work board: the token is asked for, never on the command line
         import agent_jira_cli
         return agent_jira_cli.main(argv[1:])
-    if argv[:1] in (['graph'], ['feed']):  # work board feeds: Microsoft 365 sign-in (device code), feed state
+    if argv[:1] in (['graph'], ['feed']):
         import agent_feed_cli
         return (agent_feed_cli.graph_main if argv[0] == 'graph' else agent_feed_cli.feed_main)(argv[1:])
+    if argv[:1] == ['tasks']:
+        import task_sources
+        return task_sources.main(argv[1:])
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     update = commands.add_parser('update')

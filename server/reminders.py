@@ -105,6 +105,17 @@ def _clean_link(link):
     return out or None
 
 
+def _clean_source(source):
+    if source is None:
+        return None
+    if (not isinstance(source, dict) or source.keys() != {'key', 'label'}
+            or not all(isinstance(source[k], str) and source[k].isprintable()
+                       and source[k] == source[k].strip() and 0 < len(source[k]) <= limit
+                       for k, limit in (('key', 1024), ('label', 200)))):
+        raise ReminderError('The reminder source needs a valid key and label.')
+    return dict(source)
+
+
 def _valid(record):
     return (isinstance(record, dict) and isinstance(record.get('id'), str) and ID.fullmatch(record['id'])
             and isinstance(record.get('text'), str) and record['text'].strip()
@@ -180,12 +191,12 @@ def _text(text):
     return text
 
 
-def _due(value, now):
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or value != value:
+def _due(value, now, *, sourced=False):
+    if type(value) not in (int, float) or not -inf < value < inf:
         raise ReminderError('Pick a time.')
     if value <= now:
         raise ReminderError('Pick a time in the future.')
-    if value > now + MAX_AHEAD:
+    if not sourced and value > now + MAX_AHEAD:
         raise ReminderError('Pick a time within five years.')
     return float(value)
 
@@ -201,7 +212,7 @@ def _find(records, rid):
 
 
 def _schedule(record, due):
-    record.update(due=due, state='scheduled', fired_at=None, late=False, occ=record['occ'] + 1, sent=[],
+    record.update(due=due, state='scheduled', done_at=None, fired_at=None, late=False, occ=record['occ'] + 1, sent=[],
                   tries={}, retry_at={}, sending={}, failed=[])
     record.pop('push', None)
 
@@ -218,7 +229,10 @@ def listing(now=None):
 def public(record):
     keys = ('id', 'text', 'due', 'created', 'by', 'state', 'fired_at', 'late', 'snoozes', 'done_at', 'link',
             'occ', 'failed', 'repeat', 'next_id')
-    return {key: record.get(key) for key in keys}
+    result = {key: record.get(key) for key in keys}
+    if record.get('source'):
+        result['source'] = record['source']
+    return result
 
 
 def next_due(rule, now):
@@ -247,23 +261,79 @@ def next_due(rule, now):
         day += timedelta(days=step)
 
 
-def add(text, due, by='you', link=None, now=None, repeat=None):
-    now = time.time() if now is None else now
+def _new(text, due, by, link, now, repeat, source):
     if repeat is not None and repeat not in RULES:
         raise ReminderError('Pick a repeat: never, day, weekday or week.')
     text = _text(text)
-    due = _due(due, now)
+    source = _clean_source(source)
+    due = _due(due, now, sourced=bool(source))
+    if source and repeat is not None:
+        raise ReminderError('A linked reminder cannot repeat.')
     record = {'text': text, 'due': due, 'created': now, 'by': str(by or 'you')[:200],
               'state': 'scheduled', 'fired_at': None, 'late': False, 'snoozes': 0, 'done_at': None,
               'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': [],
               'repeat': {'every': repeat, 'anchor': due, 'zone': ZONE.key} if repeat is not None else None}
+    if source:
+        record.update(source=source, source_at=due)
+    return record
+
+
+def _append(data, record):
+    record['id'] = f'R{data["next"]}'
+    data['next'] += 1
+    data['reminders'].append(record)
+
+
+def add(text, due, by='you', link=None, now=None, repeat=None, *, source=None):
+    now = time.time() if now is None else now
+    record = _new(text, due, by, link, now, repeat, source)
     with _locked():
         data = _load(now)
-        record['id'] = f'R{data["next"]}'
-        data['next'] += 1
-        data['reminders'].append(record)
+        _append(data, record)
         _save(data)
     return public(record)
+
+
+def sync_source(label, links, present, upcoming, now):
+    """Reconcile a complete source read in one reminder save. Return links with their upstream times.
+
+    upcoming maps each task with a future reminder to (title, upstream time). Keep the upstream time even
+    when the user snoozes, marks Done or deletes. A retry after the mirror write fails uses the last source
+    occurrence from the reminder store, including a deleted occurrence.
+    """
+    links = links.copy()
+    with _locked():
+        data = _load(now)
+        latest, changed = {}, False
+        for deleted, records in ((False, data['reminders']), (True, data['deleted'])):
+            for record in records:
+                source = record.get('source')
+                if (not isinstance(source, dict) or source.get('label') != label or 'source_at' not in record
+                        or not isinstance(source.get('key'), str)):
+                    continue
+                key = source['key']
+                if key not in latest or int(record['id'][1:]) > int(latest[key][0]['id'][1:]):
+                    latest[key] = record, deleted
+                if not deleted and key not in present and record['state'] != 'done':
+                    record.update(state='done', done_at=now)
+                    changed = True
+        for key, (title, at) in upcoming.items():
+            record, deleted = latest.get(key, (None, False))
+            previous = links.get(key)
+            if previous and at == previous['at'] and (record is None or at == record['source_at']):
+                continue
+            if record is None or record['source_at'] != at:
+                if record is None or deleted:
+                    record = _new(title, at, label, None, now, None, {'key': key, 'label': label})
+                    _append(data, record)
+                else:
+                    _schedule(record, _due(at, now, sourced=True))
+                    record['source_at'] = at
+                changed = True
+            links[key] = {'id': record['id'], 'at': at}
+        if changed:
+            _save(data)
+    return links
 
 
 def change(rid, action, body=None, now=None, *, by_id=False):
@@ -298,6 +368,8 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                 repeat = body['repeat']
                 if repeat is not None and repeat not in RULES:
                     raise ReminderError('Pick a repeat: never, day, weekday or week.')
+                if repeat is not None and record.get('source'):
+                    raise ReminderError('A linked reminder cannot repeat.')
                 keep = rule if rule and not due_changed else {'anchor': record['due']}
                 record['repeat'] = None if repeat is None else {
                     'every': repeat, 'zone': ZONE.key,
@@ -364,6 +436,9 @@ def restore(rid, now=None):
         record = _find(data['deleted'], rid)
         if record is None:
             raise ReminderError('That reminder is no longer in Recently deleted.', 404)
+        if record.get('source') and any(other.get('source') == record['source'] and int(other['id'][1:]) > int(rid[1:])
+                                        for other in data['reminders'] + data['deleted']):
+            raise ReminderError('This task has a newer reminder.', 409)
         data['deleted'].remove(record)
         del record['deleted_at']
         data['reminders'].append(record)
@@ -432,7 +507,8 @@ def tick(channels, now=None):
         if changed:
             _save(data)
         pending = [(r['id'], r['occ'], channel) for r in data['reminders'] if r['state'] == 'due'
-                   for channel in channels if channel not in r['sent'] and r['retry_at'].get(channel, 0) <= started]
+                   for channel in channels if (channel != 'ping' or not r.get('source'))
+                   and channel not in r['sent'] and r['retry_at'].get(channel, 0) <= started]
     sent = []
     for rid, occ, channel in pending:
         with _locked():

@@ -74,6 +74,27 @@ class StoreTests(Base):
                 reminders.add(text, due, now=NOW, link=link)
         self.assertFalse((self.folder / 'reminders.json').exists())
 
+    def test_source_needs_a_key_and_label_and_is_public(self):
+        for source in ('todo', {}, {'key': 'todo:xyz'}, {'key': 'x\ny', 'label': 'label'},
+                       {'key': 'todo:xyz', 'label': ' '}, {'key': 'todo:xyz', 'label': 1}):
+            with self.subTest(source=source), self.assertRaises(reminders.ReminderError):
+                self.add(source=source)
+        source = {'key': 'todo:abc_+=', 'label': 'Microsoft To Do'}
+        self.assertEqual(self.add(source=source)['source'], source)
+        self.assertEqual(reminders.listing(NOW)['reminders'][0]['source'], source)
+
+    def test_sourced_reminders_skip_ping_but_still_fire_and_push(self):
+        when = NOW + 60
+        linked = self.add(due=when, source={'key': 'todo:a', 'label': 'Microsoft To Do'})
+        manual = self.add(due=when)
+        push = mock.Mock(return_value=True)
+        ping = mock.Mock(return_value=True)
+        self.assertEqual(reminders.tick({'push': push, 'ping': ping}, now=when),
+                         [(linked['id'], 'push'), (manual['id'], 'push'), (manual['id'], 'ping')])
+        self.assertEqual([call.args[0]['id'] for call in push.call_args_list], [linked['id'], manual['id']])
+        self.assertEqual(ping.call_args.args[0]['id'], manual['id'])
+        self.assertEqual([row['state'] for row in reminders.listing(when)['reminders']], ['due', 'due'])
+
     def test_thread_without_pane_is_dropped(self):
         self.assertIsNone(self.add(link={'thread': 'abc'})['link'])
 
