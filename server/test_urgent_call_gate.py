@@ -92,11 +92,11 @@ class GateMeasuresTests(unittest.TestCase):
 
     def test_latency_includes_download_and_wav_decode_but_excludes_play_response(self):
         self.assertEqual(gate.latency_measures(5, 6, 6.25, 7, 7.125),
-                         {'reply_latency_s': 2.125, 'stt_s': .25, 'tts_s': .75})
+                         {'local_processing_latency_s': 2.125, 'stt_s': .25, 'tts_s': .75})
 
     def test_latency_rounds_to_milliseconds(self):
         self.assertEqual(gate.latency_measures(2.01, 2.09, 2.3451, 2.4567, 2.4581),
-                         {'reply_latency_s': .448, 'stt_s': .255, 'tts_s': .112})
+                         {'local_processing_latency_s': .448, 'stt_s': .255, 'tts_s': .112})
 
     def test_report_omits_credentials_and_keeps_diagnostics(self):
         location = 'https://recordings.example/secret.wav'

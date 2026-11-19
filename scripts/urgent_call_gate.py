@@ -121,8 +121,19 @@ def collect_tones(events):
 
 
 def latency_measures(t0, stt_start, stt_end, tts_end, t1):
-    return {'reply_latency_s': round(t1 - t0, 3), 'stt_s': round(stt_end - stt_start, 3),
+    return {'local_processing_latency_s': round(t1 - t0, 3), 'stt_s': round(stt_end - stt_start, 3),
             'tts_s': round(tts_end - stt_end, 3)}
+
+
+def audible_latency(record_event, reply_event, reply_wav):
+    """Server time from the end of the recording to the start of the reply audio.
+
+    Uses BriskBot's server times: (reply play completed - reply duration) - record completed.
+    It includes the silence wait that ends a recording without a stop tone.
+    """
+    with wave.open(io.BytesIO(reply_wav), 'rb') as wav:
+        duration = wav.getnframes() / wav.getframerate()
+    return round((reply_event['at'] / 1000 - duration) - record_event['at'] / 1000, 3)
 
 
 def render_report(started, check, events, measures, secrets=()):
@@ -414,7 +425,9 @@ def run_gate(call, measures):
     finally:
         measures['reply_play_requested_s_from_create'] = round(t1 - call.started, 3)
         measures.update(latency_measures(t0, stt_start, stt_end, tts_end, t1))
-    call.wait_op(reply_op, 30)
+    reply_done = call.wait_op(reply_op, 30)
+    measures['record_result_info'] = record.get('resultInfo')
+    measures['speech_end_to_reply_audible_s'] = audible_latency(record, reply_done, reply)
 
 
 def run_outcome(call):
