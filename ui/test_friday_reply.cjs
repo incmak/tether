@@ -144,7 +144,7 @@ test('paging restarts at zero when the reply id changes, even for an empty previ
 })
 
 // Exercise the actual Live tool handler with fixture-only API calls, without mounting React or using a terminal.
-function liveRead(fetchChat) {
+function liveRead(fetchChat, findPane) {
   const source = readFileSync(join(__dirname, 'src', 'Live.tsx'), 'utf8')
   const ast = ts.createSourceFile('Live.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   let handler
@@ -163,7 +163,7 @@ function liveRead(fetchChat) {
       assert.equal(params.get('session'), pane.id)
       return fetchChat(Number(params.get('limit')))
     } } },
-    sessionChoice: () => null, findPane: () => pane, paneTitle: item => item.title,
+    sessionChoice: () => null, findPane: findPane ?? (() => pane), paneTitle: item => item.title,
     findLastReply, replyPage, speakable, encodeURIComponent,
   })
 }
@@ -178,6 +178,17 @@ test('Live distinguishes an empty history from a capped search', async () => {
     assert.equal(result.chat, 'Fixture chat')
     assert.deepEqual(fake.calls, limits)
   }
+})
+test('Live reads the current chat only when no chat is named', async () => {
+  let fetches = 0
+  const read = liveRead(async () => { fetches++; return { messages: [reply('r1')], earlier: 0 } }, () => undefined)
+  // 20 Nov review: a missed name read the current chat and Friday reported it as the named one.
+  const missed = await read({ chat: 'predicta' })
+  assert.equal(missed.error, 'No chat called predicta.')
+  assert.equal(fetches, 0)
+  const current = await read({})
+  assert.equal(current.chat, 'Fixture chat')
+  assert.equal(fetches, 1)
 })
 test('Live pages the spoken reply and restarts when a new reply arrives', async () => {
   let message = { ...reply('old'), text: 'alpha beta '.repeat(1000) }
