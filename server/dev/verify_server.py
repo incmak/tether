@@ -464,7 +464,12 @@ def use_fixture_folders(root):
         for name in wanted[len(root):].split(os.sep):
             if name:
                 part = os.path.join(part, name)
-                if os.path.islink(part) or not os.path.isdir(part):
+                # One lstat per part: a separate islink and isdir could follow a link swapped in between them.
+                try:
+                    is_folder = stat.S_ISDIR(os.lstat(part).st_mode)
+                except OSError:
+                    is_folder = False
+                if not is_folder:
                     raise ValueError('The default session folder is unavailable. Choose an existing folder in the fixture root.')
         return wanted
 

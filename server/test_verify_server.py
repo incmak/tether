@@ -453,9 +453,10 @@ os.symlink(decoy, root / 'work' / 'link')          # a link that leads out
 os.symlink(decoy + '/missing', root / 'work' / 'dead')
 os.symlink(decoy, root / 'work' / 'ws')            # next to a real folder whose name differs by one space
 (root / 'work' / 'ws ').mkdir()
-asked = []
+(root / 'work' / 'file').write_text('x')           # a file is not a folder
+asked, followed = [], []
 real_stat, real_lstat = os.stat, os.lstat
-os.stat = lambda path, *a, **k: (asked.append(os.fspath(path)), real_stat(path, *a, **k))[1]
+os.stat = lambda path, *a, **k: (asked.append(os.fspath(path)), followed.append(os.fspath(path)), real_stat(path, *a, **k))[2]
 os.lstat = lambda path, *a, **k: (asked.append(os.fspath(path)), real_lstat(path, *a, **k))[1]
 def answer(value):
     try:
@@ -471,7 +472,7 @@ cases = [
     (str(root / 'work' / 'ws'), GONE), (str(root / 'work' / 'ws') + '/.', GONE),
     # The name with the space is the real folder. The checked string is the string that is looked up.
     (str(root / 'work' / 'ws ') + '/.', str(root / 'work' / 'ws ')),
-    (str(root / 'work' / 'none'), GONE),
+    (str(root / 'work' / 'none'), GONE), (str(root / 'work' / 'file'), GONE), (str(root / 'work' / 'file' / 'below'), GONE),
     # A path that leaves the root and returns is looked up by its normalized form, whatever exists outside.
     (f'{root}/../{there}/../{root.name}/work', str(root / 'work')),
     (f'{root}/../{missing}/../{root.name}/work', str(root / 'work')),
@@ -500,6 +501,9 @@ bad = [path for path in folder_questions if not (path + os.sep).startswith(str(r
        or any(part in path.split(os.sep) for part in ('..',))
        or path.startswith((str(root / 'work' / 'link') + os.sep, str(root / 'work' / 'ws') + os.sep, str(root / 'work' / 'dead') + os.sep))]
 assert bad == [], bad
+# One lstat per part (B254): a stat that follows links could see a link swapped in after the lstat.
+followed_below = [path for path in followed if isinstance(path, str) and (path + os.sep).startswith(str(root / 'work') + os.sep)]
+assert followed_below == [], followed_below
 print('ok')
 """
         with tempfile.TemporaryDirectory(prefix='tv-') as root, tempfile.TemporaryDirectory(prefix='tv-decoy-') as decoy:
