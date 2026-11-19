@@ -235,6 +235,13 @@ for port in $(seq 7700 7709); do tailscale serve --bg --https=$port http://127.0
 
 Set `MOBILE_TMUX_DEV_PREVIEW_PORTS` to change the pool (`7700-7704`), or to `off` to turn previews off.
 
+## Commit gate
+
+Install the Git commit gate from the worktree with `python3 server/commit_gate.py install-hook`. It checks the final
+`Verified:` line for Claude, Codex and terminal commits, using the mode in Settings › Agents. An existing
+`commit-msg` hook moves to `commit-msg.local` and runs first. Add `--uninstall` to remove the Tether hook and restore
+the previous hook.
+
 ## Auto-merge
 
 Auto-merge checks a low-risk worker branch against `main` at the push URL for `origin` after a reviewer tab approves it.

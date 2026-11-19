@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Commit gate (B204): does a Claude `git commit` message end with a valid "Verified:" line (stamp.py)?
+"""Commit gate: does a commit message carry a valid "Verified:" line (stamp.py)?
 
 The person sets the mode in Settings. Nothing else changes it.
   off      no check, no log.
   observe  the default. Each commit is checked and logged; none is blocked.
-  enforce  a commit with no valid line is denied, with the reason. Two denials at most in one Claude session:
-           the third such commit passes and is logged, so a wrong gate cannot hold a session.
+  enforce  a commit with no valid line is denied, with the reason. Agents get two denials per session.
+           The third such commit passes and is logged, so a wrong gate cannot hold a session.
 
   paths.CONFIG/commit-gate                  the global mode: one word. Missing or bad: observe.
   paths.TETHER/projects/<id>/commit-gate    a project override: {"override": true, "mode": "enforce"}.
   paths.COMMIT_GATE_LOG                     one JSON line per check and per landed commit. No message text.
   paths.CACHE/commit-gate/<session>.json    the session's denial count and its commits that wait for their result.
 
-claude_hooks.py calls hook() for Bash PreToolUse and PostToolUse events whose command names `git` and `commit`.
+The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
+It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
+Ordinary amendments are checked. Claude's PreToolUse check defers when the installed hook will run.
+
+Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
 message has no valid line, and nothing can add one later. A message it cannot read for certain passes with the
 verdict "unknown": a shell variable, --amend --no-edit, an editor, --trailer, an option the gate does not know, a
@@ -22,17 +26,17 @@ let the commit through.
 After the command, the gate reads the commits that landed. A false block is a "would block" or "let through" verdict
 whose commit has a valid line. The rate in Settings is false blocks / landed commits with a valid line, over the
 calls where git can say which commit the call made (see stats()). Two sessions that commit in one working tree at
-the same moment can still mix their results; sessions use their own worktrees.
-
-Codex commits are not checked: this is a Claude Code hook."""
+the same moment can still mix their results; sessions use their own worktrees."""
 import fcntl
 import json
 import math
 import os
 import re
+import shlex
 import stat as stat_module
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -42,14 +46,19 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-import paths  # noqa: E402
-import stamp  # noqa: E402
+try:
+    import paths
+    import stamp
+except Exception:
+    if __name__ == '__main__' and sys.argv[1:2] == ['commit-msg']:
+        sys.exit(0)
+    raise
 
 MODES = (
     ('off', 'Off', 'Commits are not checked.'),
-    ('observe', 'Observe', 'Each Claude commit is checked and logged. No commit is blocked.'),
-    ('enforce', 'Enforce', 'A Claude commit with no valid "Verified:" line is blocked. '
-                           'After 2 blocks in one session, the next one passes.'),
+    ('observe', 'Observe', 'Each commit is checked and logged. No commit is blocked.'),
+    ('enforce', 'Enforce', 'A commit with no valid "Verified:" line is blocked. '
+                           'An agent gets 2 blocks per session; the next one passes.'),
 )
 NAMES = tuple(mode for mode, _, _ in MODES)
 DEFAULT = 'observe'
@@ -62,6 +71,9 @@ PENDING_MAX = 50
 STATE_DAYS = 45  # cleanup age for sessions with no blocks
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
 SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
+HOOK_MARK = '# tether-commit-gate-hook v1'
+HOOK_MESSAGE_BYTES = 1_000_000
+SCISSORS = re.compile(r'^. ------------------------ >8 ------------------------\r?$', re.M)
 
 
 class GateError(Exception):
@@ -768,14 +780,19 @@ def _tree(folder):
     return root if os.path.isabs(root) else None
 
 
+def _git_path(folder, *args):
+    shown = _git(folder, 'rev-parse', '--path-format=absolute', *args, text=False)
+    if shown is None or shown.returncode != 0:
+        return None
+    path = Path(os.fsdecode(shown.stdout).removesuffix('\n'))
+    return path if path.is_absolute() else None
+
+
 def _message_hook(folder):
     """True when the repository has a hook that can change the message, False when it has none, None when git
     cannot tell."""
-    shown = _git(folder, 'rev-parse', '--path-format=absolute', '--git-path', 'hooks', text=False)
-    if shown is None or shown.returncode != 0:
-        return None
-    hooks = Path(os.fsdecode(shown.stdout).removesuffix('\n'))
-    if not hooks.is_absolute():
+    hooks = _git_path(folder, '--git-path', 'hooks')
+    if hooks is None:
         return None
     try:
         return any(os.access(hooks / name, os.X_OK) and (hooks / name).is_file() for name in MESSAGE_HOOKS)
@@ -818,6 +835,20 @@ def _tmux(*args):
     return subprocess.run([paths.TMUX, *args], capture_output=True, text=True, timeout=0.4)
 
 
+def _project_id(pid):
+    if not pid:
+        return None, True
+    if not PROJECT_ID.fullmatch(pid):
+        return None, False
+    if project_path(pid).exists() and read_project(pid) is None:
+        return pid, False  # a file that the gate cannot read
+    return pid, True
+
+
+def _no_tmux_server(shown):
+    return 'no server running' in shown.stderr or 'No such file or directory' in shown.stderr
+
+
 def _project(cwd, env, tmux=_tmux):
     """(project id or None, sure). `sure` is False when tmux or the project's file could not be read: the session may
     have an override that the gate cannot see, so it must not block."""
@@ -834,7 +865,7 @@ def _project(cwd, env, tmux=_tmux):
             shown = tmux('list-panes', '-a', '-F', '#{pane_current_path}\t#{@project}')
             if shown.returncode:
                 # No tmux server: no session has a project. Any other failure is not an answer.
-                return None, 'no server running' in shown.stderr or 'No such file or directory' in shown.stderr
+                return None, _no_tmux_server(shown)
             found = {fields[1] for fields in (line.split('\t') for line in shown.stdout.splitlines())
                      if len(fields) == 2 and fields[0] == cwd}
             if len(found) != 1:
@@ -842,27 +873,60 @@ def _project(cwd, env, tmux=_tmux):
             pid = next(iter(found))
     except (OSError, subprocess.SubprocessError):
         return None, False
-    if not pid:
-        return None, True
-    if not PROJECT_ID.fullmatch(pid):
-        return None, False
-    if project_path(pid).exists() and read_project(pid) is None:
-        return pid, False  # a file that the gate cannot read
-    return pid, True
+    return _project_id(pid)
+
+
+HOOK_OVERRIDE = re.compile(r'--no-verify|--config-env|core\.hooksPath|GIT_CONFIG|'
+                           r'--git-dir|GIT_DIR|--work-tree|GIT_WORK_TREE|GIT_COMMON_DIR|(?<![\w-])-[cn](?![\w-])',
+                           re.I)
+SHORT_NO_VERIFY = re.compile(r'^-[apsvqzioeh]*n')
+
+
+def _has_gate_marker(hook):
+    return HOOK_MARK.encode() in hook.read_bytes().splitlines()
+
+
+def _defer_to_hook(tree, command, *, cwd_fallback=False):
+    if tree is None or HOOK_OVERRIDE.search(command):
+        return False
+    hooks = _git_path(tree, '--git-path', 'hooks')
+    if hooks is None:
+        return False
+    hook = hooks / 'commit-msg'
+    try:
+        if not os.access(hook, os.X_OK) or not hook.is_file() or not _has_gate_marker(hook):
+            return False
+        # Inspect assembled words too. A quoted cluster or a line join can hide a bypass in the raw text.
+        for word in _tokens(command, []):
+            if not isinstance(word, _Word):
+                continue
+            arg = word.text
+            if (HOOK_OVERRIDE.search(arg) or SHORT_NO_VERIFY.match(arg)
+                    or (arg.startswith('--no-v') and '--no-verify'.startswith(arg))):
+                return False
+            if cwd_fallback and arg in ('-C', 'cd', 'pushd', 'popd', 'source', '.', 'eval', 'builtin'):
+                return False  # evaluate could not follow a change of directory
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def check(data, env=os.environ, now=None):
     """PreToolUse: log the verdict. Returns the hook's stdout: a deny in enforce mode, else ''."""
     now = time.time() if now is None else now
-    found = evaluate(data['tool_input']['command'], data.get('cwd'))
+    command, cwd = data['tool_input']['command'], data.get('cwd')
+    found = evaluate(command, cwd)
     if found is None:
         return ''
-    pid, sure = _project(data.get('cwd'), env)
+    pid, sure = _project(cwd, env)
     mode = resolve(pid if sure else None)['mode']
     if mode == 'off':
         return ''
     verdict, reason, folder = found['verdict'], found['reason'], found['folder']
     tree = _tree(folder) if folder is not None else None
+    hook_tree = _tree(cwd) if folder is None and cwd else tree
+    if _defer_to_hook(hook_tree, command, cwd_fallback=folder is None):
+        return ''
     head = _head(folder) if tree is not None else None
     if (verdict == 'missing' and head is None) or (reason == 'file' and folder is None):
         verdict, reason = 'unknown', 'folder'
@@ -951,6 +1015,215 @@ def hook(data, env=os.environ):
     return ''
 
 
+# ---- Git's commit-msg hook ----
+
+def _ancestors():
+    """Nearest parents first. A vanished process or a slow ps ends the walk."""
+    pid = os.getppid()
+    deadline = time.monotonic() + 0.05
+    for _ in range(40):
+        remaining = deadline - time.monotonic()
+        if pid < 1 or remaining <= 0:
+            break
+        try:
+            if sys.platform.startswith('linux'):
+                entry = Path(f'/proc/{pid}/stat').read_bytes()
+                start, end = entry.index(b'('), entry.rindex(b')')
+                comm = os.fsdecode(entry[start + 1:end])
+                ppid = int(entry[end + 1:].split()[1])
+            else:
+                shown = subprocess.run(['ps', '-o', 'ppid=,comm=', '-p', str(pid)], capture_output=True,
+                                       text=True, check=True, timeout=remaining)
+                parent, comm = shown.stdout.strip().split(maxsplit=1)
+                ppid, comm = int(parent), os.path.basename(comm)
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            break
+        yield pid, comm
+        if ppid == pid:
+            break
+        pid = ppid
+
+
+def _project_for_hook(cwd, env, ancestors=None):
+    if env.get('TMUX_PANE'):
+        return _project(cwd, {**env, 'TMUX': '1'})
+    try:
+        shown = _tmux('list-panes', '-a', '-F', '#{pane_pid}\t#{@project}')
+    except (OSError, subprocess.SubprocessError):
+        return None, False
+    if shown.returncode:
+        return None, _no_tmux_server(shown)
+    panes = {}
+    for line in shown.stdout.splitlines():
+        pane, tab, project = line.partition('\t')
+        if tab:
+            panes.setdefault(pane, set()).add(project)
+    for pid, _ in _ancestors() if ancestors is None else ancestors:
+        if projects := panes.get(str(pid)):
+            return _project_id(next(iter(projects))) if len(projects) == 1 else (None, False)
+    return _project(cwd, env)
+
+
+def _source_session(ancestors, env):
+    for pid, comm in ancestors:
+        if comm == 'claude':
+            source = 'claude'
+            break
+        if comm.startswith('codex'):
+            source = 'codex'
+            break
+    else:
+        if env.get('CODEX_THREAD_ID'):
+            source = 'codex'
+        elif env.get('CLAUDE_CODE_SESSION_ID') or env.get('CLAUDECODE') == '1':
+            source = 'claude'
+        else:
+            return 'terminal', None
+        pid = os.getppid()
+    session = env.get('CLAUDE_CODE_SESSION_ID' if source == 'claude' else 'CODEX_THREAD_ID', '')
+    return source, session if SESSION.fullmatch(session) else f'{source}-pid-{pid}'
+
+
+def _final_verdict(path, cwd):
+    git_dir = _git_path(cwd, '--git-dir')
+    if git_dir is None:
+        raise GateError(400, 'Git could not find the repository for the commit message.')
+    if (git_dir / 'MERGE_HEAD').exists():
+        return 'skip', 'merge'
+    if any((git_dir / name).exists() for name in ('CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply')):
+        return 'skip', 'replay'
+    with open(Path(cwd) / path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as stream:
+        if not stat_module.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError('Git commit message is not a regular file')
+        message = stream.read(HOOK_MESSAGE_BYTES + 1)
+    if message.lstrip(b'\r\n').startswith((b'fixup! ', b'squash! ', b'amend! ')):
+        return 'skip', 'fixup'
+    if len(message) > HOOK_MESSAGE_BYTES:
+        return 'unknown', 'size'
+    config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
+    if config is None or config.returncode not in (0, 1):
+        raise GateError(400, 'Git could not read the commit comment configuration.')
+    if any(item.partition(b'\n')[2] != b'#' for item in config.stdout.split(b'\0') if item):
+        return 'unknown', 'comment-char'
+    text = SCISSORS.split(message.decode('utf-8', errors='replace'), maxsplit=1)[0]
+    return ('would_block', 'no-line') if stamp.message_status(text) == 'missing' else ('pass', '')
+
+
+def commit_msg(path, env=os.environ, cwd=None, now=None):
+    """Return (exit code, stderr text). Only code 3 tells the shell wrapper to block."""
+    record = {'event': 'check', 'via': 'commit-msg', 'source': None, 'id': None, 'session': None,
+              'project': None, 'mode': None, 'count': 1, 'folder': None}
+    try:
+        now = time.time() if now is None else now
+        record['at'] = round(now, 3)
+        cwd = os.path.abspath(os.getcwd() if cwd is None else cwd)
+        record['folder'] = cwd  # Git starts the hook at the worktree root.
+        ancestors = tuple(_ancestors())
+        pid, sure = _project_for_hook(cwd, env, ancestors)
+        record['project'] = pid
+        if not sure:
+            record['project_unsure'] = True
+        mode = resolve(pid if sure else None)['mode']
+        if mode == 'off':
+            return 0, ''
+        record['mode'] = mode
+        source, session = _source_session(ancestors, env)
+        record.update(source=source, session=session)
+        verdict, reason = _final_verdict(path, cwd)
+        blocks = None
+        if verdict == 'would_block' and mode == 'enforce' and sure:
+            verdict = 'block'
+            if session is not None:
+                with _Lock():
+                    state = _read_session(session, now)
+                    if state['blocks'] >= MAX_BLOCKS:
+                        verdict = 'let_through'
+                    else:
+                        state['blocks'] += 1
+                        blocks = state['blocks']
+                        _write_session(session, state, now)
+        _log(dict(record, verdict=verdict, reason=reason))
+        if verdict == 'block':
+            message = ('Tether commit gate: this commit message has no valid "Verified:" line. Fix: add a last line '
+                       '"Verified: none (reason)", or a stamp such as "Verified: tests(server 412 ok)", and commit again.')
+            if blocks is not None:
+                message += f'\nBlock {blocks} of {MAX_BLOCKS} in this session.'
+            return 3, message
+    except Exception:
+        try:
+            _log(dict(record, verdict='unknown', reason='error'))
+        except Exception:
+            pass
+    return 0, ''
+
+
+def install_hook(repo, uninstall=False, gate=None, python=None):
+    """Install the hook in Git's metadata or an external hooks directory."""
+    tree = _tree(repo)
+    if tree is None:
+        raise GateError(400, 'Choose a Git work tree.')
+    hooks = _git_path(tree, '--git-path', 'hooks')
+    common = _git_path(tree, '--git-common-dir')
+    if hooks is None or common is None:
+        raise GateError(400, 'Git could not find the hooks directory.')
+    hooks = hooks.resolve()
+    if hooks.is_relative_to(Path(tree).resolve()) and not hooks.is_relative_to(common.resolve()):
+        raise GateError(400, 'The hooks directory is inside the work tree. Choose a hooks directory outside it.')
+    hook, local = hooks / 'commit-msg', hooks / 'commit-msg.local'
+    if hook.is_symlink():
+        raise GateError(400, 'The commit-msg hook is a symlink. Choose a regular hook file.')
+    exists = hook.exists()
+    if exists and not hook.is_file():
+        raise GateError(400, 'The commit-msg hook must be a regular file.')
+    ours = exists and _has_gate_marker(hook)
+    has_local = os.path.lexists(local)
+    if uninstall:
+        if not ours:
+            return 'No Tether commit-msg hook to uninstall.'
+        if has_local:
+            os.replace(local, hook)
+            return 'Uninstalled the Tether commit-msg hook and restored commit-msg.local to commit-msg.'
+        hook.unlink()
+        return 'Uninstalled the Tether commit-msg hook.'
+    foreign = exists and not ours
+    if foreign and has_local:
+        raise GateError(400, 'Both commit-msg and commit-msg.local exist. Move one before installing the hook.')
+    gate = Path(__file__).resolve() if gate is None else Path(gate).absolute()
+    python = Path(sys.executable if python is None else python).absolute()
+    script = f'''#!/bin/sh
+{HOOK_MARK}
+# Written by Tether (server/commit_gate.py install-hook). Your own commit-msg hook goes in commit-msg.local.
+hooks=$(dirname "$0")
+if [ -x "$hooks/commit-msg.local" ]; then "$hooks/commit-msg.local" "$@" || exit $?; fi
+gate={shlex.quote(str(gate))}
+py={shlex.quote(str(python))}
+[ -f "$gate" ] && [ -x "$py" ] || exit 0
+if command -v timeout >/dev/null 2>&1; then timeout 10 "$py" "$gate" commit-msg "$1"; else "$py" "$gate" commit-msg "$1"; fi
+[ $? -eq 3 ] && exit 1
+exit 0
+'''
+    hooks.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=hooks, prefix='.commit-msg.', mode='w', encoding='utf-8', delete=False) as out:
+        temp = Path(out.name)
+        try:
+            out.write(script)
+            os.fchmod(out.fileno(), 0o755)
+            out.close()
+            if foreign:
+                hook.rename(local)
+            try:
+                os.replace(temp, hook)
+            except OSError:
+                if foreign:
+                    local.rename(hook)
+                raise
+        finally:
+            temp.unlink(missing_ok=True)
+    if foreign:
+        return 'Installed the Tether commit-msg hook. Moved the existing hook to commit-msg.local.'
+    return ('Updated' if ours else 'Installed') + ' the Tether commit-msg hook.'
+
+
 # ---- the numbers for Settings ----
 
 def _rows():
@@ -983,9 +1256,10 @@ def _rows():
 def stats(pid=None, days=DAYS, now=None):
     """The last `days` days of the log, for one project or for all.
 
-    The counts are Bash calls that ran `git commit`. The rate uses only the calls where the gate read the message
-    (pass, would_block, let_through) and git can say which commit the call made: one commit in the command, one commit
-    landed, no other call of the session in that repository at the same time.
+    The counts cover final-message checks and Bash commit calls. Skip rows are excluded. Final-message checks
+    count passes as stamped and would_block or let_through as unstamped. They need no landed row.
+    For Bash calls, the rate uses only pass, would_block and let_through with one commit in the command,
+    one commit landed and no other call of the session in that repository at the same time.
     false_blocks: 'would_block' and 'let_through' verdicts whose commit landed with a valid line.
     rate: false_blocks / stamped (such commits with a valid line), or None with no such commit yet."""
     now = time.time() if now is None else now
@@ -1004,6 +1278,10 @@ def stats(pid=None, days=DAYS, now=None):
         if row['verdict'] not in counts:
             continue
         counts[row['verdict']] += 1
+        if row.get('via') == 'commit-msg':
+            stamped += row['verdict'] == 'pass'
+            unstamped += row['verdict'] in ('would_block', 'let_through')
+            continue
         result = results.get(row.get('id'))
         if (not result or row['verdict'] not in ('pass', 'would_block', 'let_through') or row.get('count') != 1
                 or result.get('count') != 1 or result.get('shared')):
@@ -1092,3 +1370,32 @@ def post(handler):
         handler.respond(400, {'error': 'Invalid request.'})
     except OSError:
         handler.respond(500, {'error': 'Tether could not save the commit gate mode.'})
+
+
+def _main(args):
+    if args[:1] == ['commit-msg']:
+        try:
+            if len(args) == 2:
+                code, message = commit_msg(args[1], cwd=os.getcwd())
+                if message:
+                    print(message, file=sys.stderr)
+                return code
+        except Exception:
+            pass
+        return 0
+    if args[:1] == ['install-hook']:
+        import argparse
+        parser = argparse.ArgumentParser(prog='commit_gate.py install-hook')
+        parser.add_argument('--repo', default='.')
+        parser.add_argument('--uninstall', action='store_true')
+        options = parser.parse_args(args[1:])
+        try:
+            print(install_hook(options.repo, uninstall=options.uninstall))
+        except (GateError, OSError) as exc:
+            print(f'Tether commit gate: {exc}', file=sys.stderr)
+            return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(_main(sys.argv[1:]))
