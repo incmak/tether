@@ -23,3 +23,10 @@
 .todo-command code { flex: 1; min-width: 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; user-select: all; }
 .todo-source .switch-row { min-height: 48px; }
 .todo-source .switch-row strong { font-size: 13.5px; font-weight: 500; }
+.todo-row { flex-wrap: wrap; }
+.todo-row .reminder-text, .todo-row .reminder-meta > span { min-width: 0; overflow-wrap: anywhere; }
+.todo-confirm { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 2px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--hover); }
+.todo-confirm p { flex: 1 1 180px; margin: 0; font-size: 13px; line-height: 1.45; }
+.todo-confirm button { min-height: var(--control); padding: 0 14px; }
+.todo-confirm button[aria-disabled="true"] { opacity: .6; cursor: progress; }
+.reminders-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }

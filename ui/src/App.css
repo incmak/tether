@@ -294,10 +294,11 @@ label.broadcast-row:hover { background: var(--hover); }
 .switch-row { display: flex; align-items: center; gap: 16px; min-height: 56px; cursor: pointer; }
 .switch-row > span { flex: 1; display: grid; gap: 3px; }
 .switch-row small { color: var(--muted); font-size: 13px; line-height: 1.4; }
-.switch-row input { appearance: none; flex-shrink: 0; width: 46px; height: 28px; margin: 0; border-radius: 14px; background: var(--line); position: relative; cursor: pointer; transition: background .15s; }
-.switch-row input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #0003; transition: transform .15s; }
-.switch-row input:checked { background: var(--accent); }
-.switch-row input:checked::after { transform: translateX(18px); }
+/* Off: an outlined track and a small muted thumb, so the control and its state reach 3:1 (WCAG 1.4.11). */
+.switch-row input { appearance: none; flex-shrink: 0; width: 46px; height: 28px; margin: 0; border-radius: 14px; background: transparent; box-shadow: inset 0 0 0 2px var(--muted); position: relative; cursor: pointer; transition: background .15s, box-shadow .15s; }
+.switch-row input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transform: scale(.73); transition: transform .15s, background .15s; }
+.switch-row input:checked { background: var(--accent); box-shadow: none; }
+.switch-row input:checked::after { background: #fff; box-shadow: 0 1px 2px #0003; transform: translateX(18px); }
 .switch-row input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .switch-row input, .switch-row input::after { transition: none; } }
 /* Pane tabs under the chat header: one tab per tmux pane, + splits. */

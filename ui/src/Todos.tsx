@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { BellRing, ChevronRight, ClipboardList, Copy, ExternalLink, ListPlus, RefreshCw, Star } from 'lucide-react'
 import type { Api } from './api'
 import { errorText } from './api'
@@ -12,13 +12,28 @@ type Polled = ReturnType<typeof useTasks>
 const LABEL: Record<string, string> = { todo: 'To Do', planner: 'Planner' }
 
 function TaskRow({ task, now, overdue, api, onOpenItem, onChanged, onError }: {
-  task: ExternalTask; now: number; overdue: boolean; api: Api; onOpenItem?: (ref: string) => void; onChanged: () => void; onError: (text: string) => void
+  task: ExternalTask; now: number; overdue: boolean; api: Api; onOpenItem?: (ref: string) => void; onChanged: () => Promise<void>; onError: (text: string) => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const askRef = useRef<HTMLButtonElement>(null)
+  const confirmRef = useRef<HTMLButtonElement>(null)
+  const itemRef = useRef<HTMLElement>(null)
+  // Move focus only after React has drawn the control that takes it.
+  const focusNext = (ref: React.RefObject<HTMLElement | null>) => requestAnimationFrame(() => ref.current?.focus())
+  const ask = () => { setConfirming(true); focusNext(confirmRef) }
+  const cancel = () => { setConfirming(false); focusNext(askRef) }
   const add = async () => {
+    if (busy) return
     setBusy(true)
-    try { await toBacklog(api, task.key); onChanged() } catch (error) { onError(errorText(error)) } finally { setBusy(false) }
+    try {
+      await toBacklog(api, task.key)
+      await onChanged()
+      setConfirming(false)
+      focusNext(itemRef)
+    } catch (error) { onError(errorText(error)) } finally { setBusy(false) }
   }
+  const app = LABEL[task.source] ?? 'the app'
   return <li className="reminder-row todo-row">
     <div className="reminder-main">
       <p className="reminder-text">{task.importance === 'high' && <Star className="todo-star" size={13} aria-label="Important" />}{task.title}</p>
@@ -31,11 +46,16 @@ function TaskRow({ task, now, overdue, api, onOpenItem, onChanged, onError }: {
     <div className="reminder-actions">
       {task.backlog
         ? (onOpenItem
-          ? <button type="button" className="link-button todo-backlog" title="In the backlog" onClick={() => onOpenItem(task.backlog!)}><ClipboardList size={13} aria-hidden="true" />{task.backlog}</button>
-          : <span className="todo-backlog" title="In the backlog"><ClipboardList size={13} aria-hidden="true" />{task.backlog}</span>)
-        : <button type="button" className="icon-button" aria-label={`Add to backlog: ${task.title}`} title="Add to backlog Inbox" disabled={busy} onClick={() => void add()}><ListPlus size={16} /></button>}
-      {task.link && <a className="icon-button" href={task.link} target="_blank" rel="noopener noreferrer" aria-label={`Open in ${LABEL[task.source] ?? 'the app'}: ${task.title}`} title={`Open in ${LABEL[task.source] ?? 'the app'}`}><ExternalLink size={15} /></a>}
+          ? <button type="button" ref={itemRef as React.RefObject<HTMLButtonElement>} className="link-button todo-backlog" title="In the backlog" onClick={() => onOpenItem(task.backlog!)}><ClipboardList size={13} aria-hidden="true" />{task.backlog}</button>
+          : <span ref={itemRef as React.RefObject<HTMLSpanElement>} tabIndex={-1} className="todo-backlog" title="In the backlog"><ClipboardList size={13} aria-hidden="true" />{task.backlog}</span>)
+        : <button type="button" ref={askRef} className="icon-button" aria-label={`Add to backlog: ${task.title}`} aria-expanded={confirming} title="Add to backlog Inbox" onClick={() => confirming ? cancel() : ask()}><ListPlus size={16} /></button>}
+      {task.link && <a className="icon-button" href={task.link} target="_blank" rel="noopener noreferrer" aria-label={`Open in ${app}: ${task.title}`} title={`Open in ${app}`}><ExternalLink size={15} /></a>}
     </div>
+    {confirming && !task.backlog && <div className="todo-confirm" role="group" aria-label={`Add to backlog: ${task.title}`}>
+      <p>Add to the backlog Inbox? Every agent sees Inbox items.</p>
+      <button type="button" ref={confirmRef} className="primary" aria-disabled={busy} onClick={() => void add()}>{busy ? 'Adding…' : 'Add'}</button>
+      <button type="button" className="secondary" onClick={cancel}>Cancel</button>
+    </div>}
   </li>
 }
 
@@ -51,12 +71,13 @@ function Group({ title, tasks, render, folded = false }: { title: string; tasks:
   </section>
 }
 
-function SourceRow({ source, now, api, onChanged, onError }: { source: TaskSource; now: number; api: Api; onChanged: () => void; onError: (text: string) => void }) {
+function SourceRow({ source, now, api, onChanged, onError }: { source: TaskSource; now: number; api: Api; onChanged: () => Promise<void>; onError: (text: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const change = async (body: { enabled?: boolean; alerts?: boolean }) => {
+    if (busy) return
     setBusy(true)
-    try { await settings(api, source.id, body); onChanged(); if ('alerts' in body) announce() } catch (error) { onError(errorText(error)) } finally { setBusy(false) }
+    try { await settings(api, source.id, body); await onChanged(); if ('alerts' in body) announce() } catch (error) { onError(errorText(error)) } finally { setBusy(false) }
   }
   const copy = async () => {
     try { await navigator.clipboard.writeText(source.command!); setCopied(true); window.setTimeout(() => setCopied(false), 2000) } catch { onError('Cannot copy. Select the command and copy it.') }
@@ -77,9 +98,9 @@ function SourceRow({ source, now, api, onChanged, onError }: { source: TaskSourc
       <span className="visually-hidden" role="status">{copied ? 'Copied' : ''}</span>
     </div>}
     <label className="switch-row"><span><strong>Show tasks</strong></span>
-      <input type="checkbox" role="switch" checked={source.enabled} disabled={busy} onChange={() => void change({ enabled: !source.enabled })} /></label>
+      <input type="checkbox" role="switch" checked={source.enabled} aria-disabled={busy} onChange={() => void change({ enabled: !source.enabled })} /></label>
     {source.id === 'todo' && <label className="switch-row"><span><strong>Alerts</strong><small>A task’s own reminder time becomes a Tether reminder. Past times never alert.</small></span>
-      <input type="checkbox" role="switch" checked={source.alerts} disabled={busy || !source.enabled} onChange={() => void change({ alerts: !source.alerts })} /></label>}
+      <input type="checkbox" role="switch" checked={source.alerts} disabled={!source.enabled} aria-disabled={busy} onChange={() => void change({ alerts: !source.alerts })} /></label>}
   </li>
 }
 
@@ -98,7 +119,10 @@ export function TodosPanel({ api, polled, onOpenItem }: { api: Api; polled: Poll
   const groups = useMemo(() => groupTasks(shown, now), [shown, now])
   const sources = Array.isArray(data?.sources) ? data.sources : []
   const live = sources.some(source => source.enabled && source.state !== 'off')
-  const changed = () => void refresh()
+  // "No open tasks" is true only after a source has read its tasks at least once.
+  const read = sources.some(source => source.enabled && source.state !== 'off' && source.syncedAt !== null)
+  const reading = sources.some(source => source.enabled && source.state === 'syncing')
+  const changed = () => refresh()
   const sync = async () => {
     setSyncing(true); setProblem('')
     try { await syncNow(api); await refresh() } catch (error) { setProblem(errorText(error)) } finally { setSyncing(false) }
@@ -114,7 +138,11 @@ export function TodosPanel({ api, polled, onOpenItem }: { api: Api; polled: Poll
       {loading && !data && <ul className="reminder-skeleton" aria-label="Loading todos">{[0, 1, 2].map(key => <li key={key}><Bone w="70%" h={14} /><Bone w="35%" h={12} /></li>)}</ul>}
       {error && !data && <div className="reminder-load-error" role="alert"><p>Cannot load todos: {error}</p><button type="button" className="secondary" onClick={() => void refresh()}>Retry</button></div>}
       {error && data && <p className="reminder-stale" role="status">Not up to date: {error}</p>}
-      {data && live && !shown.length && <p className="reminder-empty">No open tasks. New tasks in To Do and Planner show here within 5 minutes.</p>}
+      {data && live && !shown.length && (read
+        ? <p className="reminder-empty">No open tasks. New tasks in To Do and Planner show here within 5 minutes.</p>
+        : reading
+          ? <p className="reminder-empty" role="status">Reading your tasks…</p>
+          : <p className="reminder-empty">Tether has not read your tasks yet. See Task apps below.</p>)}
       {data && !live && <p className="reminder-empty">Connect a task app below to see your To Do and Planner tasks here.</p>}
       <Group title="Overdue" tasks={groups.overdue} render={row(true)} />
       <Group title="Today" tasks={groups.today} render={row(false)} />

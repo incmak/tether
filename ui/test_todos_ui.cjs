@@ -136,7 +136,7 @@ test('Todos in Chromium', async t => {
   const browser = await getBrowser()
   t.after(() => browser.close())
 
-  for (const [width, height] of [[360, 780], [1280, 800]]) {
+  for (const [width, height] of [[320, 700], [1280, 800]]) {
     const viewport = { width, height }
     await t.test(`${width}px tabs, groups, fold and counts`, async t => {
       const { page, sheet } = await open(t, browser, origin, viewport)
@@ -168,15 +168,31 @@ test('Todos in Chromium', async t => {
     await t.test(`${width}px add to backlog, sync now and the alerts switch post once each`, async t => {
       const { page, sheet, posts } = await open(t, browser, origin, viewport)
       await toTodos(page, sheet)
-      await button(sheet, 'Add to backlog: Book venue').click()
-      await sheet.getByRole('button', { name: 'B500' }).or(sheet.getByText('B500')).first().waitFor()
+      await page.keyboard.press('Tab')  // the panel itself is the next tab stop (APG tabs pattern)
+      assert.equal(await sheet.getByRole('tabpanel').evaluate(node => node === document.activeElement), true, 'Tab moves into the panel')
+      // The first click only asks. Cancel posts nothing and gives focus back.
+      const ask = button(sheet, 'Add to backlog: Book venue')
+      await ask.click()
+      const confirm = sheet.getByRole('group', { name: 'Add to backlog: Book venue' })
+      await confirm.getByText('Add to the backlog Inbox? Every agent sees Inbox items.').waitFor()
+      await page.waitForFunction(() => document.activeElement?.textContent === 'Add')
+      await button(confirm, 'Cancel').click()
+      await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Add to backlog: Book venue')
+      assert.equal(posts.length, 0, 'Cancel posts nothing')
+      await page.keyboard.press('Enter')
+      await page.keyboard.press('Enter')  // focus is on Add
+      const item = sheet.getByRole('button', { name: 'B500' }).or(sheet.getByText('B500')).first()
+      await item.waitFor()
+      await page.waitForFunction(() => document.activeElement?.textContent?.includes('B500'))
       assert.equal(await button(sheet, 'Add to backlog: Book venue').count(), 0)
       await button(sheet, 'Sync now').click()
       const alerts = sheet.getByRole('switch', { name: /^Alerts/ })
       assert.equal(await alerts.isChecked(), true)
-      await alerts.click()
-      await page.waitForFunction(() => !document.querySelector('[role=switch]:disabled'))
+      await alerts.focus()
+      await page.keyboard.press('Space')
+      await page.waitForFunction(() => document.querySelector('[role=switch][aria-disabled=true]') === null && !document.querySelectorAll('[role=switch]')[1].checked)
       assert.equal(await alerts.isChecked(), false)
+      assert.equal(await alerts.evaluate(node => node === document.activeElement), true, 'focus stays on the switch after the save')
       assert.deepEqual(posts, [
         { endpoint: 'tasks/backlog', body: { key: 'planner:3' } },
         { endpoint: 'tasks/sync', body: {} },
@@ -191,6 +207,50 @@ test('Todos in Chromium', async t => {
       assert.equal(await sheet.locator('code', { hasText: COMMAND }).count(), 2)
       assert.equal(await button(sheet, 'Sync now').count(), 0)
       assert.equal(await sheet.getByRole('switch', { name: /^Alerts/ }).isChecked(), false)
+    })
+
+    await t.test(`${width}px a malformed body never breaks the sheet`, async t => {
+      const listing = LIVE()
+      listing.sources.push(null, { id: 'x' })
+      listing.tasks.push(null, 7, { key: 'todo:9', title: 'Bad due', source: 'todo', list: 'Tasks', link: '', due: { date: 3 }, reminderAt: null })
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing })
+      await toTodos(page, sheet)
+      await sheet.getByText('Pay electricity bill').waitFor()
+      assert.equal(await sheet.getByText('Bad due').count(), 0)
+      assert.match(await tab(sheet, 'Todos').innerText(), /5/)
+      await page.keyboard.press('ArrowLeft')
+      await sheet.getByRole('textbox', { name: 'Remind me to' }).waitFor()
+    })
+
+    await t.test(`${width}px a body without lists shows an error, and Reminders still works`, async t => {
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing: { tasks: 'x' } })
+      await sheet.getByRole('textbox', { name: 'Remind me to' }).waitFor()
+      await toTodos(page, sheet)
+      await sheet.getByRole('alert').filter({ hasText: 'Cannot load todos: Tether returned an unreadable todo list.' }).waitFor()
+    })
+
+    await t.test(`${width}px before the first read says Reading, not No open tasks`, async t => {
+      const listing = { sources: [source('todo', 'Microsoft To Do', { state: 'syncing', syncedAt: null }),
+        source('planner', 'Planner', { state: 'error', syncedAt: null, why: 'Microsoft could not sync this source (HTTP 503).' })], tasks: [] }
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing })
+      await toTodos(page, sheet)
+      await sheet.getByText('Reading your tasks…').waitFor()
+      assert.equal(await sheet.getByText(/^No open tasks/).count(), 0)
+    })
+
+    await t.test(`${width}px a long unbroken list name wraps inside the sheet`, async t => {
+      const listing = LIVE()
+      listing.tasks[1].list = 'L'.repeat(120)
+      listing.tasks[1].title = 'T'.repeat(150)
+      const { page, sheet } = await open(t, browser, origin, viewport, { listing })
+      await toTodos(page, sheet)
+      await sheet.getByText('L'.repeat(120), { exact: false }).waitFor()
+      const overflow = await sheet.evaluate(node => [...node.querySelectorAll('*')].filter(el => el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).overflowX !== 'visible').length
+        + (document.documentElement.scrollWidth > window.innerWidth ? 1 : 0))
+      assert.equal(overflow, 0, 'no horizontal scroll')
+      const row = await sheet.locator('.todo-row').nth(1).boundingBox()
+      const box = await sheet.boundingBox()
+      assert.ok(row.x + row.width <= box.x + box.width + 1, 'the row stays inside the sheet')
     })
 
     await t.test(`${width}px a GET error offers Retry`, async t => {

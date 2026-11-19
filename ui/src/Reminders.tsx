@@ -233,7 +233,7 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
           {label}{count !== null && <span className="agent-tab-count">{count}</span>}
         </button>)}
     </div>
-    <div role="tabpanel" id={`${ids}-panel`} aria-labelledby={`${ids}-tab-${tab}`}>
+    <div role="tabpanel" id={`${ids}-panel`} aria-labelledby={`${ids}-tab-${tab}`} tabIndex={0} className="reminders-panel">
     {tab === 'todos' ? <TodosPanel api={api} polled={tasks} onOpenItem={onOpenItem && (ref => { onClose(); onOpenItem(ref) })} /> : <>
     <p className="sheet-sub sheet-note">Tether notifies you at the time, like an urgent ask. Times are in {ZONE_LABEL}.</p>
     <form className="reminder-add" onSubmit={add} aria-label="New reminder">

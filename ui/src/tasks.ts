@@ -91,8 +91,27 @@ export const settings = (api: Api, source: SourceId, change: { enabled?: boolean
 export const syncNow = (api: Api) => api<TaskListing>('tasks/sync', {})
 export const toBacklog = (api: Api, key: string) => api<{ id: string; created: boolean }>('tasks/backlog', { key })
 
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+const isTime = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
+const isDue = (value: unknown): value is TaskDue => isObject(value) && typeof value.date === 'string' && /^\d{4}-\d\d-\d\d$/.test(value.date) && (value.at === null || isTime(value.at))
+const isRef = (value: unknown) => value === null || value === undefined || typeof value === 'string'
+
+/** Keep only well-formed sources and tasks. A bad server body must never break the Reminders sheet. */
+export function cleanListing(body: unknown): TaskListing {
+  if (!isObject(body) || !Array.isArray(body.sources) || !Array.isArray(body.tasks)) throw new Error('Tether returned an unreadable todo list.')
+  const sources = body.sources.filter((source): source is TaskSource => isObject(source) && typeof source.id === 'string' && typeof source.label === 'string'
+    && typeof source.enabled === 'boolean' && typeof source.alerts === 'boolean' && typeof source.state === 'string'
+    && (source.syncedAt === null || isTime(source.syncedAt)) && typeof source.complete === 'boolean' && isTime(source.count)
+    && (source.why === undefined || typeof source.why === 'string') && (source.command === undefined || source.command === null || typeof source.command === 'string'))
+  const tasks = body.tasks.filter((task): task is ExternalTask => isObject(task) && typeof task.key === 'string' && typeof task.source === 'string'
+    && typeof task.title === 'string' && typeof task.list === 'string' && typeof task.link === 'string'
+    && (task.due === null || isDue(task.due)) && (task.reminderAt === null || isTime(task.reminderAt))
+    && isRef(task.backlog) && isRef(task.reminder))
+  return { sources, tasks }
+}
+
 /** The mirror, polled every minute while visible. The server itself syncs every 5 min. */
 export function useTasks(api: Api) {
-  const fetcher = useCallback((signal: AbortSignal) => api<TaskListing>('tasks', undefined, signal), [api])
+  const fetcher = useCallback((signal: AbortSignal) => api<unknown>('tasks', undefined, signal).then(cleanListing), [api])
   return usePolling(fetcher, POLL_MS)
 }
