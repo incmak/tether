@@ -67,6 +67,8 @@ FIXTURES = {
     'codex-runs': lambda pane: {'pane': pane, 'running': 0, 'runs': []},
     'host': lambda _pane: {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False},
     'reminders': lambda _pane: {'reminders': [], 'deleted': [], 'now': time.time()},
+    # No task app is connected in the fixture. A recipe stubs the listing to show tasks.
+    'tasks': lambda _pane: {'sources': [], 'tasks': []},
     'factory': factory_fixture,
 }
 # The UI calls these routes, but the fixture server leaves them off. This list
@@ -132,7 +134,8 @@ REFUSED = {
         'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',
         'projects/note-delete', 'projects/pin', 'projects/seen', 'projects/unpin',
         'reminders/add', 'reminders/delete', 'reminders/done', 'reminders/edit', 'reminders/reopen',
-        'reminders/restore', 'reminders/snooze', 'ui-usage/clear', 'undo', 'voice-log',
+        'reminders/restore', 'reminders/snooze', 'tasks/backlog', 'tasks/settings', 'tasks/sync',
+        'ui-usage/clear', 'undo', 'voice-log',
         'work/answer', 'work/fix', 'work/item', 'work/jira', 'work/project', 'work/qa', 'work/stage', 'work/triage',
     },
 }

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AlarmClock, BellRing, Check, ClipboardList, Pencil, Repeat as RepeatIcon, RotateCcw, SquareTerminal, Trash2, Undo2, X } from 'lucide-react'
+import { AlarmClock, BellRing, Check, ChevronRight, ClipboardList, Pencil, Repeat as RepeatIcon, RotateCcw, SquareTerminal, Trash2, Undo2, X } from 'lucide-react'
 import type { Api } from './api'
 import { errorText } from './api'
 import type { Pane } from './api'
@@ -10,6 +10,8 @@ import { SelectMenu } from './SelectMenu'
 import { chatTitle } from './Sidebar'
 import { act, fullLabel, groupReminders, parseWhen, quickPicks, repeatLabel, repeatOptions, snoozePicks, TEXT_LIMIT, whenLabel, ZONE_LABEL } from './reminders'
 import type { Listing, Reminder, Repeat, useReminders } from './reminders'
+import { TodosPanel } from './Todos'
+import { useTasks } from './tasks'
 import './Reminders.css'
 
 type Polled = ReturnType<typeof useReminders>
@@ -117,6 +119,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
         {item.state === 'due' && item.late && <span className="reminder-late">Sent late</span>}
         {item.snoozes > 0 && !done && <span>Snoozed {item.snoozes}×</span>}
         {who && <span>{who}</span>}
+        {item.source?.label && <span>From {item.source.label}</span>}
       </p>
       {(item.link?.pane || item.link?.item || item.link?.project) && <p className="reminder-links">
         {item.link?.pane && (pane && onOpenPane
@@ -149,7 +152,7 @@ function Section<T extends Reminder>({ title, items, children, folded = false, n
   if (!items.length) return null
   return <section className="reminder-section" aria-labelledby={id}>
     <h3 id={id}>{folded
-      ? <button type="button" className="reminder-fold" aria-expanded={open} onClick={() => setOpen(!open)}>{title} <span className="reminder-count">{items.length}</span></button>
+      ? <button type="button" className="reminder-fold" aria-expanded={open} onClick={() => setOpen(!open)}><ChevronRight className="reminder-fold-icon" size={14} aria-hidden="true" />{title} <span className="reminder-count">{items.length}</span></button>
       : <>{title} <span className="reminder-count">{items.length}</span></>}</h3>
     {open && note && <p className="reminder-deleted-note">{note}</p>}
     {open && <ul>{items.map(children)}</ul>}
@@ -162,6 +165,12 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
 }) {
   const modal = useModal(true, onClose, undefined, { view: 'reminders' })
   const { data, error, loading, refresh } = polled
+  const [tab, setTab] = useState<'reminders' | 'todos'>('reminders')
+  const tasks = useTasks(api)
+  // An older server or a bad body has no lists: the Reminders tab must still work.
+  const todoCount = Array.isArray(tasks.data?.tasks) && Array.isArray(tasks.data?.sources)
+    ? tasks.data.tasks.filter(task => tasks.data!.sources.some(source => source.id === task.source && source.enabled)).length : null
+  const strip = useRef<HTMLDivElement>(null)
   const [now, setNow] = useState(nowSeconds)
   useEffect(() => { const timer = setInterval(() => setNow(nowSeconds()), 15000); return () => clearInterval(timer) }, [])
   const [text, setText] = useState('')
@@ -212,6 +221,20 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
       <h2 id={`${ids}-title`}>Reminders</h2>
       <button type="button" className="icon-button" aria-label="Close" onClick={onClose}><X /></button>
     </div>
+    <div className="agent-tabs reminders-tabs" role="tablist" aria-label="Reminders and todos" ref={strip} onKeyDown={event => {
+      if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+      event.preventDefault()
+      const next = tab === 'reminders' ? 'todos' : 'reminders'
+      setTab(next)
+      strip.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus()
+    }}>
+      {([['reminders', 'Reminders', groups.due.length + groups.upcoming.length], ['todos', 'Todos', todoCount]] as const).map(([key, label, count]) =>
+        <button key={key} type="button" role="tab" data-tab={key} id={`${ids}-tab-${key}`} aria-selected={tab === key} aria-controls={`${ids}-panel`} tabIndex={tab === key ? 0 : -1} onClick={() => setTab(key)}>
+          {label}{count !== null && <span className="agent-tab-count">{count}</span>}
+        </button>)}
+    </div>
+    <div role="tabpanel" id={`${ids}-panel`} aria-labelledby={`${ids}-tab-${tab}`}>
+    {tab === 'todos' ? <TodosPanel api={api} polled={tasks} onOpenItem={onOpenItem && (ref => { onClose(); onOpenItem(ref) })} /> : <>
     <p className="sheet-sub sheet-note">Tether notifies you at the time, like an urgent ask. Times are in {ZONE_LABEL}.</p>
     <form className="reminder-add" onSubmit={add} aria-label="New reminder">
       <label htmlFor={`${ids}-text`}>Remind me to</label>
@@ -238,6 +261,8 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
           <p className="reminder-meta"><time dateTime={new Date(item.due * 1000).toISOString()} title={fullLabel(item.due)} aria-label={fullLabel(item.due)}>{whenLabel(item.due, now)}</time></p></div>
         <div className="reminder-actions"><button type="button" className="icon-button" aria-label={`Restore: ${item.text}`} title="Restore" onClick={() => void restore(item.id)}><Undo2 size={16} /></button></div>
       </li>}</Section>
+    </div>
+    </>}
     </div>
     {undo && <div className="backlog-undo reminder-undo" role="status"><span>{undo.label} It stays in Recently deleted for 30 days.</span>
       <button type="button" className="link-button" onClick={() => { const back = undo.back; setUndo(null); back().catch(error => setProblem(errorText(error))) }}>Undo</button>

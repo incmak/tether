@@ -20,6 +20,8 @@ export interface Reminder {
   failed?: string[]
   repeat?: RepeatRule | null
   next_id?: string | null
+  /** The task app this reminder mirrors (server/task_sources.py). Tether never sends it as a Teams ping. */
+  source?: { key: string; label: string } | null
 }
 /** A deleted reminder, kept for 30 days in Recently deleted. */
 export interface Deleted extends Reminder { deleted_at: number }
