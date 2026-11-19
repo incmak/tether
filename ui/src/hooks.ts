@@ -287,8 +287,11 @@ export function usePopover(ref: RefObject<HTMLDialogElement | null>, at: Anchor 
     if (!box || !at) return
     const place = () => {
       const width = box.offsetWidth, height = box.offsetHeight
-      box.style.left = `${Math.max(8, Math.min(at.x, innerWidth - width - 8))}px`
-      box.style.top = `${at.y + height > innerHeight - 8 ? Math.max(8, at.y - height) : at.y}px`
+      const left = Math.max(8, Math.min(at.x, innerWidth - width - 8))
+      const top = at.y + height > innerHeight - 8 ? Math.max(8, at.y - height) : at.y
+      box.style.left = `${left}px`
+      box.style.top = `${top}px`
+      box.style.transformOrigin = `${Math.max(0, Math.min(width, at.x - left))}px ${Math.max(0, Math.min(height, at.y - top))}px`
     }
     place()
     const observer = new ResizeObserver(place)

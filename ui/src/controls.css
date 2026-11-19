@@ -25,6 +25,9 @@
   --field: color-mix(in srgb, var(--hover) 70%, var(--surface));
   --danger: #b3261e;
   --focus: var(--accent);
+  --motion-out: cubic-bezier(0.23, 1, .32, 1);      /* entrances and exits */
+  --motion-drawer: cubic-bezier(0.32, .72, 0, 1);   /* sheets, drawers, released drags */
+  --motion-press: 160ms;                           /* press feedback */
 }
 @media (pointer: coarse) {
   /* Touch: the same shapes, sized for a finger. */
@@ -36,7 +39,7 @@
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
   min-height: var(--control); padding: 0 12px; border: 1px solid transparent; border-radius: var(--radius);
   font-size: var(--control-text); font-weight: 500; line-height: 1.2; white-space: nowrap; text-decoration: none;
-  transition: background-color .12s, border-color .12s, color .12s;
+  transition: background-color .12s, border-color .12s, color .12s, scale var(--motion-press) var(--motion-out);
 }
 .primary { background: var(--accent-fill); color: var(--accent-text); }
 :is(button, a).primary:not(:disabled):hover { background: var(--accent-hover); }
@@ -58,7 +61,11 @@
 .icon-button {
   display: inline-flex; align-items: center; justify-content: center; flex: none;
   width: var(--control); height: var(--control); min-height: 0; padding: 0; border-radius: var(--radius); color: inherit;
-  transition: background-color .12s, color .12s;
+  transition: background-color .12s, color .12s, scale var(--motion-press) var(--motion-out);
+}
+:is(.primary, .secondary, .ghost, .danger, .icon-button):not(:disabled):active { scale: .97; }
+@media (prefers-reduced-motion: reduce) {
+  :is(.primary, .secondary, .ghost, .danger, .icon-button):not(:disabled):active { scale: none; }
 }
 .icon-button.sm { width: var(--control-sm); height: var(--control-sm); border-radius: var(--radius-sm); }
 .icon-button.lg { width: var(--control-lg); height: var(--control-lg); }

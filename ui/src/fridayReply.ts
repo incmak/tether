@@ -1,4 +1,24 @@
+import { chatMessages, type ChatData, type ChatMessage } from './api'
+
+export const REPLY_WINDOWS = [20, 200, 2000] as const
 export const REPLY_PART = 6000
+
+export const isReply = (message: ChatMessage) => message.role === 'assistant' && !message.kind && !!message.text.trim()
+
+export async function findLastReply(fetchChat: (limit: number) => Promise<ChatData>): Promise<{ message: ChatMessage | null; searchedAll: boolean }> {
+  for (const limit of REPLY_WINDOWS) {
+    const data = await fetchChat(limit)
+    const message = [...chatMessages(data)].reverse().find(isReply) ?? null
+    const searchedAll = !data.earlier
+    if (message || searchedAll) return { message, searchedAll }
+  }
+  return { message: null, searchedAll: false }
+}
+
+export function replyPage(text: string, replyId: string, offset?: number, previousId?: string) {
+  const newReply = previousId !== undefined && previousId !== replyId
+  return { ...replyPart(text, newReply ? 0 : offset), reply_id: replyId, ...(newReply ? { new_reply: true } : {}) }
+}
 
 function splitsSurrogate(text: string, index: number) {
   const before = text.charCodeAt(index - 1)

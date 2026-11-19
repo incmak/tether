@@ -141,7 +141,7 @@ button.agent-node:focus-visible { outline: 2px solid var(--focus); outline-offse
 .agent-state i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .agent-state.running i { box-shadow: 0 0 0 0 color-mix(in srgb, var(--st) 45%, transparent); }
 @media (prefers-reduced-motion: no-preference) {
-  .agent-state.running i { animation: agent-ring 1.6s cubic-bezier(.23, 1, .32, 1) infinite; }
+  .agent-state.running i { animation: agent-ring 1.6s var(--motion-out) infinite; }
 }
 @keyframes agent-ring { 70%, 100% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--st) 0%, transparent); } }
 .agent-state-word { font-weight: 600; }

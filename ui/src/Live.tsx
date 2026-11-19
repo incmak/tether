@@ -6,7 +6,7 @@ import { agentNames, groupSessions, paneTitle } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
-import { replyPart } from './fridayReply'
+import { findLastReply, isReply, replyPage } from './fridayReply'
 import { LiveVoice, sentences } from './liveVoice'
 import { useBackStep } from './backNav'
 import { useFloatingWindow, type Edge, type FloatMode, type Point, type Rect } from './floatingWindow'
@@ -50,7 +50,7 @@ const firstRect = (): Rect => {
   return { x: vw - w - 24, y: vh - h - 24, w, h }
 }
 const name = (pane: Pane) => `${paneTitle(pane)} · ${agentNames[pane.agent]}`
-const lastReply = (data: ChatData) => [...chatMessages(data)].reverse().find(item => item.role === 'assistant' && !item.kind && item.text.trim()) ?? null
+const lastReply = (data: ChatData) => [...chatMessages(data)].reverse().find(isReply) ?? null
 const shortText = (text: string, limit: number) => { const plain = speakable(text); return plain.length > limit ? `${plain.slice(0, limit).replace(/\s+\S*$/, '')}…` : plain }
 const yesOption = (approval: Approval) => approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0]
 const noOption = (approval: Approval) => { const options = approval.options!; return options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1] }
@@ -423,15 +423,14 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       await flow.current.answer(pane, approval, decision === 'approve' ? yesOption(approval) : noOption(approval))
       return { ok: true, chat: paneTitle(pane), decision: decision === 'approve' ? 'approve' : 'deny' }
     },
-    read_last_reply: async ({ chat, offset }) => {
+    read_last_reply: async ({ chat, offset, reply_id }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
       const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.target
       if (!pane) return { error: `No chat called ${chat}.` }
-      const data = await live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=6`)
-      const message = lastReply(data)
-      if (!message) return { chat: paneTitle(pane), text: 'No reply yet.' }
-      const part = replyPart(speakable(message.text), typeof offset === 'number' ? offset : undefined)
+      const { message, searchedAll } = await findLastReply(limit => live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`))
+      if (!message) return { chat: paneTitle(pane), text: searchedAll ? 'No reply yet.' : 'No reply in the last 2000 messages.' }
+      const part = replyPage(speakable(message.text), message.id, typeof offset === 'number' ? offset : undefined, typeof reply_id === 'string' ? reply_id : undefined)
       return { chat: paneTitle(pane), ...part }
     },
     new_chat: async ({ name: wanted, agent: kind, prompt, project }) => {

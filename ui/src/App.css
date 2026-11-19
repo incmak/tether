@@ -41,7 +41,7 @@
 .agent-bubble { position: fixed; left: 0; top: 0; z-index: 40; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; padding: 0;
   background: var(--surface); color: var(--text); border: 1px solid var(--line);
   box-shadow: 0 1px 2px rgb(0 0 0 / .08), 0 6px 18px rgb(0 0 0 / .14); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
-  --spring: cubic-bezier(.32, .72, 0, 1);
+  --spring: var(--motion-drawer);
   transition: transform .22s var(--spring), width .28s var(--spring), height .28s var(--spring), border-radius .28s var(--spring),
     background-color .2s ease, color .2s ease, border-color .2s ease, box-shadow .2s ease, scale .15s ease; }
 /* Docked: a D-shaped tab, flat side on the screen edge. The ::before widens the touch area to 44px. */
@@ -57,7 +57,7 @@
 .agent-bubble.docked.working .agent-bubble-count { color: var(--accent-ink); }
 .agent-bubble.docked.attention { background: var(--attention); border-color: var(--attention); }
 /* The call pulse: a copy of the tab grows and fades behind it (transform and opacity only, no repaint). */
-.agent-bubble.docked.attention::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--attention); pointer-events: none; animation: tab-call 2.2s cubic-bezier(.23, 1, .32, 1) infinite; }
+.agent-bubble.docked.attention::after { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: var(--attention); pointer-events: none; animation: tab-call 2.2s var(--motion-out) infinite; }
 .agent-bubble.docked.attention .agent-bubble-count { color: var(--surface); }
 @keyframes tab-call { 0% { opacity: .5; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(1.3, 1.25); } }
 .agent-bubble.dragging { transition: width .2s var(--spring), height .2s var(--spring), border-radius .2s var(--spring), box-shadow .2s ease, scale .15s ease; cursor: grabbing; scale: 1.08; box-shadow: 0 2px 4px rgb(0 0 0 / .1), 0 14px 32px rgb(0 0 0 / .22); }
@@ -69,11 +69,11 @@
 .agent-bubble.idle { color: var(--muted); }
 .agent-bubble.working .agent-bubble-ring { border-color: var(--accent); border-right-color: transparent; animation: spin 1.4s linear infinite; }
 .agent-bubble.attention .agent-bubble-ring { border-color: var(--attention); }
-.agent-bubble.attention .agent-bubble-ring::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--attention); animation: bubble-call 1.8s cubic-bezier(.23, 1, .32, 1) infinite; }
+.agent-bubble.attention .agent-bubble-ring::after { content: ''; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid var(--attention); animation: bubble-call 1.8s var(--motion-out) infinite; }
 @keyframes bubble-call { 0% { opacity: .45; transform: scale(1); } 100% { opacity: 0; transform: scale(1.45); } }
 .agent-pop { position: fixed; z-index: 41; display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--line);
-  box-shadow: 0 2px 6px rgb(0 0 0 / .08), 0 18px 48px rgb(0 0 0 / .22); animation: pop-in .2s cubic-bezier(.23, 1, .32, 1) .06s backwards; outline: none; }
-.agent-pop.closing { animation: pop-out .14s cubic-bezier(.23, 1, .32, 1) forwards; }
+  box-shadow: 0 2px 6px rgb(0 0 0 / .08), 0 18px 48px rgb(0 0 0 / .22); animation: pop-in .2s var(--motion-out) .06s backwards; outline: none; }
+.agent-pop.closing { animation: pop-out .14s var(--motion-out) forwards; }
 @keyframes pop-in { from { opacity: 0; transform: scale(.95); } to { opacity: 1; transform: scale(1); } }
 @keyframes pop-out { to { opacity: 0; transform: scale(.94); } }
 .agent-pop-head { display: flex; align-items: center; gap: 8px; padding: 10px 6px 6px 14px; }
@@ -402,6 +402,14 @@ button.stop-button:not(:disabled):hover { background: var(--muted); }
 .hint { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 16px; }
 .sheet-buttons { display: flex; gap: 10px; justify-content: flex-end; }
 .app-toast { --toast-bottom: 110px; position: fixed; left: 50%; bottom: var(--toast-bottom); transform: translateX(-50%); z-index: 20; max-width: calc(100% - 32px); margin: 0; }
+.app-toast, .update-banner, .heads-up { transition: opacity 200ms var(--motion-out), translate 200ms var(--motion-out); }
+@starting-style {
+  .app-toast, .heads-up { opacity: 0; translate: 0 8px; }
+  .update-banner { opacity: 0; translate: 0 -8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  @starting-style { .app-toast, .update-banner, .heads-up { translate: none; } }
+}
 .state-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--muted); }
 .state-dot.working { width: 10px; height: 10px; background: none; border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: spin .9s linear infinite; }
 .state-dot.approval { background: var(--attention); width: 8px; height: 8px; }
@@ -562,13 +570,13 @@ a { -webkit-touch-callout: default; }
 .toast.app-toast { margin: 0; max-height: calc(100dvh - var(--toast-bottom) - 16px); overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; }
 .read-only { font-size: 13px; color: var(--muted); padding: 4px 20px; text-align: center; }
 dialog { color: var(--text); background: var(--surface); border: 1px solid var(--line); }
-dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress, 0)); transition: opacity var(--sheet-duration, 0ms) cubic-bezier(.32,.72,0,1); }
-.drawer { position: fixed; inset: 0 auto 0 0; margin: 0; width: min(340px, 88vw); max-width: none; height: 100dvh; max-height: none; border: 0; padding: 0; background: var(--sidebar); transition: transform 320ms cubic-bezier(.32,.72,0,1); touch-action: pan-y; }
+dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress, 0)); transition: opacity var(--sheet-duration, 0ms) var(--motion-drawer); }
+.drawer { position: fixed; inset: 0 auto 0 0; margin: 0; width: min(340px, 88vw); max-width: none; height: 100dvh; max-height: none; border: 0; padding: 0; background: var(--sidebar); transition: transform 320ms var(--motion-drawer); touch-action: pan-y; }
 .drawer[open] { display: flex; flex-direction: column; }
 @starting-style { .drawer[open] { transform: translateX(-100%); } }
 .sheet { position: fixed; inset: auto 0 0; width: 100%; max-width: 500px; max-height: 90dvh; margin: 0 auto; padding: 22px 24px max(24px, env(safe-area-inset-bottom)); border-radius: var(--radius-xl) var(--radius-xl) 0 0; border-bottom: 0; }
 @media (max-width: 599.98px) {
-  .sheet:not(.popover) { transition: transform 300ms cubic-bezier(.32,.72,0,1); touch-action: pan-x pan-y; }
+  .sheet:not(.popover) { transition: transform 300ms var(--motion-drawer); touch-action: pan-x pan-y; }
   /* Content keeps native scrolling; the heading reserves vertical drags. */
   .sheet:not(.popover) .sheet-heading { touch-action: pan-x; }
   @starting-style { .sheet:not(.popover)[open] { transform: translateY(100%); } }
@@ -593,6 +601,14 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 .signin .primary { min-width: 150px; }
 @media (min-width: 600px) {
   .sheet { inset: 0; margin: auto; height: fit-content; border-radius: var(--radius-xl); border: 1px solid var(--line); padding: 26px; }
+  .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 200ms var(--motion-out), scale 200ms var(--motion-out); }
+  @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { opacity: 0; scale: .97; } }
+  dialog.sheet:not(.popover, .command-menu)::backdrop { transition: opacity 200ms var(--motion-out); }
+  @starting-style { dialog.sheet:not(.popover, .command-menu)[open]::backdrop { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop) { transition: opacity 150ms ease-out; }
+    @starting-style { .sheet:not(.popover, .command-menu, .preview-drawer, .task-pop)[open] { scale: none; } }
+  }
   .messages { padding: 36px 34px 16px; }
   .chat-header { padding-left: 24px; padding-right: 24px; }
   .composer-area { padding-bottom: max(22px, env(safe-area-inset-bottom)); }
@@ -784,7 +800,7 @@ dialog::backdrop { background: #11110e66; opacity: calc(1 - var(--sheet-progress
 
 /* Sidebar row swipe: Pin and Delete sit under the row; a left swipe slides the row aside. */
 .swipe-row { position: relative; overflow: hidden; border-radius: var(--radius); touch-action: pan-y pinch-zoom; }
-.swipe-row > .session-row { position: relative; z-index: 1; background: var(--sidebar); transition: transform .22s cubic-bezier(.32,.72,0,1); }
+.swipe-row > .session-row { position: relative; z-index: 1; background: var(--sidebar); transition: transform .22s var(--motion-drawer); }
 .swipe-row > .session-row.selected { background: linear-gradient(var(--hover), var(--hover)), var(--sidebar); }
 .swipe-row.swiped > .session-row { transform: translateX(-228px); }
 .swipe-actions { position: absolute; inset: 0 0 0 auto; display: flex; width: 228px; visibility: hidden; }
@@ -1426,6 +1442,12 @@ button.live-chip:active { background: var(--line); }
 /* Actions as a popover on the desktop: a compact menu at the pointer, no dimmed page. */
 .action-label { margin: 6px 6px 2px; font-size: 12px; color: var(--muted); }
 .sheet.popover { inset: auto; width: 288px; max-width: calc(100vw - 16px); height: auto; max-height: calc(100dvh - 16px); overflow-y: auto; margin: 0; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 12px 32px #0000002e, 0 2px 6px #0000001a; }
+.sheet.popover:not(.command-menu) { transition: opacity 150ms var(--motion-out), scale 150ms var(--motion-out); }
+@starting-style { .sheet.popover:not(.command-menu)[open] { opacity: 0; scale: .96; } }
+@media (prefers-reduced-motion: reduce) {
+  .sheet.popover:not(.command-menu) { transition: opacity 150ms ease-out; }
+  @starting-style { .sheet.popover:not(.command-menu)[open] { scale: none; } }
+}
 .sheet.popover::backdrop { background: transparent; }
 .sheet.popover:focus-visible { outline: none; }
 .sheet.popover .sheet-heading { padding: 6px 8px 0; }
@@ -1612,12 +1634,12 @@ button.live-chip:active { background: var(--line); }
 
 /* The end of a turn this page watched: a check, then it goes away. */
 .done-line { align-items: center; }
-.done-check { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 50%; background: var(--accent-fill); color: var(--accent-text); animation: done-pop .2s cubic-bezier(.23, 1, .32, 1); }
+.done-check { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; border-radius: 50%; background: var(--accent-fill); color: var(--accent-text); animation: done-pop .2s var(--motion-out); }
 .done-line strong { font-weight: 500; }
 @keyframes done-pop { from { opacity: 0; transform: scale(.9); } }
 
 /* New messages settle in. Only movement: a message is fully visible even when the animation never runs. */
-.messages > [data-msg-id]:last-child, .messages > div:last-child > [data-msg-id], .messages > .user-message:last-child { animation: message-in .22s cubic-bezier(.23, 1, .32, 1); }
+.messages > [data-msg-id]:last-child, .messages > div:last-child > [data-msg-id], .messages > .user-message:last-child { animation: message-in .22s var(--motion-out); }
 @keyframes message-in { from { transform: translateY(6px); } }
 /* A pane that just opened shows its messages in place. A 0s duration ends the animation at once; the later change
    back to .22s does not restart it, so only messages that come after this moment settle in. */
