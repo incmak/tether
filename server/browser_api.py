@@ -10,6 +10,7 @@ import browser
 import browser_cdp
 import browser_live
 import agent_browser_setup
+import extension_zip
 import mac_browser
 
 PREFIX = '/mobile/api/browser/'
@@ -81,6 +82,9 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
     browser_id = _canonical(query.get('browser', ['test'])[0])
     if name == 'extension/devices':
         handler.respond(200, mac_browser.BROKER.rows())
+        return
+    if name == 'extension/download':
+        extension_zip.send(handler)
         return
     if name == 'signed/access':
         browser_id = 'signed'
