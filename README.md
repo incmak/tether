@@ -243,9 +243,13 @@ own `commit-msg` hook, the installer gives you a line to add before the hook exi
 `--uninstall` to remove the Tether hook. Both forms let the commit through if the gate takes more than 10 seconds.
 For the line in your own hook, the helper uses `python3` unless you set `TETHER_PYTHON`.
 
-If cleanup can change the verdict, the gate uses the explicit Git options. It records `unknown` with reason
-`cleanup` and lets the commit through when those options leave the verdict uncertain. In enforce mode,
-an agent without a session key can commit and the log records `let_through` with reason `no-session`.
+The gate compares possible cleanup results. If they disagree, it lets the commit through and records `unknown`
+with reason `cleanup`. In enforce mode, an agent without a session key can commit and the log records
+`let_through` with reason `no-session`.
+
+When Claude defers its check to the Git hook, Tether checks for a hook verdict after the command ends. If a commit
+landed and the hook logged no verdict for the session during the command, Tether logs a check with reason
+`hook-silent` based on the landed commit message.
 
 ## Auto-merge
 

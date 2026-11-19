@@ -14,7 +14,8 @@ The person sets the mode in Settings. Nothing else changes it.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-Ordinary amendments are checked. Claude's PreToolUse check defers when the installed hook will run.
+Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse logs a
+check from the landed messages if the hook left no verdict.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -77,7 +78,7 @@ SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
 HOOK_MARK = '# tether-commit-gate-hook v1'
 CALL_MARK = '# tether-commit-gate-call v1'
 HOOK_MESSAGE_BYTES = 1_000_000
-SCISSORS = '# ------------------------ >8 ------------------------'
+SCISSORS = re.compile(r'. -{24} >8 -{24}')
 
 
 class GateError(Exception):
@@ -755,6 +756,8 @@ def _read_session(session, now):
                 or not isinstance(value.get('head'), str) or type(value.get('shared')) is not bool
                 or ('tree' in value and not isinstance(value['tree'], str))
                 or (value.get('project') is not None and not isinstance(value['project'], str))
+                or type(value.get('deferred', False)) is not bool
+                or (value.get('deferred') and value.get('mode') not in NAMES)
                 or type(value.get('closing', False)) is not bool):
             raise ValueError('invalid commit gate pending call')
     return {'blocks': data['blocks'], 'pending': {key: value for key, value in pending.items()
@@ -834,10 +837,10 @@ def _message_hook(folder):
 def _landed(folder, head):
     """[status] for the commits made since `head`, newest first: 'verified', 'none' or 'missing' each. [] when no
     commit landed. None when git cannot tell."""
-    shown = _git(folder, 'log', '--first-parent', '-n', '20', '--format=%B%x1e', f'{head}..HEAD' if head else 'HEAD')
+    shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--format=%B', f'{head}..HEAD' if head else 'HEAD')
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
-    return [stamp.message_status(body) for body in shown.stdout.split('\x1e') if body.strip()]
+    return [stamp.message_status(body) for body in shown.stdout.split('\0')[:-1]]
 
 
 # ---- the hook ----
@@ -925,8 +928,7 @@ def _owned_hook(hook):
 
 
 def _hook_ready(contents):
-    """The installed wrapper will reach the gate: its helper, Python and gate file exist. A wrapper whose files are
-    gone fails open with no row, so PreToolUse must keep its own check."""
+    """The installed wrapper's helper, Python and gate file exist. PostToolUse checks if the hook logged a verdict."""
     for line in contents.decode('utf-8', errors='replace').splitlines():
         if not line.startswith('exec /bin/sh '):
             continue
@@ -1009,28 +1011,31 @@ def check(data, env=os.environ, now=None):
     if mode == 'off':
         return ''
     verdict, reason, folder = found['verdict'], found['reason'], found['folder']
-    tree = _tree(folder) if folder is not None else None
-    hook_tree = _tree(cwd) if folder is None and cwd else tree
-    if _defer_to_hook(hook_tree, command, cwd_fallback=folder is None):
-        return ''
-    head = _head(folder) if tree is not None else None
-    if (verdict == 'missing' and head is None) or (reason == 'file' and folder is None):
-        verdict, reason = 'unknown', 'folder'
-    elif verdict == 'missing':
-        hooked = _message_hook(folder)
-        if hooked is not False:
-            verdict, reason = 'unknown', 'hook' if hooked else 'folder'
-    elif verdict == 'pass' and tree is not None and _message_hook(folder):
-        verdict, reason = 'unknown', 'hook'  # the hook can also remove the line
     session = data.get('session_id')
     session = session if isinstance(session, str) and SESSION.fullmatch(session) else None
     tool = data.get('tool_use_id') if isinstance(data.get('tool_use_id'), str) else None
+    tree = _tree(folder) if folder is not None else None
+    hook_tree = _tree(cwd) if folder is None and cwd else tree
+    deferred = bool(session and tool and _defer_to_hook(hook_tree, command, cwd_fallback=folder is None))
+    if deferred and folder is None:
+        folder = tree = hook_tree
+    head = _head(folder) if tree is not None else None
+    deferred = deferred and head is not None
+    if not deferred:
+        if (verdict == 'missing' and head is None) or (reason == 'file' and folder is None):
+            verdict, reason = 'unknown', 'folder'
+        elif verdict == 'missing':
+            hooked = _message_hook(folder)
+            if hooked is not False:
+                verdict, reason = 'unknown', 'hook' if hooked else 'folder'
+        elif verdict == 'pass' and tree is not None and _message_hook(folder):
+            verdict, reason = 'unknown', 'hook'  # the hook can also remove the line
     action, blocks = {'pass': 'pass', 'unknown': 'unknown', 'missing': 'would_block'}[verdict], 0
     if session:
         with _Lock():
             state = _read_session(session, now)
             before = json.dumps(state, sort_keys=True)
-            if verdict == 'missing' and mode == 'enforce' and sure:
+            if not deferred and verdict == 'missing' and mode == 'enforce' and sure:
                 if state['blocks'] >= MAX_BLOCKS:
                     action = 'let_through'
                 else:
@@ -1045,8 +1050,12 @@ def check(data, env=os.environ, now=None):
                         other['shared'] = shared = True
                 state['pending'][tool] = {'folder': folder, 'tree': tree, 'head': head, 'at': now, 'project': pid,
                                           'shared': shared}
+                if deferred:
+                    state['pending'][tool].update(deferred=True, mode=mode)
             if json.dumps(state, sort_keys=True) != before:
                 _write_session(session, state, now)
+    if deferred:
+        return ''
     record = {'at': round(now, 3), 'event': 'check', 'id': tool, 'session': session, 'project': pid, 'mode': mode,
               'verdict': action, 'reason': reason, 'count': found['count'], 'folder': folder}
     if not sure:
@@ -1090,6 +1099,12 @@ def landed(data, now=None):
               'landed': worst, 'count': len(statuses)}
     if waiting.get('shared') or 'tree' not in waiting:
         record['shared'] = True
+    if statuses and waiting.get('deferred') and not any(
+            row.get('via') == 'commit-msg' and row.get('session') == session and row['at'] >= waiting['at'] - 0.001  # rows round to ms
+            for row in _rows()):
+        _log({'at': record['at'], 'event': 'check', 'id': tool, 'session': session, 'project': record['project'],
+              'mode': waiting['mode'], 'verdict': 'would_block' if worst == 'missing' else 'pass',
+              'reason': 'hook-silent', 'count': len(statuses), 'folder': waiting['folder']})
     _log(record)
 
 
@@ -1106,27 +1121,6 @@ def hook(data, env=os.environ):
 class _Ancestor(NamedTuple):
     pid: int
     comm: str
-    argv: list[str]
-    exact_argv: bool
-
-
-def _process_argv(pid, comm, deadline):
-    if sys.platform.startswith('linux'):
-        try:
-            raw = Path(f'/proc/{pid}/cmdline').read_bytes()
-            if raw.endswith(b'\0'):
-                return os.fsdecode(raw[:-1]).split('\0'), True
-        except OSError:
-            pass
-    remaining = deadline - time.monotonic()
-    if comm == 'git' and remaining > 0:
-        try:
-            shown = subprocess.run(['ps', '-ww', '-o', 'args=', '-p', str(pid)], capture_output=True,
-                                   text=True, errors='replace', check=True, timeout=remaining)
-            return shown.stdout.split(), False
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return [], False
 
 
 def _ancestors():
@@ -1150,7 +1144,7 @@ def _ancestors():
                 ppid, comm = int(parent), os.path.basename(comm)
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             break
-        yield _Ancestor(pid, comm, *_process_argv(pid, comm, deadline))
+        yield _Ancestor(pid, comm)
         if ppid == pid:
             break
         pid = ppid
@@ -1177,7 +1171,7 @@ def _project_for_hook(cwd, env, ancestors=None):
 
 
 def _source_session(ancestors, env):
-    for pid, comm, _, _ in ancestors:
+    for pid, comm in ancestors:
         if comm == 'claude':
             source = 'claude'
             break
@@ -1205,134 +1199,6 @@ def _source_session(ancestors, env):
     return source, None
 
 
-GIT_GLOBAL_VALUES = {'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--shallow-file'}
-GIT_GLOBAL_FLAGS = set((
-    '-p -P --paginate --no-pager --no-replace-objects --bare --literal-pathspecs --no-literal-pathspecs '
-    '--glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice'
-).split())
-GIT_GLOBAL_ATTACHED = {'--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path'}
-COMMIT_REQUIRED_VALUES = {name[2:] for name in COMMIT_VALUE_OPTIONS} | {
-    'message', 'file', 'reuse-message', 'reedit-message', 'fixup', 'squash', 'template', 'cleanup', 'trailer',
-}
-COMMIT_OPTIONAL_VALUES = {'gpg-sign', 'untracked-files'}
-COMMIT_CLEANUP_FLAGS = {name[2:] for name in COMMIT_FLAGS} | {
-    'edit', 'interactive', 'dry-run', 'short', 'branch', 'ahead-behind', 'porcelain', 'long', 'null',
-}
-COMMIT_SHORT_NAMES = {
-    'm': 'message', 'F': 'file', 'C': 'reuse-message', 'c': 'reedit-message', 't': 'template',
-    'e': 'edit', 'v': 'verbose', 'u': 'untracked-files', 'S': 'gpg-sign',
-    'a': 'all', 'p': 'patch', 's': 'signoff', 'q': 'quiet', 'n': 'no-verify',
-    'z': 'null', 'i': 'include', 'o': 'only',
-}
-
-
-def _commit_argv(ancestor):
-    args = iter(ancestor.argv[1:])
-    for arg in args:
-        if arg == 'commit':
-            return args
-        if arg in GIT_GLOBAL_FLAGS:
-            continue
-        if not ancestor.exact_argv:
-            return None  # ps may have joined the option, its value and later arguments
-        if arg in GIT_GLOBAL_VALUES and next(args, None) is not None:
-            continue
-        name, equals, _ = arg.partition('=')
-        if equals and name in GIT_GLOBAL_ATTACHED:
-            continue
-        return None
-    return None
-
-
-def _cleanup_options(args, *, exact_argv):
-    """Parse the Git 2.43 commit options that affect the final message cleanup."""
-    options = {}
-    for arg in args:
-        if arg == '--':
-            break
-        if arg.startswith('--'):
-            name, equals, value = arg[2:].partition('=')
-            negated = not equals and name.startswith('no-') and name not in ('no-verify', 'no-post-rewrite')
-            if negated:
-                name = name[3:]
-            if name in COMMIT_CLEANUP_FLAGS and name not in COMMIT_OPTIONAL_VALUES and not equals:
-                options[name] = not negated
-            elif name in COMMIT_REQUIRED_VALUES or name in COMMIT_OPTIONAL_VALUES:
-                if not exact_argv:
-                    return None
-                if negated:
-                    if name == 'trailer':
-                        return None
-                    value = None
-                elif not equals and name in COMMIT_REQUIRED_VALUES:
-                    value = next(args, None)
-                if not negated and value is None:
-                    return None
-                options[name] = value
-            else:
-                return None
-        elif arg.startswith('-') and len(arg) > 1:
-            for index, letter in enumerate(arg[1:], start=2):
-                name = COMMIT_SHORT_NAMES.get(letter)
-                if name is None:
-                    return None
-                if name in COMMIT_REQUIRED_VALUES or name in COMMIT_OPTIONAL_VALUES:
-                    if not exact_argv:
-                        return None
-                    value = arg[index:]
-                    if not value and name in COMMIT_REQUIRED_VALUES:
-                        value = next(args, None)
-                        if value is None:
-                            return None
-                    options[name] = value
-                    break
-                options[name] = True
-        elif not exact_argv:
-            return None  # a pathspec from ps could contain a word that looks like an option
-    return options
-
-
-def _cleanup_modes(ancestors, env):
-    git_commands = [
-        (entry, _commit_argv(entry)) for entry in ancestors
-        if entry.argv and os.path.basename(entry.argv[0]) == 'git'
-    ]
-    # Git runs a second Git process for a builtin alias. Its parent still names the alias.
-    if not git_commands or any(args is None for _, args in git_commands):
-        return None
-    git, args = git_commands[0]
-    if (options := _cleanup_options(args, exact_argv=git.exact_argv)) is None:
-        return None
-    use_editor = options.get('edit')
-    if use_editor is None:
-        use_editor = all(options.get(name) is None for name in ('message', 'file', 'reuse-message'))
-        fixup = options.get('fixup')
-        if use_editor and fixup in ('amend', 'reword'):
-            # Git 2.43 replaces the colon with NUL in argv. A ref named "amend" or "reword"
-            # can look the same. Git sets GIT_EDITOR=: in the hook if it skipped the editor.
-            use_editor = env.get('GIT_EDITOR') != ':'
-            if not use_editor:
-                try:
-                    original_env = Path(f'/proc/{git.pid}/environ').read_bytes().split(b'\0')
-                except OSError:
-                    return None
-                if b'GIT_EDITOR=:' in original_env:
-                    return None  # the original editor and Git's no-editor signal are identical
-        elif fixup is not None and not fixup.startswith(('amend:', 'reword:')):
-            use_editor = False
-    cleanup = options.get('cleanup')
-    supported = ('default', 'strip', 'whitespace', 'scissors')
-    if cleanup is not None and cleanup not in supported:
-        return None
-    # Git reads commit.verbose and commit.cleanup before hooks run. A hook can change that config.
-    cleanups = supported if cleanup is None else (cleanup,)
-    verbosity = (options['verbose'],) if 'verbose' in options else (False, True)
-    return {
-        (verbose or (mode == 'scissors' and use_editor), mode == 'strip' or (mode == 'default' and use_editor))
-        for mode in cleanups for verbose in verbosity
-    }
-
-
 def _message_verdict(lines):
     subject = next((line for line in lines if line.strip()), '')
     if subject.startswith(('fixup! ', 'squash! ', 'amend! ')):
@@ -1340,7 +1206,7 @@ def _message_verdict(lines):
     return ('would_block', 'no-line') if stamp.message_status('\n'.join(lines)) == 'missing' else ('pass', '')
 
 
-def _final_verdict(path, cwd, ancestors, env):
+def _final_verdict(path, cwd):
     git_dir = _git_path(cwd, '--git-dir')
     if git_dir is None:
         raise GateError(400, 'Git could not find the repository for the commit message.')
@@ -1357,21 +1223,26 @@ def _final_verdict(path, cwd, ancestors, env):
     config = _git(cwd, 'config', '--null', '--get-regexp', r'^core\.comment(char|string)$', text=False)
     if config is None or config.returncode not in (0, 1):
         raise GateError(400, 'Git could not read the commit comment configuration.')
-    if any(item.partition(b'\n')[2] != b'#' for item in config.stdout.split(b'\0') if item):
+    comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
+                for item in config.stdout.split(b'\0') if item}
+    if comments - {'#'}:
         return 'unknown', 'comment-char'
     lines = message.decode('utf-8', errors='replace').split('\n')
-    cut = next((index for index, line in enumerate(lines) if line == SCISSORS), len(lines))
-    verdicts = {}
-    for truncate, part in ((False, lines), (True, lines[:cut])):
-        verdicts[truncate, False] = _message_verdict(part)
-        verdicts[truncate, True] = _message_verdict([line for line in part if not line.startswith('#')])
-    if len(set(verdicts.values())) == 1:
-        return verdicts[False, False]
-    modes = _cleanup_modes(ancestors, env)
-    possible = {verdicts[mode] for mode in modes} if modes else set()
-    if len(possible) == 1:
-        return possible.pop()
-    return 'unknown', 'cleanup'
+    cuts = {}
+    for index, line in enumerate(lines):
+        if SCISSORS.fullmatch(line):
+            cuts.setdefault(line[0], index)
+    chars = {'#'} | {char for char in comments if len(char) == 1} | cuts.keys()
+    verdict = _message_verdict(lines)
+    # Git reads cleanup and comment settings before prepare-commit-msg can change them. Use a verdict only
+    # when every reading agrees. An unknown verdict never counts as stamped or unstamped.
+    for char in chars:
+        truncated = lines[:cuts.get(char, len(lines))]
+        for reading in (truncated, [line for line in lines if not line.startswith(char)],
+                        [line for line in truncated if not line.startswith(char)]):
+            if _message_verdict(reading) != verdict:
+                return 'unknown', 'cleanup'
+    return verdict
 
 
 def commit_msg(path, env=os.environ, cwd=None, now=None):
@@ -1380,7 +1251,7 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
               'project': None, 'mode': None, 'count': 1, 'folder': None}
     try:
         now = time.time() if now is None else now
-        record['at'] = round(now, 3)
+        record['at'] = now  # PostToolUse compares it with the start of the deferred call.
         cwd = os.path.abspath(os.getcwd() if cwd is None else cwd)
         record['folder'] = cwd  # Git starts the hook at the worktree root.
         ancestors = tuple(_ancestors())
@@ -1394,7 +1265,7 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         record['mode'] = mode
         source, session = _source_session(ancestors, env)
         record.update(source=source, session=session)
-        verdict, reason = _final_verdict(path, cwd, ancestors, env)
+        verdict, reason = _final_verdict(path, cwd)
         blocks = None
         if verdict == 'would_block' and mode == 'enforce' and source != 'terminal' and session is None:
             verdict, reason = 'let_through', 'no-session'

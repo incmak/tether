@@ -116,8 +116,8 @@ sys.exit(main(sys.argv[2:]))
         path = self.script(self.root / 'bin' / name, f'{shlex.quote(child)} "$@"\nexit $?')
         return (path,)
 
-    def pre(self, command, event='PreToolUse', tool='tool-1'):
-        data = {'hook_event_name': event, 'tool_name': 'Bash', 'session_id': SESSION, 'cwd': str(self.repo),
+    def pre(self, command, event='PreToolUse', tool='tool-1', session=SESSION):
+        data = {'hook_event_name': event, 'tool_name': 'Bash', 'session_id': session, 'cwd': str(self.repo),
                 'tool_use_id': tool, 'tool_input': {'command': command}}
         return subprocess.run([sys.executable, str(GATE.with_name('claude_hooks.py'))], input=json.dumps(data),
                               cwd=self.repo, env=self.env, capture_output=True, text=True, check=True, timeout=20)
@@ -350,13 +350,14 @@ esac''')
         self.pre(command, 'PostToolUse', tool='active')
         self.assertEqual(self.rows()[-1]['landed'], 'verified')
 
-    def test_verbose_commit_under_user_hook_finds_git_past_extra_shell(self):
+    def test_verbose_commit_under_user_hook_reports_cleanup_disagreement(self):
         self.mode('enforce')
         line = self.user_hook_line()
         self.script(self.hook, f'/bin/sh -c {shlex.quote(line)} gate "$1"\nexit $?')
-        self.assertNotEqual(self.commit('-v', '-m', 'subject', '-m', SCISSORS, '-m', STAMP, check=False).returncode, 0)
+        self.commit('-v', '-m', 'subject', '-m', SCISSORS, '-m', STAMP)
+        self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), 'subject')
         row, = self.rows()
-        self.assertEqual((row['verdict'], row['reason']), ('block', 'no-line'))
+        self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
 
     def test_concurrent_fresh_installs_leave_one_tether_hook(self):
         results = self.concurrent_installs()
@@ -553,11 +554,11 @@ time.sleep(20)
         command = 'git commit -m x'
         self.assertEqual(self.pre(command).stdout, '')
         self.assertEqual(self.rows(), [])
-        self.assertFalse((self.cache / 'commit-gate' / f'{SESSION}.json').exists())
         self.commit('-m', 'x', command=claude)
         self.assertEqual(self.pre(command, 'PostToolUse').stdout, '')
-        row, = self.rows()
+        row, landed = self.rows()
         self.assertEqual((row['via'], row['source'], row['session']), ('commit-msg', 'claude', SESSION))
+        self.assertEqual((landed['event'], landed['landed']), ('landed', 'missing'))
         for index, command in enumerate((
             'git commit --no-verify -m x', 'git commit -qn -m x', 'git commit -an -m x',
             'git commit -"qn" -m x', 'git -c core.hooksPath=other commit -m x',
@@ -566,9 +567,86 @@ time.sleep(20)
             'git -C "$OTHER" commit -m x', 'cd "$OTHER" && git commit -m x',
         ), start=2):
             with self.subTest(command=command):
+                before = len(self.rows())
                 self.pre(command, tool=f'tool-{index}')
-                self.assertEqual(len(self.rows()), index)
-                self.assertNotIn('via', self.rows()[-1])
+                row, = self.rows()[before:]
+                self.assertNotIn('via', row)
+
+    def test_claude_records_a_check_when_git_add_filter_moves_the_hook(self):
+        self.mode('enforce')
+        self.install()
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        self.git('config', 'filter.mv.clean', 'mv .git/hooks/commit-msg .git/hooks/commit-msg.moved && cat')
+        (self.repo / '.gitattributes').write_text('one.txt filter=mv\n')
+        (self.repo / 'one.txt').write_text('one\n')
+        command = 'git add one.txt && git commit -m subject'
+        self.assertEqual(self.pre(command).stdout, '')
+        self.assertEqual(self.rows(), [])
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.assertTrue(self.hook.with_name('commit-msg.moved').is_file())
+        self.assertEqual(self.pre(command, 'PostToolUse').stdout, '')
+        check, landed = self.rows()
+        self.assertEqual((check['event'], check['id'], check['session'], check['mode'], check['project'],
+                          check['count'], check['reason'], check['verdict']),
+                         ('check', 'tool-1', SESSION, 'enforce', None, 1, 'hook-silent', 'would_block'))
+        self.assertEqual((landed['event'], landed['id'], landed['landed'], landed['count']),
+                         ('landed', 'tool-1', 'missing', 1))
+
+    def test_claude_records_a_check_when_the_gate_cannot_import(self):
+        broken_gate = self.root / 'broken' / GATE.name
+        broken_gate.parent.mkdir()
+        broken_gate.write_text('import tether_missing_module\n' + GATE.read_text())
+        self.install(gate=broken_gate, python=sys.executable)
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        claude = self.agent('claude', '/bin/sh')
+        for args, status, verdict in (
+            (f'-m subject -m {shlex.quote(STAMP)}', 'verified', 'pass'),
+            ("--allow-empty-message -m ''", 'missing', 'would_block'),
+        ):
+            with self.subTest(status=status):
+                command = f'git commit --allow-empty {args}'
+                before = len(self.rows())
+                self.assertEqual(self.pre(command, tool=status).stdout, '')
+                self.assertEqual(len(self.rows()), before)
+                self.git('-c', command, command=claude)
+                self.assertEqual(self.pre(command, 'PostToolUse', tool=status).stdout, '')
+                check, landed = self.rows()[before:]
+                self.assertEqual((check['event'], check['reason'], check['verdict']), ('check', 'hook-silent', verdict))
+                self.assertEqual((landed['event'], landed['id'], landed['landed']), ('landed', status, status))
+
+    def test_claude_does_not_duplicate_the_hook_check_after_a_deferred_commit(self):
+        self.mode('enforce')
+        self.install()
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        command = f'git commit --allow-empty -m subject -m {shlex.quote(STAMP)}'
+        self.assertEqual(self.pre(command).stdout, '')
+        self.assertEqual(self.rows(), [])
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.assertEqual(self.pre(command, 'PostToolUse').stdout, '')
+        check, landed = self.rows()
+        self.assertEqual((check['event'], check['via'], check['verdict']), ('check', 'commit-msg', 'pass'))
+        self.assertEqual((landed['event'], landed['id'], landed['landed']), ('landed', 'tool-1', 'verified'))
+
+    def test_claude_does_not_add_a_check_after_the_hook_refuses_a_deferred_commit(self):
+        self.mode('enforce')
+        self.install()
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        command = 'git commit --allow-empty -m subject'
+        self.assertEqual(self.pre(command).stdout, '')
+        self.assertEqual(self.rows(), [])
+        result = self.git('-c', command, command=self.agent('claude', '/bin/sh'), check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.pre(command, 'PostToolUseFailure').stdout, '')
+        check, landed = self.rows()
+        self.assertEqual((check['event'], check['via'], check['verdict']), ('check', 'commit-msg', 'block'))
+        self.assertEqual((landed['event'], landed['id'], landed['landed']), ('landed', 'tool-1', 'no-commit'))
+
+    def test_claude_keeps_the_pretooluse_check_without_a_session_id(self):
+        self.install()
+        self.assertEqual(self.pre('git commit -m x', session=None).stdout, '')
+        row, = self.rows()
+        self.assertEqual((row['event'], row['session'], row['verdict']), ('check', None, 'unknown'))
+        self.assertNotIn('via', row)
 
     def test_claude_checks_when_the_command_moves_the_hook_before_commit(self):
         self.mode('enforce')
@@ -816,7 +894,7 @@ esac''')
         self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
                          [('block', 'no-line')] + [('skip', 'fixup')] * 3 + [('skip', 'replay')])
 
-    def test_verbose_commit_cuts_scissors_before_checking_stamp(self):
+    def test_verbose_commit_with_stamp_below_scissors_is_unknown(self):
         self.install()
         self.write_file('one')
         editor = self.root / 'editor'
@@ -831,11 +909,13 @@ mv "$1.new" "$1"''')
 mv "$1.new" "$1"''')
         self.git('commit', '-v')
         self.assertNotIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
-        self.assertEqual([row['verdict'] for row in self.rows()], ['pass', 'would_block'])
+        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
+                         [('pass', ''), ('unknown', 'cleanup')])
         self.mode('enforce')
         self.write_file('three')
-        self.assertNotEqual(self.git('commit', '-v', check=False).returncode, 0)
-        self.assertEqual(self.rows()[-1]['verdict'], 'block')
+        self.git('commit', '-v')
+        self.assertNotIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
+        self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
 
     def test_literal_scissors_and_instruction_in_message_preserve_stamp(self):
         self.mode('enforce')
@@ -844,19 +924,17 @@ mv "$1.new" "$1"''')
             literal = scissors + '\n' + scissors[0] + ' Do not modify or remove the line above.'
             self.commit('-m', 'subject', '-m', literal, '-m', STAMP)
             self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
-        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
-                         [('unknown', 'cleanup'), ('pass', '')])
+        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()], [('unknown', 'cleanup')] * 2)
 
-    def test_message_keeps_the_leading_comment_as_subject(self):
+    def test_leading_comment_and_fixup_subject_disagree(self):
         self.mode('enforce')
         self.install()
-        result = self.commit('--no-verbose', '--cleanup=default', '-m', '# actual subject', '-m', 'fixup! base',
-                             check=False)
-        self.assertNotEqual(result.returncode, 0)
+        self.commit('--no-verbose', '--cleanup=default', '-m', '# actual subject', '-m', 'fixup! base')
+        self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(), '# actual subject')
         row, = self.rows()
-        self.assertEqual((row['verdict'], row['reason']), ('block', 'no-line'))
+        self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
 
-    def test_cleanup_modes_match_real_git_for_message_and_editor(self):
+    def test_cleanup_disagreement_allows_each_message_and_editor_mode(self):
         self.install()
         message = ('# leading comment', 'subject', SCISSORS, STAMP)
         self.env['GIT_EDITOR'] = self.script(
@@ -878,15 +956,15 @@ mv "$1.new" "$1"''')
                         self.assertEqual('# leading comment' in landed,
                                          cleanup != 'strip' and not (cleanup == 'default' and editor))
                         self.assertEqual(kept, not (verbose or (cleanup == 'scissors' and editor)))
-                        known = verbose or (cleanup == 'scissors' and editor)
                         self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']),
-                                         ('would_block', 'no-line') if known else ('unknown', 'cleanup'))
+                                         ('unknown', 'cleanup'))
                         self.mode('enforce')
                         result = self.commit(*args, check=False)
                         self.assertFalse(kept and result.returncode != 0, result.stderr)
-                        self.assertEqual(result.returncode == 0, not known, result.stderr)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(self.git('log', '-1', '--format=%B').stdout, landed)
                         self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']),
-                                         ('block', 'no-line') if known else ('unknown', 'cleanup'))
+                                         ('unknown', 'cleanup'))
 
     def test_prepare_hook_can_change_verbose_config_after_git_reads_it(self):
         self.mode('enforce')
@@ -898,6 +976,20 @@ mv "$1.new" "$1"''')
         self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
         row, = self.rows()
         self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
+
+    def test_prepare_hook_can_change_comment_char_after_git_reads_it(self):
+        self.mode('enforce')
+        self.install()
+        self.script(self.hooks / 'prepare-commit-msg', "git config core.commentChar '#'")
+        for before in (';', '!'):
+            for options in ((), ('--no-verbose',)):
+                with self.subTest(before=before, options=options):
+                    self.git('config', 'core.commentChar', before)
+                    result = self.commit(*options, '-m', 's', '-m', SCISSORS, '-m', STAMP, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
+                    row = self.rows()[-1]
+                    self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
 
     def test_plain_and_verbose_editor_commits_pass_or_block_without_unknown(self):
         self.mode('enforce')
@@ -921,14 +1013,13 @@ mv "$1.new" "$1"''')
         message = ('# actual subject', 'fixup! replacement', SCISSORS, STAMP)
         self.env['GIT_EDITOR'] = self.script(
             self.root / 'editor', f'printf "%s\\n\\n" {shlex.join(message)} > "$1"')
-        result = self.commit('-v', '--cleanup=whitespace', check=False)
-        self.assertNotEqual(result.returncode, 0)
+        self.commit('-v', '--cleanup=whitespace')
+        self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), '# actual subject\n\nfixup! replacement')
         self.commit('-v', '--cleanup=strip')
         self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), 'fixup! replacement')
-        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
-                         [('block', 'no-line'), ('skip', 'fixup')])
+        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()], [('unknown', 'cleanup')] * 2)
 
-    def test_commit_options_distinguish_values_from_flags_and_ignore_config(self):
+    def test_cleanup_disagreement_ignores_git_options_and_config(self):
         self.mode('enforce')
         self.install()
         for subject in ('-v', '--cleanup=strip'):
@@ -940,9 +1031,9 @@ mv "$1.new" "$1"''')
         self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         for options in (('-v', '-m', 's'), ('-vm', 's'), ('-qvms',), ('--no-verbose', '-vm', 's')):
             with self.subTest(options=options):
-                result = self.commit(*options, '-m', SCISSORS, '-m', STAMP, check=False)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.rows()[-1]['verdict'], 'block')
+                self.commit(*options, '-m', SCISSORS, '-m', STAMP)
+                self.assertEqual(self.git('log', '-1', '--format=%B').stdout.strip(), 's')
+                self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         for global_options in (('-c', 'commit.verbose=true'),
                                ('-C', str(self.repo), '--git-dir=.git', '--work-tree', str(self.repo),
                                 '--namespace', 'example', '--no-pager', '--literal-pathspecs', '-p',
@@ -954,14 +1045,17 @@ mv "$1.new" "$1"''')
                 self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         self.git('config', 'commit.verbose', 'true')
         self.commit('-v', '--no-verbose', '-m', 's', '-m', SCISSORS, '-m', STAMP)
-        self.assertEqual(self.rows()[-1]['verdict'], 'pass')
+        self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
+        self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         self.git('config', 'commit.cleanup', 'strip')
         self.commit('--no-verbose', '-m', '# hidden', '-m', 'fixup! base')
         self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         self.commit('--no-verbose', '--cleanup=strip', '-m', '# hidden', '-m', 'fixup! base')
-        self.assertEqual(self.rows()[-1]['verdict'], 'skip')
+        self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(), 'fixup! base')
+        self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
         self.commit('-m', 's', '-m', SCISSORS, '-m', STAMP, '--cleanup=whitespace', '--no-cleanup', '--no-verbose')
-        self.assertEqual(self.rows()[-1]['verdict'], 'pass')
+        self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
+        self.assertEqual((self.rows()[-1]['verdict'], self.rows()[-1]['reason']), ('unknown', 'cleanup'))
 
     def test_unresolved_cleanup_lets_alias_and_verbatim_through(self):
         self.mode('enforce')
@@ -1001,8 +1095,7 @@ mv "$1.new" "$1"''')
                 self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(),
                                  'fixup! replacement' if editor else '# comment')
                 row = self.rows()[-1]
-                self.assertEqual((row['verdict'], row['reason']),
-                                 ('skip', 'fixup') if editor else ('would_block', 'no-line'))
+                self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
 
     def test_edited_fixup_subject_follows_blank_lines_and_comments(self):
         self.commit('-m', 'base')
@@ -1014,7 +1107,8 @@ mv "$1.new" "$1"''')
                                                      f'printf "{prefix}%s\\n" {shlex.quote(subject)} > "$1"')
                 self.commit('--fixup=HEAD', '-e', '--no-verbose', '--cleanup=default')
                 self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(), subject)
-        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()], [('skip', 'fixup')] * 2)
+        self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
+                         [('skip', 'fixup'), ('unknown', 'cleanup')])
 
     def test_non_default_comment_config_and_large_messages_are_unknown(self):
         self.mode('enforce')
