@@ -1110,6 +1110,12 @@ def runtime_types():
             self._thought_signatures = {}
             self._request_roles = ''
 
+        def _token_usage(self, usage):
+            # Usage is metrics only. A provider may send null counts; that must not fail the reply.
+            counts = {name: getattr(usage, name, None) or 0
+                      for name in ('prompt_tokens', 'completion_tokens', 'total_tokens')}
+            return super()._token_usage(usage.model_copy(update=counts))
+
         async def process_frame(self, frame, direction):
             if (hasattr(frame, 'friday_event_generation')
                     and frame.friday_event_generation != self.session.event_generation):

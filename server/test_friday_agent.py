@@ -1692,6 +1692,18 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(filler.text, 'Checking your reminders.')
         self.assertFalse(filler.append_to_context)
 
+    async def test_usage_with_missing_counts_does_not_fail_the_turn(self):
+        # Gemini can send a usage record with null counts (seen 2026-11-19 after a tool error).
+        from openai.types import CompletionUsage
+        llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
+        for fields in ({'prompt_tokens': 812, 'completion_tokens': None, 'total_tokens': 812},
+                       {'prompt_tokens': None, 'completion_tokens': None, 'total_tokens': None}):
+            usage = CompletionUsage.model_construct(**fields)
+            tokens = llm._token_usage(usage)
+            self.assertEqual(tokens.prompt_tokens, fields['prompt_tokens'] or 0)
+            self.assertEqual(tokens.completion_tokens, 0)
+            self.assertEqual(tokens.total_tokens, fields['total_tokens'] or 0)
+
     async def test_llm_request_refreshes_clock_on_tool_followup(self):
         from pipecat.processors.aggregators.llm_context import LLMContext
         llm = self.rt.FridayLLM(SimpleNamespace(), friday.brain_config({}))
