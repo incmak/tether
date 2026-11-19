@@ -755,6 +755,136 @@
    }
   },
   {
+   "id": "log-answer-only-c",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "h7",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Automation tether . Can we have\\u2026\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "h7",
+     "content": "{\"chat\": \"Automation tether . Can we have\\u2026\", \"text\": \"B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\\n\\nYou still have 2 open decisions:\\nAuto-merge: \\\"C\\\" keeps Observe mode.\\nFactory floor: grill questions Q1 to Q5.\\n\\nNext: reply \\\"C, yes to all\\\", or give the numbers you want changed.\\n\\nNeeds you: yes\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions."
+    },
+    {
+     "role": "user",
+     "content": "So what is the auto-most question?"
+    },
+    {
+     "role": "assistant",
+     "content": "It asks whether to keep Observe mode with option C."
+    },
+    {
+     "role": "user",
+     "content": "Do you think we should keep that?"
+    },
+    {
+     "role": "assistant",
+     "content": "I cannot judge your design choices, but option C keeps Observe mode active."
+    }
+   ],
+   "user": "tell it let's keep option C",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
+     "prompt": "(?i)\\bC\\b"
+    },
+    "prompt_not": "(?i)yes to all"
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
+   "id": "log-answer-only-q7",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "What did it say about the Factory floor?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "h8",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Automation tether . Can we have\\u2026\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "h8",
+     "content": "{\"chat\": \"Automation tether . Can we have\\u2026\", \"text\": \"Factory floor, round 2: questions Q6 to Q9.\\n\\nNext: reply \\\"yes to all\\\", or give the numbers you want changed.\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "The chat is waiting for your answers to questions Q6 to Q9."
+    }
+   ],
+   "user": "tell it yes to Q7 only",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)^Automation tether \\. Can we have\u2026$",
+     "prompt": "(?i)\\bQ?7\\b"
+    },
+    "prompt_not": "(?i)yes to all"
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
    "id": "reminder-not-backlog",
    "group": "reminder",
    "split": "dev",
@@ -962,7 +1092,7 @@
     },
     {
      "role": "assistant",
-     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+     "content": "Not sent yet. Should I send this to api-server? Add rate limiting to the upload endpoint. Yes or no?"
     }
    ],
    "user": "yes please",
@@ -990,7 +1120,7 @@
     },
     {
      "role": "assistant",
-     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+     "content": "Not sent yet. Should I send this to api-server? Add rate limiting to the upload endpoint. Yes or no?"
     }
    ],
    "user": "no, not now",
@@ -1015,7 +1145,7 @@
     },
     {
      "role": "assistant",
-     "content": "Send to api-server: Add rate limiting to the upload endpoint. Yes or no?"
+     "content": "Not sent yet. Should I send this to api-server? Add rate limiting to the upload endpoint. Yes or no?"
     }
    ],
    "user": [
@@ -1443,7 +1573,7 @@
     },
     {
      "role": "assistant",
-     "content": "Send to docs-site: Update the changelog for the new release. Yes or no?"
+     "content": "Not sent yet. Should I send this to docs-site? Update the changelog for the new release. Yes or no?"
     }
    ],
    "user": "yeah go ahead",

@@ -1,4 +1,4 @@
-"""Write cases.json: python3 make_cases.py cases.json (names are invented; speech from the 19 Nov log keeps its disfluencies)."""
+"""Write cases.json beside this script by default, or pass an output path."""
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -127,6 +127,28 @@ case("log-unknown-session", "misheard", "dev",
      {"tool": None, "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find"}, "log",
      tool_results={"list_chats": {"error": "No session called predicta. Sessions: Tether, Backend, Docs, Automation, Friday chats"}})
 
+# ---- From the 19 Nov 2026 13:51-13:52 call (user evidence) ----
+AUTO_CHAT = r"(?i)^Automation tether \. Can we have…$"
+case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
+     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bC\b"},
+      "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
+     history=turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
+                  "read_last_reply", {"chat": AUTO}, {"chat": AUTO, "text":
+                      'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
+                      'You still have 2 open decisions:\nAuto-merge: "C" keeps Observe mode.\n'
+                      'Factory floor: grill questions Q1 to Q5.\n\n'
+                      'Next: reply "C, yes to all", or give the numbers you want changed.\n\nNeeds you: yes'},
+                  "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions.", "h7")
+     + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
+     + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
+case("log-answer-only-q7", "send_direct", "dev", "tell it yes to Q7 only",
+     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bQ?7\b"},
+      "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
+     history=turn("What did it say about the Factory floor?", "read_last_reply", {"chat": AUTO},
+                  {"chat": AUTO, "text": 'Factory floor, round 2: questions Q6 to Q9.\n\n'
+                                        'Next: reply "yes to all", or give the numbers you want changed.'},
+                  "The chat is waiting for your answers to questions Q6 to Q9.", "h8"))
+
 # ---- Spec b34 (reminder tools). Added only once reminder_add exists. ----
 if 'reminder_add' in TOOLS:
     case("reminder-not-backlog", "reminder", "dev", "keep those all in reminders",
@@ -254,5 +276,7 @@ case("h-split-tell", "split_turn", H, ["okay tell api server to", "add logging t
      {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)log"}})
 case("h-status-needs", "status", H, "does anything need me right now?", {"tool": None, "reply": "(?i)deploy"})
 
-json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, open(sys.argv[1], "w"), indent=1)
+output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
+with output.open("w", encoding="utf-8") as stream:
+    json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)
 print(len(cases), sum(c["split"] == "dev" for c in cases))

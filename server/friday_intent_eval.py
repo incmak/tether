@@ -61,8 +61,10 @@ def _score(trace, expect, expected_tools):
         yield 'wrong_tool'
     if proposal and readback_chat is not None:
         args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
-    if not readback_instead and any(key not in args or not re.search(pattern, str(args[key]))
-                                    for key, pattern in expect.get('args', {}).items()):
+    wrong_args = any(key not in args or not re.search(pattern, str(args[key]))
+                     for key, pattern in expect.get('args', {}).items())
+    forbidden_prompt = 'prompt_not' in expect and re.search(expect['prompt_not'], str(args.get('prompt', '')))
+    if not readback_instead and (wrong_args or forbidden_prompt):
         yield 'wrong_args'
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
@@ -123,6 +125,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
 
     for _ in range(4):
+        suggestions = friday.suggested_replies(messages) if source == 'speech' else ()
         trace['steps'] += 1
         payload = {'model': brain.model, 'messages': signed(messages), 'tools': prefix['tools'],
                    'max_tokens': brain.max_tokens, **brain.extra}
@@ -136,7 +139,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
-                                       pending=pending or declined, user_turn=user_turn)
+                                       pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
             if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:
                 if trace['proposal'] is None:
                     key = 'prompt' if name == 'send_to_chat' else 'item'
@@ -265,7 +268,7 @@ def _validate_expectation(expect, label, names):
     if not isinstance(args, dict):
         raise ValueError(f'{label}: expect.args must be an object')
     try:
-        for pattern in list(args.values()) + ([expect['reply']] if 'reply' in expect else []):
+        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'prompt_not') if key in expect]:
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None

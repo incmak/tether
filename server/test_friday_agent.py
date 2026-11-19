@@ -406,7 +406,7 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', yes, set(), readback))
             for no in ('no', 'yes but no', "yes, don't", 'yesterday'):
                 self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', no, set(), readback), refusal)
-        for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Send to another chat?'):
+        for readback in ('', 'Fix another issue?', 'I read ci-audit.', 'Should I send this elsewhere?'):
             self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'yes', set(), readback), refusal)
 
     def test_send_consent_matches_pending_tool_chat_and_turn(self):
@@ -451,16 +451,59 @@ class FridayRulesTests(unittest.TestCase):
     def test_send_readback_shortens_chat_and_prompt(self):
         cases = (
             ('send_to_chat', 'Docs . Investigate the notes…', 'Check the notes.',
-             'Send to Docs: Check the notes. Yes or no?'),
+             'Not sent yet. Should I send this to Docs? Check the notes. Yes or no?'),
+            ('send_to_chat', 'Docs', 'Check the notes?',
+             'Not sent yet. Should I send this to Docs? Check the notes. Yes or no?'),
+            ('send_to_chat', 'Docs', 'Check the notes!',
+             'Not sent yet. Should I send this to Docs? Check the notes. Yes or no?'),
             ('send_to_chat', 'Docs…', 'a' * 150 + ' anotherlongword',
-             'Send to Docs: ' + 'a' * 150 + '…. Yes or no?'),
+             'Not sent yet. Should I send this to Docs? ' + 'a' * 150 + '…. Yes or no?'),
             ('send_to_chat', 'X' * 60, 'a' * 161,
-             'Send to ' + 'X' * 40 + ': ' + 'a' * 159 + '…. Yes or no?'),
-            ('backlog_send', 'API… Follow up', 'B12', 'Send B12 to API. Yes or no?'),
+             'Not sent yet. Should I send this to ' + 'X' * 40 + '? ' + 'a' * 159 + '…. Yes or no?'),
+            ('backlog_send', 'API… Follow up', 'B12',
+             'Not sent yet. Should I send B12 to API? Yes or no?'),
         )
         for tool, chat, payload, readback in cases:
-            with self.subTest(tool=tool, chat=chat):
+            with self.subTest(tool=tool, chat=chat, payload=payload):
                 self.assertEqual(friday.send_readback(friday.SendProposal(tool, chat, payload, 1)), readback)
+                self.assertFalse(friday.false_success(readback))
+
+    def test_copied_suggestions_need_the_users_words_or_a_readback(self):
+        chat = 'Automation tether . Can we have…'
+        cases = (
+            ("Well like answer it like let's keep option C", 'C, yes to all', 'C, yes to all', True),
+            ("tell it let's keep option C", 'C, yes to all', 'C, yes to all', True),
+            ("tell it let's keep option C", 'C, yes to all', None, False),
+            ("tell it let's keep option C", 'C', 'C, yes to all', False),
+            ('tell it yes to Q7 only', 'yes to all', 'yes to all', True),
+            ('tell it yes to all', 'yes to all', 'yes to all', False),
+            ('tell it yes to Q7 only', 'Please say YES—to_all.', 'yes to all', True),
+            ('tell it yes to Q7 only', 'Please say yes to alligators.', 'yes to all', False),
+            ('tell it yes to Q7 only', 'approve', 'approve', True),
+            ('tell it yes to Q7 only', 'Please approve Q7.', 'approve', False),
+        )
+        for speech, payload, suggestion, blocked in cases:
+            with self.subTest(speech=speech, payload=payload, suggestion=suggestion):
+                args = {'chat': chat, 'prompt': payload}
+                suggestions = (suggestion,) if suggestion else ()
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', speech, set(),
+                                                  suggestions=suggestions),
+                                 friday.READBACK_REQUIRED if blocked else None)
+
+    def test_copied_suggestions_require_confirmation_of_the_same_payload(self):
+        proposal = friday.SendProposal('send_to_chat', 'Docs', 'C, yes to all', 1)
+        readback = friday.send_readback(proposal)
+        for chat, prompt, expected in (
+                ('docs', 'C, yes to all', None),
+                ('Docs', 'C — YES TO ALL!', None),
+                ('Other', 'C, yes to all', friday.READBACK_REQUIRED),
+                ('Docs', 'C, yes to all and start work', friday.READBACK_REQUIRED)):
+            with self.subTest(chat=chat, prompt=prompt):
+                self.assertEqual(friday.check_tool('send_to_chat', {'chat': chat, 'prompt': prompt},
+                    'speech', 'yes', set(), readback, proposal, 2, suggestions=('C, yes to all',)),
+                    expected)
+        self.assertEqual(friday.check_tool('backlog_send', {'chat': 'Docs', 'item': 'B12'},
+            'speech', 'tell it to take B7', set(), suggestions=('B12',)), friday.READBACK_REQUIRED)
 
     def test_false_success(self):
         for text in ('I have sent that.', 'Switched to Docs.', 'Done!'):
@@ -732,6 +775,33 @@ class ShortenOldReadsTests(unittest.TestCase):
     def shortened(self, messages):
         return [json.loads(m['content']) for m in messages if m.get('role') == 'tool'
                 and json.loads(m['content']).get('shortened')]
+
+    def test_suggested_replies_extracts_the_1352_reply_and_shortened_previews(self):
+        evidence = (
+            'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
+            'You still have 2 open decisions:\nAuto-merge: "C" keeps Observe mode.\n'
+            'Factory floor: grill questions Q1 to Q5.\n\n'
+            'Next: reply "C, yes to all", or give the numbers you want changed.\n\nNeeds you: yes'
+        )
+        messages = self.read(text=evidence)
+        self.assertEqual(friday.suggested_replies(messages), ('C, yes to all',))
+        messages += self.read(text='ANSWER “approve” or reply "C, yes to all".', shortened=True)
+        self.assertEqual(friday.suggested_replies(messages), ('approve', 'C, yes to all'))
+
+    def test_suggested_replies_ignores_non_read_results(self):
+        messages = [
+            {'role': 'assistant', 'tool_calls': [
+                {'id': 'other', 'function': {'name': 'list_chats'}}]},
+            {'role': 'tool', 'tool_call_id': 'other', 'content': '{"text": "reply \\"approve\\""}'},
+        ]
+        self.assertEqual(friday.suggested_replies(messages), ())
+        self.assertEqual(friday.suggested_replies([]), ())
+
+    def test_suggested_replies_respects_quote_pairs_and_length(self):
+        text = (f'''Say "{"a" * 80}" or answer "{"b" * 81}". '''
+                "Send 'don't proceed' or reply ‘don’t proceed’.")
+        self.assertEqual(friday.suggested_replies(self.read(text=text)),
+                         ('a' * 80, "don't proceed", 'don’t proceed'))
 
     def test_grill_round_keeps_read_after_five_user_turns(self):
         messages = [{'role': 'user', 'content': 'Read the questions'}] + self.read()
@@ -1426,7 +1496,17 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                         browser_results[ident] = result
                     with patch.object(llm, 'get_chat_completions', completion(text, current, delay)):
                         await llm.process_frame(self.rt.LLMContextFrame(context), direction)
-                    context.add_message({'role': 'tool', 'content': '{}'})
+                    reads = [(ident, name, args) for ident, name, args in current if name == 'read_last_reply'
+                             and ('dispatch', name) in frames]
+                    if reads:
+                        context.add_message({'role': 'assistant', 'tool_calls': [
+                            {'id': ident, 'function': {'name': name, 'arguments': json.dumps(args)}}
+                            for ident, name, args in reads]})
+                        for ident, _, _ in reads:
+                            context.add_message({'role': 'tool', 'tool_call_id': ident,
+                                                 'content': json.dumps(browser_results[ident])})
+                    else:
+                        context.add_message({'role': 'tool', 'content': '{}'})
         finally:
             await llm._client.close()
         return session, frames
@@ -1500,12 +1580,46 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(('dispatch', 'send_to_chat'), frames)
         self.assertIs(result.properties.run_llm, False)
         self.assertEqual(result.result, {'error': 'Not sent yet. Friday asked the user to confirm.'})
-        self.assertEqual(speech.text, 'Send to Automation tether: Review the full context. Yes or no?')
+        self.assertEqual(speech.text,
+                         'Not sent yet. Should I send this to Automation tether? Review the full context. Yes or no?')
         self.assertTrue(speech.append_to_context)
         self.assertLess(frames.index(result), frames.index(speech))
         self.assertEqual(session.pending_proposal,
                          friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 1))
         self.assertEqual(session.llm_calls, 1)
+
+    async def test_copied_reply_with_send_word_speaks_confirmation_instead_of_sending(self):
+        chat = 'Automation tether . Can we have…'
+        args = {'chat': chat, 'prompt': 'C, yes to all'}
+        messages = [
+            {'role': 'user', 'content': 'What did that chat say?'},
+            {'role': 'assistant', 'tool_calls': [
+                {'id': 'read', 'function': {'name': 'read_last_reply', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'read', 'content': json.dumps({
+                'chat': chat, 'text': 'Next: reply "C, yes to all", or give the numbers you want changed.'})},
+            {'role': 'assistant', 'content': 'It asks whether to keep Observe mode with option C.'},
+            {'role': 'user', 'content': "tell it let's keep option C"},
+        ]
+        with patch('sys.stderr'):
+            session, frames = await self.tool_flow(messages, [
+                ('', 1, [('send_to_chat', args, {'ok': True})])])
+        self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+        speech, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+        self.assertEqual(speech.text, 'Not sent yet. Should I send this to Automation tether? C, yes to all. Yes or no?')
+        self.assertEqual(session.pending_proposal, friday.SendProposal('send_to_chat', chat, args['prompt'], 1))
+
+    async def test_copied_reply_from_a_read_in_the_same_turn_requires_confirmation(self):
+        chat = 'Automation tether . Can we have…'
+        reply = {'chat': chat, 'text': 'Next: reply "yes to all", or give the numbers you want changed.'}
+        with patch('sys.stderr'):
+            _, frames = await self.tool_flow('Read the questions and tell it yes to Q7 only', [
+                ('', 1, [('read_last_reply', {'chat': chat}, reply)]),
+                ('', 1, [('send_to_chat', {'chat': chat, 'prompt': 'yes to all'}, {'ok': True})]),
+            ])
+        self.assertIn(('dispatch', 'read_last_reply'), frames)
+        self.assertNotIn(('dispatch', 'send_to_chat'), frames)
+        self.assertIn('Not sent yet. Should I send this to Automation tether? yes to all. Yes or no?',
+                      [f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)])
 
     async def test_false_success_replaces_complete_reply_after_failed_or_blocked_action(self):
         cases = (

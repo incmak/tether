@@ -141,7 +141,7 @@ class IntentEvalTests(unittest.TestCase):
         trace, = result['samples']
         self.assertEqual(trace['proposal'], {'name': 'send_to_chat', 'chat': 'friday test',
                                             'payload': 'Fix the login bug'})
-        self.assertEqual(trace['reply'], 'Send to friday test: Fix the login bug. Yes or no?')
+        self.assertEqual(trace['reply'], 'Not sent yet. Should I send this to friday test? Fix the login bug. Yes or no?')
         self.assertEqual((trace['actions'], trace['blocked']), ([], []))
 
     def test_fixed_readback_does_not_match_a_destination_in_the_payload(self):
@@ -179,7 +179,25 @@ class IntentEvalTests(unittest.TestCase):
         expect['readback_tool'] = 'backlog_send'
         result, _ = self.run_script(example, send)
         self.assertEqual(result['passed'], 1)
-        self.assertEqual(result['samples'][0]['reply'], 'Send B12 to docs-site. Yes or no?')
+        self.assertEqual(result['samples'][0]['reply'], 'Not sent yet. Should I send B12 to docs-site? Yes or no?')
+
+    def test_answer_only_cases_score_the_users_answer_and_block_copied_suggestions(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        cases = {example['id']: example for example in data['cases']}
+        chat = 'Automation tether . Can we have…'
+        for id_, answer, suggestion in (('log-answer-only-c', 'C', 'C, yes to all'),
+                                        ('log-answer-only-q7', 'Yes to Q7 only', 'yes to all')):
+            with self.subTest(id=id_):
+                example = cases[id_]
+                correct = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=answer)])
+                copied = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=suggestion)])
+                result, _ = self.run_script(example, correct, data=data)
+                self.assertEqual(result['passed'], 1, result['fails'])
+                result, _ = self.run_script(example, copied, data=data)
+                self.assertEqual(result['fails'], {'readback_instead': 1})
+        extra_answer = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt='C. Also, yes to all.')])
+        result, _ = self.run_script(cases['log-answer-only-c'], extra_answer, data=data)
+        self.assertEqual(result['fails'], {'wrong_args': 1})
 
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
@@ -189,7 +207,8 @@ class IntentEvalTests(unittest.TestCase):
         for chat, last_reply, fails in (
                 ('friday test', readback, {}),
                 ('docs-site', readback, {'readback_instead': 1}),
-                ('friday test', 'Send to friday test: Fix the logout bug. Yes or no?', {'readback_instead': 1})):
+                ('friday test', friday.send_readback(friday.SendProposal(
+                    'send_to_chat', 'friday test', 'Fix the logout bug', 0)), {'readback_instead': 1})):
             with self.subTest(chat=chat, last_reply=last_reply):
                 example['history'][-1] = assistant(last_reply)
                 sent = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt=pending['payload'])])

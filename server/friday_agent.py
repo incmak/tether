@@ -57,6 +57,8 @@ SYSTEM_PROMPT = (
     'never say the reply cut off while truncated is true. '
     'If it returns new_reply, the chat replied again; use the new text. '
     'Before send_to_chat, turn the user request into a clear, complete prompt for the coding agent. '
+    'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
+    'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
     'call the tool now, even if speech-to-text misheard the chat name: use the closest name in state. '
@@ -99,7 +101,12 @@ APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
+SEND_READBACK_START = 'Not sent yet. Should I send '
 SEND_READBACK_END = '. Yes or no?'
+SEND_READBACK_QUESTION_END = '?' + SEND_READBACK_END.removeprefix('.')
+SUGGESTED_REPLY = re.compile(
+    r'\b(?:reply|answer|say|send)\s+(?:"([^"]{1,80})"|“([^”]{1,80})”'
+    r"|'((?:[^']|(?<=\w)'(?=\w)){1,80})'(?!\w)|‘((?:[^’]|(?<=\w)’(?=\w)){1,80})’(?!\w))", re.I)
 REMINDER_INTENT = re.compile(r'\b(?:remind(?:er|ers)?|remember)\b', re.I)
 STT_FIXUPS = {'t third': 'Tether', 'tthird': 'Tether', 'teether': 'Tether',
               'tetter': 'Tether', "tether's": "Tether's",
@@ -412,12 +419,13 @@ class SendProposal:
 def send_readback(proposal):
     chat = re.split(r' \. |…', proposal.chat, maxsplit=1)[0][:40].rstrip()
     if proposal.name == 'backlog_send':
-        return f'Send {proposal.payload} to {chat}{SEND_READBACK_END}'
+        return f'{SEND_READBACK_START}{proposal.payload} to {chat}{SEND_READBACK_QUESTION_END}'
     prompt = ' '.join(proposal.payload.split())
     if len(prompt) > 160:
         end = prompt.rfind(' ', 0, 160)
         prompt = prompt[:end if end > 0 else 159] + '…'
-    return f'Send to {chat}: {prompt.removesuffix(".")}{SEND_READBACK_END}'
+    prompt = prompt[:-1] if prompt.endswith(('?', '!')) else prompt.removesuffix('.')
+    return f'{SEND_READBACK_START}this to {chat}? {prompt}{SEND_READBACK_END}'
 
 
 def false_success(text):
@@ -440,7 +448,12 @@ def stray_text(text):
     return stray
 
 
-def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0):
+def norm(text):
+    return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
+
+
+def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
+               *, suggestions=()):
     """Return a short refusal, without changing the originating turn's state."""
     guarded_action = name in ACTION_TOOLS and name != 'open_panel'
     if source == 'event' and guarded_action:
@@ -476,20 +489,34 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
             r'\bwhat\s+(?:was|is|did)\b.*\b(?:response|reply|answer|say)\b|\bdid it (?:reply|answer|finish)\b',
             str(args.get('prompt', '')), re.I | re.S):
         return 'This asks about a reply; call read_last_reply.'
-    if name in SEND_TOOLS and not SEND_INTENT.search(last_user_text):
-        prompt = str(args.get('prompt' if name == 'send_to_chat' else 'item', '')).strip().casefold()
+    if name in SEND_TOOLS:
+        payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
-        readback = previous_assistant.strip().casefold()
         proposal_matches = has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
+        yes = APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
+        if suggestions:
+            normalized_payload = norm(payload)
+            normalized_speech = norm(last_user_text)
+            confirmed_payload = yes and proposal_matches and normalized_payload == norm(pending.payload)
+            if not confirmed_payload:
+                for suggestion in suggestions:
+                    words = norm(suggestion)
+                    if not words or f' {words} ' in f' {normalized_speech} ':
+                        continue
+                    if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
+                        return READBACK_REQUIRED
+        if SEND_INTENT.search(last_user_text):
+            return None
+        prompt = payload.strip().casefold()
+        readback = previous_assistant.strip().casefold()
         # Friday's fixed read-back requires the matching proposal, even after it expires.
-        fixed_readback = readback.startswith('send ') and readback.endswith(SEND_READBACK_END.casefold())
+        fixed_readback = (readback.startswith(SEND_READBACK_START.casefold())
+                          and readback.endswith((SEND_READBACK_END.casefold(), SEND_READBACK_QUESTION_END.casefold())))
         legacy_matches = (not fixed_readback
                           and ((prompt and prompt in readback)
                                or (chat and re.search(r'\bsend\b', readback)
                                    and re.search(r'(?<![\w-])' + re.escape(chat) + r'(?![\w-])', readback))))
-        confirmed = (APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
-                     and (proposal_matches or legacy_matches))
-        if not confirmed:
+        if not (yes and (proposal_matches or legacy_matches)):
             return READBACK_REQUIRED
     return None
 
@@ -597,17 +624,13 @@ def with_state_time(messages):
 READ_BUDGET = 24000
 
 
-def shorten_old_reads(messages):
-    """Keep the latest reply parts per chat, then bound older reads without changing them twice."""
+def read_reply_results(messages):
+    """Yield the index and parsed result for each read_last_reply tool message."""
     calls = set()
-    reads = []
-    last_user = -1
     for index, message in enumerate(messages):
-        if is_real_user(message):
-            last_user = index
         if message.get('role') == 'assistant':
             calls.update(call.get('id') for call in message.get('tool_calls', [])
-                         if call.get('function', {}).get('name') == 'read_last_reply')
+                         if call.get('id') and call.get('function', {}).get('name') == 'read_last_reply')
         if message.get('role') != 'tool' or message.get('tool_call_id') not in calls:
             continue
         content = message.get('content')
@@ -617,10 +640,26 @@ def shorten_old_reads(messages):
             data = json.loads(content)
         except ValueError:
             continue
-        if (not isinstance(data, dict) or data.get('shortened') or 'error' in data
-                or not isinstance(data.get('text'), str) or not isinstance(data.get('chat'), str)):
-            continue
-        reads.append((index, data))
+        if isinstance(data, dict) and 'error' not in data and isinstance(data.get('text'), str):
+            yield index, data
+
+
+def suggested_replies(messages) -> tuple[str, ...]:
+    """Collect quoted reply suggestions, newest read first."""
+    suggestions = {}
+    for _, result in reversed(list(read_reply_results(messages))):
+        for match in SUGGESTED_REPLY.finditer(result['text']):
+            suggestion = next(group for group in match.groups() if group is not None)
+            suggestions[suggestion] = None
+    return tuple(suggestions)
+
+
+def shorten_old_reads(messages):
+    """Keep the latest reply parts per chat, then bound older reads without changing them twice."""
+    reads = [(index, data) for index, data in read_reply_results(messages)
+             if not data.get('shortened') and isinstance(data.get('chat'), str)]
+    last_user = next((index for index in range(len(messages) - 1, -1, -1)
+                      if is_real_user(messages[index])), -1)
 
     newest = {}
     offsets = {}
@@ -1293,10 +1332,14 @@ def runtime_types():
                 self.tool_run = SimpleNamespace(source=self.run_source,
                     last_user_text=self.last_user_text, used=set(),
                     previous_assistant=previous if isinstance(previous, str) else '',
+                    suggestions=suggested_replies(messages) if self.run_source == 'speech' else (),
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
                     pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
+                if self.tool_run and self.tool_run.source == 'speech':
+                    # A read can return a new suggestion before a follow-up completion.
+                    self.tool_run.suggestions = suggested_replies(messages)
             return self.tool_run
 
         async def handle_browser_tool(self, params):
@@ -1309,7 +1352,7 @@ def runtime_types():
             reason = check_tool(params.function_name, params.arguments,
                 run.source if run else None, run.last_user_text if run else '',
                 run.used if run else set(), run.previous_assistant if run else '',
-                proposal, run.user_turn if run else 0)
+                proposal, run.user_turn if run else 0, suggestions=run.suggestions if run else ())
             response = self._active_response.get()
             if reason:
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
