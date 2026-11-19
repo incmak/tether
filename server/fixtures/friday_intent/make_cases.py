@@ -189,8 +189,8 @@ case("new-chat", "new_chat", D, "start a new codex chat called db-migrate in the
 case("backlog-list", "backlog_list", D, "what's on my backlog?", {"tool": "backlog_list"})
 case("backlog-add", "backlog_add", D, "add to the backlog: dark mode for the login page",
      {"tool": "backlog_add", "args": {"text": "(?i)dark mode"}})
-case("backlog-remember", "backlog_add", D, "remember to rotate the staging API keys next week",
-     {"tool": "backlog_add", "args": {"text": "(?i)rotate"}})
+case("backlog-remember", "reminder", D, "remember to rotate the staging API keys next week",
+     {"tool": "reminder_add", "args": {"reminders": "(?i)rotate"}})
 case("backlog-send", "backlog_send", D, "send B 12 to api server",
      {"tool": "backlog_send", "args": {"item": "(?i)b ?12", "chat": "(?i)api.server"}})
 case("backlog-readback", "readback", D, "B 12 for api server I think",

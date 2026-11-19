@@ -1214,15 +1214,15 @@
   },
   {
    "id": "backlog-remember",
-   "group": "backlog_add",
+   "group": "reminder",
    "split": "dev",
    "source": "hand",
    "history": [],
    "user": "remember to rotate the staging API keys next week",
    "expect": {
-    "tool": "backlog_add",
+    "tool": "reminder_add",
     "args": {
-     "text": "(?i)rotate"
+     "reminders": "(?i)rotate"
     }
    }
   },
