@@ -809,6 +809,11 @@ def _call(callback, entry):
         return None
 
 
+def _review_entry(worker, folder):
+    """Pass the request's folder to a Git lookup without changing the live pane entry."""
+    return dict(worker, review_folder=folder) if isinstance(folder, str) and folder else worker
+
+
 def _request_text(value):
     # A field cannot start a new line or mimic the delimiter that the UI uses to find the worker's reply.
     value = value.replace('\r\n', '\n').removesuffix('\n')
@@ -1291,10 +1296,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 forwarded = False
                 bound = link.get('review_commit') if approved else None
                 named = _named_commit(reply) if approved else None
+                review_entry = _review_entry(worker, link.get('review_folder')) if bound else worker
                 if (bound or named) and state != 'Idle':
                     # A working tab can still commit. The approval waits until the tab is idle.
                     return link
-                current = _call(commit, worker) if bound or named else None
+                current = _call(commit, review_entry) if bound or named else None
                 if bound or named:
                     # The cached state can be old, and the commit read takes time: read the state again, after the
                     # commit and right before the send.
@@ -1351,7 +1357,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     forwarded = _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery)
                     if not forwarded:
                         pass  # not delivered: the same checks run again on the next tick
-                    elif bound and (after_send := _call(commit, worker)) != bound:
+                    elif bound and (after_send := _call(commit, review_entry)) != bound:
                         # The tab has the approval text. A different commit or a failed read needs a new review.
                         now = after_send if isinstance(after_send, str) and FULL.fullmatch(after_send) else None
                         link['stale_commit'] = bound
@@ -1374,7 +1380,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
                         # The tree must also be clean now: it can change during the review with HEAD in place.
-                        now = _call(scope, worker) if bound and link.get('review_clean') and anchored else None
+                        now = _call(scope, review_entry) if bound and link.get('review_clean') and anchored else None
                         if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
@@ -1525,7 +1531,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     + binding
                     + _checklist_binding(target.get('checklist'), folder))
                 confirm = link.get('confirm_commit')
-                if isinstance(confirm, str):
+                if isinstance(confirm, str) and link.get('review_folder') in (None, target.get('folder')):
                     binding += (f'You approved this work as commit {confirm[:12]} plus uncommitted changes. The tab '
                                 'has committed since: check that this commit holds that work and nothing else. ')
                 ui = target.get('ui')
@@ -1550,7 +1556,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     f'{INTRO} Review id: {request_id}. {binding}'
                     f"Its last reply:\n\n{last_reply(worker)[:1500]}\n\nTranscript: {worker.get('transcript', '')}")
             before = _digest(last_reply(reviewer))
-            mark = work_mark(worker) if work_mark is not None else None
+            mark = work_mark(_review_entry(worker, target and target.get('folder'))) if work_mark is not None else None
             if not _linked(link, snapshot, entries):
                 return link  # stopped or replaced during the reads above: no request for a link that is gone
             try:

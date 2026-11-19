@@ -7,10 +7,12 @@ import html
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
 import sqlite3
+import stat
 from pathlib import Path
 import subprocess
 import threading
@@ -283,8 +285,72 @@ def review_turn_source(entry):
                                              distinguish_missing=True, with_time=True)
 
 
+REVIEW_GATE_TAIL_BYTES = 256 * 1024
+REVIEW_GATE_TAIL = (None, {})  # (path, size, mtime) -> the newest record per (agent, thread)
+
+
+def review_gate_records():
+    """Read complete commit-msg records at the end of the gate log. Cache only the parsed log data."""
+    global REVIEW_GATE_TAIL
+    path = commit_gate.log_path()
+    try:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return {}
+        key = (path, info.st_size, info.st_mtime_ns)
+        cached_key, records = REVIEW_GATE_TAIL
+        if key == cached_key:
+            return records
+        with open(path, 'rb', buffering=0, opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK)) as stream:
+            info = os.fstat(stream.fileno())  # The writer can rotate the log between stat and open.
+            if not stat.S_ISREG(info.st_mode):
+                return {}
+            key = (path, info.st_size, info.st_mtime_ns)
+            start = max(0, info.st_size - REVIEW_GATE_TAIL_BYTES)
+            stream.seek(start)
+            data = stream.read(info.st_size - start)
+    except OSError:
+        return {}
+    if start:
+        data = data.partition(b'\n')[2]  # The first line may start inside a record.
+    records = {}
+    for line in data.rpartition(b'\n')[0].split(b'\n'):  # A writer may not have finished the last line.
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(row, dict) or row.get('via') != 'commit-msg':
+            continue
+        source, session, folder, at, head = (row.get(field) for field in ('source', 'session', 'folder', 'at', 'head'))
+        if (source not in ('claude', 'codex') or not isinstance(session, str) or not review_links.UUID.fullmatch(session)
+                or not isinstance(folder, str) or not os.path.isabs(folder)
+                or type(at) not in (int, float) or type(at) is float and not math.isfinite(at) or at <= 0
+                or head is not None and not isinstance(head, str)):
+            continue
+        identity = (source, session)
+        if identity not in records or at >= records[identity][0]:
+            records[identity] = (at, folder)
+    REVIEW_GATE_TAIL = key, records
+    return records
+
+
 def review_folder(entry):
-    """The folder a worker commits in: where the agent says it works, else the pane's folder."""
+    """Use a sent request's folder, or find the latest commit folder for a new request."""
+    if folder := entry.get('review_folder'):
+        return folder
+    source = entry.get('agent')
+    thread = helper_tabs._thread(entry)
+    started = entry.get('process_start')
+    if source in ('claude', 'codex') and thread and not entry.get('codex_unresolved') and started:
+        record = review_gate_records().get((source, thread))
+        if record is not None:
+            at, folder = record
+            try:
+                started_ms = agents.started_ms(started)
+            except (OSError, TypeError, ValueError, OverflowError):
+                started_ms = None
+            if started_ms is not None and at > started_ms / 1000 and review_scope.head(folder):
+                return folder
     return agent_folder(entry)
 
 
@@ -345,7 +411,7 @@ def review_parent(entry, entries):
 
 
 def review_work_mark(entry):
-    cwd = entry.get('cwd')
+    cwd = entry.get('review_folder') or entry.get('cwd')
     if not cwd:
         return None
     try:

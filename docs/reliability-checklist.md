@@ -85,3 +85,9 @@ diff is ignored.
 - Text: release-work/20
 - Check: The test gets its screenshot folder from `shotsDir()` in `ui/browser_test_helper.cjs`. Without `SHOTS` it writes to a scratch folder. Only `SHOTS` or an explicit flag such as `verify.cjs --shots` points a run at a dated `.release-work` folder.
 - Incident: B219, 2026-11-17, a run of test_responsive_chat_ui.cjs replaced the 2026-11-16 release screenshots
+
+## R13: A review checks the worktree named in its request
+- Paths: `^server/(server|review_links)\.py$`
+- Text: `\breview_(folder|gate_records)\b|\b_review_entry\b`
+- Check: Run `test_review_scope`. A worker that commits in another worktree gets a review of that worktree. The approval checks its HEAD and status even if a later gate record names a different folder.
+- Incident: B363, 2026-11-19, reviews named the worker tab's start folder after the worker committed in another worktree.
