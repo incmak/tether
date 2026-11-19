@@ -2,6 +2,7 @@
 from datetime import datetime
 import re
 import codex_messages
+from antigravity import transcript_message
 
 from agents import task_notice
 
@@ -113,6 +114,8 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             if kind in ('AGENT_RESPONSE', 'PLANNER_RESPONSE'):
                 is_assistant = True
             elif assistant_seen and kind == 'USER_INPUT':
+                if identify is not None and (prompt := transcript_message(record, 0, lambda text: text)):
+                    return prompt_source(record, prompt['text'])
                 return result('user')
         if is_assistant:
             if with_time and not assistant_seen and finished_at is None:

@@ -140,6 +140,18 @@ def _sanitize(row):
         row.setdefault('seen_working', False)
     if 'counts' in row:
         row['counts'] = _clean_reviewer_counts(row['counts'])
+    correction = row.pop('stale_correction', None)
+    if (_is_link(row) and isinstance(correction, dict)
+            and correction.keys() == {'commit', 'now', 'request', 'requested'}
+            and isinstance(correction['commit'], str) and FULL.fullmatch(correction['commit'])
+            and (correction['now'] is None or isinstance(correction['now'], str) and FULL.fullmatch(correction['now']))
+            and correction['now'] != correction['commit']
+            and isinstance(correction['request'], str)
+            and re.fullmatch(r'[0-9a-f]{8}|[0-9a-f]{64}', correction['request'])
+            and type(correction['requested']) is bool):
+        row['stale_correction'] = correction
+    if not isinstance(row.get('review_folder'), str):
+        row.pop('review_folder', None)
     stage = row.pop('parent_stage', None)
     if (isinstance(stage, dict) and isinstance(stage.get('pane'), str) and isinstance(stage.get('notice'), str)
             and (stage.get('thread') is None or isinstance(stage['thread'], str))):
@@ -751,7 +763,7 @@ def _binding_pending(rows, key, entries):
         _is_link(row) and _cap_key(row) == (worker, None) and _reviewer_ready(row, entries) for row in rows))
 
 
-def _linked(link, snapshot, entries, *, delivery=None, blocking=None):
+def _linked(link, snapshot, entries, *, delivery=None, blocking=None, correction=None):
     """Check the link and decision again after the transcript reads and before terminal I/O."""
     with _lock:
         rows = _read()
@@ -766,7 +778,10 @@ def _linked(link, snapshot, entries, *, delivery=None, blocking=None):
             return False
         if delivery is not None:
             # A competing tick may have consumed or replaced this request while its reply was read.
-            if not stored.get('awaiting') or any(stored.get(field) != link.get(field)
+            if correction is not None:
+                if stored.get('stale_correction') != correction:
+                    return False
+            elif not stored.get('awaiting') or any(stored.get(field) != link.get(field)
                     for field in ('request_id', 'send_reply', 'reviewer_before')):
                 return False
             # The browser holds SEND_LOCK when it calls add. Never take that lock while holding _lock.
@@ -837,9 +852,10 @@ def _send_message(entry, text, state, send, clear):
 
 
 def _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery,
-                 *, summary=False, blocking=False):
+                 *, summary=False, blocking=False, correction=None):
     if not (_can_send(worker, state, clear)
-            and _linked(link, snapshot, entries, delivery=delivery, blocking=cap if blocking else None)):
+            and _linked(link, snapshot, entries, delivery=delivery, blocking=cap if blocking else None,
+                        correction=correction)):
         return False
     key = _cap_key(link)
     sent_at = time.time()
@@ -853,13 +869,31 @@ def _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries,
                 _release(key, delivery)
     if not sent:
         return False
-    if summary:
-        cap['review_prompts'] = [*cap.get('review_prompts', ()), ['review-summary', sent_at]]
+    if summary or correction is not None:
+        kind = 'review-summary' if summary else 'review-correction'
+        cap['review_prompts'] = [*cap.get('review_prompts', ()), [kind, sent_at]]
     cap['feedback_turn'] = {'sent_at': sent_at, 'phase': 'queued' if state == 'Working' else 'pending'}
     if state == 'Working':
         link['worker_busy_send'] = True
-        link['seen_working'] = True
+        if correction is None:
+            link['seen_working'] = True
     return True
+
+
+def _send_correction(link, correction, cap, snapshot, entries, status, send, clear, delivery):
+    worker = entries.get(link['worker'])
+    if worker is None or helper_tabs._thread(worker) != link.get('worker_thread') or not _reviewer_ready(link, entries):
+        return
+    now = correction['now']
+    detail = (f'This tab is now at {now}.' if now else
+              "Tether could not read this tab's commit after the approval, so the approval cannot be checked.")
+    end = (CORRECTION_PAUSED if _at_cap(cap) or cap.get('unreadable') else
+           CORRECTION_REQUESTED if link['stale_correction']['requested'] else CORRECTION_WAIT)
+    text = f"{CORRECTION_HEAD}{correction['commit']} only. {detail} {CORRECTION_ACTION} {end}"
+    # Claude can receive the correction while working, after it may already have acted on the approval.
+    if _send_worker(link, cap, snapshot, worker, text, status(worker)['state'], send, clear, entries, delivery,
+                    correction=correction):
+        link.pop('stale_correction')
 
 
 def _prompt_kind(marker):
@@ -870,7 +904,10 @@ def _idle_source(link, cap, worker, turn_source):
     source = turn_source(worker) if turn_source is not None else 'user'
     source, started_at, finished_at = source if isinstance(source, tuple) else (source, None, None)
     pending = cap.get('review_prompts', [])
-    observed = 'restart' in cap or link['seen_working']
+    feedback = cap.get('feedback_turn')
+    observed = ('restart' in cap or link['seen_working'] or
+                feedback and feedback['phase'] == 'working'
+                and ['review-correction', feedback['sent_at']] in pending)
     fresh = finished_at is None or finished_at > cap.get('review_turn_at', float('-inf'))
     clipped = source in ('unknown', 'unknown-background')
     # Use the prompt's time when visible. An earlier queued prompt can finish after a later send.
@@ -897,11 +934,11 @@ def _idle_source(link, cap, worker, turn_source):
         cap.pop('review_turn_at', None)
     elif finished_at is not None and fresh:
         cap['review_turn_at'] = finished_at
-    if feedback := cap.get('feedback_turn'):
+    if feedback:
         sent_at = feedback['sent_at']
         after_send = ((turn_at is None or turn_at >= sent_at) and
                       (finished_at is None or finished_at >= sent_at))
-        if after_send and source in ('review-feedback', 'review-summary'):
+        if after_send and source in ('review-feedback', 'review-summary', 'review-correction'):
             cap.pop('feedback_turn')
         elif feedback['phase'] == 'queued':
             # An idle tick can be the end of the turn that was already running when we queued feedback.
@@ -946,10 +983,16 @@ FEEDBACK = (
     (re.compile(r'^\[Tether review\] Stopped after [0-9]+ review rounds: the reviewer tab \(%[0-9]+\) '
                 r'still finds blocking problems\. Do not fix them in this turn\. Mak decides the next step\.'),
      'then end with "Needs you: yes".'),
-    (re.compile(r'^\[Tether review\] Approved by the reviewer tab \(%[0-9]+\)(?: for commit [0-9a-f]{12}'
+    (re.compile(r'^\[Tether review\] Approved by the reviewer tab \(%[0-9]+\)'
+                r'(?: for commit (?:[0-9a-f]{12}|[0-9a-f]{40}|[0-9a-f]{64})'
                 r'(?: and its uncommitted changes)?)?:\n\n'),
-     'Do the next step your instructions give for an approved review, then stop.'),
+     'the next step your instructions give for an approved review, then stop.'),
 )
+CORRECTION_HEAD = '[Tether review] Correction: the approval above is for commit '
+CORRECTION_ACTION = 'Do not push, deploy or merge on that approval.'
+CORRECTION_PAUSED = 'The review is paused: Mak decides.'
+CORRECTION_REQUESTED = 'Tether asked the reviewer to review the current commit.'
+CORRECTION_WAIT = 'Wait for the next review.'
 
 
 def prompt_source(text):
@@ -960,6 +1003,9 @@ def prompt_source(text):
     notice = PARENT_NOTICE.match(text)
     if notice and text.rstrip().endswith(_parent_options(notice[1])):
         return 'review-notice'
+    if text.startswith(CORRECTION_HEAD) and any(text.rstrip().endswith(f'{CORRECTION_ACTION} {end}')
+            for end in (CORRECTION_PAUSED, CORRECTION_REQUESTED, CORRECTION_WAIT)):
+        return 'review-correction'
     if any(head.match(text) and text.rstrip().endswith(tail) for head, tail in FEEDBACK):
         return 'review-feedback'
     return None
@@ -1140,6 +1186,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     state = status(worker)['state']
     key = _cap_key(link)
     turn = key, cap.get('cap_reset')
+    correction_turn = any(_prompt_kind(marker) == 'review-correction' for marker in cap.get('review_prompts', ()))
     source = None
     if state == 'Idle' and ('restart' in cap or link['seen_working'] or cap.get('review_prompts')
                             or cap.get('feedback_turn') or turn in sources):
@@ -1265,22 +1312,41 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     link['seen_working'] = True
                     link['awaiting'] = False
                 elif approved:
-                    covers = '' if not bound else (
-                        f" for commit {bound[:12]}" + ('' if link.get('review_clean') else ' and its uncommitted changes'))
                     uncommitted = bool(bound) and not link.get('review_clean')
+                    covers = f' for commit {bound}' if bound else ''
+                    condition = ''
+                    next_step = 'Do'
+                    if uncommitted:
+                        covers += ' and its uncommitted changes'
+                        condition = ('It covered uncommitted changes, so no commit is approved yet: commit the work '
+                                     'in this turn, and Tether asks the reviewer to confirm that commit. ')
+                    elif bound:
+                        folder = link.get('review_folder')
+                        location = "in this tab's worktree (`git rev-parse HEAD`)"
+                        if folder and all(unicodedata.category(c)[0] != 'C'
+                                          and unicodedata.category(c) not in ('Zl', 'Zp') for c in folder):
+                            quoted = shlex.quote(folder)
+                            location = f'in {quoted} (`git -C {quoted} rev-parse HEAD`)'
+                        condition = (
+                            f'The approval is for commit {bound} only. Before you push, deploy or merge, '
+                            f'check that HEAD {location} is {bound}. '
+                            'If HEAD is different or you cannot read it, do not act on this approval. '
+                            'Stop and wait for the next review. ')
+                        next_step = 'If HEAD is that hash, do'
                     text = (f"[Tether review] Approved by the reviewer tab ({link['reviewer']}){covers}:\n\n"
-                            f'{_bounded_reply(reply, reviewer)}\n\nThe review is complete. '
-                            + ('It covered uncommitted changes, so no commit is approved yet: commit the work in this '
-                               'turn, and Tether asks the reviewer to confirm that commit. ' if uncommitted else '')
-                            + 'Do the next step your instructions give for an approved review, then stop.')
+                            f'{_bounded_reply(reply, reviewer)}\n\nThe review is complete. {condition}'
+                            f'{next_step} the next step your instructions give for an approved review, then stop.')
                     forwarded = _send_worker(link, cap, snapshot, worker, text, state, send, clear, entries, delivery)
                     if not forwarded:
                         pass  # not delivered: the same checks run again on the next tick
                     elif bound and (after_send := _call(commit, worker)) != bound:
                         # The tab has the approval text. A different commit or a failed read needs a new review.
+                        now = after_send if isinstance(after_send, str) and FULL.fullmatch(after_send) else None
                         link['stale_commit'] = bound
                         link['stale_delivered'] = True
-                        link['stale_unreadable'] = not isinstance(after_send, str)
+                        link['stale_unreadable'] = now is None
+                        request = link.get('request_id') or link.get('send_reply') or link.get('reviewer_before')
+                        link['stale_correction'] = dict(commit=bound, now=now, request=request, requested=False)
                         _record_round(cap, link, 'stale_rounds')
                         link['seen_working'] = True
                         link['awaiting'] = False
@@ -1291,7 +1357,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
                         for key in ('stale_commit', 'approved_commit', 'approved_at',
                                     'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered',
-                                    'stale_unreadable'):
+                                    'stale_unreadable', 'stale_correction'):
                             link.pop(key, None)
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
@@ -1337,6 +1403,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                                             entries, delivery, summary=stage is not None, blocking=True):
                             return link
                         forwarded = True
+                        link.pop('stale_correction', None)
                         paused_now = _record_round(cap, link, count)
                         link.pop('empty_turn', None)
                         if stop:
@@ -1355,7 +1422,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 link.pop(key, None)
         return link
     if state == 'Working':
-        if link['worker'] not in awaiting:
+        if link['worker'] not in awaiting and not correction_turn:
             link['seen_working'] = True
     elif state == 'Idle' and link.get('approved_turn') and not link['seen_working']:
         if _digest(last_reply(worker)) != link.get('approved_before'):
@@ -1403,8 +1470,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if target is None and was_bound:
                 # Still unreadable. A timeout does not show that an approval is for the current commit: the review
                 # stops and the user decides. The user's next prompt restarts reviews without the old binding.
-                for key in ('review_commit', 'review_clean', 'stale_commit', 'stale_delivered', 'stale_unreadable',
-                            'scope_ticks'):
+                for key in ('review_commit', 'review_clean', 'review_folder', 'stale_commit', 'stale_delivered',
+                            'stale_unreadable', 'scope_ticks'):
                     link.pop(key, None)
                 cap['unreadable'] = True
                 link['seen_working'] = False
@@ -1479,9 +1546,14 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link.pop('stale_unreadable', None)
             link.pop('confirm_commit', None)
             link.pop('scope_ticks', None)
+            link.pop('review_folder', None)
             if target is not None:
                 link['review_commit'] = target['commit']
                 link['review_clean'] = target.get('dirty') is False
+                if isinstance(target.get('folder'), str):
+                    link['review_folder'] = target['folder']
+                if (correction := link.get('stale_correction')) and correction['now'] in (None, target['commit']):
+                    link['stale_correction'] = {**correction, 'requested': True}
             else:
                 link.pop('review_commit', None)
                 link.pop('review_clean', None)
@@ -1544,7 +1616,13 @@ def _apply_step(old, updated, snapshot, cap, entries, delivery):
                 if updated is None:
                     rows.remove(link)
                 else:
-                    rows[rows.index(link)] = _merge(old, updated, link)
+                    merged_link = _merge(old, updated, link)
+                    if not reserved and old.get('stale_correction') != link.get('stale_correction'):
+                        # A request send must not restore a correction another tick has already retired.
+                        merged_link.pop('stale_correction', None)
+                        if 'stale_correction' in link:
+                            merged_link['stale_correction'] = link['stale_correction']
+                    rows[rows.index(link)] = merged_link
             merged = _merge(snapshot, cap, stored)
             rows[rows.index(stored)] = merged
             _release(key, delivery)
@@ -1628,6 +1706,10 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 updated = _step(link, cap, snapshot, by_pane, status, send, last_reply, awaiting, clear,
                                 delivery, work_mark, review_reply, stalled_replies, turn_source,
                                 sources, level, parent, reply_effect, scope, commit, fresh)
+                # Give any new verdict priority. Only a correction already stored before this tick can be sent.
+                if (updated is not None and 'lost_reason' not in updated and 'verdict' not in reply_effect
+                        and (correction := current.get('stale_correction')) and 'stale_correction' in updated):
+                    _send_correction(updated, correction, cap, snapshot, by_pane, status, send, clear, delivery)
                 if updated is not None and updated != current:
                     updated.pop('wait_ticks', None)
                     updated.pop('retries', None)
