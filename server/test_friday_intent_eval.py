@@ -86,6 +86,20 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(blocked, {'name': 'send_to_chat', 'args': {'chat': 'Other chat', 'prompt': 'Check it'},
                                    'blocked': 'Only one send_to_chat is allowed per spoken turn.'})
 
+    def test_action_with_fixture_result_can_reply_after_an_error(self):
+        for name, args in (('show_chat', {'chat': 'docs-site'}), ('show_session', {'session': 'Backend'})):
+            with self.subTest(name=name):
+                error = {'error': 'Friday can act in Tether is off in Settings.'}
+                example = case(user='Show it in Tether', expect={'tool': name, 'reply': 'off in Settings'},
+                               tool_results={name: error})
+                result, payloads = self.run_script(
+                    example, assistant(tool_calls=[call(name, **args)]), assistant(error['error']))
+                self.assertEqual(result['passed'], 1, result['fails'])
+                trace, = result['samples']
+                self.assertEqual(trace['actions'], [{'name': name, 'args': args}])
+                self.assertEqual(payloads[1]['messages'][-1], {'role': 'tool', 'tool_call_id': 'c1',
+                                                            'content': json.dumps(error)})
+
     def test_split_speech_joins_fragments_for_guard(self):
         example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
         result, payloads = self.run_script(
@@ -271,6 +285,15 @@ class IntentEvalTests(unittest.TestCase):
         both = assistant(tool_calls=[call('list_chats'), call('switch_chat', chat='friday test')])
         self.assertEqual(self.run_script(example, both)[0]['fails'], {'extra_action': 1})
         self.assertEqual(self.run_script(example, assistant(tool_calls=[call('list_chats')]))[0]['passed'], 1)
+
+    def test_alternative_arg_names_match_either_tool(self):
+        example = case(group='show', user='open that session',
+                       expect={'tool': 'show_chat', 'any_tool': ['show_session'], 'args': {'chat|session': '(?i)deploy'}})
+        for name, key in (('show_chat', 'chat'), ('show_session', 'session')):
+            reply = assistant(tool_calls=[call(name, **{key: 'deploy-check'})])
+            self.assertEqual(self.run_script(example, reply, assistant('Showing deploy-check.'))[0]['passed'], 1, name)
+        wrong = assistant(tool_calls=[call('show_session', session='Backend')])
+        self.assertEqual(self.run_script(example, wrong, assistant('Showing Backend.'))[0]['fails'], {'wrong_args': 1})
 
     def test_readback_requires_send_and_the_chat_name(self):
         example = case(expect={'tool': None, 'readback_chat': 'api-server'})

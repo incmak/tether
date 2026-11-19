@@ -1,5 +1,6 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { flushSync } from 'react-dom'
 import { LayoutDashboard, SquareSplitHorizontal, SquareSplitVertical, Terminal } from 'lucide-react'
 import { ApiError, canFork, errorText, request, requestIfChanged } from './api'
 import { takeBootSessions } from './boot'
@@ -783,6 +784,29 @@ function App() {
     setDrawer(false)
     leaveHome()
   }
+  const onShowPane = (id: string): string | null => {
+    const target = panes.find(item => item.id === id)
+    if (!target) return 'That chat is gone.'
+    const terminal = screen === 'terminals'
+    // Friday sends the tool result as soon as this callback returns.
+    flushSync(() => {
+      if (screen !== 'chats' && !terminal) chooseScreen('chats')
+      openPane(target)
+      followSlot.current = false
+    })
+    const toggle = document.querySelector<HTMLButtonElement>('.slot.focused .terminal-toggle') ?? toggleButton()
+    if (!toggle || toggle.closest<HTMLElement>('.chat-panel')?.dataset.pane !== id || !toggle.getClientRects().length) return 'That chat could not open.'
+    if ((toggle.getAttribute('aria-pressed') === 'true') !== terminal) flushSync(() => toggle.click())
+    return null
+  }
+  const onShowSession = (id: string) => {
+    const session = sessions.find(item => item.id === id)
+    if (!session) return { error: 'That session is gone.' }
+    const target = session.panes.find(item => item.id === prefs.lastPane[session.id]) ?? session.panes[0]
+    if (!target) return { error: 'That session has no tabs.' }
+    const error = onShowPane(target.id)
+    return error === null ? { pane: target.id } : { error }
+  }
   // The search menu's "Add to the backlog" and "Start a new tab" rows, and their toast.
   const quick = useQuickCreate({ api, agent: prefs.mainModel, sessions, onOpen: openPane })
   const archiveTab = (target: Pane) => {
@@ -1037,7 +1061,7 @@ function App() {
     {reviewing && <LessonsReview api={api} onClose={() => { setReviewing(false); void refreshReview() }} />}
     {cleanup && <CleanUp api={api} onClose={() => setCleanup(false)} />}
     {deck && <ActionDeck api={api} items={deckCards} sessions={sessions} review={review} onOpen={openPane} onClose={() => setDeck(false)} onUpdate={() => void refresh()} />}
-    {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} commands={view ? commands.filter(item => !item.label.includes('Live mode')) : []} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
+    {liveMode && <Suspense fallback={<Loading as="div" className="lazy-float" label={`Opening ${ASSISTANT}…`} />}><Live api={api} panes={panes} selected={pane} acts={prefs.fridayActs} onShowPane={onShowPane} onShowSession={onShowSession} commands={view ? commands.filter(item => !item.label.includes('Live mode')) : []} onClose={() => setLive(false)} onBacklog={() => setBacklog({ mode: 'sheet' })} reveal={liveReveal} from={liveFrom} /></Suspense>}
     {view && <Inbox api={api} items={inbox} sessions={sessions} selected={openId} open={desk.inbox} decisions={decisionsGroup(true)} decisionCount={decisionCount} onToggle={() => { if (!home) setDesk({ inbox: !desk.inbox }) }} onOpen={openPane} onUpdate={() => void refresh()} />}
     {panelsOn && <PanelHandles grid={lookShown.grid} closed={panelsClosed}
       onSize={(key, size) => update(current => { const sizes = { ...current.panelSizes[lookId] }; if (size === null) delete sizes[key]; else sizes[key] = size; return { panelSizes: { ...current.panelSizes, [lookId]: sizes } } })}

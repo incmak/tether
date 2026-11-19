@@ -99,7 +99,7 @@
   },
   {
    "id": "log-open-in-tether",
-   "group": "cant_do",
+   "group": "show",
    "split": "dev",
    "source": "log",
    "history": [
@@ -114,13 +114,18 @@
    ],
    "user": "Okay, can you open that session in the teeth so that I can see it?",
    "expect": {
-    "tool": null,
-    "reply": "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't something"
+    "tool": "show_chat",
+    "any_tool": [
+     "show_session"
+    ],
+    "args": {
+     "chat|session": "(?i)deploy"
+    }
    }
   },
   {
    "id": "log-switch-in-window",
-   "group": "cant_do",
+   "group": "show",
    "split": "dev",
    "source": "log",
    "history": [
@@ -162,13 +167,18 @@
    ],
    "user": "No, you switch that in this uh like uh this Friday session. But I want you to uh switch that within the Ther window.",
    "expect": {
-    "tool": null,
-    "reply": "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't something"
+    "tool": "show_chat",
+    "any_tool": [
+     "show_session"
+    ],
+    "args": {
+     "chat|session": "(?i)deploy"
+    }
    }
   },
   {
    "id": "log-go-to-session",
-   "group": "cant_do",
+   "group": "show",
    "split": "dev",
    "source": "log",
    "history": [
@@ -183,8 +193,13 @@
    ],
    "user": "And can you go to that session?",
    "expect": {
-    "tool": null,
-    "reply": "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't something"
+    "tool": "show_chat",
+    "any_tool": [
+     "show_session"
+    ],
+    "args": {
+     "chat|session": "(?i)deploy"
+    }
    }
   },
   {
@@ -358,8 +373,12 @@
    "user": "Okay let's move to The automation teeth are session.",
    "expect": {
     "tool": "switch_chat",
+    "any_tool": [
+     "show_chat",
+     "show_session"
+    ],
     "args": {
-     "chat": "(?i)automation"
+     "chat|session": "(?i)automation"
     }
    }
   },
@@ -1266,8 +1285,25 @@
    "user": "switch to docs site",
    "expect": {
     "tool": "switch_chat",
+    "any_tool": [
+     "show_chat"
+    ],
     "args": {
      "chat": "(?i)docs.site"
+    }
+   }
+  },
+  {
+   "id": "show-session",
+   "group": "show",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "show me the backend session",
+   "expect": {
+    "tool": "show_session",
+    "args": {
+     "session": "(?i)backend"
     }
    }
   },
@@ -1767,15 +1803,34 @@
    }
   },
   {
-   "id": "h-cant-show",
-   "group": "cant_do",
+   "id": "h-show-chat",
+   "group": "show",
    "split": "holdout",
    "source": "hand",
    "history": [],
    "user": "bring up the api server chat on my screen",
    "expect": {
-    "tool": null,
-    "reply": "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't something"
+    "tool": "show_chat",
+    "args": {
+     "chat": "(?i)api.server"
+    }
+   }
+  },
+  {
+   "id": "h-show-off",
+   "group": "show",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "show me the docs site chat",
+   "expect": {
+    "tool": "show_chat",
+    "reply": "(?i)off|settings|can(?:'t|not)|did not|didn't"
+   },
+   "tool_results": {
+    "show_chat": {
+     "error": "Friday cannot change the screen: Friday can act in Tether is off in Settings."
+    }
    }
   },
   {

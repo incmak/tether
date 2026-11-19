@@ -68,10 +68,11 @@ SYSTEM_PROMPT = (
     '3. When the user says yes to that read-back, call the tool with the same chat and task. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
-    'After a tool error, say plainly that it did not happen. '
+    'After a tool error, say plainly that it did not happen. For show tools, give the reason. '
     'If "are you sure" or "I don\'t see it" follows your claim, check the tool results and answer honestly. '
-    'You cannot show, open, or bring up a chat in the Tether window. switch_chat only sets where sends go, '
-    'and open_panel only opens panels. If asked to show a chat, say you cannot, and offer to read its last reply. '
+    'Call show_chat to show, open, go to, bring up, or switch to a chat on screen. It also sets where sends go. '
+    'Call show_session for a named tmux session with several chats. '
+    'switch_chat only sets where sends go, without changing the screen. '
     'A name that sounds close to one in state, such as ape server for api-server, is a match; use it. Only if a session or chat name matches nothing, say so and ask which one; do not list other chats. '
     'Outside your tools (GitHub, email, accounts), say you cannot do it directly, even when the user said send; offer '
     'send_to_chat to a named chat or new_chat. Read that prompt back and wait for yes. '
@@ -99,7 +100,8 @@ SEND_INTENT = re.compile(
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
-ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
+ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'show_chat', 'show_session',
+                'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
 SEND_READBACK_START = 'Not sent yet. Should I send '
 SEND_READBACK_END = '. Yes or no?'
@@ -381,6 +383,10 @@ def action_ack(name, args, result):
         return f'Started {chat}.' if chat else 'Started.'
     if name == 'switch_chat':
         return f'Switched{to_chat}.'
+    if name == 'show_chat':
+        return f"Showing {chat or 'it'}."
+    if name == 'show_session':
+        return f"Showing {field('session') or chat or 'it'}."
     if name == 'open_panel':
         return 'Closed.' if args.get('open') is False else 'Opened.'
     if name == 'backlog_add':
@@ -429,7 +435,7 @@ def send_readback(proposal):
 
 
 def false_success(text):
-    return (bool(re.search(r'\b(?:sent|done|approved|denied|switched|started|added)\b', text, re.I))
+    return (bool(re.search(r'\b(?:sent|done|approved|denied|switched|started|added|showing|opened)\b', text, re.I))
             and not re.search(r'\bnot\b|n[’\']t|\?', text, re.I))
 
 
@@ -557,8 +563,14 @@ def tool_schemas():
          'Created chats go to the tmux session "Friday chats", one tab each.',
          {'name': string, 'agent': {'type': 'string', 'enum': ['claude', 'codex']}, 'prompt': string,
           'project': {'type': 'string', 'description': "Project name or folder the chat works in. Omit to use the current chat's project. If the tool returns 'Which project?', ask the user."}}, ['name', 'agent']),
-        ('switch_chat', 'Set the chat that later sends go to. It does not show the chat on screen.', {'chat': string}, ['chat']),
-        ('open_panel', 'Open or close a Tether side panel. It cannot show a chat.',
+        ('switch_chat', 'Set the chat that later sends go to without changing the screen. '
+         'Use show_chat when the user wants to see the chat.', {'chat': string}, ['chat']),
+        ('show_chat', "Show a chat on the user's Tether screen and make it the chat sends go to. "
+         'Use when the user asks to show, open, go to, bring up, or switch to a chat or tab in Tether, or to see it.',
+         {'chat': string}, ['chat']),
+        ('show_session', "Show a tmux session on the user's Tether screen. It opens the session's last-used chat. "
+         'Use for a named session with several chats.', {'session': string}, ['session']),
+        ('open_panel', 'Open or close a Tether side panel.',
          {'panel': {'type': 'string', 'enum': ['preview', 'terminal', 'changes', 'files', 'sidebar', 'backlog']},
           'open': {'type': 'boolean'}}, ['panel', 'open']),
         ('backlog_list', "Read the user's open backlog items in list order, with their IDs.", {}, []),

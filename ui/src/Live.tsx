@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowUp, AudioLines, Check, ChevronDown, GripHorizontal, Maximize2, Mic, MicOff, Minimize2, Minus, PhoneOff, Square } from 'lucide-react'
 import { chatMessages, errorText, SESSION_NAME, type Api, type Approval, type ChatData, type Choice, type Pane, type SessionsData } from './api'
 import type { Command } from './CommandMenu'
-import { agentNames, groupSessions, paneTitle } from './Sidebar'
+import { agentNames, groupSessions, paneTitle, type Session } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
+import { findPane, findSession, sessionChoice, spokenForm, spokenName } from './fridayNames'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
 import { findLastReply, isReply, replyPage } from './fridayReply'
@@ -35,6 +36,7 @@ interface Brief { speech: string }
 
 const STATUS: Record<Phase, string> = { starting: 'Starting', idle: 'Tap to talk', paused: 'Paused', listening: 'Listening', converting: 'Converting', thinking: 'Thinking', sending: 'Sending', speaking: 'Speaking' }
 const PANELS: Record<string, string> = { preview: 'browser', browser: 'browser', terminal: 'terminal', changes: 'changes', diff: 'changes', file: 'files', files: 'files', sidebar: 'sidebar', backlog: 'backlog' }
+const ACTS_OFF = 'Friday cannot change the screen: Friday can act in Tether is off in Settings.'
 
 const approvalOf = (pane: Pane) => {
   const approval = pane.approval as Approval | null
@@ -49,33 +51,41 @@ const firstRect = (): Rect => {
   const w = Math.min(400, vw - 32), h = Math.min(600, vh - 48)
   return { x: vw - w - 24, y: vh - h - 24, w, h }
 }
+// The bubble must not cover a message box: on a phone chat its default spot sits on the composer.
+// When it would, it moves up to just above that composer.
+const clearOfComposer = (at: Point): Point => {
+  let y = at.y
+  for (const form of document.querySelectorAll<HTMLElement>('form.composer')) {
+    const box = form.getBoundingClientRect()
+    if (!box.width || !box.height) continue
+    const covers = at.x < box.right && at.x + BUBBLE.w > box.left && y < box.bottom && y + BUBBLE.h > box.top
+    if (covers) y = box.top - 8 - BUBBLE.h
+  }
+  return { x: at.x, y }
+}
 const name = (pane: Pane) => `${paneTitle(pane)} · ${agentNames[pane.agent]}`
 const lastReply = (data: ChatData) => [...chatMessages(data)].reverse().find(isReply) ?? null
 const shortText = (text: string, limit: number) => { const plain = speakable(text); return plain.length > limit ? `${plain.slice(0, limit).replace(/\s+\S*$/, '')}…` : plain }
 const yesOption = (approval: Approval) => approval.options!.find(option => !option.free && !/^no\b/i.test(option.text)) ?? approval.options![0]
 const noOption = (approval: Approval) => { const options = approval.options!; return options.find(option => /^no\b/i.test(option.text)) ?? options[options.length - 1] }
-/** Speech has no hyphens: "weekly reporting" must match "weekly-reporting". */
-const spokenForm = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
-const spokenName = (wanted: string) => spokenForm(wanted).replace(/^the /, '').replace(/ (pane|chat|tab|session)$/, '')
-const inSession = (agents: Pane[], name: string) => agents.filter(pane => spokenForm(pane.tmux_session) === name)
-/** A chat by its spoken name: exact title first, then a part of it, then the agent name, then a tmux session with one chat. */
-const findPane = (agents: Pane[], wanted: string) => {
-  const name = spokenName(wanted)
-  if (!name) return undefined
-  const session = inSession(agents, name)
-  return agents.find(pane => spokenForm(paneTitle(pane)) === name) ?? agents.find(pane => spokenForm(paneTitle(pane)).includes(name) || pane.agent === name)
-    ?? (session.length === 1 ? session[0] : undefined)
-}
-/** A name that means a tmux session with several chats: Friday must ask which one, and must not guess. */
-const sessionChoice = (agents: Pane[], wanted: string) => {
-  const name = spokenName(wanted)
-  const session = name && !findPane(agents, wanted) ? inSession(agents, name) : []
-  return session.length ? { error: `${session[0].tmux_session} is a tmux session with ${session.length} chats: ${session.map(paneTitle).join(', ')}. Ask which one.` } : null
-}
 const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.needs ? `needs ${pane.needs.kind}` : pane.state.toLowerCase()
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
-export function Live({ api, panes, selected, commands, onClose, onBacklog, reveal = 0, from = null }: { api: Api; panes: Pane[]; selected?: Pane; commands: Command[]; onClose: () => void; onBacklog?: () => void; reveal?: number; from?: DOMRect | null }) {
+interface LiveProps {
+  api: Api
+  panes: Pane[]
+  selected?: Pane
+  commands: Command[]
+  acts: boolean
+  onShowPane: (id: string) => string | null
+  onShowSession: (sessionId: string) => { pane: string } | { error: string }
+  onClose: () => void
+  onBacklog?: () => void
+  reveal?: number
+  from?: DOMRect | null
+}
+
+export function Live({ api, panes, selected, commands, acts, onShowPane, onShowSession, onClose, onBacklog, reveal = 0, from = null }: LiveProps) {
   // The floating window refits on viewport resize; its minimum must fit the same viewport too.
   const viewport = window.visualViewport
   const { ref: attachWindow, mode, setMode, moving, bubble, windowStyle, bubbleStyle, move, resize, bubbleHandlers } = useFloatingWindow('tether.live-window.v1', { minW: Math.min(300, (viewport?.width ?? window.innerWidth) - 16), minH: Math.min(360, (viewport?.height ?? window.innerHeight) - 16), bubble: BUBBLE, initial: firstRect, initialMode: 'window' })
@@ -88,7 +98,8 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const focusBubble = useRef(false)
   function shrink(focus = false) {
     if (mode === 'bubble' || folding.current) return
-    const fold = foldToBubble(root.current, bubble, BUBBLE)
+    const spot = clearOfComposer(bubble)
+    const fold = foldToBubble(root.current, spot, BUBBLE)
     let fallback = 0, over = false
     const done = () => {
       if (over) return
@@ -96,7 +107,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       window.clearTimeout(fallback)
       folded.current = !!fold
       focusBubble.current = focus
-      setMode('bubble')
+      setMode('bubble', spot)
     }
     if (!fold) { done(); return }
     folding.current = fold
@@ -210,12 +221,14 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   const queue = useRef<{ who: string; text: string }[]>([])
   const watches = useRef(new Map<string, Watch>())
   const announced = useRef(new Set<string>())
-  const live = useRef({ agents, panes, target, approval, approvalPane, commands, api, onClose, onBacklog })
-  useEffect(() => { live.current = { agents, panes, target, approval, approvalPane, commands, api, onClose, onBacklog } })
+  const live = useRef({ agents, panes, target, approval, approvalPane, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog })
+  useLayoutEffect(() => { live.current = { agents, panes, target, approval, approvalPane, commands, api, acts, onShowPane, onShowSession, onClose, onBacklog } })
   const go = (next: Phase) => { phaseNow.current = next; setPhase(next) }
 
   // Every step reads the latest panes and commands through `live`, so the voice callbacks never go stale.
   const flow = useRef({
+    // The Live window steps aside so the chat shows (set below, next to the window code).
+    shown() {},
     async say(who: string, text: string) {
       if (!text.trim()) return
       if (agent.current) { showReply({ who, text }); agent.current.say(text); return }
@@ -445,7 +458,29 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
       setTargetId(pane.id)
       return { ok: true, chat: paneTitle(pane) }
     },
+    show_chat: async ({ chat }) => {
+      const { acts, agents, panes } = live.current
+      if (!acts) return { error: ACTS_OFF }
+      const wanted = String(chat ?? '')
+      const sessions = groupSessions(panes)
+      const session = sessions.find(item => spokenForm(item.name) === spokenForm(wanted))
+        ?? sessions.find(item => spokenForm(item.name) === spokenName(wanted))
+      // The chat resolver expects a spoken session name. A pane stores the tmux ID.
+      const named = session ? agents.map(pane => pane.tmux_session === session.id ? { ...pane, tmux_session: spokenName(wanted) } : pane) : agents
+      if (sessionChoice(named, wanted) && session) return showSessionPane(session)
+      return showChatPane(findPane(named, wanted), wanted)
+    },
+    show_session: async ({ session }) => {
+      const { acts, agents, panes } = live.current
+      if (!acts) return { error: ACTS_OFF }
+      const wanted = String(session ?? '')
+      const found = findSession(groupSessions(panes), wanted)
+      if (!found) return showChatPane(findPane(agents, wanted), wanted)
+      if ('error' in found) return found
+      return showSessionPane(found)
+    },
     open_panel: async ({ panel, open }) => {
+      if (!live.current.acts) return { error: ACTS_OFF }
       const kind = PANELS[String(panel ?? '').toLowerCase()]
       if (!kind) return { error: `No panel called ${panel}.` }
       const done = flow.current.toggle(open !== false, kind)
@@ -481,6 +516,23 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     reminder_add: async ({ reminders: asked }) => addReminders(live.current.api, asked),
     reminder_list: async () => listReminders(live.current.api),
   })
+  function showChatPane(pane: Pane | undefined, wanted: string) {
+    if (!pane) return { error: `No chat called ${wanted}.` }
+    const error = live.current.onShowPane(pane.id)
+    if (error !== null) return { error }
+    setTargetId(pane.id)
+    flow.current.shown()
+    return { ok: true, chat: paneTitle(pane) }
+  }
+  function showSessionPane(session: Session) {
+    const opened = live.current.onShowSession(session.id)
+    if ('error' in opened) return opened
+    const pane = live.current.panes.find(pane => pane.id === opened.pane)
+    if (!pane) return { error: 'That chat is gone.' }
+    if (pane.agent !== 'shell') setTargetId(pane.id)
+    flow.current.shown()
+    return { ok: true, session: session.name, chat: paneTitle(pane) }
+  }
   /** The open backlog items, in list order. */
   async function openItems() {
     const data = await live.current.api<{ text: string }>(BACKLOG_PATH)
@@ -810,6 +862,14 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
   useEffect(() => { if (lastMode.current === 'bubble' && mode !== 'bubble') root.current?.focus(); lastMode.current = mode }, [mode])
   // Back shrinks Friday to its bubble, like a call app. Only End stops the call.
   useBackStep(mode !== 'bubble', () => shrink())
+  // After Friday shows a chat, the window steps aside so the chat is in view. The call stays on.
+  // A phone window covers most of the screen, so it folds to the bubble; a desktop full screen steps down to a window.
+  useLayoutEffect(() => {
+    flow.current.shown = () => {
+      if (window.innerWidth < 600) shrink()  // the phone breakpoint of firstRect
+      else if (mode === 'full') setMode('window')
+    }
+  })
   const revealed = useRef(reveal)
   useEffect(() => { if (reveal !== revealed.current) { revealed.current = reveal; if (mode === 'bubble') setMode('window') } }, [reveal, mode, setMode])
   useEffect(() => { talkButton.current?.focus() }, [])

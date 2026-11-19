@@ -22,7 +22,7 @@ else:
 DEFAULT_CASES = Path(__file__).with_name('fixtures') / 'friday_intent' / 'cases.json'
 GROUPS = frozenset('approval backlog_add backlog_list backlog_send cant_do confirm deny event '
                    'list_chats misheard new_chat no_tool outside panel read_reply readback reminder '
-                   'send_direct split_turn status switch'.split())
+                   'send_direct show split_turn status switch'.split())
 LOOKUPS = {'list_chats', 'backlog_list', 'read_last_reply'}
 CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
@@ -61,8 +61,10 @@ def _score(trace, expect, expected_tools):
         yield 'wrong_tool'
     if proposal and readback_chat is not None:
         args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
-    wrong_args = any(key not in args or not re.search(pattern, str(args[key]))
-                     for key, pattern in expect.get('args', {}).items())
+    # A key such as "chat|session" passes when any of its names matches: show_chat and show_session
+    # name the same target with different argument names.
+    wrong_args = not all(any(name in args and re.search(pattern, str(args[name])) for name in key.split('|'))
+                         for key, pattern in expect.get('args', {}).items())
     forbidden_prompt = 'prompt_not' in expect and re.search(expect['prompt_not'], str(args.get('prompt', '')))
     if not readback_instead and (wrong_args or forbidden_prompt):
         yield 'wrong_args'
@@ -136,6 +138,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             trace['reply'] = message.get('content') or ''
             return
         messages.append(message)
+        replay_action_result = False
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
@@ -158,10 +161,10 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     trace['action'] = {'name': name, 'args': args}
                 if name not in LOOKUPS:
                     trace['actions'].append({'name': name, 'args': args})
-                    continue
+                    replay_action_result |= name in results
                 result = results.get(name, {'ok': True})
             messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
-        if trace['proposal'] is not None or trace['action'] is not None:
+        if trace['proposal'] is not None or (trace['action'] is not None and not replay_action_result):
             return
 
 

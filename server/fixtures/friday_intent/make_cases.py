@@ -50,16 +50,16 @@ case("log-catch-up-count", "backlog_list", "dev",
      {"tool": "backlog_list", "any_tool": ["backlog_list", "list_chats"]}, "log")
 case("log-needs-attention", "status", "dev", "Yeah, see which chat needs my attention. Let's start with the oldest.",
      {"tool": None, "reply": "(?i)deploy"}, "log")
-case("log-open-in-tether", "cant_do", "dev", "Okay, can you open that session in the teeth so that I can see it?",
-     {"tool": None, "reply": CANT}, "log", history=NEEDS)
-case("log-switch-in-window", "cant_do", "dev",
+case("log-open-in-tether", "show", "dev", "Okay, can you open that session in the teeth so that I can see it?",
+     {"tool": "show_chat", "any_tool": ["show_session"], "args": {"chat|session": "(?i)deploy"}}, "log", history=NEEDS)
+case("log-switch-in-window", "show", "dev",
      "No, you switch that in this uh like uh this Friday session. But I want you to uh switch that within the Ther window.",
-     {"tool": None, "reply": CANT}, "log",
+     {"tool": "show_chat", "any_tool": ["show_session"], "args": {"chat|session": "(?i)deploy"}}, "log",
      history=NEEDS + turn("Okay, can you open that session in the teeth so that I can see it?", "switch_chat",
                           {"chat": "deploy-check"}, {"ok": True, "chat": "deploy-check"},
                           "I have switched to the deploy-check chat.", "h1"))
-case("log-go-to-session", "cant_do", "dev", "And can you go to that session?",
-     {"tool": None, "reply": CANT}, "log", history=NEEDS)
+case("log-go-to-session", "show", "dev", "And can you go to that session?",
+     {"tool": "show_chat", "any_tool": ["show_session"], "args": {"chat|session": "(?i)deploy"}}, "log", history=NEEDS)
 case("log-you-havent", "no_tool", "dev", "No you haven't. I can I cannot see it. Like what are you talking about?",
      {"tool": None}, "log",
      history=NEEDS + say("And can you go to that session?", "I have opened the sidebar and switched to that chat for you."))
@@ -85,7 +85,7 @@ case("log-queue-question", "no_tool", "dev",
      history=turn("Yes, please.", "send_to_chat", {"chat": "friday test", "prompt": "Write a spec for an urgent voice call feature."},
                   {"ok": True, "chat": "friday test"}, "I have sent that to the friday test chat.", "h2"))
 case("log-move-to-automation", "misheard", "dev", "Okay let's move to The automation teeth are session.",
-     {"tool": "switch_chat", "args": {"chat": "(?i)automation"}}, "log")
+     {"tool": "switch_chat", "any_tool": ["show_chat", "show_session"], "args": {"chat|session": "(?i)automation"}}, "log")
 case("log-latest-update", "read_reply", "dev", "What is the latest uh update from it?",
      {"tool": "read_last_reply", "args": {"chat": "(?i)automation"}}, "log",
      history=turn("Okay let's move to The automation teeth are session.", "switch_chat", {"chat": "Automation tether"},
@@ -203,7 +203,10 @@ case("busy-finished", "status", D, "did login fix finish yet?",
 case("list-idle", "list_chats", D, "which chats are idle right now?", {"tool": "list_chats"})
 case("list-session-email", "misheard", D, "what chats are in the docs email session?",
      {"tool": "list_chats", "args": {"session": "(?i)docs"}})
-case("switch", "switch", D, "switch to docs site", {"tool": "switch_chat", "args": {"chat": "(?i)docs.site"}})
+case("switch", "switch", D, "switch to docs site",
+     {"tool": "switch_chat", "any_tool": ["show_chat"], "args": {"chat": "(?i)docs.site"}})
+case("show-session", "show", D, "show me the backend session",
+     {"tool": "show_session", "args": {"session": "(?i)backend"}})
 case("panel-terminal", "panel", D, "open the terminal", {"tool": "open_panel", "args": {"panel": "terminal", "open": "True"}})
 case("panel-close-preview", "panel", D, "close the preview", {"tool": "open_panel", "args": {"panel": "preview", "open": "False"}})
 case("new-chat", "new_chat", D, "start a new codex chat called db-migrate in the backend project",
@@ -268,7 +271,11 @@ case("h-backlog-add", "backlog_add", H, "put fix the flaky upload test on my bac
 case("h-backlog-send", "backlog_send", H, "send backlog item B seven to docs site",
      {"tool": "backlog_send", "args": {"item": "(?i)b ?7|seven", "chat": "(?i)docs.site"}})
 case("h-outside-email", "outside", H, "send an email to the team with the release notes", {"tool": None, "reply": CANT})
-case("h-cant-show", "cant_do", H, "bring up the api server chat on my screen", {"tool": None, "reply": CANT})
+case("h-show-chat", "show", H, "bring up the api server chat on my screen",
+     {"tool": "show_chat", "args": {"chat": "(?i)api.server"}})
+case("h-show-off", "show", H, "show me the docs site chat",
+     {"tool": "show_chat", "reply": "(?i)off|settings|can(?:'t|not)|did not|didn't"},
+     tool_results={"show_chat": {"error": "Friday cannot change the screen: Friday can act in Tether is off in Settings."}})
 case("h-misheard-theatre", "misheard", H, "ask the automation theatre chat to restart the watcher",
      {"tool": "send_to_chat", "args": {"chat": "(?i)automation"}})
 case("h-no-tool-joke", "no_tool", H, "ha, that was quick", {"tool": None})
