@@ -6,6 +6,7 @@ commit. A clean approved commit stays on the link as 'approved_commit' (see appr
 """
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -43,7 +44,9 @@ UPGRADE_PAUSE = 'upgrade'
 UPGRADE_ERROR = 'The review state from the upgrade needs attention. Stop any existing review link, then link the tabs again in the browser.'
 DELIVERY_ERROR = 'Review feedback is being delivered. Try linking again.'
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as unverified
-SCOPE_TICKS = 30  # ticks to wait for a readable commit before a review that was bound pauses and asks the user
+SCOPE_WAIT = 60  # seconds from the first failed scope read before a bound review pauses
+SCOPE_BACKOFF = (2, 4, 8, 15)
+SCOPE_RETRY_FIELDS = ('scope_ticks', 'scope_since', 'scope_retry_at')
 NAMED = re.compile(r'APPROVED[\s:,.(`*\u2013\u2014-]*(?:for\s+)?(?:commit\s+)?[`*]*([0-9a-f]{7,64})\b', re.I)
 MENTIONED_COMMIT = re.compile(r'\bcommit\s+[`*]*([0-9a-f]{7,64})\b', re.I)
 FULL = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # a short hash can match two commits; only a full one names a commit
@@ -122,6 +125,8 @@ def _sanitize(row):
           'pending_idle_ticks', 'scope_ticks', 'verify_ticks'), lambda value: type(value) is int and value >= 0),
         (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
          lambda value: type(value) in (int, float)),
+        (('scope_since', 'scope_retry_at'),
+         lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
         (('unreadable', 'pending_reset', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
          lambda value: type(value) is bool),
         (('name', 'escalate', 'cap_reset'), lambda value: isinstance(value, str)),
@@ -1465,20 +1470,28 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             return link
         delivered = False
         if reviewer.get('writable'):
-            agent = 'Claude' if link['agent'] == 'claude' else 'Codex'
-            request_id = secrets.token_hex(4)
+            was_bound = 'review_commit' in link
+            if was_bound and 'scope_retry_at' in link:
+                now = time.time()
+                # A clock rollback can put the saved retry farther away than any backoff we set.
+                if now < link['scope_retry_at'] <= now + SCOPE_BACKOFF[-1]:
+                    return link
             target = _call(scope, worker)
             target = target if isinstance(target, dict) and isinstance(target.get('commit'), str) else None
-            was_bound = 'review_commit' in link
-            if target is None and was_bound and link.get('scope_ticks', 0) + 1 < SCOPE_TICKS:
-                # The last review of this tab was bound to a commit. One failed read must not remove the binding.
-                link['scope_ticks'] = link.get('scope_ticks', 0) + 1
-                return link
             if target is None and was_bound:
+                now = time.time()
+                since = link.get('scope_since', now)
+                deadline = since + SCOPE_WAIT
+                if now < deadline:
+                    # A legacy count has no timestamp. Start a fresh wait on its first failed read.
+                    failures = link.get('scope_ticks', 0) if 'scope_since' in link else 0
+                    delay = SCOPE_BACKOFF[min(failures, len(SCOPE_BACKOFF) - 1)]
+                    link.update(scope_ticks=failures + 1, scope_since=since, scope_retry_at=min(now + delay, deadline))
+                    return link
                 # Still unreadable. A timeout does not show that an approval is for the current commit: the review
                 # stops and the user decides. The user's next prompt restarts reviews without the old binding.
                 for key in ('review_commit', 'review_clean', 'review_folder', 'stale_commit', 'stale_delivered',
-                            'stale_unreadable', 'scope_ticks'):
+                            'stale_unreadable', *SCOPE_RETRY_FIELDS):
                     link.pop(key, None)
                 cap['unreadable'] = True
                 link['seen_working'] = False
@@ -1498,6 +1511,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     f'Your approval of {stale[:12]} was not forwarded: this tab is not at that commit. ' if stale
                     else 'Your approval was not forwarded: it did not name the full commit hash right after APPROVED. ')
             if target is not None:
+                for key in SCOPE_RETRY_FIELDS:
+                    link.pop(key, None)
                 folder = shlex.quote(_request_text(str(target.get('folder') or '')))
                 binding = (
                     f"Commit under review: {target['commit']} in {folder}"
@@ -1529,6 +1544,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             binding = ''.join(
                 '?' if c != '\n' and (unicodedata.category(c)[0] == 'C' or unicodedata.category(c) in ('Zl', 'Zp'))
                 else c for c in binding)
+            agent = 'Claude' if link['agent'] == 'claude' else 'Codex'
+            request_id = secrets.token_hex(4)
             text = (f"[Tether review] The {agent} tab “{link['name']}” ({link['worker']}) finished a turn. "
                     f'{INTRO} Review id: {request_id}. {binding}'
                     f"Its last reply:\n\n{last_reply(worker)[:1500]}\n\nTranscript: {worker.get('transcript', '')}")
@@ -1552,7 +1569,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link.pop('stale_delivered', None)
             link.pop('stale_unreadable', None)
             link.pop('confirm_commit', None)
-            link.pop('scope_ticks', None)
+            for key in SCOPE_RETRY_FIELDS:
+                link.pop(key, None)
             link.pop('review_folder', None)
             if target is not None:
                 link['review_commit'] = target['commit']

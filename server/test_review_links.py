@@ -4809,14 +4809,16 @@ class ReviewLinksTests(unittest.TestCase):
 
                 scope = self.scope
                 self.scope = lambda entry: None
-                self.observe()  # the retry waits for a readable scope
+                with own_time(review_links, time=lambda: 1000):
+                    self.observe()  # the retry waits for a readable scope
                 self.assertEqual(self.send.call_count, 3)
                 self.send.assert_called_with(self.worker,
                     f'[Tether review] Correction: the approval above is for commit {self.HASH} only. '
                     "Tether could not read this tab's commit after the approval, so the approval cannot be checked. "
                     'Do not push, deploy or merge on that approval. Wait for the next review.', 'Idle')
                 self.scope = scope  # git can read the same commit again
-                self.observe()
+                with own_time(review_links, time=lambda: 1002):
+                    self.observe()
                 self.assertEqual(self.send.call_count, 4)
                 self.assertEqual(self.send.call_args.args[0], self.reviewer)
                 text = self.send.call_args.args[1]
@@ -5215,17 +5217,69 @@ class ReviewLinksTests(unittest.TestCase):
         self.head = self.NEXT
         self.finish_review(f'APPROVED {self.HASH}')
         working = self.scope
-        self.scope = lambda entry: None  # git does not answer on the retry
-        for _ in range(review_links.SCOPE_TICKS - 2):
+        self.scope = Mock(return_value=None)  # git does not answer on the retry
+        with own_time(review_links, time=Mock(return_value=1000)) as clock:
             self.observe()
-        self.assertEqual(self.send.call_count, 1)  # no unbound request went out
-        self.assertEqual(self.links()[0]['stale_commit'], self.HASH)
-        self.scope = working
-        self.observe()
+            waiting = self.links()[0]
+            for now in (1000, 1001):
+                clock.return_value = now
+                self.observe()
+                self.assertEqual(self.links()[0], waiting)
+            self.scope.assert_called_once_with(self.worker)
+            self.assertEqual(waiting['scope_since'], 1000)
+            self.assertEqual(waiting['scope_retry_at'], 1002)
+            self.assertEqual(self.send.call_count, 1)
+            self.assertEqual(waiting['stale_commit'], self.HASH)
+            self.scope = working
+            clock.return_value = 1002
+            self.observe()
         self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
-        self.assertNotIn('scope_ticks', self.links()[0])
+        self.assertTrue({'scope_ticks', 'scope_since', 'scope_retry_at'}.isdisjoint(self.links()[0]))
         self.finish_review(f'APPROVED {self.HASH}')  # the reviewer repeats the old approval
         self.assertTrue(all(call.args[0] == self.reviewer for call in self.send.call_args_list))
+
+    def test_legacy_scope_count_starts_a_new_window_and_clock_rollback_allows_a_read(self):
+        self.bind()
+        self.request_review()
+        self.head = self.NEXT
+        self.finish_review(f'APPROVED {self.HASH}')
+        rows = self.rows()
+        next(row for row in rows if review_links._is_link(row))['scope_ticks'] = 29
+        self.file.write_text(json.dumps(rows))
+        readable = self.scope(self.worker)
+        self.scope = Mock(return_value=None)
+        self.send.reset_mock()
+        with own_time(review_links, time=Mock(return_value=1000)) as clock:
+            self.observe()
+            link = self.links()[0]
+            self.assertEqual(link['review_commit'], self.HASH)
+            self.assertEqual(link['scope_ticks'], 1)
+            self.assertEqual(link['scope_since'], 1000)
+            self.assertEqual(link['scope_retry_at'], 1002)
+            self.send.assert_not_called()
+            self.alert.assert_not_called()
+
+            clock.return_value = 987  # exactly 15 seconds before the scheduled read
+            self.observe()
+            self.scope.assert_called_once_with(self.worker)
+            clock.return_value = 986
+            self.scope.return_value = readable
+            self.send.side_effect = RuntimeError('reviewer has a draft')
+            self.observe()
+            self.assertEqual(self.scope.call_count, 2)
+            self.send.assert_called_once()
+            link = self.links()[0]
+            self.assertFalse(link['awaiting'])
+            self.assertTrue({'scope_ticks', 'scope_since', 'scope_retry_at'}.isdisjoint(link))
+
+    def test_sanitizer_validates_scope_retry_timestamps(self):
+        for field in ('scope_since', 'scope_retry_at'):
+            for value in (True, None, '1000', [], -1, -0.25, float('inf'), float('-inf'), float('nan')):
+                with self.subTest(field=field, value=value):
+                    self.assertNotIn(field, review_links._sanitize({'worker': '%13', field: value}))
+            for value in (0, 1000, 1000.25, 10 ** 400):
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(review_links._sanitize({'worker': '%13', field: value})[field], value)
 
     def test_commit_unreadable_for_long_pauses_the_review_and_asks_the_user(self):
         # Review round 2, finding 1: a timeout cannot show that an approval is for the current commit.
@@ -5233,17 +5287,25 @@ class ReviewLinksTests(unittest.TestCase):
         self.request_review()
         self.head = self.NEXT
         self.finish_review(f'APPROVED {self.HASH}')  # stale: a new request is due
-        self.scope = lambda entry: None
+        self.scope = Mock(return_value=None)
         self.send.reset_mock()
-        for _ in range(review_links.SCOPE_TICKS - 1):
+        with own_time(review_links, time=Mock(return_value=1000)) as clock:
+            for now, retry_at in ((1000, 1002), (1002, 1006), (1006, 1014), (1014, 1029),
+                                  (1029, 1044), (1044, 1059), (1059, 1060)):
+                clock.return_value = now
+                self.observe()
+                self.assertEqual(self.links()[0]['scope_retry_at'], retry_at)
+            self.assertEqual(self.scope.call_count, 7)
+            self.send.assert_not_called()
+            self.alert.assert_not_called()
+            clock.return_value = 1060
             self.observe()
-        self.send.assert_not_called()
-        self.alert.assert_not_called()
-        self.observe()
+        self.assertEqual(self.scope.call_count, 8)
         self.send.assert_not_called()  # no unbound request went out
         link = self.links()[0]
         self.assertTrue(link['paused'])
-        for key in ('review_commit', 'review_clean', 'stale_commit', 'scope_ticks'):
+        for key in ('review_commit', 'review_clean', 'review_folder', 'stale_commit',
+                    'scope_ticks', 'scope_since', 'scope_retry_at'):
             self.assertNotIn(key, link)
         self.alert.assert_called_once_with('Review needs you',
             '“Fix the bug”: Tether cannot read the commit in the folder of that tab, so it cannot tie the review '
