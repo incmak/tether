@@ -303,8 +303,12 @@
    ],
    "user": "Yes, please.",
    "expect": {
-    "tool": null,
-    "readback_chat": "friday test"
+    "tool": "send_to_chat",
+    "readback_ok": true,
+    "args": {
+     "chat": "(?i)friday test",
+     "prompt": "(?is)spec.*\\b(urgent|critical|blocker)|\\b(urgent|critical|blocker).*spec"
+    }
    }
   },
   {
@@ -808,7 +812,7 @@
     "tool": "send_to_chat",
     "args": {
      "chat": "(?i)^Automation tether \\. Can we have\u2026$",
-     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
+     "prompt": "(?i)^\\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\\W+)*C\\W*(?:for now\\W*)?$"
     }
    },
    "state": {
@@ -2152,7 +2156,7 @@
     "tool": null,
     "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
+     "prompt": "(?i)^\\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\\W+)*C\\W*(?:for now\\W*)?$"
     }
    },
    "state": {
@@ -2451,7 +2455,7 @@
     "tool": null,
     "readback_chat": "Automation tether . Can we have\u2026",
     "args": {
-     "prompt": "(?is)^(?=.{1,60}$)(?!.*(\\ball\\b|approv|\\byes\\b|\\bno\\b|\\band\\b|\\balso\\b|\\boption [ABD]\\b)).*\\bC\\b"
+     "prompt": "(?i)^\\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\\W+)*C\\W*(?:for now\\W*)?$"
     }
    },
    "state": {

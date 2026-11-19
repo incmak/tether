@@ -50,7 +50,11 @@ def _score(trace, expect, expected_tools):
     action, reply, proposal = trace['action'], trace['reply'], trace['proposal']
     name, args = (action['name'], action['args']) if action else (None, {})
     readback_chat = expect.get('readback_chat')
-    readback_instead = proposal is not None and action is None and None not in expected_tools
+    if expect.get('readback_ok') and proposal is not None and action is None:
+        # A read-back of the expected send also passes: the guard sends only text the user heard.
+        name, args = proposal['name'], {'chat': proposal['chat'], 'prompt': proposal['payload']}
+    readback_instead = (proposal is not None and action is None and None not in expected_tools
+                        and not expect.get('readback_ok'))
     if trace['blocked']:
         yield 'blocked'
     if len(trace['actions']) + (name in LOOKUPS) > 1:  # An expected lookup plus a write is also extra.
@@ -70,7 +74,7 @@ def _score(trace, expect, expected_tools):
         yield 'reply'
     if 'reply_not' in expect and re.search(expect['reply_not'], reply):
         yield 'reply'
-    # Every read_last_reply must name an allowed chat, even a read the case does not expect.
+    # Every read_last_reply must name and return an allowed chat, even a read the case does not expect.
     if 'read_chat' in expect and not all(re.search(expect['read_chat'], chat) for chat in trace.get('reads', [])):
         yield 'wrong_read'
     if readback_chat is not None:
@@ -161,6 +165,9 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 used.add(name)
                 if name == 'read_last_reply':
                     trace['reads'].append(str(args.get('chat') or ''))
+                    returned = results.get(name, {})
+                    if isinstance(returned, dict) and returned.get('chat'):
+                        trace['reads'].append(str(returned['chat']))
                 if trace['action'] is None and (name not in LOOKUPS or name in expected_tools):
                     trace['action'] = {'name': name, 'args': args}
                 if name not in LOOKUPS:
@@ -280,6 +287,8 @@ def _validate_expectation(expect, label, names):
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None
+    if 'readback_ok' in expect and not (isinstance(expect['readback_ok'], bool) and tool in friday.SEND_TOOLS):
+        raise ValueError(f'{label}: readback_ok must be true or false on a send case')
     if 'readback_chat' in expect and not isinstance(expect['readback_chat'], str):
         raise ValueError(f'{label}: readback_chat must be text')
     if 'readback_tool' in expect and expect['readback_tool'] not in friday.SEND_TOOLS:

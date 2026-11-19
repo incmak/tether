@@ -451,13 +451,58 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIsNone(friday.check_tool('backlog_send', {'chat': 'deploy', 'item': 'B12 and B99'}, 'speech',
                                             'yes, and B99 too', set(), readback, pending=proposal, user_turn=2))
 
+    def test_yes_confirms_only_the_exact_text_that_was_read_back(self):
+        text = 'Do not restart the production workers before the 10 am release.'
+        fixed = friday.SendProposal('send_to_chat', 'deploy', text, 4)
+        readbacks = {'fixed': friday.send_readback(fixed),
+                     'free-form': f'Should I send {text[:-1]} to deploy?',
+                     'plan': f'I will tell deploy to {text[0].lower() + text[1:]} Shall I send that?'}
+        mutations = {
+            'deleted not': 'Do restart the production workers before the 10 am release.',
+            'no negation': 'Restart the production workers before the 10 am release.',
+            'added not': 'Do not restart the production workers before the 10 am release. Do not deploy.',
+            'inserted word': 'Do not restart the production workers before the 10 am release now.',
+            'reordered': 'Before the 10 am release do not restart the production workers.',
+            'deleted word': 'Do not restart the workers before the 10 am release.',
+            'changed number': 'Do not restart the production workers before the 11 am release.',
+        }
+        for kind, readback in readbacks.items():
+            def check(payload, yes='Yes.'):
+                return friday.check_tool('send_to_chat', {'chat': 'deploy', 'prompt': payload}, 'speech', yes,
+                                         set(), readback, fixed if kind == 'fixed' else None, 5)
+            with self.subTest(kind):
+                self.assertIsNone(check(text))
+            for mutation, payload in mutations.items():
+                with self.subTest(kind, mutation=mutation):
+                    self.assertEqual(check(payload), friday.READBACK_REQUIRED)
+        # Text past any cut is not read back, so the read-back now holds the whole prompt.
+        long_text = 'Fix the flaky test. ' * 12 + 'Then delete the release branch.'
+        self.assertIn('delete the release branch',
+                      friday.send_readback(friday.SendProposal('send_to_chat', 'deploy', long_text, 4)))
+
+    def test_a_question_about_the_users_own_send_is_not_a_request(self):
+        for text in ('Should I just message ci-audit myself', 'Should I ask ci-audit myself',
+                     "I'll tell docs myself", 'I’ll just send it later', 'We could message them later',
+                     'did you tell docs', 'have you sent it'):
+            with self.subTest(text):
+                self.assertFalse(friday.send_intent(text))
+        for text in ('Just message ci-audit with the fix', 'Can you tell docs to rerun it',
+                     'I want you to tell docs to rerun it', 'Ask ci-audit to fix the flake. I will check later.',
+                     'Okay. Message ci-audit with the fix.',
+                     "But I'll can you ask the Frida test session why it was slow"):
+            with self.subTest(text):
+                self.assertTrue(friday.send_intent(text))
+
     def test_plan_then_send_that_readback_binds_chat_and_text(self):
         plan = 'I will tell api-server to add rate limiting to the upload endpoint. Shall I send that?'
         def check(chat, prompt, readback=plan):
             return friday.check_tool('send_to_chat', {'chat': chat, 'prompt': prompt}, 'speech', 'yes', set(), readback)
         self.assertIsNone(check('api-server', 'Add rate limiting to the upload endpoint.'))
-        self.assertIsNone(check('docs-site', 'docs site needs a page about the new settings screen',
-                                'I will ask docs-site to add a page about the new settings screen. Shall I send that?'))
+        site = 'I will ask docs-site to add a page about the new settings screen. Shall I send that?'
+        self.assertIsNone(check('docs-site', 'Add a page about the new settings screen.', site))
+        # Other words than Friday said need the exact read-back first.
+        self.assertEqual(check('docs-site', 'docs site needs a page about the new settings screen', site),
+                         friday.READBACK_REQUIRED)
         refusal = friday.READBACK_REQUIRED
         self.assertEqual(check('docs', 'Add rate limiting to the upload endpoint.'), refusal)
         self.assertEqual(check('api-server', 'Delete the upload endpoint and its tests.'), refusal)
@@ -481,8 +526,10 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIsNotNone(check(previous='Want me to read the rest?'))
         self.assertIsNotNone(check(previous=readback.lower()))
         self.assertIsNotNone(check(previous=readback + ' ', chat='Automation tether'))
-        self.assertIsNone(check('Yes, please do. And for the factory floor, check the alerts.',
-                                prompt='Review the full context and check the factory floor alerts.'))
+        more = 'Yes, please do. And for the factory floor, check the alerts.'
+        self.assertIsNone(check(more, prompt='Review the full context. And for the factory floor, check the alerts.'))
+        # A rewording of the added words is new text, so it needs its own read-back.
+        self.assertIsNotNone(check(more, prompt='Review the full context and check the factory floor alerts.'))
         self.assertIsNotNone(check("No, don't send it."))
         self.assertIsNotNone(check("No, don't answer it."))
         self.assertIsNotNone(check('Yes, but no.'))
@@ -506,7 +553,7 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIsNone(friday.check_tool('switch_chat', {'chat': 'Deploy'}, 'speech',
                                             'No, switch to deploy.', set(), readback, proposal, 5))
 
-    def test_send_readback_shortens_chat_and_prompt(self):
+    def test_send_readback_shortens_chat_and_reads_the_whole_prompt(self):
         cases = (
             ('send_to_chat', 'Docs . Investigate the notes…', 'Check the notes.',
              'Not sent yet. Should I send this to Docs? Check the notes. Yes or no?'),
@@ -515,9 +562,9 @@ class FridayRulesTests(unittest.TestCase):
             ('send_to_chat', 'Docs', 'Check the notes!',
              'Not sent yet. Should I send this to Docs? Check the notes. Yes or no?'),
             ('send_to_chat', 'Docs…', 'a' * 150 + ' anotherlongword',
-             'Not sent yet. Should I send this to Docs? ' + 'a' * 150 + '…. Yes or no?'),
+             'Not sent yet. Should I send this to Docs? ' + 'a' * 150 + ' anotherlongword. Yes or no?'),
             ('send_to_chat', 'X' * 60, 'a' * 161,
-             'Not sent yet. Should I send this to ' + 'X' * 40 + '? ' + 'a' * 159 + '…. Yes or no?'),
+             'Not sent yet. Should I send this to ' + 'X' * 40 + '? ' + 'a' * 161 + '. Yes or no?'),
             ('backlog_send', 'API… Follow up', 'B12',
              'Not sent yet. Should I send B12 to API? Yes or no?'),
         )
@@ -1749,7 +1796,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             {'role': 'user', 'content': friday.STATE_PREFIX + 'No.'},
             {'role': 'user', 'content': 'And for the factory floor, check the alerts.'},
         ]
-        args = {'chat': proposal.chat, 'prompt': 'Review the context and check the factory floor alerts.'}
+        args = {'chat': proposal.chat, 'prompt': 'Review the context. And for the factory floor, check the alerts.'}
         session, frames = await self.tool_flow(messages, [
             ('', 1, [('send_to_chat', args, {'ok': True})])], proposal)
         self.assertIn(('dispatch', 'send_to_chat'), frames)
@@ -1792,7 +1839,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session = SimpleNamespace(pending_proposal=proposal, rtvi=rtvi)
         service = self.rt.FridayLLM(session, friday.brain_config({}))
         params = SimpleNamespace(function_name='send_to_chat', tool_call_id='c1',
-                                 arguments={'chat': 'Docs', 'prompt': 'Run the tests and check the factory floor alerts.'},
+                                 arguments={'chat': 'Docs', 'prompt': 'Run the tests. And for the factory floor, check the alerts.'},
                                  result_callback=AsyncMock())
         service.push_frame = AsyncMock()
         try:

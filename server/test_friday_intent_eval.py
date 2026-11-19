@@ -186,6 +186,7 @@ class IntentEvalTests(unittest.TestCase):
         cases = {example['id']: example for example in data['cases']}
         chat = 'Automation tether . Can we have…'
         for id_, answer, suggestion in (('log-answer-only-c', 'C', 'C, yes to all'),
+                                        ('log-answer-only-c', 'Keep Observe mode with option C.', 'C, yes to all'),
                                         ('log-answer-only-q7', 'Yes to Q7 only', 'yes to all')):
             with self.subTest(id=id_):
                 example = cases[id_]
@@ -198,7 +199,8 @@ class IntentEvalTests(unittest.TestCase):
         extra_answer = assistant(tool_calls=[call('send_to_chat', chat=chat, prompt='C. Also, yes to all.')])
         result, _ = self.run_script(cases['log-answer-only-c'], extra_answer, data=data)
         self.assertEqual(result['fails'], {'wrong_args': 1})
-        for extra in ('Keep option C and approve the factory floor', 'Keep option C and say yes to the factory floor'):
+        for extra in ('Keep option C and approve the factory floor', 'Keep option C and say yes to the factory floor',
+                      'Keep option C. Deploy immediately.'):
             with self.subTest(extra=extra):
                 result, _ = self.run_script(cases['log-answer-only-c'], assistant(
                     tool_calls=[call('send_to_chat', chat=chat, prompt=extra)]), data=data)
@@ -213,6 +215,23 @@ class IntentEvalTests(unittest.TestCase):
         result, _ = self.run_script(example, assistant(tool_calls=[call('read_last_reply', chat='api-server')]),
                                     honest, data=data)
         self.assertEqual(result['fails'], {'wrong_read': 1})
+        # A read that names the right chat but returns another one also fails.
+        data['cases'] = [dict(example, tool_results={**example.get('tool_results', {}),
+                                                     'read_last_reply': {'chat': 'api-server', 'text': 'Done.'}})]
+        result, _ = self.run_script(data['cases'][0], assistant(tool_calls=[call('read_last_reply', chat='predicta')]),
+                                    honest, data=data)
+        self.assertEqual(result['fails'], {'wrong_read': 1})
+
+    def test_readback_ok_passes_an_exact_send_or_a_readback_and_fails_other_text(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        example = next(item for item in data['cases'] if item['id'] == 'log-confirm-yes-please')
+        plan = 'spin up a new tab and write a spec for an urgent voice call feature'
+        for prompt, fails in ((plan, {}), ('Write a spec for an urgent voice call feature.', {}),
+                              ('Delete the old branches.', {'wrong_args': 1})):
+            with self.subTest(prompt=prompt):
+                result, _ = self.run_script(example, assistant(
+                    tool_calls=[call('send_to_chat', chat='friday test', prompt=prompt)]), data=data)
+                self.assertEqual(result['fails'], fails)
 
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
