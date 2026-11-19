@@ -150,6 +150,7 @@ class Rules(Base):
         self.assertIn('skip items marked doing, items in the Inbox, and items that need a product, business or safety '
                       'decision from the user.', rule)
         self.assertIn('Take the oldest item that is left. If none is left, stop.', rule)
+        self.assertIn('hand the next open backlog item of this project to a new tab (see Backlog)', rule)
 
     def test_saved_answers_only_at_levels_three_to_five_for_the_selected_project(self):
         folder = paths.TETHER / 'projects' / PID

@@ -139,6 +139,12 @@ class ProjectTests(unittest.TestCase):
                     'Run `start` first. When finished, run `done` with the commit, PR, or outcome.',
                     backlog_section.splitlines(),
                 )
+                handoff = next(line for line in backlog_section.splitlines()
+                               if line.startswith('- An item that is not the task this tab was started for goes to a new tab'))
+                for part in ('at every autonomy level, also mid-work', 'handoff note in the work-notes folder',
+                             'what not to redo', '`agent_tab_cli.py start --name "B12 two to four words" --cwd ITEM_REPO "TASK"`',
+                             'run `start B12` first', 'report the new tab name', 'Hand off one item, then stop.'):
+                    self.assertIn(part, handoff)
 
     def test_instructions_count_revisions_and_refuse_a_stale_save(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
