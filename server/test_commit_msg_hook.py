@@ -911,6 +911,36 @@ time.sleep(20)
         self.assertEqual(json.loads(ledger.read_text()), {fresh: oid})
         self.assertEqual((fallback['reason'], landed['landed']), ('hook-silent', 'missing'))
 
+    def test_broken_key_and_claim_files_fail_open_in_enforce(self):
+        self.commit('-m', 'base')
+        self.mode('enforce')
+        self.install()
+        folder = self.cache / 'commit-gate'
+        folder.mkdir(parents=True, exist_ok=True)
+        ledger = folder / f'claims.{hashlib.sha256(os.fsencode(self.repo)).hexdigest()}.json'
+        for case in ('directory', 'unreadable'):
+            with self.subTest(case=case):
+                key = folder / 'commit-gate.key'
+                if key.is_dir():
+                    key.rmdir()
+                elif key.exists():
+                    key.chmod(0o600)
+                    key.unlink()
+                if case == 'directory':
+                    key.mkdir()
+                else:
+                    key.write_bytes(b'k' * 32)
+                    key.chmod(0)
+                ledger.write_text('{not json')
+                command = f'git commit --allow-empty -m subject -m {shlex.quote(STAMP)}'
+                self.pre(command)
+                result = self.git('-c', command, command=self.agent('claude', '/bin/sh'), check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.pre(command, 'PostToolUse')
+                verdicts = [row.get('verdict') for row in self.rows() if row.get('event') == 'check']
+                self.assertNotIn('block', verdicts)
+        key.chmod(0o600)
+
     def test_claude_matches_normalized_cleanup_readings(self):
         self.install()
         self.git('config', 'core.commentChar', ';')
