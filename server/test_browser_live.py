@@ -79,12 +79,10 @@ class FakeBrowser:
             self.changed.notify_all()
 
     def input(self, target, events):
-        if events == 'bad':
-            raise ValueError('Invalid events.')
-        if events == 'browser-error':
+        if {'type': 'text', 'text': 'browser-error'} in events:
             raise browser.BrowserError('Input failed.')
         with self.changed:
-            self.inputs.append((target, events))
+            self.inputs.extend((target, event) for event in events)
             self.changed.notify_all()
 
 
@@ -313,20 +311,57 @@ class LiveTests(unittest.TestCase):
             self.assertEqual(flows[0].acked, 2)
 
     def test_input_order_errors_and_socket_remains_open(self):
+        events = [{'type': 'text', 'text': text} for text in ('one', 'two', 'three')]
         client = self.connect()
         client.message('hello')
-        client.send({'type': 'input', 'events': [1]})
-        client.send({'type': 'input', 'events': [2]})
-        for invalid in ('bad', 'browser-error'):
+        client.send({'type': 'input', 'events': events[:1]})
+        client.send({'type': 'input', 'events': events[1:2]})
+        for invalid in ('bad', events[:1] * 201):
             client.send({'type': 'input', 'events': invalid})
-            self.assertTrue(client.message('error')[0]['error'])
+            self.assertEqual(client.message('error')[0]['error'], 'Invalid input.')
+        # A browser failure in the input worker is reported, and later input still goes through.
+        # Wait for the first two events first, so the failing event cannot share their batch.
+        self.assert_input_events(events[:2])
+        client.send({'type': 'input', 'events': [{'type': 'text', 'text': 'browser-error'}]})
+        self.assertEqual(client.message('error')[0]['error'], 'Input failed.')
         client.raw(b'not json')
         client.send(['ignore'])
         client.send({'type': 'unknown'})
-        client.send({'type': 'input', 'events': [3]})
+        client.send({'type': 'input', 'events': events[2:]})
+        self.assert_input_events(events)
+
+    def test_queued_input_coalesces_moves_and_preserves_key_order(self):
+        started, release = threading.Event(), threading.Event()
+        record_input = self.browser.input
+
+        def blocked_input(target, events):
+            started.set()
+            release.wait()
+            record_input(target, events)
+
+        self.browser.input = blocked_input
+        client = self.connect()
+        client.message('tabs')
+        down = {'type': 'keydown', 'key': 'a'}
+        move = {'type': 'move', 'x': 4, 'y': 8}
+        up = {'type': 'keyup', 'key': 'a'}
+        try:
+            client.send({'type': 'input', 'events': [down]})
+            self.assertTrue(started.wait(1))
+            client.send({'type': 'input', 'events': [dict(move, x=2)]})
+            client.send({'type': 'input', 'events': [move, up]})
+            # The pong confirms the reader queued both batches while input was blocked.
+            client.raw(b'queued', opcode=9)
+            self.assertEqual(client.packet(), (10, b'queued'))
+        finally:
+            release.set()
+        self.assert_input_events([down, move, up])
+
+    def assert_input_events(self, events):
         with self.browser.changed:
-            self.assertTrue(self.browser.changed.wait_for(lambda: len(self.browser.inputs) == 3, 1))
-        self.assertEqual(self.browser.inputs, [('T1', [1]), ('T1', [2]), ('T1', [3])])
+            self.assertTrue(self.browser.changed.wait_for(lambda: len(self.browser.inputs) >= len(events), 1),
+                            self.browser.inputs)
+            self.assertEqual(self.browser.inputs, [('T1', event) for event in events])
 
     def test_closed_when_tab_disappears(self):
         client = self.connect()
