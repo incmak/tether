@@ -924,6 +924,24 @@ def _owned_hook(hook):
         return None
 
 
+def _hook_ready(contents):
+    """The installed wrapper will reach the gate: its helper, Python and gate file exist. A wrapper whose files are
+    gone fails open with no row, so PreToolUse must keep its own check."""
+    for line in contents.decode('utf-8', errors='replace').splitlines():
+        if not line.startswith('exec /bin/sh '):
+            continue
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            return False
+        if len(words) != 7 or words[3] != '$1':
+            return False
+        helper, python, gate = (Path(word) for word in (words[2], words[4], words[5]))
+        return (helper.is_file() and os.access(helper, os.R_OK) and gate.is_file() and os.access(gate, os.R_OK)
+                and python.is_file() and os.access(python, os.X_OK))
+    return False
+
+
 def _defer_to_hook(tree, command, *, cwd_fallback=False):
     if tree is None:
         return False
@@ -932,7 +950,8 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
         return False
     hook = hooks / 'commit-msg'
     try:
-        if not os.access(hook, os.X_OK) or _owned_hook(hook) is None:
+        contents = _owned_hook(hook) if os.access(hook, os.X_OK) else None
+        if contents is None or not _hook_ready(contents):
             return False
         tokens = list(_tokens(command, [], for_hook=True))
         if any(isinstance(token, str) and token not in ('&&', '\n') for token in tokens):
@@ -947,6 +966,10 @@ def _defer_to_hook(tree, command, *, cwd_fallback=False):
         *prefix, words = [segment[1] for segment in segments]
         if prefix and prefix[0][0].text == 'cd':
             if cwd_fallback or len(prefix[0]) != 2:
+                return False
+            # A relative folder can resolve through CDPATH to another repository than the one checked here.
+            target = prefix[0][1].text
+            if not (target.startswith('/') or target in ('.', '..') or target.startswith(('./', '../'))):
                 return False
             prefix = prefix[1:]
         if prefix and (len(prefix) != 1 or [word.text for word in prefix[0][:2]] != ['git', 'add']):
@@ -1438,11 +1461,23 @@ exec {call} {python} {gate} {deadline}
             if uninstall:
                 if not ours:
                     return 'No Tether commit-msg hook to uninstall.'
-                hook.unlink()
+                # Move the hook aside before the final check, so a hook placed without our lock is never deleted.
+                backup = hook.with_name(f'{hook.name}.tether-old.{os.getpid()}')
+                if os.path.lexists(backup):
+                    raise GateError(400, f'Tether cannot uninstall {hook} while {backup} exists.')
+                os.rename(hook, backup)
+                if _owned_hook(backup) is None:
+                    try:
+                        os.link(backup, hook, follow_symlinks=False)
+                    except OSError as exc:
+                        raise GateError(400, f'Tether could not restore {hook}. The hook is at {backup}.') from exc
+                    backup.unlink()
+                    return 'No Tether commit-msg hook to uninstall.'
+                backup.unlink()
                 return 'Uninstalled the Tether commit-msg hook.'
             if exists and not ours:
                 raise GateError(400, refusal)
-            if existing == script.encode():
+            if existing == script.encode() and os.access(hook, os.X_OK):
                 return 'The Tether commit-msg hook is already installed.'
             with tempfile.NamedTemporaryFile(dir=hooks, prefix='.commit-msg.', mode='w', encoding='utf-8',
                                              delete=False) as out:

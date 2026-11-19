@@ -392,6 +392,30 @@ esac''')
         self.assertEqual(self.hook.read_bytes(), foreign)
         self.assertEqual(list(self.hooks.glob('commit-msg*')), [self.hook])
 
+    def test_uninstall_restores_foreign_hook_swapped_in_after_ownership_check(self):
+        self.install()
+        foreign = b'#!/bin/sh\nexit 42\n'
+        rename = os.rename
+
+        def swap(source, destination):
+            self.hook.unlink()
+            self.hook.write_bytes(foreign)
+            return rename(source, destination)
+
+        with mock.patch.object(commit_gate.os, 'rename', side_effect=swap):
+            self.assertIn('No Tether', self.install(uninstall=True))
+        self.assertEqual(self.hook.read_bytes(), foreign)
+        self.assertEqual(list(self.hooks.glob('commit-msg*')), [self.hook])
+
+    def test_reinstall_restores_a_hook_that_lost_its_execute_bit(self):
+        self.install()
+        self.hook.chmod(0o644)
+        self.assertIn('Updated', self.install())
+        self.assertTrue(os.access(self.hook, os.X_OK))
+        self.commit('-m', 'terminal commit')
+        row, = self.rows()
+        self.assertEqual((row['via'], row['verdict']), ('commit-msg', 'would_block'))
+
     def test_update_preserves_hook_placed_before_publish(self):
         self.install()
         foreign = b'#!/bin/sh\nexit 42\n'
@@ -570,6 +594,29 @@ time.sleep(20)
                 self.git('-c', command, command=claude)
                 row, = self.rows()[before:]
                 self.assertEqual((row['via'], row['verdict']), ('commit-msg', 'pass'))
+
+    def test_claude_checks_a_relative_cd_that_cdpath_can_redirect(self):
+        self.install()
+        (self.repo / 'target').mkdir()
+        other = self.root / 'elsewhere' / 'target'
+        other.mkdir(parents=True)
+        self.git('init', '-q', '-b', 'main', '--template=', cwd=other)
+        command = f'cd target && git commit --allow-empty -m {shlex.quote(STAMP)}'
+        self.assertEqual(self.pre(command).stdout, '')
+        self.env['CDPATH'] = str(other.parent)
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        row, = self.rows()
+        self.assertNotIn('via', row)
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD', cwd=other).stdout.strip(), '1')
+
+    def test_claude_checks_when_the_wrapper_cannot_reach_its_gate(self):
+        self.install(gate=self.root / 'gone' / 'commit_gate.py')
+        command = f'git commit --allow-empty -m {shlex.quote(STAMP)}'
+        self.assertEqual(self.pre(command).stdout, '')
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        row, = self.rows()
+        self.assertNotIn('via', row)
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD').stdout.strip(), '1')
 
     def test_claude_keeps_its_check_for_other_shell_syntax(self):
         self.install()
