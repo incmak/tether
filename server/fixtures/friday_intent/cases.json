@@ -1832,6 +1832,231 @@
     "tool": null,
     "reply": "(?i)deploy"
    }
+  },
+  {
+   "id": "log2-go-question-one",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "For the release notes chat, can you check what questions it has asked me?"
+    },
+    {
+     "role": "assistant",
+     "content": "The release-notes chat is waiting for your answers to four questions about urgent calls."
+    }
+   ],
+   "user": "Can you uh go question by question? Let's start with question one.",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)release.notes"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   },
+   "tool_results": {
+    "read_last_reply": {
+     "chat": "release-notes",
+     "text": "Round 1 waits for your answers. Q1: Who decides what is critical? Q2: How should an urgent call reach you? Q3: How do approvals work during an urgent call? Q4: What are quiet hours?"
+    }
+   }
+  },
+  {
+   "id": "log2-already-asked",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "For the release notes chat, can you check what questions it has asked me?"
+    },
+    {
+     "role": "assistant",
+     "content": "The release-notes chat is waiting for your answers to four questions about urgent calls."
+    },
+    {
+     "role": "user",
+     "content": "No no no don't send it. No no no."
+    },
+    {
+     "role": "assistant",
+     "content": "Shall I send the request to go question by question to release-notes?"
+    }
+   ],
+   "user": "It has already It has already asked those questions. You just have to check it. You have to ask me those.",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)release.notes"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   },
+   "tool_results": {
+    "read_last_reply": {
+     "chat": "release-notes",
+     "text": "Round 1 waits for your answers. Q1: Who decides what is critical? Q2: How should an urgent call reach you? Q3: How do approvals work during an urgent call? Q4: What are quiet hours?"
+    }
+   }
+  },
+  {
+   "id": "log2-read-the-questions",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "For the release notes chat, can you check what questions it has asked me?"
+    },
+    {
+     "role": "assistant",
+     "content": "The release-notes chat is waiting for your answers to four questions about urgent calls."
+    }
+   ],
+   "user": "Can you read the questions?",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)release.notes"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   },
+   "tool_results": {
+    "read_last_reply": {
+     "chat": "release-notes",
+     "text": "Round 1 waits for your answers. Q1: Who decides what is critical? Q2: How should an urgent call reach you? Q3: How do approvals work during an urgent call? Q4: What are quiet hours?"
+    }
+   }
+  },
+  {
+   "id": "log2-ask-other-session",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "For the release notes chat, can you check what questions it has asked me?"
+    },
+    {
+     "role": "assistant",
+     "content": "The release-notes chat is waiting for your answers to four questions about urgent calls."
+    }
+   ],
+   "user": "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)friday test",
+     "prompt": "(?i)log"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   }
+  },
+  {
+   "id": "h-read-asked-me",
+   "group": "read_reply",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "what questions did docs site ask me? read them out",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)docs.site"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   }
+  },
+  {
+   "id": "h-ask-other-session",
+   "group": "send_direct",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "get the api server session to rebase on main",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)api.server"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "release-notes"
+   }
   }
  ]
 }

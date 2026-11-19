@@ -803,6 +803,7 @@ def runtime_types():
         InterimTranscriptionFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame)
     from pipecat.metrics.metrics import TTFBMetricsData
     from pipecat.observers.base_observer import BaseObserver
+    from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.frame_processor import FrameDirection
     from pipecat.processors.frameworks.rtvi.observer import RTVIFunctionCallReportLevel, RTVIObserverParams
     from pipecat.services.stt_service import SegmentedSTTService
@@ -1147,6 +1148,7 @@ def runtime_types():
             self._run_message = None
             self._active_run = ContextVar('friday_tool_run', default=None)
             self._active_response = ContextVar('friday_llm_response', default=None)
+            self._request_messages = ContextVar('friday_request_messages', default=None)
             self._thought_signatures = {}
             self._request_roles = ''
 
@@ -1241,6 +1243,9 @@ def runtime_types():
             await super().run_function_calls(function_calls)
 
         async def get_chat_completions(self, context):
+            messages = self._request_messages.get()
+            if messages is not None:
+                context = LLMContext(messages, tools=context.tools, tool_choice=context.tool_choice)
             stream = await super().get_chat_completions(context)
             if self.brain.kind != 'gemini':
                 return stream
@@ -1401,15 +1406,35 @@ def runtime_types():
             self._settings.system_instruction = None
 
         async def _process_context(self, context):
-            run = self.prepare_run(context.get_messages())
+            run_messages = context.get_messages()
+            messages = self.session.prepare_messages(run_messages)
+            if messages and messages[-1]['role'] == 'assistant':
+                event_index = None
+                if not messages[-1].get('tool_calls'):
+                    for i in range(len(messages) - 2, -1, -1):
+                        message = messages[i]
+                        if is_real_user(message):
+                            content = message.get('content')
+                            if isinstance(content, str) and content.startswith(EVENT_PREFIX):
+                                event_index = i
+                            break
+                if event_index is None:
+                    print('Friday skipped request ending with assistant', file=sys.stderr, flush=True)
+                    return
+                messages = messages[:event_index] + messages[event_index + 1:] + [messages[event_index]]
+                run_messages = messages
+                print('Friday reordered event after reply', file=sys.stderr, flush=True)
+            run = self.prepare_run(run_messages)
+            context.set_messages(messages)
             response = self._active_response.get()
             if response and run and run.failed_action and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
             token = self._active_run.set(run)
-            context.set_messages(self.session.prepare_messages(context.get_messages()))
+            # The aggregator can add a reply while Gemini refreshes its credentials.
+            request_token = self._request_messages.set(messages[:])
             self._request_roles = ','.join(m['role'] + ('(tool_calls)' if m.get('tool_calls') else '')
-                                           for m in context.get_messages())
+                                           for m in messages)
             try:
                 if self.brain.kind == 'gemini':
                     self._client.api_key = await self.session.models.auth.token()
@@ -1448,17 +1473,23 @@ def runtime_types():
                     if not response.text and not response.call_count and not (run and run.source == 'event'):
                         await self.push_frame(TTSSpeakFrame('Sorry, I lost my words. Say that again?'))
             finally:
+                self._request_messages.reset(request_token)
                 if response:
                     await self.cancel_ttfb_metrics()
                 self._active_run.reset(token)
 
     class FridayObserver(BaseObserver):
         def __init__(self, session):
-            super().__init__(observe_every_push=False)
+            super().__init__(observe_every_push=True)
             self.session = session
+            self.reply_end = None
 
         async def on_push_frame(self, data):
             s, f = self.session, data.frame
+            reply_at_output = (isinstance(f, LLMFullResponseEndFrame)
+                               and data.direction == FrameDirection.DOWNSTREAM and data.source is s.output)
+            if not data.first_push and not reply_at_output:
+                return
             if isinstance(f, VADUserStartedSpeakingFrame):
                 s.user_speaking = True
                 s.new_turn()
@@ -1471,12 +1502,23 @@ def runtime_types():
                 s.user_speaking = False
                 s.busy = True
             elif isinstance(f, LLMFullResponseStartFrame):
+                self.reply_end = None
+                s.reply_open = True
                 s.llm_running = True
                 s.busy = True
             elif isinstance(f, LLMFullResponseEndFrame):
-                s.llm_running = False
-                if s.tts.voice_cancelled and not s.bot_speaking and not s.waiting_for_read:
-                    s.busy = False
+                if data.first_push:
+                    self.reply_end = f
+                    s.llm_running = False
+                # A tool follow-up can start before the preceding end reaches output.
+                if reply_at_output and f is self.reply_end:
+                    self.reply_end = None
+                    s.reply_open = False
+                    # Device speech may be queued even if playback has not started.
+                    pending_voice = (s.tts.voice_client and s.tts.voice_count
+                                     and not s.tts.voice_playback_ended and not s.tts.voice_cancelled)
+                    if not s.bot_speaking and not s.waiting_for_read and not pending_voice:
+                        s.busy = False
             elif isinstance(f, BotStartedSpeakingFrame):
                 # A tap can overtake the start broadcast from spoken(start).
                 if s.tts.voice_client and not s.tts.voice_speaking:
@@ -1486,9 +1528,11 @@ def runtime_types():
                     await s.report_metrics()
             elif isinstance(f, BotStoppedSpeakingFrame):
                 s.bot_speaking = False
-                if not s.llm_running and not s.waiting_for_read:
+                if not s.llm_running and not s.reply_open and not s.waiting_for_read:
                     s.busy = False
             elif isinstance(f, InterruptionFrame):
+                self.reply_end = None
+                s.reply_open = False
                 s.bot_speaking = False
                 s.busy = False
                 s.llm_running = False
@@ -1568,7 +1612,7 @@ class Session:
         self.last_sent = None
         self.events = EventQueue()
         self.wake = asyncio.Event()
-        self.user_speaking = self.bot_speaking = self.busy = self.llm_running = False
+        self.user_speaking = self.bot_speaking = self.busy = self.llm_running = self.reply_open = False
         self.event_generation = 0
         self.offline_spoken = False
         self.voice_mode = 'server'
@@ -1786,7 +1830,7 @@ class Session:
             except asyncio.TimeoutError:
                 continue
             self.wake.clear()
-            item = self.events.pop(self.user_speaking, self.bot_speaking, self.busy)
+            item = self.events.pop(self.user_speaking, self.bot_speaking, self.busy or self.reply_open)
             if not item:
                 continue
             self.busy = True

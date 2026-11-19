@@ -1909,7 +1909,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
 
         async def push(processor, frame, direction):
             if isinstance(frame, self.rt.MetricsFrame):
-                await observer.on_push_frame(SimpleNamespace(frame=frame, direction=direction, source=processor))
+                await observer.on_push_frame(SimpleNamespace(frame=frame, direction=direction, source=processor,
+                                                             first_push=True))
 
         async def cancelled(_context):
             started.set()
@@ -1943,6 +1944,157 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(session.llm_calls, 2)
         finally:
             await llm._client.close()
+
+    async def test_event_queue_waits_for_reply_to_pass_output(self):
+        from pipecat.observers.base_observer import FramePushed
+
+        session = SimpleNamespace(llm=Mock(), tts=Mock(voice_cancelled=False, voice_client=False), output=Mock(),
+            waiting_for_read=False, user_speaking=False, bot_speaking=True, busy=False,
+            wake=asyncio.Event(), events=friday.EventQueue())
+        observer = self.rt.FridayObserver(session)
+        event = {'id': 'e1', 'chat': 'ci', 'kind': 'done', 'priority': 'idle', 'text': 'Done.'}
+        session.events.put('event', event)
+        start = self.rt.LLMFullResponseStartFrame()
+        end = self.rt.LLMFullResponseEndFrame()
+
+        async def push(frame, source, first_push=True):
+            await observer.on_push_frame(FramePushed(source, Mock(), frame,
+                self.rt.FrameDirection.DOWNSTREAM, 0, first_push=first_push))
+
+        await push(start, session.llm)
+        await push(end, session.llm)
+        await push(self.rt.BotStoppedSpeakingFrame(), session.output)
+        self.assertFalse(session.llm_running)
+        self.assertFalse(session.bot_speaking)
+        self.assertIsNone(session.events.pop(session.user_speaking, session.bot_speaking, session.busy))
+
+        await push(start, session.output, first_push=False)
+        self.assertFalse(session.llm_running)
+        session.wake.clear()
+        await push(end, session.output, first_push=False)
+        self.assertTrue(observer.observe_every_push)
+        self.assertTrue(session.wake.is_set())
+        self.assertEqual(session.events.pop(session.user_speaking, session.bot_speaking, session.busy)['data'], event)
+
+        follow_up = self.rt.LLMFullResponseEndFrame()
+        end = self.rt.LLMFullResponseEndFrame()
+        session.events.put('event', dict(event, id='e2'))
+        await push(self.rt.LLMFullResponseStartFrame(), session.llm)
+        await push(end, session.llm)
+        await push(self.rt.LLMFullResponseStartFrame(), session.llm)
+        await push(follow_up, session.llm)
+        await push(end, session.output, first_push=False)
+        self.assertIsNone(session.events.pop(session.user_speaking, session.bot_speaking, session.busy))
+        await push(follow_up, session.output, first_push=False)
+        self.assertEqual(session.events.pop(session.user_speaking, session.bot_speaking, session.busy)['data']['id'], 'e2')
+
+    async def test_interruption_clears_open_reply(self):
+        from pipecat.observers.base_observer import FramePushed
+
+        session = SimpleNamespace(wake=asyncio.Event())
+        observer = self.rt.FridayObserver(session)
+        direction = self.rt.FrameDirection.DOWNSTREAM
+        await observer.on_push_frame(FramePushed(Mock(), Mock(), self.rt.LLMFullResponseStartFrame(), direction, 0))
+        self.assertTrue(getattr(session, 'reply_open', False))
+        session.wake.clear()
+        await observer.on_push_frame(FramePushed(Mock(), Mock(), self.rt.InterruptionFrame(), direction, 0))
+        self.assertFalse(session.reply_open)
+        self.assertFalse(session.busy)
+        self.assertTrue(session.wake.is_set())
+
+    async def request_messages(self, messages, during_auth=None):
+        from openai import BadRequestError
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        import httpx
+
+        session = SimpleNamespace(prepare_messages=lambda m: m,
+                                  models=SimpleNamespace(llm_health=AsyncMock(return_value=True)))
+        context = LLMContext(messages)
+        env = {}
+        if during_auth:
+            async def token():
+                context.add_message(during_auth)
+                return 'test-token'
+
+            session.models.auth = SimpleNamespace(token=token)
+            env = {'TETHER_FRIDAY_BRAIN': 'gemini', 'TETHER_FRIDAY_GCP_PROJECT': 'test-project'}
+        service = self.rt.FridayLLM(session, friday.brain_config(env))
+        async def complete(**kwargs):
+            if kwargs['messages'][-1]['role'] == 'assistant':
+                request = httpx.Request('POST', service.brain.base_url)
+                raise BadRequestError('Invalid role', response=httpx.Response(400, request=request), body=None)
+
+            async def chunks():
+                yield self.chunk(content='Ready.')
+
+            return chunks()
+
+        try:
+            with patch.object(self.rt.OpenAILLMService, 'push_frame', new_callable=AsyncMock) as push, \
+                    patch.object(service._client.chat.completions, 'create', AsyncMock(side_effect=complete)) as create, \
+                    patch('sys.stderr') as stderr:
+                await service.process_frame(self.rt.LLMContextFrame(context), self.rt.FrameDirection.DOWNSTREAM)
+            log = ''.join(call.args[0] for call in stderr.write.call_args_list)
+            spoken = [call.args[0].text for call in push.await_args_list
+                      if isinstance(call.args[0], self.rt.TTSSpeakFrame)]
+            requests = [call.kwargs['messages'] for call in create.await_args_list]
+            return requests, spoken, log, service.run_source
+        finally:
+            await service._client.close()
+
+    async def test_request_moves_newest_event_after_assistant_reply(self):
+        prefix = [{'role': 'system', 'content': 'System'}, {'role': 'user', 'content': 'Read chats'},
+                  {'role': 'assistant', 'tool_calls': [self.tool_call('read')]},
+                  {'role': 'tool', 'tool_call_id': 'read', 'content': '{}'}]
+        earlier = [{'role': 'user', 'content': friday.EVENT_PREFIX + 'Earlier.'}]
+        event = {'role': 'user', 'content': friday.EVENT_PREFIX + 'Done.'}
+        reply = {'role': 'assistant', 'content': 'Here are your chats.'}
+        for prior_events in ([], earlier):
+            with self.subTest(prior_events=prior_events):
+                requests, spoken, log, source = await self.request_messages(prefix + prior_events + [event, reply])
+                self.assertEqual(len(requests), 1)
+                messages = [m for m in requests[0]
+                            if not (m['role'] == 'user' and m['content'].startswith(friday.STATE_PREFIX))]
+                self.assertEqual(messages, prefix + prior_events + [reply, event])
+                self.assertIn('Friday reordered event after reply\n', log)
+                self.assertEqual(spoken, [])
+                self.assertEqual(source, 'event')
+
+    async def test_request_skips_assistant_tail_without_current_event(self):
+        user = {'role': 'user', 'content': 'Hello'}
+        stale = {'role': 'user', 'content': friday.EVENT_PREFIX + 'Earlier.'}
+        reply = {'role': 'assistant', 'content': 'Hi.'}
+        tool_call = {'role': 'assistant', 'tool_calls': [self.tool_call('pending')]}
+        for messages in ([user, reply], [stale, user, reply], [user, stale, tool_call]):
+            with self.subTest(messages=messages):
+                requests, spoken, log, _ = await self.request_messages(list(messages))
+                self.assertEqual(requests, [])
+                self.assertEqual(spoken, [])
+                self.assertIn('Friday skipped request ending with assistant\n', log)
+
+    async def test_request_keeps_valid_tail_when_auth_refresh_overlaps_a_reply(self):
+        event = {'role': 'user', 'content': friday.EVENT_PREFIX + 'Done.'}
+        requests, spoken, _, source = await self.request_messages([event],
+            during_auth={'role': 'assistant', 'content': 'Here are your chats.'})
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0][-1], event)
+        self.assertEqual(spoken, [])
+        self.assertEqual(source, 'event')
+
+    async def test_request_preserves_normal_user_and_tool_result_tails(self):
+        user = {'role': 'user', 'content': 'Read chats'}
+        tool_call = {'role': 'assistant', 'tool_calls': [self.tool_call('read')]}
+        result = {'role': 'tool', 'tool_call_id': 'read', 'content': '{}'}
+        for messages, expected_source in (([user], 'speech'), ([user, tool_call, result], 'tool')):
+            with self.subTest(messages=messages):
+                requests, spoken, log, source = await self.request_messages(list(messages))
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0][1:], messages)
+                self.assertTrue(requests[0][0]['content'].startswith(friday.STATE_PREFIX))
+                self.assertEqual(spoken, [])
+                self.assertNotIn('Friday reordered event after reply', log)
+                self.assertNotIn('Friday skipped request ending with assistant', log)
+                self.assertEqual(source, expected_source)
 
     async def test_gemini_stream_signatures_survive_followup_without_context_mutation(self):
         from pipecat.processors.aggregators.llm_context import LLMContext
@@ -2572,7 +2724,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.new_turn()
         session.stop_time = friday.time.time() - 0.1
         session.wake = asyncio.Event()
-        session.user_speaking = session.bot_speaking = session.busy = session.llm_running = False
+        session.user_speaking = session.bot_speaking = session.busy = session.llm_running = session.reply_open = False
         session.llm = Mock(name='llm')
         session.context = LLMContext([])
         session.tts = self.rt.SharedPocketTTS(Mock(sample_rate=24000), 'voice', session)
@@ -3140,7 +3292,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_tap_during_event_health_wait_frees_queue(self):
         session = friday.Session.__new__(friday.Session)
         session.events, session.wake = friday.EventQueue(), asyncio.Event()
-        session.user_speaking = session.bot_speaking = session.busy = False
+        session.user_speaking = session.bot_speaking = session.busy = session.reply_open = False
         session.event_generation, session.offline_spoken = 0, False
         session.new_turn, session.context = Mock(), Mock()
         session.worker = Mock(queue_frame=AsyncMock())

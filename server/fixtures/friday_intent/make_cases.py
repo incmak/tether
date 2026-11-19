@@ -276,6 +276,28 @@ case("h-split-tell", "split_turn", H, ["okay tell api server to", "add logging t
      {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)log"}})
 case("h-status-needs", "status", H, "does anything need me right now?", {"tool": None, "reply": "(?i)deploy"})
 
+# ---- From the 19 Nov 2026 08:23 call (B339; names replaced) ----
+QS = {"read_last_reply": {"chat": "release-notes", "text": "Round 1 waits for your answers. Q1: Who decides what is critical? Q2: How should an urgent call reach you? Q3: How do approvals work during an urgent call? Q4: What are quiet hours?"}}
+QS_STATE = dict(STATE, target="release-notes")
+QS_CTX = say("For the release notes chat, can you check what questions it has asked me?",
+             "The release-notes chat is waiting for your answers to four questions about urgent calls.")
+case("log2-go-question-one", "read_reply", "dev", "Can you uh go question by question? Let's start with question one.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
+case("log2-already-asked", "read_reply", "dev",
+     "It has already It has already asked those questions. You just have to check it. You have to ask me those.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", state=QS_STATE, tool_results=QS,
+     history=QS_CTX + say("No no no don't send it. No no no.",
+                          "Shall I send the request to go question by question to release-notes?"))
+case("log2-read-the-questions", "read_reply", "dev", "Can you read the questions?",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
+case("log2-ask-other-session", "send_direct", "dev",
+     "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log", history=QS_CTX, state=QS_STATE)
+case("h-read-asked-me", "read_reply", "holdout", "what questions did docs site ask me? read them out",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)docs.site"}}, state=QS_STATE)
+case("h-ask-other-session", "send_direct", "holdout", "get the api server session to rebase on main",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}}, state=QS_STATE)
+
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:
     json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)
