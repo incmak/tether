@@ -202,6 +202,24 @@ class IntentEvalTests(unittest.TestCase):
                     self.assertIsNone(trace['proposal'])
                     self.assertEqual(trace['action']['name'], 'send_to_chat')
 
+    def test_replacement_readback_invalidates_pending_approval(self):
+        for name, key, payload in (('send_to_chat', 'prompt', 'Fix the login bug'),
+                                   ('backlog_send', 'item', 'B12')):
+            with self.subTest(tool=name):
+                pending = {'name': name, 'chat': 'docs-site', 'payload': payload}
+                readback = friday.send_readback(friday.SendProposal(**pending, turn=0))
+                example = case(name, user='yes', history=[assistant(readback)], pending=pending)
+                response = assistant(tool_calls=[
+                    call(name, chat='other-site', **{key: payload}),
+                    call(name, 'c2', chat='docs-site', **{key: payload}),
+                ])
+                result, _ = self.run_script(example, response)
+                trace, = result['samples']
+                self.assertIsNone(trace['action'])
+                self.assertEqual(trace['actions'], [])
+                self.assertEqual(trace['proposal'], dict(pending, chat='other-site'))
+                self.assertEqual(result['fails'], {'readback_instead': 1})
+
     def test_declined_pending_proposal_still_blocks_send(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
         readback = friday.send_readback(friday.SendProposal(**pending, turn=0))

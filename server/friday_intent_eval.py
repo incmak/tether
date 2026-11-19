@@ -143,6 +143,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                     proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''),
                                                    user_turn)
                     trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                    pending = None
                     trace['reply'] = friday.send_readback(proposal)
                 result = {'error': 'Not sent yet. Friday asked the user to confirm.'}
             elif reason:
