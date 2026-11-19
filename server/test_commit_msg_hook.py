@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
@@ -82,9 +83,15 @@ sys.exit(main(sys.argv[2:]))
     def cli(self, *args, check=True):
         return self.git(str(GATE), *args, check=check, command=(sys.executable,))
 
-    def install(self, **options):
+    def install(self, repo=None, **options):
         with mock.patch.dict(os.environ, self.env, clear=True):
-            return commit_gate.install_hook(self.repo, **{'gate': GATE, 'python': self.python, **options})
+            return commit_gate.install_hook(repo or self.repo, **{'gate': GATE, 'python': self.python, **options})
+
+    def gate_with_import_error(self):
+        gate = self.root / 'broken' / GATE.name
+        gate.parent.mkdir()
+        gate.write_text('import tether_missing_module\n' + GATE.read_text())
+        return gate
 
     def mode(self, mode):
         (self.config / 'commit-gate').write_text(mode + '\n')
@@ -593,10 +600,7 @@ time.sleep(20)
                          ('landed', 'tool-1', 'missing', 1))
 
     def test_claude_records_a_check_when_the_gate_cannot_import(self):
-        broken_gate = self.root / 'broken' / GATE.name
-        broken_gate.parent.mkdir()
-        broken_gate.write_text('import tether_missing_module\n' + GATE.read_text())
-        self.install(gate=broken_gate, python=sys.executable)
+        self.install(gate=self.gate_with_import_error(), python=sys.executable)
         self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
         claude = self.agent('claude', '/bin/sh')
         for args, status, verdict in (
@@ -613,6 +617,75 @@ time.sleep(20)
                 check, landed = self.rows()[before:]
                 self.assertEqual((check['event'], check['reason'], check['verdict']), ('check', 'hook-silent', verdict))
                 self.assertEqual((landed['event'], landed['id'], landed['landed']), ('landed', status, status))
+
+    def test_claude_claims_hook_checks_only_in_the_deferred_worktree(self):
+        other = self.root / 'other'
+        other.mkdir()
+        self.git('init', '-q', '-b', 'main', '--template=', cwd=other)
+        subdir = self.repo / 'subdir'
+        subdir.mkdir()
+        self.install()
+        self.install(repo=other, gate=self.gate_with_import_error(), python=sys.executable)
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        claude = self.agent('claude', '/bin/sh')
+        calls = {
+            'working': f'git -C {shlex.quote(str(subdir))} commit --allow-empty -m working',
+            'silent': f'git -C {shlex.quote(str(other))} commit --allow-empty -m silent',
+        }
+        for tool, command in calls.items():
+            self.pre(command, tool=tool)
+        self.assertEqual(self.rows(), [])
+        for command in calls.values():
+            self.git('-c', command, command=claude)
+        for tool, command in reversed(calls.items()):
+            self.pre(command, 'PostToolUse', tool=tool)
+        working, = [row for row in self.rows() if row.get('via') == 'commit-msg']
+        self.assertEqual((working['folder'], working['session']), (str(self.repo), SESSION))
+        silent, = [row for row in self.rows() if row.get('reason') == 'hook-silent']
+        self.assertEqual((silent['id'], silent['folder'], silent['count'], silent['verdict']),
+                         ('silent', str(other), 1, 'would_block'))
+
+    def test_claude_claims_a_hook_check_once_across_deferred_calls_in_one_worktree(self):
+        self.commit('-m', 'base')
+        self.git('branch', 'silent')
+        self.install()
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        claude = self.agent('claude', '/bin/sh')
+        working = f'git commit --allow-empty -m working -m {shlex.quote(STAMP)}'
+        silent = 'git commit --allow-empty -m silent'
+        self.pre(working, tool='working')
+        self.pre(silent, tool='silent')
+        self.assertEqual(self.rows(), [])
+        self.git('-c', working, command=claude)
+        self.pre(working, 'PostToolUse', tool='working')
+        self.git('checkout', '-q', 'silent')
+        self.install(gate=self.gate_with_import_error(), python=sys.executable)
+        self.git('-c', silent, command=claude)
+        self.pre(silent, 'PostToolUse', tool='silent')
+        check, first, fallback, second = self.rows()
+        self.assertEqual((check['via'], check['verdict']), ('commit-msg', 'pass'))
+        self.assertEqual((first['id'], first['landed'], first['count']), ('working', 'verified', 1))
+        self.assertEqual((fallback['id'], fallback['reason'], fallback['count'], fallback['verdict']),
+                         ('silent', 'hook-silent', 1, 'would_block'))
+        self.assertEqual((second['id'], second['landed'], second['count']), ('silent', 'missing', 1))
+
+    def test_claude_counts_commits_without_hook_checks_in_one_deferred_call(self):
+        self.install()
+        self.env['CLAUDE_CODE_SESSION_ID'] = SESSION
+        # Git runs post-commit after the first commit lands. The nested commit skips commit-msg.
+        self.script(self.hooks / 'post-commit',
+                    'rm .git/hooks/post-commit\ngit commit --allow-empty --no-verify -m silent')
+        command = f'git commit --allow-empty -m working -m {shlex.quote(STAMP)}'
+        self.pre(command)
+        self.assertEqual(self.rows(), [])
+        self.git('-c', command, command=self.agent('claude', '/bin/sh'))
+        self.assertEqual(self.git('rev-list', '--count', 'HEAD').stdout.strip(), '2')
+        self.pre(command, 'PostToolUse')
+        check, fallback, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict']), ('commit-msg', 'pass'))
+        self.assertEqual((fallback['id'], fallback['reason'], fallback['count'], fallback['verdict']),
+                         ('tool-1', 'hook-silent', 1, 'would_block'))
+        self.assertEqual((landed['event'], landed['landed'], landed['count']), ('landed', 'missing', 2))
 
     def test_claude_does_not_duplicate_the_hook_check_after_a_deferred_commit(self):
         self.mode('enforce')
@@ -892,7 +965,8 @@ esac''')
         self.env.update(GIT_SEQUENCE_EDITOR=editor, GIT_EDITOR='true')
         self.git('rebase', '-i', '--root')
         self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
-                         [('block', 'no-line')] + [('skip', 'fixup')] * 3 + [('skip', 'replay')])
+                         [('block', 'no-line'), ('unknown', 'cleanup'), ('unknown', 'cleanup'),
+                          ('skip', 'fixup'), ('skip', 'replay')])
 
     def test_verbose_commit_with_stamp_below_scissors_is_unknown(self):
         self.install()
@@ -990,6 +1064,47 @@ mv "$1.new" "$1"''')
                     self.assertIn(STAMP, self.git('log', '-1', '--format=%B').stdout)
                     row = self.rows()[-1]
                     self.assertEqual((row['verdict'], row['reason']), ('unknown', 'cleanup'))
+
+    def test_editor_comment_char_can_differ_from_config_seen_by_hook(self):
+        self.commit('-m', 'base')
+        self.mode('enforce')
+        self.install()
+        self.script(self.hooks / 'prepare-commit-msg', "git config core.commentChar '#'")
+        for char, subject in ((';', 'fixup! base'), ('!', 'squash! base'), ('V', 'amend! base')):
+            with self.subTest(char=char, subject=subject):
+                self.git('config', 'core.commentChar', char)
+                message = f'{char} comment\n{subject}\n'
+                self.env['GIT_EDITOR'] = self.script(self.root / 'editor',
+                                                     f'printf %s {shlex.quote(message)} > "$1"')
+                result = self.commit('--cleanup=strip', check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(), subject)
+                row = self.rows()[-1]
+                self.assertIn((row['verdict'], row['reason']), (('unknown', 'cleanup'), ('skip', 'fixup')))
+
+    def test_messages_with_common_line_starts_keep_normal_verdicts(self):
+        self.install()
+        body = 'Body text\nMore details\n- one\n* two\n1. three'
+        self.commit('-m', 'subject', '-m', body, '-m', STAMP)
+        self.commit('-m', 'subject', '-m', body)
+        self.mode('enforce')
+        result = self.commit('-m', 'subject', '-m', body, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.commit('-m', 'fixup! base', '-m', body)
+        self.assertEqual([row['verdict'] for row in self.rows()[:3]], ['pass', 'would_block', 'block'])
+        row = self.rows()[-1]
+        self.assertIn((row['verdict'], row['reason']), (('unknown', 'cleanup'), ('skip', 'fixup')))
+
+    def test_too_many_candidate_comment_characters_are_unknown(self):
+        self.mode('enforce')
+        self.install()
+        starts = (string.ascii_letters + string.digits + '-*+').replace('V', '')
+        for count, expected in ((63, ('pass', '')), (64, ('unknown', 'cleanup'))):
+            with self.subTest(count=count):
+                body = '\n'.join(char + ' text' for char in starts[:count])
+                self.commit('-m', body, '-m', STAMP)
+                row = self.rows()[-1]
+                self.assertEqual((row['verdict'], row['reason']), expected)
 
     def test_plain_and_verbose_editor_commits_pass_or_block_without_unknown(self):
         self.mode('enforce')
@@ -1108,32 +1223,35 @@ mv "$1.new" "$1"''')
                 self.commit('--fixup=HEAD', '-e', '--no-verbose', '--cleanup=default')
                 self.assertEqual(self.git('log', '-1', '--format=%s').stdout.strip(), subject)
         self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
-                         [('skip', 'fixup'), ('unknown', 'cleanup')])
+                         [('unknown', 'cleanup')] * 2)
 
-    def test_non_default_comment_config_and_large_messages_are_unknown(self):
+    def test_unambiguous_non_default_comment_configs_and_large_messages(self):
         self.mode('enforce')
         self.install()
         for key, value in (('core.commentChar', ';'), ('core.commentString', '//'), ('core.commentChar', 'auto')):
-            self.git('config', key, value)
-            self.commit('-m', 'no stamp')
-            self.git('config', '--unset', key)
+            with self.subTest(key=key, value=value):
+                self.git('config', key, value)
+                self.assertNotEqual(self.commit('-m', 'no stamp', check=False).returncode, 0)
+                self.git('config', '--unset', key)
         message = self.root / 'large-message'
         message.write_text('x' * 1_000_001 + '\n')
         self.commit('-F', str(message))
         self.git('config', 'core.commentChar', '#')
         self.commit('-m', 'default comment', '-m', STAMP)
         self.assertEqual([(row['verdict'], row['reason']) for row in self.rows()],
-                         [('unknown', 'comment-char')] * 3 + [('unknown', 'size'), ('pass', '')])
+                         [('block', 'no-line')] * 3 + [('unknown', 'size'), ('pass', '')])
 
     def test_stats_counts_final_messages_without_landed_rows(self):
+        self.commit('-m', 'base')
+        self.git('checkout', '-qb', 'side')
+        self.commit('-m', 'side')
+        self.git('checkout', '-q', 'main')
         self.install()
         self.commit('-m', 'pass', '-m', STAMP)
         self.commit('-m', 'observe')
-        self.commit('--fixup=HEAD')
+        self.git('merge', '--no-ff', '--no-edit', 'side')
         self.mode('enforce')
-        self.git('config', 'core.commentChar', ';')
-        self.commit('-m', 'unknown')
-        self.git('config', '--unset', 'core.commentChar')
+        self.commit('-m', '# comment', '-m', 'fixup! base')
         self.env['CODEX_THREAD_ID'] = SESSION
         for _ in range(3):
             self.commit('-m', 'enforce', check=False)

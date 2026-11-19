@@ -10,12 +10,12 @@ The person sets the mode in Settings. Nothing else changes it.
   paths.CONFIG/commit-gate                  the global mode: one word. Missing or bad: observe.
   paths.TETHER/projects/<id>/commit-gate    a project override: {"override": true, "mode": "enforce"}.
   paths.COMMIT_GATE_LOG                     one JSON line per check and per landed commit. No message text.
-  paths.CACHE/commit-gate/<session>.json    the session's denial count and its commits that wait for their result.
+  paths.CACHE/commit-gate/<session>.json    denial count, pending commits and claimed hook rows.
 
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
-Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse logs a
-check from the landed messages if the hook left no verdict.
+Ordinary amendments are checked. Claude's PreToolUse check can defer to the installed hook. PostToolUse claims one
+hook row per landed commit in the worktree and logs a check from the landed messages if there is a shortfall.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -41,6 +41,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
@@ -72,12 +73,14 @@ LOCK_SECONDS = 0.3
 HOOK_LOCK_SECONDS = 5
 PENDING_SECONDS = 3600  # a commit command that has not ended after this long gets no result
 PENDING_MAX = 50
+LOG_TIME_TOLERANCE = 0.001  # allow for log timestamps rounded to milliseconds
 STATE_DAYS = 45  # cleanup age for sessions with no blocks
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
 SESSION = re.compile(r'[a-zA-Z0-9-]{1,80}')
 HOOK_MARK = '# tether-commit-gate-hook v1'
 CALL_MARK = '# tether-commit-gate-call v1'
 HOOK_MESSAGE_BYTES = 1_000_000
+HOOK_COMMENT_CHARS = 64
 SCISSORS = re.compile(r'. -{24} >8 -{24}')
 
 
@@ -740,11 +743,11 @@ def _invalid_json_constant(value):
 
 
 def _read_session(session, now):
-    """{'blocks': int, 'pending': {tool id: {...}}}. Call it with the lock held."""
+    """{'blocks': int, 'pending': {tool id: {...}}, 'claimed': [[at, folder], ...]}. Call with the lock held."""
     try:
         data = json.loads(_session_path(session).read_text(encoding='utf-8'), parse_constant=_invalid_json_constant)
     except FileNotFoundError:
-        return {'blocks': 0, 'pending': {}}
+        return {'blocks': 0, 'pending': {}, 'claimed': []}
     if not isinstance(data, dict) or type(data.get('blocks')) is not int or data['blocks'] < 0:
         raise ValueError('invalid commit gate block count')
     pending = data.get('pending')
@@ -760,8 +763,13 @@ def _read_session(session, now):
                 or (value.get('deferred') and value.get('mode') not in NAMES)
                 or type(value.get('closing', False)) is not bool):
             raise ValueError('invalid commit gate pending call')
+    claimed = data.get('claimed', [])
+    if not isinstance(claimed, list) or any(
+            not isinstance(pair, list) or len(pair) != 2 or type(pair[0]) not in (int, float)
+            or not math.isfinite(pair[0]) or not isinstance(pair[1], str) for pair in claimed):
+        raise ValueError('invalid commit gate claimed rows')
     return {'blocks': data['blocks'], 'pending': {key: value for key, value in pending.items()
-                                                  if now - value['at'] < PENDING_SECONDS}}
+                                                  if now - value['at'] < PENDING_SECONDS}, 'claimed': claimed}
 
 
 def _write_session(session, state, now):
@@ -783,6 +791,9 @@ def _write_session(session, state, now):
             pass
     while len(state['pending']) > PENDING_MAX:
         del state['pending'][min(state['pending'], key=lambda key: state['pending'][key]['at'])]
+    keep_since = min((value['at'] - LOG_TIME_TOLERANCE for value in state['pending'].values()),
+                     default=now - PENDING_SECONDS)
+    state['claimed'] = [pair for pair in state['claimed'] if pair[0] >= keep_since]
     _write(path, json.dumps(state))
 
 
@@ -1069,6 +1080,27 @@ def check(data, env=os.environ, now=None):
                                               'permissionDecisionReason': deny_reason(blocks)}})
 
 
+def _claim_hook_rows(session, state, waiting, count):
+    """Claim the oldest eligible rows and return the shortfall. Call with the session lock held."""
+    if not waiting.get('tree'):
+        return count
+    tree = os.path.realpath(waiting['tree'])
+    since = waiting['at'] - LOG_TIME_TOLERANCE
+    matches = [(row['at'], folder) for row in _rows(locked=True)
+               if row.get('via') == 'commit-msg' and row.get('session') == session and since <= row['at'] < math.inf
+               and isinstance(folder := row.get('folder'), str) and os.path.realpath(folder) == tree]
+    used = Counter(map(tuple, state['claimed']))
+    for at, folder in sorted(matches, key=lambda match: match[0]):
+        if used[at, folder]:
+            used[at, folder] -= 1
+            continue
+        state['claimed'].append([at, folder])
+        count -= 1
+        if count == 0:
+            break
+    return count
+
+
 def landed(data, now=None):
     """PostToolUse and PostToolUseFailure: log what the commits that landed carry."""
     now = time.time() if now is None else now
@@ -1084,6 +1116,7 @@ def landed(data, now=None):
             return
         waiting['closing'] = True
         _write_session(session, state, now)
+    statuses, shortfall = None, 0
     try:
         statuses = _landed(waiting['folder'], waiting['head'])
     finally:
@@ -1091,6 +1124,8 @@ def landed(data, now=None):
             state = _read_session(session, now)
             waiting = state['pending'].pop(tool, None)
             if waiting is not None:
+                if statuses and waiting.get('deferred'):
+                    shortfall = _claim_hook_rows(session, state, waiting, len(statuses))
                 _write_session(session, state, now)
     if statuses is None or waiting is None:
         return
@@ -1099,12 +1134,10 @@ def landed(data, now=None):
               'landed': worst, 'count': len(statuses)}
     if waiting.get('shared') or 'tree' not in waiting:
         record['shared'] = True
-    if statuses and waiting.get('deferred') and not any(
-            row.get('via') == 'commit-msg' and row.get('session') == session and row['at'] >= waiting['at'] - 0.001  # rows round to ms
-            for row in _rows()):
+    if shortfall:
         _log({'at': record['at'], 'event': 'check', 'id': tool, 'session': session, 'project': record['project'],
               'mode': waiting['mode'], 'verdict': 'would_block' if worst == 'missing' else 'pass',
-              'reason': 'hook-silent', 'count': len(statuses), 'folder': waiting['folder']})
+              'reason': 'hook-silent', 'count': shortfall, 'folder': waiting['folder']})
     _log(record)
 
 
@@ -1225,14 +1258,18 @@ def _final_verdict(path, cwd):
         raise GateError(400, 'Git could not read the commit comment configuration.')
     comments = {item.partition(b'\n')[2].decode('utf-8', errors='replace')
                 for item in config.stdout.split(b'\0') if item}
-    if comments - {'#'}:
-        return 'unknown', 'comment-char'
     lines = message.decode('utf-8', errors='replace').split('\n')
+    chars = {'#'} | {char for char in comments if len(char) == 1} | {line[0] for line in lines if line}
+    # Treating V as a comment character would strip the Verified: line and make every stamped message unknown.
+    # Leaving it out can cause a false pass, but never a false block from losing the stamp.
+    vee = 'V' in chars
+    chars.discard('V')
+    if len(chars) > HOOK_COMMENT_CHARS:
+        return 'unknown', 'cleanup'
     cuts = {}
     for index, line in enumerate(lines):
         if SCISSORS.fullmatch(line):
             cuts.setdefault(line[0], index)
-    chars = {'#'} | {char for char in comments if len(char) == 1} | cuts.keys()
     verdict = _message_verdict(lines)
     # Git reads cleanup and comment settings before prepare-commit-msg can change them. Use a verdict only
     # when every reading agrees. An unknown verdict never counts as stamped or unstamped.
@@ -1241,6 +1278,13 @@ def _final_verdict(path, cwd):
         for reading in (truncated, [line for line in lines if not line.startswith(char)],
                         [line for line in truncated if not line.startswith(char)]):
             if _message_verdict(reading) != verdict:
+                return 'unknown', 'cleanup'
+    if vee and verdict[0] == 'would_block':
+        # V can still hide a line above an autosquash subject. Check that reading only to avoid a false block.
+        truncated = lines[:cuts.get('V', len(lines))]
+        for reading in ([line for line in lines if not line.startswith('V')],
+                        [line for line in truncated if not line.startswith('V')]):
+            if _message_verdict(reading)[0] == 'skip':
                 return 'unknown', 'cleanup'
     return verdict
 
@@ -1392,7 +1436,7 @@ exec {call} {python} {gate} {deadline}
 
 # ---- the numbers for Settings ----
 
-def _rows():
+def _rows(*, locked=False):
     path = log_path()
 
     def snapshot():
@@ -1404,11 +1448,14 @@ def _rows():
                 continue
         return files
 
-    try:
-        with _Lock():
-            files = snapshot()
-    except TimeoutError:
+    if locked:
         files = snapshot()
+    else:
+        try:
+            with _Lock():
+                files = snapshot()
+        except TimeoutError:
+            files = snapshot()
     for content in files:
         for line in content.splitlines():
             try:
