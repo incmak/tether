@@ -1,5 +1,5 @@
 // The Factory view (src/Factory.tsx) against a build, with fixture data only. It checks the keyboard zoom path
-// (arrows, Enter, Esc, Backspace), the breadcrumb, wheel zoom, a token that moves phase, the live region, the
+// (arrows, Enter, Esc, Backspace), the breadcrumb, wheel and touch zoom, a token that moves phase, the live region, the
 // loading, empty and error states, and no sideways scroll from 320 px. With SHOTS set (or by default) it saves
 // screenshots of all four levels at 390, 1280, 1920 and 3840 px wide, light and dark.
 // Run: cd ui && npm run test:ui (or DIST=<build> node test_factory_ui.cjs).
@@ -78,6 +78,27 @@ const base = {
   'browser/signed/access': { browser: 'signed', requests: [], grants: [], ended: [] }, usage: { claude: null, codex: null }, 'work/board': { projects: [], items: [] },
 }
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.webmanifest': 'application/manifest+json' }
+const touchViewports = [{ width: 320, height: 640 }, { width: 768, height: 1024 }]
+const readCrumbs = page => page.locator('.factory-crumbs li').allInnerTexts()
+const zoomSettled = page => page.waitForFunction(() => !document.documentElement.matches(':active-view-transition'))
+
+async function midpoint(item) {
+  await item.scrollIntoViewIfNeeded()
+  const { x, y, width, height } = await item.boundingBox()
+  return { x: Math.round(x + width / 2), y: Math.round(y + height / 2) }
+}
+
+async function dragTouches(cdp, paths) {
+  const dispatch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints })
+  const points = fraction => paths.map(([from, to], id) => ({
+    id,
+    x: from.x + (to.x - from.x) * fraction,
+    y: from.y + (to.y - from.y) * fraction,
+  }))
+  await dispatch('touchStart', points(0))
+  for (let step = 1; step <= 6; step++) await dispatch('touchMove', points(step / 6))
+  await dispatch('touchEnd', [])
+}
 
 async function main() {
   let browser, page, failed = 0
@@ -93,12 +114,7 @@ async function main() {
   const reportsDeploy = body => body.moves.some(move => move.task === 'B71' && move.phase === 'deploy')
   const deployReports = () => state.reports.filter(({ body }) => reportsDeploy(body))
   let sessionGate, historyRetryGate
-  try {
-    if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
-    browser = await getBrowser()
-    const context = browser.contexts()[0]
-    if (!context || context.pages().length >= 3) throw new Error('Shared browser has no context or already has three tabs')
-    page = await context.newPage()
+  const setupPage = async page => {
     page.setDefaultTimeout(10000)
     page.on('pageerror', error => pageErrors.push(error.stack))
     await page.emulateMedia({ reducedMotion: 'no-preference', colorScheme: 'light' })
@@ -159,9 +175,16 @@ async function main() {
       localStorage.setItem('tmux-chat.prefs.v1', JSON.stringify({ theme: 'light', voiceOff: true, voiceSound: false, selected: '%1' }))
       localStorage.setItem('tether-factory-history', JSON.stringify({ B71: [{ phase: 'done', at: Date.now() }] }))
     })
+  }
+  try {
+    if (SHOTS) await fs.mkdir(SHOTS, { recursive: true })
+    // The shared browser proxy does not allow per-page CDP sessions.
+    browser = await getBrowser({ local: true })
+    page = await browser.contexts()[0].newPage()
+    await setupPage(page)
 
     const view = page.locator('dialog.factory')
-    const crumbs = () => page.locator('.factory-crumbs li').allInnerTexts()
+    const crumbs = () => readCrumbs(page)
     const focused = () => page.evaluate(() => { const el = document.activeElement; return el ? (el.getAttribute('data-key') || el.textContent.trim().slice(0, 40)) : '' })
     const station = phase => page.locator(`.factory-station.phase-${phase}`)
     const overflow = () => page.evaluate(() => { const body = document.querySelector('.factory-body'); return document.documentElement.scrollWidth > innerWidth || (body && body.scrollWidth > body.clientWidth + 1) })
@@ -253,6 +276,130 @@ async function main() {
     check('ctrl+wheel down zooms out one level, to the phase', JSON.stringify(await crumbs()) === '["Factory","Build"]', JSON.stringify(await crumbs()))
     await page.keyboard.press('Escape')
     await page.locator('.factory-floor').waitFor()
+
+    // Touch pinch at phone and tablet sizes.
+    {
+      const viewport = page.viewportSize()
+      const pointers = (center, steps, pointerType = 'touch') => page.evaluate(({ center, steps, pointerType }) => {
+        for (const [type, offsets] of steps) {
+          offsets.forEach((offset, index) => {
+            if (offset === null) return
+            const clientX = center.x + offset, clientY = center.y
+            const target = document.elementFromPoint(clientX, clientY)
+            if (!target?.closest('.factory')) throw new Error(`Touch point outside Factory: ${clientX}, ${clientY}`)
+            target.dispatchEvent(new PointerEvent(`pointer${type}`, {
+              bubbles: true, pointerType, pointerId: 11 + index, isPrimary: index === 0, clientX, clientY,
+            }))
+          })
+        }
+      }, { center, steps, pointerType })
+      const zoom = async (center, start, finish, pointerType) => {
+        await pointers(center, [['down', start], ['move', finish], ['up', finish]], pointerType)
+        await zoomSettled(page)
+      }
+
+      for (const { width, height } of touchViewports) {
+        await zoomSettled(page)
+        await page.setViewportSize({ width, height })
+        const center = await midpoint(page.locator('[data-key="task:B190"]'))
+        check(`${width}: Factory allows one-finger pan on both axes`, await view.evaluate(el => getComputedStyle(el).touchAction) === 'pan-x pan-y')
+        const prevented = await view.evaluate(el => {
+          const touches = [11, 12].map(identifier => new Touch({ identifier, target: el }))
+          return [touches, touches.slice(0, 1)].map(points => {
+            const event = new TouchEvent('touchmove', { cancelable: true, touches: points })
+            el.dispatchEvent(event)
+            return event.defaultPrevented
+          })
+        })
+        check(`${width}: two-touch move is canceled and one-touch move is allowed`, prevented[0] && !prevented[1], JSON.stringify(prevented))
+
+        await zoom(center, [-30, 30], [-45, 45])
+        check(`${width}: a spread of less than 40 px does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-80, 80], [-103, 103])
+        check(`${width}: a spread below the distance ratio does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-30], [-85])
+        check(`${width}: one moving finger does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        for (const kind of ['mouse', 'pen']) {
+          await zoom(center, [-30, 30], [-60, 60], kind)
+          check(`${width}: ${kind} pointers do not pinch zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        }
+        await zoom({ x: Math.floor(width / 2), y: 20 }, [-30, 30], [-60, 60])
+        check(`${width}: a spread with no item under the start midpoint does not zoom`, JSON.stringify(await crumbs()) === '["Factory"]')
+        await zoom(center, [-60, 60], [-30, 30])
+        check(`${width}: squeezing at the floor leaves Factory open`, await page.locator('dialog.factory[open]').isVisible() && JSON.stringify(await crumbs()) === '["Factory"]')
+
+        await pointers(center, [['down', [-30, 30]], ['move', [-60, 60]]])
+        await page.locator('.factory-task').waitFor()
+        await zoomSettled(page)
+        check(`${width}: spreading two fingers on B190 zooms to the task`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        const agentCenter = await midpoint(page.locator('[data-key="agent:%5"]'))
+        await pointers(agentCenter, [['move', [-90, 90]], ['move', [-120, 120]], ['move', [-5, 5]], ['up', [-5, 5]]])
+        await zoomSettled(page)
+        check(`${width}: continuing or reversing the same pinch only zooms once`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+
+        await zoom(agentCenter, [-50, 50], [-36, 36])
+        check(`${width}: a squeeze of less than 40 px does not zoom`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        await zoom(agentCenter, [-100, 100], [-77, 77])
+        check(`${width}: a squeeze above the distance ratio does not zoom`, JSON.stringify(await crumbs()) === '["Factory","Build","B190"]')
+        await pointers(agentCenter, [
+          ['down', [-30, 30]], ['cancel', [null, 30]], ['down', [null, 90]],
+          ['move', [-30, 30]], ['up', [-30, 30]],
+        ])
+        await page.locator('.factory-phase').waitFor()
+        check(`${width}: a new squeeze after pointercancel zooms out to the phase`, JSON.stringify(await crumbs()) === '["Factory","Build"]')
+        await page.keyboard.press('Escape')
+        await page.locator('.factory-floor').waitFor()
+      }
+      await zoomSettled(page)
+      await page.setViewportSize(viewport)
+    }
+
+    // CDP sends trusted touches through Chromium's gesture recognition and scrolling.
+    for (const viewport of touchViewports) {
+      const { width } = viewport
+      const context = await browser.newContext({ viewport, hasTouch: true, isMobile: true, serviceWorkers: 'block' })
+      try {
+        const touchPage = await context.newPage()
+        await setupPage(touchPage)
+        const cdp = await context.newCDPSession(touchPage)
+        await touchPage.goto(`${ORIGIN}/chat/?go=factory`)
+        const pinch = (center, from, to) => dragTouches(cdp, [-1, 1].map(side => [
+          { x: center.x + side * from, y: center.y },
+          { x: center.x + side * to, y: center.y },
+        ]))
+        const viewportScale = () => touchPage.evaluate(() => window.visualViewport.scale)
+
+        await pinch(await midpoint(touchPage.locator('[data-key="task:B190"]')), 30, 65)
+        await touchPage.locator('.factory-task').waitFor()
+        await zoomSettled(touchPage)
+        check(`${width}: real spread on B190 zooms to the task`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build","B190"]')
+        check(`${width}: viewport scale stays at 1 after real spread`, await viewportScale() === 1)
+
+        await pinch(await midpoint(touchPage.locator('[data-key="agent:%5"]')), 65, 30)
+        await touchPage.locator('.factory-phase').waitFor()
+        await zoomSettled(touchPage)
+        check(`${width}: real squeeze zooms out to the phase`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build"]')
+        check(`${width}: viewport scale stays at 1 after real squeeze`, await viewportScale() === 1)
+
+        const body = touchPage.locator('.factory-body')
+        if (!await body.evaluate(el => el.scrollHeight > el.clientHeight)) {
+          // Leave 120 px for the body so the Build fixture overflows.
+          const { y } = await body.boundingBox()
+          await touchPage.setViewportSize({ width, height: Math.ceil(y) + 120 })
+        }
+        await touchPage.waitForFunction(() => {
+          const el = document.querySelector('.factory-body')
+          return el.scrollHeight > el.clientHeight
+        })
+        await body.evaluate(el => { el.scrollTop = 0 })
+        const { x, y } = await midpoint(body)
+        await dragTouches(cdp, [[{ x, y: y + 40 }, { x, y: y - 40 }]])
+        await touchPage.waitForFunction(() => document.querySelector('.factory-body').scrollTop > 0)
+        check(`${width}: one real finger scrolls the body and keeps the phase`, JSON.stringify(await readCrumbs(touchPage)) === '["Factory","Build"]')
+      } finally {
+        await context.close()
+      }
+    }
 
     // A task changes phase while its history write fails. A fresh floor prompts another attempt.
     const deployReport = (status, count = 1) => page.waitForResponse(response => response.url().endsWith('/factory/history') &&

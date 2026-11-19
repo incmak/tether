@@ -16,7 +16,7 @@ import './Factory.css'
    levels: the floor (all phases), one phase, one task, one agent. Made for a big screen across the room, and it
    still works from 320 px wide, where each phase is a list.
    Read-only. The only action is "Open tab", which leaves the view for that tab.
-   Input: click, ctrl/pinch wheel to zoom in or out, arrows move focus to the nearest item in that direction,
+   Input: click, ctrl+wheel or a two-finger pinch to zoom in or out, arrows move focus to the nearest item in that direction,
    Enter zooms in, Esc or Backspace zooms out (a TV remote's Back key too). Phone Back zooms out one level. */
 
 const FACTORY_MS = 5000
@@ -27,6 +27,9 @@ const IDLE_MS = 60000          // ambient tour starts after a minute with no inp
 const TOUR_MS = 12000          // and shows each task this long
 const ANNOUNCE_MS = 15000      // at most one live-region message this often
 const FLOOR_TOKENS = 10        // tokens a station shows before "+N more"
+const PINCH_SPREAD_RATIO = 1.35
+const PINCH_SQUEEZE_RATIO = 0.75
+const PINCH_MIN_CHANGE = 40   // CSS pixels
 const HISTORY_KEY = 'tether-factory-history'
 const HISTORY_BATCH = 256 // factory_history.MAX_MOVES
 const TOUR_KEY = 'tether-factory-tour'
@@ -243,6 +246,72 @@ export function Factory({ api, panes, groups, onOpen, onClose }: Props) {
     box.addEventListener('wheel', wheel, { passive: false })
     return () => box.removeEventListener('wheel', wheel)
   }, [out])
+
+  // Touch pinch: use the starting midpoint and take one step until a finger lifts.
+  const pinch = useRef({
+    pointers: new Map<number, { x: number; y: number }>(),
+    start: null as { first: number; second: number; distance: number; item: HTMLElement | null } | null,
+  })
+  useEffect(() => {
+    const box = dialog.current
+    if (!box) return
+    const state = pinch.current
+    const { pointers } = state
+    const down = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || pointers.has(event.pointerId)) return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      if (pointers.size !== 2) return
+      const [[first, a], [second, b]] = pointers
+      const item = document.elementFromPoint((a.x + b.x) / 2, (a.y + b.y) / 2)?.closest<HTMLElement>('[data-zoom]')
+      state.start = {
+        first, second, distance: Math.hypot(a.x - b.x, a.y - b.y),
+        item: item && box.contains(item) ? item : null,
+      }
+      // Keep receiving touch events when zoom replaces the items under the fingers.
+      if (event.isTrusted) {
+        box.setPointerCapture(first)
+        box.setPointerCapture(second)
+      }
+    }
+    const move = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !pointers.has(event.pointerId)) return
+      pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+      const start = state.start
+      if (!start || pointers.size !== 2) return
+      const a = pointers.get(start.first), b = pointers.get(start.second)
+      if (!a || !b) return
+      const distance = Math.hypot(a.x - b.x, a.y - b.y)
+      if (Math.abs(distance - start.distance) < PINCH_MIN_CHANGE) return
+      if (distance >= start.distance * PINCH_SPREAD_RATIO) {
+        state.start = null
+        if (start.item && box.contains(start.item)) start.item.click()
+      } else if (distance <= start.distance * PINCH_SQUEEZE_RATIO) {
+        state.start = null
+        // A squeeze at the floor leaves Factory open.
+        if (depth > 0) out()
+      }
+    }
+    const end = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch') return
+      pointers.delete(event.pointerId)
+      if (pointers.size < 2) state.start = null
+    }
+    const touchmove = (event: TouchEvent) => {
+      if (event.touches.length >= 2 && event.cancelable) event.preventDefault()
+    }
+    box.addEventListener('pointerdown', down, { passive: true })
+    box.addEventListener('pointermove', move, { passive: true })
+    box.addEventListener('pointerup', end, { passive: true })
+    box.addEventListener('pointercancel', end, { passive: true })
+    box.addEventListener('touchmove', touchmove, { passive: false })
+    return () => {
+      box.removeEventListener('pointerdown', down)
+      box.removeEventListener('pointermove', move)
+      box.removeEventListener('pointerup', end)
+      box.removeEventListener('pointercancel', end)
+      box.removeEventListener('touchmove', touchmove)
+    }
+  }, [depth, out])
 
   // Tokens that change station travel there (FLIP). Reduced motion: they just appear in the new place.
   const places = useRef(new Map<string, { rect: DOMRect; phase: string }>())
