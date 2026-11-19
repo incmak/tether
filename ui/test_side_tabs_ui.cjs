@@ -222,17 +222,21 @@ async function fridayGrabWhileOpening(page, label) {
   await rest(page, '.live-bubble')
   await page.mouse.move(1, 1)
   await page.locator(FRIDAY).click()
-  await page.waitForTimeout(60)
+  // Hold the bloom at 200 of 300 ms, so the press lands while it runs, whatever the machine speed.
+  await page.waitForFunction(() => document.querySelector('.live-window')?.getAnimations().length > 0)
+  await page.evaluate(() => { for (const motion of document.querySelector('.live-window').getAnimations()) { motion.pause(); motion.currentTime = 200 } })
   const grip = await page.locator('.live-grip').boundingBox()
   const x = grip.x + grip.width / 2, y = grip.y + grip.height / 2
   await page.mouse.move(x, y)
   await page.mouse.down()
+  assert.ok(await page.evaluate(() => document.querySelector('.live-window').getAnimations().some(motion => motion.playState === 'paused')), `${label}: the bloom ended before the grab`)
+  await page.evaluate(() => { for (const motion of document.querySelector('.live-window').getAnimations()) motion.play() })
   await page.mouse.move(x - 45, y + 30, { steps: 5 })
   await page.mouse.up()
   await rest(page, '.live-window')
   const after = await page.locator('.live-window').boundingBox()
   const off = Math.hypot(after.x - target.x, after.y - target.y)
-  assert.ok(off <= 120, `${label}: a grab during the bloom moved the window ${off.toFixed(0)} px (from ${target.x},${target.y} to ${after.x},${after.y})`)
+  assert.ok(off >= 20 && off <= 120, `${label}: a grab during the bloom moved the window ${off.toFixed(0)} px (from ${target.x},${target.y} to ${after.x},${after.y})`)
 }
 
 async function main() {
