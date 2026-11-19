@@ -133,7 +133,7 @@
 .work-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(440px, 100%); max-width: none; height: 100dvh; max-height: none; padding: 0; border: 0; border-left: 1px solid var(--line); }
 .work-drawer[open] { display: flex; flex-direction: column; }
 @media (prefers-reduced-motion: no-preference) {
-  .work-drawer { transition: transform 260ms cubic-bezier(.32,.72,0,1); }
+  .work-drawer { transition: transform 260ms var(--motion-drawer); }
   @starting-style { .work-drawer[open] { transform: translateX(100%); } }
 }
 .work-drawer-head { flex: none; display: flex; align-items: flex-start; gap: 10px; padding: 16px 12px 12px 18px; border-bottom: 1px solid var(--line); }

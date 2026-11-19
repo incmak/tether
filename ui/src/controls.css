@@ -25,6 +25,9 @@
   --field: color-mix(in srgb, var(--hover) 70%, var(--surface));
   --danger: #b3261e;
   --focus: var(--accent);
+  --motion-out: cubic-bezier(0.23, 1, .32, 1);      /* entrances and exits */
+  --motion-drawer: cubic-bezier(0.32, .72, 0, 1);   /* sheets, drawers, released drags */
+  --motion-press: 160ms;                           /* press feedback */
 }
 @media (pointer: coarse) {
   /* Touch: the same shapes, sized for a finger. */
