@@ -23,6 +23,7 @@ export interface Prefs {
   lastPane: Record<string, string>
   liveReplyPreview: boolean
   voiceOff: boolean
+  fridayActs: boolean
   // Play a short chime when the mic is ready to hear you.
   voiceSound: boolean
   // Read each new reply aloud when the turn ends (this device only).
@@ -96,7 +97,7 @@ export interface ArchivedTab { thread: string | null; dir: string }
 export interface SidePin { pane: string; note?: string }
 const KEY = 'tmux-chat.prefs.v1'
 const CLEARED_KEEP = 2 * 86400  // Match CLEARED_KEEP in server/prefs_sync.py (seconds).
-const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', sideMode: 'catchup', activeOnly: false, seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hideHelpers: true, shownHelpers: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto', activity: false, activityAgents: false, uiUsage: true }
+const DEFAULTS: Prefs = { autoResume: true, pinned: [], sidePins: [], order: [], collapsed: { past: true }, expanded: {}, selected: null, lastPane: {}, voiceOff: false, fridayActs: true, voiceSound: true, readAloud: false, handsFree: false, agentBubble: true, headerSwipe: true, panelSizes: {}, panelsClosed: {}, liveReplyPreview: true, theme: 'system', scheme: 'claude', textSize: 'default', showPaths: false, tmuxWords: false, sort: 'smart', colors: {}, groups: [], groupOf: {}, groupBy: 'agent', attention: true, waitingOrder: 'oldest', sideMode: 'catchup', activeOnly: false, seen: {}, paneOrder: {}, drafts: {}, archived: {}, archivedTabs: {}, hideHelpers: true, shownHelpers: {}, hosts: [], layout: {}, look: DEFAULT_LOOK, myLook: null, imagePromptTuned: true, mainModel: 'auto', activity: false, activityAgents: false, uiUsage: true }
 
 function keptDrafts(drafts: Record<string, Draft>) {
   const now = Date.now() / 1000
@@ -120,7 +121,7 @@ function load(): Prefs {
   return { ...prefs, drafts: keptDrafts(prefs.drafts) }
 }
 
-const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hideHelpers', 'shownHelpers', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'activity', 'activityAgents', 'uiUsage'] as const
+const SYNCED = ['pinned', 'sidePins', 'order', 'paneOrder', 'sort', 'colors', 'groups', 'groupOf', 'groupBy', 'seen', 'collapsed', 'showPaths', 'tmuxWords', 'liveReplyPreview', 'voiceOff', 'fridayActs', 'voiceSound', 'theme', 'scheme', 'drafts', 'archived', 'archivedTabs', 'hideHelpers', 'shownHelpers', 'hosts', 'layout', 'autoResume', 'attention', 'waitingOrder', 'imagePromptTuned', 'mainModel', 'activity', 'activityAgents', 'uiUsage'] as const
 type Shared = Partial<Pick<Prefs, typeof SYNCED[number]>>
 const PENDING_KEY = 'tmux-chat.prefs.pending'
 

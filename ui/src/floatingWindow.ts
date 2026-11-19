@@ -98,7 +98,7 @@ const keyStep = (event: React.KeyboardEvent, shift = true): Point | null => {
 export function useFloatingWindow(storageKey: string, options: Options): {
   ref: React.RefCallback<HTMLDivElement>
   mode: FloatMode
-  setMode: (mode: FloatMode) => void
+  setMode: (mode: FloatMode, bubble?: Point) => void
   rect: Rect
   bubble: Point
   moving: boolean
@@ -135,12 +135,12 @@ export function useFloatingWindow(storageKey: string, options: Options): {
     setPlace(next)
     if (commit) savePlace(storageKey, next)
   }
-  const setMode = (mode: FloatMode) => {
+  const setMode = (mode: FloatMode, at?: Point) => {
     interrupt()
     setMoving(false)
     if (element.current) element.current.style.transition = ''
     const p = current.current
-    update({ ...p, mode, rect: fitRect(p.rect, minW, minH), bubble: fitBubble(p.bubble, size) }, true)
+    update({ ...p, mode, rect: fitRect(p.rect, minW, minH), bubble: fitBubble(at ?? p.bubble, size) }, true)
   }
 
   useEffect(() => {
