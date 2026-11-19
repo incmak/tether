@@ -298,6 +298,59 @@ case("h-read-asked-me", "read_reply", "holdout", "what questions did docs site a
 case("h-ask-other-session", "send_direct", "holdout", "get the api server session to rebase on main",
      {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}}, state=QS_STATE)
 
+# ---- Call audit 19 Nov 2026 (B339; fixes 1-3, 5-10 in tether-notes call-audit-2026-11-19.md) ----
+AGENCY = ["Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions.",
+          "It should be like an environment where I talk to Friday.",
+          "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"]
+AGENCY_PROMPT = r"(?is)(?=.*\b(toggle|setting|enabl\w*|switch\w*))(?=.*\b(act\w*|interact\w*|control\w*|agen(cy|tic)))"
+case("log-agency-ask-it", "split_turn", "dev", AGENCY,
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": AGENCY_PROMPT}},
+     "log", history=say("Can you switch to that tab within Tither?",
+                        "I cannot show or open a chat in the window, but I have switched your target to Automation tether."),
+     state=AUTO_STATE)
+C_CTX = (turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
+              "read_last_reply", {"chat": AUTO},
+              {"chat": AUTO, "text": "B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\nYou still have 2 open decisions:\nAuto-merge: \"C\" keeps Observe mode.\nFactory floor: grill questions Q1 to Q5.\n\nNext: reply \"C, yes to all\", or give the numbers you want changed.\n\nNeeds you: yes", "truncated": False},
+              "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions.", "c1")
+         + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
+         + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
+case("log-keep-that-readback", "readback", "dev", "Okay, let's keep that.",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": r"(?is)^(?!.*\ball\b).*\bC\b"}}, "log",
+     history=C_CTX, state=AUTO_STATE)
+case("log-resend-long-text", "send_direct", "dev",
+     "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test",
+                                        "prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
+     "log", history=[{"role": "user", "content": part} for part in AGENCY] + [
+         {"role": "assistant", "content": None, "tool_calls": [call("r1", "send_to_chat",
+             {"chat": "friday test", "prompt": "What did you do about it?"})]},
+         {"role": "tool", "tool_call_id": "r1",
+          "content": json.dumps({"ok": True, "chat": "friday test", "delivery": "submitted"})},
+         {"role": "assistant", "content": "Sent to friday test."}])
+case("log-urgent-q1", "read_reply", "dev", "Okay so go question by question. Start with question one.",
+     {"tool": None, "any_tool": ["read_last_reply"],
+      "reply": CANT + r"|not in|doesn't (say|include|list)|only says|ask (it|the chat)"}, "log",
+     history=turn("What questions has the urgent call chat asked me?", "read_last_reply", {"chat": "Urgent Call Spec"},
+                  {"chat": "Urgent Call Spec", "text": "Round 1 (Q1-Q4) still waits for your answers. Answer Q1-Q4 above.", "truncated": False},
+                  "It is waiting for your answers to four questions.", "q1"))
+case("log-whats-happening-session", "read_reply", "dev",
+     "Uh ignore ignore it. It was a dumb ex uh agent. Uh so Friday, uh what's been happening lately? Like Uh what's been happening in the Friday test session.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)friday test"}}, "log")
+case("log-automation-data", "misheard", "dev", "Okay what about the automation data session?",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)automation"}}, "log",
+     history=say("Hi Friday.", "Hi, I am listening."), state=dict(STATE, busy=[AUTO]))
+case("log-echo-ignore", "no_tool", "dev",
+     "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
+     {"tool": None}, "log")
+case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that?",
+     {"tool": None, "reply": r"(?i)recommend|suggest|propos|advis|it says|its next step"}, "log",
+     history=C_CTX[:-2], state=AUTO_STATE)
+case("log-ask-friday-test-new-tab", "send_direct", "dev",
+     "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
+     history=say("The chat already has the first question. Why are you not able to see it?",
+                 "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
+
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:
     json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)

@@ -51,12 +51,22 @@ SYSTEM_PROMPT = (
     'Idle chats are open, not running. Say running or working only for busy chats. '
     'To list the chats in one session, call list_chats with session. '
     'Speak about chats only from current state or tool results. Never invent a status, result, or file. '
+    'Never state what a chat asked or said unless a tool result in this call holds that text. '
+    'If the reply you read does not hold it, say so and offer to ask the chat. '
+    'When asked what is happening in a chat or session, call read_last_reply for that chat, '
+    'or for the most recent chat in that session, and summarize it. Do not list chat names. '
+    'If no session matches a name, match the closest chat name. '
+    'If asked what you think about a chat\'s question, give the chat\'s own suggestion from its reply and say it is the chat\'s. '
     'If unsure, say you do not know or use the relevant tool. '
     'If the user asks what a chat said or replied, call read_last_reply. '
     'If read_last_reply returns truncated, call it again with next_offset and reply_id before answering about the missing part; '
     'never say the reply cut off while truncated is true. '
     'If it returns new_reply, the chat replied again; use the new text. '
     'Before send_to_chat, turn the user request into a clear, complete prompt for the coding agent. '
+    'Build it from everything the user said about it since your last reply, not only the last sentence. '
+    'Replace it, that, he and this with what they name, and keep the user\'s details. Never send a bare question with a pronoun. '
+    'If the user says you sent the wrong or short text, send the full text the user meant. '
+    'In a question about your own mistake, it or Friday means you, the voice assistant, not the chat. '
     'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
     'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
@@ -73,7 +83,7 @@ SYSTEM_PROMPT = (
     'You cannot show, open, or bring up a chat in the Tether window. switch_chat only sets where sends go, '
     'and open_panel only opens panels. If asked to show a chat, say you cannot, and offer to read its last reply. '
     'A name that sounds close to one in state, such as ape server for api-server, is a match; use it. Only if a session or chat name matches nothing, say so and ask which one; do not list other chats. '
-    'Outside your tools (GitHub, email, accounts), say you cannot do it directly, even when the user said send; offer '
+    'Outside your tools (GitHub, email, accounts), call no tool in that turn: say you cannot do it directly, even when the user said send; offer '
     'send_to_chat to a named chat or new_chat. Read that prompt back and wait for yes. '
     'Use answer_approval only when a chat in state needs approval and the user clearly said approve or yes, '
     'or deny or no, to that approval in this turn. A yes to your read-back is not an approval. '
@@ -95,7 +105,8 @@ BARGE_IN_WORDS = 3
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|prompt|instruct|message|forward)\b'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
-    r'|\bget\s+(?:it|them)\s+to\b', re.I)
+    r'|\bget\s+(?:it|them)\s+to\b'
+    r'|\banswer\s+(?:it|them)\b|\breply\s+(?:to\s+(?:it|them)|with)\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')

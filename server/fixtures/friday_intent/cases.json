@@ -2057,6 +2057,359 @@
     ],
     "target": "release-notes"
    }
+  },
+  {
+   "id": "log-agency-ask-it",
+   "group": "split_turn",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Can you switch to that tab within Tither?"
+    },
+    {
+     "role": "assistant",
+     "content": "I cannot show or open a chat in the window, but I have switched your target to Automation tether."
+    }
+   ],
+   "user": [
+    "Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions.",
+    "It should be like an environment where I talk to Friday.",
+    "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"
+   ],
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)friday test",
+     "prompt": "(?is)(?=.*\\b(toggle|setting|enabl\\w*|switch\\w*))(?=.*\\b(act\\w*|interact\\w*|control\\w*|agen(cy|tic)))"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
+   "id": "log-keep-that-readback",
+   "group": "readback",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Automation tether . Can we have\\u2026\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "{\"chat\": \"Automation tether . Can we have\\u2026\", \"text\": \"B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\\n\\nYou still have 2 open decisions:\\nAuto-merge: \\\"C\\\" keeps Observe mode.\\nFactory floor: grill questions Q1 to Q5.\\n\\nNext: reply \\\"C, yes to all\\\", or give the numbers you want changed.\\n\\nNeeds you: yes\", \"truncated\": false}"
+    },
+    {
+     "role": "assistant",
+     "content": "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions."
+    },
+    {
+     "role": "user",
+     "content": "So what is the auto-most question?"
+    },
+    {
+     "role": "assistant",
+     "content": "It asks whether to keep Observe mode with option C."
+    },
+    {
+     "role": "user",
+     "content": "Do you think we should keep that?"
+    },
+    {
+     "role": "assistant",
+     "content": "I cannot judge your design choices, but option C keeps Observe mode active."
+    }
+   ],
+   "user": "Okay, let's keep that.",
+   "expect": {
+    "tool": null,
+    "readback_chat": "Automation tether . Can we have\u2026",
+    "args": {
+     "prompt": "(?is)^(?!.*\\ball\\b).*\\bC\\b"
+    }
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
+   "id": "log-resend-long-text",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions."
+    },
+    {
+     "role": "user",
+     "content": "It should be like an environment where I talk to Friday."
+    },
+    {
+     "role": "user",
+     "content": "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "r1",
+       "type": "function",
+       "function": {
+        "name": "send_to_chat",
+        "arguments": "{\"chat\": \"friday test\", \"prompt\": \"What did you do about it?\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "r1",
+     "content": "{\"ok\": true, \"chat\": \"friday test\", \"delivery\": \"submitted\"}"
+    },
+    {
+     "role": "assistant",
+     "content": "Sent to friday test."
+    }
+   ],
+   "user": "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)friday test",
+     "prompt": "(?is)(?=.*\\bfriday\\b)(?=.*\\b(toggle|setting|agen(cy|tic)|interact\\w*|act\\w*))"
+    }
+   }
+  },
+  {
+   "id": "log-urgent-q1",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "What questions has the urgent call chat asked me?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "q1",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Urgent Call Spec\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "q1",
+     "content": "{\"chat\": \"Urgent Call Spec\", \"text\": \"Round 1 (Q1-Q4) still waits for your answers. Answer Q1-Q4 above.\", \"truncated\": false}"
+    },
+    {
+     "role": "assistant",
+     "content": "It is waiting for your answers to four questions."
+    }
+   ],
+   "user": "Okay so go question by question. Start with question one.",
+   "expect": {
+    "tool": null,
+    "any_tool": [
+     "read_last_reply"
+    ],
+    "reply": "(?i)can(?:'t|not| ?not)|unable|don't have|no way|not able|isn't something|not in|doesn't (say|include|list)|only says|ask (it|the chat)"
+   }
+  },
+  {
+   "id": "log-whats-happening-session",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [],
+   "user": "Uh ignore ignore it. It was a dumb ex uh agent. Uh so Friday, uh what's been happening lately? Like Uh what's been happening in the Friday test session.",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)friday test"
+    }
+   }
+  },
+  {
+   "id": "log-automation-data",
+   "group": "misheard",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Hi Friday."
+    },
+    {
+     "role": "assistant",
+     "content": "Hi, I am listening."
+    }
+   ],
+   "user": "Okay what about the automation data session?",
+   "expect": {
+    "tool": "read_last_reply",
+    "args": {
+     "chat": "(?i)automation"
+    }
+   },
+   "state": {
+    "busy": [
+     "Automation tether . Can we have\u2026"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "friday test"
+   }
+  },
+  {
+   "id": "log-echo-ignore",
+   "group": "no_tool",
+   "split": "dev",
+   "source": "log",
+   "history": [],
+   "user": "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
+   "expect": {
+    "tool": null
+   }
+  },
+  {
+   "id": "log-keep-option-c",
+   "group": "read_reply",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "read_last_reply",
+        "arguments": "{\"chat\": \"Automation tether . Can we have\\u2026\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "{\"chat\": \"Automation tether . Can we have\\u2026\", \"text\": \"B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\\n\\nYou still have 2 open decisions:\\nAuto-merge: \\\"C\\\" keeps Observe mode.\\nFactory floor: grill questions Q1 to Q5.\\n\\nNext: reply \\\"C, yes to all\\\", or give the numbers you want changed.\\n\\nNeeds you: yes\", \"truncated\": false}"
+    },
+    {
+     "role": "assistant",
+     "content": "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions."
+    },
+    {
+     "role": "user",
+     "content": "So what is the auto-most question?"
+    },
+    {
+     "role": "assistant",
+     "content": "It asks whether to keep Observe mode with option C."
+    }
+   ],
+   "user": "Do you think we should keep that?",
+   "expect": {
+    "tool": null,
+    "reply": "(?i)recommend|suggest|propos|advis|it says|its next step"
+   },
+   "state": {
+    "busy": [
+     "login-fix"
+    ],
+    "idle": 5,
+    "needs": [
+     {
+      "chat": "deploy-check",
+      "needs": "Allow Bash command: npm test?"
+     }
+    ],
+    "target": "Automation tether . Can we have\u2026"
+   }
+  },
+  {
+   "id": "log-ask-friday-test-new-tab",
+   "group": "send_direct",
+   "split": "dev",
+   "source": "log",
+   "history": [
+    {
+     "role": "user",
+     "content": "The chat already has the first question. Why are you not able to see it?"
+    },
+    {
+     "role": "assistant",
+     "content": "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"
+    }
+   ],
+   "user": "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
+   "expect": {
+    "tool": "send_to_chat",
+    "args": {
+     "chat": "(?i)friday test",
+     "prompt": "(?i)read|reply|response|cut|trunc"
+    }
+   }
   }
  ]
 }

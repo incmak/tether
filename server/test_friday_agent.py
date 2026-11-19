@@ -397,9 +397,11 @@ class FridayRulesTests(unittest.TestCase):
         for text in ('tell ci-audit to fix the flake', 'SEND this', 'ask it', 'prompt it',
                      'instruct it', 'message ci-audit', 'forward this', 'have it fix it',
                      'have them fix it', 'have ci-audit fix it', 'get it to fix it',
-                     'get them to fix it'):
+                     'get them to fix it', 'answer it, keep option C', 'reply to it with C',
+                     'reply with C'):
             self.assertIsNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
-        for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish'):
+        for text in ('sender', 'telling', 'messaged', 'forget it to', 'I have a fish',
+                     'what was the answer', 'did it reply'):
             self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', text, set()))
         for readback in ('Shall I send ci-audit the fix?', 'Should I ask it: Fix the flake.?'):
             for yes in ('yes', 'YEP!', 'go ahead'):
@@ -427,6 +429,7 @@ class FridayRulesTests(unittest.TestCase):
         self.assertIsNone(check('Yes, please do. And for the factory floor, check the alerts.',
                                 prompt='Review the full context and check the factory floor alerts.'))
         self.assertIsNotNone(check("No, don't send it."))
+        self.assertIsNotNone(check("No, don't answer it."))
         self.assertIsNotNone(check('Yes, but no.'))
         self.assertIsNotNone(check(chat='Different chat'))
         self.assertIsNotNone(check(pending=None, chat='Automation tether'))
