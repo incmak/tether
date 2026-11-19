@@ -1,10 +1,13 @@
 """Test the verify server against decoys and a fresh private tmux."""
+from collections import Counter
 import errno
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
+from itertools import islice
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -15,6 +18,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 import urllib.error
+from urllib.parse import parse_qs
 import urllib.request
 from unittest.mock import Mock, patch
 
@@ -67,6 +71,7 @@ class Configuration(unittest.TestCase):
         script = r'''
 import os, signal, sys, tempfile
 from pathlib import Path
+import re
 import verify_server as v
 
 when, signum, dist = sys.argv[1:]
@@ -177,7 +182,296 @@ BLOCKED_REQUESTS = [
 ]
 
 
+UI_SRC = HERE.parent / 'ui/src'
+CALL = re.compile(
+    r'\b(?<!function )(?<!wakeLock\.)(api|baseApi|request|requestIfChanged|withApproval|usePoll|'
+    r'fetch|reach|EventSource|openLive|xhr\.open|usePolling|write|act)\s*(?:<(?:[^\n]*?|[^()]*?)>\s*)?\('
+)
+JS_TOKEN = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|\x60|//[^\n]*|/\*.*?\*/|[()[\]{},]""", re.S)
+TEMPLATE_TOKEN = re.compile(r'\\.|\x60|\$\{', re.S)
+ABSOLUTE_PATH = re.compile(re.escape(verify_server.API_PREFIX)
+                           + r'(?:[\w/.-]|\$\{[^}\n]*\})*(?:\?(?:[\w%&=.+/-]|\$\{[^}\n]*\})*)?')
+METHOD = re.compile(r"""\bmethod\s*:\s*['"]([A-Z]+)['"]""")
+
+
+# Keys identify a computed call by file, method, helper and URL expression.
+# Values are its concrete routes, or () for a forwarding helper or non-API call.
+COMPUTED_ROUTES = {
+    # Action names come from the caller's finite set of choices.
+    ('AccountLogin.tsx', 'POST', 'api', '`login/${action}`'): ('login/start', 'login/code', 'login/cancel'),
+    ('AgentBrowser.tsx', 'POST', 'api', '`browser/signed/${path}`'): (
+        'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss'),
+    ('AgentBrowser.tsx', 'POST', 'api', 'path'): ('browser/agents', 'browser/ask/dismiss', 'browser/agents/setup'),
+    ('BrowserPanel.tsx', 'POST', 'api', "windowView ? 'browser/window/input' : 'browser/input'"): (
+        'browser/window/input', 'browser/input'),
+    ('ExplorerPhone.tsx', 'POST', 'write', '`files/${mode}`'): ('files/copy', 'files/move'),
+    ('Project.tsx', 'POST', 'api', '`projects/${path}`'): (
+        'projects/note', 'projects/note-delete', 'projects/pin', 'projects/unpin',
+        'projects/instructions', 'projects/seen', 'projects/budget'),
+    ('attention.ts', 'POST', 'api', '`attention/${action}`'): ('attention/handled', 'attention/snooze', 'attention/opened'),
+    ('reminders.ts', 'POST', 'api', '`${PATH}/${action}`'): (
+        'reminders/add', 'reminders/edit', 'reminders/done', 'reminders/reopen', 'reminders/snooze',
+        'reminders/delete', 'reminders/restore'),
+    # These variables or functions supply the path and possibly its query.
+    ('ActivityLog.tsx', 'GET', 'api', 'path'): ('audit',),
+    ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, next)'): ('audit',),
+    ('Autonomy.tsx', 'GET', 'api', 'path'): ('autonomy',),
+    ('BrowserPanel.tsx', 'GET', 'EventSource',
+     'windowView ? `/mobile/api/browser/window?browser=signed&w=${streamWidth}&h=${streamHeight}&sid=${sid}`'
+     ' : `/mobile/api/browser/stream?${query}&sid=${sid}`'): ('browser/window', 'browser/stream'),
+    ('Chat.tsx', 'GET', 'usePolling', 'streamPath'): ('stream',),
+    ('ClaudeAdvisor.tsx', 'GET', 'api', 'path'): ('claude-advisor',),
+    ('CodexLevel.tsx', 'GET', 'api', 'path'): ('codex-level',),
+    ('CommitGate.tsx', 'GET', 'api', 'path'): ('commit-gate',),
+    ('Factory.tsx', 'GET', 'usePoll', "agent.pane.agent === 'shell' ? null : `footer?session=${id}`"): ('footer',),
+    ('Project.tsx', 'GET', 'api',
+     'groupId ? `groups/context?session=${encodeURIComponent(session.id)}&group=${encodeURIComponent(groupId)}`'
+     ' : `projects/project?session=${encodeURIComponent(session.id)}`'): ('groups/context', 'projects/project'),
+    ('Sidebar.tsx', 'GET', 'api', "live ? 'usage?live=1' : 'usage'"): ('usage?live=1', 'usage'),
+    ('ToolGroup.tsx', 'GET', 'api', 'source'): ('tool', 'subagent-tool'),
+    ('Worktree.tsx', 'GET', 'api', "`worktree-info${session ? `?session=${encodeURIComponent(session)}` : ''}`"): (
+        'worktree-info',),
+    # These URLs come from filesUrl, sizeUrl or the view's file URL.
+    ('Chat.tsx', 'GET', 'fetch', 'url'): ('file',),
+    ('CreateFields.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('CreateFields.tsx', 'GET', 'api', "filesUrl.list(folder, false, 'name', true)"): ('files/list',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(target.select)'): ('files/stat',),
+    ('Explorer.tsx', 'POST', 'api', 'filesUrl.secrets()'): ('files/secrets',),
+    ('Explorer.tsx', 'GET', 'api', 'url'): ('files/list', 'files/search'),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(detailPath)'): ('files/stat',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.preview(detailPath)'): ('files/preview',),
+    ('Explorer.tsx', 'GET', 'api', 'filesUrl.stat(cwd)'): ('files/stat',),
+    ('ExplorerPhone.tsx', 'POST', 'api', 'filesUrl.secrets()'): ('files/secrets',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'filesUrl.places()'): ('files/places',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'url'): ('files/list', 'files/search'),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'sizeUrl(paths)'): ('files/size',),
+    ('ExplorerPhone.tsx', 'GET', 'api', "filesUrl.list(folder, hidden, 'name', true)"): ('files/list',),
+    ('ExplorerPhone.tsx', 'GET', 'api', 'filesUrl.preview(row.full)'): ('files/preview',),
+    ('ExplorerWrites.tsx', 'GET', 'api', "filesUrl.list(folder, false, 'name', true)"): ('files/list',),
+    ('OfficeViewer.tsx', 'GET', 'reach', 'file.url'): ('file', 'files/raw'),
+    ('TextViewer.tsx', 'GET', 'reach', 'url'): ('file', 'files/raw'),
+    ('panelProps.tsx', 'GET', 'fetch', 'url'): ('file',),
+    # These paths use named constants, including Share's API base and encoded IDs.
+    ('Backlog.tsx', 'GET', 'api', 'PATH'): ('projects/backlog',),
+    ('Backlog.tsx', 'POST', 'api', 'PATH'): ('projects/backlog',),
+    ('CommandMenu.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('Factory.tsx', 'GET', 'usePoll', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-add`'): ('projects/backlog-add',),
+    ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-start`'): ('projects/backlog-start',),
+    ('MacPairing.tsx', 'GET', 'reach', 'EXTENSION_ZIP'): ('browser/extension/download',),
+    ('Share.tsx', 'GET', 'fetch', 'rawUrl(file.id)'): ('share/raw/{}',),
+    ('backlogNews.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('fridayReminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
+    ('fridayReminders.ts', 'POST', 'api', '`${PATH}/add`'): ('reminders/add',),
+    ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('quickBacklog.ts', 'POST', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('reminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
+    ('shareApi.ts', 'GET', 'reach', '`${BASE}raw/${encodeURIComponent(id)}?text=1`'): ('share/raw/{}',),
+    ('shareApi.ts', 'POST', 'xhr.open', '`${BASE}upload`'): ('share/upload',),
+    ('shareApi.ts', 'POST', 'reach', '`${BASE}thumb/${encodeURIComponent(id)}`'): ('share/thumb/{}',),
+    ('shareApi.ts', 'POST', 'xhr.open', '`${BASE}uploads/${encodeURIComponent(id)}?offset=${offset}`'): ('share/uploads/{}',),
+    ('shareApi.ts', 'POST', 'request', '`share/uploads/${encodeURIComponent(id)}/cancel`'): ('share/uploads/{}/cancel',),
+    ('shareApi.ts', 'GET', 'request', '`share/uploads/${encodeURIComponent(session.id)}`'): ('share/uploads/{}',),
+    ('shareApi.ts', 'GET', 'fetch', 'url'): ('share/raw/{}',),
+    ('work.ts', 'GET', 'api', 'BOARD_PATH'): ('work/board',),
+    # Forwarding helpers. Their call sites supply the route and are scanned separately.
+    ('App.tsx', 'POST', 'request', 'path'): (),
+    ('BrowserPanel.tsx', 'POST', 'baseApi', "body === undefined ? `${path}${path.includes('?') ? '&' : '?'}browser=${which}` : path"): (),
+    ('BrowserPanel.tsx', 'POST', 'api', 'path'): (),
+    ('Chat.tsx', 'POST', 'api', 'path'): (),
+    ('ExplorerPhone.tsx', 'POST', 'reach', '`/mobile/api/${path}`'): (),
+    ('Factory.tsx', 'GET', 'api', 'path'): (),
+    ('QuickReply.tsx', 'POST', 'api', 'path'): (),
+    ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): (),
+    ('api.ts', 'GET', 'fetch', 'input'): (),
+    ('approval.ts', 'POST', 'api', 'path'): (),
+    ('hooks.ts', 'GET', 'EventSource', "`/mobile/api/${typeof streamPath === 'function' ? streamPath(shown.current) : streamPath}`"): (),
+    # These calls use another origin, a static asset, or the unrelated RegExp helper.
+    ('BrowserPanel.tsx', 'GET', 'fetch', 'liveSrc'): (),
+    ('HostMenu.tsx', 'GET', 'fetch', "origin + '/chat/icon.svg'"): (),
+    ('HostMenu.tsx', 'GET', 'reach', 'url'): (),
+    ('lazyPanels.ts', 'GET', 'fetch', 'href'): (),
+    ('reviewText.ts', 'POST', 'request', '`${NAME}?`'): (),
+    ('reviewText.ts', 'POST', 'request', 'NAME'): (),
+}
+
+# Track repeated shapes so copying a computed call also needs an explicit decision.
+REPEATED_COMPUTED = {
+    ('Backlog.tsx', 'POST', 'api', 'PATH'): 3,
+    ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): 2,
+    ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): 2,
+    ('approval.ts', 'POST', 'api', 'path'): 2,
+    ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): 3,
+}
+
+ABSOLUTE_EXCEPTIONS = {
+    # AppIdentity's preview constant is joined with the two image names.
+    ('AppIdentity.tsx', 'app-identity/preview/'): (
+        ('GET', 'app-identity/preview/art.png'), ('GET', 'app-identity/preview/draft.png')),
+    # Share's BASE is a prefix. The calls above cover the writes and raw GETs.
+    ('shareApi.ts', 'share/'): (('GET', 'share/raw/{}'), ('GET', 'share/thumb/{}')),
+    # SmallWebRTCTransport uses POST for the offer and PATCH for trickled ICE.
+    ('fridayAgent.ts', 'live/offer'): (('POST', 'live/offer'), ('PATCH', 'live/offer')),
+}
+
+
+def js_arguments(source, start, closing=')'):
+    """Split call arguments, keeping commas in strings, templates and groups."""
+    stack = []
+    position = start
+    while True:
+        while match := JS_TOKEN.search(source, position):
+            token = match[0]
+            position = match.end()
+            if token == '`':
+                _, position = template_path(source, position)
+            elif token in ('(', '[', '{'):
+                stack.append({'(': ')', '[': ']', '{': '}'}[token])
+            elif stack:
+                if token == stack[-1]:
+                    stack.pop()
+            elif token in (',', closing):
+                break
+        else:
+            return
+        yield source[start:match.start()].strip(), position
+        start = position
+        if token == closing:
+            return
+
+
+def template_path(source, start):
+    """Keep the literal parts and represent each interpolation with {}."""
+    parts = []
+    position = start
+    while match := TEMPLATE_TOKEN.search(source, position):
+        position = match.end()
+        if match[0] == '`':
+            return ''.join(parts) + source[start:match.start()], position
+        if match[0] == '${':
+            parts.extend((source[start:match.start()], '{}'))
+            for _, position in js_arguments(source, position, closing='}'):
+                pass
+            start = position
+    return ''.join(parts) + source[start:], len(source)
+
+
+def literal_path(argument):
+    if argument.startswith('`'):
+        value, end = template_path(argument, 1)
+        return value if end == len(argument) and argument.endswith('`') else None
+    if re.fullmatch(JS_TOKEN, argument) and argument[:1] in ("'", '"'):
+        return argument[1:-1]
+    return None
+
+
+def route_key(path):
+    # Most query strings only select fixture data. This one changes the route's safety.
+    route, _, query = path.partition('?')
+    if route == 'usage' and '1' in parse_qs(query).get('live', ()):
+        return 'usage?live=1'
+    return route
+
+
+def ui_route_calls(file, source):
+    """Scan the current URL forms without a TypeScript toolchain."""
+    # Strip documentation without shifting the source lines used for diagnostics.
+    source = re.sub(r'(?m)(?:^[ \t]*|[ \t]+)//(?:[ \t]|$)[^\n]*|^[ \t]*/\*[\s\S]*?\*/',
+                    lambda match: re.sub(r'[^\n]', ' ', match[0]), source)
+    relative = {'api', 'baseApi', 'request', 'requestIfChanged', 'withApproval', 'usePoll', 'usePolling'}
+    wrappers = {'BrowserPanel.tsx': {'act'}, 'Chat.tsx': {'write'}, 'QuickReply.tsx': {'write'},
+                'ExplorerPhone.tsx': {'write'}}.get(file, set())
+    relative.update(wrappers)
+    handled = []
+    for match in CALL.finditer(source):
+        helper = match[1]
+        if helper in {'write', 'act'} and helper not in wrappers:
+            continue
+        args = list(islice(js_arguments(source, match.end()), 4 if helper in relative else 2))
+        index = 2 if helper == 'usePolling' else int(helper in {'withApproval', 'usePoll', 'xhr.open'})
+        if len(args) <= index or not args[index][0]:
+            continue
+        argument, end = args[index]
+        if helper == 'usePolling' and argument in ('undefined', 'null'):
+            continue
+        method = 'GET'
+        if helper in ('api', 'baseApi', 'request'):
+            method = 'POST' if len(args) > 1 and args[1][0] != 'undefined' else 'GET'
+            if len(args) > 3 and literal_path(args[3][0]):
+                method = literal_path(args[3][0])
+        elif helper == 'withApproval' or helper in wrappers:
+            method = 'POST'
+        elif helper == 'xhr.open':
+            method = literal_path(args[0][0])
+        elif helper in ('fetch', 'reach') and len(args) > 1:
+            method_match = METHOD.search(args[1][0])
+            if method_match:
+                method = method_match[1]
+        line = source.count('\n', 0, match.start()) + 1
+        path = literal_path(argument)
+        if helper not in relative and path is not None:
+            prefix, found, path = path.partition(verify_server.API_PREFIX)
+            if not found:
+                if not prefix.startswith('/') or prefix.startswith('//'):
+                    yield line, method, None, (helper, argument)
+                continue
+        handled.append((match.end() if not index else args[index - 1][1], end))
+        if path is None or '{}' in route_key(path):
+            yield line, method, None, (helper, ' '.join(argument.split()))
+        else:
+            yield line, method, route_key(path), None
+
+    # Direct links and URLs set on DOM attributes, as well as request helpers that
+    # take absolute URLs. Scan them even if there is no fetch call at the site.
+    for match in ABSOLUTE_PATH.finditer(source):
+        if any(start <= match.start() < end for start, end in handled):
+            continue
+        path = match[0][len(verify_server.API_PREFIX):]
+        line = source.count('\n', 0, match.start()) + 1
+        path = route_key(re.sub(r'\$\{[^}\n]*\}', '{}', path))
+        if (file, path) in ABSOLUTE_EXCEPTIONS:
+            yield line, 'GET', None, ('URL literal', path)
+        else:
+            yield line, 'GET', path, None
+
+
 class RouteGate(unittest.TestCase):
+    def test_ui_api_routes_are_classified(self):
+        files = sorted(path for path in UI_SRC.rglob('*')
+                       if path.suffix in {'.ts', '.tsx', '.js', '.jsx', '.css', '.html'})
+        self.assertTrue(files, f'No UI sources found in {UI_SRC}')
+        seen = Counter()
+        problems = []
+        for file in files:
+            relative = file.relative_to(UI_SRC)
+            for line, method, path, computed in ui_route_calls(relative.as_posix(), file.read_text(encoding='utf-8')):
+                location = f'ui/src/{relative}:{line}'
+                if computed:
+                    helper, expression = computed
+                    key = (relative.as_posix(), method, helper, expression)
+                    seen[key] += 1
+                    if helper == 'URL literal' and seen[key] == 1:
+                        cases = ABSOLUTE_EXCEPTIONS[(relative.as_posix(), expression)]
+                    elif key in COMPUTED_ROUTES and seen[key] <= REPEATED_COMPUTED.get(key, 1):
+                        cases = [(method, route) for route in COMPUTED_ROUTES[key]]
+                    else:
+                        problems.append(f'{location}: unclassified computed {method} {helper}({expression})')
+                        continue
+                else:
+                    cases = [(method, path)]
+                for verb, route in cases:
+                    target = verify_server.API_PREFIX + route
+                    allowed = (verify_server.allowed_route(verb, target)
+                               or verb == 'GET' and route.partition('?')[0] in verify_server.FIXTURES)
+                    refused = route in verify_server.REFUSED.get(verb, ())
+                    if allowed == refused:
+                        problem = 'both allowed and refused' if allowed else 'unclassified'
+                        problems.append(f'{location}: {problem} {verb} {target}')
+        self.assertFalse(problems, 'Classify UI requests in verify_server or list the computed call in this test:\n'
+                         + '\n'.join(problems))
+
     def test_rejects_before_method_dispatch(self):
         class Base(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -226,6 +520,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 from unittest.mock import patch
 import server
 import verify_server
@@ -293,6 +588,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from unittest.mock import patch
@@ -359,6 +655,7 @@ with (patch('http.server.ThreadingHTTPServer', InMemoryServer),
 GUARDED = r'''
 import os, signal, socket, subprocess, sys
 from pathlib import Path
+import re
 import verify_server
 
 root, outside, dist = map(Path, sys.argv[1:4])
@@ -441,6 +738,7 @@ class Folders(unittest.TestCase):
         script = r"""
 import os, sys
 from pathlib import Path
+import re
 import verify_server
 root, decoy = Path(sys.argv[1]), sys.argv[2]
 sys.path.insert(0, str(verify_server.SERVER))
@@ -605,6 +903,7 @@ DECOYS = r'''
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json, os, signal, subprocess, threading, urllib.error, urllib.request
 from pathlib import Path
+import re
 import server, verify_server
 
 root = Path(os.environ['HOME']).parent

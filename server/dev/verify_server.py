@@ -63,6 +63,73 @@ FIXTURES = {
     'host': lambda _pane: {'name': 'Fixture', 'resources': False, 'terminal': False, 'office': False},
     'reminders': lambda _pane: {'reminders': [], 'deleted': [], 'now': time.time()},
 }
+# The UI calls these routes, but the fixture server leaves them off. This list
+# documents the decision for the source scan. The request gate stays default-deny.
+# {} marks an ID in a reviewed path shape. It never grants runtime access.
+REFUSED = {
+    'GET': {
+        # These inspect host services, credentials, processes, or live account data.
+        'accounts', 'browser/extension/devices', 'browser/extension/download',
+        'browser/live', 'browser/stream', 'browser/tabs', 'browser/window',
+        'dev-preview', 'foundry-spend', 'host-stats', 'live/agent', 'live/brief',
+        'login/state', 'passkeys', 'upkeep/ops', 'upkeep/ops/note', 'upkeep/prune', 'usage?live=1',
+        # These browse or expose files outside the fixture chat transcript.
+        'file', 'files', 'files/list', 'files/places', 'files/preview', 'files/raw',
+        'files/search', 'files/size', 'files/stat', 'files/zip', 'office/copy',
+        'repo/changes', 'repo/diff', 'repo/tree', 'worktree-info',
+        # The fixture has no Share store, generated assets, or attached media.
+        'app-identity/generate', 'app-identity/preview/art.png', 'app-identity/preview/draft.png',
+        'backgrounds', 'backgrounds/generate', 'icon/{}.svg', 'layouts/generate', 'message-image',
+        'share/list', 'share/raw/{}', 'share/thumb/{}', 'share/uploads', 'share/uploads/{}', 'tool-image',
+        # Optional panels and detail views have no fixture contract. The verify
+        # browser relay answers the chat stream with 204 so the UI polls instead.
+        'activity', 'activity/export', 'attention', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
+        'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'factory', 'groups/context',
+        'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
+        'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
+    },
+    # These can close a pane or session.
+    'DELETE': {'session', 'tmux-sessions'},
+    # WebRTC signaling connects to the live voice worker.
+    'PATCH': {'live/offer'},
+    'POST': {
+        # These can type into, start, stop, or reconfigure a terminal or agent.
+        'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
+        'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
+        'continue', 'continue-preview', 'delegate', 'dialog', 'fork', 'key', 'live/summary',
+        'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
+        'pane-name', 'pick', 'projects/backlog-start', 'prompt-action', 'quick-tab/move',
+        'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',
+        'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
+        'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
+        # These access live browsers, host services, login flows, or external workers.
+        'accounts/refresh', 'accounts/switch', 'browser/ack', 'browser/agents', 'browser/agents/setup',
+        'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',
+        'browser/extension/revoke', 'browser/history', 'browser/input', 'browser/navigate',
+        'browser/new', 'browser/show', 'browser/signed/allow', 'browser/signed/deny',
+        'browser/signed/dismiss', 'browser/signed/end', 'browser/window/input',
+        'dev-preview', 'dev-preview/release', 'dev-preview/stop', 'live/offer', 'login/cancel',
+        'login/code', 'login/start', 'preview', 'push/level', 'push/settings', 'push/subscribe',
+        'push/test', 'push/unsubscribe', 'transcribe', 'tts', 'update', 'upkeep/ops', 'upkeep/prune',
+        # These act on files, uploads, or generated assets with no fixture.
+        'app-identity', 'app-identity/generate', 'app-identity/upload', 'backgrounds/delete',
+        'backgrounds/generate', 'backgrounds/upload', 'file-check', 'files/copy', 'files/delete',
+        'files/duplicate', 'files/mkdir', 'files/move', 'files/rename', 'files/save', 'files/secrets',
+        'files/upload', 'layouts/delete', 'layouts/generate', 'layouts/save', 'office/open',
+        'share/delete', 'share/rename', 'share/restore', 'share/thumb/{}', 'share/to-chat',
+        'share/upload', 'share/uploads', 'share/uploads/{}', 'share/uploads/{}/cancel', 'upload',
+        # These change state outside the small set of fixture writes in ALLOWED.
+        'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
+        'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
+        'codex-trust', 'commit-gate', 'feedback', 'groups/arrange', 'groups/create', 'groups/move',
+        'groups/remove', 'groups/rename', 'groups/reorder', 'groups/ungroup', 'history/hide', 'passkeys',
+        'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',
+        'projects/note-delete', 'projects/pin', 'projects/seen', 'projects/unpin',
+        'reminders/add', 'reminders/delete', 'reminders/done', 'reminders/edit', 'reminders/reopen',
+        'reminders/restore', 'reminders/snooze', 'ui-usage/clear', 'undo', 'voice-log',
+        'work/answer', 'work/fix', 'work/item', 'work/jira', 'work/project', 'work/qa', 'work/stage', 'work/triage',
+    },
+}
 STATIC_PREFIX = '/chat/'
 API_PREFIX = '/mobile/api/'
 
