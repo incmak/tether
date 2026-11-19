@@ -9,11 +9,14 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import subprocess
 import sys
+import time
 
 RULES = 'origin/main:REVIEW.md'
 TIMEOUT = 5
+READ_CHUNK_SIZE = 64 * 1024
 HASH = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')  # SHA-1 or SHA-256 repositories
 UI_PATH = re.compile(
     r'^ui/(src|public)/|^ui/(index\.html|vite\.config\.ts|package\.json|package-lock\.json)$'
@@ -33,6 +36,39 @@ def git_result(folder, *args):
                               capture_output=True, timeout=TIMEOUT)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
         return None
+
+
+def _hash_command(root, args, digest):
+    """Hash git stdout in bounded chunks and report whether the output is complete."""
+    deadline = time.monotonic() + TIMEOUT
+    try:
+        with subprocess.Popen(['git', *args], cwd=root, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                has_stderr = False
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    selector.register(process.stderr, selectors.EVENT_READ)
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        for key, _ in selector.select(remaining):
+                            chunk = os.read(key.fd, READ_CHUNK_SIZE)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                            elif key.fileobj is process.stdout:
+                                digest.update(chunk)
+                            else:
+                                has_stderr = True
+                # A child can close both pipes before it exits.
+                remaining = deadline - time.monotonic()
+                return remaining > 0 and process.wait(timeout=remaining) == 0 and not has_stderr
+            finally:
+                if process.returncode is None:
+                    process.kill()  # Popen closes the pipes and reaps the child on exit.
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return False
 
 
 def git(folder, *args, complete=False):
@@ -129,12 +165,14 @@ def fingerprint(folder):
     for command in (('rev-parse', 'HEAD'), ('status', '--porcelain', '-z', '--untracked-files=all'),
                     # As the checker reads them: no text conversion, or an edit could leave the digest as it was.
                     ('diff', '--no-ext-diff', '--no-textconv', '--text', 'HEAD'),
-                    ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD'),
-                    ('ls-files', '--others', '--exclude-standard', '-z')):
-        result = git_result(root, *command)
-        if result is None or result.returncode != 0 or result.stderr:
+                    ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD')):
+        if not _hash_command(root, command, digest):
             return None
-        digest.update(result.stdout + b'\0\0')
+        digest.update(b'\0\0')
+    result = git_result(root, 'ls-files', '--others', '--exclude-standard', '-z')
+    if result is None or result.returncode != 0 or result.stderr:
+        return None
+    digest.update(result.stdout + b'\0\0')
     for name in result.stdout.split(b'\0'):
         if name:
             try:

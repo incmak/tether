@@ -1,4 +1,5 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
+import hashlib
 import importlib.util
 import io
 from itertools import product
@@ -8,7 +9,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -5841,6 +5844,97 @@ class ServerWatcherTests(unittest.TestCase):
         self.assertIsNone(review_scope.fingerprint(None))
         with patch.object(review_scope.subprocess, 'run', side_effect=subprocess.TimeoutExpired('git', 5)):
             self.assertIsNone(review_scope.fingerprint('/project'))
+
+    def test_fingerprint_matches_the_buffered_digest(self):
+        for origin in (True, False):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as root:
+                folder, git = self.make_repository(root, origin=origin)
+                tracked = folder / 'server/app.py'
+                tracked.write_text('x = 2\n')
+                git('add', 'server/app.py')
+                tracked.write_text('x = 3\n')
+                (folder / 'untracked file').write_text('untracked\n')
+
+                def buffered(*args):
+                    return subprocess.run(['git', *args], cwd=folder, capture_output=True)
+
+                base = buffered('rev-parse', '--verify', '--quiet', 'origin/main')
+                expected = hashlib.sha256(base.stdout + bytes([base.returncode & 255]))
+                for command in (('rev-parse', 'HEAD'), ('status', '--porcelain', '-z', '--untracked-files=all'),
+                                ('diff', '--no-ext-diff', '--no-textconv', '--text', 'HEAD'),
+                                ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD'),
+                                ('ls-files', '--others', '--exclude-standard', '-z')):
+                    result = buffered(*command)
+                    self.assertEqual((result.returncode, result.stderr), (0, b''))
+                    expected.update(result.stdout + b'\0\0')
+                for name in result.stdout.split(b'\0'):
+                    if name:
+                        found = os.lstat(os.path.join(os.fsencode(folder), name))
+                        expected.update(b'%d:%d:%d:%d;' %
+                                        (found.st_size, found.st_mtime_ns, found.st_ctime_ns, found.st_ino))
+                self.assertEqual(review_scope.fingerprint(folder), expected.hexdigest())
+
+    def test_fingerprint_reads_large_diffs_in_bounded_chunks(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, git = self.make_repository(root)
+            large = folder / 'large.txt'
+            large.write_bytes((b'x' * 63 + b'\n') * (48 * 1024))
+            staged_size = large.stat().st_size
+            git('add', 'large.txt')
+            with large.open('ab') as file:
+                file.write(b'worktree change\n')
+            total = 0
+
+            def read(fd, size):
+                nonlocal total
+                self.assertLessEqual(size, 64 * 1024)
+                chunk = os.read(fd, size)
+                total += len(chunk)
+                return chunk
+
+            with patch.object(review_scope, 'os', Mock(wraps=os, environ=os.environ, read=read)):
+                self.assertIsInstance(review_scope.fingerprint(folder), str)
+            self.assertGreater(total, 2 * staged_size)
+
+    def test_fingerprint_rejects_failed_streamed_commands(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder, _ = self.make_repository(root)
+            popen = subprocess.Popen
+            hash_command = review_scope._hash_command
+            for case, script, exit_code, timed_out in (
+                ('start failure', None, None, False),
+                ('stderr', 'import sys; sys.stderr.buffer.write(b"x" * (1024 * 1024)); print("partial")', 0, False),
+                ('nonzero exit', 'print("partial"); raise SystemExit(7)', 7, False),
+                ('busy pipes', 'import os\nwhile True: os.write(1, b"x" * 65536)', -signal.SIGKILL, True),
+                ('closed pipes', 'import os; os.close(1); os.close(2); fd, writer = os.pipe(); os.read(fd, 1)',
+                 -signal.SIGKILL, True),
+            ):
+                child = None
+
+                def start(argv, **kwargs):
+                    nonlocal child
+                    if argv[:2] != ['git', 'diff']:
+                        return popen(argv, **kwargs)
+                    if script is None:
+                        raise OSError('could not start git')
+                    # Let a broken timeout fail the test instead of leaving an endless fake command.
+                    child = popen([sys.executable, '-c', 'import signal; signal.alarm(5)\n' + script], **kwargs)
+                    return child
+
+                def run_hash(*args):
+                    with patch.object(review_scope, 'TIMEOUT', 0.2 if timed_out else review_scope.TIMEOUT):
+                        return hash_command(*args)
+
+                with self.subTest(case=case), patch.object(subprocess, 'Popen', start), \
+                        patch.object(review_scope, '_hash_command', run_hash):
+                    self.assertIsNone(review_scope.fingerprint(folder))
+                    if script is not None:
+                        self.assertIsNotNone(child)
+                        self.assertEqual(child.returncode, exit_code)
+                        self.assertTrue(child.stdout.closed)
+                        self.assertTrue(child.stderr.closed)
+                        with self.assertRaises(ChildProcessError):
+                            os.waitpid(child.pid, os.WNOHANG)
 
     def test_cached_scope_is_not_reused_after_an_untracked_edit_in_a_real_repository(self):
         with tempfile.TemporaryDirectory() as root:
