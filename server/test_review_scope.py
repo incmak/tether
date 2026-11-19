@@ -180,3 +180,63 @@ class ReviewFolderTests(unittest.TestCase):
             observe()
             self.assertEqual(send.call_args.args[0], reviewer)
             self.assertIn(f"Commit under review: {self.start_head} in '{self.work}'", send.call_args.args[1])
+
+    def approve_dirty_then_commit(self, commit_in_review_folder):
+        """Approve uncommitted work in the review folder, then commit either there or in a third worktree."""
+        reviewer = {'id': '%12', 'agent': 'codex', 'thread': '0f8fad5b-d9cb-469f-a165-70867728950e', 'writable': True}
+        root = self.work.parent
+        self.entry['writable'] = True
+        self.enterContext(patch.object(review_links, 'FILE', root / 'review-links.json'))
+        self.enterContext(patch.object(review_links, '_last_sent', {}))
+        self.enterContext(patch.object(review_links.audit, 'record'))
+        self.enterContext(patch.object(server, 'REVIEW_SCOPES', {}))
+        review_links.add(worker=self.entry['id'], reviewer=reviewer['id'], reviewer_thread=reviewer['thread'],
+                         name='Fix the bug', agent='claude', worker_thread=SESSION)
+        third = root / 'third worktree'
+        self.git('worktree', 'add', '-qb', 'third', str(third))
+        (self.work / 'changed.txt').write_text('Fixed\n')  # Uncommitted work in the review folder.
+        work_head = self.git('rev-parse', 'HEAD', cwd=self.work)
+        self.log.write_bytes(self.line())
+        send = Mock()
+        answer = None
+
+        def observe(worker_state='Idle'):
+            review_links.observe([self.entry, reviewer],
+                                 lambda entry: {'state': worker_state if entry is self.entry else 'Idle'},
+                                 send, lambda entry: 'I fixed it.', review_reply=lambda entry, request: answer,
+                                 scope=server.review_scope_of, commit=server.review_commit,
+                                 work_mark=server.review_work_mark)
+
+        with own_time(review_links, monotonic=Mock(side_effect=range(0, 1200, 10))):
+            observe('Working')
+            observe()
+            self.assertIn(f"Commit under review: {work_head} in '{self.work}'", send.call_args.args[1])
+            answer = f'APPROVED {work_head}'
+            observe()
+            self.assertEqual(send.call_args.args[0], self.entry)  # The approval of uncommitted work reached the tab.
+            answer = None
+            if commit_in_review_folder:
+                folder = self.work
+                self.git('add', 'changed.txt', cwd=folder)
+            else:
+                folder = third
+                (folder / 'other.txt').write_text('Other work\n')
+                self.git('add', 'other.txt', cwd=folder)
+                (self.work / 'changed.txt').unlink()
+            self.git('commit', '-qm', 'Commit', cwd=folder)
+            with self.log.open('ab') as stream:
+                stream.write(self.line(at=102, folder=str(folder)))
+            observe('Working')
+            observe()
+            text = send.call_args.args[1]
+            self.assertEqual(send.call_args.args[0], reviewer)
+            self.assertIn(f"Commit under review: {self.git('rev-parse', 'HEAD', cwd=folder)} in '{folder}'", text)
+            return work_head, text
+
+    def test_confirm_note_only_for_the_folder_the_approval_covered(self):
+        work_head, text = self.approve_dirty_then_commit(commit_in_review_folder=True)
+        self.assertIn(f'You approved this work as commit {work_head[:12]} plus uncommitted changes.', text)
+
+    def test_no_confirm_note_for_a_commit_in_another_worktree(self):
+        work_head, text = self.approve_dirty_then_commit(commit_in_review_folder=False)
+        self.assertNotIn('plus uncommitted changes', text)
