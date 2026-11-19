@@ -1442,6 +1442,12 @@ button.live-chip:active { background: var(--line); }
 /* Actions as a popover on the desktop: a compact menu at the pointer, no dimmed page. */
 .action-label { margin: 6px 6px 2px; font-size: 12px; color: var(--muted); }
 .sheet.popover { inset: auto; width: 288px; max-width: calc(100vw - 16px); height: auto; max-height: calc(100dvh - 16px); overflow-y: auto; margin: 0; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 12px 32px #0000002e, 0 2px 6px #0000001a; }
+.sheet.popover:not(.command-menu) { transition: opacity 150ms var(--motion-out), scale 150ms var(--motion-out); }
+@starting-style { .sheet.popover:not(.command-menu)[open] { opacity: 0; scale: .96; } }
+@media (prefers-reduced-motion: reduce) {
+  .sheet.popover:not(.command-menu) { transition: opacity 150ms ease-out; }
+  @starting-style { .sheet.popover:not(.command-menu)[open] { scale: none; } }
+}
 .sheet.popover::backdrop { background: transparent; }
 .sheet.popover:focus-visible { outline: none; }
 .sheet.popover .sheet-heading { padding: 6px 8px 0; }

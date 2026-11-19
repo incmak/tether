@@ -1,10 +1,8 @@
-/* The + popover on the tab strip (NewTask.tsx). It grows out of the +. No shimmer: Mak asked for none.
+/* The + popover on the tab strip (NewTask.tsx). No shimmer: Mak asked for none.
    Reduced motion keeps it still. */
 
-.sheet.popover.task-pop { width: 360px; padding: 0; overflow: hidden auto; border-radius: 16px; background: var(--surface); transform-origin: top right;
-  box-shadow: 0 1px 0 #ffffff0d inset, 0 2px 6px #00000014, 0 22px 56px #00000033;
-  animation: task-grow .32s var(--motion-out); }
-@keyframes task-grow { from { opacity: 0; transform: translateY(-6px) scale(.94); } }
+.sheet.popover.task-pop { width: 360px; padding: 0; overflow: hidden auto; border-radius: 16px; background: var(--surface);
+  box-shadow: 0 1px 0 #ffffff0d inset, 0 2px 6px #00000014, 0 22px 56px #00000033; }
 
 .task-pop form { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px; }
 .task-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -146,7 +144,7 @@
 .create-browser-foot .ghost:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .create-browser-foot .primary { display: flex; align-items: center; gap: 6px; min-height: 32px; max-width: 70%; margin-left: auto; padding: 0 12px; overflow: hidden; border-radius: 8px; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
-  .sheet.popover.task-pop, .pane-tabs button.task-new, .task-spin { animation: none !important; }
+  .pane-tabs button.task-new, .task-spin { animation: none !important; }
   .pane-tabs .tab-add svg, .task-switch input::after, .create-folder-chevron { transition: none; }
 }
 
