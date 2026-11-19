@@ -2006,7 +2006,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_event_queue_waits_for_reply_to_pass_output(self):
         from pipecat.observers.base_observer import FramePushed
 
-        session = SimpleNamespace(llm=Mock(), tts=Mock(voice_cancelled=False, voice_client=False), output=Mock(),
+        session = SimpleNamespace(llm=Mock(), tts=Mock(device_voice_pending=Mock(return_value=False)), output=Mock(),
             waiting_for_read=False, user_speaking=False, bot_speaking=True, busy=False,
             wake=asyncio.Event(), events=friday.EventQueue())
         observer = self.rt.FridayObserver(session)
@@ -2060,9 +2060,106 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(session.busy)
         self.assertTrue(session.wake.is_set())
 
-    async def request_messages(self, messages, during_auth=None):
+    async def test_event_waits_for_tool_only_reply_and_keeps_spoken_ack(self):
+        for name, arguments, result, ack in (
+                ('switch_chat', {'chat': 'api server'}, {'ok': True, 'chat': 'api server'}, 'Switched to api server.'),
+                ('open_panel', {'open': False}, {'ok': True}, 'Closed.')):
+            with self.subTest(name=name):
+                end_seen, pump_checked, event_started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                dispatched = asyncio.Queue()
+                requests, acks, queue_sizes = [], [], []
+                event = {'id': 'e1', 'chat': 'docs', 'kind': 'done', 'priority': 'idle', 'text': 'Done.'}
+
+                def respond(number):
+                    if number == 1:
+                        return self.chunk(tool_calls=[{'index': 0, 'id': 'call', 'type': 'function',
+                            'function': {'name': name, 'arguments': json.dumps(arguments)}}])
+                    event_started.set()
+                    return self.chunk(content='Ready.')
+
+                async def watch(session, data):
+                    if data.source is session.output and isinstance(data.frame, self.rt.LLMFullResponseEndFrame):
+                        end_seen.set()
+                    if data.source is session.llm and isinstance(data.frame, self.rt.TTSSpeakFrame):
+                        acks.append(data.frame.text)
+
+                async def exercise(session):
+                    session.models = SimpleNamespace(llm_health=AsyncMock(return_value=True))
+                    session.llm.register_function(name, session.llm.handle_browser_tool, cancel_on_interruption=False)
+                    session.rtvi.handle_function_call = AsyncMock(side_effect=dispatched.put)
+                    session.context.add_message({'role': 'user', 'content': 'Switch to api server or close the panel.'})
+                    user = session.aggregators.user()
+                    await user.push_frame(self.rt.LLMContextFrame(session.context))
+                    call = await dispatched.get()
+                    await end_seen.wait()
+                    session.events.put('event', event)
+                    pop = session.events.pop
+
+                    def check(*args):
+                        item = pop(*args)
+                        queue_sizes.append(len(session.events.items))
+                        pump_checked.set()
+                        return item
+
+                    session.events.pop = check
+                    session.worker.queue_frame = user.push_frame
+                    pump = asyncio.create_task(session.pump())
+                    try:
+                        session.wake.set()
+                        await pump_checked.wait()
+                        await call.result_callback(result)
+                        await event_started.wait()
+                    finally:
+                        pump.cancel()
+                        await asyncio.gather(pump, return_exceptions=True)
+
+                await self.voice_pipeline('server', [exercise], llm_calls=requests, respond=respond, watch=watch)
+                self.assertEqual(queue_sizes[0], 1)
+                self.assertEqual(acks, [ack])
+                self.assertEqual(len(requests), 2)
+                self.assertTrue(requests[1][-1]['content'].startswith(friday.EVENT_PREFIX))
+                self.assertIn({'role': 'assistant', 'content': ack}, requests[1])
+
+    async def test_tool_gate_tracks_each_final_result_cancel_and_interruption(self):
+        from pipecat.frames.frames import FunctionCallFromLLM, FunctionCallInProgressFrame
+
+        async def exercise(session):
+            assistant = session.aggregators.assistant()
+            direction = self.rt.FrameDirection.DOWNSTREAM
+            ids = ['finished', 'cancelled', 'interrupted']
+            calls = [FunctionCallFromLLM('list_chats', ident, {}, session.context) for ident in ids]
+            processed = asyncio.Queue()
+
+            @assistant.event_handler('on_after_process_frame')
+            async def collect(processor, frame):
+                await processed.put(frame)
+
+            async def send(frame):
+                await session.llm.push_frame(frame, direction)
+                while await processed.get() is not frame:
+                    pass
+
+            await send(self.rt.FunctionCallsStartedFrame(calls))
+            for ident in ids:
+                await send(FunctionCallInProgressFrame('list_chats', ident, {}))
+            self.assertEqual(session.llm.tools_in_flight, set(ids))
+
+            update = self.rt.FunctionCallResultProperties(run_llm=False, is_final=False)
+            await send(self.rt.FunctionCallResultFrame('list_chats', 'finished', {}, {'count': 1}, properties=update))
+            self.assertEqual(session.llm.tools_in_flight, set(ids))
+            await send(self.rt.FunctionCallResultFrame('list_chats', 'finished', {}, {'count': 2}, run_llm=False))
+            self.assertEqual(session.llm.tools_in_flight, {'cancelled', 'interrupted'})
+            await send(self.rt.FunctionCallCancelFrame('list_chats', 'cancelled'))
+            self.assertEqual(session.llm.tools_in_flight, {'interrupted'})
+            await send(self.rt.InterruptionFrame())
+            self.assertEqual(session.llm.tools_in_flight, set())
+
+        await self.voice_pipeline('server', [exercise], llm_calls=[])
+
+    async def request_messages(self, messages, during_auth=None, during_reply=None):
         from openai import BadRequestError
         from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
         import httpx
 
         session = SimpleNamespace(prepare_messages=lambda m: m,
@@ -2077,6 +2174,20 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             session.models.auth = SimpleNamespace(token=token)
             env = {'TETHER_FRIDAY_BRAIN': 'gemini', 'TETHER_FRIDAY_GCP_PROJECT': 'test-project'}
         service = self.rt.FridayLLM(session, friday.brain_config(env))
+        assistant = LLMAssistantAggregator(context)
+        service.track_assistant(assistant, context)
+        direction = self.rt.FrameDirection.DOWNSTREAM
+        first_request = during_reply is not None
+
+        async def forward(frame, direction=direction):
+            if first_request and isinstance(frame, (self.rt.LLMFullResponseStartFrame,
+                    self.rt.LLMTextFrame, self.rt.LLMFullResponseEndFrame)):
+                if isinstance(frame, self.rt.LLMFullResponseEndFrame):
+                    context.add_messages(during_reply)
+                await assistant._call_event_handler('on_before_process_frame', frame)
+                await assistant.process_frame(frame, direction)
+                await assistant._call_event_handler('on_after_process_frame', frame)
+
         async def complete(**kwargs):
             if kwargs['messages'][-1]['role'] == 'assistant':
                 request = httpx.Request('POST', service.brain.base_url)
@@ -2088,10 +2199,13 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             return chunks()
 
         try:
-            with patch.object(self.rt.OpenAILLMService, 'push_frame', new_callable=AsyncMock) as push, \
+            with patch.object(self.rt.OpenAILLMService, 'push_frame', side_effect=forward) as push, \
                     patch.object(service._client.chat.completions, 'create', AsyncMock(side_effect=complete)) as create, \
                     patch('sys.stderr') as stderr:
-                await service.process_frame(self.rt.LLMContextFrame(context), self.rt.FrameDirection.DOWNSTREAM)
+                if first_request:
+                    await service.process_frame(self.rt.LLMContextFrame(context), direction)
+                    first_request = False
+                await service.process_frame(self.rt.LLMContextFrame(context), direction)
             log = ''.join(call.args[0] for call in stderr.write.call_args_list)
             spoken = [call.args[0].text for call in push.await_args_list
                       if isinstance(call.args[0], self.rt.TTSSpeakFrame)]
@@ -2100,23 +2214,44 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service._client.close()
 
-    async def test_request_moves_newest_event_after_assistant_reply(self):
+    async def test_request_moves_reply_before_unseen_event(self):
         prefix = [{'role': 'system', 'content': 'System'}, {'role': 'user', 'content': 'Read chats'},
                   {'role': 'assistant', 'tool_calls': [self.tool_call('read')]},
                   {'role': 'tool', 'tool_call_id': 'read', 'content': '{}'}]
         earlier = [{'role': 'user', 'content': friday.EVENT_PREFIX + 'Earlier.'}]
         event = {'role': 'user', 'content': friday.EVENT_PREFIX + 'Done.'}
-        reply = {'role': 'assistant', 'content': 'Here are your chats.'}
+        reply = {'role': 'assistant', 'content': 'Ready.'}
         for prior_events in ([], earlier):
             with self.subTest(prior_events=prior_events):
-                requests, spoken, log, source = await self.request_messages(prefix + prior_events + [event, reply])
-                self.assertEqual(len(requests), 1)
-                messages = [m for m in requests[0]
+                requests, spoken, log, source = await self.request_messages(prefix + prior_events, during_reply=[event])
+                self.assertEqual(len(requests), 2)
+                messages = [m for m in requests[1]
                             if not (m['role'] == 'user' and m['content'].startswith(friday.STATE_PREFIX))]
                 self.assertEqual(messages, prefix + prior_events + [reply, event])
-                self.assertIn('Friday reordered event after reply\n', log)
+                self.assertIn('Friday reordered reply before newer messages\n', log)
                 self.assertEqual(spoken, [])
                 self.assertEqual(source, 'event')
+
+    async def test_request_moves_reply_before_late_tool_result(self):
+        result = {'role': 'developer', 'content': 'Tool result: saved.'}
+        reply = {'role': 'assistant', 'content': 'Ready.'}
+        for text in (friday.EVENT_PREFIX + 'Done.', 'What time is it?'):
+            with self.subTest(text=text):
+                user = {'role': 'user', 'content': text}
+                requests, spoken, log, source = await self.request_messages([user], during_reply=[result])
+                self.assertEqual(len(requests), 2)
+                messages = [m for m in requests[1] if not m['content'].startswith(friday.STATE_PREFIX)]
+                self.assertEqual(messages, [user, reply, dict(result, role='user')])
+                self.assertIn('Friday reordered reply before newer messages\n', log)
+                self.assertEqual(spoken, [])
+                self.assertEqual(source, 'tool')
+
+    async def test_request_skips_reply_when_its_snapshot_has_all_messages(self):
+        event = {'role': 'user', 'content': friday.EVENT_PREFIX + 'Done.'}
+        requests, spoken, log, _ = await self.request_messages([event], during_reply=[])
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(spoken, [])
+        self.assertIn('Friday skipped request ending with assistant\n', log)
 
     async def test_request_skips_assistant_tail_without_current_event(self):
         user = {'role': 'user', 'content': 'Hello'}
@@ -2150,7 +2285,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(requests[0][1:], messages)
                 self.assertTrue(requests[0][0]['content'].startswith(friday.STATE_PREFIX))
                 self.assertEqual(spoken, [])
-                self.assertNotIn('Friday reordered event after reply', log)
+                self.assertNotIn('Friday reordered reply before newer messages', log)
                 self.assertNotIn('Friday skipped request ending with assistant', log)
                 self.assertEqual(source, expected_source)
 
@@ -2763,7 +2898,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(service._settings.voice, expected)
                 self.assertIs(service._voice_state, models.voice)
 
-    async def voice_pipeline(self, mode, frames, user_turns=False, smart=False, llm_calls=None):
+    async def voice_pipeline(self, mode, frames, user_turns=False, smart=False, llm_calls=None,
+                             respond=None, watch=None):
         from pipecat.frames.frames import Frame, TTSAudioRawFrame
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.observers.base_observer import BaseObserver
@@ -2860,19 +2996,28 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 llm_calls.append(copy.deepcopy(kwargs['messages']))
 
                 async def chunks():
-                    yield self.chunk(content='A reply.')
+                    yield respond(len(llm_calls)) if respond else self.chunk(content='A reply.')
 
                 return chunks()
 
             session.llm._client.chat.completions.create = AsyncMock(side_effect=completion)
             processors.append(session.llm)
         assistant = LLMAssistantAggregator(session.context)
+        if llm_calls is not None:
+            session.llm.track_assistant(assistant, session.context)
+
+        class Observer(self.rt.FridayObserver):
+            async def on_push_frame(self, data):
+                await super().on_push_frame(data)
+                if watch:
+                    await watch(session, data)
+
         pipeline = Pipeline(processors + [session.tts, session.output, assistant])
         with patch.object(self.rt.PocketTTSService, 'run_tts', audio):
             try:
                 await asyncio.wait_for(run_test(pipeline,
                     frames_to_send=[Action(f) if callable(f) else f for f in frames],
-                    observers=[self.rt.FridayObserver(session), SpeakingFrames()]), timeout=10)
+                    observers=[Observer(session), SpeakingFrames()]), timeout=10)
             finally:
                 if llm_calls is not None:
                     await session.llm._client.close()
@@ -3353,6 +3498,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         session.user_speaking = session.bot_speaking = session.busy = session.reply_open = False
         session.event_generation, session.offline_spoken = 0, False
         session.new_turn, session.context = Mock(), Mock()
+        session.llm = SimpleNamespace(tools_in_flight=set())
         session.worker = Mock(queue_frame=AsyncMock())
         session.rt = SimpleNamespace(TTSSpeakFrame=lambda text: SimpleNamespace(text=text),
                                      LLMContextFrame=lambda context: SimpleNamespace(context=context))
