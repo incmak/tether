@@ -208,7 +208,31 @@ async function checkControl(page, cdp, { selector, opened, resting }, side, labe
   if (friday) {
     await page.mouse.move(1, 1)
     await fridayPop(page, label)
+    await fridayGrabWhileOpening(page, label)
   }
+}
+
+// A grab during the bloom must start from where the window shows, not from the corner.
+async function fridayGrabWhileOpening(page, label) {
+  await rest(page, '.live-bubble')
+  await page.locator(FRIDAY).click()
+  await rest(page, '.live-window')
+  const target = await page.locator('.live-window').boundingBox()
+  await page.getByRole('button', { name: 'Shrink Friday to a bubble' }).click()
+  await rest(page, '.live-bubble')
+  await page.mouse.move(1, 1)
+  await page.locator(FRIDAY).click()
+  await page.waitForTimeout(60)
+  const grip = await page.locator('.live-grip').boundingBox()
+  const x = grip.x + grip.width / 2, y = grip.y + grip.height / 2
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.mouse.move(x - 45, y + 30, { steps: 5 })
+  await page.mouse.up()
+  await rest(page, '.live-window')
+  const after = await page.locator('.live-window').boundingBox()
+  const off = Math.hypot(after.x - target.x, after.y - target.y)
+  assert.ok(off <= 120, `${label}: a grab during the bloom moved the window ${off.toFixed(0)} px (from ${target.x},${target.y} to ${after.x},${after.y})`)
 }
 
 async function main() {
