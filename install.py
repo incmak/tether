@@ -937,7 +937,8 @@ def main(argv=None):
             print('Fix required checks:\n' + fixes)
             if args.apply:
                 print('Required checks failed:\n' + fixes, file=sys.stderr)
-            print(f'Result: FAIL ({len(failed)} required checks failed)')
+            if not args.defer_restart:  # the caller (tether update) prints the result
+                print(f'Result: FAIL ({len(failed)} required checks failed)')
             return 1 if args.apply else 0
         if args.plan:
             print(f'Result: PASS (plan ready; {written} unit files to write, {unchanged} unchanged)')

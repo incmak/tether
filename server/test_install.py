@@ -280,6 +280,7 @@ class InstallTests(unittest.TestCase):
             (['--apply'], failed, 1, 'Result: FAIL (1 required checks failed)', '1. Fix test check.'),
             (['--apply'], plan, 1, 'Result: FAIL (see the error above)', 'apply error'),
             (['--apply', '--defer-restart'], plan, 1, None, 'apply error'),
+            (['--apply', '--defer-restart'], failed, 1, None, '1. Fix test check.'),
         ):
             with self.subTest(args=args, last=last), mock.patch.object(installer, 'make_plan', return_value=selected_plan), \
                     mock.patch.object(installer, 'apply_plan', side_effect=OSError('apply error')) as apply, \
