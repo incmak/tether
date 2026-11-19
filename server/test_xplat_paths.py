@@ -32,7 +32,7 @@ class TestStoreIsolation(unittest.TestCase):
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
         stores = {name: value for name, value in vars(paths).items()
                   if name.isupper() and isinstance(value, Path)}
-        stores.update(work=paths.work(), reminders=paths.reminders(), items=paths.items(),
+        stores.update(work=paths.work(), reminders=paths.reminders(), task_sources=paths.task_sources(), items=paths.items(),
                       private_file=paths.private_file('test'), path_home=Path.home(),
                       expanduser_home=Path(os.path.expanduser('~')), tempdir=Path(tempfile.gettempdir()))
         for name, store in stores.items():
