@@ -294,14 +294,20 @@ def add(text, due, by='you', link=None, now=None, repeat=None, *, source=None):
     return public(record)
 
 
-def sync_source(label, account, links, present, selected, now):
+def sync_source(label, account, links, present, now, *, suppressed, moved):
     """Reconcile a complete source read in one reminder save. Return links with their upstream times.
 
-    selected contains a single task key for each title and reminder time. Keep the upstream time even when
-    it is past or off, or when the user snoozes, marks Done or deletes. A retry after the mirror write fails
-    uses the last occurrence from this account, including a deleted occurrence.
+    Suppress the new key during a move overlap. Re-key the linked occurrence when the old key disappears.
+    Keep the upstream time even when it is past or off, or when the user snoozes, marks Done or deletes.
+    A retry after the mirror write fails uses the last occurrence from this account, including a deleted one.
     """
     links = links.copy()
+    rekey = {}
+    for old, new in moved.items():
+        previous = links.pop(old, None)
+        if previous:
+            links[new] = previous
+            rekey[previous['id']] = old, new
     with _locked():
         data = _load(now)
         latest, changed = {}, False
@@ -312,17 +318,27 @@ def sync_source(label, account, links, present, selected, now):
                         or not isinstance(source.get('key'), str) or record.get('source_account') != account):
                     continue
                 key = source['key']
-                if key not in latest or int(record['id'][1:]) > int(latest[key][0]['id'][1:]):
-                    latest[key] = record, deleted
+                move = rekey.get(record['id'])
+                if move and key == move[0]:
+                    key = move[1]
+                    record['source'] = dict(source, key=key)
+                    # The transferred record takes precedence over any older history for this key.
+                    record['source_order'] = data['next'] - 1
+                    changed = True
+                sequence = int(record['id'][1:])
+                linked = record['id'] == links.get(key, {}).get('id')
+                order = record.get('source_order', sequence), linked, sequence
+                if key not in latest or order > latest[key][2]:
+                    latest[key] = record, deleted, order
                 if not deleted and key not in present and record['state'] != 'done':
                     record.update(state='done', done_at=now)
                     changed = True
         for key, row in present.items():
             at = row['reminderAt']
-            record, deleted = latest.get(key, (None, False))
+            record, deleted, _ = latest.get(key, (None, False, ()))
             previous = links.get(key)
             future = at is not None and at > now
-            duplicate = at is not None and key not in selected
+            duplicate = key in suppressed
             if not future or duplicate:
                 if record is not None and record['source_at'] != at:
                     record['source_at'] = at

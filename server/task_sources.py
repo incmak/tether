@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -89,12 +90,24 @@ def _save(name, data):
             os.unlink(temp)
 
 
-def _snapshot(mirror, source, account):
-    saved = mirror.get(source, {})
-    if account is not None and saved.get('account') == account:
-        return saved
-    return {'account': account, 'tasks': [], 'syncedAt': None, 'complete': False, 'error': '',
-            'backlog': {}, 'reminder': {}}
+def _account_snapshots(mirror, account):
+    return mirror['accounts'].setdefault(json.dumps(account), {}) if account is not None else {}
+
+
+def _mirror():
+    mirror = _read('mirror.json')
+    mirror.setdefault('accounts', {})
+    for source in LABELS:
+        legacy = mirror.pop(source, {})
+        account = legacy.pop('account', None)
+        if account is not None:
+            _account_snapshots(mirror, account).setdefault(source, legacy)
+    return mirror
+
+
+def _snapshot(snapshots, source):
+    return snapshots.get(source, {'tasks': [], 'syncedAt': None, 'complete': False, 'error': '',
+                                  'backlog': {}, 'reminder': {}})
 
 
 def _command(connection):
@@ -187,13 +200,13 @@ def _pages(client, path, *, alternatives=()):
 def _todo(client):
     lists = '/me/todo/lists'
     for task_list in _pages(client, _query(lists, select='id,displayName')):
-        list_id = quote(_graph_id(task_list.get('id')), safe='')
+        list_id = _graph_id(task_list.get('id'))
         name = _one_line(task_list.get('displayName')) or 'Tasks'
-        path = f'{lists}/{list_id}/tasks'
+        path = f"{lists}/{quote(list_id, safe='')}/tasks"
         for item in _pages(client, _query(path, filter=TODO_FILTER, select=TODO_FIELDS),
                            alternatives=(_query(path, select=TODO_FIELDS),)):
             if item.get('status') != 'completed':
-                yield _task('todo', item, name, TODO_HOME)
+                yield dict(_task('todo', item, name, TODO_HOME), listId=list_id)
 
 
 _PLAN_NAMES = {}  # (tenant, app, account, plan) -> (expires, title), only used under the sync lock
@@ -248,16 +261,27 @@ def _account(config):
     return tuple(config.get(field) for field in ('tenant', 'client', 'account'))
 
 
-def _reminder_keys(rows, links):
-    selected = {}
-    for key, row in rows.items():
-        at = row['reminderAt']
-        if at is None:
-            continue
-        pair = row['title'], at
-        if pair not in selected or (key in links and selected[pair] not in links):
-            selected[pair] = key
-    return set(selected.values())
+def _overlapping_moves(rows, previous):
+    """Match a known and a new key in different lists with the same title and reminder time.
+
+    A move plus a rename inside one poll cannot be detected. Leave ambiguous matches as separate tasks.
+    """
+    old_keys = {row['key'] for row in previous}
+    groups = defaultdict(list)
+    for row in rows.values():
+        if row['reminderAt'] is not None:
+            groups[row['title'], row['reminderAt']].append(row)
+    moves = {}
+    for group in groups.values():
+        old = [row for row in group if row['key'] in old_keys]
+        new = [row for row in group if row['key'] not in old_keys]
+        for before in old:
+            candidates = [row for row in new if row['listId'] != before['listId']]
+            if len(candidates) == 1:
+                after = candidates[0]
+                if sum(row['listId'] != after['listId'] for row in old) == 1:
+                    moves[before['key']] = after['key']
+    return moves
 
 
 def sync():
@@ -298,24 +322,28 @@ def sync():
                 current = _settings()[source]
                 if not current['enabled']:
                     continue
-                mirror = _read('mirror.json')
-                previous_account = mirror.get(source, {}).get('account')
-                saved = _snapshot(mirror, source, account)
+                mirror = _mirror()
+                snapshots = _account_snapshots(mirror, account)
+                saved = _snapshot(snapshots, source)
                 complete = not error
                 if complete and source == 'todo' and current['alerts']:
-                    now = time.time()
-                    links = saved['reminder']
+                    moves = _overlapping_moves(rows, saved['tasks'])
+                    resolved = {old: new for old, new in saved.get('moves', {}).items()
+                                if old not in rows and new in rows}
                     try:
                         saved['reminder'] = reminders.sync_source(
-                            LABELS[source], account, links, rows, _reminder_keys(rows, links), now)
+                            LABELS[source], account, saved['reminder'], rows, time.time(),
+                            suppressed=set(moves.values()), moved=resolved)
                     except (reminders.ReminderError, OSError):
                         error = 'Tether could not update the linked reminders.'
+                    else:
+                        saved['moves'] = moves
+                elif complete:
+                    saved.pop('moves', None)
                 if not error:
                     saved.update(tasks=list(rows.values()), syncedAt=time.time())
-                # A failed first poll after an account change leaves an empty, unsynced snapshot.
-                if previous_account is None or previous_account == account or not error:
-                    saved.update(complete=complete, error=error)
-                mirror[source] = saved
+                saved.update(complete=complete, error=error)
+                snapshots[source] = saved
                 _save('mirror.json', mirror)
 
 
@@ -378,14 +406,15 @@ def _sort_key(row, now, today):
 def listing():
     with _lock('.lock'):
         settings = _settings()
-        mirror = _read('mirror.json')
+        mirror = _mirror()
         loaded = graph_client.load()
     connection = graph_client.status(loaded)
     account = list(_account(loaded[0])) if connection['tasks'] else None
+    snapshots = _account_snapshots(mirror, account)
     syncing = _syncing()
     sources, tasks = [], []
     for key, label in LABELS.items():
-        saved, setting = _snapshot(mirror, key, account), settings[key]
+        saved, setting = _snapshot(snapshots, key), settings[key]
         why = command = ''
         if not setting['enabled']:
             state, why = 'off', 'This source is disabled.'
@@ -404,8 +433,11 @@ def listing():
         rows = saved['tasks'] if setting['enabled'] else []
         sources.append({'id': key, 'label': label, **setting, 'state': state, 'why': why, 'command': command,
                         'syncedAt': saved['syncedAt'], 'complete': saved['complete'], 'count': len(rows)})
-        tasks.extend(dict(row, backlog=saved['backlog'].get(row['key']),
-                          reminder=saved['reminder'].get(row['key'], {}).get('id')) for row in rows)
+        for row in rows:
+            task = dict(row, backlog=saved['backlog'].get(row['key']),
+                        reminder=saved['reminder'].get(row['key'], {}).get('id'))
+            task.pop('listId', None)
+            tasks.append(task)
     now = time.time()
     today = datetime.fromtimestamp(now, reminders.ZONE).date().isoformat()
     return {'sources': sources, 'tasks': sorted(tasks, key=lambda row: _sort_key(row, now, today))}
@@ -435,8 +467,8 @@ def to_backlog(key, project=''):
         connection = graph_client.load()
         if not graph_client.status(connection)['tasks']:
             raise TaskError('That task is no longer in the list.', 404)
-        mirror = _read('mirror.json')
-        saved = _snapshot(mirror, source, list(_account(connection[0])))
+        mirror = _mirror()
+        saved = _snapshot(_account_snapshots(mirror, _account(connection[0])), source)
         if key in saved['backlog']:
             return {'id': saved['backlog'][key], 'created': False}
         copying = saved.setdefault('copying', {})
