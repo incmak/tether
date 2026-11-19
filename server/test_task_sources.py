@@ -53,6 +53,7 @@ class TaskTests(unittest.TestCase):
         self.sync_now = self.enterContext(mock.patch.object(task_sources, 'sync_now'))
         self.calls = []
         self.pages = {LISTS: page({'id': 'personal', 'displayName': 'Personal'}), LIST: page(), PLANNER: page()}
+        self.real_client = graph_client.Client
         client = mock.Mock(spec=graph_client.Client)
         client.get.side_effect = self.get_page
         self.client = self.enterContext(mock.patch.object(graph_client, 'Client', return_value=client))
@@ -109,12 +110,29 @@ class TaskTests(unittest.TestCase):
 
     def test_query_fallback_still_filters_locally(self):
         first = task_sources._query(LIST, filter=task_sources.TODO_FILTER, select=task_sources.TODO_FIELDS)
+        fallback = task_sources._query(LIST, select=task_sources.TODO_FIELDS)
         self.pages[first] = graph_client.GraphError('Unsupported query', 400)
-        self.pages[task_sources._query(LIST, filter=task_sources.TODO_FILTER)] = page(
-            todo('open', title='use this'), todo('done', status='completed'))
+        self.pages[fallback] = page(todo('open'), todo('done', status='completed'))
         shown = self.poll()
         self.assertEqual([task['key'] for task in shown['tasks']], ['todo:open'])
-        self.assertEqual(self.calls[1:3], [first, task_sources._query(LIST, filter=task_sources.TODO_FILTER)])
+        self.assertEqual(self.calls[1:3], [first, fallback])
+
+    def test_rejected_todo_projection_never_reads_unprojected_rows(self):
+        before = self.poll(todo('keep'))['tasks']
+        for path, fields in ((LIST, task_sources.TODO_FIELDS), (LISTS, 'id,displayName')):
+            with self.subTest(path=path):
+                self.calls.clear()
+                rejected = graph_client.GraphError('Unsupported projection', 501)
+                projected = {task_sources._query(path, select=fields): rejected}
+                if path == LIST:
+                    projected[task_sources._query(path, filter=task_sources.TODO_FILTER, select=fields)] = rejected
+                with mock.patch.dict(self.pages, projected):
+                    after = self.poll(todo('unprojected', body={'content': 'private'}))
+                self.assertEqual(after['tasks'], before)
+                self.assertEqual(after['sources'][0]['state'], 'error')
+                self.assertFalse(after['sources'][0]['complete'])
+                self.assertTrue(all('$select' in parse_qs(urlsplit(url).query)
+                                    for url in self.calls if url.startswith(LISTS)))
 
     def test_overdue_timed_task_precedes_date_only_due_today(self):
         shown = self.poll(todo('z', title='Z last'), todo('tomorrow', dueDateTime='2026-11-20'),
@@ -192,6 +210,21 @@ class TaskTests(unittest.TestCase):
         with self.assertRaises(reminders.ReminderError):
             reminders.restore(second, NOW)
 
+    def test_restored_future_time_reopens_after_past_or_disabled_time(self):
+        self.alert()
+        original = NOW + 3600
+        for intermediate in (NOW - 60, None):
+            with self.subTest(intermediate=intermediate):
+                self.poll(todo('done', original), todo('open', original))
+                done = self.active()[0]
+                reminders.change(done['id'], 'done', {'occ': done['occ']}, NOW)
+                before = self.active()
+                self.poll(todo('done', intermediate), todo('open', intermediate), todo('new', intermediate))
+                self.assertEqual(self.active(), before)
+                self.poll(todo('done', original), todo('open', original))
+                self.assertEqual([(r['id'], r['due'], r['state'], r['occ']) for r in self.active()],
+                                 [(r['id'], original, 'scheduled', r['occ'] + 1) for r in before])
+
     def test_retried_mirror_write_reuses_reminder(self):
         self.alert()
         self.pages[LIST] = page(todo('task', NOW + 3600))
@@ -234,6 +267,38 @@ class TaskTests(unittest.TestCase):
         self.assertEqual([(r['text'], r['state']) for r in self.active()],
                          [('old', 'done'), ('another old', 'done'), ('new', 'scheduled')])
         self.assertEqual([r['list'] for r in moved['tasks']], ['Shared', 'Shared'])
+
+    def test_move_seen_in_both_lists_links_once_and_prefers_existing_link(self):
+        self.alert()
+        at = NOW + 3600
+        self.poll(todo('old', at, title='Moving task'))
+        old_id = self.active()[0]['id']
+        self.pages[LISTS] = page({'id': 'shared', 'displayName': 'Shared'}, {'id': 'personal'})
+        self.pages[LISTS + '/shared/tasks'] = page(todo('new', at, title='Moving task'), todo('first', at))
+        shown = self.poll(todo('old', at, title='Moving task'), todo('second', at, title='first'),
+                          todo('later', at + 1, title='Moving task'), todo('other', at))
+        linked = {row['key']: row['reminder'] for row in shown['tasks']}
+        self.assertEqual(len(linked), 6)
+        self.assertEqual(linked['todo:old'], old_id)
+        self.assertIsNone(linked['todo:new'])
+        self.assertIsNone(linked['todo:second'])
+        self.assertTrue(all(linked[f'todo:{key}'] for key in ('first', 'later', 'other')))
+        self.assertEqual(len(self.active()), 4)
+
+    def test_time_change_is_recorded_while_another_link_wins_the_pair(self):
+        self.alert()
+        first, second = NOW + 3600, NOW + 7200
+        self.poll(todo('winner', first, title='Task'), todo('suppressed', second, title='Task'))
+        winner, suppressed = self.active()
+        reminders.change(suppressed['id'], 'done', {'occ': 1}, NOW)
+        shown = self.poll(todo('winner', first, title='Task'), todo('suppressed', first, title='Task'))
+        self.assertEqual({row['key']: row['reminder'] for row in shown['tasks']},
+                         {'todo:winner': winner['id'], 'todo:suppressed': None})
+        self.assertEqual(self.active()[1]['state'], 'done')
+        self.poll(todo('winner', first, title='Task'), todo('suppressed', second, title='Task'))
+        record = self.active()[1]
+        self.assertEqual((record['id'], record['due'], record['state'], record['occ']),
+                         (suppressed['id'], second, 'scheduled', 2))
 
     def test_planner_reads_assigned_open_tasks_and_caches_plan_names(self):
         task_sources.settings_for('planner', alerts=True)
@@ -284,6 +349,68 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(task_sources.listing()['sources'][0]['command'].endswith('--feeds teams,tasks'))
         graph_client.remove()
         self.assertTrue(task_sources.listing()['sources'][0]['command'].endswith('--feeds tasks'))
+
+    def test_account_change_hides_tasks_and_drops_links_even_after_failed_poll(self):
+        self.alert()
+        at = NOW + 3600
+        self.pages[PLANNER] = page({'id': 'reused', 'planId': 'plan', 'title': 'Old Planner task'})
+        self.pages['/planner/plans/plan'] = {'title': 'Plan'}
+        self.poll(todo('reused', at, title='Old To Do task'), todo('uncopied'))
+        old_copy = task_sources.to_backlog('todo:reused')['id']
+        old_reminder = self.active()[0]
+        other = dict(CONFIG, account='other@example.com', scopes=graph_client.scopes_for(['tasks']))
+        for connected in (False, True):
+            with self.subTest(connected=connected):
+                if connected:
+                    graph_client.save(other)
+                    self.pages[LISTS] = self.pages[PLANNER] = graph_client.GraphError('Busy', 429)
+                    task_sources.sync()
+                else:
+                    graph_client.remove()
+                shown = task_sources.listing()
+                self.assertEqual(shown['tasks'], [])
+                self.assertEqual([(s['state'], s['syncedAt'], s['count']) for s in shown['sources']],
+                                 [('syncing' if connected else 'off', None, 0)] * 2)
+                for key in ('todo:reused', 'todo:uncopied', 'planner:reused'):
+                    with self.assertRaises(task_sources.TaskError) as missing:
+                        task_sources.to_backlog(key)
+                    self.assertEqual(missing.exception.status, 404)
+        self.pages[LISTS] = page({'id': 'personal'})
+        self.pages[PLANNER] = page({'id': 'reused', 'planId': 'plan', 'title': 'New Planner task'})
+        shown = self.poll(todo('reused', at, title='New To Do task'))
+        indexed = {row['source']: row for row in shown['tasks']}
+        self.assertEqual(indexed['planner']['title'], 'New Planner task')
+        self.assertEqual(indexed['todo']['title'], 'New To Do task')
+        self.assertIsNone(indexed['todo']['backlog'])
+        self.assertNotEqual(indexed['todo']['reminder'], old_reminder['id'])
+        self.assertEqual(self.active()[0], old_reminder)
+        new_copy = task_sources.to_backlog('todo:reused')
+        self.assertTrue(new_copy['created'])
+        self.assertNotEqual(new_copy['id'], old_copy)
+        self.assertIn('Old To Do task', backlog.show(old_copy))
+
+    def test_unowned_snapshot_is_hidden_until_replaced(self):
+        self.poll(todo('legacy'))
+        saved = task_sources._read('mirror.json')
+        for snapshot in saved.values():
+            snapshot.pop('account', None)
+        task_sources._save('mirror.json', saved)
+        self.assertEqual(task_sources.listing()['tasks'], [])
+        with self.assertRaises(task_sources.TaskError) as missing:
+            task_sources.to_backlog('todo:legacy')
+        self.assertEqual(missing.exception.status, 404)
+        self.assertEqual([row['key'] for row in self.poll(todo('current'))['tasks']], ['todo:current'])
+
+    def test_in_flight_client_does_not_use_another_accounts_token(self):
+        config, _ = graph_client.load()
+        other = dict(config, account='other@example.com', refresh='other-refresh')
+        graph_client.save(other)
+        open_url = mock.Mock(side_effect=AssertionError('The client must reject the new account before a request.'))
+        client = self.real_client(config, open_url=open_url)
+        with self.assertRaises(graph_client.GraphError) as changed:
+            client.get(LISTS)
+        self.assertEqual(changed.exception.status, 401)
+        open_url.assert_not_called()
 
     def test_windows_iana_utc_and_unknown_zones(self):
         items = [todo(f't{index}', NOW + 3600, dueDateTime={'dateTime': '2026-11-19T20:00:00', 'timeZone': zone})

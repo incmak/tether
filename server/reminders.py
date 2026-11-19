@@ -294,12 +294,12 @@ def add(text, due, by='you', link=None, now=None, repeat=None, *, source=None):
     return public(record)
 
 
-def sync_source(label, links, present, upcoming, now):
+def sync_source(label, account, links, present, selected, now):
     """Reconcile a complete source read in one reminder save. Return links with their upstream times.
 
-    upcoming maps each task with a future reminder to (title, upstream time). Keep the upstream time even
-    when the user snoozes, marks Done or deletes. A retry after the mirror write fails uses the last source
-    occurrence from the reminder store, including a deleted occurrence.
+    selected contains a single task key for each title and reminder time. Keep the upstream time even when
+    it is past or off, or when the user snoozes, marks Done or deletes. A retry after the mirror write fails
+    uses the last occurrence from this account, including a deleted occurrence.
     """
     links = links.copy()
     with _locked():
@@ -309,7 +309,7 @@ def sync_source(label, links, present, upcoming, now):
             for record in records:
                 source = record.get('source')
                 if (not isinstance(source, dict) or source.get('label') != label or 'source_at' not in record
-                        or not isinstance(source.get('key'), str)):
+                        or not isinstance(source.get('key'), str) or record.get('source_account') != account):
                     continue
                 key = source['key']
                 if key not in latest or int(record['id'][1:]) > int(latest[key][0]['id'][1:]):
@@ -317,18 +317,36 @@ def sync_source(label, links, present, upcoming, now):
                 if not deleted and key not in present and record['state'] != 'done':
                     record.update(state='done', done_at=now)
                     changed = True
-        for key, (title, at) in upcoming.items():
+        for key, row in present.items():
+            at = row['reminderAt']
             record, deleted = latest.get(key, (None, False))
             previous = links.get(key)
-            if previous and at == previous['at'] and (record is None or at == record['source_at']):
+            future = at is not None and at > now
+            duplicate = at is not None and key not in selected
+            if not future or duplicate:
+                if record is not None and record['source_at'] != at:
+                    record['source_at'] = at
+                    if future:
+                        # Record the change now. Only the selected task can schedule it in this poll.
+                        record['source_pending'] = True
+                    changed = True
+                if duplicate:
+                    links.pop(key, None)
+                elif previous:
+                    links[key] = {'id': previous['id'], 'at': at}
                 continue
-            if record is None or record['source_at'] != at:
+            current = record is not None and record['source_at'] == at and not record.get('source_pending')
+            if previous and at == previous['at'] and (record is None or current):
+                continue
+            if not current:
                 if record is None or deleted:
-                    record = _new(title, at, label, None, now, None, {'key': key, 'label': label})
+                    record = _new(row['title'], at, label, None, now, None, {'key': key, 'label': label})
+                    record['source_account'] = account
                     _append(data, record)
                 else:
                     _schedule(record, _due(at, now, sourced=True))
                     record['source_at'] = at
+                    record.pop('source_pending', None)
                 changed = True
             links[key] = {'id': record['id'], 'at': at}
         if changed:
@@ -436,7 +454,9 @@ def restore(rid, now=None):
         record = _find(data['deleted'], rid)
         if record is None:
             raise ReminderError('That reminder is no longer in Recently deleted.', 404)
-        if record.get('source') and any(other.get('source') == record['source'] and int(other['id'][1:]) > int(rid[1:])
+        if record.get('source') and any(other.get('source') == record['source']
+                                        and other.get('source_account') == record.get('source_account')
+                                        and int(other['id'][1:]) > int(rid[1:])
                                         for other in data['reminders'] + data['deleted']):
             raise ReminderError('This task has a newer reminder.', 409)
         data['deleted'].remove(record)

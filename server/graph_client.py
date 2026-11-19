@@ -237,8 +237,8 @@ class Client:
             if not fresh:  # disconnected, or broken: never write the old connection back
                 _ACCESS.clear()
                 raise GraphError(why or NOT_CONNECTED, 401)
-            if fresh['tenant'] != config['tenant'] or fresh['client'] != config['client']:
-                raise GraphError(EXPIRED, 401)  # connected again to another app since this poll began
+            if any(fresh.get(field) != config.get(field) for field in ('tenant', 'client', 'account')):
+                raise GraphError(EXPIRED, 401)  # another app or account replaced this connection
             config = self.config = fresh
             self._secrets.add(config['refresh'])
             key = (config['tenant'], config['client'], config['refresh'])

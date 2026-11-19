@@ -89,9 +89,12 @@ def _save(name, data):
             os.unlink(temp)
 
 
-def _snapshot(mirror, source):
-    return mirror.setdefault(source, {'tasks': [], 'syncedAt': None, 'complete': False, 'error': '',
-                                      'backlog': {}, 'reminder': {}})
+def _snapshot(mirror, source, account):
+    saved = mirror.get(source, {})
+    if account is not None and saved.get('account') == account:
+        return saved
+    return {'account': account, 'tasks': [], 'syncedAt': None, 'complete': False, 'error': '',
+            'backlog': {}, 'reminder': {}}
 
 
 def _command(connection):
@@ -183,12 +186,12 @@ def _pages(client, path, *, alternatives=()):
 
 def _todo(client):
     lists = '/me/todo/lists'
-    for task_list in _pages(client, _query(lists, select='id,displayName'), alternatives=(lists,)):
+    for task_list in _pages(client, _query(lists, select='id,displayName')):
         list_id = quote(_graph_id(task_list.get('id')), safe='')
         name = _one_line(task_list.get('displayName')) or 'Tasks'
         path = f'{lists}/{list_id}/tasks'
         for item in _pages(client, _query(path, filter=TODO_FILTER, select=TODO_FIELDS),
-                           alternatives=(_query(path, filter=TODO_FILTER), path)):
+                           alternatives=(_query(path, select=TODO_FIELDS),)):
             if item.get('status') != 'completed':
                 yield _task('todo', item, name, TODO_HOME)
 
@@ -205,7 +208,7 @@ def _planner(client, config, now):
             continue
         plan = quote(_graph_id(item.get('planId')), safe='')
         task = quote(_graph_id(item.get('id')), safe='')
-        cache_key = (config['tenant'], config['client'], config.get('account'), plan)
+        cache_key = (*_account(config), plan)
         if cache_key not in _PLAN_NAMES:
             path = f'/planner/plans/{plan}'
             try:
@@ -245,6 +248,18 @@ def _account(config):
     return tuple(config.get(field) for field in ('tenant', 'client', 'account'))
 
 
+def _reminder_keys(rows, links):
+    selected = {}
+    for key, row in rows.items():
+        at = row['reminderAt']
+        if at is None:
+            continue
+        pair = row['title'], at
+        if pair not in selected or (key in links and selected[pair] not in links):
+            selected[pair] = key
+    return set(selected.values())
+
+
 def sync():
     """Run one poll here. Another server or CLI with a poll in progress already covers this request."""
     with contextlib.ExitStack() as stack:
@@ -256,6 +271,8 @@ def sync():
         config, _ = connection
         if not graph_client.status(connection)['tasks']:
             return
+        identity = _account(config)
+        account = list(identity)
         with _lock('.lock'):
             settings = _settings()
         for source in LABELS:
@@ -274,27 +291,31 @@ def sync():
                 error = str(exc)
             else:
                 error = ''
-            with _lock('.lock'):
+            with graph_client.locked(), _lock('.lock'):
                 connection = graph_client.load()
-                if not graph_client.status(connection)['tasks'] or _account(connection[0]) != _account(config):
+                if not graph_client.status(connection)['tasks'] or _account(connection[0]) != identity:
                     return  # another sign-in or a disconnect superseded this read
                 current = _settings()[source]
                 if not current['enabled']:
                     continue
                 mirror = _read('mirror.json')
-                saved = _snapshot(mirror, source)
+                previous_account = mirror.get(source, {}).get('account')
+                saved = _snapshot(mirror, source, account)
                 complete = not error
                 if complete and source == 'todo' and current['alerts']:
                     now = time.time()
-                    upcoming = {key: (row['title'], row['reminderAt']) for key, row in rows.items()
-                                if row['reminderAt'] is not None and row['reminderAt'] > now}
+                    links = saved['reminder']
                     try:
-                        saved['reminder'] = reminders.sync_source(LABELS[source], saved['reminder'], rows, upcoming, now)
+                        saved['reminder'] = reminders.sync_source(
+                            LABELS[source], account, links, rows, _reminder_keys(rows, links), now)
                     except (reminders.ReminderError, OSError):
                         error = 'Tether could not update the linked reminders.'
                 if not error:
                     saved.update(tasks=list(rows.values()), syncedAt=time.time())
-                saved.update(complete=complete, error=error)
+                # A failed first poll after an account change leaves an empty, unsynced snapshot.
+                if previous_account is None or previous_account == account or not error:
+                    saved.update(complete=complete, error=error)
+                mirror[source] = saved
                 _save('mirror.json', mirror)
 
 
@@ -358,11 +379,13 @@ def listing():
     with _lock('.lock'):
         settings = _settings()
         mirror = _read('mirror.json')
-    connection = graph_client.status()
+        loaded = graph_client.load()
+    connection = graph_client.status(loaded)
+    account = list(_account(loaded[0])) if connection['tasks'] else None
     syncing = _syncing()
     sources, tasks = [], []
     for key, label in LABELS.items():
-        saved, setting = _snapshot(mirror, key), settings[key]
+        saved, setting = _snapshot(mirror, key, account), settings[key]
         why = command = ''
         if not setting['enabled']:
             state, why = 'off', 'This source is disabled.'
@@ -408,9 +431,12 @@ def to_backlog(key, project=''):
             or project != project.strip()):
         raise TaskError('Choose a valid backlog project.')
     source = key.partition(':')[0]
-    with _lock('.lock'):
+    with graph_client.locked(), _lock('.lock'):
+        connection = graph_client.load()
+        if not graph_client.status(connection)['tasks']:
+            raise TaskError('That task is no longer in the list.', 404)
         mirror = _read('mirror.json')
-        saved = _snapshot(mirror, source)
+        saved = _snapshot(mirror, source, list(_account(connection[0])))
         if key in saved['backlog']:
             return {'id': saved['backlog'][key], 'created': False}
         copying = saved.setdefault('copying', {})
