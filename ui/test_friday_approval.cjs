@@ -56,6 +56,26 @@ test('two matching spoken titles ask which one and list only matches', () => {
     /Weekly-reporting, Weekly reporting\. Ask which one\./)
 })
 
+for (const [chat, shortTitle] of [['Auth session', 'Auth'], ['The Hub', 'Hub'], ['Friday chat', 'Friday']]) {
+  test(`"${chat}" is ambiguous when both the full and stripped titles are waiting`, () => {
+    const agents = [waiting(shortTitle), waiting(chat, '%2')]
+    assert.equal(approvalTarget(agents, chat).error,
+      `Multiple chats are waiting for approval: ${shortTitle}, ${chat}. Ask which one.`)
+  })
+}
+
+for (const title of ['Auth session', 'Review tab']) {
+  test(`"${title}" selects a chat with that full title`, () => {
+    const pane = waiting(title)
+    assert.equal(approvalTarget([pane], title), pane)
+  })
+}
+
+test('"the auth chat" selects Auth when only the stripped title matches', () => {
+  const pane = waiting('Auth')
+  assert.equal(approvalTarget([pane], 'the auth chat'), pane)
+})
+
 test('no waiting chats produce errors for named and unnamed approvals', () => {
   const noOptions = { ...reports, approval: { id: 'approval', options: [] } }
   assert.equal(approvalTarget([idle, noOptions], '').error, 'No chat is waiting for approval.')

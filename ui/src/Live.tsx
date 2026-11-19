@@ -71,8 +71,12 @@ const noOption = (approval: Approval) => { const options = approval.options!; re
 // eslint-disable-next-line react-refresh/only-export-components -- The approval selector is exported for unit tests.
 export function approvalTarget(agents: Pane[], chat: string): Pane | { error: string } {
   const waiting = agents.filter(approvalOf)
-  const wanted = spokenName(chat)
-  const matches = chat ? waiting.filter(pane => spokenForm(paneTitle(pane)) === wanted) : waiting
+  const fullName = spokenForm(chat)
+  const strippedName = spokenName(chat)
+  const matches = chat ? waiting.filter(pane => {
+    const title = spokenForm(paneTitle(pane))
+    return title === fullName || title === strippedName
+  }) : waiting
   if (matches.length === 1) return matches[0]
   if (matches.length > 1) return { error: `Multiple chats are waiting for approval: ${matches.map(paneTitle).join(', ')}. Ask which one.` }
   if (chat) return { error: `No chat called ${chat} is waiting for approval. Waiting: ${waiting.map(paneTitle).join(', ') || 'none'}.` }
