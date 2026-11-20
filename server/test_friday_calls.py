@@ -237,7 +237,7 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(self.scan(historical=False), [])
         self.assertEqual(self.digest()['turns'], 1)
         saved = json.loads(self.state.read_text())
-        self.assertEqual(saved, {'cursor': self.rows[-1]['__CURSOR'], 'done': [self.digest()['id']]})
+        self.assertEqual(saved, {'cursor': self.rows[-1]['__CURSOR'], 'done': [self.digest()['id']], 'pending': []})
         self.scan()
         self.assertEqual(json.loads(self.state.read_text()), saved)
 
@@ -275,6 +275,22 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(self.scan(historical=False), [])
         self.assertEqual(len(self.digests()), 1)
 
+    def test_failed_print_replays_pending_before_reading_journal(self):
+        self.scan(historical=False)
+        self.start()
+        self.append(runner('finished'))
+        with patch.object(friday_calls, 'print', create=True, side_effect=BrokenPipeError('closed')):
+            with self.assertRaisesRegex(BrokenPipeError, 'closed'):
+                friday_calls.scan(self.directory)
+        saved = json.loads(self.state.read_text())
+        self.assertEqual(saved['done'], [self.digest()['id']])
+        [pending] = saved['pending']
+        self.assertEqual(pending['id'], self.digest()['id'])
+        with patch.object(friday_calls, 'journal', side_effect=friday_calls.JournalError('offline')):
+            self.assertEqual(self.cli('scan'), (1, pending['line'] + '\n', 'friday-call error: offline\n'))
+        self.assertEqual(json.loads(self.state.read_text())['pending'], [])
+        self.assertEqual(self.scan(historical=False), [])
+
     def test_digest_names_distinguish_milliseconds_under_one_pid(self):
         for name, offset in [('runner/x', 0), ('runner:x', 250_000), ('runner_x', 250_500)]:
             self.append(runner('started', name), __REALTIME_TIMESTAMP=str(self.base + offset))
@@ -305,8 +321,8 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(self.digest()['turns'], 1)
 
     def test_first_run_without_anchor_preserves_lookback(self):
-        self.append(runner('started', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 8_000_000_000))
-        self.append(runner('finished', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 7_999_000_000))
+        self.append(runner('started', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 48_000_000_000))
+        self.append(runner('finished', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 47_999_000_000))
         self.start()
         self.assertEqual(self.scan(historical=False), [])
         self.assertIsNone(json.loads(self.state.read_text())['cursor'])
@@ -314,6 +330,125 @@ class FridayCallsTest(unittest.TestCase):
         self.append(runner('finished'))
         self.assertEqual(len(self.scan(historical=False)), 1)
         self.assertEqual(self.scan(historical=False), [])
+
+    def test_first_run_reads_twelve_hours_and_skips_a_recent_finish(self):
+        self.append(runner('started'), __REALTIME_TIMESTAMP=str(self.base - 10 * 3600 * 1_000_000))
+        self.append(runner('finished'))
+        self.now = int(self.rows[-1]['__REALTIME_TIMESTAMP']) / 1e6 + 1
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(self.run_journal.call_args.args[0][-2:], ['--since', f'@{self.now - 12 * 3600:.6f}'])
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], self.rows[-1]['__CURSOR'])
+        self.now += 60
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(self.digests(), [])
+
+    def test_grace_and_peer_expiry_use_the_clock_before_journal_read(self):
+        self.scan(historical=False)
+        self.start()
+        self.append(runner('finished'))
+        self.now = int(self.rows[-1]['__REALTIME_TIMESTAMP']) / 1e6 + 1
+        read_journal = friday_calls.journal
+
+        def slow_journal(*args, **kwargs):
+            self.now += 60
+            return read_journal(*args, **kwargs)
+
+        with patch.object(friday_calls, 'journal', slow_journal):
+            self.assertEqual(self.scan(historical=False), [])
+        self.append('Friday metrics {"llm_calls":2}')
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(self.digest()['metrics']['llm_calls'], 2)
+        cursor = self.rows[-1]['__CURSOR']
+        self.append(peer())
+        self.now = int(self.rows[-1]['__REALTIME_TIMESTAMP']) / 1e6 + 1
+        with patch.object(friday_calls, 'journal', slow_journal):
+            self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], cursor)
+
+    def test_runner_distinguishes_calls_started_at_the_same_time_under_one_pid(self):
+        self.directory.mkdir()
+        start = datetime.fromtimestamp(self.base / 1e6).astimezone().isoformat()
+        legacy_id = f'{start}-23'
+        self.state.write_text(json.dumps({'cursor': None, 'done': [legacy_id]}))
+        for name in ('runner/x', 'runner:x'):
+            self.append(runner('started', name), __REALTIME_TIMESTAMP=str(self.base))
+            self.append(runner('finished', name), __REALTIME_TIMESTAMP=str(self.base))
+        self.assertEqual(len(self.scan(historical=False)), 2)
+        ids = {json.loads(path.read_text())['id'] for path in self.digests()}
+        self.assertEqual(ids, {f'{start}-23-runner/x', f'{start}-23-runner:x'})
+        self.assertEqual(set(json.loads(self.state.read_text())['done']), ids | {legacy_id})
+
+    def test_bad_text_is_replaced_and_digest_failure_does_not_stop_the_scan(self):
+        self.scan(historical=False)
+        for name in ('text', 'broken', 'markdown-write', 'last'):
+            self.start(name=name)
+            self.append(context(message('user', 'literal surrogate \ud800')))
+            self.append('Friday bye \udfff')
+            self.append(runner('finished', name))
+
+        render = friday_calls.markdown
+        write = friday_calls.atomic_write
+
+        def fail_one(data, timeline):
+            if data['id'].endswith('-broken'):
+                raise RuntimeError('private detail')
+            return render(data, timeline)
+
+        def fail_markdown_write(path, content):
+            if path.name.endswith('-markdown-write.md'):
+                raise OSError('private detail')
+            write(path, content)
+
+        with (patch.object(friday_calls, 'markdown', side_effect=fail_one),
+              patch.object(friday_calls, 'atomic_write', side_effect=fail_markdown_write)):
+            lines = self.scan(historical=False)
+        self.assertEqual(len(lines), 4)
+        normal, broken, markdown_write, last = [json.loads(path.read_text()) for path in self.digests()]
+        for data in (normal, last):
+            self.assertEqual(data['transcript'], [message('user', 'literal surrogate ?')])
+            self.assertEqual(data['events'][0]['text'], 'Friday bye ?')
+        self.assertEqual(broken, {
+            'id': friday_calls.decode_entry(self.rows[6]).at.isoformat() + '-23-broken',
+            'start': friday_calls.decode_entry(self.rows[6]).at.isoformat(),
+            'end': friday_calls.decode_entry(self.rows[9]).at.isoformat(),
+            'error': 'RuntimeError', 'flags': {'digest_error': 1},
+        })
+        self.assertIn('flags=digest_error:1', lines[1])
+        self.assertNotIn('private detail', lines[1])
+        self.assertEqual(markdown_write['error'], 'OSError')
+        self.assertEqual(markdown_write['flags'], {'digest_error': 1})
+        self.assertTrue(lines[2].endswith('-markdown-write.json'))
+        self.assertEqual(self.scan(historical=False), [])
+
+    def test_refuses_symlink_directories_and_does_not_follow_digest_symlinks(self):
+        target = Path(self.scratch) / 'target'
+        target.mkdir(mode=0o755)
+        self.directory.symlink_to(target, target_is_directory=True)
+        self.start()
+        self.append(runner('finished'))
+        start = friday_calls.decode_entry(self.rows[1]).at
+        day = self.directory / f'{start:%Y-%m-%d}'
+        args = ('scan', '--since', '2030-01-01 00:00')
+        for link in (self.directory, day):
+            with self.subTest(link=link):
+                if link == day:
+                    self.directory.mkdir()
+                    day.symlink_to(target, target_is_directory=True)
+                result, stdout, stderr = self.cli(*args)
+                self.assertEqual((result, stdout), (1, ''))
+                self.assertIn('symlink', stderr)
+                self.assertIn(str(link), stderr)
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+                self.assertEqual(list(target.iterdir()), [])
+                link.unlink()
+        day.mkdir()
+        base = day / f'{start:%H%M%S}-000-23-runner-synthetic'
+        external = target / 'outside.json'
+        external.write_text(json.dumps({'id': f'{start.isoformat()}-23-runner-synthetic'}))
+        base.with_suffix('.json').symlink_to(external)
+        self.assertEqual(len(self.scan()), 1)
+        self.assertTrue(base.with_suffix('.json').is_symlink())
+        self.assertTrue(base.with_name(base.name + '-2').with_suffix('.json').is_file())
 
     def test_repeated_peer_init_does_not_create_phantom_calls(self):
         self.append(peer(), __REALTIME_TIMESTAMP=str(self.base - 60_000_000))

@@ -5,6 +5,7 @@ import ast
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
+import errno
 import fcntl
 from functools import cached_property
 from itertools import count
@@ -13,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import statistics
 import subprocess
 import sys
@@ -44,7 +46,7 @@ FRIDAY_FLAGS = {'llm_error', 'corrected_false_success', 'dropped_stray_text', 's
 PIPECAT = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ \| (\w+)\s+\| (\S+) - ([\s\S]*)$')
 CONTEXT = re.compile(r'^FridayLLM#\d+:\s+Generating LLM response\s+')
 MAX_CONTEXT_BYTES = 4 * 1024 * 1024
-INITIAL_LOOKBACK = 3 * 60 * 60
+INITIAL_LOOKBACK = 12 * 60 * 60
 PEER_ATTACH_SECONDS = 5
 PEER_EXPIRE_SECONDS = 30
 FINISH_GRACE_SECONDS = 5
@@ -122,8 +124,8 @@ def journal(*options):
 
 def decode_entry(row):
     message = row.get('MESSAGE') or ''
-    raw = message.encode('utf-8') if isinstance(message, str) else bytes(message)
-    pid = str(row.get('_PID') or '')
+    raw = message.encode('utf-8', 'replace') if isinstance(message, str) else bytes(message)
+    pid = clean_text(str(row.get('_PID') or ''))
     lifecycle = row.get('MESSAGE_ID') in LIFECYCLE_IDS
     if pid == '1' and row.get('UNIT') == 'tether-friday.service':
         lifecycle |= raw.startswith((b'Starting ', b'Started ', b'Stopping ', b'Stopped '))
@@ -150,6 +152,16 @@ def journal_entries(rows):
         pending = entry
     if pending:
         yield pending
+
+
+def clean_text(value):
+    if isinstance(value, str):
+        return value.encode('utf-8', 'replace').decode('utf-8')
+    if isinstance(value, dict):
+        return {clean_text(key): clean_text(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(map(clean_text, value))
+    return value
 
 
 def context_messages(raw, flags):
@@ -191,7 +203,7 @@ def context_messages(raw, flags):
                               'name': name, 'arguments': arguments})
             if calls:
                 item['tool_calls'] = calls
-        result.append(item)
+        result.append(clean_text(item))
     return result
 
 
@@ -302,7 +314,7 @@ class Call:
 
     @property
     def id(self):
-        return f'{self.start.at.isoformat()}-{self.start.pid}'
+        return f'{self.start.at.isoformat()}-{self.start.pid}-{self.runner or "peer"}'
 
     def digest(self, end, ended):
         transcript, timeline, events = [], [], []
@@ -441,55 +453,108 @@ def atomic_write(path, content):
             temporary.unlink(missing_ok=True)
 
 
-def write_state(path, cursor, done, lookback):
-    state = {'cursor': cursor, 'done': done[-200:]}
+def write_state(path, cursor, done, lookback, pending):
+    state = {'cursor': cursor, 'done': done[-200:], 'pending': pending}
     if cursor is None and lookback is not None:
         state['since'] = lookback
     atomic_write(path, json.dumps(state) + '\n')
 
 
-def write_digest(directory, call, end, ended):
-    data, timeline = call.digest(end, ended)
-    day = directory / call.start.at.strftime('%Y-%m-%d')
-    day.mkdir(mode=0o700, exist_ok=True)
-    day.chmod(0o700)
+def private_directory(path, *, parents=False):
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        path.mkdir(mode=0o700, parents=parents, exist_ok=True)
+        mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode):
+        raise OSError(f'refusing symlink directory: {path}')
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(descriptor, 0o700)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def read_digest(path):
+    with open(path, encoding='utf-8', opener=lambda name, flags: os.open(name, flags | os.O_NOFOLLOW)) as stream:
+        return stream.read()
+
+
+def digest_base(day, call):
     stamp = call.start.at
     stem = re.sub(r'[^A-Za-z0-9_-]', '_',
                   f'{stamp:%H%M%S}-{stamp.microsecond // 1000:03d}-{call.start.pid}-{call.runner or "peer"}')
     base = day / stem
     for suffix in count(2):
         try:
-            existing = json.loads(base.with_suffix('.json').read_text(encoding='utf-8'))
+            existing = json.loads(read_digest(base.with_suffix('.json')))
         except FileNotFoundError:
-            if not base.with_suffix('.md').exists():
-                break
+            try:
+                os.lstat(base.with_suffix('.md'))
+            except FileNotFoundError:
+                return base
+        except OSError as exc:
+            if exc.errno != errno.ELOOP:
+                raise
         except ValueError:
             pass
         else:
             if isinstance(existing, dict) and existing.get('id') == call.id:
-                break
+                return base
         base = day / f'{stem}-{suffix}'
+
+
+def write_digest(directory, call, end, ended):
+    stamp = call.start.at
+    day = directory / stamp.strftime('%Y-%m-%d')
+    os.close(private_directory(day))
+    base = digest_base(day, call)
     md_path = base.with_suffix('.md')
-    atomic_write(base.with_suffix('.json'), json.dumps(data, ensure_ascii=False, indent=2) + '\n')
-    atomic_write(md_path, markdown(data, timeline))
-    return (f"friday-call {stamp:%H:%M} {data['duration_s']:g}s turns={data['turns']} "
-            f"ended={ended} flags={flag_text(data['flags'])} digest={md_path}")
+    json_path = base.with_suffix('.json')
+    try:
+        data, timeline = call.digest(end, ended)
+        rendered = markdown(data, timeline)
+        atomic_write(json_path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+        atomic_write(md_path, rendered)
+        duration, turns, flags = data['duration_s'], data['turns'], data['flags']
+    except Exception as exc:
+        duration, turns, flags = max(0, (end - stamp).total_seconds()), 0, {'digest_error': 1}
+        error = type(exc).__name__
+        minimal = {'id': call.id, 'start': stamp.isoformat(), 'end': end.isoformat(), 'error': error, 'flags': flags}
+        atomic_write(json_path, json.dumps(minimal, indent=2) + '\n')
+        try:
+            atomic_write(md_path, f"# Friday call at {minimal['start']}\n\nDigest error: {error}\n")
+        except Exception:
+            # The minimal JSON is usable even if the Markdown path still fails.
+            md_path = json_path
+    return (f'friday-call {stamp:%H:%M} {duration:g}s turns={turns} '
+            f'ended={ended} flags={flag_text(flags)} digest={md_path}')
 
 
 def scan_locked(directory, since):
     state_path = directory / 'state.json'
     initializing = False
     lookback = None
-    cursor, done = None, []
+    cursor, done, pending = None, [], []
     if since is None:
         try:
             state = json.loads(state_path.read_text(encoding='utf-8'))
         except FileNotFoundError:
             initializing = True
-            lookback = f'@{time.time() - INITIAL_LOOKBACK:.6f}'
         else:
             cursor, done = state['cursor'], state['done']
             lookback = state.get('since')
+            pending = state.get('pending', [])
+            if pending:
+                for notification in pending:
+                    print(notification['line'], flush=True)
+                pending.clear()
+                write_state(state_path, cursor, done, lookback, pending)
+    now = time.time()
+    if initializing:
+        lookback = f'@{now - INITIAL_LOOKBACK:.6f}'
     window_start = since if since is not None else lookback
     if cursor:
         rows = journal(f'--after-cursor={cursor}')
@@ -506,11 +571,16 @@ def scan_locked(directory, since):
         if call.id not in done:
             summary = write_digest(directory, call, end, ended)
             done.append(call.id)
+            if since is None:
+                pending.append({'id': call.id, 'line': summary})
         if since is None:
-            write_state(state_path, checkpoint, done, lookback)
+            write_state(state_path, checkpoint, done, lookback, pending)
             cursor = checkpoint
         if summary is not None:
             print(summary, flush=True)
+            if since is None:
+                pending.pop()
+                write_state(state_path, cursor, done, lookback, pending)
 
     previous = cursor
     call = None
@@ -548,24 +618,21 @@ def scan_locked(directory, since):
                 ('Friday metrics ', 'Friday net ', 'Friday bye ')):
             call.entries.append(entry)
         previous = entry.cursor
-    now = time.time()
     checkpoint = previous
     if pending_peer and now - pending_peer.at.timestamp() < PEER_EXPIRE_SECONDS:
         checkpoint = peer_checkpoint
     if call:
-        if finished_at and now - finished_at.timestamp() >= FINISH_GRACE_SECONDS:
+        if finished_at and (initializing or now - finished_at.timestamp() >= FINISH_GRACE_SECONDS):
             finish(call, finished_at, 'clean', checkpoint)
         else:
             checkpoint = call.checkpoint
     if since is None and (initializing or checkpoint != cursor):
-        write_state(state_path, checkpoint, done, lookback)
+        write_state(state_path, checkpoint, done, lookback, pending)
 
 
 def scan(directory, since=None):
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    directory.chmod(0o700)
     # The directory inode stays stable while state.json is atomically replaced.
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = private_directory(directory, parents=True)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         scan_locked(directory, since)
@@ -585,10 +652,10 @@ def main(argv=None):
     watch.add_argument('--interval', type=float, default=15)
     commands.add_parser('show').add_argument('digest', type=Path)
     args = parser.parse_args(argv)
-    directory = Path(os.environ.get('TETHER_FRIDAY_CALLS') or paths.CACHE / 'friday-calls').resolve()
+    directory = Path(os.environ.get('TETHER_FRIDAY_CALLS') or paths.CACHE / 'friday-calls').absolute()
     try:
         if args.command == 'show':
-            print(args.digest.with_suffix('.md').read_text(encoding='utf-8'), end='')
+            print(read_digest(args.digest.with_suffix('.md')), end='')
         elif args.command == 'scan':
             scan(directory, args.since)
         else:
