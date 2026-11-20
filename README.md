@@ -203,14 +203,20 @@ Phones get the desktop editor, because Community Edition opens its mobile editor
 
 ## Panel browser in a container (optional)
 
-When Docker and the `lscr.io/linuxserver/chromium` image are present, the panel browser runs in a container and streams as live video.
-Tether serves the live view on its own port (7698 by default, `MOBILE_TMUX_BROWSER_LIVE_PORT`), so the page in it cannot reach Tether.
-Without that port, the panel shows still pictures as before. Set `MOBILE_TMUX_BROWSER_SELKIES=0` to keep the local Chromium.
+The Test and Signed-in browsers each use a separate container and live video origin when Docker and the pinned
+`lscr.io/linuxserver/chromium` image are present. The Test browser uses port 7698 (`MOBILE_TMUX_BROWSER_LIVE_PORT`).
+The Signed-in browser uses port 7699 (`MOBILE_TMUX_BROWSER_SIGNED_LIVE_PORT`). Sign in again in the Signed-in panel
+after upgrade. Its Chromium profile stays in the container's persistent config.
 
-If you reach Tether through Tailscale Serve, publish the port too:
+If the video origin is unreachable, the panel shows Retry. With Docker or the image unavailable, the Test browser
+uses local Chromium and the Signed-in browser is unavailable. Set `MOBILE_TMUX_BROWSER_SELKIES=0` to use local
+Chromium for the Test browser.
+
+If you reach Tether through Tailscale Serve, publish both ports.
 
 ```sh
 tailscale serve --bg --https=7698 http://127.0.0.1:7698
+tailscale serve --bg --https=7699 http://127.0.0.1:7699
 ```
 
 ## Dev server previews

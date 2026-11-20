@@ -47,6 +47,7 @@ DASHBOARD = '/usr/share/selkies/selkies-dashboard'
 # Tether serves the live view on this port only (server.BrowserLiveOriginHandler), so it has its own origin. Behind
 # tailscale serve, publish it too: tailscale serve --bg --https=7698 http://127.0.0.1:7698
 LIVE_PORT = int(os.environ.get('MOBILE_TMUX_BROWSER_LIVE_PORT', '7698'))
+SIGNED_LIVE_PORT = int(os.environ.get('MOBILE_TMUX_BROWSER_SIGNED_LIVE_PORT', '7699'))
 
 
 class ContainerError(RuntimeError):
@@ -64,10 +65,11 @@ def _run(args, timeout=60):
 class Container:
     """One Selkies container for one panel browser. Thread-safe; Browser calls launch() and stop()."""
 
-    def __init__(self, name, *, persistent=False, root=None, runner=_run, image=IMAGE, files=FILES):
+    def __init__(self, name, *, persistent=False, live_port=LIVE_PORT, root=None, runner=_run, image=IMAGE, files=FILES):
         self.name = 'tether-selkies-' + name
         self.root = Path(root) if root is not None else paths.CACHE / 'selkies' / name
         self.persistent = persistent
+        self.live_port = live_port
         self.runner, self.image, self.files = runner, image, files
         self.lock = threading.RLock()
         self.password = None
@@ -143,7 +145,15 @@ class Container:
                     pass
             self.password = secrets.token_urlsafe(24)
             self.run_id = secrets.token_hex(6)
-            result = self.runner(self.run_args(), timeout=120)
+            args = self.run_args()
+            release_by = time.monotonic() + 10
+            while True:
+                result = self.runner(args, timeout=120)
+                # After docker stop, --rm can still be releasing the name when the next launch starts.
+                conflict = f'Conflict. The container name "/{self.name}" is already in use'
+                if result.returncode == 0 or conflict not in result.stderr or time.monotonic() >= release_by:
+                    break
+                time.sleep(0.25)
             if result.returncode != 0:
                 self.password = None
                 raise ContainerError('The browser container did not start: %s' % (result.stderr.strip()[-300:] or 'docker run failed'))
@@ -199,4 +209,7 @@ def default(name):
         result = _run(['docker', 'image', 'inspect', '-f', '{{.Id}}', IMAGE], timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
-    return Container(name) if result.returncode == 0 else None
+    if result.returncode != 0:
+        return None
+    signed = name == 'signed'
+    return Container(name, persistent=signed, live_port=SIGNED_LIVE_PORT if signed else LIVE_PORT)

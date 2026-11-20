@@ -2019,7 +2019,7 @@ class Handler(BaseHTTPRequestHandler):
             lines.append('Connection: close')
         self.pipe_upstream(upstream, lines)
 
-    def proxy_browser_live(self):
+    def proxy_browser_live(self, container):
         """Pass /browser/live/ (the Selkies client of the panel browser, WebSocket included) to the container's
         Unix socket. Only BrowserLiveOriginHandler calls this, on its own port: the container sends the page, so it
         must not share an origin with Tether's pages and APIs. Tether's cookie and identity headers stay here; the
@@ -2028,7 +2028,6 @@ class Handler(BaseHTTPRequestHandler):
         if origin and not auth.same_origin(origin, self.headers.get('Host', '')):
             self.respond(403, {'error': 'Reload the page and try again.'})
             return
-        container = browser.BROWSER.container
         secret = container.web_auth() if container is not None else None
         if secret is None:
             self.live_wait('The panel browser is not running.')
@@ -3700,6 +3699,10 @@ class BrowserLiveOriginHandler(Handler):
     A page from the container can then never read Tether's pages or call its APIs with the person's sign-in. This
     listener serves nothing else."""
 
+    def __init__(self, *args, panel_browser, **kwargs):
+        self.panel_browser = panel_browser
+        super().__init__(*args, **kwargs)
+
     def do_GET(self):
         if not self.path.startswith(browser_container.LIVE_PREFIX):
             self.respond(404, {'error': 'Not found'})
@@ -3708,19 +3711,19 @@ class BrowserLiveOriginHandler(Handler):
                 or auth.tailscale_signed_in(self.headers.get('Tailscale-User-Login'), self.client_address[0])):
             self.respond(401, {'error': 'Sign in required.'})
             return
-        self.proxy_browser_live()
+        self.proxy_browser_live(self.panel_browser.container)
 
     do_POST = do_PUT = do_HEAD = do_DELETE = do_OPTIONS = do_PATCH = do_GET
 
 
-def start_browser_live_origin(host):
-    import browser
-    if browser.BROWSER.container is None:
+def start_browser_live_origin(host, panel_browser):
+    if panel_browser.container is None:
         return None
+    port = panel_browser.container.live_port
     try:
-        http = ThreadingHTTPServer((host, browser_container.LIVE_PORT), BrowserLiveOriginHandler)
+        http = ThreadingHTTPServer((host, port), partial(BrowserLiveOriginHandler, panel_browser=panel_browser))
     except OSError as exc:
-        logging.getLogger(__name__).warning('Browser live view listener did not start: %s', type(exc).__name__)
+        logging.getLogger(__name__).warning('Browser live view listener on port %d did not start: %s', port, type(exc).__name__)
         return None
     threading.Thread(target=http.serve_forever, name='browser-live-listener', daemon=True).start()
     return http
@@ -3729,7 +3732,8 @@ def start_browser_live_origin(host):
 def start_dev_previews(host, port):
     """The pool of ports that forward dev servers (dev_previews.py). Tether's own ports are never forwarded."""
     office = office_addon.load() or {}
-    own = {port, MAIN_PORT, TTYD_PORT, browser_container.LIVE_PORT, 7697, office.get('editor_port'), urlsplit(office.get('url') or '').port}
+    own = {port, MAIN_PORT, TTYD_PORT, browser_container.LIVE_PORT, browser_container.SIGNED_LIVE_PORT,
+           7697, office.get('editor_port'), urlsplit(office.get('url') or '').port}
     return dev_previews.start(host, port, denied={item for item in own if item})
 
 
@@ -3756,9 +3760,15 @@ if __name__ == '__main__':
     import pane_view
     import detection_rules
     detection_rules.save_last_good()
-    container = browser_container.default('test')
-    if container is not None:
-        browser.BROWSER.use_container(container)
+    panel_browsers = (('test', browser.BROWSER), ('signed', browser.SIGNED_BROWSER))
+    if any(not 1 <= port <= 65535 for port in (browser_container.LIVE_PORT, browser_container.SIGNED_LIVE_PORT)):
+        raise SystemExit('Set each browser live port to a number from 1 to 65535.')
+    if browser_container.LIVE_PORT == browser_container.SIGNED_LIVE_PORT:
+        raise SystemExit('The Test and Signed-in browsers need distinct live ports.')
+    for name, panel_browser in panel_browsers:
+        container = browser_container.default(name)
+        if container is not None:
+            panel_browser.use_container(container)
     atexit.register(browser.stop_all)
     pane_view.zoom_repair_all()
     paths.SCOPE_TMUX = bool(os.environ.get('INVOCATION_ID'))
@@ -3791,6 +3801,7 @@ if __name__ == '__main__':
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()
     start_office_origin(host)
-    start_browser_live_origin(host)
+    for _, panel_browser in panel_browsers:
+        start_browser_live_origin(host, panel_browser)
     start_dev_previews(host, port)
     http.serve_forever()
