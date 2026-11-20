@@ -784,13 +784,13 @@ class ReviewLinksTests(unittest.TestCase):
         self.file.write_text(json.dumps([link, other, dict(link, reviewer='%21'), None, {}, cap, other_cap]))
         write_store = review_links._write
 
-        def write(rows):
+        def write(rows, **kwargs):
             self.assertTrue(review_links._lock.locked())
-            write_store(rows)
+            write_store(rows, **kwargs)
 
         with patch.object(review_links, '_write', side_effect=write) as write_mock:
             self.assertTrue(review_links.remove('%13'))
-        write_mock.assert_called_once_with([other, None, {}, cap, other_cap])
+        write_mock.assert_called_once_with([other, None, {}, cap, other_cap], adopt={('%13', None)})
         self.assertEqual(self.rows(), [other, None, {}, other_cap])
 
     def test_remove_missing_worker_returns_false_without_writing(self):
@@ -1454,10 +1454,10 @@ class ReviewLinksTests(unittest.TestCase):
             '%13',
         )
 
-    def assert_mak_stop(self, rounds=3):
+    def assert_mak_stop(self, rounds=3, reviewer='%12'):
         self.send.assert_called_with(
             self.worker,
-            f'[Tether review] Stopped after {rounds} review rounds: the reviewer tab (%12) still finds '
+            f'[Tether review] Stopped after {rounds} review rounds: the reviewer tab ({reviewer}) still finds '
             f'blocking problems. Do not fix them in this turn. Mak decides the next step.\n\n'
             f'Open findings:\n\n{FINDINGS}\n\nReply with a short list of the open findings and what you tried, '
             'then end with "Needs you: yes".',
@@ -1795,7 +1795,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.alert.assert_not_called()
 
     def test_parent_grant_while_unlinked_preserves_the_five_round_cap_on_relink(self):
-        for prior, remaining, reviewer in ((3, 2, '%12'), (4, 1, '%12'), (4, 5, '%21')):
+        for prior, remaining, reviewer in ((3, 2, '%12'), (4, 1, '%12'), (4, 1, '%21')):
             with self.subTest(prior=prior, reviewer=reviewer):
                 self.file.write_text('[]')
                 self.add()
@@ -1877,8 +1877,7 @@ class ReviewLinksTests(unittest.TestCase):
                 for reviewer, thread in (('%22', THREAD), ('%12', PARENT_THREAD), ('%12', THREAD)):
                     self.add(reviewer=reviewer, reviewer_thread=thread, worker_thread=WORKER_THREAD, reset=False)
                     link, = self.links()
-                    expected = counts if (reviewer, thread) == ('%12', THREAD) else (0, 0)
-                    self.assertEqual((link.get('rounds', 0), link.get('empty_rounds', 0)), expected)
+                    self.assertEqual((link.get('rounds', 0), link.get('empty_rounds', 0)), counts)
                     self.assertEqual((link['limit'], link['grant_rounds']), (5, 3))
                     review_links.remove('%13', reviewer)
 
@@ -1942,6 +1941,165 @@ class ReviewLinksTests(unittest.TestCase):
         self.request_review()
         self.finish_review(FINDINGS)
         self.assert_mak_stop()
+
+    def test_relinking_the_reviewer_during_a_feedback_turn_keeps_the_round_count(self):
+        # B281: the turn that acts on feedback is not Mak's restart, also when the reviewer is relinked during it.
+        for agent, relink_while_working in product(('codex', 'claude'), (True, False)):
+            with self.subTest(agent=agent, relink_while_working=relink_while_working):
+                self.file.write_text('[]')
+                self.worker['agent'] = agent
+                self.states.update({'%13': 'Idle', '%12': 'Idle'})
+                self.send.reset_mock()
+                self.alert.reset_mock()
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                for _ in range(2):
+                    self.request_review()
+                    self.finish_review()
+                if relink_while_working:
+                    self.observe(**{'%13': 'Working'})  # the worker acts on the second findings
+                    self.observe()
+                self.assertTrue(review_links.remove('%13', '%12'))
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                self.assertEqual(self.links()[0]['rounds'], 2)
+                self.observe(**{'%13': 'Working'})  # the new link sees the feedback turn run
+                self.observe(**{'%13': 'Idle'})  # the feedback turn ends; the new link asks for review 3
+                self.assertEqual(self.links()[0]['rounds'], 2)
+                self.finish_review(FINDINGS)
+                self.assert_mak_stop()
+
+    def test_replacement_reviewer_continues_at_round_three_in_either_order(self):
+        for stop, limit in (('before add', 3), ('before add', 5), ('after add', 3), ('close after add', 3)):
+            with self.subTest(stop=stop, limit=limit):
+                self.file.write_text('[]')
+                self.entries = [self.worker, self.reviewer, dict(self.reviewer, id='%21')]
+                self.states.update({'%13': 'Idle', '%12': 'Idle', '%21': 'Idle'})
+                self.turn_source = None
+                self.level = lambda _: limit
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                for _ in range(2):
+                    self.request_review()
+                    self.finish_review()
+                    self.turn_source = lambda _: 'review-feedback'
+                self.assert_one_cap(2)
+                if limit == 5:
+                    rows = self.rows()
+                    next(row for row in rows if row.get('cap')).update(limit=5, grant_rounds=3)
+                    self.file.write_text(json.dumps(rows))
+
+                if stop == 'before add':
+                    self.assertTrue(review_links.remove('%13', '%12'))
+                self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+                if stop == 'after add':
+                    self.assertTrue(review_links.remove('%13', '%12'))
+                if stop == 'close after add':
+                    review_links.close('%12')
+
+                self.alert.reset_mock()
+                for rounds in range(3, limit + 1):
+                    self.request_review()
+                    self.send.reset_mock()
+                    self.reply.return_value = FINDINGS
+                    self.observe(**{'%21': 'Working'})
+                    self.observe(**{'%21': 'Idle'})
+                    if rounds == limit:
+                        self.assert_mak_stop(rounds, reviewer='%21')
+                    else:
+                        self.send.assert_called_once()
+                        self.assertIn('Feedback from the reviewer tab (%21)', self.send.call_args.args[1])
+                        self.alert.assert_not_called()
+                    self.assert_one_cap(rounds, reviewer='%21')
+
+    def test_only_a_sole_reviewer_without_counts_adopts_a_stopped_reviewers_history(self):
+        for own_count in (0, 1):
+            with self.subTest(own_count=own_count):
+                self.file.write_text('[]')
+                for pane in ('%12', '%21', '%22'):
+                    self.add(reviewer=pane, worker_thread=WORKER_THREAD, reset=False)
+                self.entries = [self.worker, self.reviewer, *(dict(self.reviewer, id=pane) for pane in ('%21', '%22'))]
+                self.states.update({'%21': 'Idle', '%22': 'Idle'})
+                rows = self.rows()
+                cap = next(row for row in rows if row.get('cap'))
+                self.set_counts(cap, '%12', rounds=2)
+                if own_count:
+                    self.set_counts(cap, '%21', rounds=own_count)
+                self.file.write_text(json.dumps(rows))
+
+                review_links.remove('%13', '%12')
+                self.observe()
+                by_reviewer = {link['reviewer']: link.get('rounds', 0) for link in self.links()}
+                self.assertEqual(by_reviewer, {'%21': own_count, '%22': 0})
+                self.assert_one_cap(2)
+
+                review_links.remove('%13', '%22')
+                self.observe()
+                expected = {f'%21:{THREAD}': {'rounds': own_count or 2}}
+                if own_count:
+                    expected[f'%12:{THREAD}'] = {'rounds': 2}
+                cap, = (row for row in self.rows() if row.get('cap'))
+                self.assertEqual(cap['counts'], expected)
+
+    def test_granted_replacement_moves_one_whole_entry_and_its_restart_baseline(self):
+        self.add(worker_thread=WORKER_THREAD)
+        self.add(reviewer='%22', worker_thread=WORKER_THREAD, reset=False)
+        rows = self.rows()
+        cap = next(row for row in rows if row.get('cap'))
+        cap.update(limit=5, grant_rounds=3)
+        self.set_counts(cap, '%12', rounds=3, stale_rounds=1)
+        self.set_counts(cap, '%22', empty_rounds=2)
+        self.set_counts(cap.setdefault('restart', {}), '%12', rounds=2, stale_rounds=1)
+        self.set_counts(cap['restart'], '%22', empty_rounds=2)
+        self.file.write_text(json.dumps(rows))
+        review_links.remove('%13')
+
+        self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+        cap, = (row for row in self.rows() if row.get('cap'))
+        self.assertEqual(cap['counts'], {f'%21:{THREAD}': {'rounds': 3, 'stale_rounds': 1},
+                                         f'%22:{THREAD}': {'empty_rounds': 2}})
+        self.assertEqual(cap['restart']['counts'], {f'%21:{THREAD}': {'rounds': 2, 'stale_rounds': 1},
+                                                    f'%22:{THREAD}': {'empty_rounds': 2}})
+
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        self.turn_source = lambda _: 'review-feedback'
+        self.request_review()
+        self.send.reset_mock()
+        self.reply.return_value = FINDINGS
+        self.observe(**{'%21': 'Working'})
+        self.observe(**{'%21': 'Idle'})
+        self.send.assert_called_once()
+        self.assertIn('Feedback from the reviewer tab (%21)', self.send.call_args.args[1])
+        self.assert_one_cap(4, reviewer='%21')
+        self.assertEqual(review_links.paused(), {})
+        self.alert.assert_not_called()
+
+    def test_orphan_selection_uses_stale_rounds_and_breaks_ties_by_rounds(self):
+        for first, second in (({'rounds': 1}, {'stale_rounds': 2}),
+                              ({'empty_rounds': 2}, {'rounds': 1, 'empty_rounds': 1})):
+            with self.subTest(first=first, second=second):
+                self.file.write_text('[]')
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                self.add(reviewer='%22', worker_thread=WORKER_THREAD, reset=False)
+                rows = self.rows()
+                cap = next(row for row in rows if row.get('cap'))
+                self.set_counts(cap, '%12', **first)
+                self.set_counts(cap, '%22', **second)
+                self.file.write_text(json.dumps(rows))
+                review_links.remove('%13')
+
+                self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+                cap, = (row for row in self.rows() if row.get('cap'))
+                self.assertEqual(cap['counts'], {f'%12:{THREAD}': first, f'%21:{THREAD}': second})
+
+    def test_a_reviewer_with_a_live_sibling_takes_its_own_counts_from_before_its_thread_was_known(self):
+        self.file.write_text('[]')
+        self.add(worker_thread=WORKER_THREAD, reset=False)
+        rows = self.rows()
+        cap = next(row for row in rows if row.get('cap'))
+        cap['counts'] = {'%21:': {'rounds': 2}, review_links.UNOWNED: {'rounds': 1}}
+        self.file.write_text(json.dumps(rows))
+        self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+        cap = next(row for row in self.rows() if row.get('cap'))
+        self.assertEqual(cap['counts'], {f'%21:{THREAD}': {'rounds': 2}, review_links.UNOWNED: {'rounds': 1}})
 
     def ready_siblings(self, rounds, *, level=3, reverse=False):
         self.file.write_text('[]')
@@ -2088,7 +2246,11 @@ class ReviewLinksTests(unittest.TestCase):
                     replies[approver] = f'APPROVED {self.head}'
                     self.observe()
                     self.assertIn(replies[approver], self.send.call_args.args[1])
-                    self.assert_one_cap(1, blocker)
+                    if stop_blocker:
+                        cap, = (row for row in self.rows() if row.get('cap'))
+                        self.assertFalse(cap.get('counts'))  # the sole reviewer cleared the entry it adopted
+                    else:
+                        self.assert_one_cap(1, blocker)
                     self.alert.assert_not_called()
 
     def test_reviewer_reply_matrix_keeps_counts_with_the_reviewer(self):
@@ -2498,7 +2660,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.alert.call_count, int(conflict))
                 self.send.assert_not_called()
 
-    def test_legacy_saved_counts_bind_to_their_owner_once(self):
+    def test_legacy_saved_counts_follow_a_sole_reviewer_across_relinks(self):
         for named in (False, True):
             with self.subTest(named=named):
                 saved = dict(worker='%13', worker_thread=WORKER_THREAD, saved_at=time.time(),
@@ -2510,8 +2672,7 @@ class ReviewLinksTests(unittest.TestCase):
                 for pane, thread in (('%21', THREAD), ('%12', THREAD), (owner, PARENT_THREAD), (owner, THREAD)):
                     self.add(reviewer=pane, reviewer_thread=thread, worker_thread=WORKER_THREAD, reset=False)
                     link, = self.links()
-                    expected = int((pane, thread) == (owner, THREAD))
-                    self.assertEqual((link.get('rounds', 0), link.get('empty_rounds', 0)), (expected, expected))
+                    self.assertEqual((link.get('rounds', 0), link.get('empty_rounds', 0)), (1, 1))
                     self.assertTrue(review_links.remove('%13', pane))
 
     def test_upgrade_keeps_both_counts_without_the_highest_totals_grant(self):
@@ -3007,6 +3168,51 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(review_links.reviewed_by(), {})
         with self.assertRaisesRegex(ValueError, 'Mak or the parent'):
             self.add(worker_thread=WORKER_THREAD, reset=False)
+
+    def test_stop_during_final_feedback_passes_the_saved_round_to_the_surviving_reviewer(self):
+        for delivered in (True, False):
+            with self.subTest(delivered=delivered):
+                self.file.write_text('[]')
+                self.states.update({'%13': 'Idle', '%12': 'Idle', '%21': 'Idle'})
+                self.entries = [self.worker, self.reviewer, dict(self.reviewer, id='%21')]
+                self.send.reset_mock(side_effect=True)
+                self.alert.reset_mock()
+                self.turn_source = None
+                self.add(worker_thread=WORKER_THREAD, reset=False)
+                for _ in range(2):
+                    self.request_review()
+                    self.finish_review()
+                    self.turn_source = lambda _: 'review-feedback'
+                self.request_review()
+                self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+                during_send = []
+
+                def stop_on_send(entry, *_):
+                    if entry == self.worker:
+                        stopped = review_links.remove('%13', '%12')
+                        cap, = (row for row in self.rows() if row.get('cap'))
+                        during_send.append((stopped, cap['counts']))
+                        if not delivered:
+                            raise DraftError('Keep the draft.')
+
+                self.send.side_effect = stop_on_send
+                self.finish_review(FINDINGS)
+                self.assertEqual(during_send, [(True, {f'%12:{THREAD}': {'rounds': 2}})])
+                if delivered:
+                    self.assert_mak_stop()
+                self.send.reset_mock(side_effect=True)
+                self.request_review()
+                if delivered:
+                    self.send.assert_not_called()
+                    self.assert_mak_alert()
+                else:
+                    self.reply.return_value = FINDINGS
+                    self.observe(**{'%21': 'Working'})
+                    self.observe(**{'%21': 'Idle'})
+                    self.assert_mak_stop(reviewer='%21')
+                self.assertEqual(review_links.paused(), {'%13': ['%21']})
+                cap, = (row for row in self.rows() if row.get('cap'))
+                self.assertEqual(cap['counts'], {f'%21:{THREAD}': {'rounds': 3}})
 
     def test_stop_during_final_feedback_alert_gives_browser_restart(self):
         for starting_rounds, limit in ((2, 3), (4, 5)):
