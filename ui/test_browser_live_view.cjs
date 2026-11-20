@@ -290,7 +290,8 @@ async function main() {
 
       // Notes take one CDP screenshot, then draw on it.
       const notes = page.getByRole('button', { name: 'Add notes to this frame', exact: true })
-      assert(await notes.isEnabled())
+      // Notes wait for the reloaded live view's load event, so wait on the condition, not one read.
+      await page.waitForFunction(() => !document.querySelector('[aria-label="Add notes to this frame"]').disabled)
       await notes.click()
       await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/snapshot?tab=fixture'))
       await page.getByRole('status').filter({ hasText: 'Taking a picture of the page' }).waitFor()
@@ -324,6 +325,11 @@ async function main() {
         assert(Math.abs(box.x - (stage.x + (stage.width - box.width) / 2)) < 1)
         assert(Math.abs(box.y - (stage.y + (stage.height - box.height) / 2)) < 1)
         assert.deepEqual(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => [innerWidth, innerHeight]), [width, height])
+        // Scaled down, the live page samples its canvas smoothly so thin text keeps its strokes (tether-wheel.js).
+        const smooth = () => [...document.querySelectorAll('style')].some(style => style.textContent.includes('image-rendering: auto'))
+        await page.frameLocator('iframe.browser-live').locator('body').evaluate((_, [want, source]) =>
+          new Promise((done, fail) => { const until = Date.now() + 3000; const check = () => (new Function('return (' + source + ')()')() === want ? done() : Date.now() > until ? fail(new Error('smooth ' + !want)) : setTimeout(check, 50)); check() }),
+        [scale < 1, smooth.toString()])
         return box
       }
       await page.getByRole('button', { name: 'Device: Desktop', exact: true }).click()

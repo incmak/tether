@@ -7,8 +7,15 @@
 (function () {
   if (window.parent === window) return
   var relay = true
+  // Selkies sets image-rendering: pixelated inline on its canvas. When the panel scales this frame down, that drops
+  // pixel columns from thin text, so the panel asks for smooth sampling; !important wins over the inline value.
+  var smooth = document.createElement('style')
+  smooth.textContent = 'canvas, video { image-rendering: auto !important; }'
   window.addEventListener('message', function (event) {
-    if (event.source === window.parent && event.data?.tether === 'wheel-mode') relay = event.data.relay !== false
+    if (event.source !== window.parent || event.data?.tether !== 'wheel-mode') return
+    relay = event.data.relay !== false
+    if (event.data.smooth === true) (document.head || document.documentElement).appendChild(smooth)
+    else smooth.remove()
   })
   window.addEventListener('wheel', function (event) {
     if (!relay || event.ctrlKey) return

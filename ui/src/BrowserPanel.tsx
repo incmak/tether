@@ -182,13 +182,16 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const liveView = liveMode && !noting
   const liveOffline = liveView && liveReach === 'down'
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
-  const syncLiveInput = useCallback(() => {
-    if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView }, new URL(liveSrc).origin)
-  }, [liveSrc, windowView])
-  useEffect(syncLiveInput, [syncLiveInput])
   // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
   const livePreset = tab && tab.preset !== 'desktop' && !windowView ? tab : null
   const liveScale = livePreset ? Math.min(1, stage.width / livePreset.width, stage.height / livePreset.height) : 1
+  // Selkies draws its canvas with pixelated sampling. Scaled down, that drops whole pixel columns from thin glyph
+  // strokes, so a scaled preset asks the live page for smooth sampling (tether-wheel.js).
+  const liveSmooth = liveScale < 1
+  const syncLiveInput = useCallback(() => {
+    if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView, smooth: liveSmooth }, new URL(liveSrc).origin)
+  }, [liveSrc, windowView, liveSmooth])
+  useEffect(syncLiveInput, [syncLiveInput])
 
   const stageRef = useRef<HTMLDivElement | null>(null)
   // The stage mounts late in Your Chrome (after the pairing card), so observe the element itself, not the load.

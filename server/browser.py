@@ -56,12 +56,14 @@ AGENT_EMULATION = {
     'Emulation.setTouchEmulationEnabled': 'touch',
     'Emulation.setEmitTouchEventsForMouse': 'mouse',
     'Emulation.setUserAgentOverride': 'ua',
+    'Emulation.setScrollbarsHidden': 'scrollbars',
 }
 AGENT_DEFAULTS = {
     'metrics': ('Emulation.clearDeviceMetricsOverride', {}),
     'touch': ('Emulation.setTouchEmulationEnabled', {'enabled': False}),
     'mouse': ('Emulation.setEmitTouchEventsForMouse', {'enabled': False}),
     'ua': ('Emulation.setUserAgentOverride', {'userAgent': ''}),
+    'scrollbars': ('Emulation.setScrollbarsHidden', {'hidden': False}),
 }
 
 
@@ -740,11 +742,14 @@ class Browser:
         spec = PRESETS[preset]
         session = tab.session
         window_view = self.window_view if window_view is None else window_view
+        desktop_view = preset == 'desktop' or window_view
+        # Chromium picks up the scrollbar setting when the metrics change triggers layout.
+        self.conn.call('Emulation.setScrollbarsHidden', {'hidden': not desktop_view}, session)
         if preset == 'desktop':
             width = _clamp(width, 320, 2560, DESKTOP[0])
             height = _clamp(height, 240, 1600, DESKTOP[1])
             tab.size = (width, height)
-        if preset == 'desktop' or window_view:
+        if desktop_view:
             if self.container is not None:  # the page fills its fullscreen window; Selkies sizes the screen to the panel
                 self.conn.call('Emulation.clearDeviceMetricsOverride', session=session)
             else:

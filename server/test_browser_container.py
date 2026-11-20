@@ -306,14 +306,22 @@ class BrowserInContainerTests(unittest.TestCase):
             with self.subTest(preset=preset):
                 row = self.browser.set_device(target, preset)
                 self.assertEqual((row['width'], row['height'], row['touch']), (width, height, True))
-                self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], {
+                metrics = self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]
+                self.assertEqual(metrics['params'], {
                     'width': width, 'height': height, 'deviceScaleFactor': dpr, 'mobile': False,
                     'screenWidth': width, 'screenHeight': height})
                 self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'],
                                  {'enabled': True, 'configuration': 'mobile'})
+                scrollbar = self.fake.sent('Emulation.setScrollbarsHidden')[-1]
+                self.assertEqual(scrollbar['params'], {'hidden': True})
+                self.assertLess(scrollbar['id'], metrics['id'])
         self.browser.set_device(target, 'desktop')
-        self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
+        clears = self.fake.sent('Emulation.clearDeviceMetricsOverride')
+        self.assertEqual(len(clears), 2)
         self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'], {'enabled': False})
+        scrollbar = self.fake.sent('Emulation.setScrollbarsHidden')[-1]
+        self.assertEqual(scrollbar['params'], {'hidden': False})
+        self.assertLess(scrollbar['id'], clears[-1]['id'])
 
     def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
