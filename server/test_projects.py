@@ -191,6 +191,47 @@ class ProjectTests(unittest.TestCase):
         with self.assertRaises(projects.ProjectError):
             projects.set_budget(PID, 50000, 2)
 
+    def test_default_budget_keeps_notes_and_instructions_with_long_paths(self):
+        short_tether = paths.TETHER
+        short_checkout = Path(projects.__file__).resolve().parent.parent
+        short_python = Path(sys.executable)
+        # About 150 more characters per path, 7 path copies in all. The guidance stays under BUDGET_MAX - BUDGET,
+        # so the default budget must stay whole (B291). Before 8127a1b the guidance used the budget and cut the notes.
+        long_tether = short_tether / ('state-' + 'x' * 144)
+        long_checkout = short_checkout / ('checkout-' + 'x' * 141)
+        long_python = short_python.parent / ('python-' + 'x' * 143) / short_python.name
+        stack = {'pid': 'b1b2c3d4e5f6', 'name': 'Docs'}
+        instructions = 'Use pnpm.'
+        project_note = '# Setup\nRun make.'
+        stack_note = '# Chart\nUse the bar chart.'
+
+        for tether in (short_tether, long_tether):
+            with mock.patch.object(paths, 'TETHER', tether):
+                projects.set_instructions(PID, instructions, 0)
+                projects.write_note(PID, 'setup.md', project_note)
+                projects.write_note(stack['pid'], 'chart.md', stack_note)
+
+        for group in (None, stack):
+            with self.subTest(group=group):
+                short = projects.render(PID, home=self.home, group=group)
+                with (
+                    mock.patch.object(projects, '__file__', str(long_checkout / 'server/projects.py')),
+                    mock.patch.object(sys, 'executable', str(long_python)),
+                    mock.patch.object(paths, 'TETHER', long_tether),
+                ):
+                    long = projects.render(PID, home=self.home, group=group)
+
+                self.assertNotIn('Cut to fit', long)
+                self.assertNotIn('Cut to fit', short)
+                self.assertIn(f'\n## Instructions\n{instructions}\n', short)
+                self.assertIn(f'\n#### setup.md\n{project_note}\n', short)
+                if group:
+                    self.assertIn(f'\n#### chart.md\n{stack_note}\n', short)
+                normalized = long.replace(str(long_tether), str(short_tether))
+                normalized = normalized.replace(str(long_checkout), str(short_checkout))
+                normalized = normalized.replace(str(long_python), sys.executable)
+                self.assertEqual(normalized, short)
+
     def _content(self, group=None):
         """The rendered text and the part of it that uses the project budget."""
         prompt, fixed = projects._render(PID, projects.meta(PID), self.home, group)

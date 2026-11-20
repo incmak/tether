@@ -324,7 +324,12 @@ class Hook(Base):
         self.assertEqual([len(row['text']) for row in rows], [150] * 8)
         self.assertEqual(text.count('- Avoid ('), 8)
         self.assertIn('Lessons from past feedback', text)
-        self.assertLess(len(text), 9000)
+        # Measure the guidance at typical install paths so the checkout length cannot skew the check.
+        checkout = str(Path(autonomy.__file__).resolve().parent.parent)
+        normalized = text.replace(str(paths.TETHER), '/srv/user/.tether')
+        normalized = normalized.replace(checkout, '/srv/user/apps/tether')
+        normalized = normalized.replace(sys.executable, '/usr/bin/python3')
+        self.assertLess(len(normalized), 9000)
         self.assertIn('Autonomy level 5', text)
         self.assertIn('second advisor (Codex, GPT New (latest), high effort)', text)
         self.assertIn('The user saved answers', text)
