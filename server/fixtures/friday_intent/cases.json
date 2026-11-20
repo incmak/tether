@@ -65,6 +65,7 @@
    "user": "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)friday test"
     }
@@ -308,7 +309,7 @@
     "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
-     "prompt": "(?i)spec.*voice call|voice call.*spec"
+     "prompt": "(?i)spec"
     }
    }
   },

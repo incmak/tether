@@ -634,9 +634,10 @@ class FridayRulesTests(unittest.TestCase):
         # With no question before it, a direct request still sends.
         self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
                                             'speech', 'Tell docs to fix the header.', set(), 'Docs is done.'))
-        self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
-                                            'speech', 'Tell docs to fix the header.', set(),
-                                            'I am listening. What can I help you with today?'))
+        # Any question counts, even one with no send word: the send gets the fixed read-back first.
+        self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
+                                           'speech', 'Tell docs to fix the header.', set(),
+                                           'I am listening. What can I help you with today?'), friday.READBACK_REQUIRED)
 
     def test_a_question_about_the_users_own_send_is_not_a_request(self):
         for text in ('Should I just message ci-audit myself', 'Should I ask ci-audit myself',
@@ -653,6 +654,23 @@ class FridayRulesTests(unittest.TestCase):
                      "But I'll can you ask the Frida test session why it was slow"):
             with self.subTest(text):
                 self.assertTrue(friday.send_intent(text))
+
+    def test_review_round_9_holes_stay_closed(self):
+        # 20 Nov review of e92a5f6: filler before yes, "approval" as a noun, a chat named like a refusal.
+        refusal = friday.READBACK_REQUIRED
+        for answer in ('Um, yes, send it.', 'So, uh, yes. Send it to docs.', 'Send it to docs.'):
+            with self.subTest(answer=answer):
+                self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix it.'}, 'speech',
+                                                   answer, set(), 'Shall I do that?'), refusal)
+        self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'}, 'speech',
+                                           'Yes.', set(), 'Should I send the approval checklist to docs?'),
+                         'The user answered a send question, not an approval.')
+        proposal = friday.SendProposal('send_to_chat', 'Hold Off', 'Ship it.', 4)
+        self.assertFalse(friday.plain_yes('Yes, hold off.', 'Hold Off'))
+        self.assertEqual(friday.check_tool('send_to_chat', {'chat': 'Hold Off', 'prompt': 'Ship it.'}, 'speech',
+                                           'Yes, hold off.', set(), friday.send_readback(proposal), proposal, 5),
+                         refusal)
+        self.assertTrue(friday.plain_yes('Yes, send it to Hold Off.', 'Hold Off'))
 
     def test_friday_own_words_never_confirm_a_send(self):
         # 20 Nov advisor decision: only the server's stored proposal binds a yes. Parsing Friday's

@@ -70,11 +70,12 @@ SYSTEM_PROMPT = (
     'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
     'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
-    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
-    'call the tool now, even if speech-to-text misheard the chat name: use the closest name in state. '
+    'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
+    'misheard it ("docs sight" is docs-site): use the closest name in state. '
+    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
     'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise still call the tool, with the chat name written exactly as in state, for example api-server. '
-    'Do not ask "Shall I send" in your own words: the tool reads the task back to the user and asks yes or no. '
+    '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
+    'Never ask "Shall I send" in your own words. '
     '3. When the user says yes to that read-back, call the tool again with the same chat and task. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
@@ -487,9 +488,10 @@ def plain_yes(text, chat=''):
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
     words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
-    # The chat name counts only as one whole phrase: a free-text title such as "Can we have…" is no yes.
+    # The chat name counts only as one whole phrase right after "to" ("send it to docs"): a title such
+    # as "Hold Off" or "Can we have…" never turns other words into a yes.
     for name in {norm(chat), norm(clean_chat(chat))} - {''}:
-        words = words.replace(f' {name} ', ' ')
+        words = words.replace(f' to {name} ', ' to ')
     words = words.split()
     allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
@@ -547,23 +549,17 @@ SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
 
 
-# "Yes, and tell docs ..." after any question from Friday answers that question.
-ANSWER_START = re.compile(r'^\W*(?:yes|yeah|yep|yup|sure|ok|okay|alright|no|nope|nah)\b', re.I)
-# A question about an approval keeps answer_approval open even when it names a send word.
-APPROVAL_TOPIC = re.compile(r'\b(?:approve|approval|allow|permission|permit|deny)\b', re.I)
+# The user's own approval words. Friday's words ("the approval checklist") never open answer_approval.
+USER_APPROVAL_WORDS = re.compile(r'\b(?:approve|approved|allow|deny|denied|reject)\b', re.I)
 
 
-def answers_send_question(previous, user_text, chat=''):
-    """True when the user's turn may answer a send question from Friday: a request in it needs a read-back.
+def answers_question(previous):
+    """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
 
-    Friday's question counts when it names a send word or the call's chat ("Would you like me to
-    ping docs?"), or when the answer starts with yes or no. "What can I help you with?" followed by
-    "Can you ask docs ..." is a fresh request, so it still sends directly."""
-    if '?' not in previous:
-        return False
-    target = norm(clean_chat(chat))
-    return bool(SEND_WORDS.search(previous) or (target and f' {target} ' in f' {norm(previous)} ')
-                or ANSWER_START.match(user_text))
+    Filler ("Um, yes, send it") or a question with no send word ("Shall I do that?") cannot be told
+    apart from a fresh request by its words, so any question counts. A send then gets the fixed read-back.
+    """
+    return '?' in previous
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -599,7 +595,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         # A yes to Friday's send question answers that send, not a tool approval in some chat.
         if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
                 or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant)
-                    and not APPROVAL_TOPIC.search(previous_assistant))):
+                    and not USER_APPROVAL_WORDS.search(last_user_text))):
             return 'The user answered a send question, not an approval.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))
@@ -630,8 +626,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # An answer to a send question never sends directly, even when it holds send words
         # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
-        if not (has_proposal or answers_send_question(previous_assistant, last_user_text, chat)) \
-                and send_intent(last_user_text):
+        if not (has_proposal or answers_question(previous_assistant)) and send_intent(last_user_text):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
         # the fixed read-back first, and the next yes sends the stored text once.

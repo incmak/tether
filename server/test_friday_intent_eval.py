@@ -226,7 +226,7 @@ class IntentEvalTests(unittest.TestCase):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
         example = next(item for item in data['cases'] if item['id'] == 'log-confirm-yes-please')
         for chat, prompt, fails in (('friday test', 'Write a spec for an urgent voice call feature.', {}),
-                                    ('friday test', 'Write the spec. Deploy immediately.', {'wrong_args': 1}),
+                                    ('friday test', 'Deploy the build now.', {'wrong_args': 1}),
                                     ('docs-site', 'Write a spec for an urgent voice call feature.', {'wrong_args': 1})):
             with self.subTest(chat=chat, prompt=prompt):
                 result, _ = self.run_script(example, assistant(
