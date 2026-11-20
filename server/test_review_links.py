@@ -2810,6 +2810,7 @@ class ReviewLinksTests(unittest.TestCase):
             'restart': (dict(paused=True, agent=True), dict(paused=False)),
             'review_prompts': ([['review-summary', now - 10]], [['review-notice', now - 5]]),
             'review_turn_at': (now - 8, now - 3), 'agent_prompt': (now - 11, now - 6),
+            'parent_send_at': (now - 12, now - 7),
             'feedback_turn': (dict(sent_at=now - 2, phase='pending'), dict(sent_at=now - 1, phase='queued')),
         }
         fields = tuple(field for field in review_links.CAP_FIELDS if field != 'counts')
@@ -2839,8 +2840,8 @@ class ReviewLinksTests(unittest.TestCase):
                         self.file.write_text(json.dumps(order))
                         cap, = (row for row in review_links._read() if row.get('cap'))
                         shared = {field: cap[field] for field in fields if field in cap}
-                        expected = {'paused': 'upgrade', 'agent_prompt': max(
-                            row['agent_prompt'] for row in order if 'agent_prompt' in row)}
+                        expected = {'paused': 'upgrade', **{field: max(row[field] for row in order if field in row)
+                                                            for field in ('agent_prompt', 'parent_send_at')}}
                         if any('saved_at' not in row and row.get('restart', {}).get('agent') for row in order):
                             # A live row's agent flag is the only evidence of a parent turn whose marker was consumed.
                             expected['restart'] = {'paused': True, 'agent': True}
@@ -3082,7 +3083,12 @@ class ReviewLinksTests(unittest.TestCase):
         self.entries.append(dict(self.reviewer, id='%21'))
         self.states.update({'%21': 'Idle', '%22': 'Idle', '%23': 'Idle'})
         self.turn_source = Mock(return_value=('background', None, None))
-        for reverse, gap in ((False, False), (True, False), (False, True)):
+        hidden = [dict(self.worker, thread=None), *self.entries[1:]]
+        found = [*self.entries, *late]
+        # Each case lists the discovery result of each poll. A one-poll gap must not send a second alert.
+        for reverse, gap, polls in ((False, 'none', (None, found, found)), (True, 'none', (None, found, found)),
+                                    (False, 'first poll', (hidden, found, found)),
+                                    (False, 'after the bound alert', (None, hidden, found, found))):
             with self.subTest(reverse=reverse, discovery_gap=gap):
                 self.clock.return_value = 1000
                 rows = self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))
@@ -3090,39 +3096,57 @@ class ReviewLinksTests(unittest.TestCase):
                          for row, pane in zip(self.legacy_pair(dict(rounds=1), dict(empty_rounds=1)), ('%22', '%23'))]
                 self.file.write_text(json.dumps(rows[::-1] if reverse else rows))
                 self.alert.reset_mock()
-                self.observe(elapsed=0, entries=[dict(self.worker, thread=None), *self.entries[1:]] if gap else None)
-                self.observe(entries=[*self.entries, *late])
-                self.observe(entries=[*self.entries, *late])
+                self.observe(elapsed=0, entries=polls[0])
+                for entries in polls[1:]:
+                    self.observe(entries=entries)
                 self.alert.assert_called_once()
                 self.assertTrue(self.upgrade_cap()['upgrade_alerted'])
 
-    def test_hold_agent_prompt_marks_live_caps_and_undo_keeps_a_newer_marker(self):
+    def test_parent_send_stamp_marks_live_caps_and_survives_a_bind(self):
         self.enterContext(own_time(review_links, time=self.clock))
-        for newer, bind in ((False, False), (True, False), (False, True)):
-            with self.subTest(newer=newer, bind=bind):
-                self.clock.return_value = 1000
-                thread = None if bind else WORKER_THREAD
-                rows = [dict(row, worker_thread=thread) for row in self.rows() if not row.get('cap')]
-                rows += [dict(cap=True, worker='%13', worker_thread=thread, name='Live',
-                              agent_prompt=900),
-                         dict(cap=True, worker='%13', worker_thread=None, name='Saved', saved_at=990)]
-                self.file.write_text(json.dumps(rows))
-                caps = lambda: {row['name']: row for row in self.rows() if row.get('cap')}
-                undo = review_links.hold_agent_prompt('%13', worker_thread=WORKER_THREAD)
-                self.assertEqual(caps()['Live']['agent_prompt'], 1000)
-                self.assertNotIn('agent_prompt', caps()['Saved'])
-                if bind:
-                    # The watcher binds the cap while the send is still in flight.
-                    rows = self.rows()
-                    for row in rows:
-                        if row.get('name') in ('Live', 'Fix the bug'):
-                            row['worker_thread'] = WORKER_THREAD
-                    self.file.write_text(json.dumps(rows))
-                if newer:
-                    self.clock.return_value = 1001
-                    review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)
-                undo()
-                self.assertEqual(caps()['Live']['agent_prompt'], 1001 if newer else 900)
+        self.clock.return_value = 1000
+        rows = [dict(row, worker_thread=WORKER_THREAD) for row in self.rows() if not row.get('cap')]
+        rows += [dict(cap=True, worker='%13', worker_thread=WORKER_THREAD, name='Live', parent_send_at=900),
+                 dict(cap=True, worker='%13', worker_thread=None, name='Saved', saved_at=990)]
+        self.file.write_text(json.dumps(rows))
+        review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+        caps = {row['name']: row for row in self.rows() if row.get('cap')}
+        self.assertEqual(caps['Live']['parent_send_at'], 1000)
+        self.assertNotIn('parent_send_at', caps['Saved'])
+        # The newest stamp and the newest parent marker survive a bind, whichever side holds them.
+        for bound, unbound in ((dict(parent_send_at=1001), dict(agent_prompt=999)),
+                               (dict(agent_prompt=999), dict(parent_send_at=1001))):
+            for conflict in (False, True):
+                with self.subTest(bound=bound, unbound=unbound, conflict=conflict):
+                    rows = [dict(cap=True, worker='%13', worker_thread=WORKER_THREAD, name='Bound', **bound),
+                            dict(cap=True, worker='%13', worker_thread=None, name='Unbound', **unbound,
+                                 **(dict(limit=5) if conflict else {}))]
+                    review_links._bind_worker(rows, '%13', WORKER_THREAD)
+                    cap, = rows
+                    self.assertEqual((cap.get('agent_prompt'), cap.get('parent_send_at')), (999, 1001))
+
+    def test_upgrade_holds_for_a_parent_turn_after_a_failed_send(self):
+        # The send failed after the stamp, or the parent's turn started before agent_prompt() ran.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        self.clock.return_value = 1000
+        self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+        self.observe(elapsed=0)
+        self.clock.return_value = 1001
+        review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+        for source in (('user', 1002, 1004), ('user', 1001 + review_links.AGENT_PROMPT_TTL - 1, 1700)):
+            with self.subTest(source=source):
+                self.turn_source = Mock(return_value=source)
+                self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
+                self.send.assert_not_called()
+        # A Mak turn that starts after the window clears the pause.
+        self.turn_source = Mock(return_value=('user', 1001 + review_links.AGENT_PROMPT_TTL, 1800))
+        self.observe(**{'%13': 'Working'})
+        self.observe(**{'%13': 'Idle'})
+        self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])
 
     def test_upgrade_does_not_clear_on_a_replayed_turn_it_already_judged(self):
         # A transcript reader can return the last completion again after a background turn without a reply.
@@ -3192,8 +3216,9 @@ class ReviewLinksTests(unittest.TestCase):
     def test_upgrade_alert_for_an_unbound_cap_waits_only_for_the_current_conversation(self):
         self.enterContext(own_time(review_links, time=self.clock))
         self.turn_source = Mock(return_value=('background', None, None))
-        for alerted, calls, gap in ((True, 1, False), (False, 2, False), (True, 1, True), (False, 2, True)):
-            with self.subTest(old_cap_alerted=alerted, discovery_gap=gap):
+        for alerted, calls, gap, old_fails in ((True, 1, False, False), (False, 2, False, False),
+                                               (True, 1, True, False), (False, 2, True, False), (False, 4, True, True)):
+            with self.subTest(old_cap_alerted=alerted, discovery_gap=gap, old_alert_fails=old_fails):
                 self.clock.return_value = 1000
                 old = dict(cap=True, worker='%13', worker_thread='old-thread', name='Old', paused='upgrade',
                            upgrade_at=990, saved_at=990, upgrade_alerted=alerted)
@@ -3202,8 +3227,15 @@ class ReviewLinksTests(unittest.TestCase):
                 self.file.write_text(json.dumps([old, *rows]))
                 self.alert.reset_mock()
                 entries = [dict(self.worker, thread=None), *self.entries[1:]] if gap else None
+                # The old conversation's alert can keep failing. The unbound alert must not wait on it.
+                def push(title, text, *args, **kwargs):
+                    if old_fails and '“Old”' in text:
+                        raise RuntimeError('push failed')
+                self.alert.side_effect = push
                 self.observe(elapsed=0, entries=entries)
                 self.observe(entries=entries)
+                if old_fails:
+                    self.observe(entries=entries)
                 self.assertEqual(self.alert.call_count, calls)
                 unbound, = (row for row in self.rows() if row.get('cap') and row['worker_thread'] is None)
                 self.assertTrue(unbound['upgrade_alerted'])

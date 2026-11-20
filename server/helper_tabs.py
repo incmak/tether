@@ -221,17 +221,12 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock, bef
         previous = dict(record)
         record.update(sent_at=time.time(), before=digest(last_reply(helper)))
         save(pane, record, run)
-        undo = None
         try:
             # Inside the lock and before delivery, so the helper's turn cannot finish before this runs.
-            undo = before_send(helper) if before_send is not None else None
+            if before_send is not None:
+                before_send(helper)
             delivery = send(helper, message, state)
         except BaseException:
-            try:
-                if undo is not None:
-                    undo()
-            except Exception:
-                pass
             try:
                 save(pane, previous, run)
             except Exception:

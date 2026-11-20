@@ -36,7 +36,8 @@ EXTRA_ROUNDS = 2
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 CAP_DECISION = ('counts', 'limit', 'grant_rounds', 'paused', 'unreadable', 'parent_stage', 'parent_missing',
                 'escalate', 'cap_reset')
-CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', 'agent_prompt', 'feedback_turn')
+CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', 'agent_prompt', 'parent_send_at',
+              'feedback_turn')
 LEGACY_COUNTS = (*COUNTS, 'round_sources')
 UNOWNED = ''  # B268 saved records can predate reviewer identity.
 SAVED_CAP_TTL = 24 * 60 * 60
@@ -131,10 +132,11 @@ def _sanitize(row):
           'pending_idle_ticks', 'scope_ticks', 'verify_ticks'),
          lambda value: type(value) is int and value >= 0),
         (('created', 'saved_at'), lambda value: type(value) in (int, float)),
-        (('agent_prompt', 'review_turn_at', 'upgrade_at'), _is_time),
+        (('agent_prompt', 'parent_send_at', 'review_turn_at', 'upgrade_at'), _is_time),
         (('scope_since', 'scope_retry_at', 'follow_up_checked_at', 'follow_up_untimed_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
-        (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
+        (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted',
+          'upgrade_alert_deferred', 'stale_unreadable'),
          lambda value: type(value) is bool),
         (('name', 'escalate', 'cap_reset'), lambda value: isinstance(value, str)),
     ):
@@ -266,7 +268,8 @@ def _migrate(rows, cutoff):
                 counts = _merge_counts(counts, {reviewer: own})
         if ambiguous:
             cap.update(paused=UPGRADE_PAUSE, upgrade_at=time.time())
-            _keep_latest_time(cap, 'agent_prompt', peers)
+            for field in ('agent_prompt', 'parent_send_at'):
+                _keep_latest_time(cap, field, peers)
         else:
             row, = peers
             cap.update({field: row[field] for field in CAP_FIELDS if field in row})
@@ -406,7 +409,7 @@ def _merge_turn_tracking(bound, unbound):
     if prompts:
         bound['review_prompts'] = sorted(prompts, key=lambda marker: float('-inf') if isinstance(marker, str)
                                          else marker[1])
-    for field in ('review_turn_at', 'agent_prompt'):
+    for field in ('review_turn_at', 'agent_prompt', 'parent_send_at'):
         _keep_latest_time(bound, field, (bound, unbound))
     for field in ('feedback_turn', 'cap_reset'):
         if field in unbound:
@@ -440,7 +443,8 @@ def _bind_worker(rows, worker, thread):
             for field in (*CAP_DECISION, 'restart'):
                 bound.pop(field, None)
             bound['paused'] = UPGRADE_PAUSE
-            _keep_latest_time(bound, 'agent_prompt', (bound, unbound))
+            for field in ('agent_prompt', 'parent_send_at'):
+                _keep_latest_time(bound, field, (bound, unbound))
         else:
             _merge_turn_tracking(bound, unbound)
         if bound.get('paused') == UPGRADE_PAUSE:
@@ -678,38 +682,20 @@ def _parent_can_decide(cap):
     return not _saved(cap) or stage.get('sent') or _feedback_in_flight.get(_cap_key(cap)) == stage
 
 
-def hold_agent_prompt(worker, *, worker_thread=None):
-    """Mark the worker's live caps before a parent prompt is delivered: its turn can finish before the send
-    returns. Returns an undo for a failed send. agent_prompt() still runs after delivery for the grant."""
+def mark_parent_send(worker, *, worker_thread=None):
+    """Stamp the worker's live caps before a parent prompt is delivered: its turn can finish before the send
+    returns. Only an upgrade pause reads the stamp. A failed send keeps it: the pause then holds for at most
+    AGENT_PROMPT_TTL. agent_prompt() still runs after delivery (B189)."""
     with _lock:
         rows = _read()
         at = time.time()
-        held = {}
+        marked = False
         for cap in rows:
             if _is_cap(cap) and _matches(cap, worker, worker_thread) and not _saved(cap):
-                held[_cap_key(cap)] = cap.get('agent_prompt')
-                cap['agent_prompt'] = at
-        if held:
+                cap['parent_send_at'] = at
+                marked = True
+        if marked:
             _write(rows)
-
-    def undo():
-        with _lock:
-            rows = _read()
-            changed = False
-            for cap in rows:
-                # A bind during delivery can move the marker to another key of the same worker.
-                if not (_is_cap(cap) and cap['worker'] == worker and cap.get('agent_prompt') == at):
-                    continue
-                previous = held.get(_cap_key(cap), max((time for time in held.values() if time is not None),
-                                                       default=None))
-                if previous is None:
-                    cap.pop('agent_prompt')
-                else:
-                    cap['agent_prompt'] = previous
-                changed = True
-            if changed:
-                _write(rows)
-    return undo
 
 
 def agent_prompt(worker, sender=None, sender_thread=None, *, worker_thread=None):
@@ -801,6 +787,12 @@ def _lost(link, reason):
 def _agent_prompt_fresh(cap, at=None):
     sent = cap.get('agent_prompt')
     return sent is not None and (time.time() if at is None else at) < sent + AGENT_PROMPT_TTL
+
+
+def _parent_sent(cap, at=None):
+    """An upgrade pause also counts a parent send that started before delivery, and one that failed."""
+    sent, at = cap.get('parent_send_at'), time.time() if at is None else at
+    return _agent_prompt_fresh(cap, at) or sent is not None and at < sent + AGENT_PROMPT_TTL
 
 
 def _round_limit(cap):
@@ -911,7 +903,7 @@ def _merge(old, updated, stored):
     for key in set(old) | set(updated):
         if old.get(key, missing) == updated.get(key, missing):
             continue
-        if key == 'agent_prompt' and stored.get(key, missing) != old.get(key, missing):
+        if key in ('agent_prompt', 'parent_send_at') and stored.get(key, missing) != old.get(key, missing):
             continue
         if key == 'review_prompts':
             before, after = old.get(key, []), updated.get(key, [])
@@ -1419,18 +1411,19 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     turn_source(worker) if turn_source is not None else 'user')
             turn_reads[key] = read if isinstance(read, tuple) else (read, None, None)
         if upgrade_paused:
-            # A parent records its marker before it sends the prompt. The store has it once its turn is readable.
+            # A parent stamps the cap before it sends the prompt. The store has it once its turn is readable.
             with _lock:
                 stored = _cap_for(_read(), key)
             if stored is not None:
-                _keep_latest_time(cap, 'agent_prompt', (cap, stored))
+                for field in ('agent_prompt', 'parent_send_at'):
+                    _keep_latest_time(cap, field, (cap, stored))
         if between_ticks:
             # This probe must leave the queued turn markers alone.
             candidate, started, finished = turn_reads[key]
             if (candidate == 'user' and _is_time(started) and _is_time(finished)
                     and started >= cap.get('upgrade_at', float('inf'))
                     and finished > cap.get('review_turn_at', float('-inf'))
-                    and not _agent_prompt_fresh(cap, started)):
+                    and not _parent_sent(cap, started)):
                 source, started_at, finished_at = candidate, started, finished
                 cap['restart'] = _restart_state(cap)
         else:
@@ -1449,9 +1442,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
                 # marker comes from an older watcher that consumed the marker. That turn's owner is unknown, so
                 # the pause holds; the next Mak turn clears it.
-                by_agent = _agent_prompt_fresh(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
+                by_agent = _parent_sent(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
             else:
-                by_agent = start.get('agent') or _agent_prompt_fresh(cap)
+                by_agent = start.get('agent') or _parent_sent(cap)
             if by_agent and _is_time(finished_at):
                 # Older watchers could consume the prompt marker before the agent turn ended.
                 cap['review_turn_at'] = max(finished_at, cap.get('review_turn_at', float('-inf')))
@@ -1469,6 +1462,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 cap.pop('paused', None)
                 cap.pop('unreadable', None)
                 cap.pop('upgrade_alerted', None)
+                cap.pop('upgrade_alert_deferred', None)
                 cap.pop('upgrade_at', None)
             cap['cap_reset'] = secrets.token_hex(8)
     if state == 'Idle' and link.pop('worker_busy_send', False) and not summary:
@@ -1966,7 +1960,8 @@ def _apply_step(old, updated, snapshot, cap, entries, delivery):
 
 
 def _claim_upgrade_alerts(rows, entries):
-    alerts = []
+    """Return the alerts to send, and whether a deferral changed the rows."""
+    alerts, deferred = [], False
     for cap in rows:
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
@@ -1977,17 +1972,19 @@ def _claim_upgrade_alerts(rows, entries):
             bound = [other for other in rows
                      if _is_cap(other) and other['worker'] == key[0] and other.get('worker_thread') is not None
                      and other.get('paused') == UPGRADE_PAUSE]
-            # The current conversation's bound cap alerts, and the bind carries its marker. Without a discovered
-            # thread the unbound cap may be the same conversation: it waits one poll for a bound cap that alerts
-            # now, then alerts itself. A second alert is better than none.
-            if any(other['worker_thread'] == current for other in bound) or current is None and any(
-                    not other.get('upgrade_alerted') for other in bound):
+            # The current conversation's bound cap alerts, and the bind carries its marker.
+            if any(other['worker_thread'] == current for other in bound):
+                continue
+            # Without a discovered thread the unbound cap may be the same conversation. It waits one poll for
+            # discovery, then alerts whatever the other caps' alerts did. A second alert is better than none.
+            if current is None and bound and not cap.get('upgrade_alert_deferred'):
+                cap['upgrade_alert_deferred'] = deferred = True
                 continue
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
             name = worker.get('pane_name') or worker.get('agent_name') or worker.get('label') or name
         alerts.append((key, cap.get('upgrade_at'), ('Review needs you', f'“{name}”: {UPGRADE_ERROR}')))
-    return alerts
+    return alerts, deferred
 
 
 def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None, turn_source=None,
@@ -2008,8 +2005,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             bound = False
             for worker in bindable & by_pane.keys():
                 bound |= _bind_worker(rows, worker, helper_tabs._thread(by_pane[worker]))
-            upgrade_alerts = _claim_upgrade_alerts(rows, by_pane) if alert is not None else []
-            if bound or upgrade_alerts or any(_is_cap(row) and row.get('pending_adoption')
+            upgrade_alerts, deferred = _claim_upgrade_alerts(rows, by_pane) if alert is not None else ([], False)
+            if bound or deferred or upgrade_alerts or any(_is_cap(row) and row.get('pending_adoption')
                                              and _cap_key(row) not in _feedback_in_flight for row in rows):
                 _write(rows)
         links = [row for row in rows if _is_link(row)]
