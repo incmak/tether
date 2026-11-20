@@ -209,8 +209,10 @@ export function useModal(open: boolean, close: () => void, drawer?: { onInterrup
   useEffect(() => {
     const dialog = ref.current
     if (!open || !dialog) return
-    const opener = [from, ...focusHistory].find((item): item is HTMLElement =>
-      item instanceof HTMLElement && item !== document.body && item.isConnected && !dialog.contains(item)) ?? null
+    // No opener (a tap on iOS does not focus a button): return focus nowhere, not to an older control.
+    const real = from instanceof HTMLElement && from !== document.body ? from : null
+    const opener = !real ? null : real.isConnected ? (dialog.contains(real) ? null : real)
+      : focusHistory.find(item => item !== document.body && item.isConnected && !dialog.contains(item)) ?? null
     const host = opener?.closest('dialog')
     const chain = [...(opener && !opener.matches('input, textarea, [contenteditable]') ? [opener] : []), ...(host && openers.get(host) || [])]
     openers.set(dialog, chain)
