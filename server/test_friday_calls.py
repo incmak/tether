@@ -275,6 +275,19 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(self.scan(historical=False), [])
         self.assertEqual(len(self.digests()), 1)
 
+    def test_refuses_symlinked_state_file(self):
+        self.scan(historical=False)
+        target = self.directory.parent / 'other-state.json'
+        target.write_text(self.state.read_text())
+        self.state.unlink()
+        self.state.symlink_to(target)
+        self.start()
+        self.append(runner('finished'))
+        result, stdout, stderr = self.cli('scan')
+        self.assertEqual((result, stdout), (1, ''))
+        self.assertIn('friday-call error:', stderr)
+        self.assertEqual(self.digests(), [])
+
     def test_failed_print_replays_pending_before_reading_journal(self):
         self.scan(historical=False)
         self.start()
@@ -401,10 +414,15 @@ class FridayCallsTest(unittest.TestCase):
 
         with (patch.object(friday_calls, 'markdown', side_effect=fail_one),
               patch.object(friday_calls, 'atomic_write', side_effect=fail_markdown_write)):
-            lines = self.scan(historical=False)
+            result, stdout, stderr = self.cli('scan')
+        self.assertEqual(result, 1)
+        lines = stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        # A failed write is retried in full on the next healthy scan.
+        lines += self.scan(historical=False)
         self.assertEqual(len(lines), 4)
         normal, broken, markdown_write, last = [json.loads(path.read_text()) for path in self.digests()]
-        for data in (normal, last):
+        for data in (normal, markdown_write, last):
             self.assertEqual(data['transcript'], [message('user', 'literal surrogate ?')])
             self.assertEqual(data['events'][0]['text'], 'Friday bye ?')
         self.assertEqual(broken, {
@@ -415,9 +433,7 @@ class FridayCallsTest(unittest.TestCase):
         })
         self.assertIn('flags=digest_error:1', lines[1])
         self.assertNotIn('private detail', lines[1])
-        self.assertEqual(markdown_write['error'], 'OSError')
-        self.assertEqual(markdown_write['flags'], {'digest_error': 1})
-        self.assertTrue(lines[2].endswith('-markdown-write.json'))
+        self.assertTrue(lines[2].endswith('-markdown-write.md'))
         self.assertEqual(self.scan(historical=False), [])
 
     def test_refuses_symlink_directories_and_does_not_follow_digest_symlinks(self):

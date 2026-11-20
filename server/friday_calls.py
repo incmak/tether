@@ -516,19 +516,20 @@ def write_digest(directory, call, end, ended):
     try:
         data, timeline = call.digest(end, ended)
         rendered = markdown(data, timeline)
-        atomic_write(json_path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
-        atomic_write(md_path, rendered)
+        json_text = json.dumps(data, ensure_ascii=False, indent=2) + '\n'
+        # Fail here, not mid-write, on text the file encoding cannot hold.
+        json_text.encode('utf-8'), rendered.encode('utf-8')
         duration, turns, flags = data['duration_s'], data['turns'], data['flags']
     except Exception as exc:
+        # Only a digest that cannot be built falls back. A failed write raises,
+        # so the next scan retries the full digest.
         duration, turns, flags = max(0, (end - stamp).total_seconds()), 0, {'digest_error': 1}
         error = type(exc).__name__
         minimal = {'id': call.id, 'start': stamp.isoformat(), 'end': end.isoformat(), 'error': error, 'flags': flags}
-        atomic_write(json_path, json.dumps(minimal, indent=2) + '\n')
-        try:
-            atomic_write(md_path, f"# Friday call at {minimal['start']}\n\nDigest error: {error}\n")
-        except Exception:
-            # The minimal JSON is usable even if the Markdown path still fails.
-            md_path = json_path
+        json_text = json.dumps(minimal, indent=2) + '\n'
+        rendered = f"# Friday call at {minimal['start']}\n\nDigest error: {error}\n"
+    atomic_write(json_path, json_text)
+    atomic_write(md_path, rendered)
     return (f'friday-call {stamp:%H:%M} {duration:g}s turns={turns} '
             f'ended={ended} flags={flag_text(flags)} digest={md_path}')
 
@@ -540,7 +541,7 @@ def scan_locked(directory, since):
     cursor, done, pending = None, [], []
     if since is None:
         try:
-            state = json.loads(state_path.read_text(encoding='utf-8'))
+            state = json.loads(read_digest(state_path))
         except FileNotFoundError:
             initializing = True
         else:
