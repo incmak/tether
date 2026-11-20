@@ -19,7 +19,7 @@ import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 import math
@@ -30,6 +30,7 @@ import time
 from types import SimpleNamespace
 import unicodedata
 import urllib.request
+from uuid import uuid4
 
 try:
     from . import paths, reminders
@@ -437,6 +438,56 @@ class SendProposal:
     chat: str
     payload: str
     turn: int
+    heard: bool = False
+    marker_id: str | None = None
+    voice_turn: int | None = None
+
+    @property
+    def key(self):
+        return self.name, self.chat.strip().casefold(), same_text(self.payload)
+
+    def live(self, user_turn):
+        return 1 <= user_turn - self.turn <= 2
+
+    def follows(self, previous):
+        return previous.strip().endswith(send_readback(self))
+
+
+READBACK_CUE = 'Let me finish, then say yes.'
+READBACK_CAP = 'I could not finish reading it back. Please say the whole request again.'
+MAX_READBACK_REPLAYS = 2
+
+
+class ReadbackBudget:
+    """A replacement for the same send uses another slot, even after a clear."""
+
+    def __init__(self):
+        self.key = None
+        self.count = 0
+
+    def offer(self, proposal):
+        if self.key != proposal.key:
+            self.key = proposal.key
+            self.count = 0
+        else:
+            self.count = min(self.count + 1, MAX_READBACK_REPLAYS + 1)
+        return self.count
+
+    def reset(self, proposal):
+        if self.key == proposal.key:
+            self.key = None
+            self.count = 0
+
+
+def invalidate_readback(session, *, marker_id=None):
+    proposal = getattr(session, 'pending_proposal', None)
+    if (proposal and not proposal.heard and proposal.marker_id is not None
+            and (marker_id is None or marker_id == proposal.marker_id)):
+        session.pending_proposal = replace(proposal, marker_id=None, voice_turn=None)
+
+
+def readback_overlapped(session):
+    return session.user_speaking or getattr(getattr(session, 'user_turn_start', None), 'overlap', False)
 
 
 def send_readback(proposal):
@@ -514,8 +565,8 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
     if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
         return args
     chat = str(args.get('chat', '')).strip()
-    if not (plain_yes(last_user_text, chat) and 1 <= user_turn - pending.turn <= 2
-            and previous_assistant == send_readback(pending)
+    if not (plain_yes(last_user_text, chat) and pending.live(user_turn)
+            and pending.heard and pending.follows(previous_assistant)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
         return args
     return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': pending.payload})
@@ -567,7 +618,7 @@ def answers_question(previous):
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
-               *, suggestions=()):
+               *, suggestions=(), block_fresh=False, after_replay_cap=None):
     """Return a short refusal, without changing the originating turn's state."""
     guarded_action = name in ACTION_TOOLS and name != 'open_panel'
     if source == 'event' and guarded_action:
@@ -576,9 +627,12 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
         return 'No spoken user turn authorizes this action.'
     # The yes must answer the read-back the user heard last. Two turns keep a yes split over two runs
     # (the first run interrupted before it spoke).
-    has_proposal = (pending is not None and 1 <= user_turn - pending.turn <= 2
-                    and previous_assistant == send_readback(pending))
-    if source == 'speech' and name in SEND_TOOLS and has_proposal and APPROVAL_NO.search(last_user_text):
+    live = pending is not None and pending.live(user_turn)
+    follows_readback = live and pending.follows(previous_assistant)
+    has_proposal = follows_readback and pending.heard
+    if (source == 'speech' and name in SEND_TOOLS and live
+            and (follows_readback or (not pending.heard and not previous_assistant.strip()))
+            and APPROVAL_NO.search(last_user_text)):
         return 'The user declined the proposed send.'
     if name in SEND_TOOLS and used.intersection(SEND_TOOLS):
         return 'Only one send is allowed per spoken turn.'
@@ -598,7 +652,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name == 'answer_approval':
         # A yes to Friday's send question answers that send, not a tool approval in some chat.
         # Fail-safe boundary: a real approval question that names a send word is refused too; Friday asks again.
-        if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
+        if (live or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
                 or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
             return 'The user answered a send question, not an approval.'
         if APPROVAL_NEGATION.search(last_user_text):
@@ -632,7 +686,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # An answer to a send question never sends directly, even when it holds send words
         # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
-        if not (has_proposal or answers_question(previous_assistant)) and send_intent(last_user_text):
+        capped_yes = after_replay_cap is not None and plain_yes(last_user_text, after_replay_cap)
+        if not (live or block_fresh or capped_yes or answers_question(previous_assistant)) and send_intent(last_user_text):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
         # the fixed read-back first, and the next yes sends the stored text once.
@@ -949,6 +1004,7 @@ def runtime_types():
             super().__init__()
             self.session = session
             self.bot_speaking = self.overlap = self.active = False
+            session.user_turn_start = self
 
         async def handle_user_turn_started(self):
             self.active = True
@@ -1078,6 +1134,9 @@ def runtime_types():
             self.voice_user_turn = None
             self.voice_text = ''
             self.voice_replayed = False
+            self._readback_speech = None
+            self._readback_marker_id = None
+            self._readback_output = None
 
         def begin_voice_turn(self):
             self.voice_turn += 1
@@ -1102,6 +1161,12 @@ def runtime_types():
                         and not self.session.llm_running):
                     self.session.release_event()
                 return
+            if isinstance(frame, FridayToolSpeechCompleteFrame) and self._readback_output:
+                marker_id, voice_turn, count = self._readback_output
+                if marker_id == frame.tool_call_id:
+                    frame.readback_ready = not self.voice_cancelled
+                    frame.voice_turn, frame.voice_count = voice_turn, count
+                    self._readback_output = None
             await super().process_frame(frame, direction)
 
         async def _handle_llm_response_start(self, frame):
@@ -1112,7 +1177,21 @@ def runtime_types():
             standalone = not self._turn_context_id
             if not self.voice_open:
                 self.begin_voice_turn()
-            await super()._handle_tts_speak(frame)
+            if isinstance(frame, FridayReadbackSpeechFrame):
+                self._readback_speech = frame
+                self._readback_marker_id = frame.marker_id
+                try:
+                    if frame.marker_id and not standalone:
+                        # Pipecat can hold the model's last sentence until response end.
+                        # Drain it now so the fixed read-back is the final spoken text.
+                        remaining = await self._text_aggregator.flush()
+                        if remaining:
+                            await self._handle_aggregated_text(self._aggregated_text_frame(remaining))
+                    await super()._handle_tts_speak(frame)
+                finally:
+                    self._readback_speech = None
+            else:
+                await super()._handle_tts_speak(frame)
             # No audio context exists to commit standalone client speech.
             if standalone and self.voice_count and frame.append_to_context:
                 await self._audio_context_manager.put_frame(TTSStoppedFrame())
@@ -1155,6 +1234,17 @@ def runtime_types():
 
         async def on_turn_context_completed(self):
             await super().on_turn_context_completed()
+            speech = self._readback_speech
+            if speech is not None and speech.marker_id is None:
+                # The cue and read-back are separate utterances in one device turn.
+                return
+            if speech is not None:
+                if not self.voice_cancelled:
+                    voice_turn = self.voice_turn if self.voice_client else None
+                    self._readback_output = (speech.marker_id, voice_turn, self.voice_count)
+                # Release the device end only after the assistant sees the marker.
+                self.voice_open = False
+                return
             if self.voice_open and self.voice_client and not self.voice_cancelled:
                 await self.session.rtvi.send_server_message({'t': 'say_end', 'd': {
                     'turn': self.voice_turn, 'count': self.voice_count}})
@@ -1169,6 +1259,11 @@ def runtime_types():
                     {'t': 'stop', 'd': {'turn': self.voice_turn}})
             self.voice_cancelled = True
             self.voice_open = False
+            self._readback_output = None
+            # An interruption can reach TTS after the LLM has already queued the next replay.
+            if self._readback_marker_id is not None:
+                invalidate_readback(self.session, marker_id=self._readback_marker_id)
+                self._readback_marker_id = None
             await super()._handle_interruption(frame, direction)
             if was_speaking:
                 await self.session.output.broadcast_frame(BotStoppedSpeakingFrame)
@@ -1186,6 +1281,11 @@ def runtime_types():
             elif data.get('state') == 'end' and self.voice_speaking:
                 self.voice_speaking = False
                 self.voice_playback_ended = True
+                proposal = getattr(self.session, 'pending_proposal', None)
+                if (proposal and proposal.voice_turn == self.voice_turn
+                        and self.session.llm.tool_run and self.session.llm.tool_run.source == 'speech'
+                        and data.get('complete') is True and not readback_overlapped(self.session)):
+                    self.session.pending_proposal = replace(proposal, heard=True)
                 await self.session.output.broadcast_frame(BotStoppedSpeakingFrame)
 
         def device_voice_pending(self):
@@ -1264,10 +1364,19 @@ def runtime_types():
     @dataclass
     class FridayToolSpeechCompleteFrame(DataFrame):
         tool_call_id: str
+        readback_ready: bool = False
+        voice_turn: int | None = None
+        voice_count: int = 0
+
+    @dataclass
+    class FridayReadbackSpeechFrame(TTSSpeakFrame):
+        marker_id: str | None = None
 
     @dataclass(kw_only=True)
     class FridaySpokenToolResult(FunctionCallResultProperties):
         text: str
+        readback_id: str | None = None
+        cue: bool = False
 
     class FridayLLM(OpenAILLMService):
         supports_developer_role = False
@@ -1292,12 +1401,15 @@ def runtime_types():
             self.tools_in_flight = set()
             # An aggregated result awaiting inference, or the context frame that runs it.
             self.tool_followup = None
+            self.replay_marker = None
+            self.readback_budget = ReadbackBudget()
+            self.replay_cap_chat = None
             self._thought_signatures = {}
             self._request_roles = ''
 
         @property
         def tool_work_pending(self):
-            return bool(self.tools_in_flight) or self.tool_followup is not None
+            return bool(self.tools_in_flight) or self.tool_followup is not None or self.replay_marker is not None
 
         def _token_usage(self, usage):
             # Usage is metrics only. A provider may send null counts; that must not fail the reply.
@@ -1309,13 +1421,15 @@ def runtime_types():
             if (hasattr(frame, 'friday_event_generation')
                     and frame.friday_event_generation != self.session.event_generation):
                 return
+            if isinstance(frame, InterruptionFrame):
+                # At the LLM, this reaches the old response before the new speech context.
+                self.replay_marker = None
             if isinstance(frame, LLMContextFrame):
                 if isinstance(self.tool_followup, FunctionCallResultFrame):
                     # A new user turn can pick up a deferred result.
                     self.tool_followup = frame
                 turn = getattr(self.session, 'turn', None)
                 if turn is not None:
-                    self.session.llm_calls += 1
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
                                            ttfb=None, completed=False, call_count=0, buffered_text=None,
@@ -1350,6 +1464,9 @@ def runtime_types():
             if not ack:
                 return None
             if call.name in SEND_TOOLS:
+                key = 'prompt' if call.name == 'send_to_chat' else 'item'
+                sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0)
+                self.readback_budget.reset(sent)
                 self.session.pending_proposal = None
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
@@ -1365,7 +1482,7 @@ def runtime_types():
                     self.finish_browser_tool(frame)
                     if (isinstance(frame, FunctionCallResultFrame)
                             and isinstance(frame.properties, FridaySpokenToolResult)):
-                        speech = frame.properties.text
+                        speech = frame.properties
             if response and direction == FrameDirection.DOWNSTREAM:
                 if isinstance(frame, LLMFullResponseStartFrame):
                     frame.friday_response = response
@@ -1382,9 +1499,34 @@ def runtime_types():
                                           and m.processor == self.name and m.value > 0), None)
             await super().push_frame(frame, direction)
             if speech:
-                await self.push_frame(TTSSpeakFrame(speech))
+                if speech.readback_id:
+                    proposal = self.session.pending_proposal
+                    if proposal is not None and speech.readback_id == proposal.marker_id:
+                        await self.speak_readback(speech.text, speech.readback_id, cue=speech.cue)
+                else:
+                    await self.push_frame(TTSSpeakFrame(speech.text))
                 # TTS and the output transport serialize this behind the spoken result.
                 await self.push_frame(FridayToolSpeechCompleteFrame(frame.tool_call_id))
+            if (response and direction == FrameDirection.DOWNSTREAM and isinstance(frame, LLMFullResponseEndFrame)
+                    and getattr(response, 'replay_marker', None)):
+                await self.push_frame(FridayToolSpeechCompleteFrame(response.replay_marker))
+
+        async def speak_readback(self, text, marker_id, *, cue):
+            if cue:
+                await self.push_frame(FridayReadbackSpeechFrame(READBACK_CUE, append_to_context=False))
+            await self.push_frame(FridayReadbackSpeechFrame(text, marker_id=marker_id))
+
+        def offer_readback(self, proposal, marker_id):
+            n = self.readback_budget.offer(proposal)
+            if n:
+                print('Friday readback replay ' + json.dumps({'n': n, 'tool': proposal.name}, separators=(',', ':')),
+                      file=sys.stderr, flush=True)
+            if n > MAX_READBACK_REPLAYS:
+                self.session.pending_proposal = None
+                self.replay_cap_chat = proposal.chat
+                return READBACK_CAP, None, False
+            self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False, voice_turn=None)
+            return send_readback(proposal), marker_id, n > 0
 
         def track_assistant(self, assistant, context):
             response = None
@@ -1445,11 +1587,26 @@ def runtime_types():
                         isinstance(frame, FunctionCallResultFrame)
                         and (frame.properties is None or frame.properties.is_final)
                         and not isinstance(frame.properties, FridaySpokenToolResult)):
-                    if (isinstance(frame, FridayToolSpeechCompleteFrame)
-                            and frame.tool_call_id in self.tools_in_flight and s.tts.device_voice_pending()):
-                        s.busy = True
+                    if isinstance(frame, FridayToolSpeechCompleteFrame):
+                        replay = self.replay_marker == frame.tool_call_id
+                        if replay:
+                            self.replay_marker = None
+                        if (replay or frame.tool_call_id in self.tools_in_flight) and s.tts.device_voice_pending():
+                            s.busy = True
                     self.tools_in_flight.discard(frame.tool_call_id)
                     s.wake.set()
+                if isinstance(frame, FridayToolSpeechCompleteFrame) and frame.readback_ready:
+                    proposal = getattr(s, 'pending_proposal', None)
+                    if (proposal and proposal.marker_id == frame.tool_call_id and not readback_overlapped(s)
+                            and self.tool_run and self.tool_run.source == 'speech'):
+                        if frame.voice_turn is None and s.voice_mode == 'server':
+                            s.pending_proposal = replace(proposal, heard=True)
+                        elif (s.voice_mode == 'client' and frame.voice_turn == s.tts.voice_turn
+                              and not s.tts.voice_cancelled):
+                            s.pending_proposal = replace(proposal, voice_turn=frame.voice_turn)
+                    if frame.voice_turn is not None and frame.voice_turn == s.tts.voice_turn and not s.tts.voice_cancelled:
+                        await s.rtvi.send_server_message({'t': 'say_end', 'd': {
+                            'turn': frame.voice_turn, 'count': frame.voice_count}})
 
         def record_llm_ttft(self, response):
             if (response.completed and (response.text or response.tool_output)
@@ -1544,24 +1701,35 @@ def runtime_types():
                 self.run_source = 'event' if isinstance(text, str) and text.startswith(EVENT_PREFIX) else 'speech'
                 i = next((i for i in range(len(messages) - 2, -1, -1)
                           if messages[i].get('role') == 'assistant'), -1)
-                previous = (messages[i].get('content') or '') if i >= 0 else ''
+                previous = messages[i].get('content') if i >= 0 else None
+                previous = previous.strip() if isinstance(previous, str) else ''
                 proposal = getattr(self.session, 'pending_proposal', None)
-                declined = False
+                declined = replay = block_fresh = False
+                after_replay_cap = None
                 if self.run_source == 'speech':
                     self.user_turn += 1
                     self.last_user_text = ' '.join(m['content'].strip() for m in messages[i + 1:]
                         if is_real_user(m) and isinstance(m.get('content'), str)
                         and m['content'].strip() and not m['content'].startswith(EVENT_PREFIX))
-                    if proposal and (previous != send_readback(proposal) or self.user_turn - proposal.turn > 2):
+                    after_replay_cap, self.replay_cap_chat = self.replay_cap_chat, None
+                    live = proposal is not None and proposal.live(self.user_turn)
+                    block_fresh = live and (not proposal.heard or proposal.follows(previous))
+                    if not live or (not proposal.follows(previous) and (proposal.heard or previous)):
                         self.session.pending_proposal = proposal = None
-                    if proposal and APPROVAL_NO.search(self.last_user_text):
+                    elif APPROVAL_NO.search(self.last_user_text):
                         self.session.pending_proposal = None
+                        self.readback_budget.reset(proposal)
                         declined = True
+                    elif not proposal.heard:
+                        replay = plain_yes(self.last_user_text, proposal.chat)
+                        if not replay:
+                            self.session.pending_proposal = proposal = None
                 self.tool_run = SimpleNamespace(source=self.run_source,
                     last_user_text=self.last_user_text, used=set(),
-                    previous_assistant=previous if isinstance(previous, str) else '',
+                    previous_assistant=previous,
                     suggestions=suggested_replies(messages) if self.run_source == 'speech' else (),
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
+                    replay=replay, block_fresh=block_fresh, after_replay_cap=after_replay_cap,
                     pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
@@ -1583,7 +1751,9 @@ def runtime_types():
             reason = check_tool(params.function_name, params.arguments,
                 run.source if run else None, run.last_user_text if run else '',
                 run.used if run else set(), run.previous_assistant if run else '',
-                proposal, run.user_turn if run else 0, suggestions=run.suggestions if run else ())
+                proposal, run.user_turn if run else 0, suggestions=run.suggestions if run else (),
+                block_fresh=run.block_fresh if run else False,
+                after_replay_cap=run.after_replay_cap if run else None)
             response = self._active_response.get()
             if reason:
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
@@ -1592,14 +1762,14 @@ def runtime_types():
                 if reason == READBACK_REQUIRED:
                     speak = (not run.readback_spoken and run is self.tool_run
                              and (not response or response.turn == getattr(self.session, 'turn', None)))
+                    properties = FunctionCallResultProperties(run_llm=False)
                     if speak:
                         key = 'prompt' if params.function_name == 'send_to_chat' else 'item'
                         proposal = SendProposal(params.function_name, str(params.arguments.get('chat') or ''),
                                                 str(params.arguments.get(key) or ''), run.user_turn)
                         run.readback_spoken = True
-                        self.session.pending_proposal = proposal
-                    properties = (FridaySpokenToolResult(run_llm=False, text=send_readback(proposal))
-                                  if speak else FunctionCallResultProperties(run_llm=False))
+                        text, marker_id, cue = self.offer_readback(proposal, params.tool_call_id)
+                        properties = FridaySpokenToolResult(run_llm=False, text=text, readback_id=marker_id, cue=cue)
                     await params.result_callback({'error': 'Not sent yet. Friday asked the user to confirm.'},
                                                  properties=properties)
                     return
@@ -1650,6 +1820,20 @@ def runtime_types():
             run = self.prepare_run(run_messages)
             context.set_messages(messages)
             response = self._active_response.get()
+            if run and run.replay and self.run_source == 'speech':
+                text, marker_id, cue = self.offer_readback(replace(run.proposal, turn=run.user_turn), uuid4().hex)
+                if marker_id:
+                    # The normal response envelope owns the busy gate and reply snapshot.
+                    # The marker follows the end so the replay is committed before it binds.
+                    response.request_messages = messages[:]
+                    response.replay_marker = marker_id
+                    self.replay_marker = marker_id
+                    await self.speak_readback(text, marker_id, cue=cue)
+                else:
+                    await self.push_frame(TTSSpeakFrame(text))
+                return
+            if response and response.turn is not None:
+                self.session.llm_calls += 1
             if response and run and run.failed_action and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
@@ -1717,6 +1901,7 @@ def runtime_types():
             if not data.first_push and not reply_at_output:
                 return
             if isinstance(f, VADUserStartedSpeakingFrame):
+                invalidate_readback(s)
                 s.user_speaking = True
                 s.new_turn()
             elif isinstance(f, VADUserStoppedSpeakingFrame):
@@ -1980,6 +2165,8 @@ class Session:
                 device = self.tts.voice_client
                 was_speaking = self.tts.voice_speaking if device else self.bot_speaking
                 replay_turn = self.tts.voice_user_turn
+                if self.voice_mode != data['mode']:
+                    invalidate_readback(self)
                 self.voice_mode = data['mode']
                 if self.voice_mode == 'server' and self.tts.voice_client:
                     # Device playback can fail without spoken(end). Retire its

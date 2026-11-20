@@ -73,7 +73,7 @@ export class FridayAgent {
     // The device speaks when it can; the server voice (Pocket) is the fallback.
     this.voice = new DeviceVoice({
       onStart: turn => { this.send('spoken', { turn, state: 'start' }); this.setTurn('speaking'); this.gate(this.voice.kind === 'system') },
-      onEnd: turn => { this.gate(false); this.send('spoken', { turn, state: 'end' }); this.setTurn('listening') },
+      onEnd: (turn, complete) => { this.gate(false); this.send('spoken', { turn, state: 'end', complete }); this.setTurn('listening') },
       // The reply so far was never heard: the server voice speaks it, and speaks the rest of the turn itself.
       onFail: reason => { console.warn('Friday device voice failed', reason); this.gate(false); this.voice.close(); this.mode(null, this.bot) },
       onKind: kind => this.mode(kind),

@@ -125,7 +125,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             if friday.is_real_user(m) and isinstance(m.get('content'), str)
             and m['content'].strip() and not m['content'].startswith(friday.EVENT_PREFIX))
     user_turn = 1
-    pending = friday.SendProposal(**case['pending'], turn=0) if 'pending' in case else None
+    # An eval case's stored proposal stands for a read-back that played to the end.
+    pending = friday.SendProposal(**case['pending'], turn=0, heard=True) if 'pending' in case else None
     if pending and previous_assistant != friday.send_readback(pending):
         pending = None
     declined = None
