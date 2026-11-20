@@ -572,7 +572,8 @@ def codex_recheck(entry, run):
     """The conversation the pane of `entry` shows now, by the same binding as discovery over every live Codex pane:
     one pane's evidence can rule out another pane's thread. None when the pane no longer runs that Codex process."""
     processes = procinfo.table(run)
-    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{@zoom_for}\t#{pane_current_path}'],
+    result = run([paths.TMUX, 'list-panes', '-a', '-f', '#{==:#{pane_dead},0}', '-F',
+                  '#{pane_id}\t#{pane_pid}\t#{session_name}\t#{@zoom_for}\t#{pane_current_path}'],
                  capture_output=True, text=True, timeout=5, check=True)
     claude = claude_registries(processes)
     entries = []
@@ -584,7 +585,11 @@ def codex_recheck(entry, run):
         tree = descendants(pane_pid, processes)
         owner, agent = _pane_agent(pane_pid, processes, tree, _pane_registries(claude, pane, tree))
         if agent == 'codex':
-            entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': process_start(owner)})
+            try:
+                started = process_start(owner)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            entries.append({'id': pane, 'agent': 'codex', 'cwd': cwd, 'owner_pid': owner, 'process_start': started})
     connection = codex_database()
     try:
         bind_codex(connection, entries, run, processes, strict=True)
@@ -597,29 +602,29 @@ def codex_recheck(entry, run):
 def discover(config, run):
     pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
-                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}'],
+                  '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}\t#{pane_dead}'],
                  capture_output=True, text=True, timeout=5)
     if result.returncode:
         return ([{'id': 'saved', 'label': 'Last chat', 'agent': 'codex',
                   'thread': config['thread'], 'transcript': config['transcript'], 'writable': False}] if config.get('thread') else [])
-    positions = {}
+    panes, positions = [], {}
     for line in result.stdout.splitlines():
         fields = line.split('\t')
-        if len(fields) > 12:
-            fields.pop()  # @tether_role
-        if len(fields) > 9 and fields[-1]:
-            positions[(fields[1], fields[-1])] = fields[3]
+        if len(fields) > 13 and fields.pop() == '1':
+            continue  # #{pane_dead}: tmux can keep panes after their process exits.
+        # @tether_role (delegate.ROLES): a helper tab's job, such as "advisor". Older callers send no such field.
+        role = fields.pop() if len(fields) > 12 else ''
+        zoom_for = fields.pop() if len(fields) > 9 else ''
+        if zoom_for:
+            positions[(fields[1], zoom_for)] = fields[3]
+            continue  # @zoom_for identifies the placeholder, never a chat.
+        panes.append((fields, role))
     processes = procinfo.table(run)
     claude = claude_registries(processes)
     connection = codex_database()
     entries = []
     try:
-        for line in result.stdout.splitlines():
-            fields = line.split('\t')
-            # @tether_role (delegate.ROLES): a helper tab's job, such as "advisor". Older callers send no such field.
-            role = fields.pop() if len(fields) > 12 else ''
-            if len(fields) > 9 and fields.pop():
-                continue  # @zoom_for identifies the placeholder, never a chat.
+        for fields, role in panes:
             group = fields.pop() if len(fields) > 10 else ''  # @group (groups.py); older callers send no such field
             worktree = fields.pop() if len(fields) > 9 else ''
             pane, tmux_session, label, position, pid = fields[:5]
@@ -638,12 +643,21 @@ def discover(config, run):
             else:
                 cwd, pane_name = '\t'.join(fields[5:]), ''
             pane_pid = int(pid)
+            try:
+                pane_start = process_start(pane_pid)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The pane process exited after tmux listed it.
             tree = descendants(pane_pid, processes)
             registered = _pane_registries(claude, pane, tree)
             owner, agent = _pane_agent(pane_pid, processes, tree, registered)
+            if agent in ('claude', 'codex'):
+                try:
+                    started = process_start(owner)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
             entry = {'id': pane, 'tmux_session': tmux_session, 'label': label, 'position': position,
                      'agent': 'shell', 'writable': False, 'worktree': worktree.strip()[:200], 'group': group.strip()[:16],
-                     'pane_pid': pane_pid, 'pane_start': process_start(pane_pid), 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
+                     'pane_pid': pane_pid, 'pane_start': pane_start, 'cwd': cwd, 'pane_name': pane_name.strip()[:40], 'tmux_pane_name': pane_name.strip()[:40], 'full_pane_name': pane_name.strip(), 'pane_icon': icon if ICON.fullmatch(icon) else '',
                      'pane_named_at': int(named_at) if named_at.isdigit() else 0}
             if role in ('advisor', 'second-advisor'):
                 entry['role'] = 'advisor'
@@ -655,22 +669,19 @@ def discover(config, run):
             if live:
                 transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
-                             registry=live['registry'], writable=True, owner_pid=live['pid'],
-                             process_start=process_start(live['pid']),
+                             registry=live['registry'], writable=True, owner_pid=owner, process_start=started,
                              busy=live.get('status') == 'busy')
                 # A name the user gave (/rename or claude --name). Claude's own derived names ("projects-40") are not shown.
                 if live.get('nameSource') == 'user' and isinstance(live.get('name'), str) and live['name'].strip():
                     entry['agent_name'] = ' '.join(live['name'].split())
                     entry['agent_named_at'] = live.get('nameSince') if isinstance(live.get('nameSince'), int) else 0
             elif agent == 'claude':
-                started = process_start(owner)
                 pending = 'pending-' + str(owner) + '-' + started
                 transcript = HOME / '.claude/projects' / 'pending' / (pending + '.jsonl')
                 entry.update(agent='claude', thread=pending, transcript=str(transcript),
                              writable=True, owner_pid=owner, process_start=started,
                              pending_conversation=True)
             elif agent == 'codex':
-                started = process_start(owner)
                 entry['codex_profile'] = codex_provider.pane_profile(owner)  # 'foundry' for `codex -p foundry`; None = the plan
                 # bind_codex (below) chooses the conversation once every pane is known: one pane's evidence can rule out another's guess.
                 entry.update(agent='codex', writable=True, cwd=cwd, owner_pid=owner, process_start=started)

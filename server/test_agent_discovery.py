@@ -5,7 +5,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import agent_tabs
 import agents
@@ -51,6 +51,39 @@ class AgentDiscoveryTest(unittest.TestCase):
         with patch.object(Path, 'glob', return_value=registries):
             entry, = agents.discover({}, self.run)
         return entry
+
+    def test_dead_pane_is_skipped_before_reading_its_pid(self):
+        self.run.return_value.stdout = (
+            '%14\t$1\twork\t0.1\t101\t/work\t\t\t\t\t\t\t\t1\n'
+            '%13\t$1\twork\t0.0\t100\t/work\t123\tFix\tbug\tfeature/fix\tgroup\t\tadvisor\t0\n')
+        entry = self.discover()
+        self.assertEqual((entry['id'], entry['worktree'], entry['group'], entry['role']),
+                         ('%13', 'feature/fix', 'group', 'advisor'))
+        self.assertEqual(agents.process_start.call_args_list, [call(100), call(200)])
+
+    def test_missing_pane_pid_does_not_hide_live_pane(self):
+        self.run.return_value.stdout = ('%14\t$1\twork\t0.1\t101\t/work\t\t\t\t\t\t\t\t0\n'
+                                        + self.run.return_value.stdout)
+        self.processes[101] = (1, 'zsh')
+        for error in (FileNotFoundError('/proc/101/stat'), ProcessLookupError(101)):
+            with self.subTest(error=type(error).__name__):
+                agents.process_start.side_effect = [error, '100', '200']
+                self.assertEqual(self.discover()['id'], '%13')
+
+    def test_missing_agent_owner_does_not_hide_live_pane(self):
+        self.run.return_value.stdout += '%14\t$1\twork\t0.1\t101\t/work\n'
+        self.processes[101] = (1, 'zsh')
+        registry = self.registry(200, HELPER, 'cli')
+        for name, registries in (('claude', (registry,)), ('claude', ()), ('codex', ())):
+            with self.subTest(agent=name, registered=bool(registries)):
+                self.processes[200] = (100, name)
+                agents.process_start.side_effect = ['100', ProcessLookupError(200), '101']
+                self.assertEqual(self.discover(*registries)['id'], '%14')
+
+    def test_process_start_permission_error_propagates(self):
+        agents.process_start.side_effect = PermissionError('/proc/100/stat')
+        with self.assertRaises(PermissionError):
+            agents.discover({}, self.run)
 
     def test_registered_outer_claude_with_another_process_name_keeps_its_identity(self):
         # A Claude process that is not named "claude" (node, a wrapper) still owns the pane through its registry.
@@ -131,6 +164,13 @@ class AgentDiscoveryTest(unittest.TestCase):
         self.registry(2, OTHER, 'sdk-cli')
         entry = dict(id='%13', agent='codex', owner_pid=200, process_start='200', thread=HELPER)
         terminal_input.verify_codex(entry, self.run)
+
+    def test_codex_recheck_skips_another_panes_missing_owner(self):
+        self.processes.update({200: (100, 'codex'), 300: (1, 'codex')})
+        self.run.return_value.stdout = '%14\t300\twork\t\t/work\n%13\t100\twork\t\t/work\n'
+        agents.process_start.side_effect = [FileNotFoundError('/proc/300/stat'), '200']
+        entry = dict(id='%13', agent='codex', owner_pid=200, process_start='200', thread=HELPER)
+        self.assertEqual(agents.codex_recheck(entry, self.run)['thread'], HELPER)
 
     def test_antigravity_pane_ignores_nested_claude_registry(self):
         self.processes[200] = (100, 'agy')
