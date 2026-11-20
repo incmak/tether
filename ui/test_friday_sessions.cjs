@@ -71,4 +71,51 @@ assert.deepEqual(list([], ambiguous, '', 'theatre'), {
   error: 'No session called theatre. Sessions: Tether, Friday test, Admin Work, Totoro',
 })
 assert.equal(list([], ambiguous, '', 'Tether').session, 'Tether', 'Existing matches win despite phonetic ambiguity')
+const fallbackSessions = [{ id: 't', name: 'Tether' }, { id: 'r', name: 'Triage' }]
+const idleChat = (session, chat) => ({ session, chat, agent: 'Codex', state: 'idle', busy: false })
+const automation = idleChat('t', 'Automation tether . Can we have the report')
+const release = idleChat('t', 'Release notes')
+const fallbackChats = [automation, release, idleChat('r', 'Review')]
+const assertFallback = (candidates, wanted, match, session) => {
+  assert.deepEqual(list(candidates, fallbackSessions, '', wanted), {
+    session,
+    chats: [`${match.chat}, Codex, idle, in ${session}`],
+    note: `No session called ${wanted}. Closest match: the chat ${match.chat} in session ${session}. Say this name back to the user.`,
+  })
+}
+for (const wanted of ['automation tether session', 'automation data', 'automation teeth', 'Automation Ther',
+  'the automation tether chat', 'THE automation tether TAB']) {
+  assertFallback(fallbackChats, wanted, automation, 'Tether')
+}
+assertFallback(fallbackChats, 'Release', release, 'Tether')
+assertFallback(fallbackChats, 'notes', release, 'Tether')
+const billing = idleChat('r', 'Billing . Report . Weekly')
+assertFallback([idleChat('t', 'Billing Report draft'), billing], 'billing report weekly', billing, 'Triage')
+const archive = idleChat('r', 'Archive export')
+assertFallback([idleChat('t', 'Archived export'), archive], 'archiv export', archive, 'Triage')
+const document = idleChat('r', 'Document')
+assertFallback([document], 'Documant', document, 'Triage')
+const phoneticChat = idleChat('r', 'Babaro')
+assertFallback([phoneticChat], 'Bowiebar', phoneticChat, 'Triage')
+const docs = [idleChat('t', 'Docs one'), idleChat('r', 'Docs two')]
+assert.deepEqual(list(docs, fallbackSessions, '', 'docs'), {
+  error: 'No session called docs. Closest chats: Docs one (in Tether), Docs two (in Triage). Ask which one.',
+})
+assert.deepEqual(list([...docs, idleChat('r', 'Docs three'), idleChat('t', 'Docs four')], fallbackSessions, '', 'docs'), {
+  error: 'No session called docs. Closest chats: Docs one (in Tether), Docs two (in Triage), Docs three (in Triage). Ask which one.',
+})
+for (const wanted of ['zzzzzzzzzz', '']) {
+  assert.deepEqual(list(fallbackChats, fallbackSessions, '', wanted), {
+    error: `No session called ${wanted}. Sessions: Tether, Triage`,
+  })
+}
+assert.deepEqual(list([...fallbackChats, idleChat('t', 'Triage')], fallbackSessions, '', 'the Triage session'), {
+  session: 'Triage', chats: ['Review, Codex, idle, in Triage'],
+})
+const triageReport = idleChat('t', 'Weekly Triage report')
+assertFallback([...fallbackChats, triageReport], 'weekly triage', triageReport, 'Tether')
+assert.deepEqual(list(fallbackChats, fallbackSessions, '', 'weekly triage'), {
+  session: 'Triage', chats: ['Review, Codex, idle, in Triage'],
+})
 console.log('Friday sessions: names, counts, case-insensitive filtering, normalized and closest matches, threshold, errors and ID fallback pass')
+console.log('Friday chat fallback: spoken names, prefix and substring matches, edit and phonetic matches, ties, and session priority pass')
