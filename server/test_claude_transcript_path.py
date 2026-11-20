@@ -1,4 +1,5 @@
 """A resumed Claude session keeps writing to the folder where it began, not the one named after its working folder."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import tempfile
 import unittest

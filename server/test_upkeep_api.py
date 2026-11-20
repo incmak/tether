@@ -1,4 +1,5 @@
 """upkeep_api.py: the HTTP routes of the clean-up list and the daily ops report, and the monitor call."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

@@ -1,4 +1,5 @@
 """The auto-merge notice that server.py sends. No tmux, no network: notify is replaced."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
 from unittest.mock import patch
 

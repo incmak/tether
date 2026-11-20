@@ -1,4 +1,5 @@
 """The one-line "Needs you" summary in the session list."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
 from unittest.mock import patch
 

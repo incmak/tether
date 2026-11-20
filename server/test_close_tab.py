@@ -1,4 +1,5 @@
 """DELETE /mobile/api/session: a close names the chat the page saw, and a tab that now holds another chat stays open."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import json

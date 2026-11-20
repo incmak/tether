@@ -1,4 +1,5 @@
 """Optional preview tools, with isolated catalogs and temporary fake executables."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

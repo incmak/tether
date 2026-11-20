@@ -1,5 +1,6 @@
 """ops_agent.py and lesson_candidates.py: the daily ops report (B212). Real git in a temporary folder; tmux, the tab
 launcher and the clock are stand-ins. No model runs."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 import subprocess

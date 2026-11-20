@@ -1,4 +1,5 @@
 """Advisor settings and CLI contracts, with isolated files and mocked tmux/tab processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import copy
 import io

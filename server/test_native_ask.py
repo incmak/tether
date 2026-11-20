@@ -1,4 +1,5 @@
 """Native Claude 2.1.318 captures with synthetic questions; no real terminal writes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

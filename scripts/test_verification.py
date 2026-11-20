@@ -1,4 +1,5 @@
 """B189: verification stamps on DEPLOYED.md lines and commit trailers. Real git in temp folders."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import date, datetime, timedelta, timezone
 import io
 import os

@@ -1,4 +1,5 @@
 """B231: exercise the installed commit-msg hook with real Git and isolated state."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import hmac
 import json

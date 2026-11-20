@@ -1,4 +1,5 @@
 """The agent command: no live tmux or agent. The fake tmux fails, as it does in Codex's sandbox, unless a test says otherwise."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import os

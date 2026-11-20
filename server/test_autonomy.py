@@ -1,4 +1,5 @@
 """Autonomy settings use temporary paths and mocked processes, never live tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

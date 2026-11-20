@@ -1,4 +1,5 @@
 """Setup tests use temporary homes and mocked ping processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import shlex

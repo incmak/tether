@@ -1,4 +1,5 @@
 """Auto-resume uses an isolated cache and fake tmux, never real terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import importlib
 import io
 import json

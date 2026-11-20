@@ -1,4 +1,5 @@
 """Saved Claude permissions dialogs parse without terminal access."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import unittest
 

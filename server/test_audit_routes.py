@@ -1,4 +1,5 @@
 """Audit API and permission decisions with a mocked terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

@@ -1,4 +1,5 @@
 """Process readers against a small fake proc tree."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 from pathlib import Path
 import subprocess

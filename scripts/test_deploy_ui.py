@@ -1,4 +1,5 @@
 """Regression checks for preserving open-tab assets during an internal UI deploy."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from functools import partial
 import importlib.util
 import json

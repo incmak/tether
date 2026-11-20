@@ -1,4 +1,5 @@
 """A question taller than the pane: the card gets the whole question from the transcript, not only the screen's bottom rows."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import tempfile

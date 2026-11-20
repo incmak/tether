@@ -1,4 +1,5 @@
 """Capture freshness and stream pacing. All CDP traffic uses FakeChrome."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import threading

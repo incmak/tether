@@ -1,4 +1,5 @@
 """A tap on a row of a picker moves the cursor there, checks each step on screen, then presses one key."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 import re
 import unittest

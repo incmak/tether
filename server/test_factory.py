@@ -1,4 +1,5 @@
 """factory.py: the Factory view's read-only facts (DEPLOYED.md lines, latest tool calls, recent commits)."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
 import time

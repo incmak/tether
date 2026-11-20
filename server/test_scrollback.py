@@ -1,4 +1,5 @@
 """A pane left in tmux copy mode (a mouse-wheel scroll) no longer blocks a send. Uses its own tmux server."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import subprocess
 import tempfile
 import time

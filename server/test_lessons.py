@@ -1,4 +1,5 @@
 """Feedback storage uses temporary projects, including cross-process writers."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import multiprocessing
 from pathlib import Path

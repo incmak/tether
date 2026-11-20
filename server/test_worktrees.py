@@ -1,4 +1,5 @@
 """Worktree creation uses disposable git repositories and never touches tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 from pathlib import Path
 import subprocess

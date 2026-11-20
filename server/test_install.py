@@ -1,4 +1,5 @@
 """Installer tests never use the real user manager or fixed production ports."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import importlib.util
 import io

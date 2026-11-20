@@ -1,5 +1,6 @@
 """Groups (groups.py, groups_api.py) and the places that carry @group. The store runs against a real tmux server in
 its own socket folder (TMUX_TMPDIR), never the user's tmux. No test sends input to a terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import functools
 import io
 import json

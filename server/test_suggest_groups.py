@@ -1,4 +1,5 @@
 """Group suggestions use fake processes, HTTP responses and socket-free route fixtures."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

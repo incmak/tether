@@ -1,4 +1,5 @@
 """Session list sharing and ETag tests: mocked discovery, no tmux, no terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

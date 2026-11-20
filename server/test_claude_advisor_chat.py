@@ -1,4 +1,5 @@
 """Claude advisor transcript records as they appear in chat."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import unittest

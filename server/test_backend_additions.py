@@ -1,4 +1,5 @@
 """Backend routes use in-memory requests and mocked tmux, never live panes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

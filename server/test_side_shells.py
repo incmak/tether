@@ -1,4 +1,5 @@
 """side_shells against a real tmux server in its own socket folder (TMUX_TMPDIR), never the user's tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import functools
 import os
 import shutil

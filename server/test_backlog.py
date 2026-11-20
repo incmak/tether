@@ -1,4 +1,5 @@
 """The shared backlog: no live tmux or agent. Several processes write at once, as the server and agents do."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import multiprocessing
 import os

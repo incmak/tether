@@ -1,4 +1,5 @@
 """Run real suites in temp folders to check the rerun labels and exit status of run_tests.py."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import subprocess
 import sys

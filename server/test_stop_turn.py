@@ -1,4 +1,5 @@
 """Stop restores Claude's interrupted draft without touching pre-existing text."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import subprocess
 import unittest
 from unittest.mock import Mock, patch

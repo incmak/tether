@@ -1,4 +1,5 @@
 """LaunchAgent plans and applies use temporary homes and mocked processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import importlib.machinery
 import importlib.util

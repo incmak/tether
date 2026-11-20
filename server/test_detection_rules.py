@@ -1,4 +1,5 @@
 """Rule migration contracts and isolated loader, fallback, and input guard tests."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import importlib
 import json
 from pathlib import Path

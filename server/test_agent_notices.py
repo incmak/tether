@@ -1,4 +1,5 @@
 """Regression checks for native quota notices and fresh-session allowance reports."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import tempfile

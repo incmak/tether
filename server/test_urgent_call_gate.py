@@ -1,5 +1,6 @@
 """Pure checks for the BriskBot call driver. No credentials, calls, or models."""
 
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import importlib.util
 import io
 from pathlib import Path

@@ -1,4 +1,5 @@
 """Zoom uses mocks or a private tmux server; no commands reach a user's terminal."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path

@@ -1,4 +1,5 @@
 """macOS discovery and host samples, forced on Linux without real processes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 from pathlib import Path
 import pwd

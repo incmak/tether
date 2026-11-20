@@ -1,5 +1,6 @@
 """The broadcast broker: skip panes that wait on the user, re-check each pane right before its send, report per pane.
 No test touches a real tmux pane: sends are fakes, or terminal_input.submit with a fake `run`."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import http.client
 import importlib.machinery
 import importlib.util

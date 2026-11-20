@@ -1,5 +1,6 @@
 """Undo and redo (undo.py, undo_store.py, undo_api.py). The tmux tests run a private tmux server in its own socket folder
 (TMUX_TMPDIR), never the user's tmux. Reopened agent tabs get a harmless command instead of claude or codex."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import functools
 import io

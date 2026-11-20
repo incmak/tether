@@ -1,4 +1,5 @@
 """Unnumbered Claude pickers use panel text and never receive an automatic Esc."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch

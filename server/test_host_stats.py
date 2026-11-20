@@ -1,4 +1,5 @@
 """Host resources use fake proc/cgroup files and mocked terminal writes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import subprocess
 import tempfile

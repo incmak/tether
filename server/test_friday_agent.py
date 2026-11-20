@@ -1,4 +1,5 @@
 """Pure rules run on system Python. Optional API tests skip without Pipecat."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import copy
 import asyncio
 from contextlib import redirect_stderr

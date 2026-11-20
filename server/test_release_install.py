@@ -1,4 +1,5 @@
 """Offline release/bootstrap and migration proofs; only temporary homes and fake tools."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import hashlib
 import io

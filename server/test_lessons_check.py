@@ -1,4 +1,5 @@
 """Lesson checks use temporary files and mocked models, never live agents or tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime
 import hashlib
 import json

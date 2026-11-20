@@ -1,4 +1,5 @@
 """Panel actions use mocked writes, except for one isolated tmux key probe."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

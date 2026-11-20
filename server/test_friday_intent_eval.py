@@ -1,4 +1,5 @@
 """Offline checks for Friday's intent eval runner."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import io

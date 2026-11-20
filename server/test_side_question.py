@@ -1,4 +1,5 @@
 """Checks for Claude Code's /btw side question card. Frames in fixtures/ come from Claude Code 2.1.325."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import subprocess
 import tempfile

@@ -6,6 +6,7 @@ question renderer at 318764000, checkbox glyph table at 289538072.
 Claude resume renderer at 324513007; qE filter at 301747028 (⌕ prefix).
 Fixtures use public dummy labels. Every width is a physical terminal layout.
 """
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import subprocess

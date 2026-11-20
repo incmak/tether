@@ -1,4 +1,5 @@
 """Auto stack names (rules 4 and 5) and the empty-stack timer. The stack rules against a real tmux are in test_groups.py."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import unittest
 from unittest import mock
 

@@ -1,4 +1,5 @@
 """The Changes and Files side panels: repositories, per-file counts, diffs and the folder tree, on temporary Git repositories."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import subprocess
 import tempfile

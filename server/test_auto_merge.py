@@ -1,4 +1,5 @@
 """Auto-merge decisions and the trust ladder, on disposable git repositories. Nothing here touches tmux or a real remote."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import io
 import json

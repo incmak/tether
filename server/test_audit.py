@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta, timezone

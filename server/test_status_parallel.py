@@ -1,4 +1,5 @@
 """Session rows share cached pane status without serializing different panes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import unittest

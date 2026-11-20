@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 """Checks for session creation, shell input, and pre-conversation trust dialogs."""
 import os

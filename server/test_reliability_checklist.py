@@ -1,4 +1,5 @@
 """Reliability checklist (B209): row parsing, diff triggers, and the three results on real temporary repositories."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import json

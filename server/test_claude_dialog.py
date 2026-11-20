@@ -1,4 +1,5 @@
 """Claude slash-command dialogs read as data. Fixtures are styled frames of Claude Code 2.1.325 (names and paths replaced)."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import re
 import subprocess
 import unittest

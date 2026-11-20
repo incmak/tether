@@ -1,3 +1,4 @@
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import nullcontext
 import json
 import subprocess

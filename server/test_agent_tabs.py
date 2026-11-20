@@ -1,4 +1,5 @@
 """Agent commands use isolated review stores and mocked launchers and HTTP."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 import io
 import json

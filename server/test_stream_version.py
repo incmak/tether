@@ -1,4 +1,5 @@
 """Chat version and stream `have` tests (B63) use a mocked handler: no sockets, no terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import unittest

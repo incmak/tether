@@ -1,4 +1,5 @@
 """Synthetic WebAuthn ceremonies; all files and processes are isolated."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import hashlib
 import io
 import json

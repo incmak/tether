@@ -1,4 +1,5 @@
 """B204: the commit gate. Real git in temp folders; the mode files, the log and the session state are isolated."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import fcntl
 import io
 import json

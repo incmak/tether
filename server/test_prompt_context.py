@@ -1,4 +1,5 @@
 """The standing rules go out once per conversation (B74). Run: python3 -m unittest test_prompt_context"""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 import tempfile

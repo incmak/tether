@@ -1,5 +1,6 @@
 """Exercise Friday call scans with synthetic journal records."""
 
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 import io

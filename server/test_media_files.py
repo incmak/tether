@@ -1,4 +1,5 @@
 """Which files the phone may open from a path in chat, and video byte ranges."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from pathlib import Path
 import os
 import tempfile

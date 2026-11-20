@@ -1,4 +1,5 @@
 """Start times come from bounded transcript heads, not the loaded message window."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 import os

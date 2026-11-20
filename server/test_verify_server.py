@@ -1,4 +1,5 @@
 """Test the verify server against decoys and a fresh private tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from collections import Counter
 import errno
 from http.server import BaseHTTPRequestHandler

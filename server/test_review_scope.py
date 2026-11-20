@@ -1,4 +1,5 @@
 """Review folder selection with a private gate log and real Git worktrees."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path

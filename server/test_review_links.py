@@ -1,4 +1,5 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import nullcontext
 import hashlib
 import importlib.util

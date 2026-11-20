@@ -1,4 +1,5 @@
 """Signed browser isolation and lifecycle. Real tests use temporary profiles, never the live bridge."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
 import io
 import json

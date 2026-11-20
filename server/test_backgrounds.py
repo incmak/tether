@@ -1,4 +1,5 @@
 """Background routes use temporary storage and fake Codex processes only."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import base64
 import io
 import json

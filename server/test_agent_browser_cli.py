@@ -1,4 +1,5 @@
 """The CLI uses a local HTTP stub and never writes to real agent panes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os

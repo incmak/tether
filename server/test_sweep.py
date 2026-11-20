@@ -1,4 +1,5 @@
 """sweep.py: the 30-minute worktree sweep (B210). Real git in a temporary folder; gh and the clock are stand-ins."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 import subprocess

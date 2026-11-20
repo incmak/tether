@@ -1,4 +1,5 @@
 """Narrow screen guards: styled input, clipped controls, and private tmux only."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
 from pathlib import Path

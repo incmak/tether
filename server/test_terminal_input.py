@@ -1,4 +1,5 @@
 """Permissions attention and guarded retry keys use saved screens and mocked writes."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import io
 import json
 from pathlib import Path

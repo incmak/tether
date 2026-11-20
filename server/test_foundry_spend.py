@@ -1,4 +1,5 @@
 """Foundry spend: token totals from Codex logs, Retail Prices parsing, and the Azure bill (fake network)."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import datetime as dt
 import json
 import os

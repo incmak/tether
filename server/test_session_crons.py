@@ -1,4 +1,5 @@
 """Session cron jobs: names, schedules in words, next runs, and scheduled turns in the chat."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import datetime
 import json
 import os

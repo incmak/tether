@@ -1,4 +1,5 @@
 """advisor_log.py: concurrent writers, damaged JSONL lines and the full text of each ask."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import fcntl
 import json
 import os

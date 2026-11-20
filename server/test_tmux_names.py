@@ -1,4 +1,5 @@
 """tmux_names hooks against a real tmux server on its own socket (-L, in its own TMUX_TMPDIR), never the user's tmux."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
 import shutil
 import subprocess

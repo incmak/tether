@@ -1,4 +1,5 @@
 """Subagent reads use isolated transcripts and never write to real terminals."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from datetime import datetime, timezone
 import json
 import os

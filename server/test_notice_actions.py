@@ -1,4 +1,5 @@
 """Notice chips use the same regex data in Python and the UI."""
+import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 from pathlib import Path
 import re
