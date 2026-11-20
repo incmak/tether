@@ -10,7 +10,7 @@ import type { ArchivedTab } from './prefs'
 /** The prefs this module reads. `shownHelpers` binds a tab like an archived tab: pane id, conversation and folder. */
 export interface HelperPrefs { hideHelpers: boolean; shownHelpers: Record<string, ArchivedTab> }
 
-/** The tab waits on you: a prompt on screen, an ask ("Needs you: yes", Urgent), or an escalated review. */
+/** The tab waits on you: a prompt on screen, an ask ("Needs you: yes", with or without Urgent), or a review paused for you. */
 export function needsMak(pane: Pane): boolean {
   return pane.state === 'Approval' || pane.state === 'Input needed' || !!pane.ask || !!pane.escalated
 }
@@ -46,13 +46,17 @@ export function foldTarget(pane: Pane, byId: ReadonlyMap<string, Pane>, shown: R
   return undefined
 }
 
-/** Hidden helpers grouped by the shown tab they fold under. A helper with no shown owner goes under `orphan(helper)`. */
+/**
+ * Hidden helpers grouped by the shown tab they fold under. A helper with no shown owner in its own session goes under
+ * `orphan(helper)`: the strip and the sidebar draw a session's folds only next to that session's tabs.
+ */
 export function foldHelpers(hidden: Pane[], all: Pane[], shown: Pane[], orphan: (pane: Pane) => string = () => ''): Map<string, Pane[]> {
   const byId = new Map(all.map(pane => [pane.id, pane]))
   const ids = new Set(shown.map(pane => pane.id))
   const out = new Map<string, Pane[]>()
   for (const pane of hidden) {
-    const key = foldTarget(pane, byId, ids) ?? orphan(pane)
+    const target = foldTarget(pane, byId, ids)
+    const key = target && byId.get(target)?.tmux_session === pane.tmux_session ? target : orphan(pane)
     out.set(key, [...out.get(key) ?? [], pane])
   }
   return out
@@ -110,14 +114,16 @@ export const HelperFoldToggle = createContext<(key: string) => void>(() => {})
 
 /**
  * Which tabs the helper filter hides, and the folds that list them. A fold you opened shows its helpers again. Archived
- * tabs stay with the archive. A session never loses all its tabs to the filter: then its helpers show.
+ * tabs stay with the archive. A stack (or a session without stacks) never loses all its tabs to the filter: then its
+ * helpers show, so each hidden helper has a fold next to a tab that is drawn.
  */
 export function helperView(panes: Pane[], prefs: HelperPrefs, selected: string | null | undefined, archived: (pane: Pane) => boolean, opened: (key: string) => boolean) {
   const candidates = panes.filter(pane => !archived(pane) && hidesHelper(pane, prefs, selected))
   const candidateIds = new Set(candidates.map(pane => pane.id))
   const shown = panes.filter(pane => !archived(pane) && !candidateIds.has(pane.id))
-  const sessionsShown = new Set(shown.map(pane => pane.tmux_session))
-  const kept = candidates.filter(pane => sessionsShown.has(pane.tmux_session))
+  const place = (pane: Pane) => `${pane.tmux_session}\u0000${pane.group ?? ''}`
+  const placesShown = new Set(shown.map(place))
+  const kept = candidates.filter(pane => placesShown.has(place(pane)))
   const folds = foldHelpers(kept, panes, shown, orphanKey)
   const hidden = new Set<string>()
   const bySession = new Map<string, HelperFold[]>()

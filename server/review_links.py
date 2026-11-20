@@ -459,12 +459,22 @@ def paused():
     return _reviewers(paused_only=True)
 
 
+def _waits_on_mak(cap):
+    """The review waits on Mak: an escalation not yet sent, or a pause that only Mak's answer ends.
+
+    A pause that the parent tab still decides (`parent_stage`) or a pause for an agent upgrade does not.
+    """
+    if 'escalate' in cap:
+        return True
+    return 'parent_stage' not in cap and cap.get('paused') != UPGRADE_PAUSE and bool(_at_cap(cap) or cap.get('unreadable'))
+
+
 def escalated(entries):
-    """Live worker panes whose cap holds an escalation for the watcher."""
+    """Live worker panes whose review waits on Mak (B400: a hidden helper tab shows again until Mak answers)."""
     threads = {entry['id']: helper_tabs._thread(entry) for entry in entries}
     with _lock:
         return {row['worker'] for row in _read()
-                if _is_cap(row) and 'escalate' in row and row['worker'] in threads
+                if _is_cap(row) and row['worker'] in threads and _waits_on_mak(row)
                 and row.get('worker_thread') in (None, threads[row['worker']])}
 
 

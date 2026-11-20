@@ -132,16 +132,18 @@ class ListingParentsTests(unittest.TestCase):
         self.assertEqual(row['opened_by'], {'pane': '%1', 'name': None, 'live': False})
         self.assertEqual(row['helper'], True)
 
-    def test_escalated_only_for_the_current_worker_with_an_escalation_entry(self):
+    def test_escalated_only_for_the_current_worker_whose_review_waits_on_mak(self):
         self.tmux_rows([])
         cap = {'cap': True, 'worker': '%1', 'worker_thread': self.record['owner_thread'], 'escalate': 'Review needed.'}
         stale = dict(cap, worker='%2', worker_thread='1f8fad5b-d9cb-469f-a165-70867728950e')
-        waiting = {'cap': True, 'worker': '%5', 'paused': True}
-        self.review_file.write_text(json.dumps([cap, stale, waiting]))
+        parent_decides = {'cap': True, 'worker': '%4', 'paused': True, 'parent_stage': {'pane': '%3', 'thread': None, 'notice': 'Open findings.'}}
+        waiting = {'cap': True, 'worker': '%5', 'paused': True}  # the alert went out; Mak has not answered yet
+        self.review_file.write_text(json.dumps([cap, stale, parent_decides, waiting]))
         rows = self.listing()
         self.assertIs(rows['%1']['escalated'], True)
         self.assertNotIn('escalated', rows['%2'])
-        self.assertNotIn('escalated', rows['%5'])
+        self.assertNotIn('escalated', rows['%4'])
+        self.assertIs(rows['%5']['escalated'], True)
         with patch.object(server.review_links, '_read', side_effect=OSError('Unreadable')):
             self.assertNotIn('escalated', self.listing()['%1'])
             self.assertEqual(self.listing()['%1']['reviewers'], ['%5'])

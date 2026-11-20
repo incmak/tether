@@ -2785,10 +2785,12 @@ class ReviewLinksTests(unittest.TestCase):
                     self.send.assert_not_called()
                     self.assert_one_cap(limit)
                     self.assertEqual(review_links.paused(), {'%13': ['%12']})
+                    self.assertEqual(review_links.escalated(self.entries), {'%13'})  # B400: shown until Mak answers
                     self.request_review()  # Mak starts a new task
                     self.send.assert_called_once()
                     self.finish_review()
                     self.assert_one_cap(1)
+                    self.assertEqual(review_links.escalated(self.entries), set())
 
     def test_visible_stop_prompt_preserves_an_upgraded_cap_without_a_delivery_marker(self):
         self.fail_to_limit()
@@ -3621,6 +3623,7 @@ class ReviewLinksTests(unittest.TestCase):
     def test_escalation_alerts_on_next_tick_and_keeps_review_paused(self):
         parent = self.add_parent()
         self.fail_to_limit()
+        self.assertEqual(review_links.escalated([self.worker, self.reviewer]), set(), 'the parent tab decides first')
         with self.assertRaisesRegex(ValueError, 'That tab has no review waiting on this tab.'):
             review_links.escalate('%13', '%14', PARENT_THREAD)
         review_links.escalate('%13', parent['id'], parent['thread'])
@@ -3633,7 +3636,8 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(link['paused'])
         self.assertNotIn('parent_stage', link)
         self.assertNotIn('escalate', link)
-        self.assertEqual(review_links.escalated([self.worker, self.reviewer]), set())
+        # The alert is sent, but the review still waits on Mak: the helper tab stays shown until he answers.
+        self.assertEqual(review_links.escalated([self.worker, self.reviewer]), {'%13'})
 
     def test_third_failed_review_asks_mak_with_the_findings_instead_of_a_third_fix(self):
         self.assertEqual(review_links.MAX_ROUNDS, 3)

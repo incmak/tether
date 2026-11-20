@@ -67,6 +67,17 @@ assert.deepEqual(plain(view.bySession.get('$1').map(fold => fold.key)), ['@$1'])
 view = helperView([tab('%8', { helper: true, tmux_session: '$2' })], on, null, () => false, () => false)
 assert.equal(view.hidden.size, 0)
 
+// A stack never loses all its tabs: a stack with only a hidden helper keeps it shown (it would have no fold to draw).
+view = helperView([owner, tab('%10', { helper: true, group: 'g2' })], on, null, () => false, () => false)
+assert.equal(view.hidden.size, 0)
+view = helperView([owner, tab('%11', { group: 'g2' }), tab('%10', { helper: true, group: 'g2' })], on, null, () => false, () => false)
+assert.deepEqual([...view.hidden], ['%10'])
+
+// An owner in another session: the helper folds under its own session, where the fold can be drawn.
+view = helperView([owner, tab('%12', { tmux_session: '$3' }), tab('%13', { helper: true, owner: '%1', tmux_session: '$3' })], on, null, () => false, () => false)
+assert.deepEqual(plain(view.bySession.get('$3').map(fold => fold.key)), ['@$3'])
+assert.equal(view.bySession.get('$1'), undefined)
+
 // Nesting: helpers right after their owner, depth first, whatever the tab order; the rest keep their order.
 const order = [tab('%5', { owner: '%4' }), tab('%9'), tab('%4', { owner: '%1' }), tab('%1'), tab('%2', { owner: '%1' })]
 assert.deepEqual(plain(nestHelpers(order).map(item => item.id)), ['%9', '%1', '%4', '%5', '%2'])
