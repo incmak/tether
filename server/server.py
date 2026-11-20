@@ -293,10 +293,19 @@ def review_turn_source(entry):
                                                  distinguish_missing=True, with_time=True, **options)
 
     result = classify(notification_records(entry))
-    # Antigravity exports rewrite old steps out of order, so a wider tail can bring back an older prompt.
-    if result[0] in ('unknown', 'unknown-background') and entry.get('agent') in ('claude', 'codex'):
-        # The wider tail must not credit an earlier turn's prompt to a turn that has no reply yet.
-        return classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES), latest_turn=True)
+    if entry.get('agent') == 'antigravity':
+        if result[0] in ('user', 'unknown', 'unknown-background'):
+            # Exports rewrite old steps out of order, so a tail can bring back an older prompt.
+            # Only the whole export shows which prompt is newest.
+            records, whole = _transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, whole=True)
+            if whole:
+                result = classify(records)
+            elif result[0] == 'user':
+                result = ('unknown', *result[1:])
+    elif result[0] in ('unknown', 'unknown-background'):
+        # latest_turn: a prompt after the latest reply starts a turn with no reply yet.
+        # The wider tail must not credit an earlier turn's prompt to it.
+        result = classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES), latest_turn=True)
     return result
 
 
@@ -1327,28 +1336,28 @@ def notification_records(entry):
     return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES)
 
 
-def _transcript_tail_records(entry, tail_bytes):
-    if entry.get('agent') not in ('claude', 'codex', 'antigravity') or entry.get('ambiguous'):
-        return []
-    try:
-        with open(entry['transcript'], 'rb') as stream:
-            size = stream.seek(0, os.SEEK_END)
-            start = max(0, size - tail_bytes)
-            stream.seek(start)
-            tail = stream.read(tail_bytes)
-        if start:
-            tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
-        records = []
-        for line in tail.splitlines():
-            try:
-                record = json.loads(line)
-            except (ValueError, UnicodeError):
-                continue
-            if isinstance(record, dict):
-                records.append(record)
-        return records
-    except (OSError, KeyError, ValueError):
-        return []
+def _transcript_tail_records(entry, tail_bytes, *, whole=False):
+    """Read the last tail_bytes. With whole, also return whether the read started at the file start."""
+    records, start = [], None
+    if entry.get('agent') in ('claude', 'codex', 'antigravity') and not entry.get('ambiguous'):
+        try:
+            with open(entry['transcript'], 'rb') as stream:
+                size = stream.seek(0, os.SEEK_END)
+                start = max(0, size - tail_bytes)
+                stream.seek(start)
+                tail = stream.read(tail_bytes)
+            if start:
+                tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
+            for line in tail.splitlines():
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+        except (OSError, KeyError, ValueError):
+            records, start = [], None
+    return (records, start == 0) if whole else records
 
 
 def notification_context(entry):

@@ -3036,27 +3036,47 @@ class ReviewLinksTests(unittest.TestCase):
             with self.subTest(agent=agent, limit=limit):
                 stop = self.stopped_review_prompt(agent, limit, legacy=True)
                 times = self.write_worker_turn(stop, LONG_REVIEW_OUTPUT)
-                # Antigravity has no wider reread: its exports rewrite old steps out of order.
-                expected = ('unknown', None, None) if agent == 'antigravity' else ('review-feedback', *times)
-                self.assertEqual(self.turn_source(self.worker), expected)
+                self.assertEqual(self.turn_source(self.worker), ('review-feedback', *times))
                 self.request_review()
                 self.assert_stopped_review(limit)
 
     def test_long_mak_turn_restarts_a_paused_cap(self):
-        for agent in ('claude', 'codex'):
+        for agent in REVIEW_TRANSCRIPT_AGENTS:
             with self.subTest(agent=agent):
                 self.stopped_review_prompt(agent, 3, legacy=True)
                 times = self.write_worker_turn('Mak asks to fix the findings.', LONG_REVIEW_OUTPUT)
                 self.assertEqual(self.turn_source(self.worker), ('user', *times))
                 self.assert_reviews_restarted()
 
-    def test_long_antigravity_mak_turn_waits_for_a_readable_prompt(self):
-        self.stopped_review_prompt('antigravity', 3, legacy=True)
-        self.write_worker_turn('Mak asks to fix the findings.', LONG_REVIEW_OUTPUT)
-        self.assertEqual(self.turn_source(self.worker), ('unknown', None, None))
+    def test_wider_tail_does_not_skip_a_background_prompt_without_a_reply(self):
+        # B289 review r2: a scheduled prompt starts a turn that aborts after long tool output.
+        stop = self.stopped_review_prompt('claude', 3, legacy=True)
+        write_records(Path(self.worker['transcript']), [
+            claude('user', 'An earlier task from Mak.'), claude('assistant', 'Done.'),
+            claude('user', '<scheduled-task>Check CI.</scheduled-task>', isSystemInjected=True),
+            claude('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'x' * LONG_REVIEW_OUTPUT}]),
+        ])
+        self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
         self.request_review()
         self.assert_stopped_review(3)
-        self.write_worker_turn('Mak asks again.')
+
+    def test_antigravity_prompt_from_a_partial_export_does_not_restart(self):
+        # B289 review r2: the older Mak step is rewritten inside the normal tail; the stop prompt is beyond 8 MiB.
+        stop = self.stopped_review_prompt('antigravity', 3, legacy=True)
+        write_records(Path(self.worker['transcript']), [
+            dict(type='USER_INPUT', step_index=1, content='<USER_REQUEST>An earlier task from Mak.</USER_REQUEST>'),
+            dict(type='AGENT_RESPONSE', step_index=2, content='Done.'),
+            dict(type='USER_INPUT', step_index=3, content=f'<USER_REQUEST>{stop}</USER_REQUEST>'),
+            dict(type='PLANNER_RESPONSE', step_index=4, content='x' * CLIPPED_REVIEW_OUTPUT),
+            dict(type='USER_INPUT', step_index=1, content='<USER_REQUEST>An earlier task from Mak.</USER_REQUEST>'),
+            dict(type='AGENT_RESPONSE', step_index=5, content='Done.'),
+        ])
+        self.assertEqual(server.notification_priority.turn_source(
+            'antigravity', server.notification_records(self.worker), distinguish_missing=True), 'user')
+        self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
+        self.request_review()
+        self.assert_stopped_review(3)
+        self.write_worker_turn('Mak asks again.')  # a whole export: the newest prompt is known
         self.assert_reviews_restarted()
 
     def test_wider_tail_does_not_credit_an_earlier_mak_prompt_to_a_turn_without_a_reply(self):

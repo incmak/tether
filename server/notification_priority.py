@@ -40,8 +40,8 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
 
     Tool results and debug copies are not prompts. Claude sidechains belong to another agent.
     Codex and Antigravity currently expose no reliable background-origin flag.
-    With latest_turn, a foreground prompt after the latest assistant record gives 'unknown': that turn
-    has no reply yet, so the prompt before that record belongs to an earlier turn.
+    With latest_turn, any prompt after the latest assistant record gives 'unknown': that turn has no
+    reply yet, so the prompt before that record belongs to an earlier turn.
     """
     finished_at = None
 
@@ -70,7 +70,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             if kind == 'assistant' and not record.get('isMeta'):
                 is_assistant = True
             elif not assistant_seen:
-                if latest_turn and _claude_foreground_prompt(record, kind):
+                if latest_turn and _claude_prompt(record, kind):
                     return result('unknown')
                 continue
             if kind == 'user':
@@ -98,7 +98,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             if kind == 'system' and record.get('subtype') in ('hook', 'hook_response', 'scheduled_task', 'scheduled_wakeup', 'cron', 'loop', 'monitor_event'):
                 return result('background')
         elif agent == 'codex':
-            if latest_turn and not assistant_seen and _codex_foreground_prompt(kind, payload):
+            if latest_turn and not assistant_seen and _codex_prompt(kind, payload):
                 return result('unknown')
             if kind == 'response_item' and payload.get('type') == 'message':
                 if payload.get('role') == 'assistant':
@@ -132,7 +132,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
     return result('background' if hook_blocked else 'user')
 
 
-def _claude_foreground_prompt(record, kind):
+def _claude_prompt(record, kind):
     if kind == 'user' and not record.get('isAutoCompactSummary'):
         message = record.get('message') if isinstance(record.get('message'), dict) else {}
         content = text_content(message.get('content'))
@@ -142,10 +142,10 @@ def _claude_foreground_prompt(record, kind):
         content = content if isinstance(content, str) else ''
     else:
         return False
-    return bool(content.strip()) and not claude_background(record, content)
+    return bool(content.strip())
 
 
-def _codex_foreground_prompt(kind, payload):
+def _codex_prompt(kind, payload):
     if kind == 'event_msg':
         return payload.get('type') == 'user_message'
     if kind != 'response_item' or payload.get('type') != 'message' or payload.get('role') != 'user':
@@ -153,8 +153,7 @@ def _codex_foreground_prompt(kind, payload):
     if any(part.get('_user') for part in codex_messages.parts(payload)):
         return True
     content = text_content(payload.get('content'))
-    return (bool(content.strip()) and not content.lstrip().startswith('# AGENTS.md instructions')
-            and not codex_messages.background(payload))
+    return bool(content.strip()) and not content.lstrip().startswith('# AGENTS.md instructions')
 
 
 def status_line(reply):

@@ -107,16 +107,16 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(turn_source('claude', [BACKGROUND, ASSISTANT, hook, ASSISTANT], identify=identify), 'background')
         self.assertEqual(turn_source('claude', [hook, ASSISTANT], identify=identify), 'background')  # a clipped tail
 
-    def test_latest_turn_refuses_a_foreground_prompt_without_a_reply(self):
+    def test_latest_turn_refuses_a_prompt_without_a_reply(self):
         earlier = [claude('user', 'Earlier task.'), ASSISTANT]
         for records, expected in (
                 (earlier + [claude('user', 'New task.')], 'unknown'),
                 (earlier + [dict(type='attachment', attachment={'type': 'queued_command', 'prompt': 'Queued.'})], 'unknown'),
-                (earlier + [BACKGROUND], 'user'),  # a background record after the reply is not a new prompt
+                (earlier + [BACKGROUND], 'unknown'),  # a background turn with no reply yet
                 (earlier + [claude('user', [{'type': 'tool_result', 'content': 'x'}])], 'user')):
             with self.subTest(records=records[-1]):
                 self.assertEqual(turn_source('claude', records, latest_turn=True), expected)
-                self.assertEqual(turn_source('claude', records), 'user')
+                self.assertEqual(turn_source('claude', records), 'user')  # without latest_turn: the replied turn
         codex_earlier = [codex('user', 'Earlier task.'), codex('assistant', 'Done.')]
         for last, expected in ((codex('user', 'New task.'), 'unknown'),
                                ({'type': 'event_msg', 'payload': {'type': 'user_message', 'message': 'New.'}}, 'unknown'),
