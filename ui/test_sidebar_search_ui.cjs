@@ -141,8 +141,13 @@ async function main() {
     await page.getByRole('button', { name: 'Open sessions' }).first().click()
     const search = root.getByRole('searchbox', { name: 'Search sessions' })
     await search.fill('')
-    await search.pressSequentially('latency', { delay: 30 })
-    await page.waitForTimeout(600)
+    await Promise.all([
+      page.waitForResponse(response => {
+        const { pathname, searchParams } = new URL(response.url())
+        return response.request().method() === 'GET' && pathname.endsWith('/api/history') && searchParams.get('q') === 'latency'
+      }),
+      search.pressSequentially('latency', { delay: 30 }),
+    ])
     const typed = history.filter(q => q && q !== 'voice')
     check('past chats wait for a pause in typing', typed.length <= 2 && typed.at(-1) === 'latency', JSON.stringify(history))
     check('no page errors', !pageErrors.length, pageErrors.join('; '))

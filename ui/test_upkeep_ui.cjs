@@ -163,8 +163,11 @@ async function main() {
       await sheet.getByText(/Nothing is stale\. Last check:/).waitFor()
       check(`${at} the empty state names the last check`, true)
       if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `cleanup-empty-${width}.png`) })
-      await sheet.getByRole('button', { name: 'Check now' }).click()
-      check(`${at} Check now sends check`, JSON.stringify(state.posts.at(-1).body) === JSON.stringify({ action: 'check' }))
+      const [request] = await Promise.all([
+        page.waitForRequest(req => req.method() === 'POST' && new URL(req.url()).pathname.endsWith('/api/upkeep/prune')),
+        sheet.getByRole('button', { name: 'Check now' }).click(),
+      ])
+      check(`${at} Check now sends check`, JSON.stringify(request.postDataJSON()) === JSON.stringify({ action: 'check' }))
       await page.keyboard.press('Escape')
       await sheet.waitFor({ state: 'detached' })
       check(`${at} Escape closes the sheet`, true)

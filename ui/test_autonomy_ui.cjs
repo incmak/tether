@@ -401,12 +401,13 @@ async function main() {
       check(`${at} global lesson shows kind and did-not-stick flag`, await page.locator('.lesson').first().getByText('Avoid', { exact: true }).isVisible() && await page.getByText('Did not stick').first().isVisible())
       check(`${at} no page overflow (learning)`, !(await overflow()))
       await page.screenshot({ path: path.join(SHOTS, `settings-learning-${width}.png`) })
-      mark0 = posts.length
-      await learnSwitch.click()
-      await page.waitForTimeout(300)
-      check(`${at} switch posts enabled false`, posts.slice(mark0).some(post => post.endpoint === 'autonomy/lessons' && post.body.enabled === false))
-      await learnSwitch.click()
-      await page.waitForTimeout(300)
+      const toggleLearning = () => Promise.all([
+        page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/autonomy/lessons')),
+        learnSwitch.click(),
+      ])
+      const [learningOff] = await toggleLearning()
+      check(`${at} switch posts enabled false`, learningOff.request().postDataJSON().enabled === false)
+      await toggleLearning()
       reviewState = { ...reviewState, due: true, check: { state: 'idle' } }
       await page.getByRole('button', { name: 'Review', exact: true }).click()
       const reviewSheet = page.getByRole('dialog', { name: 'Review lessons' })

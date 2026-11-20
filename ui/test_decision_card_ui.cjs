@@ -42,13 +42,13 @@ const contexts = []
 async function open(browser, viewport) {
   const context = await browser.newContext({ viewport, serviceWorkers: 'block', hasTouch: viewport.width < 500 })
   contexts.push(context)
-  const posts = [], gets = [], errors = []
+  const gets = [], errors = []
   await context.route(`${ORIGIN}/**`, route => {
     const request = route.request()
     const url = new URL(request.url())
     if (url.pathname.startsWith('/mobile/api/')) {
       const name = url.pathname.slice('/mobile/api/'.length)
-      if (request.method() === 'POST') { posts.push(name); return route.fulfill({ json: name === 'work/answer' ? { sent: false, why: 'test' } : {} }) }
+      if (request.method() === 'POST') return route.fulfill({ json: name === 'work/answer' ? { sent: false, why: 'test' } : {} })
       gets.push(`${name}${url.search}`)
       return name === 'stream' ? route.fulfill({ status: 204 }) : route.fulfill({ json: fixtures[name] ?? {} })
     }
@@ -61,7 +61,7 @@ async function open(browser, viewport) {
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(`${ORIGIN}/chat/`)
   await page.locator('#home-group-decisions .work-card').first().waitFor()
-  return { context, page, posts, gets, errors }
+  return { context, page, gets, errors }
 }
 
 // The title button's ::after covers the card body, so a real tap lands on it: click by position, as a finger does.
@@ -70,9 +70,15 @@ const tapOn = async (page, locator) => {
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
 }
 // Opened: Home gives way to the chat, and the chat watches the tab (Home also loads short previews of tabs).
-const opened = async (page, gets, from, id) => {
-  const left = await page.locator('#home-group-decisions').waitFor({ state: 'detached', timeout: 5000 }).then(() => true, () => false)
-  return left && gets.slice(from).some(entry => entry.startsWith(`chat?session=${encodeURIComponent(id)}`) && entry.includes('watch=1'))
+const openLinkedTab = async (page, id, action) => {
+  await Promise.all([
+    page.waitForRequest(request => {
+      const { pathname, searchParams } = new URL(request.url())
+      return request.method() === 'GET' && pathname.endsWith('/api/chat') && searchParams.get('session') === id && searchParams.get('watch') === '1'
+    }),
+    action(),
+  ])
+  await page.locator('#home-group-decisions').waitFor({ state: 'detached', timeout: 5000 })
 }
 
 async function main() {
@@ -92,26 +98,24 @@ async function main() {
         assert.equal(await button.count(), 1, `aria: ${await card.ariaSnapshot()}`)
         assert.equal(await card.getAttribute('aria-labelledby').then(id => page.locator(`[id="${id}"]`).innerText()), 'exhibits-carry-over')
         if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `decision-card-${viewport.width}.png`), fullPage: true })
-        const before = gets.length
-        await tapOn(page, card.locator('.work-q'))
-        assert.ok(await opened(page, gets, before, '%195'), `the tap did not open %195: ${gets.slice(before).join(', ')}`)
+        await openLinkedTab(page, '%195', () => tapOn(page, card.locator('.work-q')))
         assert.deepEqual(errors, [], errors.join(" | ") + ' :: unmocked ' + [...new Set(gets.map(g => g.split('?')[0]).filter(g => !(g in fixtures)))].join(','))
         await context.close()
       })
       await check(`${at}: the top row opens the tab, an answer button only answers`, async () => {
-        const { context, page, posts, gets } = await open(browser, viewport)
+        const { context, page, gets } = await open(browser, viewport)
         const card = page.locator('#home-group-decisions .work-card[data-item="T-020"]')
         const before = gets.length
-        await card.getByRole('button', { name: 'Hold' }).click()
-        await page.waitForTimeout(300)
-        assert.ok(posts.includes('work/answer'), 'Hold did not answer')
+        const [answer] = await Promise.all([
+          page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/api/work/answer')),
+          card.getByRole('button', { name: 'Hold' }).click(),
+        ])
+        assert.ok(answer.ok(), 'Hold did not answer')
         assert.equal(await page.locator('#home-group-decisions').count(), 1, 'Hold left Home')
         assert.ok(!gets.slice(before).some(entry => entry.startsWith('chat?session=%25195') && entry.includes('watch=1')), `Hold opened the tab: ${gets.slice(before).join(', ')}`)
         await context.close()
         const second = await open(browser, viewport)
-        const start = second.gets.length
-        await tapOn(second.page, second.page.locator('#home-group-decisions .work-card[data-item="T-020"] .work-id'))
-        assert.ok(await opened(second.page, second.gets, start, '%195'), 'the top row did not open the tab')
+        await openLinkedTab(second.page, '%195', () => tapOn(second.page, second.page.locator('#home-group-decisions .work-card[data-item="T-020"] .work-id')))
         await second.context.close()
       })
       await check(`${at}: a card whose tab is closed opens the item details`, async () => {
@@ -125,11 +129,9 @@ async function main() {
         await context.close()
       })
       await check(`${at}: keyboard Enter on the title opens the tab`, async () => {
-        const { context, page, gets } = await open(browser, viewport)
-        const before = gets.length
+        const { context, page } = await open(browser, viewport)
         await page.locator('#home-group-decisions .work-card[data-item="T-020"] .work-open').focus()
-        await page.keyboard.press('Enter')
-        assert.ok(await opened(page, gets, before, '%195'), 'Enter did not open the tab')
+        await openLinkedTab(page, '%195', () => page.keyboard.press('Enter'))
         await context.close()
       })
     }
