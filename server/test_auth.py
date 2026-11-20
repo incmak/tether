@@ -163,7 +163,10 @@ class AuthTests(unittest.TestCase):
         self.assertNotIn(auth.COOKIE, seen[0])   # the sign-in cookie is not handed on to ttyd
 
     def live_listener(self):
-        http = ThreadingHTTPServer(('127.0.0.1', 0), server.BrowserLiveOriginHandler)
+        import browser
+        from functools import partial
+        http = ThreadingHTTPServer(('127.0.0.1', 0),
+                                   partial(server.BrowserLiveOriginHandler, panel_browser=browser.BROWSER))
         threading.Thread(target=http.serve_forever, daemon=True).start()
         self.addCleanup(http.server_close)
         self.addCleanup(http.shutdown)
@@ -211,6 +214,37 @@ class AuthTests(unittest.TestCase):
             response, body = self.request('GET', '/browser/live/index.html', headers={'Cookie': cookie})
         self.assertNotEqual((response.status, body), (200, b'ok'))
         self.assertEqual(seen, [])
+
+    def test_live_listeners_bound_to_separate_sockets(self):
+        from types import SimpleNamespace
+        cookie = self.sign_in(auth.token())[0].getheader('Set-Cookie').split(';')[0]
+        headers = {'Cookie': cookie, 'Connection': 'Upgrade', 'Upgrade': 'websocket'}
+        listeners, requests = [], []
+        for label in ('test', 'signed'):
+            container, seen = self.fake_container([
+                b'HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s' % (len(label), label.encode())])
+            container.live_port = 0
+            container.web_auth = lambda label=label: 'Basic ' + label
+            listener = server.start_browser_live_origin('127.0.0.1', SimpleNamespace(container=container))
+            self.addCleanup(listener.server_close)
+            self.addCleanup(listener.shutdown)
+            listeners.append(listener.server_address[1])
+            requests.append(seen)
+
+        for port, other in (listeners, listeners[::-1]):
+            refused, _ = self.live_request(port, 'GET', '/browser/live/api/websockets', dict(
+                headers, Host=f'phone.test:{port}', Origin=f'http://phone.test:{other}'))
+            self.assertEqual(refused.status, 403)
+        self.assertEqual(requests, [[], []])
+
+        for port, other, label in zip(listeners, listeners[::-1], ('test', 'signed')):
+            # Even a forged Host and a query asking for the other browser cannot change the bound container.
+            reply, body = self.live_request(port, 'GET', '/browser/live/?browser=' + ('signed' if label == 'test' else 'test'),
+                                            dict(headers, Host=f'phone.test:{other}'))
+            self.assertEqual((reply.status, body), (200, label.encode()))
+        for seen, label in zip(requests, ('test', 'signed')):
+            self.assertEqual(len(seen), 1)
+            self.assertIn('Authorization: Basic ' + label + '\r\n', seen[0])
 
     def test_live_origin_serves_only_the_live_view_after_sign_in(self):
         patcher = mock.patch.object(server.prefs_sync, 'host_origins', return_value=[])  # not this machine's list

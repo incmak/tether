@@ -28,7 +28,7 @@ class SignedTests(unittest.TestCase):
         self.launcher = Mock(side_effect=lambda chrome, profile, **kwargs: self.fake.launcher(chrome, profile))
         self.signed = browser.Browser(launcher=self.launcher, chrome_finder=lambda: '/fake/google-chrome',
                                       profile=Path('/nonexistent/signed/profile'), signed=True, display=self.display)
-        self.test = Mock(signed=False)
+        self.test = Mock(signed=False, container=None)
         self.test.list_tabs.return_value = {'tabs': []}
         self.test.new_tab.return_value = {'id': 'TEST'}
         self.test.running.return_value = False

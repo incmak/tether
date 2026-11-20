@@ -426,7 +426,7 @@ class Browser:
                 raise BrowserError('Google Chrome is not installed.' if self.signed else
                                    'No Chromium found. Install one or set MOBILE_TMUX_CHROME.')
             try:
-                if self.signed:
+                if self.container is None and self.signed:
                     env = self.display.start()
                     pid, read_fd, write_fd = self.launcher(chrome, self.profile, headed=True, env=env)
                 else:
@@ -467,7 +467,7 @@ class Browser:
                 _reap(pid)
             if conn:
                 conn._shut()
-            if self.display:
+            if self.container is None and self.display:
                 self.display.stop()
             if self.container is not None:
                 self.container.stop()
@@ -492,7 +492,7 @@ class Browser:
                 if pid:
                     _reap(pid)
                 self.idle_stop.set()
-                if self.display:
+                if self.container is None and self.display:
                     self.display.stop()
                 self._reset()
 
@@ -580,7 +580,7 @@ class Browser:
     def state(self):
         with self.lock:
             state = {'running': self.running(), 'version': self.version,
-                     **({'live': browser_container.LIVE_PREFIX, 'live_port': browser_container.LIVE_PORT, 'live_run': getattr(self.container, 'run_id', None)}
+                     **({'live': browser_container.LIVE_PREFIX, 'live_port': self.container.live_port, 'live_run': self.container.run_id}
                         if self.container is not None else {}),
                     'tabs': [self.tabs[target].row() for target in self.order if target in self.tabs],
                     'presets': [{'id': key, 'label': value['label'], 'width': value['width'], 'height': value['height'],

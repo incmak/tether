@@ -185,6 +185,25 @@ class ContainerTests(unittest.TestCase):
         with mock.patch.object(browser_container, 'docker_path', return_value=None):
             self.assertIsNone(browser_container.default('test'))
 
+    def test_signed_default_has_its_own_port_and_private_persistent_config(self):
+        root = Path(self.tmp.name)
+        with mock.patch.object(browser_container.paths, 'CACHE', root), \
+                mock.patch.object(browser_container, '_run', self.runner), \
+                mock.patch.dict('os.environ', MOBILE_TMUX_BROWSER_SELKIES='1'):
+            signed = browser_container.default('signed')
+            test = browser_container.default('test')
+        self.assertNotEqual(signed.live_port, test.live_port)
+        self.assertEqual(signed.live_port, browser_container.SIGNED_LIVE_PORT)
+        self.assertEqual(test.live_port, browser_container.LIVE_PORT)
+        signed.runner = test.runner = self.runner
+        test.start()
+        signed.start()
+        config = root / 'selkies' / 'signed' / 'config'
+        self.assertEqual(config.stat().st_mode & 0o777, 0o700)
+        test_args, signed_args = self.runner.ran('run')
+        self.assertIn(f'{config}:/config', signed_args)
+        self.assertFalse(any(arg.endswith(':/config') for arg in test_args))
+
 
     def test_import_starts_no_process_and_the_server_start_picks_the_container(self):
         # The UI fixture servers import server.py under an audit hook that forbids subprocesses (test_cold_load.cjs).
@@ -223,6 +242,8 @@ class WindowChrome(FakeChrome):
 class FakeContainer:
     def __init__(self, fake):
         self.fake, self.stopped = fake, 0
+        self.live_port = browser_container.LIVE_PORT
+        self.run_id = 'fixture-run'
 
     def launch(self, *_args, **_kwargs):
         return self.fake.launcher(None, None)
@@ -255,6 +276,27 @@ class BrowserInContainerTests(unittest.TestCase):
         target = self.browser.order[-1]
         self.browser.set_device(target, 'phone')
         self.assertTrue([c for c in self.fake.sent('Emulation.setDeviceMetricsOverride') if c['params'].get('mobile')])
+
+    def test_signed_container_bypasses_local_display_and_reports_its_port(self):
+        fake = WindowChrome()
+        self.addCleanup(fake.close)
+        container = FakeContainer(fake)
+        container.live_port = browser_container.SIGNED_LIVE_PORT
+        container.run_id = 'signed-run'
+        display = mock.Mock()
+        signed = browser.Browser(signed=True, display=display, container=container)
+        state = signed.list_tabs()
+        try:
+            self.assertEqual((state['live_port'], state['live_run']), (browser_container.SIGNED_LIVE_PORT, 'signed-run'))
+            test = self.browser.list_tabs()
+            self.assertEqual((test['live_port'], test['live_run']), (browser_container.LIVE_PORT, 'fixture-run'))
+            self.assertEqual(state['tabs'][0]['mode'], 'saved')
+            self.assertFalse(fake.sent('Target.createBrowserContext'))
+            self.assertEqual(fake.sent('Browser.setDownloadBehavior')[0]['params'], {'behavior': 'deny'})
+        finally:
+            signed.stop()
+        display.start.assert_not_called()
+        display.stop.assert_not_called()
 
     def test_show_brings_the_tab_to_the_front(self):
         self.browser.list_tabs()

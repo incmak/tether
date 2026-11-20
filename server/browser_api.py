@@ -247,7 +247,7 @@ def _browsers(test=None, signed=None):
         reason = ''
         if not instance.chrome_finder():
             reason = 'Google Chrome is not installed.' if ident == 'signed' else 'No Chromium found.'
-        elif ident == 'signed' and not instance.display.finder():
+        elif ident == 'signed' and instance.container is None and not instance.display.finder():
             reason = 'Xvfb is not installed.'
         rows.append({'id': ident, 'label': label, 'running': instance.running(), 'available': not reason, 'reason': reason})
     connected = mac_browser.BROKER.connected() is not None
