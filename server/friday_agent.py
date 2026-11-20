@@ -510,6 +510,11 @@ def freeform_proposal(readback):
     return payload, norm(chat)
 
 
+def freeform_tool(payload):
+    """The tool a free-form proposal names: a backlog id ("B12") is a backlog send, other text a chat prompt."""
+    return 'backlog_send' if re.fullmatch(r'b\s*\d+', same_text(payload)) else 'send_to_chat'
+
+
 def clean_chat(chat):
     return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
 
@@ -523,14 +528,15 @@ def same_text(text):
 # A yes to a read-back is only these words (and the chat's own name). "Yes, but later",
 # "Okay, once the tests pass" or "Sure, but make it D" hold more, so they are not a plain yes.
 YES_WORDS = frozenset('yes yeah yep yup ok okay sure please send alright absolutely correct ahead'.split())
-YES_FILLER = frozenset('do it that this go right now thanks thank you sounds good great perfect fine '
-                       'uh um and just so then all s to the chat session tab'.split())
+YES_FILLER = frozenset('do it that this go right now thanks thank sounds good great perfect fine '
+                       'uh um and just so then all s to the chat session tab'.split())  # "you" only in "thank you"
 
 
 def plain_yes(text, chat=''):
     if '?' in text:
         return False  # "That's correct?" asks; it does not consent.
-    words = norm(text).split()
+    # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
+    words = re.sub(r'\bthank you\b', 'thanks', norm(text)).split()
     allowed = YES_WORDS | YES_FILLER | set(norm(clean_chat(chat)).split())
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
 
@@ -551,7 +557,8 @@ def confirmed_args(name, args, last_user_text, previous_assistant, pending=None,
         text = pending.payload
     elif not previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
         proposed = freeform_proposal(previous_assistant)
-        if proposed is not None and proposed[1] == norm(clean_chat(chat)):
+        if (proposed is not None and proposed[1] == norm(clean_chat(chat))
+                and name == freeform_tool(proposed[0])):
             text = proposed[0].strip()
     if text is None:
         return args
@@ -590,16 +597,26 @@ def send_intent(text):
 
 
 # Broad on purpose: any send word in a message that asks something makes it a possible send question.
-SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share)\b', re.I)
+SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share|ping|poke|'
+                        r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
 
 
-def asks_user(text):
-    """True when Friday's last message asks a question and names a send: the user's next turn answers it.
+def asks_user(text, chat=''):
+    """True when Friday's last message asks a question that may propose a send: the user's next turn answers it.
 
-    Any such question counts, not only the shapes the parser knows ("Would you like me to send ...").
-    A request in the answer gets a read-back instead of a direct send. "What can I help you with?"
-    names no send, so a direct request after it still sends."""
-    return '?' in text and bool(SEND_WORDS.search(text))
+    It counts when the message names a send word or the call's target chat, not only the shapes the
+    parser knows ("Would you like me to ping docs?"). A request in the answer gets a read-back
+    instead of a direct send. "What can I help you with?" names neither, so a direct request still sends."""
+    if '?' not in text:
+        return False
+    target = norm(clean_chat(chat))
+    return bool(SEND_WORDS.search(text)) or bool(target and f' {target} ' in f' {norm(text)} ')
+
+
+def send_question(text):
+    """True when Friday's message proposes a send: the fixed read-back or a parsed free-form proposal."""
+    return (text.strip().casefold().startswith(SEND_READBACK_START.casefold())
+            or freeform_proposal(text) is not None)
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -632,6 +649,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                    for key in ('text', 'when')) for item in items):
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
+        # A yes to Friday's send question answers that send, not a tool approval in some chat.
+        if has_proposal or send_question(previous_assistant):
+            return 'The user answered a send question, not an approval.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))
         decision = args.get('decision')
@@ -661,7 +681,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # An answer to Friday's own send question confirms only the exact text it read back,
         # even when the answer holds send words ("Yes, and can you tell docs ...").
-        if not (has_proposal or asks_user(previous_assistant)) and send_intent(last_user_text):
+        if not (has_proposal or asks_user(previous_assistant, chat)) and send_intent(last_user_text):
             return None
         readback = previous_assistant.strip()
         # Friday's fixed read-back requires the matching proposal, even after it expires.
@@ -670,7 +690,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                                                             SEND_READBACK_QUESTION_END.casefold())))
         proposed = None if fixed_readback else freeform_proposal(readback)
         legacy_matches = (proposed is not None and proposed[1] == norm(clean_chat(chat))
-                          and binds(payload, proposed[0]))
+                          and name == freeform_tool(proposed[0]) and binds(payload, proposed[0]))
         if not (yes and (proposal_matches or legacy_matches)):
             return READBACK_REQUIRED
     return None

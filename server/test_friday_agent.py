@@ -557,6 +557,40 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
                                                        readback, proposal, 5))
 
+    def test_a_yes_binds_to_the_action_its_question_proposed(self):
+        question = 'Should I tell docs to fix the header?'
+        args = friday.confirmed_args('backlog_send', {'chat': 'docs', 'item': 'B99'}, 'Yes.', question)
+        self.assertEqual(args['item'], 'B99')
+        self.assertIsNotNone(friday.check_tool('backlog_send', args, 'speech', 'Yes.', set(), question))
+        # A backlog question still confirms its backlog send.
+        self.assertIsNone(friday.check_tool('backlog_send', {'chat': 'docs', 'item': 'B12'}, 'speech', 'Yes.', set(),
+                                            'Should I send B12 to docs?'))
+        self.assertIsNotNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'B12'}, 'speech', 'Yes.',
+                                               set(), 'Should I send B12 to docs?'))
+        proposal = friday.SendProposal('send_to_chat', 'docs', 'Keep option C.', 4)
+        for previous, pending in ((friday.send_readback(proposal), proposal), (question, None)):
+            with self.subTest(previous=previous):
+                self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
+                                                   'speech', 'Yes.', set(), previous, pending, 5),
+                                 'The user answered a send question, not an approval.')
+        self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
+                                            'speech', 'Yes, approve it.', set(), 'Deploy wants to run the tests.'))
+
+    def test_a_question_without_its_mark_is_not_a_yes(self):
+        for answer in ('You sure', 'you sure then', 'Okay you'):
+            with self.subTest(answer=answer):
+                self.assertFalse(friday.plain_yes(answer, 'docs'))
+        self.assertTrue(friday.plain_yes('Yes, thank you.', 'docs'))
+
+    def test_a_question_that_names_the_chat_makes_the_next_turn_an_answer(self):
+        previous = 'Would you like me to ping docs about option C?'
+        self.assertIsNotNone(friday.check_tool(
+            'send_to_chat', {'chat': 'docs', 'prompt': 'Archive the draft too.'}, 'speech',
+            'Yes, and tell docs to archive the draft too.', set(), previous))
+        self.assertIsNotNone(friday.check_tool(
+            'send_to_chat', {'chat': 'docs', 'prompt': 'Archive the draft too.'}, 'speech',
+            'Yes, and tell docs to archive the draft too.', set(), 'Want me to check on docs?'))
+
     def test_one_yes_allows_one_send_of_any_kind(self):
         previous = 'Should I send B12 to docs?'
         for first, second in (('backlog_send', 'send_to_chat'), ('send_to_chat', 'backlog_send')):
