@@ -65,6 +65,13 @@ class ReviewFolderTests(unittest.TestCase):
             stream.write(self.line(source='codex', at=104, folder=str(self.start)))
         self.assertEqual(server.review_commit(self.entry), self.git('rev-parse', 'HEAD'))
 
+    def test_new_request_ignores_blocked_commit_but_accepts_observe_mode_record(self):
+        self.log.write_bytes(self.line(folder=str(self.start)) + self.line(at=102, verdict='block'))
+        self.assertEqual(server.review_folder(self.entry), str(self.start))
+        with self.log.open('ab') as stream:
+            stream.write(self.line(at=103, verdict='would_block'))
+        self.assertEqual(server.review_folder(self.entry), str(self.work))
+
     def test_ignores_partial_malformed_and_wrong_type_records(self):
         bad = b'{bad json\n[]\n' + b''.join(self.line(**{'at': 104, 'folder': str(self.start), **fields}) for fields in (
             {'folder': []}, {'source': []}, {'session': []}, {'at': True}, {'at': '104'}, {'at': float('nan')},
@@ -252,3 +259,12 @@ class ReviewFolderTests(unittest.TestCase):
             snapshot.assert_called_once()
             self.assertTrue(server.HELPER_CLOSER.scope(self.entry)['dirty'])
             self.assertEqual(snapshot.call_count, 2)
+
+    def test_idle_close_scope_omits_review_metadata(self):
+        with patch.object(server.review_scope, 'checklist') as checklist, \
+                patch.object(server.review_scope, 'ui_paths') as ui_paths:
+            scope = server.HELPER_CLOSER.scope(self.entry)
+        self.assertEqual(scope, dict(commit=self.start_head, dirty=False, folder=str(self.start),
+                                     mark=server.review_scope.fingerprint(self.start)))
+        checklist.assert_not_called()
+        ui_paths.assert_not_called()

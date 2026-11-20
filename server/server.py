@@ -323,7 +323,7 @@ def review_gate_records():
             row = json.loads(line)
         except (ValueError, RecursionError):
             continue
-        if not isinstance(row, dict) or row.get('via') != 'commit-msg':
+        if not isinstance(row, dict) or row.get('via') != 'commit-msg' or row.get('verdict') == 'block':
             continue
         source, session, folder, at, head = (row.get(field) for field in ('source', 'session', 'folder', 'at', 'head'))
         if (source not in ('claude', 'codex') or not isinstance(session, str) or not review_links.UUID.fullmatch(session)
@@ -369,15 +369,18 @@ REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
 REVIEW_SCOPE_AGE = 60
 
 
-def review_scope_of(entry, *, fresh=False):
+def review_scope_of(entry, *, light=False):
     """The review scope of a worker. A request that cannot be delivered (a draft in the reviewer's composer) is tried
     again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
     (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
-    seconds. Idle close asks for a fresh snapshot even when the fingerprint agrees with the cache."""
+    seconds. Idle close reads an uncached scope without the review request metadata."""
     folder = review_folder(entry)
     mark = review_scope.fingerprint(folder)
+    if light:
+        found = review_scope.scope(folder, light=True)
+        return dict(found, mark=mark) if found is not None else None
     key, now = (folder, mark), time.monotonic()
-    cached = None if fresh else REVIEW_SCOPES.get(entry.get('id'))
+    cached = REVIEW_SCOPES.get(entry.get('id'))
     if mark is not None and cached is not None and cached[0] == key and now - cached[1] < REVIEW_SCOPE_AGE:
         return dict(cached[2])
     found = review_scope.scope(folder)
@@ -385,7 +388,8 @@ def review_scope_of(entry, *, fresh=False):
         found = dict(found, mark=mark)
     for pane in [pane for pane, item in REVIEW_SCOPES.items() if now - item[1] >= REVIEW_SCOPE_AGE]:
         del REVIEW_SCOPES[pane]
-    if mark is not None and found is not None:
+    if (mark is not None and found is not None and isinstance(found.get('commit'), str)
+            and type(found.get('dirty')) is bool):
         REVIEW_SCOPES[entry.get('id')] = (key, now, dict(found))
     else:
         REVIEW_SCOPES.pop(entry.get('id'), None)
@@ -475,7 +479,7 @@ def _observe_push(entries):
             continue
 
 
-HELPER_CLOSER = helper_close.Closer(scope=lambda entry: review_scope_of(entry, fresh=True))
+HELPER_CLOSER = helper_close.Closer(scope=lambda entry: review_scope_of(entry, light=True))
 
 
 def monitor_notices():

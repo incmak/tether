@@ -191,9 +191,9 @@ def same_work_mark(before, after):
     return before.partition(':')[0] == after.partition(':')[0]
 
 
-def scope(folder):
-    """{'commit', 'dirty', 'folder', 'rules', 'checklist', 'ui'} for a review request, or None when the folder has no
-    readable commit. checklist: the reliability checklist result. ui: the changed UI paths, or None when not known.
+def scope(folder, *, light=False):
+    """Read the commit, dirty and folder fields, or return None when the folder has no readable commit.
+    Include the rules, checklist and changed UI paths for a review request unless light is True.
     dirty: True when tracked or untracked changes exist, False when the tree is clean, None when the status cannot be
     read. Only False counts as clean. The commit and the status come from one git command, so they describe the same
     moment: a commit made between two reads cannot pair one commit with the status of another.
@@ -211,6 +211,8 @@ def scope(folder):
         commit = head(folder)  # the status failed or is slow: the review can still be bound, the tree is unknown
     if commit is None:
         return None
-    return {'commit': commit, 'dirty': dirty, 'folder': str(folder),
-            'rules': git(folder, 'cat-file', '-e', RULES) is not None,
-            'checklist': checklist(folder), 'ui': ui_paths(folder)}
+    found = {'commit': commit, 'dirty': dirty, 'folder': str(folder)}
+    if not light:
+        found.update(rules=git(folder, 'cat-file', '-e', RULES) is not None,
+                     checklist=checklist(folder), ui=ui_paths(folder))
+    return found

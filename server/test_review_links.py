@@ -1,4 +1,5 @@
 """Watcher transitions use isolated stores and mocked sends, never live panes."""
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import io
@@ -19,10 +20,12 @@ import unittest
 from unittest.mock import ANY, Mock, patch
 
 import audit
+import helper_close
 import review_links
 import review_scope
 import server
 import terminal_input
+import undo
 from own_time import own_time
 from test_notification_priority import ASSISTANT, BACKGROUND, claude, codex
 from terminal_input import DraftError
@@ -3975,7 +3978,9 @@ class ReviewLinksTests(unittest.TestCase):
         self.finish_review()
         self.request_review()  # fix 1
         self.finish_review('APPROVED')  # forwarded; resets the count
+        self.turn_source.return_value = 'review-feedback'
         self.request_review()  # approval turn
+        self.turn_source.return_value = 'background'
         self.request_review()  # a background turn: reviewed, counts from zero
         self.finish_review()
         self.assertEqual(self.links()[0]['rounds'], 1)
@@ -5457,6 +5462,25 @@ class ReviewLinksTests(unittest.TestCase):
         self.request_review()  # the next turn is reviewed as usual
         self.assertEqual(self.send.call_count, 3)
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_untimed_review_notice_checks_scope_once_and_keeps_follow_up(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.turn_source = Mock(return_value='review-notice')
+        self.reply.return_value = 'Handled a review notice.'
+        self.scope = Mock(wraps=self.scope)
+        self.observe()
+        self.observe()
+        self.scope.assert_called_once()
+        self.assertTrue(self.links()[0]['approved_turn'])
+
+        self.turn_source.return_value = 'review-feedback'
+        self.reply.return_value = 'Pushed the approved commit.'
+        self.observe()
+        self.assertEqual(self.scope.call_count, 2)
+        self.assertNotIn('approved_turn', self.links()[0])
+        self.assertEqual(self.send.call_count, 2)
 
     def test_follow_up_detects_changes_in_the_approved_folder(self):
         self.bind()
@@ -7064,6 +7088,116 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.observe()
         self.assert_follow_up_requested()
 
+    def test_follow_up_commit_is_reviewed_after_one_missing_approval_fingerprint(self):
+        self.worker_turn()
+        approved_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        review_scope = server.review_scope
+        fingerprint = review_scope.fingerprint
+        first_read = True
+
+        def miss_first_read(folder):
+            nonlocal first_read
+            if first_read:
+                first_read = False
+                return None
+            return fingerprint(folder)
+
+        with patch.object(review_scope, "fingerprint", side_effect=miss_first_read):
+            self.deliver_approval(approved_head)
+        # A watcher that defers an incomplete verdict can retry the same reply.
+        self.deliver_approval(approved_head)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+
+        self.observe("Working")
+        head = self.commit_in(self.reviewed, "Follow-up commit")
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        text = self.assert_follow_up_requested()
+        self.assertIn(f"Commit under review: {head}", text)
+        self.assertTrue(self.reviewer_should_stay_open())
+
+    def test_follow_up_reads_git_status_again_after_one_failed_read(self):
+        self.approve_reviewed_worktree()
+        self.observe("Working")
+        head = self.commit_in(self.reviewed, "Follow-up commit")
+        review_scope = server.review_scope
+        git = review_scope.git
+        status_reads = 0
+
+        def fail_first_status_read(folder, *args, **kwargs):
+            nonlocal status_reads
+            if args[:2] == ("status", "--porcelain=v2"):
+                status_reads += 1
+                if status_reads == 1:
+                    return None
+            return git(folder, *args, **kwargs)
+
+        with patch.object(review_scope, "git", side_effect=fail_first_status_read):
+            for _ in range(review_links.VERIFY_TICKS + 1):
+                self.observe()
+        self.assertGreater(status_reads, 1, "Retry must read Git status again")
+        self.assertIn(f"Commit under review: {head}", self.assert_follow_up_requested())
+
+    def test_rejected_gate_check_preserves_review_of_worktree_with_edit(self):
+        alternate = self.another_worktree()
+        head = self.approve_reviewed_worktree()
+        self.observe("Working")
+        record = {
+            "event": "check", "via": "commit-msg", "source": "claude",
+            "session": self.worker["thread"], "folder": str(alternate),
+            "at": self.now + 0.1, "head": head, "verdict": "block",
+        }
+        with self.gate_log.open("a", encoding="utf-8") as log:
+            log.write(json.dumps(record) + "\n")
+        path = self.reviewed / "notes.txt"
+        path.write_text("Actual follow-up edit in the reviewed worktree.\n", encoding="utf-8")
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=alternate), head)
+        self.assertEqual(self.git("status", "--porcelain", cwd=alternate), "")
+        self.observe()
+        folder = shlex.quote(str(self.reviewed))
+        text = self.assert_follow_up_requested()
+        self.assertIn(f"Commit under review: {head} in {folder} plus uncommitted changes", text)
+
+    def test_idle_close_skips_the_checklist_subprocess(self):
+        from test_helper_close import MockPanes
+
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=self.reviewed)
+        self.approve_reviewed_worktree()
+        self.worker_turn()
+        self.assertEqual(self.send.call_count, 2)
+
+        self.enterContext(patch.object(undo, "capture_safe"))
+        self.enterContext(patch.object(undo, "record_tab_close"))
+        self.enterContext(patch.object(helper_close.auto_resume, "forget_pane"))
+        self.enterContext(patch.object(helper_close.groups, "closing", return_value=nullcontext()))
+        panes = MockPanes(self.worker, self.reviewer)
+        entries = [self.worker, self.reviewer]
+        lock = threading.Lock()
+        checker = str(server.review_scope.CHECKER)
+        launches = []
+        popen = subprocess.Popen
+
+        def idle(entry):
+            return {"state": "Idle"}
+
+        def record_launch(args, *positional, **kwargs):
+            if len(args) > 1 and str(args[1]) == checker:
+                phase = "under the send lock" if lock.locked() else "before the send lock"
+                launches.append(phase)
+            return popen(args, *positional, **kwargs)
+
+        closer = server.HELPER_CLOSER
+        with patch.multiple(closer, now=lambda: self.now, active={}, since={}, last_sweep=float("-inf")):
+            closer.observe(entries, idle, panes, lock=lock, fresh=idle, log=lambda text: None)
+            self.now += helper_close.IDLE + 1
+            with patch.object(subprocess, "Popen", side_effect=record_launch):
+                closer.observe(entries, idle, panes, lock=lock, fresh=idle, log=lambda text: None)
+
+        self.assertEqual(panes.closed, [self.reviewer["id"]])
+        self.assertEqual(launches, [], "Idle close must skip the checklist subprocess")
+
+
 
 class ApprovalTurnTimingFixture(ApprovalTurnFixture):
     HEAD = "a" * 40
@@ -7133,6 +7267,66 @@ class ApprovalTurnTimingTests(ApprovalTurnTimingFixture):
             if call.args[0] == self.worker and "Approved by the reviewer tab" in call.args[1]
         ]
         self.assertEqual(approvals, [])
+
+    def test_late_push_skips_review_after_an_earlier_background_turn_finishes(self):
+        self.approve_current_work()
+        sent_at = self.now
+        self.turn_source = ("background", sent_at - 1, sent_at + 1)
+        self.observe()
+        self.worker_turn()
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_late_push_skips_review_after_an_unrelated_review_notice(self):
+        self.approve_current_work()
+        sent_at = self.now
+        self.turn_source = ("review-notice", sent_at + 1, sent_at + 2)
+        self.observe()
+        self.worker_turn()
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_known_clean_baseline_detects_dirty_follow_up_without_saved_mark(self):
+        self.live["mark"] = None
+        self.approve_current_work()
+        self.live.update(dirty=True, mark="first readable mark")
+        self.worker_turn()
+        self.assertIn("plus uncommitted changes", self.assert_follow_up_requested())
+
+    def test_change_during_an_unrelated_review_notice_requests_review(self):
+        self.approve_current_work()
+        sent_at = self.now
+        self.live["commit"] = self.NEXT
+        self.turn_source = ("review-notice", sent_at + 1, sent_at + 2)
+        self.observe()
+        self.assertIn(f"Commit under review: {self.NEXT}", self.assert_follow_up_requested())
+
+    def test_first_idle_checks_change_when_approval_was_queued_during_work(self):
+        self.live["commit"] = None
+        self.worker_turn()
+        self.observe("Working")
+        self.verdict = "APPROVED"
+        self.observe("Working")
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+
+        self.live.update(commit=self.HEAD, dirty=True, mark="new edit")
+        self.observe()
+        self.assertIn("plus uncommitted changes", self.assert_follow_up_requested())
+
+    def test_earlier_feedback_keeps_approval_until_a_later_user_turn_finishes(self):
+        self.approve_current_work()
+        sent_at = self.now
+        self.scope = Mock(wraps=self.scope)
+        self.turn_source = ("review-feedback", sent_at - 1, sent_at + 1)
+        self.observe()
+        self.observe()
+        self.scope.assert_called_once()
+        self.assertTrue(self.reviewer_should_stay_open())
+
+        self.turn_source = ("user", sent_at + 2, sent_at + 3)
+        self.observe()
+        self.assertEqual(self.scope.call_count, 2)
+        self.assertFalse(self.reviewer_should_stay_open())
+        self.assertEqual(self.send.call_count, 2)
+
 
 if __name__ == '__main__':
     unittest.main()

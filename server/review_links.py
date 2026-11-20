@@ -778,25 +778,27 @@ def _follow_up_change(link, worker, scope):
     """Compare the verdict with one live scope. Return (changed or None, scope for the request)."""
     before = link.get('approved_state')
     if before is None:  # older links may only have the review's binding
-        before = dict(commit=link.get('approved_dirty') or link.get('review_commit'),
-                      dirty=False if link.get('review_clean') else None, folder=link.get('review_folder'))
+        commit = link.get('approved_dirty') or link.get('review_commit')
+        before = dict(commit=commit, dirty=False if commit and link.get('review_clean') else None,
+                      folder=link.get('review_folder'))
     folder, at = before.get('folder'), before.get('at')
-    if (at is None or scope is None) and before.get('commit') is None and before.get('mark') is None:
+    fields = ('commit', 'dirty', 'mark')
+    if (at is None or scope is None) and all(before.get(field) is None for field in fields):
         return False, None  # no verdict baseline
     entry = dict(_review_entry(worker, folder), review_after=at)
     live = _call(scope, entry)
     if not isinstance(live, dict) or not isinstance(live.get('commit'), str):
         return None, None
-    if at is not None and live.get('folder') and live['folder'] != folder:
-        return True, live  # a newer gate record selected a worktree with no baseline
     dirty, mark, before_mark = live.get('dirty'), live.get('mark'), before.get('mark')
     if type(dirty) is not bool or not isinstance(mark, str):
         return None, None
-    if at is not None and (before['commit'] is None or before['dirty'] is None or before_mark is None):
-        return None, None
+    if at is not None and live.get('folder') and live['folder'] != folder:
+        return True, live  # a newer gate record selected a worktree with no baseline
     changed = (before.get('commit') not in (None, live['commit'])
                or before.get('dirty') is False and dirty
                or before_mark is not None and not review_scope.same_work_mark(before_mark, mark))
+    if not changed and any(before.get(field) is None for field in fields):
+        return None, None
     return changed, live
 
 
@@ -1080,10 +1082,10 @@ def _idle_source(link, cap, worker, turn_source):
         # Only a new user prompt can release an upgrade pause. An old turn may still be running at migration.
         if source == 'unknown' or (source == 'user' and started_at is not None
                                    and started_at < cap.get('upgrade_at', float('-inf'))):
-            return 'background', finished_at
+            return 'background', started_at, finished_at
     if source in ('unknown', 'unknown-background'):
         source = 'background' if source == 'unknown-background' else 'user'
-    return source, finished_at
+    return source, started_at, finished_at
 
 
 def _restart_state(cap):
@@ -1316,12 +1318,12 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     # Only the correction's own pending turn is not a work turn. A marker left by another turn must not block reviews.
     correction_turn = ((feedback := cap.get('feedback_turn')) is not None
                        and ['review-correction', feedback['sent_at']] in cap.get('review_prompts', ()))
-    source = finished_at = None
+    source = started_at = finished_at = None
     if state == 'Idle' and ('restart' in cap or link['seen_working'] or link.get('approved_turn') or cap.get('review_prompts')
                             or cap.get('feedback_turn') or turn in sources):
         if turn not in sources:
             sources[turn] = _idle_source(link, cap, worker, turn_source)
-        source, finished_at = sources[turn]
+        source, started_at, finished_at = sources[turn]
     summary = source == 'review-summary'
     if state == 'Idle' and 'restart' in cap:
         start = cap.pop('restart')
@@ -1344,7 +1346,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     if state == 'Idle' and link.pop('worker_busy_send', False) and not summary:
         if any(_prompt_kind(marker) == 'review-summary' for marker in cap.get('review_prompts', ())):
             link['seen_working'] = False
-        return link
+        if not link.get('approved_turn') or finished_at is None:
+            return link
+        link['seen_working'] = False  # a queued approval needs transcript evidence for this completion
     if source in ('review-summary', 'review-notice'):
         link['seen_working'] = False
         if summary and 'limit' in cap and 'agent_prompt' in cap and not _agent_prompt_fresh(cap):
@@ -1572,13 +1576,16 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         if link.get('approved_turn'):
             approved = link.get('approved_state') or {}
             at = approved.get('at', feedback['sent_at'] if feedback is not None else None)
+            checked_at = link.get('follow_up_checked_at', 0)
             new_finish = (finished_at is not None and at is not None
-                          and finished_at > max(at, link.get('follow_up_checked_at', 0)))
+                          and finished_at > max(at, checked_at))
+            observed_finish = link['seen_working'] and (finished_at is None or finished_at > checked_at)
             # Some Codex and Antigravity transcripts have no completion timestamp.
-            new_reply = (not link['seen_working'] and finished_at is None and 'approved_before' in link
-                         and worker.get('agent') in ('codex', 'antigravity')
-                         and _digest(last_reply(worker)) != link['approved_before'])
-            if not (link['seen_working'] or new_finish or new_reply or link.get('confirm_ticks')):
+            reply_mark = None
+            if finished_at is None and 'approved_before' in link and worker.get('agent') in ('codex', 'antigravity'):
+                reply_mark = _digest(last_reply(worker))
+            new_reply = not link['seen_working'] and reply_mark is not None and reply_mark != link['approved_before']
+            if not (observed_finish or new_finish or new_reply or link.get('confirm_ticks')):
                 return link
             changed, target = _follow_up_change(link, worker, scope)
             if changed is None:
@@ -1589,7 +1596,18 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if new_finish:
                 link['follow_up_checked_at'] = finished_at
             approved_dirty = link.get('approved_dirty')
-            _clear_follow_up(link)
+            if started_at is None or at is None:
+                # Preserve the observed-turn and reply-digest paths when the transcript has no times.
+                handled_approval = finished_at is None and source in ('review-feedback', 'user')
+            else:
+                handled_approval = (source == 'review-feedback' and started_at >= at
+                                    or source == 'user' and started_at > at)
+            if changed or handled_approval:
+                _clear_follow_up(link)
+            else:
+                link.pop('confirm_ticks', None)
+                if reply_mark is not None:
+                    link['approved_before'] = reply_mark  # do not recheck the same untimed completion
             link['seen_working'] = bool(changed)
             if not changed:
                 return link
