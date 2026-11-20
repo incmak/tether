@@ -3147,13 +3147,16 @@ class ReviewLinksTests(unittest.TestCase):
                 self.upgrade_cap()
                 self.send.assert_not_called()
 
-    def test_upgrade_agent_flag_without_a_marker_covers_only_a_turn_from_before_the_pause(self):
+    def test_upgrade_agent_flag_without_a_marker_holds_the_pause_for_one_turn(self):
+        # The flag without a marker comes from an older watcher. Its turn's owner is unknown, so the pause holds
+        # until the next Mak turn. A flag from a saved cap never crosses a bind.
         self.enterContext(own_time(review_links, time=self.clock))
         self.entries.append(dict(self.reviewer, id='%21'))
         self.states['%21'] = 'Idle'
-        for path in ('migration', 'saved bound cap'):
+        for path in ('migration', 'saved bound cap', 'old watcher tracked a parent turn'):
             with self.subTest(path=path):
                 self.clock.return_value = 1000
+                self.send.reset_mock()
                 rows = self.legacy_pair(dict(rounds=3, restart=dict(rounds=1, agent=True)),
                                         dict(empty_rounds=2, restart=dict(empty_rounds=1, agent=True)))
                 if path == 'saved bound cap':
@@ -3161,16 +3164,36 @@ class ReviewLinksTests(unittest.TestCase):
                     del rows[0]['reviewer']
                     rows[1].update(worker_thread=None, paused=False, restart=dict(empty_rounds=1))
                 self.file.write_text(json.dumps(rows))
-                self.turn_source = Mock(return_value=('user', 1001, 1002))
-                self.observe(elapsed=0, **{'%13': 'Working'})
+                paused = lambda: [row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade']
+                if path == 'old watcher tracked a parent turn':
+                    # The previous watcher paused at 1000, saw the parent turn Working and consumed the marker.
+                    self.observe(elapsed=0)
+                    rows = self.rows()
+                    cap, = (row for row in rows if row.get('cap'))
+                    cap['restart'] = dict(review_links._restart_state(cap), agent=True)
+                    cap.pop('agent_prompt', None)
+                    self.file.write_text(json.dumps(rows))
+                    self.turn_source = Mock(return_value=('user', 1002, 1005))
+                    self.observe(**{'%13': 'Idle'})
+                else:
+                    self.turn_source = Mock(return_value=('user', 1001, 1002))
+                    self.observe(elapsed=0, **{'%13': 'Working'})
+                    self.observe(**{'%13': 'Idle'})
+                if path == 'saved bound cap':
+                    self.assertFalse(paused())
+                    continue
+                self.assertTrue(paused())
+                self.assertFalse(self.send.called)
+                self.turn_source = Mock(return_value=('user', 1006, 1008))
+                self.observe(**{'%13': 'Working'})
                 self.observe(**{'%13': 'Idle'})
-                self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])
+                self.assertFalse(paused())
 
     def test_upgrade_alert_for_an_unbound_cap_waits_only_for_the_current_conversation(self):
         self.enterContext(own_time(review_links, time=self.clock))
         self.turn_source = Mock(return_value=('background', None, None))
-        for alerted, calls in ((True, 1), (False, 2)):
-            with self.subTest(old_cap_alerted=alerted):
+        for alerted, calls, gap in ((True, 1, False), (False, 2, False), (True, 1, True), (False, 2, True)):
+            with self.subTest(old_cap_alerted=alerted, discovery_gap=gap):
                 self.clock.return_value = 1000
                 old = dict(cap=True, worker='%13', worker_thread='old-thread', name='Old', paused='upgrade',
                            upgrade_at=990, saved_at=990, upgrade_alerted=alerted)
@@ -3178,8 +3201,9 @@ class ReviewLinksTests(unittest.TestCase):
                         for row, pane in zip(self.legacy_pair(dict(rounds=1), dict(empty_rounds=1)), ('%22', '%23'))]
                 self.file.write_text(json.dumps([old, *rows]))
                 self.alert.reset_mock()
-                self.observe(elapsed=0)
-                self.observe()
+                entries = [dict(self.worker, thread=None), *self.entries[1:]] if gap else None
+                self.observe(elapsed=0, entries=entries)
+                self.observe(entries=entries)
                 self.assertEqual(self.alert.call_count, calls)
                 unbound, = (row for row in self.rows() if row.get('cap') and row['worker_thread'] is None)
                 self.assertTrue(unbound['upgrade_alerted'])

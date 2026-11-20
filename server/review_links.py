@@ -1447,10 +1447,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 by_agent = True  # A transcript can return a turn that was judged before.
             elif _is_time(started_at):
                 # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
-                # marker comes from an old watcher that consumed the marker: it covers only a turn from before
-                # the pause.
-                by_agent = _agent_prompt_fresh(cap, started_at) or (
-                    'agent_prompt' not in cap and start.get('agent') and started_at < cap.get('upgrade_at', float('inf')))
+                # marker comes from an older watcher that consumed the marker. That turn's owner is unknown, so
+                # the pause holds; the next Mak turn clears it.
+                by_agent = _agent_prompt_fresh(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
             else:
                 by_agent = start.get('agent') or _agent_prompt_fresh(cap)
             if by_agent and _is_time(finished_at):
@@ -1975,12 +1974,14 @@ def _claim_upgrade_alerts(rows, entries):
         worker = entries.get(key[0])
         current = helper_tabs._thread(worker) if worker is not None else None
         if key[1] is None:
-            bound = {other['worker_thread'] for other in rows
+            bound = [other for other in rows
                      if _is_cap(other) and other['worker'] == key[0] and other.get('worker_thread') is not None
-                     and other.get('paused') == UPGRADE_PAUSE}
-            # The current conversation's bound cap alerts. Without a discovered thread the unbound cap may be the
-            # same conversation, so it waits. The bind carries the marker.
-            if current in bound or current is None and bound:
+                     and other.get('paused') == UPGRADE_PAUSE]
+            # The current conversation's bound cap alerts, and the bind carries its marker. Without a discovered
+            # thread the unbound cap may be the same conversation: it waits one poll for a bound cap that alerts
+            # now, then alerts itself. A second alert is better than none.
+            if any(other['worker_thread'] == current for other in bound) or current is None and any(
+                    not other.get('upgrade_alerted') for other in bound):
                 continue
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
