@@ -18,15 +18,16 @@ export function useKeyboardState() {
     function check() {
       if (disposed) return
       const width = Math.round(view?.width ?? innerWidth), height = view?.height ?? innerHeight
-      // Focus opens the keyboard, but only the height closes it: a blur comes before Chrome grows the page, and the tab
-      // bar must not come back into the small page (the composer would rise, then fall). A blur that leaves the page
-      // small (split screen) clears it after a moment. A width first seen with the keyboard open (rotation) has no
-      // baseline yet; the screen height stands in until the keyboard closes.
+      // A height drop with editable focus opens the keyboard. On blur, wait for the viewport to grow.
+      // If the viewport stays small, clear the keyboard state after the blur timer.
+      // At a new width with the keyboard open, use the screen height until it closes.
+      // With the keyboard closed and no editable focus, the baseline follows the measured height.
+      // With editable focus, the closed-keyboard baseline can only grow.
       const open = root.hasAttribute('data-keyboard'), known = baselines.get(width)
       const baseline = Math.max(height, known ?? (open ? screen.availHeight : height))
       const keyboard = height < baseline - 150 && (editable(document.activeElement) || (open && !stale))
       root.toggleAttribute('data-keyboard', keyboard)
-      if (!keyboard) baselines.set(width, Math.max(height, known ?? height))
+      if (!keyboard) baselines.set(width, editable(document.activeElement) ? Math.max(height, known ?? height) : height)
       stale = false
     }
 

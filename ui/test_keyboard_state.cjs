@@ -161,7 +161,14 @@ async function functional(page) {
   await field.evaluate(el => el.blur())
   const cleared = await page.waitForFunction(() => !document.documentElement.hasAttribute('data-keyboard') && getComputedStyle(document.querySelector('.phone-tabbar')).display !== 'none', null, { timeout: 2000 }).then(() => true, () => false)
   check('3c. a blur that leaves the page small gives the tab bar back', cleared)
+  await record(page)
+  await field.focus()
+  await page.waitForFunction(() => window.keyboardFrames.some(f => f.focused))
+  const refocusing = await finish(page)
+  check('3d. refocusing after a blur at the split height keeps the keyboard closed', refocusing.every(f => !f.keyboard),
+    { frames: refocusing.length, keyboardFrames: refocusing.filter(f => f.keyboard).length })
   await resize(page, phone)
+  await field.evaluate(el => el.blur())
   await waitForMorph(page)
   await page.locator('.chat-page .chat-scroll').evaluate(el => { el.scrollTop = 200 })
   await page.getByRole('button', { name: 'Jump to latest message' }).waitFor()
@@ -169,6 +176,20 @@ async function functional(page) {
   const split = await resize(page, keyboard)
   const scrollDrift = Math.abs(split.scrollTop - reading.scrollTop)
   check('5. a height drop without editable focus keeps the tabs and preserves manual scroll', !split.keyboard && split.display !== 'none' && scrollDrift <= 2, { scrollDrift })
+  await record(page)
+  await field.tap()
+  const splitTapped = await read(page)
+  await page.waitForFunction(() => window.keyboardFrames.some(f => f.focused))
+  const splitTapping = [...await finish(page), splitTapped]
+  check('5b. tapping the split composer keeps the keyboard closed, tabs visible and bottom still',
+    splitTapping.every(f => !f.keyboard && f.display !== 'none' && Math.abs(f.bottom - split.bottom) <= 1),
+    { expectedBottom: split.bottom, focusedBottom: splitTapped.bottom, keyboardFrames: splitTapping.filter(f => f.keyboard).length })
+  const splitOpen = await resize(page, { ...keyboard, height: 294 })
+  check('5c. a keyboard-size drop from the focused split opens the keyboard and hides the tabs',
+    splitTapped.focused && !splitTapped.keyboard && splitOpen.focused && splitOpen.keyboard && splitOpen.display === 'none',
+    { before: splitTapped.keyboard, after: splitOpen.keyboard, tabs: splitOpen.display })
+  await resize(page, keyboard)
+  await field.evaluate(el => el.blur())
   await resize(page, phone)
   await field.focus()
   const rotation = await resize(page, { width: 740, height: 360 })
