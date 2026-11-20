@@ -247,6 +247,7 @@ label.broadcast-row:hover { background: var(--hover); }
 .pane-stack-tabs { list-style: none; margin: 0; padding: 0; }
 .pane-stack-tabs button { padding-left: 38px; }
 .pane-child-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-coordinator { flex-shrink: 0; color: var(--muted); }
 .state-slot { display: flex; align-items: center; justify-content: center; width: 8px; height: 8px; flex: none; }
 .session-list .state-dot { width: 8px; height: 8px; border-width: 1.5px; }
 .session-list .state-dot.idle { background: transparent; border: 0; box-shadow: inset 0 0 0 1.5px var(--line); opacity: 1; animation: none; }
@@ -323,6 +324,10 @@ label.broadcast-row:hover { background: var(--hover); }
 /* Agent session names can be long (reviewer-esef-phase-1-3-…): one line, cut with an ellipsis. */
 /* Advisor tabs (server delegate.ROLES): a lightbulb after the agent icon, and a soft glow while the advisor works. */
 .pane-tabs .tab-advisor { flex-shrink: 0; margin-left: -3px; color: var(--advisor); }
+.pane-tabs .tab-coordinator { flex-shrink: 0; color: var(--muted); }
+.coordinator-choice { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; text-align: left; }
+[aria-labelledby="pane-title"] .coordinator-picker .action-list button .coordinator-choice small { flex: none; margin-left: 0; text-align: left; white-space: normal; }
+.coordinator-picker .action-list button { padding-block: 10px; }
 .pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
 .pane-tabs button.advising { color: var(--text); border-color: color-mix(in srgb, var(--advisor) 70%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
 .pane-tabs button.advising .state-dot.working { border-color: color-mix(in srgb, var(--advisor) 25%, transparent); border-top-color: var(--advisor); }
@@ -1470,6 +1475,7 @@ button.live-chip:active { background: var(--line); }
 .sheet.popover .sheet-sub { margin: 2px 8px 6px; font-size: 12px; }
 .sheet.popover .action-label { margin: 4px 8px 2px; font-size: 11.5px; }
 .sheet.popover .action-list button { min-height: var(--control); gap: 10px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13.5px; }
+.sheet.popover .coordinator-picker .action-list button { padding-block: 6px; }
 .sheet.popover .action-list button svg { width: 16px; height: 16px; flex: none; }
 .sheet.popover .action-list button:focus-visible { outline: none; background: var(--hover); }
 .sheet.popover .action-list hr { margin: 4px 0; }

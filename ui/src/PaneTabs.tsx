@@ -1,7 +1,7 @@
 import { createPortal, flushSync } from 'react-dom'
 import { Fragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { useWords } from './words'
-import { CornerDownRight, Eye, Lightbulb, Plus, X } from 'lucide-react'
+import { CornerDownRight, Eye, Lightbulb, Network, Plus, X } from 'lucide-react'
 import { HelperFoldButton } from './HelperFold'
 import { pickMode, orderAround } from './tabSelection'
 import type { TabPickControls } from './tabSelection'
@@ -400,7 +400,7 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       // A touch long press is handled above (drag, or actions on release). A right-click still opens the actions.
       onMouseEnter={clipTitle} onContextMenu={event => { event.preventDefault(); if (!drag.current?.touch && !suppressClick.current) onPaneActions(item.id, anchorOf(event)) }}>
       {item.owner && byId.has(item.owner) && <CornerDownRight size={12} className="tab-nest" aria-hidden="true" />}
-      {item.role === 'advisor' ? <><AgentIcon agent={item.agent} size={14} /><Lightbulb size={13} className="tab-advisor" aria-hidden="true" /></> : <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} />}<span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
+      {item.role === 'advisor' ? <><AgentIcon agent={item.agent} size={14} /><Lightbulb size={13} className="tab-advisor" aria-hidden="true" /></> : <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} />}<span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{item.coordinator && <Network size={12} className="tab-coordinator" role="img" aria-label="Coordinator" />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
       {item.state === 'Working' || needsYou(item.state) ? <span className={`state-dot ${item.state === 'Working' ? 'working' : 'approval'}`} aria-label={item.state === 'Working' ? item.role === 'advisor' ? 'Advising' : 'Working' : 'Needs you'} /> : item.state === 'Stopped' ? <span className="state-dot" aria-label="Stopped" /> : null}
       {item.owner && byId.has(item.owner) && <span className="visually-hidden">, helper of {paneTitle(byId.get(item.owner)!)}</span>}
       {picked && <span className="visually-hidden">, selected</span>}
