@@ -47,6 +47,8 @@ class FridayCallsTest(unittest.TestCase):
             'TETHER_JOURNALCTL': 'fake-journalctl',
         }))
         self.base = int(datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp()) * 1_000_000
+        self.now = self.base / 1_000_000 + 3600
+        self.enterContext(patch.object(friday_calls.time, 'time', side_effect=lambda: self.now))
 
     def journal(self, command, **kwargs):
         self.assertEqual(command[:7], ['fake-journalctl', '-u', 'tether-friday', '-o', 'json', '--no-pager', '--all'])
@@ -59,7 +61,12 @@ class FridayCallsTest(unittest.TestCase):
             after = next(i for i, row in enumerate(rows) if row['__CURSOR'] == cursor)
             rows = rows[after + 1:]
         elif options:
-            self.assertEqual(options, ['--since', '2030-01-01 00:00'])
+            self.assertEqual(options[0], '--since')
+            if options[1].startswith('@'):
+                cutoff = float(options[1][1:]) * 1_000_000
+                rows = [row for row in rows if int(row['__REALTIME_TIMESTAMP']) >= cutoff]
+            else:
+                self.assertEqual(options[1], '2030-01-01 00:00')
         return subprocess.CompletedProcess(command, 0, '\n'.join(map(json.dumps, rows)), '')
 
     def append(self, text, pid='23', **fields):
@@ -157,7 +164,7 @@ class FridayCallsTest(unittest.TestCase):
         lines = self.scan()
         self.assertEqual(len(lines), 1)
         data = self.digest()
-        self.assertEqual((data['pid'], data['ended'], data['duration_s'], data['turns']), ('23', 'clean', 14, 2))
+        self.assertEqual((data['pid'], data['ended'], data['duration_s'], data['turns']), ('23', 'clean', 13, 2))
         self.assertEqual(data['flags'], {
             'blocked:send_to_chat': 3, 'blocked_repeat': 1, 'tool_error': 1, 'user_repeat': 1})
         self.assertEqual(data['metrics']['max_stop_to_first_audio'], 0.8)
@@ -175,8 +182,8 @@ class FridayCallsTest(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertFalse(self.state.exists())
         start = datetime.fromisoformat(data['start'])
-        self.assertEqual(json_path, self.directory / f'{start:%Y-%m-%d}' / f'{start:%H%M%S}-23.json')
-        self.assertEqual(lines, [f"friday-call {start:%H:%M} 14s turns=2 ended=clean "
+        self.assertEqual(json_path, self.directory / f'{start:%Y-%m-%d}' / f'{start:%H%M%S}-000-23-runner-synthetic.json')
+        self.assertEqual(lines, [f"friday-call {start:%H:%M} 13s turns=2 ended=clean "
                                  f"flags=blocked:send_to_chat:3,blocked_repeat:1,tool_error:1,user_repeat:1 "
                                  f"digest={md_path}"])
         md = md_path.read_text()
@@ -253,6 +260,187 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(self.digests(), [])
         self.assertEqual(json.loads(self.state.read_text())['cursor'], self.rows[-1]['__CURSOR'])
 
+    def test_failed_checkpoint_retries_before_printing_once(self):
+        self.assertEqual(self.scan(historical=False), [])
+        self.start()
+        self.append(runner('finished'))
+        with patch.object(friday_calls, 'write_state', side_effect=OSError('synthetic disk error')):
+            result, stdout, stderr = self.cli('scan')
+        self.assertEqual((result, stderr), (1, 'friday-call error: synthetic disk error\n'))
+        self.assertEqual(len(self.digests()), 1)
+        self.assertTrue(self.digests()[0].with_suffix('.md').exists())
+        subsequent_lines = self.scan(historical=False)
+        self.assertEqual(stdout, '')
+        self.assertEqual(len(subsequent_lines), 1)
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(len(self.digests()), 1)
+
+    def test_digest_names_distinguish_milliseconds_under_one_pid(self):
+        for name, offset in [('runner/x', 0), ('runner:x', 250_000), ('runner_x', 250_500)]:
+            self.append(runner('started', name), __REALTIME_TIMESTAMP=str(self.base + offset))
+            self.append(runner('finished', name), __REALTIME_TIMESTAMP=str(self.base + offset + 100))
+        self.assertEqual(len(self.scan()), 3)
+        paths = self.digests()
+        start = friday_calls.decode_entry(self.rows[0]).at
+        self.assertEqual(sorted(path.stem for path in paths), [
+            f'{start:%H%M%S}-000-23-runner_x', f'{start:%H%M%S}-250-23-runner_x',
+            f'{start:%H%M%S}-250-23-runner_x-2',
+        ])
+        self.assertEqual(len({json.loads(path.read_text())['id'] for path in paths}), 3)
+        self.scan()
+        self.assertEqual(self.digests(), paths)
+
+    def test_first_run_replays_open_call_and_skips_finished_calls(self):
+        self.start(name='earlier')
+        self.append(runner('finished', 'earlier'))
+        anchor = self.rows[-1]['__CURSOR']
+        self.start()
+        self.append(context(message('user', 'Still here')))
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], anchor)
+        self.assertEqual(self.digests(), [])
+        self.append(runner('finished'))
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(self.digest()['turns'], 1)
+
+    def test_first_run_without_anchor_preserves_lookback(self):
+        self.append(runner('started', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 8_000_000_000))
+        self.append(runner('finished', 'outside lookback'), __REALTIME_TIMESTAMP=str(self.base - 7_999_000_000))
+        self.start()
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertIsNone(json.loads(self.state.read_text())['cursor'])
+        self.now += 60
+        self.append(runner('finished'))
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(self.scan(historical=False), [])
+
+    def test_repeated_peer_init_does_not_create_phantom_calls(self):
+        self.append(peer(), __REALTIME_TIMESTAMP=str(self.base - 60_000_000))
+        self.append(peer())
+        self.append(peer())
+        self.append(runner('started'))
+        self.append(peer())
+        self.append(runner('finished'))
+        self.start()
+        self.append(runner('finished'))
+        self.assertEqual(len(self.scan()), 2)
+        first, second = [json.loads(path.read_text()) for path in self.digests()]
+        self.assertEqual((first['ended'], second['ended']), ('clean', 'clean'))
+        self.assertEqual(first['start'], friday_calls.decode_entry(self.rows[3]).at.isoformat())
+        self.assertEqual([event['kind'] for event in first['events']], ['reconnect'])
+
+    def test_different_runner_ends_open_call_and_replays_the_preceding_peer(self):
+        self.scan(historical=False)
+        self.start()
+        self.append(peer())
+        self.append(runner('started', 'next'))
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], 'cursor-1')
+        first = self.digest()
+        self.assertEqual(first['ended'], 'abrupt')
+        self.assertEqual([event['kind'] for event in first['events']], ['reconnect'])
+        self.append(runner('finished', 'next'))
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(self.scan(historical=False), [])
+
+    def test_waits_for_post_finish_metrics_before_emitting(self):
+        self.append('idle')
+        self.scan(historical=False)
+        self.start()
+        self.append(runner('finished'))
+        finish_at = friday_calls.decode_entry(self.rows[-1]).at
+        self.now = finish_at.timestamp() + 1
+        self.assertEqual(self.scan(historical=False), [])
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], 'cursor-0')
+        self.append('Friday metrics {"llm_calls":2,"stop_to_first_audio":0.4}')
+        self.append('Friday net {"packetsLost":3}')
+        self.append('Friday bye {}')
+        self.now = finish_at.timestamp() + 6
+        self.append('Friday metrics {"llm_calls":80}', __REALTIME_TIMESTAMP=str(int(self.now * 1e6)))
+        self.assertEqual(len(self.scan(historical=False)), 1)
+        self.assertEqual(self.scan(historical=False), [])
+        data = self.digest()
+        self.assertEqual(data['end'], finish_at.isoformat())
+        self.assertEqual(data['metrics']['llm_calls'], 2)
+        self.assertEqual(data['net']['max_packetsLost'], 3)
+        self.assertEqual([event['kind'] for event in data['events']], ['bye'])
+
+    def test_async_tool_result_updates_existing_message_but_keeps_full_text(self):
+        self.start()
+        pending = message('tool', '{"status":"pending"}', tool_call_id='async-1')
+        full = message('tool', '{"text":"ready"}', tool_call_id='async-1')
+        short = message('tool', '{"shortened":true}', tool_call_id='async-1')
+        second_pending = message('tool', 'Working', tool_call_id='async-2')
+        second_full = message('tool', 'Done', tool_call_id='async-2')
+        user = message('user', 'Check both requests')
+        answer = message('assistant', 'Both are ready.')
+        self.append(context(user, pending, second_pending))
+        self.append(context(user, full, second_pending, answer))
+        self.append(context(short, second_full, message('user', 'Thanks')))
+        self.append(runner('finished'))
+        self.scan()
+        data = self.digest()
+        self.assertEqual([item for item in data['transcript'] if item.get('role') == 'tool'], [full, second_full])
+        md = self.digests()[0].with_suffix('.md').read_text()
+        self.assertIn('**tool:** {"text":"ready"}', md)
+        self.assertIn('**tool:** Done', md)
+        self.assertNotIn('shortened', md)
+
+    def test_keeps_developer_role_and_skips_unknown_role(self):
+        self.start()
+        developer = message('developer', 'Developer guidance')
+        user = message('user', 'Original request')
+        self.append(context(developer, message(['unexpected'], 'Ignore this role'), user))
+        self.append(runner('finished'))
+        self.scan()
+        data = self.digest()
+        self.assertEqual(data['transcript'], [developer, user])
+        self.assertEqual(data['flags'], {'unknown_role': 1})
+        self.assertIn('**developer:** Developer guidance', self.digests()[0].with_suffix('.md').read_text())
+
+    def test_skips_bad_tool_calls_and_checkpoints_oversized_context(self):
+        self.scan(historical=False)
+        self.start(name='malformed')
+        tool = {'id': 'valid', 'function': {'name': 'lookup', 'arguments': '{}'}}
+        self.append(context(message('assistant', 'Checking', tool_calls=[None, {'function': None}, tool])))
+        self.append(runner('finished', 'malformed'))
+        self.start(name='oversized')
+        self.append(context(message('user', 'é' * (2 * 1024 * 1024))))
+        self.append(runner('finished', 'oversized'))
+        with patch.object(friday_calls, 'pipecat_version', return_value='synthetic'):
+            self.assertEqual(len(self.scan(historical=False)), 2)
+        malformed, oversized = [json.loads(path.read_text()) for path in self.digests()]
+        self.assertEqual(malformed['transcript'], [
+            message('assistant', 'Checking', tool_calls=[{'id': 'valid', 'name': 'lookup', 'arguments': '{}'}]),
+        ])
+        self.assertEqual(oversized['transcript'], 'unparsed')
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], self.rows[-1]['__CURSOR'])
+        self.assertEqual(self.scan(historical=False), [])
+
+    def test_unexpected_parser_exception_does_not_stop_catch_up(self):
+        self.scan(historical=False)
+        self.start()
+        self.append(context(message('user', 'A synthetic request')))
+        self.append(runner('finished'))
+        with (patch.object(friday_calls, 'context_messages', side_effect=RuntimeError('synthetic private detail')),
+              patch.object(friday_calls, 'pipecat_version', return_value='synthetic')):
+            self.assertNotIn('synthetic private detail', self.scan(historical=False)[0])
+        self.assertEqual(self.digest()['transcript'], 'unparsed')
+        self.assertEqual(json.loads(self.state.read_text())['cursor'], self.rows[-1]['__CURSOR'])
+
+    def test_tightens_existing_output_and_day_directory_modes(self):
+        start = friday_calls.decode_entry({'__CURSOR': 'dummy', '__REALTIME_TIMESTAMP': str(self.base)}).at
+        day = self.directory / f'{start:%Y-%m-%d}'
+        day.mkdir(parents=True)
+        for directory in (self.directory, day):
+            directory.chmod(0o755)
+        self.start()
+        self.append(runner('finished'))
+        self.scan()
+        for directory in (self.directory, day):
+            self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+
     def test_end_of_call_media_warning_stays_in_events_without_flag(self):
         self.start()
         self.append(pipecat(friday_calls.MEDIA_WARNING, level='WARNING'))
@@ -280,7 +468,7 @@ class FridayCallsTest(unittest.TestCase):
         self.assertEqual(data['transcript'], [user, message('assistant', 'A synthetic reply')])
         self.assertIn('\ufffd', data['events'][0]['text'])
 
-    def test_new_peer_then_lifecycle_finish_calls_in_order(self):
+    def test_reconnect_then_lifecycle_finish_calls_in_order(self):
         self.assertEqual(self.scan(historical=False), [])
         self.start()
         self.append('Friday bye {}')
@@ -291,7 +479,7 @@ class FridayCallsTest(unittest.TestCase):
         self.append('Stopping synthetic service.', MESSAGE_ID='de5b426a63be47a7b6ac3eaac82e2f6f')
         self.assertEqual(len(self.scan(historical=False)), 1)
         self.assertEqual(self.scan(historical=False), [])
-        self.assertEqual([json.loads(path.read_text())['ended'] for path in self.digests()], ['abrupt', 'abrupt'])
+        self.assertEqual([json.loads(path.read_text())['ended'] for path in self.digests()], ['clean', 'abrupt'])
 
     def test_flags_count_transcript_patterns_and_earlier_media_warnings(self):
         self.start()

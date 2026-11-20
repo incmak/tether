@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import fcntl
 from functools import cached_property
+from itertools import count
 import json
 import math
 import os
@@ -42,6 +43,11 @@ FRIDAY_EVENTS = {
 FRIDAY_FLAGS = {'llm_error', 'corrected_false_success', 'dropped_stray_text', 'smart_turn_unavailable'}
 PIPECAT = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+ \| (\w+)\s+\| (\S+) - ([\s\S]*)$')
 CONTEXT = re.compile(r'^FridayLLM#\d+:\s+Generating LLM response\s+')
+MAX_CONTEXT_BYTES = 4 * 1024 * 1024
+INITIAL_LOOKBACK = 3 * 60 * 60
+PEER_ATTACH_SECONDS = 5
+PEER_EXPIRE_SECONDS = 30
+FINISH_GRACE_SECONDS = 5
 PEER = 'pipecat.transports.smallwebrtc.connection:_initialize:'
 LLM = 'pipecat.services.openai.base_llm:get_chat_completions:'
 RUNNER = re.compile(r"^WorkerRunner '([^']+)': (started|finished) running$")
@@ -83,6 +89,11 @@ class Entry:
 
     def pipecat(self):
         return PIPECAT.match(self.text)
+
+    @cached_property
+    def peer_init(self):
+        match = self.pipecat()
+        return bool(match and match[2].startswith(PEER) and match[3] == 'Initializing new peer connection')
 
     def context(self):
         match = self.pipecat()
@@ -141,7 +152,7 @@ def journal_entries(rows):
         yield pending
 
 
-def context_messages(raw):
+def context_messages(raw, flags):
     messages = ast.literal_eval(raw)
     if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
         raise ValueError('expected a list of messages')
@@ -150,8 +161,9 @@ def context_messages(raw):
         role = message.get('role')
         if role == 'system':
             continue
-        if role not in ('user', 'assistant', 'tool'):
-            raise ValueError('unexpected message role')
+        if role not in ('user', 'assistant', 'tool', 'developer'):
+            flags['unknown_role'] += 1
+            continue
         content = message.get('content')
         if content is not None and not isinstance(content, str):
             raise ValueError('expected text content')
@@ -160,12 +172,25 @@ def context_messages(raw):
             continue
         item = {'role': role, 'content': content}
         if 'tool_call_id' in message:
-            item['tool_call_id'] = message['tool_call_id']
-        if message.get('tool_calls'):
-            item['tool_calls'] = [
-                {'id': tool.get('id'), 'name': tool['function']['name'], 'arguments': tool['function']['arguments']}
-                for tool in message['tool_calls']
-            ]
+            call_id = message['tool_call_id']
+            if call_id is not None and not isinstance(call_id, str):
+                raise ValueError('expected text tool call id')
+            item['tool_call_id'] = call_id
+        if isinstance(tools := message.get('tool_calls'), (list, tuple)):
+            calls = []
+            for tool in tools:
+                if not isinstance(tool, dict) or not isinstance(function := tool.get('function'), dict):
+                    continue
+                name, arguments = function.get('name'), function.get('arguments')
+                if not isinstance(name, str):
+                    continue
+                if not isinstance(arguments, str):
+                    json.dumps(arguments)
+                call_id = tool.get('id')
+                calls.append({'id': call_id if isinstance(call_id, str) else None,
+                              'name': name, 'arguments': arguments})
+            if calls:
+                item['tool_calls'] = calls
         result.append(item)
     return result
 
@@ -173,14 +198,14 @@ def context_messages(raw):
 def message_key(message):
     # Friday shortens old tool results between requests, so a tool result matches by its call id.
     if message.get('role') == 'tool' and message.get('tool_call_id'):
-        return 'tool', message['tool_call_id']
+        return 'tool_id', message['tool_call_id']
     if message.get('tool_calls'):
         return 'calls', tuple(call.get('id') or call['name'] for call in message['tool_calls'])
     return message.get('role'), message.get('content')
 
 
 def context_overlap(merged, context):
-    merged = [message_key(message) for message in merged if not message.get('gap')]
+    merged = [message_key(message) for message in merged]
     context = [message_key(message) for message in context]
     for size in range(min(len(merged), len(context)), 0, -1):
         if merged[-size:] == context[:size]:
@@ -191,9 +216,32 @@ def context_overlap(merged, context):
 def json_object(raw):
     try:
         value = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def merge_context(transcript, context, by_id):
+    merged = [message for message in transcript if not message.get('gap')]
+    overlap = context_overlap(merged, context)
+    added = []
+    for index, message in enumerate(context):
+        # Use IDs outside the overlap too. Text and tool names can legitimately repeat.
+        key = None
+        if ((message['role'] == 'tool' and message.get('tool_call_id'))
+                or ((calls := message.get('tool_calls')) and all(call['id'] for call in calls))):
+            key = message_key(message)
+        existing = merged[index - overlap] if index < overlap else by_id.get(key)
+        if existing is None:
+            added.append(message)
+            if key is not None:
+                by_id[key] = message
+            continue
+        content = message['content']
+        if content != existing['content'] and not (
+                message['role'] == 'tool' and json_object(content or '').get('shortened') is True):
+            existing['content'] = content
+    return overlap, added
 
 
 def transcript_flags(messages, flags):
@@ -252,8 +300,13 @@ class Call:
     runner: str | None
     entries: list[Entry] = field(default_factory=list)
 
+    @property
+    def id(self):
+        return f'{self.start.at.isoformat()}-{self.start.pid}'
+
     def digest(self, end, ended):
         transcript, timeline, events = [], [], []
+        by_id = {}
         flags, blocked = Counter(), Counter()
         audio, lost, jitter = [], [], []
         llm_calls = logged_requests = 0
@@ -261,7 +314,9 @@ class Call:
         for entry in self.entries:
             text = entry.text
             at = entry.at.isoformat()
-            if text.startswith('Friday '):
+            if entry.peer_init and entry is not self.entries[0]:
+                event = {'t': at, 'kind': 'reconnect', 'text': text}
+            elif text.startswith('Friday '):
                 body = text.removeprefix('Friday ')
                 label, _, payload = body.partition(' ')
                 if label in ('tts', 'loop'):
@@ -289,13 +344,15 @@ class Call:
             elif (raw := entry.context()) is not None:
                 logged_requests += 1
                 try:
-                    context = context_messages(raw)
-                except (SyntaxError, ValueError, TypeError, KeyError, RecursionError):
+                    if len(raw) > MAX_CONTEXT_BYTES or len(raw.encode('utf-8')) > MAX_CONTEXT_BYTES:
+                        unparsed = True
+                        continue
+                    context = context_messages(raw, flags)
+                except Exception:
                     unparsed = True
                     continue
-                overlap = context_overlap(transcript, context)
-                added = context[overlap:]
-                if transcript and not overlap:
+                overlap, added = merge_context(transcript, context, by_id)
+                if transcript and added and not overlap:
                     # A trim drops old messages; any other mismatch is a merge failure worth a look.
                     added.insert(0, {'gap': True})
                     if not trimmed:
@@ -322,7 +379,7 @@ class Call:
         turns = transcript_flags(transcript, flags)
         start = self.start.at.isoformat()
         data = {
-            'id': f'{start}-{self.start.pid}', 'start': start, 'end': end.isoformat(),
+            'id': self.id, 'start': start, 'end': end.isoformat(),
             'duration_s': max(0, (end - self.start.at).total_seconds()), 'ended': ended,
             'pid': self.start.pid, 'turns': turns, 'transcript': transcript, 'events': events,
             'metrics': {'max_stop_to_first_audio': max(audio, default=None),
@@ -384,76 +441,129 @@ def atomic_write(path, content):
             temporary.unlink(missing_ok=True)
 
 
-def write_state(path, cursor, done):
-    atomic_write(path, json.dumps({'cursor': cursor, 'done': done[-200:]}) + '\n')
+def write_state(path, cursor, done, lookback):
+    state = {'cursor': cursor, 'done': done[-200:]}
+    if cursor is None and lookback is not None:
+        state['since'] = lookback
+    atomic_write(path, json.dumps(state) + '\n')
 
 
-def emit(directory, call, end, ended):
+def write_digest(directory, call, end, ended):
     data, timeline = call.digest(end, ended)
     day = directory / call.start.at.strftime('%Y-%m-%d')
     day.mkdir(mode=0o700, exist_ok=True)
-    base = day / f"{call.start.at:%H%M%S}-{call.start.pid}"
+    day.chmod(0o700)
+    stamp = call.start.at
+    stem = re.sub(r'[^A-Za-z0-9_-]', '_',
+                  f'{stamp:%H%M%S}-{stamp.microsecond // 1000:03d}-{call.start.pid}-{call.runner or "peer"}')
+    base = day / stem
+    for suffix in count(2):
+        try:
+            existing = json.loads(base.with_suffix('.json').read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            if not base.with_suffix('.md').exists():
+                break
+        except ValueError:
+            pass
+        else:
+            if isinstance(existing, dict) and existing.get('id') == call.id:
+                break
+        base = day / f'{stem}-{suffix}'
     md_path = base.with_suffix('.md')
     atomic_write(base.with_suffix('.json'), json.dumps(data, ensure_ascii=False, indent=2) + '\n')
     atomic_write(md_path, markdown(data, timeline))
-    print(f"friday-call {call.start.at:%H:%M} {data['duration_s']:g}s turns={data['turns']} "
-          f"ended={ended} flags={flag_text(data['flags'])} digest={md_path}", flush=True)
-    return data['id']
+    return (f"friday-call {stamp:%H:%M} {data['duration_s']:g}s turns={data['turns']} "
+            f"ended={ended} flags={flag_text(data['flags'])} digest={md_path}")
 
 
 def scan_locked(directory, since):
     state_path = directory / 'state.json'
+    initializing = False
+    lookback = None
+    cursor, done = None, []
     if since is None:
         try:
             state = json.loads(state_path.read_text(encoding='utf-8'))
         except FileNotFoundError:
-            tail = journal('-n', '1')
-            write_state(state_path, tail[-1]['__CURSOR'] if tail else None, [])
-            return
-        cursor, done = state['cursor'], state['done']
-        rows = journal(f'--after-cursor={cursor}') if cursor else journal()
+            initializing = True
+            lookback = f'@{time.time() - INITIAL_LOOKBACK:.6f}'
+        else:
+            cursor, done = state['cursor'], state['done']
+            lookback = state.get('since')
+    window_start = since if since is not None else lookback
+    if cursor:
+        rows = journal(f'--after-cursor={cursor}')
+    elif window_start is not None:
+        rows = journal('--since', window_start)
     else:
-        cursor, done = None, []
-        rows = journal('--since', since)
+        rows = journal()
 
     def finish(call, end, ended, checkpoint):
         nonlocal cursor
-        call_id = f'{call.start.at.isoformat()}-{call.start.pid}'
-        if call_id not in done:
-            # Flush the notification before acknowledging it in state.json.
-            done.append(emit(directory, call, end, ended))
+        if initializing:
+            return
+        summary = None
+        if call.id not in done:
+            summary = write_digest(directory, call, end, ended)
+            done.append(call.id)
         if since is None:
-            write_state(state_path, checkpoint, done)
+            write_state(state_path, checkpoint, done, lookback)
             cursor = checkpoint
+        if summary is not None:
+            print(summary, flush=True)
 
     previous = cursor
     call = None
+    finished_at = None
+    pending_peer, peer_checkpoint = None, None
     for entry in journal_entries(rows):
         match = entry.pipecat()
-        peer = match and match[2].startswith(PEER) and match[3] == 'Initializing new peer connection'
         runner = RUNNER.match(match[3]) if match else None
         new_runner = runner[1] if runner and runner[2] == 'started' else None
-        if call and (peer or entry.lifecycle or (entry.pid and entry.pid != call.start.pid)
-                     or (new_runner and call.runner and new_runner != call.runner)):
-            finish(call, entry.at, 'abrupt', previous)
+        if pending_peer and (entry.lifecycle or entry.pid != pending_peer.pid
+                             or (entry.at - pending_peer.at).total_seconds() > PEER_EXPIRE_SECONDS):
+            pending_peer = None
+        boundary = call and (entry.lifecycle or (entry.pid and entry.pid != call.start.pid)
+                             or (new_runner and (finished_at or new_runner != call.runner)))
+        grace_elapsed = finished_at and (entry.at - finished_at).total_seconds() > FINISH_GRACE_SECONDS
+        if call and (boundary or grace_elapsed):
+            checkpoint = peer_checkpoint if pending_peer else previous
+            finish(call, finished_at or entry.at, 'clean' if finished_at else 'abrupt', checkpoint)
             call = None
-        if call is None and (peer or new_runner):
-            # --after-cursor excludes its anchor. Keep the entry before the start.
-            call = Call(entry, previous, new_runner)
-        if call:
-            call.runner = call.runner or new_runner
+            finished_at = None
+        if call is None and new_runner:
+            # The cursor must also replay the peer entry when this call has one.
+            if pending_peer and (entry.at - pending_peer.at).total_seconds() <= PEER_ATTACH_SECONDS:
+                call = Call(entry, peer_checkpoint, new_runner, [pending_peer])
+            else:
+                call = Call(entry, previous, new_runner)
+            pending_peer = None
+        if entry.peer_init:
+            pending_peer, peer_checkpoint = entry, previous
+        if call and finished_at is None:
             call.entries.append(entry)
             if runner and runner[2] == 'finished' and call.runner == runner[1]:
-                finish(call, entry.at, 'clean', entry.cursor)
-                call = None
+                finished_at = entry.at
+        elif call and entry.pid == call.start.pid and entry.text.startswith(
+                ('Friday metrics ', 'Friday net ', 'Friday bye ')):
+            call.entries.append(entry)
         previous = entry.cursor
-    checkpoint = call.checkpoint if call else previous
-    if since is None and checkpoint != cursor:
-        write_state(state_path, checkpoint, done)
+    now = time.time()
+    checkpoint = previous
+    if pending_peer and now - pending_peer.at.timestamp() < PEER_EXPIRE_SECONDS:
+        checkpoint = peer_checkpoint
+    if call:
+        if finished_at and now - finished_at.timestamp() >= FINISH_GRACE_SECONDS:
+            finish(call, finished_at, 'clean', checkpoint)
+        else:
+            checkpoint = call.checkpoint
+    if since is None and (initializing or checkpoint != cursor):
+        write_state(state_path, checkpoint, done, lookback)
 
 
 def scan(directory, since=None):
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    directory.chmod(0o700)
     # The directory inode stays stable while state.json is atomically replaced.
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -488,7 +598,7 @@ def main(argv=None):
             while True:
                 try:
                     scan(directory)
-                except JournalError as exc:
+                except (JournalError, OSError) as exc:
                     error = error_text(exc)
                     if error not in reported:
                         reported.add(error)
