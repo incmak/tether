@@ -3311,6 +3311,18 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service._client.close()
 
+    async def test_parakeet_settings_are_complete(self):
+        from loguru import logger
+
+        service = self.rt.ParakeetSTT(Mock(), SimpleNamespace(stt_seconds=0))
+        errors = []
+        sink = logger.add(errors.append, level='ERROR')
+        try:
+            service._settings.validate_complete()
+        finally:
+            logger.remove(sink)
+        self.assertEqual(errors, [])
+
     async def test_parakeet_raw_pcm_and_empty_text(self):
         recognizer = Mock()
         recognizer.create_stream.return_value.result.text = ' hello '

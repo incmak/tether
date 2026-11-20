@@ -992,6 +992,7 @@ def runtime_types():
     from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.frame_processor import FrameDirection
     from pipecat.processors.frameworks.rtvi.observer import RTVIFunctionCallReportLevel, RTVIObserverParams
+    from pipecat.services.settings import STTSettings
     from pipecat.services.stt_service import SegmentedSTTService
     from pipecat.services.pocket_tts.tts import PocketTTSService
     from pipecat.services.tts_service import TTSService
@@ -1070,7 +1071,8 @@ def runtime_types():
 
     class ParakeetSTT(SegmentedSTTService):
         def __init__(self, recognizer, session):
-            super().__init__(sample_rate=16000, audio_passthrough=True)
+            super().__init__(sample_rate=16000, audio_passthrough=True,
+                             settings=STTSettings(model='parakeet-tdt-0.6b-v3-int8', language=None))
             self.recognizer, self.session = recognizer, session
 
         @property
