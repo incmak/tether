@@ -124,7 +124,8 @@ class Closer:
             if idle[pane] <= 0 or now - started < wait:
                 continue
             try:
-                if not self._still_quiet(pane, record, by_id[pane], fresh or status, watching, run, lock):
+                worker = by_id.get(worker_of.get(pane)) if condition == 'idle' else None
+                if not self._still_quiet(pane, record, by_id[pane], fresh or status, watching, run, lock, worker):
                     self.active[pane] = self.since[key] = now  # it got work or a viewer: start both timers again
                     continue
             except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
@@ -137,8 +138,8 @@ class Closer:
         return closed
 
     @staticmethod
-    def _still_quiet(pane, record, entry, status, watching, run, lock):
-        """Under the send lock: the record is unchanged and the tab is still quiet, then close it. False = keep."""
+    def _still_quiet(pane, record, entry, status, watching, run, lock, worker=None):
+        """Under the send lock, close an unchanged helper if it and any linked worker are still quiet."""
         if lock is not None and not lock.acquire(timeout=2):
             return False
         try:
@@ -146,6 +147,8 @@ class Closer:
             if not exists or now_record is None or now_record.get('sent_at') != record.get('sent_at'):
                 return False
             if status(entry).get('state') not in QUIET or watching(pane):
+                return False
+            if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])):
                 return False
             import undo  # here: undo.py imports this module
             closed = undo.capture_safe(pane, run, [entry])

@@ -23,6 +23,7 @@ import agents
 import audit
 import helper_tabs
 import paths
+import review_scope
 from terminal_input import DraftError
 
 FILE = paths.CACHE / 'review-links.json'
@@ -44,6 +45,7 @@ UPGRADE_PAUSE = 'upgrade'
 UPGRADE_ERROR = 'The review state from the upgrade needs attention. Stop any existing review link, then link the tabs again in the browser.'
 DELIVERY_ERROR = 'Review feedback is being delivered. Try linking again.'
 VERIFY_TICKS = 5  # ticks to wait for a readable worker commit before an approval counts as unverified
+FOLLOW_UP_TICKS = 5  # idle polls to look for a short follow-up that repeated the worker's last reply
 SCOPE_WAIT = 60  # seconds from the first failed scope read before a bound review pauses
 SCOPE_BACKOFF = (2, 4, 8, 15)
 SCOPE_RETRY_FIELDS = ('scope_ticks', 'scope_since', 'scope_retry_at')
@@ -122,7 +124,8 @@ def _sanitize(row):
     row = dict(row)
     for fields, check in (
         ((*COUNTS, 'limit', 'grant_rounds', 'parent_missing', 'confirm_ticks', 'lost_ticks', 'idle_ticks',
-          'pending_idle_ticks', 'scope_ticks', 'verify_ticks'), lambda value: type(value) is int and value >= 0),
+          'pending_idle_ticks', 'scope_ticks', 'verify_ticks', 'follow_up_ticks'),
+         lambda value: type(value) is int and value >= 0),
         (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
          lambda value: type(value) in (int, float)),
         (('scope_since', 'scope_retry_at'),
@@ -146,11 +149,15 @@ def _sanitize(row):
     if 'counts' in row:
         row['counts'] = _clean_reviewer_counts(row['counts'])
     approved = row.pop('approved_state', None)
-    if (_is_link(row) and isinstance(approved, dict) and approved.keys() == {'commit', 'dirty', 'mark'}
+    if (_is_link(row) and isinstance(approved, dict) and approved.keys() - {'folder'} == {'commit', 'dirty', 'mark'}
             and (approved['commit'] is None or isinstance(approved['commit'], str))
             and (approved['dirty'] is None or type(approved['dirty']) is bool)
-            and (approved['mark'] is None or isinstance(approved['mark'], str))):
-        row['approved_state'] = approved
+            and (approved['mark'] is None or isinstance(approved['mark'], str))
+            and (approved.get('folder') is None or isinstance(approved['folder'], str))):
+        # Older approvals used a different digest. Keep their commit and dirty state.
+        folder = row.get('review_folder')
+        row['approved_state'] = approved if 'folder' in approved else {
+            **approved, 'mark': None, 'folder': folder if isinstance(folder, str) else None}
     correction = row.pop('stale_correction', None)
     if (_is_link(row) and isinstance(correction, dict)
             and correction.keys() == {'commit', 'now', 'request', 'requested'}
@@ -526,17 +533,15 @@ def unreviewed_work(worker, reviewer, scope):
     if (link.get('seen_working') and not link.get('awaiting')
             or 'stale_correction' in link or 'stale_commit' in link):
         return True
-    approved = link.get('approved_state') or {}
-    commit = approved.get('commit')
-    clean = approved.get('dirty') is False
-    if commit is None:
-        commit = link.get('review_commit')
-        clean = link.get('review_clean') is True
-    if not isinstance(commit, str):
+    verdict = link.get('approved_state')
+    if verdict is None:  # older links may only have the review's binding
+        verdict = dict(commit=link.get('review_commit'), dirty=False if link.get('review_clean') else None,
+                       folder=link.get('review_folder'))
+    if verdict.get('commit') is None and verdict.get('mark') is None:
         return False
-    live = _call(scope, worker)
-    return (isinstance(live, dict) and isinstance(live.get('commit'), str)
-            and (live['commit'] != commit or clean and live.get('dirty') is True))
+    live = _call(scope, _review_entry(worker, verdict.get('folder')))
+    return (isinstance(live, dict) and (verdict.get('commit') is None or isinstance(live.get('commit'), str))
+            and _scope_changed(verdict, live))
 
 
 def escalated(entries):
@@ -771,23 +776,32 @@ REQUEST_PATTERN = re.compile(
     + r'\s+'.join(re.escape(word) for word in INTRO.split()) + r'\s+Review\s+id:\s+([0-9a-f]{8})\.', re.S)
 
 
-def _changed_since_approval(link, worker, scope, work_mark):
+def _scope_changed(before, after):
+    commit, dirty, mark = after.get('commit'), after.get('dirty'), after.get('mark')
+    before_mark = before.get('mark')
+    return (isinstance(commit, str) and before.get('commit') not in (None, commit)
+            or type(dirty) is bool and before.get('dirty') not in (None, dirty)
+            or isinstance(mark, str) and isinstance(before_mark, str)
+            and not review_scope.same_work_mark(before_mark, mark))
+
+
+def _changed_since_approval(link, target):
     """Return None while a needed Git read can still be retried, else whether the follow-up changed the work."""
     approved = link.get('approved_state') or {}
-    before = approved.get('commit')
     approved_dirty = link.get('approved_dirty')
     confirm = isinstance(approved_dirty, str)
-    needs_scope = confirm or before is not None
-    target = _call(scope, worker) if needs_scope else None
     target = target if isinstance(target, dict) else {}
     commit, dirty = target.get('commit'), target.get('dirty')
-    unreadable = needs_scope and not isinstance(commit, str)
+    if confirm or approved.get('commit') is not None:
+        unreadable = not isinstance(commit, str)
+    else:
+        unreadable = approved.get('mark') is not None and not isinstance(target.get('mark'), str)
+    link.pop('confirm_commit', None)
     if unreadable or (confirm and commit != approved_dirty and dirty is None):
         # A new commit with unknown status might still qualify for the uncommitted-work confirmation.
         link['confirm_ticks'] = link.get('confirm_ticks', 0) + 1
         if link['confirm_ticks'] < VERIFY_TICKS:
             return None
-    link.pop('approved_dirty', None)
     link.pop('confirm_ticks', None)
     if unreadable:
         # As before, give up on this follow-up after VERIFY_TICKS failed scope reads.
@@ -795,14 +809,12 @@ def _changed_since_approval(link, worker, scope, work_mark):
     if confirm and commit != approved_dirty and dirty is False:
         link['confirm_commit'] = approved_dirty
         return True
-    if before is not None and (commit != before or approved.get('dirty') is False and dirty is True):
-        return True
-    mark = approved.get('mark')
-    if mark is None:
-        return False
-    entry = _review_entry(worker, target.get('folder') or link.get('review_folder'))
-    current_mark = _call(work_mark, entry)
-    return current_mark is not None and current_mark != mark
+    return _scope_changed(approved, target)
+
+
+def _clear_follow_up(link):
+    for key in ('approved_turn', 'approved_before', 'approved_dirty', 'follow_up_ticks', 'confirm_ticks'):
+        link.pop(key, None)
 
 
 def _named_commit(reply):
@@ -915,6 +927,19 @@ def _call(callback, entry):
 def _review_entry(worker, folder):
     """Pass the request's folder to a Git lookup without changing the live pane entry."""
     return dict(worker, review_folder=folder) if isinstance(folder, str) and folder else worker
+
+
+def _verdict_state(link, worker, scope, commit=None):
+    """Read the verdict's worktree before delivery can start another worker turn."""
+    folder = link.get('review_folder')
+    live = _call(scope, _review_entry(worker, folder))
+    live = live if isinstance(live, dict) else {}
+    bound = link.get('review_commit') or commit
+    if bound is not None and live.get('commit') != bound:
+        # The review covered the requested commit. A different HEAD does not describe what the reviewer saw.
+        return dict(commit=bound, dirty=False if link.get('review_clean') else None, mark=None, folder=folder)
+    return dict(commit=live.get('commit'), dirty=live.get('dirty'), mark=live.get('mark'),
+                folder=folder or live.get('folder'))
 
 
 def _request_text(value):
@@ -1404,12 +1429,6 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     # A working tab can still commit. The approval waits until the tab is idle.
                     return link
                 current = _call(commit, review_entry) if bound or named else None
-                if bound or named:
-                    # The cached state can be old, and the commit read takes time: read the state again, after the
-                    # commit and right before the send.
-                    live = _call(fresh, worker) if fresh is not None else {'state': state}
-                    if not isinstance(live, dict) or live.get('state') != 'Idle':
-                        return link
                 current = current if isinstance(current, str) else None
                 misnamed = bool(bound) and named != bound  # the full hash: a prefix can be ambiguous
                 # A named commit that cannot be compared is not verified, also when the request was not bound.
@@ -1424,6 +1443,14 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     stale = (named if named and FULL.fullmatch(named) else '') if misnamed else bound
                 elif not bound and named and not (current and current == named):
                     stale = named  # no binding (no readable commit at the request), but the reply names a commit
+                if approved and stale is None:
+                    verdict = _verdict_state(link, worker, scope, current)
+                    before = _digest(last_reply(worker))
+                if bound or named:
+                    # The cached state can be old. Refresh it after the Git reads and before the send.
+                    live = _call(fresh, worker) if fresh is not None else {'state': state}
+                    if not isinstance(live, dict) or live.get('state') != 'Idle':
+                        return link
                 if stale is not None:
                     # Not an approval of the current work and not a finding either: ask for a review of the current
                     # commit. The count stops a loop.
@@ -1476,27 +1503,23 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         cap['counts'] = {owner: counts for owner, counts in cap.get('counts', {}).items()
                                          if owner != reviewer_key}
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
-                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'approved_state',
-                                    'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered',
+                        _clear_follow_up(link)
+                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'stale_delivered', 'confirm_commit',
                                     'stale_unreadable', 'stale_correction'):
                             link.pop(key, None)
-                        now = _call(scope, review_entry) if bound else None
-                        now = now if isinstance(now, dict) else {}
-                        # Idle close still needs this baseline after the follow-up turn ends.
-                        link['approved_state'] = dict(commit=now.get('commit'), dirty=now.get('dirty'),
-                                                      mark=_call(work_mark, review_entry))
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
                         # The tree must also be clean now: it can change during the review with HEAD in place.
-                        if (bound and link.get('review_clean') and anchored
-                                and now.get('commit') == bound and now.get('dirty') is False):
-                            link['approved_commit'] = bound
-                            link['approved_at'] = int(time.time())
+                        if bound and link.get('review_clean') and anchored:
+                            now = _call(scope, review_entry)
+                            if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
+                                link['approved_commit'] = bound
+                                link['approved_at'] = int(time.time())
                         if uncommitted:
                             link['approved_dirty'] = bound
                         link['awaiting'] = False
                         link['approved_turn'] = True
-                        link['approved_before'] = _digest(last_reply(worker))
+                        link['approved_before'] = before
                 else:
                     if _at_cap(cap):
                         _pause_at_limit(cap, link)
@@ -1525,6 +1548,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         else:
                             text = (f"[Tether review] Feedback from the reviewer tab ({link['reviewer']}):\n\n"
                                     f'{findings}\n\nFix what it raises, then stop and wait.')
+                        verdict = _verdict_state(link, worker, scope)
                         if not _send_worker(link, cap, snapshot, worker, text, state, send, clear,
                                             entries, delivery, summary=stage is not None, blocking=True):
                             return link
@@ -1539,6 +1563,9 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                             elif paused_now:
                                 reply_effect['alert'] = (_findings_preview(reply), limit)
                         link['awaiting'] = False
+                if forwarded:
+                    # Preserve the last delivered verdict while a newer request waits for its own verdict.
+                    link['approved_state'] = verdict
                 if forwarded and reply:
                     mentioned = MENTIONED_COMMIT.search(reply)
                     reply_effect['verdict'] = approved, named or (mentioned[1].lower() if mentioned else None)
@@ -1550,30 +1577,39 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     if state == 'Working':
         if link['worker'] not in awaiting and not correction_turn:
             link['seen_working'] = True
-    elif state == 'Idle' and link.get('approved_turn') and not link['seen_working']:
-        if _digest(last_reply(worker)) != link.get('approved_before'):
-            changed = _changed_since_approval(link, worker, scope, work_mark)
-            if changed is None:
+    elif state == 'Idle' and (link['seen_working'] or link.get('approved_turn')):
+        if link.get('approved_turn'):
+            saw_working = link['seen_working']
+            same_reply = not saw_working and _digest(last_reply(worker)) == link.get('approved_before')
+            if same_reply and link.get('follow_up_ticks', 0) >= FOLLOW_UP_TICKS:
+                # No short follow-up turn changed the work. Keep the marker for the turn the approval starts later,
+                # so a slow start is not reviewed as new work (an approval loop). Stop the Git reads.
                 return link
-            link.pop('approved_turn', None)
-            link.pop('approved_before', None)
-            if changed:
-                link['seen_working'] = True  # the next tick asks for a review of the changed work
-    elif link['seen_working'] and state == 'Idle':
-        if link.get('approved_turn', False):
-            changed = _changed_since_approval(link, worker, scope, work_mark)
-            if changed is None:
+            target = None
+            approved = link.get('approved_state') or {}
+            if approved.get('commit') is not None or approved.get('mark') is not None or link.get('approved_dirty'):
+                entry = _review_entry(worker, approved.get('folder', link.get('review_folder')))
+                target = _call(scope, entry)
+            changed = _changed_since_approval(link, target)
+            if not changed and same_reply:
+                if changed is None:
+                    return link
+                link['follow_up_ticks'] = link.get('follow_up_ticks', 0) + 1
                 return link
-            link.pop('approved_turn', None)
-            link.pop('approved_before', None)
-            if not changed:
-                link['seen_working'] = False
+            elif changed is None:
+                return link
+            _clear_follow_up(link)
+            link['seen_working'] = bool(changed)
+            if not changed or not saw_working:
+                # A short turn with changes goes through the usual idle request checks on the next poll.
                 return link
         if _turn_ended_on_limit(worker):
+            link.pop('confirm_commit', None)
             link['seen_working'] = False
             return link
         if _at_cap(cap) or cap.get('unreadable'):
             _pause_at_limit(cap, link)
+            link.pop('confirm_commit', None)
             link['seen_working'] = False
             return link
         reviewer_state = status(reviewer)['state']
@@ -1603,7 +1639,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 # Still unreadable. A timeout does not show that an approval is for the current commit: the review
                 # stops and the user decides. The user's next prompt restarts reviews without the old binding.
                 for key in ('review_commit', 'review_clean', 'review_folder', 'stale_commit', 'stale_delivered',
-                            'stale_unreadable', *SCOPE_RETRY_FIELDS):
+                            'stale_unreadable', 'confirm_commit', *SCOPE_RETRY_FIELDS):
                     link.pop(key, None)
                 cap['unreadable'] = True
                 link['seen_working'] = False
@@ -1681,7 +1717,6 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link.pop('stale_delivered', None)
             link.pop('stale_unreadable', None)
             link.pop('confirm_commit', None)
-            link.pop('approved_state', None)  # this request is now the newest baseline for the idle close
             for key in SCOPE_RETRY_FIELDS:
                 link.pop(key, None)
             link.pop('review_folder', None)

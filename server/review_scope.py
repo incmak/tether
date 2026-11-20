@@ -150,9 +150,11 @@ def ui_paths(folder):
 
 
 def fingerprint(folder):
-    """A digest of everything a scope depends on, or None when git cannot read it: HEAD, origin/main, the status,
-    the tracked and the staged diff, and the size, the modification time and the change time of each untracked file. The same digest means the
-    same scope, so a request that is retried on each monitor tick does not run the checker again."""
+    """The worktree and base digests, or None when git cannot read the scope.
+
+    The worktree digest covers HEAD, status, both the tracked and staged diffs, and untracked file metadata.
+    The base digest also invalidates the scope cache when origin/main changes.
+    """
     root = git(folder, 'rev-parse', '--show-toplevel')
     if not root:
         return None
@@ -161,7 +163,7 @@ def fingerprint(folder):
     base = git_result(root, *BASE_REF)
     if base is None:
         return None
-    digest.update(base.stdout + bytes([base.returncode & 255]))
+    base_mark = hashlib.sha256(base.stdout + bytes([base.returncode & 255])).hexdigest()
     for command in (('rev-parse', 'HEAD'), ('status', '--porcelain', '-z', '--untracked-files=all'),
                     # As the checker reads them: no text conversion, or an edit could leave the digest as it was.
                     ('diff', '--no-ext-diff', '--no-textconv', '--text', 'HEAD'),
@@ -181,7 +183,12 @@ def fingerprint(folder):
                 digest.update(b'%d:%d:%d:%d;' % (found.st_size, found.st_mtime_ns, found.st_ctime_ns, found.st_ino))
             except OSError:
                 digest.update(b'unreadable;')
-    return digest.hexdigest()
+    return f'{digest.hexdigest()}:{base_mark}'
+
+
+def same_work_mark(before, after):
+    """A change to the base ref alone leaves the worker's work unchanged."""
+    return before.partition(':')[0] == after.partition(':')[0]
 
 
 def scope(folder):

@@ -137,6 +137,21 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(closed, [('%2', 'the review has been idle for 30 minutes')])
         helper_close.review_links.close.assert_called_once_with('%2')
 
+    def test_idle_reviewer_uses_the_verdict_folder(self):
+        self.links = {'%1': ['%2']}
+        head, folder = 'a' * 40, '/work/reviewed'
+        baseline = dict(commit=head, dirty=True, mark='reviewed tree', folder=folder)
+        self.rows = [dict(worker='%1', reviewer='%2', worker_thread=OWNER_THREAD, approved_state=baseline,
+                          review_commit='b' * 40, review_folder='/work/new-request', stalled='1234abcd')]
+        tmux = Tmux({'%1': ('', ''), '%2': ('reviewer', record())})
+        live = dict(baseline)
+        self.scope.side_effect = lambda entry: live if entry.get('review_folder') == folder else dict(
+            commit='c' * 40, dirty=False)
+        self.sweep(tmux)
+        self.assertEqual(self.sweep(tmux, after=helper_close.IDLE),
+                         [('%2', 'the review has been idle for 30 minutes')])
+        self.assertEqual(tmux.killed, ['%2'])
+
     def test_idle_reviewer_checks_pending_work_and_live_scope(self):
         head, next_head = 'a' * 40, 'b' * 40
         baseline = {'commit': head, 'dirty': False, 'mark': None}
@@ -145,6 +160,8 @@ class CloserTests(unittest.TestCase):
             ('new HEAD already requested', {'review_commit': next_head, 'awaiting': True}, {},
              {'commit': next_head, 'dirty': False}, True, True),
             ('new dirty tree', {}, {}, {'commit': head, 'dirty': True}, True, True),
+            ('edit in a dirty tree', {'approved_state': dict(baseline, dirty=True, mark='before', folder=None)}, {},
+             {'commit': head, 'dirty': True, 'mark': 'after'}, True, True),
             ('same HEAD and clean', {}, {}, {'commit': head, 'dirty': False}, False, True),
             ('paused cap', {}, {'paused': True}, {'commit': next_head, 'dirty': False}, False, False),
             ('waits on Mak', {}, {'escalate': 'notice'}, None, False, False),
@@ -286,6 +303,23 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(self.sweep(tmux, after=helper_close.SWEEP), [])  # the short request ended: the timer restarted
         self.assertEqual(self.sweep(tmux, after=helper_close.IDLE - helper_close.SWEEP),
                          [('%2', 'the advisor has been idle for 30 minutes')])
+
+    def test_fresh_worker_status_under_the_lock_keeps_linked_reviewer(self):
+        tmux = Tmux({'%1': ('', ''), '%2': ('reviewer', record())})
+        self.links = {'%1': ['%2']}
+        self.sweep(tmux)
+        self.clock[0] += helper_close.IDLE
+        lock = __import__('threading').Lock()
+
+        def fresh(entry):
+            self.assertTrue(lock.locked())
+            return {'state': 'Working' if entry['id'] == '%1' else 'Idle'}
+
+        cached = lambda entry: {'state': 'Idle'}
+        self.assertEqual(self.closer.observe(self.entries(tmux), cached, tmux, log=lambda text: None,
+                                             lock=lock, fresh=fresh), [])
+        self.assertFalse(lock.locked())
+        self.assertEqual(tmux.killed, [])
 
     def test_busy_orphan_gets_a_fresh_grace_when_it_goes_quiet(self):
         tmux = Tmux({'%2': ('', record(owner='%9'))})

@@ -374,6 +374,8 @@ def review_scope_of(entry):
     if mark is not None and cached is not None and cached[0] == key and now - cached[1] < REVIEW_SCOPE_AGE:
         return dict(cached[2])
     found = review_scope.scope(folder)
+    if found is not None:
+        found = dict(found, mark=mark)
     for pane in [pane for pane, item in REVIEW_SCOPES.items() if now - item[1] >= REVIEW_SCOPE_AGE]:
         del REVIEW_SCOPES[pane]
     if mark is not None and found is not None:

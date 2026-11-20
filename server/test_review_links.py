@@ -4547,6 +4547,7 @@ class ReviewLinksTests(unittest.TestCase):
         for _ in range(2):
             self.assertTrue(self.links()[0]['awaiting'])
             self.assertNotIn('approved_turn', self.links()[0])
+            self.assertNotIn('approved_state', self.links()[0])
             self.assertNotIn('%13', review_links._last_sent)
             self.observe()
         self.assertFalse(self.links()[0]['awaiting'])
@@ -5409,6 +5410,76 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertIn(f'Commit under review: {self.NEXT}', self.send.call_args.args[1])
                 self.assertNotIn('You approved this work as commit', self.send.call_args.args[1])
 
+    def test_edit_during_approval_delivery_is_reviewed(self):
+        self.bind(mark='before delivery')
+        live = self.scope(self.worker)
+        self.scope = lambda entry: live
+        self.request_review()
+
+        def send(entry, text, state):
+            if entry == self.worker:
+                live.update(dirty=True, mark='after delivery')
+
+        self.send.side_effect = send
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertNotIn('approved_commit', self.links()[0])
+        self.request_review()
+        self.assertEqual(self.send.call_count, 3)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn('plus uncommitted changes', self.send.call_args.args[1])
+
+    def test_short_follow_up_with_identical_reply_requests_review_of_new_commit(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.bind(self.NEXT)
+        self.observe()
+        self.observe()
+        self.assertEqual(self.send.call_count, 3)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Commit under review: {self.NEXT}', self.send.call_args.args[1])
+
+    def test_idle_follow_up_checks_are_bounded_without_a_new_reply(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.scope = Mock(wraps=self.scope)
+        for _ in range(review_links.VERIFY_TICKS * 2):
+            self.observe()
+        self.assertEqual(self.scope.call_count, review_links.FOLLOW_UP_TICKS)
+        self.assertTrue(self.links()[0]['approved_turn'])  # kept for a follow-up turn that starts later
+        self.assertEqual(self.send.call_count, 2)
+        # The approval's turn starts after the window and only pushes: no review, so no approval loop.
+        self.reply.return_value = 'Pushed.'
+        self.request_review()
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+        self.assertNotIn('approved_turn', self.links()[0])
+        self.request_review()  # the next turn is reviewed as usual
+        self.assertEqual(self.send.call_count, 3)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_follow_up_detects_changes_in_the_approved_folder(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        bound = self.scope(self.worker)
+        other = dict(bound, commit='c' * 40, folder='/work/other')
+        self.scope = lambda entry: bound if entry.get('review_folder') == bound['folder'] else other
+        self.request_review()
+        self.assertEqual(self.send.call_count, 2)
+
+        # Only the approved folder changed. The new request still uses the normal folder selection.
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        bound = dict(bound, commit=self.NEXT)
+        other = dict(other, commit=self.HASH)
+        self.scope = lambda entry: bound if entry.get('review_folder') == bound['folder'] else other
+        self.request_review()
+        self.assertEqual(self.send.call_count, 5)
+        self.assertIn(f'Commit under review: {self.HASH} in /work/other', self.send.call_args.args[1])
+
     def test_clean_approval_then_dirty_tree_requests_review(self):
         self.bind()
         self.request_review()
@@ -5422,38 +5493,52 @@ class ReviewLinksTests(unittest.TestCase):
                       self.send.call_args.args[1])
 
     def test_dirty_approval_then_further_edit_requests_review(self):
-        self.bind(dirty=True)
-        self.work_mark = Mock(return_value='reviewed tree')
+        self.bind(dirty=True, mark='approved tree')
+        self.work_mark = Mock(return_value='unchanged empty-turn mark')
         self.request_review()
-        self.work_mark.return_value = 'approved tree'
         self.finish_review(f'APPROVED {self.HASH}')
-        self.assertEqual(self.links()[0]['approved_state'], dict(commit=self.HASH, dirty=True, mark='approved tree'))
         count = self.send.call_count
-        self.work_mark.return_value = 'edited tree'
+        self.bind(dirty=True, mark='edited tree')
         self.request_review()
         self.assertEqual(self.send.call_count, count + 1)
         self.assertEqual(self.send.call_args.args[0], self.reviewer)
         self.assertIn(f'Commit under review: {self.HASH}', self.send.call_args.args[1])
         self.assertNotIn('You approved this work as commit', self.send.call_args.args[1])
 
+    def test_saved_approval_with_an_old_mark_still_tracks_the_commit(self):
+        for moved in (False, True):
+            with self.subTest(moved=moved):
+                self.add()
+                self.bind(dirty=True)
+                self.request_review()
+                self.finish_review(f'APPROVED {self.HASH}')
+                rows = self.rows()
+                link = next(row for row in rows if 'reviewer' in row)
+                link['approved_state'] = dict(commit=self.HASH, dirty=True, mark='old format digest')
+                self.file.write_text(json.dumps(rows))
+
+                self.bind(self.NEXT if moved else self.HASH, dirty=True, mark='scope digest')
+                count = self.send.call_count
+                self.request_review()
+                self.assertEqual(self.send.call_count, count + int(moved))
+
     def test_unbound_approval_requests_review_only_for_a_changed_mark(self):
         for changed in (False, True):
             with self.subTest(changed=changed):
                 self.add()
-                self.work_mark = Mock(return_value='reviewed tree')
+                self.scope = Mock(return_value={'mark': 'reviewed tree'})
                 self.request_review()
                 self.finish_review('APPROVED')
                 count = self.send.call_count
                 if changed:
-                    self.work_mark.return_value = 'edited tree'
+                    self.scope.return_value = {'mark': 'edited tree'}
                 self.request_review()
                 self.assertEqual(self.send.call_count, count + int(changed))
                 if changed:
                     self.assertEqual(self.send.call_args.args[0], self.reviewer)
 
     def test_clean_approval_then_push_with_same_commit_and_mark_skips_review(self):
-        self.bind()
-        self.work_mark = Mock(return_value='same tree')
+        self.bind(mark='same tree')
         self.request_review()
         self.finish_review(f'APPROVED {self.HASH}')
         count = self.send.call_count
@@ -5462,22 +5547,56 @@ class ReviewLinksTests(unittest.TestCase):
         self.observe()
         self.assertEqual(self.send.call_count, count)
         self.assertNotIn('approved_turn', self.links()[0])
-        self.assertEqual(self.links()[0]['approved_state'], dict(commit=self.HASH, dirty=False, mark='same tree'))
+        self.assertEqual(self.links()[0]['approved_state'],
+                         dict(commit=self.HASH, dirty=False, mark='same tree', folder='/work/my tree'))
 
-    def test_newer_request_replaces_the_approval_as_idle_close_baseline(self):
-        # After the follow-up of NEXT is reviewed with feedback, NEXT is the reviewed work, not the old approval.
+    def test_push_that_updates_the_base_keeps_the_same_work(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(server, 'REVIEW_SCOPES', {}):
+            def git(*args):
+                return subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                                       '-c', 'commit.gpgsign=false', *args], cwd=folder, capture_output=True,
+                                      check=True, text=True).stdout.strip()
+            git('init')
+            git('commit', '--allow-empty', '-m', 'Base')
+            git('commit', '--allow-empty', '-m', 'Reviewed work')
+            head = git('rev-parse', 'HEAD')
+            self.bind(head)
+            self.worker['review_folder'] = folder
+            self.scope = server.review_scope_of
+            for dirty in (False, True):
+                with self.subTest(dirty=dirty):
+                    self.add()
+                    git('update-ref', 'refs/remotes/origin/main', 'HEAD^')
+                    if dirty:
+                        (Path(folder) / 'notes.txt').write_text('Reviewed draft\n')
+                    self.request_review()
+                    self.finish_review(f'APPROVED {head}')
+                    count = self.send.call_count
+                    mark = self.scope(self.worker)['mark']
+                    git('update-ref', 'refs/remotes/origin/main', 'HEAD')  # the local effect of a push to main
+                    self.assertNotEqual(mark, self.scope(self.worker)['mark'])
+                    self.request_review()
+                    self.assertEqual(self.send.call_count, count)
+                    self.assertFalse(review_links.unreviewed_work(self.worker, self.reviewer, self.scope))
+
+    def test_forwarded_feedback_replaces_the_approval_as_idle_close_baseline(self):
         self.bind()
         self.request_review()
         self.finish_review(f'APPROVED {self.HASH}')
         self.bind(self.NEXT)
         self.request_review()
         self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
-        self.assertNotIn('approved_state', self.links()[0])
+        self.assertTrue(review_links.unreviewed_work(self.worker, self.reviewer, self.scope))
+        for _ in range(30):  # the reviewer never replies to the request
+            self.observe()
+        stalled = self.links()[0]['stalled']
+        self.assertTrue(review_links.unreviewed_work(self.worker, self.reviewer, self.scope))
+        review_links.resume_stalled('%13', '%12', stalled, 'resend')
+        self.observe()
         self.finish_review('Needs a regression test.')
-        worker = {**self.worker, 'id': '%13'}
-        self.assertFalse(review_links.unreviewed_work(worker, self.reviewer, self.scope))
+        self.assertFalse(review_links.unreviewed_work(self.worker, self.reviewer, self.scope))
         self.bind(self.HASH)  # the worker moved again and nobody reviewed it
-        self.assertTrue(review_links.unreviewed_work(worker, self.reviewer, self.scope))
+        self.assertTrue(review_links.unreviewed_work(self.worker, self.reviewer, self.scope))
 
     def test_dirty_approval_reviews_partial_commit_and_skips_unreadable_or_unchanged_tree(self):
         for after in ('partial commit', 'unreadable', 'unchanged'):
@@ -6401,13 +6520,13 @@ class ServerWatcherTests(unittest.TestCase):
                 patch.object(server.review_scope, 'scope', side_effect=lambda folder: dict(found)) as scope, \
                 patch.object(server.time, 'monotonic', return_value=1000.0) as clock:
             for _ in range(50):
-                self.assertEqual(server.review_scope_of(entry), found)
+                self.assertEqual(server.review_scope_of(entry), dict(found, mark='m1'))
             self.assertEqual(scope.call_count, 1)
             mark.assert_called_with('/project')
             server.review_scope_of(entry)['commit'] = 'changed by the caller'
             self.assertEqual(server.review_scope_of(entry)['commit'], 'c' * 40)
             marks[0] = 'm2'  # a commit or an edit
-            server.review_scope_of(entry)
+            self.assertEqual(server.review_scope_of(entry)['mark'], 'm2')
             self.assertEqual(scope.call_count, 2)
             clock.return_value += server.REVIEW_SCOPE_AGE  # origin/main may have moved
             server.review_scope_of(entry)
@@ -6501,7 +6620,8 @@ class ServerWatcherTests(unittest.TestCase):
                     return subprocess.run(['git', *args], cwd=folder, capture_output=True)
 
                 base = buffered('rev-parse', '--verify', '--quiet', 'origin/main')
-                expected = hashlib.sha256(base.stdout + bytes([base.returncode & 255]))
+                expected_base = hashlib.sha256(base.stdout + bytes([base.returncode & 255])).hexdigest()
+                expected = hashlib.sha256()
                 for command in (('rev-parse', 'HEAD'), ('status', '--porcelain', '-z', '--untracked-files=all'),
                                 ('diff', '--no-ext-diff', '--no-textconv', '--text', 'HEAD'),
                                 ('diff', '--no-ext-diff', '--no-textconv', '--text', '--cached', 'HEAD'),
@@ -6514,7 +6634,7 @@ class ServerWatcherTests(unittest.TestCase):
                         found = os.lstat(os.path.join(os.fsencode(folder), name))
                         expected.update(b'%d:%d:%d:%d;' %
                                         (found.st_size, found.st_mtime_ns, found.st_ctime_ns, found.st_ino))
-                self.assertEqual(review_scope.fingerprint(folder), expected.hexdigest())
+                self.assertEqual(review_scope.fingerprint(folder), f'{expected.hexdigest()}:{expected_base}')
 
     def test_fingerprint_reads_large_diffs_in_bounded_chunks(self):
         with tempfile.TemporaryDirectory() as root:
@@ -6595,6 +6715,31 @@ class ServerWatcherTests(unittest.TestCase):
                 second = server.review_scope_of(entry)
                 self.assertEqual(second['checklist']['status'], 'hit')
                 self.assertEqual(second['ui'], ['ui/src/new.tsx'])
+
+    def test_scope_marks_track_staged_and_untracked_edits_with_the_same_head_and_status(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(server, 'REVIEW_SCOPES', {}):
+            folder, git = self.make_repository(root)
+            tracked = folder / 'server/app.py'
+            untracked = folder / 'notes.txt'
+            entry = {'id': '%13', 'review_folder': str(folder)}
+            tracked.write_text('x = 2\n')
+            git('add', 'server/app.py')
+            untracked.write_text('notes\n')
+            # The working copy and status stay identical. Only the staged content changes.
+            tracked.write_text('x = 3\n')
+            status = git('status', '--porcelain')
+            initial = server.review_scope_of(entry)
+            tracked.write_text('x = 4\n')
+            git('add', 'server/app.py')
+            tracked.write_text('x = 3\n')
+            self.assertEqual(git('status', '--porcelain'), status)
+            staged = server.review_scope_of(entry)
+            untracked.write_text('more notes\n')
+            self.assertEqual(git('status', '--porcelain'), status)
+            edited = server.review_scope_of(entry)
+            self.assertEqual({(scope['commit'], scope['dirty']) for scope in (initial, staged, edited)},
+                             {(initial['commit'], True)})
+            self.assertEqual(len({scope.get('mark') for scope in (initial, staged, edited)}), 3)
 
     def test_ui_paths_without_a_base_ref_lists_what_git_can_see_or_says_unknown(self):
         # Review round 2, finding 3: no origin/main gave [] before the untracked files were listed.
