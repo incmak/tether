@@ -497,8 +497,10 @@ class Feed:
         if record is None or not _same_chat(entry, record['tmux_session'], record['transcript']):
             # First sight of this tab: a prompt that is already on screen is in the tabs list, so it is no update.
             record = self.seen[entry['id']] = {'state': state, 'prompt': prompt, 'since': now, 'worked': None,
-                                               # A turn that ended before first sight is no update.
-                                               'sent_prompt': prompt, 'finished': latest_outcome(entry)['identity'] or None,
+                                               # A turn that ended before first sight is no update. A running turn
+                                               # already has its identity, so seed only an idle tab.
+                                               'sent_prompt': prompt,
+                                               'finished': (latest_outcome(entry)['identity'] or None) if state == 'Idle' else None,
                                                'tmux_session': entry.get('tmux_session'), 'transcript': entry.get('transcript')}
         if state != record['state'] or prompt != record['prompt']:
             record['state'], record['prompt'], record['since'] = state, prompt, now

@@ -693,6 +693,30 @@ class Feed(unittest.TestCase):
                 self.assertEqual(len(world.sent), 1)
                 self.assertIn('failed: New failure.', world.sent[0][1])
 
+    def test_a_turn_running_at_first_sight_is_reported_when_it_ends(self):
+        # The real parsers fix a turn's identity when it starts, so first sight during the turn sees its identity.
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                world = World()
+                world.states['%2'] = 'Working'
+                world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'running'}
+                if restart:
+                    world.act('%1', action='claim')
+                    world.feed = coordinator.Feed(clock=lambda: world.now)
+                else:
+                    world.tick()
+                    world.act('%1', action='claim')
+                world.tick()
+                world.tick(coordinator.MINIMUM_WORK)
+                world.outcomes['%2'] = {'kind': 'done', 'text': 'Finished text.', 'identity': 'running'}
+                world.states['%2'] = 'Idle'
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                world.tick(coordinator.GAP)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('finished: Finished text.', world.sent[0][1])
+
     def test_failed_turn_waits_for_idle_to_settle(self):
         self.world.states['%2'] = 'Working'
         self.world.outcomes['%2'] = {'kind': 'failed', 'text': 'Rate limit reached.', 'identity': 'failed'}

@@ -16,8 +16,8 @@ const CHOICES: [CoordinatorMode | null, string, string][] = [
 
 export const coordinatorLabel = (mode?: CoordinatorMode | null) => CHOICES.find(item => item[0] === (mode ?? null))?.[1] ?? ''
 
-/** May this tab be the coordinator? Claude and Codex tabs that are not helper tabs. */
-export const canCoordinate = (pane: Pane) => (pane.agent === 'claude' || pane.agent === 'codex') && !pane.role && pane.writable
+/** May this tab be the coordinator? Claude and Codex tabs that are not reviewer, advisor or helper tabs (server: coordinator.browser_role). */
+export const canCoordinate = (pane: Pane) => (pane.agent === 'claude' || pane.agent === 'codex') && !pane.role && !pane.helper && pane.writable
 
 export function CoordinatorPicker({ pane, panes, pending, onPick, onBack }: {
   pane: Pane; panes: Pane[]; pending: boolean
