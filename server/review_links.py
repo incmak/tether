@@ -790,14 +790,15 @@ def _follow_up_change(link, worker, scope):
     fields = ('commit', 'dirty', 'mark')
     if (at is None or scope is None) and all(before.get(field) is None for field in fields):
         return False, None  # no verdict baseline
-    entry = dict(_review_entry(worker, folder), review_after=at)
+    # With no saved folder, resolve it as the verdict's HEAD read did: the usual request rule.
+    entry = dict(_review_entry(worker, folder), review_after=at) if folder else worker
     live = _call(scope, entry)
     if not isinstance(live, dict) or not isinstance(live.get('commit'), str):
         return None, None
     dirty, mark, before_mark = live.get('dirty'), live.get('mark'), before.get('mark')
     if type(dirty) is not bool or not isinstance(mark, str):
         return None, None
-    if at is not None and live.get('folder') and live['folder'] != folder:
+    if at is not None and folder and live.get('folder') and live['folder'] != folder:
         return True, live  # a newer gate record selected a worktree with no baseline
     changed = (before.get('commit') not in (None, live['commit'])
                or type(before.get('dirty')) is bool and dirty != before['dirty']  # a new or removed draft

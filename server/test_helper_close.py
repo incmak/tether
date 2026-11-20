@@ -201,7 +201,8 @@ class CloserTests(unittest.TestCase):
                                  [] if keep else [('%2', 'the review has been idle for 30 minutes')])
                 self.assertEqual(tmux.killed, [] if keep else ['%2'])
                 self.assertEqual(self.scope.call_args_list,
-                                 [call({'id': '%1', 'thread': OWNER_THREAD, 'review_after': None})] * reads)
+                                 # No saved folder: the worker entry resolves its folder like the review request.
+                                 [call({'id': '%1', 'thread': OWNER_THREAD})] * reads)
 
     def test_non_helpers_and_discovery_misses_stay(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', 'not json'), '%3': ('advisor', record())})

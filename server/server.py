@@ -362,7 +362,7 @@ def review_folder(entry):
                     started_ms = None
                 if started_ms is not None and at > started_ms / 1000 and review_scope.head(gate_folder):
                     return gate_folder
-    return folder or agent_folder(entry)  # an unbound verdict compares the worker's own folder
+    return folder if after is not None else folder or agent_folder(entry)
 
 
 REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)

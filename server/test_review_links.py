@@ -7202,6 +7202,48 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         folder = shlex.quote(str(self.reviewed))
         self.assertIn(f"Commit under review: {new_head} in {folder}", self.assert_follow_up_requested())
 
+    def approve_named_without_scope(self):
+        head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.assertEqual(self.commit(self.worker), head)
+        with patch.object(self, "scope", return_value=None):
+            self.worker_turn()
+            self.assertEqual(self.send.call_count, 1)
+            self.assertNotIn("Commit under review:", self.send.call_args.args[1])
+            self.deliver_approval(head)
+        # The watcher can retry an approval after it recovers the scope.
+        self.deliver_approval(head)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        return head
+
+    def test_unchanged_push_after_named_approval_of_unbound_request_skips_review(self):
+        self.worker["cwd"] = str(self.reviewed)
+        self.gate_log.write_text("", encoding="utf-8")
+        remote = self.root / "local-remote.git"
+        self.git("init", "-q", "--bare", str(remote), cwd=self.root)
+        self.git("remote", "add", "local-test", str(remote), cwd=self.reviewed)
+        head = self.approve_named_without_scope()
+        before = server.review_scope.fingerprint(self.reviewed)
+        self.observe("Working")
+        self.git("push", "-q", "local-test", "HEAD:refs/heads/main", cwd=self.reviewed)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.reviewed), head)
+        self.assertEqual(server.review_scope.fingerprint(self.reviewed), before)
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_named_approval_keeps_the_worktree_used_to_verify_its_hash(self):
+        self.approve_named_without_scope()
+        self.observe("Working")
+        # This commit uses Git directly and leaves the older gate record in place.
+        self.git("commit", "-qm", "Follow-up work", "--allow-empty", cwd=self.reviewed)
+        head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.assertEqual(self.commit(self.worker), head)
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        self.assertIn(f"Commit under review: {head} in {shlex.quote(str(self.reviewed))}",
+                      self.assert_follow_up_requested())
+
     def test_rejected_gate_check_preserves_review_of_worktree_with_edit(self):
         alternate = self.another_worktree()
         head = self.approve_reviewed_worktree()
