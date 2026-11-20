@@ -34,6 +34,7 @@ let served = null
 
 async function main() {
   let browser, page, server, failed = 0
+  let settingsLoad
   const posts = [], pageErrors = []
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
@@ -85,7 +86,10 @@ async function main() {
           return route.fulfill({ json: { ok: true } })
         }
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs, version } })
-        if (endpoint === 'app-identity') return route.fulfill({ json: { ...identity, colors: COLORS } })
+        if (endpoint === 'app-identity') {
+          if (settingsLoad) await settingsLoad.promise
+          return route.fulfill({ json: { ...identity, colors: COLORS } })
+        }
         if (endpoint === 'app-identity/generate') { identity = { ...identity, draft: 'd1' }; return route.fulfill({ json: { state: 'done' } }) }
         if (endpoint.startsWith('app-identity/preview/')) return route.fulfill({ body: await fs.readFile(path.join(DIST, 'icon-192.png')), contentType: 'image/png' })
         if (endpoint === 'activity') return route.fulfill({ json: { enabled: false, agents: false, zone: 'UTC', since: null, store: '', days: [], projects: [], publish: { folder: '', file: '', busy: false, pending: false, published: null, last: null } } })
@@ -123,11 +127,19 @@ async function main() {
       if (width < 800) await page.getByRole('button', { name: /menu|sessions|open the list/i }).first().click().catch(() => {})
       const brand = page.locator('.sidebar-brand:visible')
       check(`${at} sidebar shows the default name and mark`, (await brand.textContent()) === 'Tether' && await brand.locator('img').getAttribute('src') === '/chat/icon.svg')
+      settingsLoad = Promise.withResolvers()
       await page.getByRole('button', { name: 'Settings' }).first().click()
       await page.getByRole('searchbox', { name: 'Search settings' }).fill('home screen icon')
       const name = page.getByRole('textbox', { name: 'App name' })
       await name.waitFor()
-      check(`${at} loads the saved name`, await name.inputValue() === 'Tether')
+      const disabled = await name.isDisabled()
+      const pendingValue = await name.inputValue()
+      check(`${at} name waits for the saved name`, disabled && pendingValue === '', JSON.stringify({ disabled, value: pendingValue }))
+      settingsLoad.resolve()
+      settingsLoad = null
+      await page.locator('#app-identity-name:enabled').waitFor()
+      const value = await name.inputValue()
+      check(`${at} loads the saved name`, value === 'Tether', JSON.stringify(value))
       const save = page.getByRole('button', { name: 'Save app name and icon' })
       check(`${at} save waits for a change`, await save.isDisabled())
       await name.fill('  Work   box ')
@@ -210,6 +222,7 @@ async function main() {
     failed++
     console.log(`FAIL ${error.stack}`)
   } finally {
+    settingsLoad?.resolve()
     await page?.close().catch(() => {})
     server?.close()
     await browser?.close?.().catch(() => {})
