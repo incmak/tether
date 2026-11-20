@@ -46,9 +46,12 @@ export function foldTarget(pane: Pane, byId: ReadonlyMap<string, Pane>, shown: R
   return undefined
 }
 
+/** The stack a tab is in: its session and its group. The tab strip shows one stack at a time. */
+const placeOf = (pane: Pane) => `${pane.tmux_session}\u0000${pane.group ?? ''}`
+
 /**
- * Hidden helpers grouped by the shown tab they fold under. A helper with no shown owner in its own session goes under
- * `orphan(helper)`: the strip and the sidebar draw a session's folds only next to that session's tabs.
+ * Hidden helpers grouped by the shown tab they fold under. A helper with no shown owner in its own stack goes under
+ * `orphan(helper)`: opening a fold must reveal its tabs in the strip that draws it, and the strip shows one stack.
  */
 export function foldHelpers(hidden: Pane[], all: Pane[], shown: Pane[], orphan: (pane: Pane) => string = () => ''): Map<string, Pane[]> {
   const byId = new Map(all.map(pane => [pane.id, pane]))
@@ -56,7 +59,8 @@ export function foldHelpers(hidden: Pane[], all: Pane[], shown: Pane[], orphan: 
   const out = new Map<string, Pane[]>()
   for (const pane of hidden) {
     const target = foldTarget(pane, byId, ids)
-    const key = target && byId.get(target)?.tmux_session === pane.tmux_session ? target : orphan(pane)
+    const owner = target ? byId.get(target) : undefined
+    const key = target && owner && placeOf(owner) === placeOf(pane) ? target : orphan(pane)
     out.set(key, [...out.get(key) ?? [], pane])
   }
   return out
@@ -121,9 +125,8 @@ export function helperView(panes: Pane[], prefs: HelperPrefs, selected: string |
   const candidates = panes.filter(pane => !archived(pane) && hidesHelper(pane, prefs, selected))
   const candidateIds = new Set(candidates.map(pane => pane.id))
   const shown = panes.filter(pane => !archived(pane) && !candidateIds.has(pane.id))
-  const place = (pane: Pane) => `${pane.tmux_session}\u0000${pane.group ?? ''}`
-  const placesShown = new Set(shown.map(place))
-  const kept = candidates.filter(pane => placesShown.has(place(pane)))
+  const placesShown = new Set(shown.map(placeOf))
+  const kept = candidates.filter(pane => placesShown.has(placeOf(pane)))
   const folds = foldHelpers(kept, panes, shown, orphanKey)
   const hidden = new Set<string>()
   const bySession = new Map<string, HelperFold[]>()
