@@ -31,12 +31,13 @@ class Closer:
         for member in members:
             entry, options = tree.entries[member], tree.options.get(member)
             thread = helper_tabs.verified_thread(entry)
-            viewing, last_view = viewed(member)
             version = activity(entry)
+            prompt_at = user_prompt_at(entry)
+            viewing, last_view = viewed(member)
             if (viewing or not thread or options is None or options.session != entry.get('tmux_session')
                     or entry.get('agent') not in ('claude', 'codex') or version is None):
                 return None
-            signature.append((member, thread, options, version, last_view))
+            signature.append((member, thread, options, version, prompt_at, last_view))
         return tuple(signature)
 
     def observe(self, tree, fresh, *, enabled, lock, activity, viewed, draft, changed, user_prompt_at):
@@ -67,16 +68,20 @@ class Closer:
                     if pane not in live.entries or pane in live.fields:
                         continue
 
-                    def recheck():
+                    def validate(current, killed):
+                        remaining = tuple(row for row in signature if row[0] not in killed)
+                        if any(draft(current.entries[member]) for member, *_ in remaining if member in current.entries):
+                            raise helper_tabs.Stale('A task or helper has an unsent draft.')
                         if (self.generation != generation or not enabled()
-                                or self._signature(pane, live, task_tree.done_items(), user_prompt_at, activity, viewed)
-                                != signature):
-                            raise helper_tabs.Stale('A task or helper changed during the auto-close check.')
+                                or pane not in current.entries or pane in current.fields
+                                or self._signature(pane, current, task_tree.done_items(), user_prompt_at, activity, viewed)
+                                != remaining):
+                            raise helper_tabs.Stale('Done status, activity, viewing, or task membership changed.')
 
-                    recheck()
-                    for member, *_ in signature:
-                        if draft(live.entries[member]):
-                            raise ValueError('A task or helper has an unsent draft.')
+                    def recheck(killed):
+                        validate(fresh(), killed)
+
+                    validate(live, ())
                     plan, captures, server = task_tree_api.prepare_close(pane, live)
                     idle = {child['pane'] for child in plan['idle']}
                     if plan['working'] or plan['task']['state'] != 'idle' or len(captures) != len(idle) + 1:
@@ -86,8 +91,8 @@ class Closer:
             except task_tree_api.CloseInterrupted as exc:
                 closed.extend(member for member, _ in exc.members)
                 print(f'task auto-close {pane}: {exc}', file=sys.stderr)
-            except helper_tabs.Stale:
-                pass
+            except helper_tabs.Stale as exc:
+                print(f'task auto-close {pane}: {exc}', file=sys.stderr)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                 print(f'task auto-close {pane}: {exc}', file=sys.stderr)
             finally:

@@ -59,12 +59,14 @@ def close_bucket(status):
     return 'idle' if task_tree.state(status) == 'idle' else 'working'
 
 
-def close_matching_pane(pane, run, *, expected, bucket, server, fresh, status):
+def close_matching_pane(pane, run, *, expected, bucket, server, fresh, status, recheck=None):
     """Read the conversation and its state after Undo is ready, immediately before the kill."""
     def guard():
         current = next((entry for entry in fresh() if entry['id'] == pane), None)
         if current is None or expected != close_identity(current) or bucket != close_bucket(status(current)):
             raise helper_tabs.Stale(CLOSE_CHANGED)
+        if recheck is not None:
+            recheck()
         result = run([paths.TMUX, 'display-message', '-p', '-t', pane, CLOSE_FORMAT],
                      capture_output=True, text=True, timeout=5)
         identity = result.stdout.rstrip('\n').split('\t')
@@ -183,18 +185,30 @@ class Closer:
             return False
         try:
             with groups.LOCK(), helper_tabs.record_lock():
-                current = _panes(run)
-                if current is None or current.get(pane) != placement:
+                def quiet():
+                    current = _panes(run)
+                    return (current is not None and current.get(pane) == placement
+                            and status(entry).get('state') in QUIET and not watching(pane)
+                            and (worker is None or (status(worker).get('state') in QUIET and not watching(worker['id']))))
+
+                if not quiet():
                     return False
-                if status(entry).get('state') not in QUIET or watching(pane):
-                    return False
-                if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])
-                                           or review_links.unreviewed_work(worker, entry, self.scope)):
-                    return False
+
+                def recheck():
+                    if not quiet() or (worker is not None and review_links.unreviewed_work(worker, entry, self.scope)):
+                        raise helper_tabs.Stale('The helper is no longer quiet or is being viewed.')
+
                 import undo  # here: undo.py imports this module
                 closed = undo.capture_safe(pane, run, [entry])
-                close_pane(pane, run)
-                undo.record_tab_close(closed, run)  # Tether closed it: Cmd+Z brings it back
+                try:
+                    undo.close_tab(pane, run, closed, helper_tabs.visible_name(entry) or pane,
+                                   close=lambda: close_pane(pane, run, guard=recheck))
+                except undo.CloseInterrupted as exc:
+                    if exc.status == 409:
+                        return False
+                    if not exc.members:
+                        raise
+                    print(f'helper close {pane}: {exc}', file=sys.stderr)
                 return True
         finally:
             if lock is not None:

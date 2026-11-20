@@ -124,9 +124,12 @@ class HelperAnswerTests(unittest.TestCase):
         )
         for name, records, frame in cases:
             with self.subTest(name=name), patch.object(terminal_input, 'verify'):
+                self.transcript_records(second if frame == second_frame else first)
+                revision = menu_row(frame, self.entry)['attention']['menu_verified']
+                self.assertTrue(revision)
                 self.transcript_records(*records)
                 run = FakeTerminal(frame)
-                self.assertEqual(self.request_menu(run), 409)
+                self.assertEqual(self.request_menu(run, revision=revision), 409)
                 self.assertEqual(run.writes, [])
 
     def test_menu_route_accepts_the_newest_outstanding_question(self):
@@ -138,6 +141,7 @@ class HelperAnswerTests(unittest.TestCase):
         self.assertEqual([command[-1] for command in run.writes], ['Enter'])
 
     def test_menu_route_refuses_when_the_question_is_answered_before_enter(self):
+        revision = menu_row(SCREEN, self.entry)['attention']['menu_verified']
         def verify(*_):
             if checks:
                 with self.transcript.open('a') as stream:
@@ -147,17 +151,26 @@ class HelperAnswerTests(unittest.TestCase):
         checks = []
         run = FakeTerminal(SCREEN)
         with patch.object(terminal_input, 'verify', side_effect=verify):
-            self.assertEqual(self.request_menu(run), 409)
+            self.assertEqual(self.request_menu(run, revision=revision), 409)
         self.assertEqual(len(checks), 2)
         self.assertEqual(run.writes, [])
 
     def test_menu_route_binds_the_click_to_the_transcript_call_even_for_identical_text(self):
-        revision = menu_row(SCREEN, self.entry)['attention']['menu_verified']
-        self.transcript_records(self.tool_ask('tool-1'), self.tool_result('tool-1'), self.tool_ask('tool-2'))
-        with patch.object(terminal_input, 'verify'):
-            run = FakeTerminal(SCREEN)
-            self.assertEqual(self.request_menu(run, revision=revision), 409)
-        self.assertEqual(run.writes, [])
+        for number, question in enumerate(('Which format should I use?', 'Which layout should I use?')):
+            with self.subTest(question=question), patch.object(terminal_input, 'verify'):
+                old, new = f'old-{number}', f'new-{number}'
+                frame = SCREEN.replace('Which format should I use?', question)
+                self.transcript_records(self.tool_ask(old, question))
+                revision = menu_row(frame, self.entry)['attention']['menu_verified']
+                self.transcript_records(self.tool_ask(old, question), self.tool_result(old), self.tool_ask(new, question))
+                run = FakeTerminal(frame)
+                self.assertEqual(self.request_menu(run, revision=revision), 409)
+                self.assertEqual(run.writes, [])
+                self.assertEqual(self.request_menu(run), 409)
+                self.assertEqual(run.writes, [])
+                current = menu_row(frame, self.entry)['attention']['menu_verified']
+                self.assertEqual(self.request_menu(run, revision=current), 200)
+                self.assertEqual([command[-1] for command in run.writes], ['Enter'])
 
     def test_status_publishes_choices_only_for_verified_menu(self):
         for records, frame in (
@@ -220,6 +233,96 @@ class HelperAnswerTests(unittest.TestCase):
         run = FakeTerminal(screen)
         with patch.object(terminal_input, 'verify'), self.assertRaises(terminal_input.MenuChanged):
             terminal_input.menu_choose(dict(self.entry, agent='codex'), 1, run=run)
+        self.assertEqual(run.writes, [])
+
+    def test_codex_170_reasoning_menus_are_verified(self):
+        fixtures = Path(__file__).parent / 'fixtures' / 'codex_0.170.0_menus'
+        entry = dict(self.entry, agent='codex', agent_version='0.170.0', codex_binding='open')
+        for name, question, labels, selected in (
+            ('effort-120', 'Select Reasoning Level for GPT-6.2-Sol',
+             ['Low (default)', 'Medium', 'High', 'Extra high', 'More reasoning… (current)'], 5),
+            ('effort-44', 'Select Reasoning Level for GPT-6.2-Sol',
+             ['Low (default)', 'Medium', 'High', 'Extra high', 'More reasoning… (current)'], 5),
+            ('more-120', 'Advanced Reasoning', ['Max (current)', 'Ultra'], 1),
+        ):
+            with self.subTest(fixture=name), patch.object(terminal_input, 'verify'):
+                screen = (fixtures / f'{name}.ansi').read_text()
+                menu = menu_row(screen, entry)['attention']
+                self.assertTrue(menu['menu_verified'])
+                self.assertEqual(menu['question'], question)
+                self.assertEqual([option['text'] for option in menu['options']], labels)
+                self.assertEqual([option['id'] for option in menu['options'] if option['selected']], [selected])
+                run = FakeTerminal(screen)
+                terminal_input.menu_choose(entry, selected, label=labels[selected - 1], run=run,
+                                           revision=menu['menu_verified'])
+                self.assertEqual([command[-1] for command in run.writes], ['Enter'])
+
+    def test_codex_170_effort_menu_stays_verified_when_focus_changes_the_footer(self):
+        path = Path(__file__).parent / 'fixtures' / 'codex_0.170.0_menus' / 'effort-120.ansi'
+        entry = dict(self.entry, agent='codex', agent_version='0.170.0')
+        screen = terminal_input.prompt_actions.plain(path.read_text())
+        revision = menu_row(screen, entry)['attention']['menu_verified']
+        run = FakeTerminal(screen)
+
+        def redraw(argv, **kwargs):
+            result = run(argv, **kwargs)
+            if argv[1] == 'send-keys' and argv[-1] == 'Up':
+                run.screen = (screen.replace('  4.', '› 4.').replace('› 5.', '  5.')
+                              .replace('enter select · esc back', 'enter default · s session · esc back'))
+            return result
+
+        with patch.object(terminal_input, 'verify'):
+            terminal_input.menu_choose(entry, 4, label='Extra high', run=redraw, sleep=lambda _: None,
+                                       revision=revision)
+        self.assertEqual([command[-1] for command in run.writes], ['Up', 'Enter'])
+
+    def test_codex_170_clipped_and_unfamiliar_menus_send_no_keys(self):
+        fixtures = Path(__file__).parent / 'fixtures' / 'codex_0.170.0_menus'
+        effort = terminal_input.prompt_actions.plain((fixtures / 'effort-120.ansi').read_text())
+        more = terminal_input.prompt_actions.plain((fixtures / 'more-120.ansi').read_text())
+        entry = dict(self.entry, agent='codex', agent_version='0.170.0')
+        for name, screen in (
+            ('clipped models', (fixtures / 'model-wide.ansi').read_text()),
+            ('extra text after ellipsis', effort.replace('More reasoning…', 'More reasoning… extra')),
+            ('partial effort footer', effort.replace('enter select · esc back', 'enter select · esc')),
+            ('wrong first effort', effort.replace('Low (default)', 'Minimal (default)')),
+            ('extra effort', effort.replace('  enter select', '  6. Bonus effort\n  enter select')),
+            ('missing warning', '\n'.join(line for line in more.splitlines() if '⚠' not in line)),
+            ('third option', more.replace('  enter default', '  3. Extra high\n  enter default')),
+            ('extra indented row', more.replace('  enter default', '     Unknown row\n  enter default')),
+        ):
+            with self.subTest(case=name), patch.object(terminal_input, 'verify'):
+                self.assertIsNone(terminal_input.verified_numbered_menu(entry, screen))
+                run = FakeTerminal(screen)
+                with self.assertRaises(terminal_input.MenuChanged):
+                    terminal_input.menu_choose(entry, 1, run=run)
+                self.assertEqual(run.writes, [])
+
+    def test_claude_329_captures_bind_menu_to_the_ask_across_widths(self):
+        fixtures = Path(__file__).parent / 'fixtures' / 'claude_2.1.329_ask'
+        entry = dict(self.entry, agent_version='2.1.329')
+        first, second = (self.tool_ask(identifier) for identifier in ('color-1', 'color-2'))
+        for record in (first, second):
+            record['message']['content'][0]['input']['questions'] = [
+                {'header': 'Color', 'question': 'Which color do you pick?', 'multiSelect': False,
+                 'options': [{'label': 'Red', 'description': 'Warm color'},
+                             {'label': 'Blue', 'description': 'Cool color'}]},
+            ]
+        revision = {}
+        for name, records in (('q1-22', (first,)),
+                              ('q2-22', (first, self.tool_result('color-1'), second)),
+                              ('q2-120', (first, self.tool_result('color-1'), second))):
+            with self.subTest(fixture=name):
+                self.transcript_records(*records)
+                screen = (fixtures / f'{name}.ansi').read_text()
+                prompt = menu_row(screen, entry)['attention']
+                self.assertTrue(prompt['menu_verified'])
+                revision[name] = prompt['menu_verified']
+        self.assertNotEqual(revision['q1-22'], revision['q2-22'])
+        self.assertEqual(revision['q2-22'], revision['q2-120'])
+        run = FakeTerminal((fixtures / 'q2-22.ansi').read_text())
+        with patch.object(terminal_input, 'verify'), self.assertRaises(terminal_input.MenuChanged):
+            terminal_input.menu_choose(entry, 1, revision=revision['q1-22'], run=run)
         self.assertEqual(run.writes, [])
 
     def test_complete_captured_menus_are_actionable(self):

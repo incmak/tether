@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import groups
 import groups_api
+import undo
 import undo_store
 from test_groups import Handler as GroupHandler
 from test_task_tree import FakeTmux, chat, owner
@@ -67,6 +68,72 @@ class StackCloseTests(unittest.TestCase):
         groups_api.post(handler, self.run, sessions=lambda: self.entries,
                         status=lambda entry: {'state': entry.get('state', 'Idle')})
         return handler.status, handler.body
+
+    def check_first_kill_error(self, outcome):
+        first = self.review['id']
+        attempt, staged = [], []
+
+        def failed_kill(command, **kwargs):
+            if command[1] == 'list-panes' and outcome == 'unknown' and attempt:
+                raise subprocess.TimeoutExpired(command, 5)
+            if command[1] != 'kill-pane':
+                return self.run(command, **kwargs)
+            attempt.append(command[-1])
+            staged.extend(undo_store.entries())
+            if outcome == 'open':
+                raise subprocess.CalledProcessError(1, command)
+            self.run(command, **kwargs)
+            raise subprocess.TimeoutExpired(command, 5)
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=Path(folder) / 'history.json'):
+            saved = dict(pane=first, name=self.review['pane_name'], session='Tether', session_id='$1',
+                         server='10:20', agent='codex', thread=self.review['thread'], folder=folder,
+                         transcript=str(Path(folder) / 'chat.jsonl'), options={}, session_options={})
+            Path(saved['transcript']).touch()
+
+            handler = Handler(groups_api.PREFIX + 'close', {'session': '$1', 'group': TREE,
+                              'panes': [{'pane': item['id'], 'thread': item['thread'], 'bucket': 'idle'}
+                                        for item in (self.other, self.worker, self.review)]})
+            with patch('undo.capture_safe', return_value=saved):
+                groups_api.post(handler, failed_kill, sessions=lambda: self.entries,
+                                status=lambda _: {'state': 'Idle'})
+            self.assertEqual(handler.status, 503)
+            self.assertEqual(len(staged), 1, 'Undo must be on disk before tmux is called')
+            self.assertTrue(staged[0]['actions'][0]['pending'])
+            self.assertEqual(handler.body['closed'], [self.review['pane_name']] if outcome == 'closed' else [])
+            self.assertEqual(attempt, [first])
+            self.assertIn(self.worker['id'], self.run.rows)
+            self.assertIn(self.other['id'], self.run.rows)
+            self.assertIn(TREE, [stack['id'] for stack in self.run.stacks])
+            if outcome == 'open':
+                self.assertIn(first, self.run.rows)
+                self.assertEqual(undo_store.entries(), [])
+                self.assertNotIn('undo', handler.body)
+                return
+            step, = undo_store.entries()
+            self.assertEqual(handler.body['undo'], step['id'])
+            self.assertEqual(step['actions'][0].get('pending', False), outcome == 'unknown')
+            if outcome == 'unknown':
+                self.assertEqual(handler.body['unknown'], [self.review['pane_name']])
+            # Apply the real Undo step, with the terminal reopen itself mocked.
+            env = undo.Env(self.run, lambda: [entry for entry in self.entries if entry['id'] in self.run.rows])
+            with patch.object(undo, '_target_session', return_value=None), \
+                    patch.object(undo, '_restack_released'), \
+                    patch.object(undo, '_reopen', return_value='%100') as reopen:
+                preview = undo.run('undo', step['id'], env)
+                self.assertEqual(undo.run('undo', step['id'], env, confirmed=preview['token'])['status'], 'done')
+                self.assertEqual(reopen.call_args.args[0]['thread'], self.review['thread'])
+
+    def test_close_timeout_after_kill_keeps_undo_and_stops_the_stack(self):
+        self.check_first_kill_error('closed')
+
+    def test_close_error_before_kill_discards_undo_and_stops_the_stack(self):
+        self.check_first_kill_error('open')
+
+    def test_close_timeout_with_unreadable_tmux_keeps_pending_undo(self):
+        self.check_first_kill_error('unknown')
 
     def test_b446_close_preserves_helpers_listed_in_another_stack(self):
         self.assertEqual(self.post('close', BUGS, self.root)[0], 200)

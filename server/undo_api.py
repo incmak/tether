@@ -88,7 +88,7 @@ def headers(status):
     """Save the step this request recorded and name it in the answer: X-Tether-Undo (id), X-Tether-Undo-Label."""
     if status >= 300:
         return {}
-    entry = undo_store.flush()
+    entry = undo_store.flush() or undo_store.offered_checkpoint()
     if not entry:
         return {}
     return {'X-Tether-Undo': entry['id'], 'X-Tether-Undo-Label': quote(entry['label'], safe='')}

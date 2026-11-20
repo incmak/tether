@@ -1,13 +1,16 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 from contextlib import nullcontext
 import json
+from pathlib import Path
 import subprocess
+import tempfile
 from threading import Lock
 import unittest
 from unittest.mock import Mock, call, patch
 
 import helper_close
 import undo
+import undo_store
 from test_review_links import ApprovalTurnTimingFixture
 
 OWNER_THREAD = '11111111-1111-4111-8111-111111111111'
@@ -76,6 +79,30 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(sorted(pane for pane, _ in closed), ['%2', '%3'])
         self.assertEqual(sorted(tmux.killed), ['%2', '%3'])
         self.assertIn('idle for 30 minutes', closed[0][1])
+
+    def test_helper_sweep_keeps_undo_when_the_kill_confirmation_times_out(self):
+        class LostAcknowledgement(Tmux):
+            def __call__(self, args, **kwargs):
+                if args[-1] == '#{pid}:#{start_time}':
+                    return subprocess.CompletedProcess(args, 0, '10:20\n', '')
+                result = super().__call__(args, **kwargs)
+                if args[1] == 'kill-pane':
+                    raise subprocess.TimeoutExpired(args, 5)
+                return result
+
+        tmux = LostAcknowledgement({'%1': ('', ''), '%2': ('advisor', record())})
+        tab = {'pane': '%2', 'name': 'Advisor', 'server': '10:20', 'options': {}, 'session_options': {}}
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=Path(folder) / 'undo.json'), \
+                patch.object(undo, 'capture_safe', return_value=tab):
+            self.assertEqual(self.sweep(tmux), [])
+            result = self.sweep(tmux, after=helper_close.IDLE)
+            step, = undo_store.entries()
+        self.assertEqual(result, [('%2', 'the advisor has been idle for 30 minutes')])
+        self.assertEqual(tmux.killed, ['%2'])
+        self.assertEqual(step['actions'][0]['tab']['pane'], '%2')
+        self.assertNotIn('pending', step['actions'][0])
 
     def test_busy_waiting_or_viewed_tab_stays_and_its_timer_restarts(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', record()), '%3': ('advisor', record()), '%4': ('advisor', record())})
@@ -390,8 +417,7 @@ class ApprovalTurnCloseTests(ApprovalTurnTimingFixture):
         self.approve_current_work()
         self.worker_turn()
         self.assertEqual(self.send.call_count, 2)
-        self.enterContext(patch.object(undo, "capture_safe"))
-        self.enterContext(patch.object(undo, "record_tab_close"))
+        self.enterContext(patch.object(undo, "capture_safe", return_value=None))
         self.enterContext(patch.object(helper_close.auto_resume, "forget_pane"))
         self.enterContext(patch.object(helper_close.groups, "closing", return_value=nullcontext()))
 

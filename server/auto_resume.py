@@ -145,7 +145,8 @@ def server_id(*, run=subprocess.run):
         identifier = result.stdout.strip()
         if result.returncode == 0 and re.fullmatch(r'\d+:\d+', identifier):
             return 'up', identifier
-        if result.returncode and any(text in result.stderr.lower() for text in ('no server running', 'error connecting')):
+        error = result.stderr.lower() if result.returncode else ''
+        if 'no server running' in error or ('error connecting' in error and '(no such file or directory)' in error):
             return 'none', None
     except (OSError, subprocess.SubprocessError):
         pass

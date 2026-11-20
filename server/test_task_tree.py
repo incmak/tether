@@ -508,6 +508,73 @@ class Routes(unittest.TestCase):
             self.assertEqual(undo_store.entries(), [])
         self.assertEqual(self.run.writes, [])
 
+    def check_auto_close_activity_after_checkpoint(self, change, target, expected):
+        clock = [0]
+        closer = task_tree_close.Closer(now=lambda: clock[0])
+        views, drafts, activity, user_prompts = {}, set(), {}, {}
+
+        def sweep():
+            return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                  activity=lambda entry: activity.get(entry['id'], 1),
+                                  viewed=lambda pane: views.get(pane, (False, None)),
+                                  draft=lambda entry: entry['id'] in drafts, changed=Mock(),
+                                  user_prompt_at=lambda entry: user_prompts.get(entry['id'], 0))
+
+        checkpoint = undo_store.checkpoint
+
+        def change_after_checkpoint(identifier, label, actions, **kwargs):
+            saved = checkpoint(identifier, label, actions, **kwargs)
+            if actions and actions[0]['closed'][-1].get('pending'):
+                if actions[0]['closed'][-1]['tab']['pane'] == target:
+                    change(views, drafts, activity, user_prompts)
+            return saved
+
+        with patch.object(task_tree, 'done_items', return_value={'B446'}), \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
+                patch.object(undo_store, 'checkpoint', side_effect=change_after_checkpoint):
+            self.assertEqual(sweep(), [])
+            clock[0] = task_tree.CLOSE_AFTER
+            self.assertEqual(sweep(), expected)
+            steps = undo_store.entries()
+            self.assertEqual([member['tab']['pane'] for step in steps
+                              for member in step['actions'][0]['closed']], expected)
+        self.assertEqual([write[-1] for write in self.run.writes], expected)
+
+    def test_auto_close_rechecks_view_after_first_checkpoint(self):
+        self.check_auto_close_activity_after_checkpoint(
+            lambda views, *_: views.update({'%3': (True, 1)}), '%3', [])
+
+    def test_auto_close_rechecks_draft_after_first_checkpoint(self):
+        self.check_auto_close_activity_after_checkpoint(
+            lambda _, drafts, *_rest: drafts.add('%3'), '%3', [])
+
+    def test_auto_close_keeps_undo_for_the_helper_closed_before_a_visit(self):
+        self.check_auto_close_activity_after_checkpoint(
+            lambda views, *_: views.update({'%2': (False, 1)}), '%2', ['%3'])
+
+    def test_auto_close_rechecks_activity_and_user_prompts(self):
+        for field in (2, 3):
+            with self.subTest(field=field):
+                self.run.writes.clear()
+                self.check_auto_close_activity_after_checkpoint(
+                    lambda *changes: changes[field].update({'%1': 2}), '%3', [])
+
+    def test_manual_task_close_allows_a_view_opened_after_confirmation(self):
+        checkpoint = undo_store.checkpoint
+
+        def begin_view(identifier, label, actions, **kwargs):
+            server.WATCHING['%3'] = 1
+            return checkpoint(identifier, label, actions, **kwargs)
+
+        with patch.object(server, 'WATCHING', {}), \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
+                patch.object(undo_store, 'checkpoint', side_effect=begin_view):
+            status, body = self.request('close', self.close_request())
+        self.assertEqual(status, 200)
+        self.assertEqual(body['closed'], ['%3', '%2', '%1'])
+
     def test_unseen_starting_child_blocks_close_and_done(self):
         late = chat(9)
         self.run.rows['%9'] = {'session_id': '$1'}

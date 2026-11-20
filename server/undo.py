@@ -357,6 +357,140 @@ def capture_session_safe(session_id, run=subprocess.run, entries=()):
         return None
 
 
+CLOSE_ERRORS = (OSError, RuntimeError, subprocess.SubprocessError, ValueError)
+
+
+class CloseInterrupted(RuntimeError):
+    def __init__(self, error, members, identifier, label, *, stale=False, without_undo=(), unknown=()):
+        super().__init__(error)
+        self.status = 409 if stale else 503
+        self.members = members
+        self.undo = identifier
+        self.label = label
+        self.without_undo = without_undo
+        self.unknown = unknown
+
+
+def kill_outcome(target, server, run, *, session=False):
+    """Return True if gone, False if present, or None if tmux cannot prove either."""
+    kind, current = auto_resume.server_id(run=run)
+    if kind == 'none':
+        return True
+    if kind != 'up' or current != server:
+        return None
+    try:
+        if session:
+            result = _tmux(run, 'list-sessions', '-F', '#{session_id}')
+            pattern = SESSION
+        else:
+            result = _tmux(run, 'list-panes', '-a', '-F', '#{pane_id}')
+            pattern = PANE
+        listed = result.stdout.splitlines() if result.returncode == 0 else None
+        if listed is not None and not all(pattern.fullmatch(item) for item in listed):
+            listed = None
+    except (OSError, subprocess.SubprocessError):
+        listed = None
+    kind, current = auto_resume.server_id(run=run)
+    if kind == 'none':
+        return True
+    if listed is not None and kind == 'up' and current == server:
+        return target not in listed
+    return None
+
+
+class CloseJournal:
+    """Checkpoint an in-flight close before attempting it. Keep the record when its outcome is unknown."""
+    def __init__(self, label, server):
+        self.label, self.server = label, server
+        self.identifier = self.pending = None
+        self.closed = []
+
+    def save(self, actions):
+        self.identifier = undo_store.checkpoint(self.identifier, self.label, actions, server=self.server)
+
+    def kill(self, target, run, close, actions, recover, *, session=False):
+        self.pending = target
+        try:
+            self.save(actions())
+        except CLOSE_ERRORS:
+            self.pending = None
+            raise
+        try:
+            close()
+        except helper_tabs.Stale:
+            self.pending = None  # the guard refused before the kill
+            raise
+        except CLOSE_ERRORS:
+            outcome = kill_outcome(target, self.server, run, session=session)
+            if outcome is not None:
+                self.pending = None
+            if outcome:
+                self.closed.append(target)
+                recover()
+            raise
+        self.closed.append(target)
+        self.pending = None
+
+
+def _journal_close(target, run, title, label, server, action, close, recover, after, *, session=False):
+    journal = CloseJournal(label, server)
+
+    def actions():
+        if action is None or not (journal.closed or journal.pending):
+            return []
+        return [dict(action, pending=True) if journal.pending else action]
+
+    def finish():
+        if journal.closed:
+            after()
+        journal.save(actions())
+
+    try:
+        journal.kill(target, run, close, actions, recover, session=session)
+    except CLOSE_ERRORS as exc:
+        try:
+            finish()
+        except CLOSE_ERRORS:
+            pass  # The pending step is already on disk.
+        stale = isinstance(exc, helper_tabs.Stale)
+        if stale:
+            error = str(exc)
+        elif journal.closed:
+            error = 'The close took effect, but tmux did not confirm it. Refresh the tabs.'
+        elif journal.pending:
+            error = 'Tether could not confirm whether the close took effect. Refresh the tabs.'
+        else:
+            error = 'Tether could not close the tab or session. Refresh the tabs.'
+        raise CloseInterrupted(error, [(target, title)] if journal.closed else [], journal.identifier,
+                                label, stale=stale, unknown=[title] if journal.pending else []) from exc
+    try:
+        finish()
+    except CLOSE_ERRORS as exc:
+        raise CloseInterrupted('The tab or session closed. Tether could not finish saving Undo.',
+                                [(target, title)], journal.identifier, label) from exc
+    undo_store.offer_checkpoint(journal.identifier, label)
+    return journal.identifier
+
+
+def tab_close_label(tab, title):
+    tab = tab or {}
+    return f'Closed tab {_q(tab.get("name") or tab.get("session") or title)}'
+
+
+def close_tab(pane, run, tab, title, *, close=None, server=None):
+    """Close one tab and journal any captured Undo while the caller holds the send lock."""
+    label = tab_close_label(tab, title)
+
+    def recover():
+        auto_resume.forget_pane(pane, run=run)
+        helper_close.release_reviews(pane)
+
+    return _journal_close(pane, run, title, label, server or (tab or {}).get('server'),
+                          dict(kind='tab.close', tab=tab) if tab else None,
+                          close or (lambda: helper_close.close_pane(pane, run)), recover,
+                          lambda: note_released(tab, run) if tab else None)
+
+
 def record_tab_close(tab, run=subprocess.run):
     if tab:
         try:
@@ -412,6 +546,25 @@ def record_session_close(saved):
         count = len(saved['tabs'])
         undo_store.record('session.close', f'Closed session {_q(saved["name"])} ({count} tab{"" if count == 1 else "s"})',
                           saved=saved)
+
+
+def close_session(session_id, run, saved, panes, close):
+    title = saved['name'] if saved else session_id
+    count = len(saved['tabs']) if saved else 0
+    label = f'Closed session {_q(title)} ({count} tab{"" if count == 1 else "s"})'
+    server = saved['tabs'][0].get('server') if saved else None
+
+    def release():
+        for pane in panes:
+            helper_close.release_reviews(pane)
+
+    def kill():
+        close()
+        release()
+
+    return _journal_close(session_id, run, title, label, server,
+                          dict(kind='session.close', saved=saved, removed_panes=panes) if saved else None,
+                          kill, release, lambda: None, session=True)
 
 
 def record_tab_start(pane, run=subprocess.run):
@@ -1164,11 +1317,22 @@ def _reopen_effects(tab):
             'A turn that was running when it closed does not continue.']
 
 
+def _check_pending_close(target, server, run, *, session=False):
+    outcome = kill_outcome(target, server, run, session=session)
+    if outcome is None:
+        raise Refused('Tether could not confirm the close. Try Undo again.')
+    if not outcome:
+        raise Refused('The tab or session did not close.')
+
+
 class TabClose:
     """undo: reopen (the pane gets a new id, kept in a['reopened']). redo: close that pane again."""
     @staticmethod
     def check(a, d, env, ctx):
         if d == 'undo':
+            if a.get('pending'):
+                tab = a['tab']
+                _check_pending_close(tab['pane'], tab.get('server') or ctx.get('server'), env.run)
             _reopen_check(a['tab'], env)
             _check_reopen_target(a['tab'], env.run)
             _check_released(a['tab'], env.run)
@@ -1180,9 +1344,13 @@ class TabClose:
     def apply(a, d, env):
         if d == 'undo':
             tab = a['tab']
+            if a.get('pending'):
+                auto_resume.forget_pane(tab['pane'], run=env.run)
+                helper_close.release_reviews(tab['pane'])
             a['reopened'] = _reopen(tab, env)
             a['reopened_server'] = _server(env.run)
             _restack_released(tab, a['reopened'], env.run)
+            a.pop('pending', None)
             return _restore_reviews([tab], {tab['pane']: a['reopened']}, env)
         else:
             a['tab'] = capture(a['reopened'], env.run, env.entry(a['reopened'])) or a['tab']
@@ -1308,7 +1476,6 @@ class TaskTreeClose:
     @staticmethod
     def check(a, d, env, ctx):
         if d == 'undo' and a['closed'] and a['closed'][-1].get('pending'):
-            from task_tree_api import kill_outcome
             member = a['closed'][-1]
             tab = member['tab']
             outcome = kill_outcome(tab['pane'], tab['server'], env.run)
@@ -1577,6 +1744,9 @@ class SessionClose:
     @staticmethod
     def check(a, d, env, ctx):
         if d == 'undo':
+            if a.get('pending'):
+                saved = a['saved']
+                _check_pending_close(saved['session_id'], saved['tabs'][0].get('server'), env.run, session=True)
             _session_reopen_check(a['saved'], env)
         else:
             _same_tmux(a.get('reopened_server'), env.run, 'that session')
@@ -1586,9 +1756,13 @@ class SessionClose:
     @staticmethod
     def apply(a, d, env):
         if d == 'undo':
+            if a.get('pending'):
+                for pane in a.get('removed_panes', ()):
+                    helper_close.release_reviews(pane)
             panes = _reopen_session(a['saved'], env)
             a['reopened'] = _show(env.run, panes[0], '#{session_id}')[0] if panes else None
             a['reopened_server'] = _server(env.run)
+            a.pop('pending', None)
         else:
             a['saved'] = capture_session(a['reopened'], env.run, env.live()) or a['saved']
             _close_session(a['reopened'], env)

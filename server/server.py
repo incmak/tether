@@ -3607,9 +3607,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Choose an option first.')
                 if answer is not None and any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in answer):
                     raise ValueError('The answer contains terminal control characters.')
-                from terminal_input import MenuChanged
+                from terminal_input import MenuChanged, menu_refusal
                 try:
                     with SEND_LOCK:
+                        if revision is None:
+                            raise MenuChanged(menu_refusal(config))
                         menu_choose(config, choice, label=label, answer=answer, revision=revision)
                         if answer is not None:
                             task_user_delivery(config)
@@ -3620,8 +3622,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'accepted': True})
                 return
             if self.path == '/mobile/api/pick':
-                with SEND_LOCK:
-                    picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                from terminal_input import MenuChanged
+                try:
+                    with SEND_LOCK:
+                        picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 if body.get('then', 'Enter') == 'Enter':
                     attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
@@ -3664,6 +3671,8 @@ class Handler(BaseHTTPRequestHandler):
                 delivery = send_text(config, message, user=True)
                 attention.STORE.clear(config['id'], config.get('thread'))  # you answered the tab
                 self.respond(200, {'accepted': True, 'delivery': delivery})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError) as exc:
             self.respond(400, {'error': str(exc) if self.path in (*quick_tab.PATHS, coordinator.PATH, '/mobile/api/history/hide', '/mobile/api/session', '/mobile/api/tmux-sessions', '/mobile/api/broadcast', '/mobile/api/merge', '/mobile/api/model', '/mobile/api/shell', '/mobile/api/split', '/mobile/api/fork', '/mobile/api/delegate', '/mobile/api/agent-tab', '/mobile/api/continue-preview', '/mobile/api/continue', '/mobile/api/review-stop', '/mobile/api/review-stalled', '/mobile/api/review-link', '/mobile/api/resume', '/mobile/api/auto-resume', '/mobile/api/pane-name', '/mobile/api/pane-icon', '/mobile/api/pane-icon/draw', tab_brief.PATH, '/mobile/api/mode', '/mobile/api/stop-task', '/mobile/api/side-shell', '/mobile/api/side-shell/end', '/mobile/api/menu', '/mobile/api/pick', '/mobile/api/push/mute', '/mobile/api/push/level', '/mobile/api/push/settings', '/mobile/api/login/start', '/mobile/api/login/code', '/mobile/api/login/cancel', '/mobile/api/accounts/refresh', '/mobile/api/accounts/switch') else 'Invalid message.'})
         except (OSError, RuntimeError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
@@ -3773,13 +3782,8 @@ class Handler(BaseHTTPRequestHandler):
                             return
                     closed = undo.capture_safe(pane, entries=sessions if entries is None else entries)
                     name = (closed or {}).get('name') or delegate.source_title(entry or {}, fallback=pane)
-                    auto_resume.forget_pane(pane, run=subprocess.run)
-                    with groups.closing(pane):  # its auto stack goes when empty or root-only
-                        subprocess.run([paths.TMUX, 'kill-pane', '-t', pane], check=True,
-                                       capture_output=True, timeout=5)
+                    undo.close_tab(pane, subprocess.run, closed, name)
                     audit.record('tab.close', f'Closed tab {name}', pane=pane)
-                    review_links.close(pane)
-                    undo.record_tab_close(closed)
                 self.respond(200, {'closed': pane})
                 return
             identifier = body.get('session') if isinstance(body, dict) else None
@@ -3797,13 +3801,15 @@ class Handler(BaseHTTPRequestHandler):
                                        '-f', '#{==:#{window_linked_sessions},1}', '-F', '#{pane_id}'],
                                        check=True, capture_output=True, text=True, timeout=5).stdout.splitlines()
                 saved = undo.capture_session_safe(identifier, entries=sessions)
-                auto_resume.forget_session(identifier, run=subprocess.run)
-                subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
-                               capture_output=True, timeout=5)
-                for pane in panes:
-                    review_links.close(pane)
-                undo.record_session_close(saved)
+                def close_session():
+                    auto_resume.forget_session(identifier, run=subprocess.run)
+                    subprocess.run([paths.TMUX, 'kill-session', '-t', identifier], check=True,
+                                   capture_output=True, timeout=5)
+
+                undo.close_session(identifier, subprocess.run, saved, panes, close_session)
             self.respond(200, {'closed': identifier})
+        except undo.CloseInterrupted as exc:
+            task_tree_api.interrupted_response(self, exc)
         except (ValueError, UnicodeError):
             self.respond(400, {'error': 'Invalid request.'})
         except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError):

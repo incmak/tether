@@ -889,8 +889,9 @@ class AnswerEndpointTest(unittest.TestCase):
         self.clear.assert_called_once_with('%1', 't1')
 
     def test_menu_preserves_the_free_text_answer_and_clears(self):
-        self.assertEqual(self.post('menu', choice=1, answer='Default'), 200)
-        self.menu_choose.assert_called_once_with(self.config, 1, label=None, answer='Default', revision=None)
+        revision = 'a' * 64
+        self.assertEqual(self.post('menu', choice=1, answer='Default', revision=revision), 200)
+        self.menu_choose.assert_called_once_with(self.config, 1, label=None, answer='Default', revision=revision)
         self.clear.assert_called_once_with('%1', 't1')
 
     def test_approval_preserves_optional_typed_feedback_and_clears(self):

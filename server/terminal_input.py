@@ -505,8 +505,8 @@ def menu_refusal(entry, *, helper=False):
                 version = first['payload'].get('cli_version')
         except (KeyError, AttributeError, OSError, TypeError, ValueError):
             pass
-    name, captured = {'claude': ('Claude Code', '2.1.316 and 2.1.318'),
-                      'codex': ('Codex', '0.169.0')}.get(agent, (agent, ''))
+    name, captured = {'claude': ('Claude Code', '2.1.316, 2.1.318 and 2.1.329'),
+                      'codex': ('Codex', '0.169.0 and 0.170.0')}.get(agent, (agent, ''))
     if isinstance(version, str) and re.fullmatch(r'v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?', version):
         detail = f' {name} {version} may have changed the screen.'
     elif captured:
@@ -736,17 +736,17 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
         picker = read_picker(entry, run)
         if picker is None:
             raise RuntimeError('The list is no longer open.')
+        if picker.get('numbered') and then in ('Space', 'Enter'):
+            if picker.get('multi'):
+                raise MenuChanged(menu_refusal(entry))
+            raise ValueError('Choose a numbered option with its own button.')
         if [picker_row_key(item) for item in picker['items']] != labels or picker_heading(picker) != heading:
             raise RuntimeError('The list changed. Review it again.')
         at = [index for index, item in enumerate(picker['items']) if item['selected']]
         if len(at) != 1:
             raise RuntimeError(f'Could not find the cursor in the list. Open the terminal to choose ({entry["agent"]} may have a new screen layout).')
-        return picker, at[0]
-    picker, at = look()
-    # A numbered option is chosen with menu_choose. Here a numbered list only scrolls, or, when it has boxes, ticks one
-    # (Space) or confirms the ticks (Enter on the marked row, from "Done").
-    if picker.get('numbered') and then not in (('Up', 'Down', 'Space', 'Enter') if picker.get('multi') else ('Up', 'Down')):
-        raise ValueError('Choose a numbered option with its own button.')
+        return at[0]
+    at = look()
     for _ in range(len(labels) + 1):
         if at == row:
             run([paths.TMUX, 'send-keys', '-t', entry['id'], then], check=True, capture_output=True, timeout=5)
@@ -755,7 +755,7 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
         run([paths.TMUX, 'send-keys', '-t', entry['id'], key], check=True, capture_output=True, timeout=5)
         for _ in range(20):  # up to 2 s for the redraw
             sleep(.1)
-            picker, moved = look()
+            moved = look()
             if moved != at:
                 break
         else:

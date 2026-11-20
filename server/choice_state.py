@@ -392,7 +392,10 @@ def codex_numbered_menu(frame):
         return None
     stop, _, hints = footer
     hint = ' · '.join(hints)
-    if hint not in ('enter select · esc back', 'enter open · esc back', 'enter default · s session · esc back'):
+    select = hint == 'enter select · esc back'
+    usage = hint == 'enter open · esc back'
+    default = hint == 'enter default · s session · esc back'
+    if not (select or usage or default):
         return None
     first = next((i for i in range(stop - 1, -1, -1) if re.match(r'^\s*› \d+\. ', rows[i][0])), None)
     if first is None:
@@ -406,11 +409,20 @@ def codex_numbered_menu(frame):
     while first < stop and not rows[first][0].strip():
         first += 1
     before = [text.strip() for text, _ in rows[:first] if text.strip()]
-    if hint == 'enter select · esc back':
+    reasoning_title = ' '.join(before[-2:] if len(before) >= 2 and before[-2].startswith('Select Reasoning')
+                               else before[-1:])
+    effort = (select or default) and re.fullmatch(r'Select Reasoning Level for [\w.-]+(?: [\w.-]+)*', reasoning_title)
+    advanced = (default and len(before) >= 2 and before[-2] == 'Advanced Reasoning' and before[-1].startswith('⚠ ')
+                and '…' not in before[-1] and '...' not in before[-1])
+    if advanced:
+        question = 'Advanced Reasoning'
+    elif effort:
+        question = reasoning_title
+    elif select:
         question = 'Select Model and Effort'
         if not (before[-1:] == [question] or ' '.join(before[-2:]) == question):
             return None
-    elif hint == 'enter open · esc back':
+    elif usage:
         if 'Usage' not in before[-4:]:
             return None
         suffix = before[len(before) - 1 - before[::-1].index('Usage'):]
@@ -418,32 +430,44 @@ def codex_numbered_menu(frame):
         if question not in ('Usage', 'Usage Account usage and resets.'):
             return None
     else:
-        question = ' '.join(before[-2:] if len(before) >= 2 and before[-2].startswith('Select Reasoning') else before[-1:])
-        if not re.fullmatch(r'Select Reasoning Level for [\w.-]+(?: [\w.-]+)*', question):
-            return None
+        return None
 
     body = [text for text, _ in rows[first:stop] if text.strip()]
     options = []
+    wrapped = False
     for text in body:
         if match := re.fullmatch(r'\s*(› )?(\d+)\.\s+(\S.*)', text):
             label, detail = (re.split(r' {2,}', match[3], maxsplit=1) + [''])[:2]
             options.append({'id': int(match[2]), 'text': label, 'detail': detail, 'selected': bool(match[1])})
         elif options and re.fullmatch(r' {5,}(?![↑↓▲▼])\S.*', text):
             options[-1]['detail'] = ' '.join(filter(None, (options[-1]['detail'], text.strip())))
+            wrapped = True
         else:
             return None
     if (len(options) < 2 or [o['id'] for o in options] != list(range(1, len(options) + 1))
-            or sum(o['selected'] for o in options) != 1
-            or any('…' in value or '...' in value for option in options
-                   for value in (option['text'], option['detail'])
-                   if not (hint == 'enter default · s session · esc back' and option is options[-1]
-                           and value == 'More reasoning…'))):
+            or sum(o['selected'] for o in options) != 1):
         return None
+    labels = [option['text'] for option in options]
+    unmarked = [label.removesuffix(' (current)') for label in labels]
     # The Usage menu always offers both destinations. A truncated row is not a destination.
-    if hint == 'enter open · esc back' and [o['text'] for o in options] != ['View analytics', 'Redeem reset']:
+    if usage and labels != ['View analytics', 'Redeem reset']:
         return None
-    if hint == 'enter default · s session · esc back' and (options[0]['text'] != 'Low'
-                                                          or options[-1]['text'] != 'More reasoning…'):
+    if advanced and (wrapped or unmarked != ['Max', 'Ultra']):
+        return None
+    if effort:
+        more = 'More reasoning…'
+        levels = [label.removesuffix(' (default)') for label in unmarked]
+        # Models can omit levels. The captured layout starts at Low and keeps them in order.
+        known_levels = ('Low', 'Medium', 'High', 'Extra high', more)
+        # Codex 0.170 switches to the default footer when focus leaves More reasoning.
+        modern = (not wrapped and levels[0] == 'Low' and levels == [level for level in known_levels if level in levels]
+                  and (select or unmarked[-1] == more and not options[-1]['selected']))
+        legacy = default and labels[0] == 'Low' and labels[-1] == more
+        if not (modern or legacy):
+            return None
+        if unmarked[-1] == more:
+            labels = labels[:-1]
+    if any('…' in value or '...' in value for value in labels + [o['detail'] for o in options]):
         return None
     return {'question': question, 'options': options}
 

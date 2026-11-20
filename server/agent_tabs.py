@@ -121,9 +121,8 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
         raise RuntimeError('That tab is working or waits on a prompt. Close it after its work is done.')
     closed = undo.capture_safe(pane, run, entries)
     name = (closed or {}).get('name') or delegate.source_title(target or {}, fallback=pane)
-    helper_close.close_pane(pane, run)
+    undo.close_tab(pane, run, closed, name)
     audit.record('tab.close', f'Closed tab {name}', pane=pane)
-    undo.record_tab_close(closed, run)
     return {'closed': pane}
 
 

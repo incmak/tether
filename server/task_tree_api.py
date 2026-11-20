@@ -15,6 +15,7 @@ import task_tree
 import undo
 import undo_store
 from terminal_input import UUID
+from undo import CloseInterrupted
 
 PREFIX = '/mobile/api/task-tree/'
 PLAN = PREFIX + 'close-plan'
@@ -233,18 +234,10 @@ def close(body, tree):
         raise helper_tabs.Stale(CLOSE_CHANGED) from exc
 
 
-class CloseInterrupted(RuntimeError):
-    def __init__(self, error, members, identifier, label, *, stale=False, without_undo=()):
-        super().__init__(error)
-        self.status = 409 if stale else 503
-        self.members = members
-        self.undo = identifier
-        self.label = label
-        self.without_undo = without_undo
-
-
 def interrupted_response(handler, interruption):
     result = {'error': str(interruption), 'closed': [title for _, title in interruption.members]}
+    if interruption.unknown:
+        result['unknown'] = list(interruption.unknown)
     if interruption.without_undo:
         result['closed_without_undo'] = list(interruption.without_undo)
     if interruption.undo:
@@ -253,21 +246,6 @@ def interrupted_response(handler, interruption):
                         'X-Tether-Undo-Label': quote(interruption.label, safe='')})
     else:
         handler.respond(interruption.status, result)
-
-
-def kill_outcome(pane, server, run):
-    """After a transport failure, check whether tmux applied the kill."""
-    try:
-        live = helper_tabs.read_panes(run)
-        kind, current = auto_resume.server_id(run=run)
-        if kind == 'none':
-            return True
-        if kind == 'up' and current == server:
-            return pane not in live
-    except (OSError, subprocess.SubprocessError):
-        if auto_resume.server_id(run=run)[0] == 'none':
-            return True
-    return None
 
 
 def close_task(pane, tree, close_children, plan, snapshots, server, *, recheck=None):
@@ -295,15 +273,15 @@ def close_task(pane, tree, close_children, plan, snapshots, server, *, recheck=N
            for member, entry in entries.items()):
         raise helper_tabs.Stale(CLOSE_CHANGED)
     if recheck is not None:
-        recheck()
+        recheck(())
 
-    killed, detached = [], []
+    detached = []
     label = f'Closed task {name(entries[pane])}'
-    identifier = None
-    pending = None
+    journal = undo.CloseJournal(label, server)
+    killed = journal.closed
 
-    def journal():
-        nonlocal identifier
+    def actions():
+        pending = journal.pending
         # An Undo must leave a tab separate when its former task (or parent helper) cannot reopen.
         lost = {member for member in killed if member not in snapshots}
         if pending and pending not in snapshots:
@@ -317,14 +295,20 @@ def close_task(pane, tree, close_children, plan, snapshots, server, *, recheck=N
                 closed.append(dict(tab=snapshots[member], record=record,
                                    **({'pending': True} if member == pending else {})))
         kept = [change for change in detached if not lost.intersection(ancestors(change['pane']))]
-        actions = ([dict(kind='task-tree.close', closed=closed, kept=kept)] if closed
-                   else [dict(kind='task-tree.move', **change) for change in kept])
-        identifier = undo_store.checkpoint(identifier, label, actions, server=server)
+        return ([dict(kind='task-tree.close', closed=closed, kept=kept)] if closed
+                else [dict(kind='task-tree.move', **change) for change in kept])
 
     def interruption(error, *, stale=False):
         return CloseInterrupted(error, [(member, name(entries[member])) for member in killed],
-                                identifier, label, stale=stale,
+                                journal.identifier, label, stale=stale,
+                                unknown=[name(entries[journal.pending])] if journal.pending else [],
                                 without_undo=[name(entries[member]) for member in killed if member not in snapshots])
+
+    def finish():
+        for member in killed:
+            if member in snapshots:
+                undo.note_released(snapshots[member], tree.run)
+        journal.save(actions())
 
     try:
         for child in keep:
@@ -332,36 +316,21 @@ def close_task(pane, tree, close_children, plan, snapshots, server, *, recheck=N
             own = moved_record(entry, before[child])
             helper_tabs.write_record(child, before[child], own, tree.run)
             detached.append(undo._task_tree_change(entry, before[child], own))
-        if keep and recheck:
-            recheck()
         for member in order:
-            pending = member
-            try:
-                journal()
-            except (OSError, ValueError):
-                pending = None
-                raise
-            try:
+            def close_member():
                 helper_close.close_matching_pane(member, tree.run, expected=identities[member],
                                                 bucket=buckets[member], server=server,
                                                 fresh=tree.fresh_entries or tree.entries.values,
-                                                status=tree.fresh_status_row)
-            except helper_tabs.Stale:
-                pending = None  # the guard refused before the kill
-                raise
-            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
-                outcome = kill_outcome(member, server, tree.run)
-                if outcome is not None:
-                    pending = None
-                if outcome:
-                    killed.append(member)
-                    auto_resume.forget_pane(member, run=tree.run)
-                    helper_close.release_reviews(member)
-                raise
-            killed.append(member)
-            pending = None
+                                                status=tree.fresh_status_row,
+                                                recheck=(lambda: recheck(killed)) if recheck else None)
+
+            def recover():
+                auto_resume.forget_pane(member, run=tree.run)
+                helper_close.release_reviews(member)
+
+            journal.kill(member, tree.run, close_member, actions, recover)
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
-        if not killed and pending is None:
+        if not killed and journal.pending is None:
             for change in detached[:]:
                 try:
                     helper_tabs.write_record(change['pane'], change['after'], change['before'], tree.run)
@@ -369,27 +338,22 @@ def close_task(pane, tree, close_children, plan, snapshots, server, *, recheck=N
                     continue
                 detached.remove(change)
         try:
-            for member in killed:
-                if member in snapshots:
-                    undo.note_released(snapshots[member], tree.run)
-            journal()
+            finish()
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
             pass  # the staged kill already has a durable record when it can be undone
         stale = isinstance(exc, helper_tabs.Stale)
-        error = (CLOSE_CHANGED if stale else 'The task close only partly completed. Reload the task tree.'
-                 if killed or detached or pending else 'Tether could not close the task. Reload the task tree.')
+        error = ((str(exc) if recheck else CLOSE_CHANGED) if stale else
+                 'The task close only partly completed. Reload the task tree.'
+                 if killed or detached or journal.pending else 'Tether could not close the task. Reload the task tree.')
         raise interruption(error, stale=stale) from exc
     try:
-        for member in killed:
-            if member in snapshots:
-                undo.note_released(snapshots[member], tree.run)
-        journal()
+        finish()
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         raise interruption('The tabs closed. Tether could not finish saving Undo.') from exc
     audit.record('tab.close', label, pane=pane, closed=order, kept=keep)
     result = {'ok': True, 'closed': order, 'kept': keep}
-    if identifier:
-        result['undo'] = identifier
+    if journal.identifier:
+        result['undo'] = journal.identifier
     if without_undo := [name(entries[member]) for member in killed if member not in snapshots]:
         result['closed_without_undo'] = without_undo
     return result

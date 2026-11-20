@@ -47,6 +47,15 @@ class Private(unittest.TestCase):
 
 
 class StoreTests(Private):
+    def test_successful_close_offers_the_checkpoint_without_writing_another_step(self):
+        tab = {'pane': '%1', 'name': 'Test tab', 'server': '10:20', 'options': {}, 'session_options': {}}
+        with undo_store.acting('user'), undo_store.step():
+            identifier = undo.close_tab('%1', mock.Mock(), tab, 'Test tab', close=lambda: None)
+            headers = undo_api.headers(200)
+        step, = undo_store.entries()
+        self.assertEqual(headers, {'X-Tether-Undo': identifier, 'X-Tether-Undo-Label': 'Closed%20tab%20%60Test%20tab%60'})
+        self.assertEqual(identifier, step['id'])
+
     def test_off_until_enabled_writes_nothing_and_reads_no_tmux(self):
         # Other test modules and tools import the routes: they must never write the real history (server.py enables).
         run = mock.Mock(side_effect=AssertionError('no tmux read while recording is off'))

@@ -136,16 +136,18 @@ class PickerChooseTests(unittest.TestCase):
             self.choose(pane, 3, rows)
         self.assertEqual(pane.keys, ['Up'])
 
-    def test_numbered_multi_select_ticks_a_row_with_space(self):
+    def test_numbered_multi_select_cannot_tick_without_a_verified_prompt(self):
         rows = ['1. ☐ Alpha', '2. ☐ Beta', '3. ☐ Gamma']
         pane = FakePane(rows, hint='Space to toggle · Enter to confirm · Esc to cancel')
-        self.choose(pane, 2, ['☐ Alpha', '☐ Beta', '☐ Gamma'], then='Space')
-        self.assertEqual(pane.keys, ['Down', 'Down', 'Space'])
+        with self.assertRaises(terminal.MenuChanged):
+            self.choose(pane, 2, ['☐ Alpha', '☐ Beta', '☐ Gamma'], then='Space')
+        self.assertEqual(pane.keys, [])
 
-    def test_numbered_multi_select_done_presses_enter_on_the_marked_row(self):
+    def test_numbered_multi_select_cannot_submit_without_a_verified_prompt(self):
         pane = FakePane(['1. ☑ Alpha', '2. ☐ Beta'], cursor=1, hint='Space to toggle · Enter to confirm · Esc to cancel')
-        self.choose(pane, 1, ['☑ Alpha', '☐ Beta'], then='Enter')
-        self.assertEqual(pane.keys, ['Enter'])
+        with self.assertRaises(terminal.MenuChanged):
+            self.choose(pane, 1, ['☑ Alpha', '☐ Beta'], then='Enter')
+        self.assertEqual(pane.keys, [])
 
     def test_done_after_the_list_closed_presses_nothing(self):
         pane = FakePane(['1. ☑ Alpha', '2. ☐ Beta'], hint='Space to toggle · Enter to confirm · Esc to cancel')

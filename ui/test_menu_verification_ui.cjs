@@ -10,6 +10,10 @@ const pane = { id: '%12', tmux_session: '$1', label: 'Menu test', dir: '/fixture
   state: 'Input needed', writable: true, thread: 'menu-thread', approval: null }
 const question = 'Which screenshot format should the report use?'
 const revision = 'a'.repeat(64)
+const listedRevision = 'b'.repeat(64)
+const options = [{ id: 1, text: 'PNG', selected: true }, { id: 2, text: 'WebP' }]
+const approvalPane = { ...pane, id: '%13', thread: 'approval-thread', state: 'Approval', attention: null,
+  approval: { id: 'approval-1', actionable: true, text: 'Run the report?', options: [{ id: 1, text: 'Yes' }] } }
 const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.woff2': 'font/woff2' }
 const replies = {
   footer: { observed: true, model: 'Opus', mode: 'default', notices: [] },
@@ -46,10 +50,12 @@ async function main() {
           return route.fulfill({ json: { accepted: true } })
         }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
-        if (endpoint === 'sessions') return route.fulfill({ json: { sessions: [pane], default_thread: pane.thread } })
+        if (endpoint === 'sessions') return route.fulfill({ json: { sessions: [{ ...pane, attention: {
+          id: 'listed-menu', reason: 'menu', question, options, menu_verified: listedRevision,
+        } }, approvalPane], default_thread: pane.thread } })
         if (endpoint === 'chat') return route.fulfill({ json: { ...pane, session: pane.id, messages: [], busy: false, earlier: 0,
           attention: { id: 'menu-1', reason: 'menu', text: question, question, menu_verified: verified ? revision : false,
-            ...(verified ? { options: [{ id: 1, text: 'PNG', selected: true }, { id: 2, text: 'WebP' }] } : {}) } } })
+            ...(verified ? { options } : {}) } } })
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { uiUsage: false }, version: 1 } })
         return route.fulfill({ json: replies[endpoint] ?? {} })
       }
@@ -101,8 +107,25 @@ async function main() {
         }
       }
     }
+    const toggle = page.getByRole('button', { name: /^Needs you,/ })
+    if (await toggle.getAttribute('aria-pressed') === 'false') await toggle.click()
+    const inbox = page.getByRole('complementary', { name: 'Needs you' })
+    const row = inbox.getByRole('button', { name: /^Question: / })
+    for (const option of options) {
+      const chose = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/mobile/api/menu')
+      await row.press(String(option.id))
+      assert.deepEqual((await chose).postDataJSON(), {
+        session: pane.id, thread: pane.thread, choice: option.id, label: option.text, revision: listedRevision,
+      })
+      await inbox.getByRole('button', { name: new RegExp(option.text) }).and(inbox.locator('button:not([disabled])')).waitFor()
+    }
+    const approved = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/mobile/api/approval')
+    await inbox.getByRole('button', { name: /^Needs permission: / }).press('y')
+    assert.deepEqual((await approved).postDataJSON(), {
+      session: approvalPane.id, thread: approvalPane.thread, approval: approvalPane.approval.id, choice: 1,
+    })
     assert.deepEqual(errors, [])
-    console.log('Verified and unverified chat menus pass at 320 px and 1280 px.')
+    console.log('Dock menus pass at 320 px and 1280 px. Inbox digits and Y send the listed identities.')
   } finally { await browser.close() }
 }
 

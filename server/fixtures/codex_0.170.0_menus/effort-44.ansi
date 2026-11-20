@@ -1,0 +1,40 @@
+[2m──────╯[0m
+
+
+  [38;5;75m>_ [1m[39mOpenAI Codex[0;2m (v0.170.0)[0m
+     [2m/tmp/…/scratchpad/r8-codex-cwd[0m
+
+[2m  To get started, describe a task or try one
+of these commands:[0m
+
+  /init[2m - create an AGENTS.md file with[0m
+[2minstructions for Codex[0m
+  /status[2m - show current session[0m
+[2mconfiguration[0m
+  /permissions[2m - choose what Codex is[0m
+[2mallowed to do[0m
+  /model[2m - choose what model and reasoning[0m
+[2meffort to use[0m
+  /review[2m - review any changes and find[0m
+[2missues[0m
+
+[38;5;255m[48;5;238m [39m
+[1;2m[38;5;255m› [0m[38;5;255m[48;5;238mThis is a throwaway test tab. Reply[39m
+[38;5;255m  'ready' and do nothing else.[39m
+[38;5;255m [39m
+[49m
+[2m• [0mready
+
+[2m  Worked for 14s • 04:43
+[0m
+
+  [1mSelect Reasoning Level for GPT-6.2-Sol[0m
+
+
+  1. Low (default)
+  2. Medium
+  3. High
+  4. Extra high
+[1;7m› 5. More reasoning… (current)
+[0m
+  [1menter[0;2m select · [0;1mesc[0;2m back

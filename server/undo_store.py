@@ -194,6 +194,18 @@ def flush():
     return _save(holder['label'] or labels[0], actions, who, at, server)
 
 
+def offer_checkpoint(identifier, label):
+    """Let the response name a step that the close already saved to disk."""
+    holder = _STEP.get()
+    if holder is not None and identifier is not None:
+        holder['checkpoint'] = {'id': identifier, 'label': label}
+
+
+def offered_checkpoint():
+    holder = _STEP.get()
+    return holder.get('checkpoint') if holder is not None else None
+
+
 def spoil():
     """A part of the open step could not be recorded: save none of the step. Undo of the other parts alone would put
     things back wrong."""

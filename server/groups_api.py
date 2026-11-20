@@ -11,10 +11,9 @@ import groups
 import helper_close
 import helper_tabs
 import projects
-from task_tree_api import CloseInterrupted, interrupted_response
+from task_tree_api import interrupted_response
 from terminal_input import UUID
 import undo
-import undo_store
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
@@ -28,7 +27,7 @@ def handles(path):
 def _answer(handler, work):
     try:
         handler.respond(200, work())
-    except CloseInterrupted as exc:
+    except undo.CloseInterrupted as exc:
         interrupted_response(handler, exc)
     except (groups.GroupError, projects.ProjectError) as exc:
         handler.respond(exc.status, {'error': str(exc)})
@@ -126,21 +125,32 @@ def _close(session_id, group_id, body, fresh, run, status):
     identities = {pane: helper_close.close_identity(live[pane]) for pane in planned}
 
     # Close grandchildren first. Keep the existing separate Undo steps for each tab.
-    closed, saved_step = [], None
+    closed, saved_step, saved_label = [], None, ''
     for pane in sorted(members, key=members.get, reverse=True):
         saved = undo.capture_safe(pane, run, [live[pane]])
-        try:
+        title = helper_tabs.visible_name(live[pane]) or pane
+
+        def close():
             helper_close.close_matching_pane(pane, run, expected=identities[pane], bucket=buckets[pane],
                                             server=server, fresh=fresh, status=close_status)
-        except helper_tabs.Stale as exc:
-            raise CloseInterrupted(helper_close.CLOSE_CHANGED, closed, saved_step['id'] if saved_step else None,
-                                   saved_step['label'] if saved_step else '', stale=True) from exc
-        title = helper_tabs.visible_name(live[pane]) or pane
+
+        try:
+            step = undo.close_tab(pane, run, saved, title, close=close, server=server)
+        except undo.CloseInterrupted as exc:
+            if exc.members:
+                audit.record('tab.close', f'Closed tab {title}', pane=pane)
+            raise undo.CloseInterrupted(str(exc), closed + exc.members, exc.undo or saved_step,
+                                        exc.label if exc.undo else saved_label, stale=exc.status == 409,
+                                        unknown=exc.unknown) from exc
         closed.append((pane, title))
         audit.record('tab.close', f'Closed tab {title}', pane=pane)
-        step = undo.record_tab_close(saved, run)
-        saved_step = undo_store.flush() or step or saved_step
-    undo.group_remove(session_id, group_id, run, after_close=True)
+        if step:
+            saved_step, saved_label = step, undo.tab_close_label(saved, title)
+    try:
+        undo.group_remove(session_id, group_id, run, after_close=True)
+    except undo.CLOSE_ERRORS as exc:
+        raise undo.CloseInterrupted('The tabs closed. Tether could not finish removing the stack.',
+                                    closed, saved_step, saved_label) from exc
     return {'ok': True}
 
 
@@ -181,7 +191,7 @@ def post(handler, run=subprocess.run, sessions=lambda: [], *, fresh=None, status
                 if name == 'close':
                     try:
                         return _close(session_id, group_id, body, fresh or sessions, run, status)
-                    except CloseInterrupted:
+                    except undo.CloseInterrupted:
                         raise
                     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
                         raise groups.GroupError(503, 'Tether could not finish closing the stack. Refresh its tabs.') from exc
