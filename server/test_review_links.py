@@ -7139,6 +7139,45 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.assertGreater(status_reads, 1, "Retry must read Git status again")
         self.assertIn(f"Commit under review: {head}", self.assert_follow_up_requested())
 
+    def approve_after_one_failed_read(self, owner, attribute):
+        self.worker_turn()
+        head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        read = getattr(owner, attribute)
+        first_read = True
+
+        def fail_first_read(*args, **kwargs):
+            nonlocal first_read
+            if first_read:
+                first_read = False
+                return None
+            return read(*args, **kwargs)
+
+        with patch.object(owner, attribute, side_effect=fail_first_read):
+            self.deliver_approval(head)
+        # Allow the watcher to defer the verdict until the read recovers.
+        self.deliver_approval(head)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+        return head
+
+    def test_follow_up_commit_is_reviewed_after_one_failed_approval_scope_read(self):
+        self.approve_after_one_failed_read(self, "scope")
+        self.observe("Working")
+        head = self.commit_in(self.reviewed, "Follow-up commit")
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        self.assertIn(f"Commit under review: {head}", self.assert_follow_up_requested())
+
+    def test_dirty_to_clean_follow_up_is_reviewed_without_saved_fingerprint(self):
+        draft = self.reviewed / "draft.txt"
+        draft.write_text("Reviewed uncommitted draft.\n", encoding="utf-8")
+        head = self.approve_after_one_failed_read(server.review_scope, "fingerprint")
+        self.observe("Working")
+        draft.unlink()
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        self.assertIn(f"Commit under review: {head}", self.assert_follow_up_requested())
+
     def test_rejected_gate_check_preserves_review_of_worktree_with_edit(self):
         alternate = self.another_worktree()
         head = self.approve_reviewed_worktree()
@@ -7275,6 +7314,30 @@ class ApprovalTurnTimingTests(ApprovalTurnTimingFixture):
         self.observe()
         self.worker_turn()
         self.assertEqual(self.send.call_count, 2)
+
+    def test_unchanged_approval_turn_with_only_a_finish_time_allows_idle_close(self):
+        self.approve_current_work()
+        approval = self.send.call_args.args[1]
+        self.observe("Working")
+        finish_time = datetime.fromtimestamp(self.now + 1, timezone.utc).isoformat()
+        transcript = self.root / "worker.jsonl"
+        records = (
+            {"type": "user", "message": {"content": approval}},
+            {"type": "assistant", "timestamp": finish_time, "message": {
+                "content": [{"type": "text", "text": "Pushed."}],
+            }},
+        )
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        self.worker["transcript"] = str(transcript)
+        self.turn_started_at = None  # Use the transcript here instead of the fixture's clock.
+        self.turn_source = server.review_turn_source(self.worker)
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+
+        self.now += helper_close.IDLE
+        self.observe()
+        self.assertFalse(self.reviewer_should_stay_open(),
+                         f"The completed approval turn {self.turn_source!r} should allow idle close")
 
     def test_late_push_skips_review_after_an_unrelated_review_notice(self):
         self.approve_current_work()

@@ -795,7 +795,7 @@ def _follow_up_change(link, worker, scope):
     if at is not None and live.get('folder') and live['folder'] != folder:
         return True, live  # a newer gate record selected a worktree with no baseline
     changed = (before.get('commit') not in (None, live['commit'])
-               or before.get('dirty') is False and dirty
+               or type(before.get('dirty')) is bool and dirty != before['dirty']  # a new or removed draft
                or before_mark is not None and not review_scope.same_work_mark(before_mark, mark))
     if not changed and any(before.get(field) is None for field in fields):
         return None, None
@@ -919,12 +919,13 @@ def _review_entry(worker, folder):
     return dict(worker, review_folder=folder) if isinstance(folder, str) and folder else worker
 
 
-def _verdict_state(link, worker, scope):
-    """Read the verdict's worktree before delivery can start another worker turn."""
+def _verdict_state(link, worker, scope, commit=None):
+    """Read the verdict's worktree before delivery can start another worker turn. When the scope read fails, keep the
+    approved commit that the HEAD read just verified, so a later commit is still a change."""
     folder = link.get('review_folder')
     live = _call(scope, _review_entry(worker, folder))
     live = live if isinstance(live, dict) else {}
-    return dict(commit=live.get('commit'), dirty=live.get('dirty'), mark=live.get('mark'),
+    return dict(commit=live.get('commit') or commit, dirty=live.get('dirty'), mark=live.get('mark'),
                 folder=folder or live.get('folder'))
 
 
@@ -1433,7 +1434,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 elif not bound and named and not (current and current == named):
                     stale = named  # no binding (no readable commit at the request), but the reply names a commit
                 if approved and stale is None:
-                    verdict = _verdict_state(link, worker, scope)
+                    verdict = _verdict_state(link, worker, scope,
+                                             current if current and current == (bound or named) else None)
                     if (bound or named) and verdict['commit'] is not None and verdict['commit'] != (bound or named):
                         stale = bound or named
                 if bound or named:
@@ -1596,9 +1598,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if new_finish:
                 link['follow_up_checked_at'] = finished_at
             approved_dirty = link.get('approved_dirty')
-            if started_at is None or at is None:
+            if at is None or started_at is None and finished_at is None:
                 # Preserve the observed-turn and reply-digest paths when the transcript has no times.
                 handled_approval = finished_at is None and source in ('review-feedback', 'user')
+            elif started_at is None:  # the prompt has no time: its finish after the verdict places the turn
+                handled_approval = source in ('review-feedback', 'user') and finished_at > at
             else:
                 handled_approval = (source == 'review-feedback' and started_at >= at
                                     or source == 'user' and started_at > at)
