@@ -1065,12 +1065,15 @@ class Feed(unittest.TestCase):
     def test_first_sight_of_a_waiting_tab_reports_no_old_turn(self):
         # A sign-in or approval prompt on first sight is not a new turn. Only an outcome identity that differs
         # from the one at first sight is reported.
-        for state in ('Input needed', 'Approval', 'Working'):
-            for kind in ('done', 'failed'):
-                with self.subTest(state=state, kind=kind):
+        # A transcript with no closing record (no turn_duration, a Codex turn that ends on an error) still reads
+        # as open, so open alone is no evidence that a turn runs.
+        cases = [(state, kind, False) for state in ('Input needed', 'Approval', 'Working') for kind in ('done', 'failed')]
+        cases += [(state, kind, True) for state in ('Input needed', 'Approval') for kind in ('done', 'failed')]
+        for state, kind, still_open in cases:
+                with self.subTest(state=state, kind=kind, open=still_open):
                     world = World()
                     world.act('%1', action='claim')
-                    world.outcomes['%2'] = {'kind': kind, 'text': 'Old turn.', 'identity': 'old'}
+                    world.outcomes['%2'] = {'kind': kind, 'text': 'Old turn.', 'identity': 'old', 'open': still_open}
                     world.states['%2'] = 'Unknown'
                     world.tick()
                     world.states['%2'] = state
@@ -1081,6 +1084,43 @@ class Feed(unittest.TestCase):
                     world.tick(coordinator.JOIN)
                     world.tick(coordinator.GAP)
                     self.assertEqual([text for _, text in world.sent if 'Old turn.' in text], [])
+
+    def test_first_sight_with_real_transcripts_reports_only_a_changed_outcome(self):
+        # Real parsers: transcripts with no closing record read as open. A prompt that closes with the transcript
+        # unchanged sends nothing. A turn that was running at the prompt and then ends is reported.
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        source = Path(__file__).parent / 'fixtures' / 'coordinator_failed'
+        lines = lambda name, count: b''.join((source / f'{name}.jsonl').read_bytes().splitlines(keepends=True)[:count])
+        codex_error = json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'error', 'turn_id': 'turn-2', 'root_turn_id': 'turn-2', 'message': 'Usage limit.'}}).encode() + b'\n'
+        codex_done = json.dumps({'type': 'event_msg', 'payload': {
+            'type': 'task_complete', 'turn_id': 'turn-2', 'root_turn_id': 'turn-2',
+            'last_agent_message': 'Turn result.'}}).encode() + b'\n'
+        cases = (
+            ('claude reply, no turn_duration', 'claude', lines('claude_peer', 7), b'', 0),
+            ('claude api error, no turn_duration', 'claude', lines('claude', 5), b'', 0),
+            ('codex ends on error', 'codex', lines('codex', 3) + codex_error, b'', 0),
+            ('codex turn runs at the prompt', 'codex', lines('codex', 3), codex_done, 1),
+        )
+        for name, agent, before, after, reports in cases:
+            for state in ('Input needed', 'Approval'):
+                with self.subTest(name=name, state=state):
+                    path = folder / f'{agent}-{state[0]}-{len(before)}.jsonl'
+                    path.write_bytes(before)
+                    world = World()
+                    real = coordinator.Feed(clock=lambda: world.now).latest_outcome
+                    world.outcome = lambda entry: real(dict(entry, agent=agent, transcript=str(path)))
+                    world.act('%1', action='claim')
+                    world.states['%2'] = state
+                    world.tick()
+                    with path.open('ab') as stream:
+                        stream.write(after)
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual(len(world.sent), reports)
 
     def test_failed_turn_waits_for_idle_to_settle(self):
         self.world.states['%2'] = 'Working'

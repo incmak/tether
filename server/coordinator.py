@@ -345,6 +345,10 @@ def _error_text(record, fallback):
     return fallback
 
 
+def _fingerprint(outcome):
+    return outcome['kind'], outcome['identity'], outcome['text']
+
+
 def _claude_turn(state, index, record):
     kind = record.get('type')
     if any(record.get(flag) for flag in ('isSidechain', 'isCompactSummary', 'isAutoCompactSummary')):
@@ -553,14 +557,18 @@ class Feed:
             # First sight of this tab: a prompt that is already on screen is in the tabs list, so it is no update.
             record = self.seen[entry['id']] = {'state': state, 'prompt': prompt, 'since': now, 'worked': None,
                                                'sent_prompt': prompt, 'finished': None, 'seeded': False,
-                                               'running_at_first_sight': False,
+                                               'running_at_first_sight': False, 'first': None,
                                                'tmux_session': entry.get('tmux_session'), 'transcript': entry.get('transcript')}
         if not record['seeded'] and state in KNOWN:
-            # The latest outcome at first sight is old unless a turn is in progress in the transcript: only a turn
-            # with another identity is new. A sign-in prompt that closes with no new turn reports nothing.
             seen = latest_outcome(entry)
-            if state == 'Idle' or not seen.get('open'):
+            if state == 'Idle':
                 record['finished'] = seen['identity'] or None
+            # The outcome at first sight is old: a sign-in prompt that closes with no new turn reports nothing.
+            # The transcript cannot always show that a turn ended (no turn_duration, a Codex turn that ends on an
+            # error), so the whole outcome must change. Exception: a Working tab whose finished reply is already
+            # written (Claude writes the final text before turn_duration, while Stop hooks run).
+            running_reply = state == 'Working' and seen.get('open') and seen['kind'] in FINISHED
+            record['first'] = None if running_reply else _fingerprint(seen)
             # A turn that runs now started before the first poll, so its full duration is not known.
             record['running_at_first_sight'] = state != 'Idle'
             record['seeded'] = True
@@ -584,6 +592,10 @@ class Feed:
         first_turn = record['running_at_first_sight']
         record.update(worked=None, running_at_first_sight=False)
         outcome = latest_outcome(entry)
+        if record['first'] is not None:
+            if _fingerprint(outcome) == record['first']:
+                return None
+            record['first'] = None
         if (outcome['kind'] not in FINISHED or outcome['identity'] == record['finished']
                 or outcome['kind'] != 'failed' and not first_turn
                 and (worked is None or record['since'] - worked < MINIMUM_WORK)):
