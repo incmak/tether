@@ -1436,7 +1436,15 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         start = start if isinstance(start, dict) else {}
         if upgrade_paused:
             # An older turn may finish before the queued parent prompt starts. Keep the original send time.
-            if _is_time(finished_at) and finished_at <= snapshot.get('review_turn_at', float('-inf')):
+            judged = snapshot.get('review_turn_at', float('-inf'))
+            if start.get('agent') and not (_is_time(finished_at) and finished_at > max(
+                    judged, cap.get('upgrade_at', float('-inf')))):
+                # A parent turn was seen Working, but this read does not show its completion. Keep the evidence
+                # until a completion after the pause is read.
+                cap['restart'] = start
+                by_agent = True
+                finished_at = None
+            elif _is_time(finished_at) and finished_at <= judged:
                 by_agent = True  # A transcript can return a turn that was judged before.
             elif _is_time(started_at):
                 # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a

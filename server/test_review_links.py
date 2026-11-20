@@ -3213,6 +3213,37 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe(**{'%13': 'Idle'})
                 self.assertFalse(paused())
 
+    def test_upgrade_agent_flag_survives_a_read_without_its_completion(self):
+        # An older watcher saw a parent turn Working at 1002 and consumed its marker. Reads that do not show a
+        # completion after the pause must keep that evidence until the parent turn's completion is read.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for first_read in (('unknown', None, None), ('user', None, None), ('user', 990, 999), ('background', 995, 998)):
+            with self.subTest(first_read=first_read):
+                self.clock.return_value = 1000
+                self.send.reset_mock()
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0, **{'%13': 'Idle'})
+                rows = self.rows()
+                cap, = (row for row in rows if row.get('cap'))
+                cap['restart'] = dict(review_links._restart_state(cap), agent=True)
+                cap.pop('agent_prompt', None)
+                self.file.write_text(json.dumps(rows))
+                self.turn_source = Mock(return_value=first_read)
+                self.observe(**{'%13': 'Idle'})
+                self.turn_source = Mock(return_value=('user', 1002, 1004))
+                self.observe(**{'%13': 'Idle'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
+                self.send.assert_not_called()
+                # The next Mak turn clears the pause.
+                self.turn_source = Mock(return_value=('user', 1006, 1008))
+                self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])
+
     def test_upgrade_alert_for_an_unbound_cap_waits_only_for_the_current_conversation(self):
         self.enterContext(own_time(review_links, time=self.clock))
         self.turn_source = Mock(return_value=('background', None, None))
