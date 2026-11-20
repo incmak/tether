@@ -171,10 +171,8 @@ class Requests:
 class AccessTests(Requests, unittest.TestCase):
     def setUp(self):
         self.fake = SignedChrome()
-        self.display = Mock()
-        self.real = browser.Browser(signed=True, profile=Path('/nonexistent/signed-grant-test'), display=self.display,
-                                    chrome_finder=lambda: '/fake/chrome',
-                                    launcher=lambda chrome, profile, **kw: self.fake.launcher(chrome, profile))
+        self.real = browser.Browser(signed=True, profile=Path('/nonexistent/signed-grant-test'),
+                                    chrome_finder=lambda: '/fake/chrome', launcher=self.fake.launcher)
         self.notifier = Mock()
         self.access = signed.Access(self.real, self.notifier, agent_finder=lambda pane: 'codex', request_seconds=3)
         self.waiters = []
@@ -588,8 +586,8 @@ const {chromium} = require('playwright-core');
 '''
 
 
-@unittest.skipUnless(browser.find_signed_chrome() and shutil.which('Xvfb') and shutil.which('node') and playwright_modules(),
-                     'Google Chrome, Xvfb, node, and ui/npm ci are required')
+@unittest.skipUnless(shutil.which('google-chrome') and shutil.which('node') and playwright_modules(),
+                     'Google Chrome, node, and ui/npm ci are required')
 class RealSignedAccessTests(Requests, unittest.TestCase):
     def test_allow_playwright_navigation_end_and_token_refusal(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -603,7 +601,8 @@ class RealSignedAccessTests(Requests, unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(data)
         with tempfile.TemporaryDirectory(prefix='tether-signed-grant-real-') as folder:
-            self.real = browser.Browser(signed=True, profile=Path(folder) / 'signed/profile')
+            self.real = browser.Browser(signed=True, profile=Path(folder) / 'profile',
+                                        chrome_finder=lambda: shutil.which('google-chrome'))
             self.access = signed.Access(self.real)
             self.waiters = []
             page_server = ThreadingHTTPServer(('127.0.0.1', 0), Page)
@@ -613,7 +612,7 @@ class RealSignedAccessTests(Requests, unittest.TestCase):
             try:
                 self.real.new_tab('about:blank')  # Mak's unrelated saved tabs must remain invisible.
                 grant, result = self.grant()
-                print(json.dumps({'chrome_pid': self.real.pid, 'xvfb_pid': self.real.display.process.pid}), flush=True)
+                print(json.dumps({'chrome_pid': self.real.pid}), flush=True)
                 node = subprocess.Popen(['timeout', '45', 'node', '-e', REAL_CLIENT], stdin=subprocess.DEVNULL,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
                                         env=dict(os.environ, NODE_PATH=playwright_modules(), E2E_CDP_URL=result['cdp'],

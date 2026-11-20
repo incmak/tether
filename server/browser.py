@@ -23,13 +23,12 @@ from uuid import uuid4
 import browser_container
 import paths
 import procinfo
-from browser_display import VirtualDisplay
 
 IDLE_SECONDS = 15 * 60
 CALL_TIMEOUT = 15
 MAX_TABS = 12
 PROFILE = paths.CACHE / 'browser' / 'profile'  # both folders are mode 700
-SIGNED_PROFILE = paths.CACHE / 'signed-browser' / 'profile'
+SIGNED_UNAVAILABLE = 'The signed-in browser needs Docker and the pinned Chromium image.'
 MODES = ('private', 'saved')
 DESKTOP = (1280, 800)
 # JPEG quality of streamed frames. At 60, text on a 2x screen showed blocks. Desktop tabs render at 2x (PRESETS) for the same reason;
@@ -93,17 +92,6 @@ def find_chrome():
     builds = sorted(builds,
                     key=lambda path: int(re.search(r'chromium-(\d+)', path).group(1)), reverse=True)
     return next((path for path in builds if os.access(path, os.X_OK)), None)
-
-
-def find_signed_chrome():
-    """The signed-in browser always uses branded Chrome, never the agent's override."""
-    if procinfo.DARWIN:
-        for root in ('/Applications', paths.HOME / 'Applications'):
-            path = str(Path(root) / 'Google Chrome.app/Contents/MacOS/Google Chrome')
-            if os.access(path, os.X_OK):
-                return path
-        return None
-    return '/usr/bin/google-chrome' if os.access('/usr/bin/google-chrome', os.X_OK) else None
 
 
 def needs_no_sandbox():
@@ -295,7 +283,7 @@ def _channel():
     return _high_fd(one.detach()), _high_fd(other.detach())
 
 
-def launch(chrome, profile, extra=(), *, headed=False, env=None):
+def launch(chrome, profile, extra=()):
     """Start Chromium in its own process group with DevTools on fds 3 and 4.
 
     Return (pid, read_fd, write_fd). TETHER_CHROME_STDERR sets the directory for per-launch logs.
@@ -303,7 +291,7 @@ def launch(chrome, profile, extra=(), *, headed=False, env=None):
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     for folder in (profile.parent, profile):  # mkdir's mode does not apply to folders that already exist
         folder.chmod(0o700)
-    args = [chrome, *(['--disable-blink-features=AutomationControlled', '--window-position=0,0'] if headed else ['--headless=new']),
+    args = [chrome, '--headless=new',
             '--remote-debugging-pipe', '--user-data-dir=' + str(profile),
             '--no-first-run', '--no-default-browser-check', '--disable-sync', '--mute-audio', '--password-store=basic',
             '--window-size=%d,%d' % DESKTOP, '--force-device-scale-factor=2', *extra, 'about:blank']
@@ -323,7 +311,7 @@ def launch(chrome, profile, extra=(), *, headed=False, env=None):
                (os.POSIX_SPAWN_DUP2, to_child_r, 3),
                (os.POSIX_SPAWN_DUP2, from_child_w, 4)]
     try:
-        pid = os.posix_spawn(chrome, args, dict(os.environ, **(env or {})), file_actions=actions, setsid=True)
+        pid = os.posix_spawn(chrome, args, os.environ, file_actions=actions, setsid=True)
     except OSError:
         os.close(from_child_r)
         os.close(to_child_w)
@@ -373,13 +361,13 @@ class Browser:
     """One panel browser. Public methods start it when needed and are safe to call from any thread."""
 
     def __init__(self, launcher=launch, chrome_finder=None, profile=None, clock=time.monotonic,
-                 *, signed=False, display=None, container=None):
+                 *, signed=False, container=None):
         self.container = None  # browser_container.Container: Chromium runs there and Selkies streams it
         self.launcher, self.clock = launcher, clock
-        self.chrome_finder = chrome_finder or (find_signed_chrome if signed else find_chrome)
-        self.profile = profile if profile is not None else (SIGNED_PROFILE if signed else PROFILE)
+        self.chrome_finder = chrome_finder or ((lambda: None) if signed else find_chrome)
+        self.profile = profile if profile is not None or signed else PROFILE
         self.signed = signed
-        self.display = (display or VirtualDisplay()) if signed else None
+        self.window_view = False
         self.default_mode = 'saved' if signed else 'private'
         self.lock = threading.RLock()
         self.conn = None
@@ -423,14 +411,10 @@ class Browser:
             self._reset()
             chrome = self.chrome_finder()
             if not chrome:
-                raise BrowserError('Google Chrome is not installed.' if self.signed else
+                raise BrowserError(SIGNED_UNAVAILABLE if self.signed else
                                    'No Chromium found. Install one or set MOBILE_TMUX_CHROME.')
             try:
-                if self.container is None and self.signed:
-                    env = self.display.start()
-                    pid, read_fd, write_fd = self.launcher(chrome, self.profile, headed=True, env=env)
-                else:
-                    pid, read_fd, write_fd = self.launcher(chrome, self.profile)
+                pid, read_fd, write_fd = self.launcher(chrome, self.profile)
                 self.pid = pid
                 self.conn = Connection(read_fd, write_fd, self._event, self._closed)
                 version = self.conn.call('Browser.getVersion', timeout=30)
@@ -467,13 +451,12 @@ class Browser:
                 _reap(pid)
             if conn:
                 conn._shut()
-            if self.container is None and self.display:
-                self.display.stop()
             if self.container is not None:
                 self.container.stop()
             self._reset()
 
     def _reset(self):
+        self.window_view = False
         for tab in self.tabs.values():
             with tab.changed:
                 tab.changed.notify_all()
@@ -492,8 +475,6 @@ class Browser:
                 if pid:
                     _reap(pid)
                 self.idle_stop.set()
-                if self.container is None and self.display:
-                    self.display.stop()
                 self._reset()
 
     def _watch(self, stopped):
@@ -525,7 +506,10 @@ class Browser:
         self.order.append(target)
         self.conn.call('Page.enable', session=session)
         if self.container is not None:
-            self._fullscreen(tab)
+            try:
+                self._set_window_bounds(tab, self.window_view)
+            except BrowserError:
+                pass  # an agent target may have no window, or the tab closed during adoption
         self._apply_preset(tab, 'desktop')
         if mode == 'agent':
             self._agent_size(tab)
@@ -552,20 +536,53 @@ class Browser:
             self._navigate(tab, url)
         return tab
 
-    def _fullscreen(self, tab):
-        """Each private context opens its own window; fullscreen hides that window's toolbar (--kiosk covers only the
-        first window). Tether's tab bar and address bar replace Chrome's."""
-        try:
-            window = self.conn.call('Browser.getWindowForTarget', {'targetId': tab.target})['windowId']
-            self.conn.call('Browser.setWindowBounds', {'windowId': window, 'bounds': {'windowState': 'fullscreen'}})
-        except (BrowserError, KeyError, TypeError):
-            pass  # a tab that closed meanwhile
+    def _set_window_bounds(self, tab, window_view):
+        """Fullscreen hides Chromium's toolbar. The whole-window view reveals it without moving the page."""
+        window = self.conn.call('Browser.getWindowForTarget', {'targetId': tab.target})
+        if 'windowId' not in window:
+            raise BrowserError('That tab has no browser window.')
+        current = window.get('bounds', {}).get('windowState')
+        wanted = 'maximized' if window_view else 'fullscreen'
+        if current == wanted:
+            return
+        if window_view and current != 'normal':
+            # Chromium requires a fullscreen or minimized window to return to normal before maximizing.
+            self.conn.call('Browser.setWindowBounds', {'windowId': window['windowId'], 'bounds': {'windowState': 'normal'}})
+        self.conn.call('Browser.setWindowBounds', {'windowId': window['windowId'], 'bounds': {'windowState': wanted}})
+
+    def set_window_view(self, target, enabled):
+        if not self.signed or self.container is None:
+            raise ValueError('The whole-window view is only for the signed-in browser.')
+        if type(enabled) is not bool:
+            raise ValueError('Choose whether to show the whole window.')
+        self.ensure()
+        with self.lock:
+            tab = self.tab(target)
+            try:
+                self._set_window_bounds(tab, enabled)
+                if tab.preset != 'desktop':
+                    self._apply_preset(tab, tab.preset, window_view=enabled)
+            except BrowserError:
+                try:
+                    self._set_window_bounds(tab, self.window_view)
+                    if tab.preset != 'desktop':
+                        self._apply_preset(tab, tab.preset)
+                except BrowserError:
+                    pass  # the window may have closed
+                raise
+            self.window_view = enabled
+            self._bump()
+            return {'window_view': enabled}
 
     def show(self, target):
         """Bring a tab's window to the front of the streamed screen (Selkies shows whatever is on top)."""
         self.ensure()
         with self.lock:
             tab = self.tab(target)
+            if self.signed and self.container is not None:
+                self._set_window_bounds(tab, self.window_view)
+                if tab.preset != 'desktop':
+                    self._apply_preset(tab, tab.preset)
             self.conn.call('Target.activateTarget', {'targetId': tab.target})
             self.conn.call('Page.bringToFront', session=tab.session)
             tab.last_input = self.clock()
@@ -586,6 +603,8 @@ class Browser:
                     'presets': [{'id': key, 'label': value['label'], 'width': value['width'], 'height': value['height'],
                                  'touch': value['mobile']} for key, value in PRESETS.items()]}
             if self.signed:
+                if self.container is not None:
+                    state['window_view'] = self.window_view
                 state.update(getattr(self.agent_proxy, 'panel_state', self.agent_proxy.state)()
                              if self.agent_proxy else {'requests': [], 'grants': []})
             return state
@@ -710,15 +729,17 @@ class Browser:
             self._bump()
             return tab.row()
 
-    def _apply_preset(self, tab, preset, width=None, height=None):
+    def _apply_preset(self, tab, preset, width=None, height=None, *, window_view=None):
         if tab.controller == 'agent':
             return
         spec = PRESETS[preset]
         session = tab.session
+        window_view = self.window_view if window_view is None else window_view
         if preset == 'desktop':
             width = _clamp(width, 320, 2560, DESKTOP[0])
             height = _clamp(height, 240, 1600, DESKTOP[1])
             tab.size = (width, height)
+        if preset == 'desktop' or window_view:
             if self.container is not None:  # the page fills its fullscreen window; Selkies sizes the screen to the panel
                 self.conn.call('Emulation.clearDeviceMetricsOverride', session=session)
             else:
@@ -761,36 +782,6 @@ class Browser:
         return {'ok': True}
 
     # screencast ------------------------------------------------------------------------------------------------
-    def window_watch(self, width, height):
-        if not self.signed:
-            raise BrowserError('The whole-window view is only for the signed-in browser.')
-        with self.lock:
-            self.ensure()
-            try:
-                return self.display.watch(width, height)
-            except RuntimeError as exc:
-                raise BrowserError(str(exc)) from exc
-
-    def window_unwatch(self):
-        if not self.signed:
-            raise BrowserError('The whole-window view is only for the signed-in browser.')
-        with self.lock:  # no ensure(): a closing stream must never start Chrome again
-            try:
-                return self.display.unwatch()
-            except RuntimeError as exc:
-                raise BrowserError(str(exc)) from exc
-
-    def window_input(self, events):
-        if not self.signed:
-            raise BrowserError('The whole-window view is only for the signed-in browser.')
-        with self.lock:
-            self.ensure()
-            self.touch()
-            try:
-                return self.display.input(events)
-            except RuntimeError as exc:
-                raise BrowserError(str(exc)) from exc
-
     def watch(self, target, max_width, max_height, css_size=None):
         """Register a viewer; start the screencast when it is the first. Returns the Tab."""
         self.ensure()
@@ -1158,7 +1149,7 @@ def frame_event(frame, browser_id='test'):
 
 
 BROWSER = Browser()  # the server's start gives it browser_container.default('test')
-SIGNED_BROWSER = Browser(chrome_finder=find_signed_chrome, profile=SIGNED_PROFILE, signed=True)
+SIGNED_BROWSER = Browser(signed=True)
 
 
 def stop_all():

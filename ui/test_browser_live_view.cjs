@@ -39,7 +39,7 @@ async function main() {
     if (req.url === '/browser/live/tether-wheel.js') { res.setHeader('Content-Type', 'text/javascript'); res.end(readFileSync(resolve(__dirname, '../server/selkies/tether-wheel.js'))); return }
     res.setHeader('Content-Type', 'text/html')
     res.end('<!doctype html><script src="tether-wheel.js"></script><title>Selkies fixture</title><body style="margin:0;background:#dee9fb;font:20px sans-serif"><p style="margin:24px">Live video fixture</p><input aria-label="Fixture input" style="margin:24px">'
-      + '<script>window.selkiesWheels = 0; document.body.addEventListener("wheel", () => window.selkiesWheels++)</script></body>')
+      + '<script>window.selkiesWheels = 0; window.addEventListener("wheel", () => window.selkiesWheels++)</script></body>')
   })
   await new Promise(done => liveServer.listen(0, '127.0.0.1', done))
   const livePort = liveServer.address().port
@@ -55,7 +55,11 @@ async function main() {
     window.run = 'run-1'; window.livePort = window.livePort || ${livePort};
     const api = async (path, body) => {
       window.calls.push({path, body});
-      if (path.startsWith('browser/tabs')) return {tabs:[window.tab, tablet], presets, nav:{back:true,forward:false}, live:'/browser/live/', live_port:window.livePort, live_run:window.run};
+      if (path.startsWith('browser/tabs')) return {tabs:[window.tab, tablet], presets, nav:{back:true,forward:false}, live:'/browser/live/', live_port:window.livePort, live_run:window.run, window_view:window.wholeWindow ?? false};
+      if (path === 'browser/window-view') {
+        window.wholeWindow = body.enabled;
+        return {window_view:window.wholeWindow};
+      }
       if (path === 'browser/device' && body.preset === 'agent') { window.tab = {...window.tab, controller:'agent'}; return window.tab }
       if (path === 'browser/device') {
         const {width,height,touch} = presets.find(preset => preset.id === body.preset)
@@ -84,7 +88,10 @@ async function main() {
     }] })
     await server.listen()
     browser = await chromium.launch({ executablePath: process.env.MOBILE_TMUX_CHROME || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] })
-    for (const [width, height, touch, agent, down, giveBack] of [[1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true], [1280, 900, false, false, false, true]]) {
+    for (const [width, height, touch, agent, down, giveBack, signed] of [
+      [1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true],
+      [1280, 900, false, false, false, true], [1280, 900, false, false, false, false, true], [320, 700, true, false, false, false, true],
+    ]) {
       const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch, serviceWorkers: 'block' })
       const page = await context.newPage()
       page.setDefaultTimeout(15000)
@@ -97,6 +104,10 @@ async function main() {
       if (agent) await page.addInitScript(() => { window.fixtureTab = { mode: 'agent', controller: 'agent', preset: 'desktop' } })
       if (giveBack) await page.addInitScript(() => { window.fixtureTab = { mode: 'agent', controller: 'user', preset: 'desktop' } })
       if (down) await page.addInitScript(port => { window.livePort = port }, closedPort)
+      if (signed) await page.addInitScript(() => {
+        localStorage.setItem('tether-browser-which', 'signed')
+        window.fixtureTab = { mode: 'saved' }
+      })
       await page.addInitScript(() => {
         window.calls = []; window.sockets = []; window.sources = []
         const NativeWebSocket = window.WebSocket
@@ -152,10 +163,44 @@ async function main() {
       assert(Math.abs(box.width - stage.width) < 1 && Math.abs(box.height - stage.height) < 1, 'live view fills the stage')
       await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/show' && call.body.tab === 'fixture'))
       // No stream brings tab titles and history, so the panel polls for them, named by its tab.
-      await page.waitForFunction(() => window.calls.filter(call => call.path === 'browser/tabs?tab=fixture').length >= 2, null, { timeout: 6000 })
+      await page.waitForFunction(() => window.calls.filter(call => call.path.startsWith('browser/tabs?tab=fixture')).length >= 2, null, { timeout: 6000 })
       assert(await page.getByRole('button', { name: 'Back', exact: true }).isEnabled() === !agent)
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `no overflow at ${width}px`)
-      await page.screenshot({ path: resolve(evidence, `live-${width}${agent ? '-agent' : ''}.png`) })
+      await page.screenshot({ path: resolve(evidence, `live-${width}${agent ? '-agent' : signed ? '-signed' : ''}.png`) })
+
+      if (signed) {
+        const toggle = page.getByRole('button', { name: 'Show the whole Chrome window' })
+        const notes = page.getByRole('button', { name: 'Add notes to this frame' })
+        await page.getByRole('button', { name: 'Device: Desktop' }).click()
+        await page.getByRole('menuitemradio', { name: /Phone/ }).click()
+        await page.locator('iframe.browser-live-preset').waitFor()
+        const frameLoads = liveLoads
+        await toggle.press('Enter')
+        await page.getByRole('button', { name: 'Show the whole Chrome window', pressed: true }).waitFor()
+        assert.equal(await frame.getAttribute('class'), 'browser-live')
+        assert(await notes.isDisabled())
+        assert.equal(await notes.getAttribute('aria-description'), 'Notes are available in page view.')
+        await page.screenshot({ path: resolve(evidence, `window-${width}.png`) })
+        await wheelOver(page, await frame.boundingBox(), 1)
+        assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.selkiesWheels), 1)
+        assert.deepEqual(await wheelCalls(page), [])
+        const input = page.frameLocator('iframe.browser-live').getByRole('textbox', { name: 'Fixture input' })
+        await input.fill('Direct input')
+        assert.equal(await input.inputValue(), 'Direct input')
+        await toggle.click()
+        await page.getByRole('button', { name: 'Show the whole Chrome window', pressed: false }).waitFor()
+        await page.locator('iframe.browser-live-preset').waitFor()
+        assert(await notes.isEnabled())
+        assert.equal(liveLoads, frameLoads, 'the whole-window toggle keeps the same iframe')
+        assert.equal(await page.evaluate(() => window.sockets.length + window.sources.length), 0, 'no picture stream')
+        assert.deepEqual(await page.evaluate(() => window.calls.filter(call => call.path === 'browser/window-view').map(call => call.body)), [
+          { tab: 'fixture', enabled: true, browser: 'signed' }, { tab: 'fixture', enabled: false, browser: 'signed' },
+        ])
+        assert.deepEqual(errors, [])
+        console.log(`Browser live view: ${width}px, whole window switches on and off in the same iframe`)
+        await context.close()
+        continue
+      }
 
       if (!agent && !giveBack && !touch) {
         // Trackpad turns: 20 events of 3 px scroll the tab by 60 px in total, at the pointer's page point.

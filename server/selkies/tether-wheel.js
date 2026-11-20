@@ -6,8 +6,12 @@
 // accepts it only from this frame and this origin.
 (function () {
   if (window.parent === window) return
+  var relay = true
+  window.addEventListener('message', function (event) {
+    if (event.source === window.parent && event.data?.tether === 'wheel-mode') relay = event.data.relay !== false
+  })
   window.addEventListener('wheel', function (event) {
-    if (event.ctrlKey) return
+    if (!relay || event.ctrlKey) return
     event.preventDefault()
     event.stopImmediatePropagation()
     var step = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? 800 : 1

@@ -23,7 +23,7 @@ type Mode = 'private' | 'saved'
 // (controller 'user'); Stop gives the agent its own viewport back.
 interface BrowserTab { id: string; url: string; title: string; preset: string; mode: Mode | 'agent'; width: number; height: number; touch: boolean; owner?: { pane: string | null } | null; controller?: 'user' | 'agent' }
 interface Preset { id: string; label: string; width: number; height: number; touch: boolean }
-interface BrowserState { tabs: BrowserTab[]; presets: Preset[]; nav?: { back: boolean; forward: boolean }; browsers?: BrowserAvailability[]; live?: string; live_port?: number | null; live_run?: string | null }
+interface BrowserState { tabs: BrowserTab[]; presets: Preset[]; nav?: { back: boolean; forward: boolean }; browsers?: BrowserAvailability[]; live?: string; live_port?: number | null; live_run?: string | null; window_view?: boolean }
 interface FrameMessage { seq: number; width: number; height: number; jpeg: string; scrollOffsetX?: number; scrollOffsetY?: number }
 type Gesture = Record<string, string | number | string[]>
 type Tool = 'point' | 'pen' | 'rect' | 'text'
@@ -146,10 +146,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   // 'down': the live port did not answer, so the panel uses the picture stream and says why.
   const [liveReach, setLiveReach] = useState<'checking' | 'ok' | 'down'>('checking')
   const [typing, setTyping] = useState(false)
-  // BrowserView is keyed by browser id, so switching browsers resets this choice.
   const [windowView, setWindowView] = useState(false)
-  const windowViewRef = useRef(windowView)
-  useLayoutEffect(() => { windowViewRef.current = windowView }, [windowView])
+  const [changingWindow, setChangingWindow] = useState(false)
   const [draft, setDraft] = useState<string | null>(null)
   const [stage, setStage] = useState({ width: 0, height: 0 })
   const [frame, setFrame] = useState<{ width: number; height: number } | null>(null)
@@ -172,10 +170,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const liveFrameRef = useRef<HTMLIFrameElement>(null)
   useLayoutEffect(() => { if (watching && document.activeElement === liveFrameRef.current) liveFrameRef.current?.blur() }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
-  const liveWanted = !!liveBase && !!tab && !windowView
-  const liveMode = liveWanted && liveReach !== 'down'
+  const liveWanted = !!liveBase && !!tab
+  const liveMode = liveWanted && (windowView || liveReach !== 'down')
   const liveView = liveMode && !noting
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
+  const syncLiveInput = useCallback(() => {
+    if (liveSrc) liveFrameRef.current?.contentWindow?.postMessage({ tether: 'wheel-mode', relay: !windowView }, new URL(liveSrc).origin)
+  }, [liveSrc, windowView])
+  useEffect(syncLiveInput, [syncLiveInput])
   // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
   const livePreset = tab && tab.preset !== 'desktop' && !windowView ? tab : null
   const liveScale = livePreset ? Math.min(1, stage.width / livePreset.width, stage.height / livePreset.height) : 1
@@ -199,6 +201,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   useLayoutEffect(() => { notingRef.current = noting }, [noting])
 
   function apply(state: BrowserState) {
+    setWindowView(state.window_view === true)
     setTabs(state.tabs)
     if (state.presets) setPresets(state.presets)
     if (state.nav) setNav(state.nav)
@@ -303,7 +306,6 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     if (moved) draw()
   }
   function predict(dx: number, dy: number) {
-    if (windowViewRef.current) return
     const tab = tabRef.current, last = painted.current, size = frameRef.current
     if (!tab || tab.touch || scrolls.current.tab !== tab.id || !scrolls.current.works || !last || !size) {
       ahead.current.at = performance.now()  // still mark the turn so the next frame can learn that scrolling works
@@ -371,11 +373,11 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [transport, setTransport] = useState<'live' | 'sse'>(() => typeof WebSocket === 'function' ? 'live' : 'sse')
   const socketRef = useRef<{ stream: LiveStream; tab: string } | null>(null)
   useEffect(() => {
-    if (!active || !visible || (!tabId && !windowView) || noting || liveMode || !stage.width) return
+    if (!active || !visible || !tabId || noting || liveMode || !stage.width) return
     const gen = ++streamGen.current
     let again = 0
     const query = `tab=${encodeURIComponent(tabId)}&w=${streamWidth}&h=${streamHeight}&cssw=${Math.max(1, stage.width)}&cssh=${Math.max(1, stage.height)}${which === 'test' ? '' : `&browser=${which}`}`
-    if (!windowView && transport === 'live') {
+    if (transport === 'live') {
       const stream = openLive(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/mobile/api/browser/live?${query}`, {
         onPicture: (bitmap, meta) => { setLive(true); show(bitmap, meta, gen) },
         onTabs: state => apply(state as BrowserState),
@@ -396,9 +398,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     // The server sends the next frame only after this panel confirms the previous ones, so frames never queue
     // in the network and the picture stays close to the input.
     const sid = Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => byte.toString(16).padStart(2, '0')).join('')
-    const source = new EventSource(windowView
-      ? `/mobile/api/browser/window?browser=signed&w=${streamWidth}&h=${streamHeight}&sid=${sid}`
-      : `/mobile/api/browser/stream?${query}&sid=${sid}`)
+    const source = new EventSource(`/mobile/api/browser/stream?${query}&sid=${sid}`)
     source.addEventListener('frame', event => {
       if (gen !== streamGen.current) return
       const message = JSON.parse((event as MessageEvent).data)
@@ -423,20 +423,20 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       }, 2000)
     }
     return () => { source.close(); clearTimeout(again); streamGen.current++; pending.current = null } // eslint-disable-line react-hooks/exhaustive-deps
-  }, [active, visible, tabId, noting, liveMode, streamWidth, streamHeight, stage.width > 0, retry, transport, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, visible, tabId, noting, liveMode, streamWidth, streamHeight, stage.width > 0, retry, transport]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // The live view has no picture stream to bring tab titles and history, so ask for them while it shows.
   // Each poll also keeps the browser from stopping as idle. A new tab, or this screen coming back, brings it to the front.
-  const deviceChange = useRef({ pending: false, version: 0 })
+  const viewChange = useRef({ pending: false, version: 0 })
   useEffect(() => {
     if (!active || !visible || !liveMode || !tabId) return
     let stopped = false
     void api('browser/show', { tab: tabId }).catch(error => { if (!stopped) setStatus(errorText(error)) })
     const poll = () => {
-      if (deviceChange.current.pending) return
-      const version = deviceChange.current.version
+      if (viewChange.current.pending) return
+      const version = viewChange.current.version
       void api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}`).then(state => {
-        if (!stopped && version === deviceChange.current.version) { apply(state); setFailure('') }
+        if (!stopped && version === viewChange.current.version) { apply(state); setFailure('') }
       }, () => undefined)
     }
     const timer = window.setInterval(() => void poll(), 2000)
@@ -463,17 +463,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   // Input: queue events, merge moves and wheel turns, and send one batch per animation frame.
   const queue = useRef<Gesture[]>([])
   const queueTab = useRef<string | null>(null)
-  const queueWindow = useRef(false)
   const sending = useRef(false)
   const scheduled = useRef(false)
   function push(...events: Gesture[]) {
-    // An agent tab blocks input to that tab only; the whole window is not one tab, and its dialogs must stay usable.
-    if (watchingRef.current && !windowViewRef.current) return
+    if (watchingRef.current) return
     // The queue belongs to one tab. Input for a new tab never goes to the old one.
-    const wholeWindow = windowViewRef.current
-    const id = wholeWindow ? 'window' : tabRef.current?.id ?? null
-    if (queueTab.current !== id || queueWindow.current !== wholeWindow) {
-      queue.current = []; queueTab.current = id; queueWindow.current = wholeWindow
+    const id = tabRef.current?.id ?? null
+    if (queueTab.current !== id) {
+      queue.current = []; queueTab.current = id
     }
     for (const event of events) {
       const last = queue.current[queue.current.length - 1]
@@ -485,19 +482,17 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
   async function flush() {
     const target = queueTab.current
-    const wholeWindow = queueWindow.current
     if (sending.current || !queue.current.length || !target) return
     // The live socket keeps input in order with no request per batch.
     const socket = socketRef.current
-    if (!wholeWindow && socket?.tab === target && socket.stream.ready()) {
+    if (socket?.tab === target && socket.stream.ready()) {
       while (queue.current.length) socket.stream.input(queue.current.splice(0, 200))
       return
     }
     sending.current = true
     const events = queue.current.splice(0, 200)
     try {
-      if (wholeWindow) await api('browser/window/input', { browser: 'signed', events })
-      else await api('browser/input', { tab: target, events })
+      await api('browser/input', { tab: target, events })
     } catch (error) { setStatus(errorText(error)) } finally {
       sending.current = false
       if (queue.current.length) void flush()
@@ -505,8 +500,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
   // Canvas point to page CSS pixels.
   function pagePoint(event: { clientX: number; clientY: number }) {
-    const canvas = canvasRef.current, size = frameRef.current ?? (windowViewRef.current
-      ? { width: 2560, height: 1600 } : tabRef.current ? { width: tabRef.current.width, height: tabRef.current.height } : null)
+    const canvas = canvasRef.current, size = frameRef.current ?? tabRef.current
     if (!canvas || !size) return { x: 0, y: 0 }
     const box = canvas.getBoundingClientRect()
     return { x: Math.round((event.clientX - box.left) / box.width * size.width), y: Math.round((event.clientY - box.top) / box.height * size.height) }
@@ -521,12 +515,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const pressed = useRef<{ button: string; x: number; y: number } | null>(null)
   const drag = useRef<{ id: number; x: number; y: number; start: { x: number; y: number }; moved: boolean } | null>(null)
   function onPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab && !windowView) return
+    if (!tab) return
     if (event.pointerType === 'mouse') keysRef.current?.focus({ preventScroll: true })
     event.currentTarget.setPointerCapture(event.pointerId)
     const point = pagePoint(event)
     // A finger on a Desktop tab scrolls; a tap clicks.
-    if (event.pointerType === 'touch' && (windowView || !tab?.touch)) { drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, start: point, moved: false }; return }
+    if (event.pointerType === 'touch' && !tab.touch) { drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, start: point, moved: false }; return }
     if (event.button > 2) return
     const now = performance.now(), last = lastDown.current
     const count = now - last.time < 500 && Math.abs(point.x - last.x) < 5 && Math.abs(point.y - last.y) < 5 ? Math.min(3, last.count + 1) : 1
@@ -535,7 +529,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     push({ type: 'down', ...point, button: BUTTONS[event.button] ?? 'left', buttons: event.buttons, clicks: count, modifiers: modifiers(event) })
   }
   function onPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab && !windowView) return
+    if (!tab) return
     const touch = drag.current
     if (touch && touch.id === event.pointerId) {
       const dx = event.clientX - touch.x, dy = event.clientY - touch.y
@@ -548,12 +542,12 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       return
     }
     // A phone or tablet tab gets only pressed moves (the server sends them as a finger drag); hover means nothing there.
-    if (!windowView && tab?.touch ? !event.buttons : event.pointerType === 'touch') return
+    if (tab.touch ? !event.buttons : event.pointerType === 'touch') return
     if (pressed.current) Object.assign(pressed.current, pagePoint(event))
     push({ type: 'move', ...pagePoint(event), button: event.buttons & 1 ? 'left' : event.buttons & 2 ? 'right' : 'none', buttons: event.buttons, modifiers: modifiers(event) })
   }
   function onPointerUp(event: ReactPointerEvent<HTMLCanvasElement>) {
-    if (!tab && !windowView) return
+    if (!tab) return
     const touch = drag.current
     if (touch && touch.id === event.pointerId) {
       drag.current = null
@@ -569,7 +563,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     const canvas = canvasBox
     if (!canvas) return
     const wheel = (event: WheelEvent) => {
-      if (notingRef.current || (!tabRef.current && !windowViewRef.current)) return
+      if (notingRef.current || !tabRef.current) return
       event.preventDefault()
       const step = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? 800 : 1
       push({ type: 'wheel', ...pagePoint(event), dx: event.deltaX * step, dy: event.deltaY * step, modifiers: modifiers(event) })
@@ -582,7 +576,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   // The live page hands wheel turns here instead (server/selkies/tether-wheel.js), and they go to Chrome with the
   // exact pixels, like the picture view. Only this frame's page on the live origin may send them.
   useEffect(() => {
-    if (!liveView || !liveSrc) return
+    if (!liveView || !liveSrc || windowView) return
     const origin = new URL(liveSrc).origin
     const number = (value: unknown, limit: number) => typeof value === 'number' && Number.isFinite(value) ? Math.max(-limit, Math.min(limit, value)) : 0
     const onMessage = (event: MessageEvent) => {
@@ -595,7 +589,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [liveView, liveSrc]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [liveView, liveSrc, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keyboard: a hidden text box takes the keys. Keys with a meaning go as key events; phone keyboards send text.
   const lastEscape = useRef(0)
@@ -611,18 +605,17 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
   // Leaving a tab: release keys and buttons there, and drop its queued input.
   useEffect(() => {
-    if (!tabId && !windowView) return
+    if (!tabId) return
     return () => {
       // Blur can queue a release just before this cleanup. Send it to the old destination before dropping input.
-      const queued = queueWindow.current === windowView && queueTab.current === (windowView ? 'window' : tabId)
+      const queued = queueTab.current === tabId
         ? queue.current.filter(event => event.type === 'up' || event.type === 'keyup') : []
       const events = [...queued, ...releases()]
       queue.current = []
       drag.current = null
-      if (events.length) void api(windowView ? 'browser/window/input' : 'browser/input',
-        windowView ? { browser: 'signed', events } : { tab: tabId, events }).catch(() => undefined)
+      if (events.length) void api('browser/input', { tab: tabId, events }).catch(() => undefined)
     }
-  }, [tabId, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tabId]) // eslint-disable-line react-hooks/exhaustive-deps
   function onKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing || event.key === 'Unidentified' || event.key === 'Process' || ['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) return
     if (event.key === 'Escape') {
@@ -632,7 +625,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     }
     const command = event.ctrlKey || event.metaKey
     if (command && event.key.toLowerCase() === 'v') return // the paste event brings the text
-    if (event.key.length !== 1 && !KEYS.has(event.key) && !(windowView && /^F([1-9]|1[0-2])$/.test(event.key))) return
+    if (event.key.length !== 1 && !KEYS.has(event.key)) return
     event.preventDefault()
     event.stopPropagation() // the page owns this key; Tether's own shortcuts must not run
     const name = command ? COMMANDS[event.key.toLowerCase()] : undefined
@@ -685,14 +678,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     urlRef.current?.blur()
   }
   async function sendDevice(body: Record<string, unknown>) {
-    if (deviceChange.current.pending) return null
-    deviceChange.current.pending = true
-    deviceChange.current.version++
+    if (viewChange.current.pending) return null
+    viewChange.current.pending = true
+    viewChange.current.version++
     try {
       const row = await act<BrowserTab>('browser/device', body)
       if (row) { setTabs(list => list.map(item => item.id === row.id ? row : item)); setFrame(null) }
       return row
-    } finally { deviceChange.current.pending = false }
+    } finally { viewChange.current.pending = false }
   }
   async function setDevice(preset: string) {
     deviceMenu.setOpen(false)
@@ -825,16 +818,23 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   }
 
   // Fit the frame (or the tab's viewport before the first frame) inside the stage.
-  const size = windowView ? { width: 2560, height: 1600 } : frame ?? (tab ? { width: tab.width, height: tab.height } : null)
+  const size = frame ?? tab
   const scale = size && stage.width && stage.height ? Math.min(stage.width / size.width, stage.height / size.height) : 0
   const view = size && scale ? { width: Math.floor(size.width * scale), height: Math.floor(size.height * scale) } : { width: 0, height: 0 }
   const presetLabel = presets.find(item => item.id === tab?.preset)?.label ?? 'Desktop'
-  function changeWindowView(value: boolean) {
-    setWindowView(value); setFrame(null); setStatus(''); deviceMenu.setOpen(false)
-    painted.current?.bitmap.close()
-    painted.current = null
-    reset()
-    canvasRef.current?.getContext('2d')?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
+  async function changeWindowView(enabled: boolean) {
+    if (!tab || viewChange.current.pending) return
+    viewChange.current.pending = true
+    viewChange.current.version++
+    setChangingWindow(true)
+    deviceMenu.setOpen(false)
+    try {
+      const result = await act<{ window_view: boolean }>('browser/window-view', { tab: tab.id, enabled })
+      if (result) setWindowView(result.window_view)
+    } finally {
+      viewChange.current.pending = false
+      setChangingWindow(false)
+    }
   }
 
   const chosen = BROWSERS.find(item => item.id === which)!
@@ -909,14 +909,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           </button>)}
         </div>}
       </div>
-      <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching && !windowView} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>
-      {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} onClick={() => changeWindowView(!windowView)}><AppWindow size={17} /></button>}
-      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title="Notes" disabled={(!frame && !liveMode) || windowView || grabbing} onClick={() => void startNotes()}><PenLine size={17} /></button>
+      {!windowView && <button type="button" className="browser-icon browser-touch-only" aria-label="Type into the page" disabled={watching} onClick={() => keysRef.current?.focus()}><Keyboard size={17} /></button>}
+      {which === 'signed' && <button type="button" className="browser-icon" aria-label="Show the whole Chrome window" title="Whole window: Chrome's dialogs, toolbar and extensions" aria-pressed={windowView} aria-disabled={changingWindow} disabled={!tab} onClick={() => void changeWindowView(!windowView)}><AppWindow size={17} /></button>}
+      <button type="button" className="browser-icon" aria-label="Add notes to this frame" title={windowView ? "Notes are available in page view" : "Notes"} aria-description={windowView ? "Notes are available in page view." : undefined} disabled={(!frame && !liveMode) || windowView || grabbing} onClick={() => void startNotes()}><PenLine size={17} /></button>
     </form>}
 
     {(windowView || tab?.mode === 'saved') && <p className="browser-saved">{which === 'signed' ? <><UserRound size={13} aria-hidden="true" />
       <span>{windowView ? "Whole Chrome window · use Chrome's own toolbar and dialogs" : signedNote(host)}</span>
-      {!windowView && <button type="button" className="browser-window-link" onClick={() => changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
+      {!windowView && <button type="button" className="browser-window-link" aria-disabled={changingWindow} onClick={() => void changeWindowView(true)}>Dialog not showing? Show the whole window</button>}
     </> : <><KeyRound size={13} />{savedNote(host)}</>}</p>}
     {tab?.mode === 'agent' && <div className="browser-agent" role="note">
       <Bot size={14} aria-hidden="true" />
@@ -937,15 +937,15 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={livePreset ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
         style={livePreset ? { width: livePreset.width, height: livePreset.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
-        referrerPolicy="no-referrer" onLoad={() => setLiveReady(true)} />}
+        referrerPolicy="no-referrer" onLoad={() => { setLiveReady(true); syncLiveInput() }} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}
       {(liveView ? !liveReady : !frame && (tab || windowView)) && <p className="browser-wait"><span><Spinner /> {live || liveView ? windowView ? 'Loading the Chrome window…' : 'Loading the page…' : 'Connecting…'}</span></p>}
-      <textarea ref={keysRef} className="browser-keys" aria-label="Keys for the page. Press Escape twice to leave." defaultValue={SENTINEL} autoCapitalize="off" autoCorrect="off" spellCheck={false}
+      {!windowView && <textarea ref={keysRef} className="browser-keys" aria-label="Keys for the page. Press Escape twice to leave." defaultValue={SENTINEL} autoCapitalize="off" autoCorrect="off" spellCheck={false}
         onFocus={() => setTyping(true)} onBlur={() => { setTyping(false); const events = releases(); if (events.length) push(...events) }} onKeyDown={onKeyDown} onKeyUp={onKeyUp}
         onInput={event => { if (!(event.nativeEvent as InputEvent).isComposing) syncText() }} onCompositionEnd={syncText}
-        onPaste={event => { event.preventDefault(); const text = event.clipboardData.getData('text/plain'); if (text) push({ type: 'text', text: text.slice(0, 20000) }) }} />
+        onPaste={event => { event.preventDefault(); const text = event.clipboardData.getData('text/plain'); if (text) push({ type: 'text', text: text.slice(0, 20000) }) }} />}
     </div>
     <p className="browser-status" role="status">{status || (typing ? 'Keys go to the page. Press Esc twice to leave.' : !live && frame && !liveMode ? 'Connecting again…'
-      : liveWanted && liveReach === 'down' ? `Live video is off: port ${liveBase?.port} did not answer. Showing pictures instead.` : '')}</p>
+      : liveWanted && liveReach === 'down' ? windowView ? 'The live window is unavailable.' : `Live video is off: port ${liveBase?.port} did not answer. Showing pictures instead.` : '')}</p>
   </div>
 }

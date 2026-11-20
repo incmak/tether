@@ -203,8 +203,6 @@ COMPUTED_ROUTES = {
     ('AgentBrowser.tsx', 'POST', 'api', '`browser/signed/${path}`'): (
         'browser/signed/allow', 'browser/signed/deny', 'browser/signed/end', 'browser/signed/dismiss'),
     ('AgentBrowser.tsx', 'POST', 'api', 'path'): ('browser/agents', 'browser/ask/dismiss', 'browser/agents/setup'),
-    ('BrowserPanel.tsx', 'POST', 'api', "windowView ? 'browser/window/input' : 'browser/input'"): (
-        'browser/window/input', 'browser/input'),
     ('ExplorerPhone.tsx', 'POST', 'write', '`files/${mode}`'): ('files/copy', 'files/move'),
     ('Project.tsx', 'POST', 'api', '`projects/${path}`'): (
         'projects/note', 'projects/note-delete', 'projects/pin', 'projects/unpin',
@@ -217,9 +215,6 @@ COMPUTED_ROUTES = {
     ('ActivityLog.tsx', 'GET', 'api', 'path'): ('audit',),
     ('ActivityLog.tsx', 'GET', 'api', 'queryOf(filters, next)'): ('audit',),
     ('Autonomy.tsx', 'GET', 'api', 'path'): ('autonomy',),
-    ('BrowserPanel.tsx', 'GET', 'EventSource',
-     'windowView ? `/mobile/api/browser/window?browser=signed&w=${streamWidth}&h=${streamHeight}&sid=${sid}`'
-     ' : `/mobile/api/browser/stream?${query}&sid=${sid}`'): ('browser/window', 'browser/stream'),
     ('Chat.tsx', 'GET', 'usePolling', 'streamPath'): ('stream',),
     ('ClaudeAdvisor.tsx', 'GET', 'api', 'path'): ('claude-advisor',),
     ('CodexLevel.tsx', 'GET', 'api', 'path'): ('codex-level',),

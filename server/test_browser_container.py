@@ -233,9 +233,13 @@ class ContainerTests(unittest.TestCase):
         chrome.pid = None
 
 class WindowChrome(FakeChrome):
+    window_state = 'normal'
+
     def answer(self, message):
         if message['method'] == 'Browser.getWindowForTarget':
-            return {'windowId': 7}
+            return {'windowId': 7, 'bounds': {'windowState': self.window_state}}
+        if message['method'] == 'Browser.setWindowBounds':
+            self.window_state = message['params']['bounds']['windowState']
         return super().answer(message)
 
 
@@ -287,14 +291,13 @@ class BrowserInContainerTests(unittest.TestCase):
         self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
         self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'], {'enabled': False})
 
-    def test_signed_container_bypasses_local_display_and_reports_its_port(self):
+    def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
         self.addCleanup(fake.close)
         container = FakeContainer(fake)
         container.live_port = browser_container.SIGNED_LIVE_PORT
         container.run_id = 'signed-run'
-        display = mock.Mock()
-        signed = browser.Browser(signed=True, display=display, container=container)
+        signed = browser.Browser(signed=True, container=container)
         state = signed.list_tabs()
         try:
             self.assertEqual((state['live_port'], state['live_run']), (browser_container.SIGNED_LIVE_PORT, 'signed-run'))
@@ -305,8 +308,6 @@ class BrowserInContainerTests(unittest.TestCase):
             self.assertEqual(fake.sent('Browser.setDownloadBehavior')[0]['params'], {'behavior': 'deny'})
         finally:
             signed.stop()
-        display.start.assert_not_called()
-        display.stop.assert_not_called()
 
     def test_show_brings_the_tab_to_the_front(self):
         self.browser.list_tabs()

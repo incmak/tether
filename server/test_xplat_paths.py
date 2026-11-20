@@ -187,19 +187,6 @@ class XplatPathsTests(unittest.TestCase):
                 binary.chmod(0o600)
             self.assertIsNone(browser.find_chrome())
 
-    def test_signed_chrome_apps_only(self):
-        candidates = [str(Path(root) / 'Google Chrome.app/Contents/MacOS/Google Chrome')
-                      for root in ('/Applications', self.home / 'Applications')]
-        with patch.object(browser.os, 'access') as access:
-            for index, chosen in enumerate(candidates):
-                access.reset_mock()
-                access.side_effect = lambda path, mode: path == chosen
-                self.assertEqual(browser.find_signed_chrome(), chosen)
-                self.assertEqual(access.call_args_list, [call(path, os.X_OK) for path in candidates[:index + 1]])
-            access.side_effect = None
-            access.return_value = False
-            self.assertIsNone(browser.find_signed_chrome())
-
     def test_linux_chrome_skips_mac_paths(self):
         with patch.object(procinfo, 'DARWIN', False), \
                 patch.object(browser.shutil, 'which', return_value=None), \

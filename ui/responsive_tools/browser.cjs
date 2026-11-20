@@ -103,7 +103,7 @@ async function main() {
       class FixtureSource extends EventTarget {
         static CLOSED=2
         readyState=1
-        constructor(url) { super(); if(url.includes('/browser/stream')||url.includes('/browser/window')) setTimeout(()=>this.dispatchEvent(new MessageEvent('frame',{data:JSON.stringify({seq:1,width:320,height:240,jpeg})})),40) }
+        constructor(url) { super(); if(url.includes('/browser/stream')) setTimeout(()=>this.dispatchEvent(new MessageEvent('frame',{data:JSON.stringify({seq:1,width:320,height:240,jpeg})})),40) }
         close() { this.readyState=2 }
       }
       window.EventSource=FixtureSource
