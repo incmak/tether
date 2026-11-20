@@ -139,7 +139,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const [failure, setFailure] = useState('')
   const [status, setStatus] = useState('')
   const [live, setLive] = useState(true)
-  // The browser runs in a Selkies container: a Desktop tab shows its real window as video (state.live is the path).
+  // The browser runs in a Selkies container and shows its real window as video (state.live is the path).
   // The video page has its own origin (state.live_port), so a page from the container cannot reach Tether.
   const [liveBase, setLiveBase] = useState<{ path: string; port: number; run: string } | null>(null)
   const [liveReady, setLiveReady] = useState(false)
@@ -172,11 +172,13 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   const liveFrameRef = useRef<HTMLIFrameElement>(null)
   useLayoutEffect(() => { if (watching && document.activeElement === liveFrameRef.current) liveFrameRef.current?.blur() }, [watching])
   const owner = usePaneLabel(tab?.owner?.pane)
-  // Phone and tablet tabs keep the picture stream: they need Chrome's device emulation at the panel's scale.
-  const liveWanted = !!liveBase && tab?.preset === 'desktop' && !windowView
+  const liveWanted = !!liveBase && !!tab && !windowView
   const liveMode = liveWanted && liveReach !== 'down'
   const liveView = liveMode && !noting
   const liveSrc = liveBase ? `${location.protocol}//${location.hostname}:${liveBase.port}${liveBase.path}` : ''
+  // Selkies sizes the remote display from the iframe's viewport. Scale the iframe without changing that viewport.
+  const livePreset = tab && tab.preset !== 'desktop' && !windowView ? tab : null
+  const liveScale = livePreset ? Math.min(1, stage.width / livePreset.width, stage.height / livePreset.height) : 1
 
   const stageRef = useRef<HTMLDivElement | null>(null)
   // The stage mounts late in Your Chrome (after the pairing card), so observe the element itself, not the load.
@@ -247,7 +249,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
   // The screen in use owns the size; never react to another viewer's size.
   function claimSize() {
     const tab = tabRef.current
-    if (!active || !tab || watching || windowView || tab.preset !== 'desktop' || stage.width < 50 || stage.height < 50 || noting) return
+    if (!active || !tab || watching || windowView || liveMode || tab.preset !== 'desktop' || stage.width < 50 || stage.height < 50 || noting) return
     const width = Math.max(320, stage.width), height = Math.max(240, stage.height)
     if (Math.abs(width - tab.width) < 3 && Math.abs(height - tab.height) < 3) return
     void api<BrowserTab>('browser/device', { tab: tab.id, preset: 'desktop', width, height }).then(row => setTabs(list => list.map(item => item.id === row.id ? row : item))).catch(() => undefined)
@@ -262,7 +264,7 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       window.removeEventListener('focus', onActive)
       document.removeEventListener('visibilitychange', onActive)
     }
-  }, [active, tab?.id, tab?.preset, stage.width, stage.height, noting, watching, windowView]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active, tab?.id, tab?.preset, stage.width, stage.height, noting, watching, windowView, liveMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Frames: decode the newest one and skip any that arrive while one decodes.
   const pending = useRef<FrameMessage | null>(null)
@@ -425,11 +427,18 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
 
   // The live view has no picture stream to bring tab titles and history, so ask for them while it shows.
   // Each poll also keeps the browser from stopping as idle. A new tab, or this screen coming back, brings it to the front.
+  const deviceChange = useRef({ pending: false, version: 0 })
   useEffect(() => {
     if (!active || !visible || !liveMode || !tabId) return
     let stopped = false
     void api('browser/show', { tab: tabId }).catch(error => { if (!stopped) setStatus(errorText(error)) })
-    const poll = () => api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}`).then(state => { if (!stopped) { apply(state); setFailure('') } }, () => undefined)
+    const poll = () => {
+      if (deviceChange.current.pending) return
+      const version = deviceChange.current.version
+      void api<BrowserState>(`browser/tabs?tab=${encodeURIComponent(tabId)}`).then(state => {
+        if (!stopped && version === deviceChange.current.version) { apply(state); setFailure('') }
+      }, () => undefined)
+    }
     const timer = window.setInterval(() => void poll(), 2000)
     void poll()
     return () => { stopped = true; clearInterval(timer) }
@@ -580,7 +589,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
       const frame = liveFrameRef.current, tab = tabRef.current, data = event.data
       if (!frame || event.source !== frame.contentWindow || event.origin !== origin || !tab) return
       if (!data || typeof data !== 'object' || data.tether !== 'wheel' || notingRef.current) return
-      push({ type: 'wheel', x: Math.round(Math.max(0, number(data.x, 1)) * tab.width), y: Math.round(Math.max(0, number(data.y, 1)) * tab.height),
+      const { width, height } = tab.preset === 'desktop' ? { width: frame.clientWidth, height: frame.clientHeight } : tab
+      push({ type: 'wheel', x: Math.round(Math.max(0, number(data.x, 1)) * width), y: Math.round(Math.max(0, number(data.y, 1)) * height),
         dx: number(data.dx, 10000), dy: number(data.dy, 10000), modifiers: (data.alt === true ? 1 : 0) | (data.meta === true ? 4 : 0) | (data.shift === true ? 8 : 0) })
     }
     window.addEventListener('message', onMessage)
@@ -675,9 +685,14 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
     urlRef.current?.blur()
   }
   async function sendDevice(body: Record<string, unknown>) {
-    const row = await act<BrowserTab>('browser/device', body)
-    if (row) { setTabs(list => list.map(item => item.id === row.id ? row : item)); setFrame(null) }
-    return row
+    if (deviceChange.current.pending) return null
+    deviceChange.current.pending = true
+    deviceChange.current.version++
+    try {
+      const row = await act<BrowserTab>('browser/device', body)
+      if (row) { setTabs(list => list.map(item => item.id === row.id ? row : item)); setFrame(null) }
+      return row
+    } finally { deviceChange.current.pending = false }
   }
   async function setDevice(preset: string) {
     deviceMenu.setOpen(false)
@@ -919,7 +934,8 @@ function BrowserView({ api: baseApi, pane, active, onPopOut, which, onSwitch }: 
           onChange={event => setLabel({ ...label, text: event.target.value })} onBlur={commitLabel}
           onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitLabel() } else if (event.key === 'Escape') { event.stopPropagation(); setLabel(null) } }} />}
       </div>
-      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className="browser-live" src={liveSrc} hidden={noting} inert={watching}
+      {liveMode && liveReach === 'ok' && <iframe key={liveBase?.run} ref={liveFrameRef} className={livePreset ? 'browser-live browser-live-preset' : 'browser-live'} src={liveSrc} hidden={noting} inert={watching}
+        style={livePreset ? { width: livePreset.width, height: livePreset.height, transform: `translate(-50%, -50%) scale(${liveScale})` } : undefined}
         title={`Page: ${tab?.title || tab?.url || 'New tab'}`} sandbox="allow-scripts allow-same-origin" allow="clipboard-read; clipboard-write"
         referrerPolicy="no-referrer" onLoad={() => setLiveReady(true)} />}
       {liveView && liveReach === 'ok' && watching && <div className="browser-live-block" aria-hidden="true" />}

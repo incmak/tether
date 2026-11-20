@@ -77,3 +77,5 @@
 /* The legacy panel reset must not remove text buttons' hit areas. */
 .browser-panel .browser-text-button { min-height: var(--control); }
 .browser-panel .mac-pairing > button { min-height: 40px; }
+
+.browser-live.browser-live-preset { inset: 50% auto auto 50%; }

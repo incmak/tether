@@ -729,13 +729,15 @@ class Browser:
             # An empty override restores the native UA, including on relayed tabs without a cached desktop UA.
             self.conn.call('Emulation.setUserAgentOverride', {'userAgent': '' if self.signed else self.user_agent}, session)
         else:
+            # The Selkies display already has the preset's shape. Setting CDP mobile here makes pages without
+            # a viewport meta tag lay out at about 980px. Keep the exact layout width and emulate the touch and UA.
             self.conn.call('Emulation.setDeviceMetricsOverride',
                            {'width': spec['width'], 'height': spec['height'], 'deviceScaleFactor': spec['scale'],
-                            'mobile': True, 'screenWidth': spec['width'], 'screenHeight': spec['height']}, session)
+                            'mobile': self.container is None, 'screenWidth': spec['width'], 'screenHeight': spec['height']}, session)
             self.conn.call('Emulation.setTouchEmulationEnabled', {'enabled': True, 'maxTouchPoints': 5}, session)
-            # Not setEmitTouchEventsForMouse: under it, headless Chromium 147 never answers Input.dispatchMouseEvent.
-            # Browser.input sends touch events for phone and tablet tabs instead.
-            self.conn.call('Emulation.setEmitTouchEventsForMouse', {'enabled': False}, session)
+            # Selkies sends native mouse input. Headless Chromium uses explicit touch events in Browser.input.
+            mouse_touch = {'enabled': True, 'configuration': 'mobile'} if self.container is not None else {'enabled': False}
+            self.conn.call('Emulation.setEmitTouchEventsForMouse', mouse_touch, session)
             agent = mobile_android_ua(self.user_agent) if spec['ua'] == 'android' else spec['ua']
             self.conn.call('Emulation.setUserAgentOverride', {'userAgent': agent}, session)
         tab.preset = preset

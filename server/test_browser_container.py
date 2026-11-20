@@ -271,11 +271,21 @@ class BrowserInContainerTests(unittest.TestCase):
         self.assertTrue(self.fake.sent('Emulation.clearDeviceMetricsOverride'))
         self.assertFalse([c for c in self.fake.sent('Emulation.setDeviceMetricsOverride') if not c['params'].get('mobile')])
 
-    def test_phone_preset_still_emulates(self):
+    def test_live_presets_keep_exact_layout_width_and_emulate_touch(self):
         self.browser.list_tabs()
         target = self.browser.order[-1]
-        self.browser.set_device(target, 'phone')
-        self.assertTrue([c for c in self.fake.sent('Emulation.setDeviceMetricsOverride') if c['params'].get('mobile')])
+        for preset, width, height, dpr in (('phone', 412, 915, 2.625), ('iphone', 393, 852, 3), ('tablet', 820, 1180, 2)):
+            with self.subTest(preset=preset):
+                row = self.browser.set_device(target, preset)
+                self.assertEqual((row['width'], row['height'], row['touch']), (width, height, True))
+                self.assertEqual(self.fake.sent('Emulation.setDeviceMetricsOverride')[-1]['params'], {
+                    'width': width, 'height': height, 'deviceScaleFactor': dpr, 'mobile': False,
+                    'screenWidth': width, 'screenHeight': height})
+                self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'],
+                                 {'enabled': True, 'configuration': 'mobile'})
+        self.browser.set_device(target, 'desktop')
+        self.assertEqual(len(self.fake.sent('Emulation.clearDeviceMetricsOverride')), 2)
+        self.assertEqual(self.fake.sent('Emulation.setEmitTouchEventsForMouse')[-1]['params'], {'enabled': False})
 
     def test_signed_container_bypasses_local_display_and_reports_its_port(self):
         fake = WindowChrome()

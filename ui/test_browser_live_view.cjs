@@ -30,7 +30,7 @@ async function wheelOver(page, box, steps) {
 
 async function main() {
   const { createServer } = await import('vite')
-  const evidence = resolve(__dirname, '../.work-notes/2026-11-14-selkies-live')
+  const evidence = process.env.TETHER_BROWSER_TEST_SHOTS || resolve(__dirname, '../.work-notes/2026-11-14-selkies-live')
   mkdirSync(evidence, { recursive: true })
   let browser, server, liveServer, closedPort
   // The live view has its own origin: a second server on another port stands in for Tether's live listener.
@@ -49,14 +49,19 @@ async function main() {
     import '/chat/src/index.css';
     import {BrowserPanel} from '/chat/src/BrowserPanel.tsx';
     import '/chat/src/App.css';
-    const presets = [{id:'desktop',label:'Desktop',width:1280,height:800,touch:false},{id:'pixel',label:'Phone',width:412,height:915,touch:true}];
+    const presets = [{id:'desktop',label:'Desktop',width:1280,height:800,touch:false},{id:'pixel',label:'Phone',width:412,height:915,touch:true},{id:'tablet',label:'Tablet',width:820,height:1180,touch:true}];
     window.tab = {id:'fixture', title:'Fixture tab', url:'https://example.com/', mode:'private', preset:'desktop', width:1280, height:800, touch:false, ...(window.fixtureTab || {})};
+    const tablet = {...window.tab, ...presets[2], id:'tablet', preset:'tablet', title:'Tablet tab', mode:'private', controller:'user'};
     window.run = 'run-1'; window.livePort = window.livePort || ${livePort};
     const api = async (path, body) => {
       window.calls.push({path, body});
-      if (path.startsWith('browser/tabs')) return {tabs:[window.tab], presets, nav:{back:true,forward:false}, live:'/browser/live/', live_port:window.livePort, live_run:window.run};
+      if (path.startsWith('browser/tabs')) return {tabs:[window.tab, tablet], presets, nav:{back:true,forward:false}, live:'/browser/live/', live_port:window.livePort, live_run:window.run};
       if (path === 'browser/device' && body.preset === 'agent') { window.tab = {...window.tab, controller:'agent'}; return window.tab }
-      if (path === 'browser/device') { window.tab = {...window.tab, preset:body.preset, touch:body.preset !== 'desktop'}; return window.tab }
+      if (path === 'browser/device') {
+        const {width,height,touch} = presets.find(preset => preset.id === body.preset)
+        window.tab = {...window.tab, preset:body.preset, width, height, touch};
+        return window.tab
+      }
       return {ok:true};
     };
     createRoot(document.getElementById('root')).render(<BrowserPanel api={api} pane={{id:'%fixture'}} folder={null} active={true}/>);
@@ -158,7 +163,7 @@ async function main() {
         const wheels = await wheelCalls(page)
         assert(wheels.length >= 1, 'wheel turns reach the tab')
         assert.equal(wheels.reduce((sum, event) => sum + event.dy, 0), 60)
-        assert(wheels.every(event => event.x === 320 && event.y === 400 && event.dx === 0 && event.modifiers === 0), JSON.stringify(wheels))
+        assert(wheels.every(event => event.x === Math.round(box.width / 4) && event.y === Math.round(box.height / 2) && event.dx === 0 && event.modifiers === 0), JSON.stringify(wheels))
         assert.equal(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => window.selkiesWheels), 0, 'Selkies does not see the turns')
         // Only the live frame may send them: a message from the panel's own page, or a malformed one, does nothing.
         const before = (await wheelCalls(page)).length
@@ -241,14 +246,41 @@ async function main() {
       await page.getByRole('status').filter({ hasText: 'Could not take a picture of the page. Try again.' }).waitFor()
       assert(await frame.isVisible())
 
-      // A phone tab needs Chrome's device emulation, so it uses the picture stream again.
+      // A preset resizes the iframe's viewport and scales the picture to fit the stage.
+      const assertPreset = async (width, height) => {
+        await page.waitForFunction(([width, height]) => {
+          const frame = document.querySelector('iframe.browser-live')
+          return frame?.clientWidth === width && frame.clientHeight === height
+        }, [width, height])
+        const stage = await page.locator('.browser-stage').boundingBox()
+        const box = await frame.boundingBox()
+        const scale = Math.min(1, stage.width / width, stage.height / height)
+        assert(Math.abs(box.width - width * scale) < 1 && Math.abs(box.height - height * scale) < 1)
+        assert(Math.abs(box.x - (stage.x + (stage.width - box.width) / 2)) < 1)
+        assert(Math.abs(box.y - (stage.y + (stage.height - box.height) / 2)) < 1)
+        assert.deepEqual(await page.frameLocator('iframe.browser-live').locator('body').evaluate(() => [innerWidth, innerHeight]), [width, height])
+        return box
+      }
       await page.getByRole('button', { name: 'Device: Desktop', exact: true }).click()
       await page.getByRole('menuitemradio', { name: /Phone/ }).click()
-      await page.waitForFunction(() => window.sockets.some(socket => !socket.closed))
-      await frame.waitFor({ state: 'detached' })
-      assert(await page.locator('.browser-screen').isVisible())
+      const phone = await assertPreset(412, 915)
+      await page.screenshot({ path: resolve(evidence, `phone-${width}.png`) })
+      await wheelOver(page, phone, 1)
+      const [turn] = (await wheelCalls(page)).slice(-1)
+      assert(Math.abs(turn.x - 103) <= 1 && Math.abs(turn.y - 458) <= 1 && turn.dy === 3, JSON.stringify(turn))
+      await page.getByRole('tab', { name: /Tablet tab/ }).click()
+      await assertPreset(820, 1180)
+      await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/show' && call.body.tab === 'tablet'))
+      await page.getByRole('tab', { name: /Fixture tab/ }).click()
+      await assertPreset(412, 915)
+      await page.getByRole('button', { name: 'Device: Phone', exact: true }).click()
+      await page.getByRole('menuitemradio', { name: /Desktop/ }).click()
+      await page.waitForFunction(() => !document.querySelector('iframe.browser-live').classList.contains('browser-live-preset'))
+      assert.equal(await page.locator('.browser-screen').isVisible(), false)
+      assert.equal(await page.evaluate(() => window.sockets.length), 0)
+      assert.equal(liveLoads, loads + 1, 'preset and tab changes keep the existing iframe')
       assert.deepEqual(errors, [])
-      console.log(`Browser live view: ${width}px, live page, poll, show, reload on new run, notes and phone stream pass`)
+      console.log(`Browser live view: ${width}px, live page, poll, show, reload, notes, phone and tablet sizes pass`)
       await context.close()
     }
   } finally {
