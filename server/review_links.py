@@ -800,6 +800,9 @@ def _parent_sent(cap, at=None):
 def _renew_parent_window(cap, started_at, finished_at, *, legacy_agent=False):
     """Carry parent evidence across a fresh completion during an upgrade pause."""
     sent = max((cap[field] for field in ('agent_prompt', 'parent_send_at') if field in cap), default=None)
+    window = cap.get('parent_window_at')
+    if window is not None and (sent is None or window >= sent):
+        return False  # One send renews its window once. Its own turn can read with no start or before its marker.
     # A completion with no start time cannot show that it started after the send, so it carries the evidence too.
     carry = legacy_agent if sent is None else (not _is_time(started_at) or started_at < sent) and sent <= finished_at
     if not carry:

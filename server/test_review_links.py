@@ -3364,8 +3364,9 @@ class ReviewLinksTests(unittest.TestCase):
         self.states['%21'] = 'Idle'
         ttl = review_links.AGENT_PROMPT_TTL
         earlier_end = 1002 + ttl + 5
-        for seen in ('Working', 'between polls'):
-            with self.subTest(seen=seen):
+        # Round 9: the parent's own turn can also read with no start, or start before its post-delivery marker.
+        for seen, parent_start, marker in product(('Working', 'between polls'), (1003, None), (None, 1004)):
+            with self.subTest(seen=seen, parent_start=parent_start, marker=marker):
                 self.clock.return_value = 1000
                 self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
                 self.send.reset_mock()
@@ -3373,11 +3374,14 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe(elapsed=0, **{'%13': 'Idle'})
                 self.clock.return_value = 1002
                 review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+                if marker is not None:
+                    self.clock.return_value = marker
+                    review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)
                 self.clock.return_value = earlier_end
                 self.turn_source = Mock(return_value=('user', 1001, earlier_end))
                 self.observe(**{'%13': 'Idle'})
                 self.clock.return_value = earlier_end + 3
-                self.turn_source = Mock(return_value=('user', 1003, earlier_end + 3))
+                self.turn_source = Mock(return_value=('user', parent_start, earlier_end + 3))
                 if seen == 'Working':
                     self.observe(**{'%13': 'Working'})
                 self.observe(**{'%13': 'Idle'})
