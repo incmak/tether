@@ -127,7 +127,7 @@ def _sanitize(row):
          lambda value: type(value) in (int, float)),
         (('scope_since', 'scope_retry_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
-        (('unreadable', 'pending_reset', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
+        (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
          lambda value: type(value) is bool),
         (('name', 'escalate', 'cap_reset'), lambda value: isinstance(value, str)),
     ):
@@ -293,14 +293,19 @@ def _backup_legacy_store():
             pass
 
 
-def _write(rows):
-    live = {_cap_key(row) for row in rows if _is_link(row)}
+def _write(rows, *, adopt=()):
+    live = {}
     retained = [row for row in rows if not _is_cap(row)]
+    for row in retained:
+        if _is_link(row):
+            live.setdefault(_cap_key(row), []).append(row)
     saved = []
     for row in rows:
         if not _is_cap(row):
             continue
         key = _cap_key(row)
+        if key in adopt or row.get('pending_adoption'):
+            _adopt_orphaned_counts(row, live.get(key, ()))
         if key in live:
             row.pop('saved_at', None)
             retained.append(row)
@@ -380,11 +385,23 @@ def _bind_worker(rows, worker, thread):
                                                      unbound['restart'].get('counts', {}))
         if counts:
             bound['counts'] = counts
+        if unbound.get('pending_adoption'):
+            bound['pending_adoption'] = True
     for link in rows:
         if not _is_link(link) or not _matches(link, worker, thread):
             continue
         link['worker_thread'] = thread
     return True
+
+
+def _move_counts(cap, previous, reviewer):
+    counts = dict(cap['counts'])
+    counts[reviewer] = counts.pop(previous)
+    cap['counts'] = counts
+    start = dict(cap.get('restart', {}).get('counts', {}))
+    if previous in start:
+        start[reviewer] = start.pop(previous)
+        cap['restart'] = {**cap['restart'], 'counts': start}
 
 
 def _adopt_counts(cap, link):
@@ -396,12 +413,27 @@ def _adopt_counts(cap, link):
     unbound = _reviewer_key(dict(reviewer=link['reviewer']))
     previous = unbound if unbound in counts else UNOWNED
     if previous in counts:
-        cap['counts'] = {key: entry for key, entry in counts.items() if key != previous}
-        cap['counts'][reviewer] = counts[previous]
-        start = cap.get('restart', {}).get('counts', {})
-        if previous in start:
-            baseline = {key: entry for key, entry in start.items() if key != previous}
-            cap['restart'] = {**cap['restart'], 'counts': {**baseline, reviewer: start[previous]}}
+        _move_counts(cap, previous, reviewer)
+
+
+def _adopt_orphaned_counts(cap, links):
+    cap.pop('pending_adoption', None)
+    if len(links) != 1:
+        return
+    reviewer = _reviewer_key(links[0])
+    counts = cap.get('counts', {})
+    if reviewer in counts:
+        return
+    if _cap_key(cap) in _feedback_in_flight:
+        # The departing reviewer can still record a round under its old key.
+        cap['pending_adoption'] = True
+    elif counts:
+        def severity(owner):
+            entry = counts[owner]
+            rounds = entry.get('rounds', 0)
+            return max(rounds + entry.get('empty_rounds', 0), entry.get('stale_rounds', 0)), rounds
+
+        _move_counts(cap, max(counts, key=severity), reviewer)
 
 
 def add(*, worker, reviewer, reviewer_thread, name, agent, seen_working=False, worker_thread=None, reset=False):
@@ -434,10 +466,12 @@ def add(*, worker, reviewer, reviewer_thread, name, agent, seen_working=False, w
                     cap['pending_reset'] = True
             rows.append(cap)
         if reviewer_thread is not None:
-            _adopt_counts(cap, link)
-        links = [row for row in rows if _is_link(row) and
-                 (row['worker'], row['reviewer']) != (worker, reviewer)]
-        _write([row for row in rows if _is_cap(row)] + (links + [link])[-MAX_LINKS:])
+            _adopt_counts(cap, link)  # this reviewer's own counts from before its thread was known
+        links = [row for row in rows if _is_link(row)]
+        remaining = [row for row in links if (row['worker'], row['reviewer']) != (worker, reviewer)]
+        remaining = (remaining + [link])[-MAX_LINKS:]
+        adopt = {key} | {_cap_key(row) for row in links if row not in remaining}
+        _write([row for row in rows if _is_cap(row)] + remaining, adopt=adopt)
         audit.record('review.link', f'Linked reviewer {reviewer} to {name}', worker=worker, reviewer=reviewer)
 
 
@@ -523,7 +557,7 @@ def remove(worker, reviewer=None):
                    and reviewer in (None, row['reviewer'])]
         if not stopped:
             return False
-        _write([row for row in rows if row not in stopped])
+        _write([row for row in rows if row not in stopped], adopt={_cap_key(row) for row in stopped})
         audit.record('review.stop', f"Stopped review for {stopped[0]['name']}", worker=worker,
                      **({'reviewer': reviewer} if reviewer else {}))
         return True
@@ -532,10 +566,11 @@ def remove(worker, reviewer=None):
 def close(pane):
     with _lock:
         rows = _read()
-        remaining = [row for row in rows if not (isinstance(row, dict) and
-                     (row.get('worker') == pane or _is_link(row) and row['reviewer'] == pane))]
+        stopped = [row for row in rows if _is_link(row) and row['reviewer'] == pane]
+        remaining = [row for row in rows if row not in stopped and
+                     not (isinstance(row, dict) and row.get('worker') == pane)]
         if remaining != rows:
-            _write(remaining)
+            _write(remaining, adopt={_cap_key(row) for row in stopped})
 
 
 def _from_parent(stage, pane, thread):
@@ -813,9 +848,15 @@ def _linked(link, snapshot, entries, *, delivery=None, blocking=None, correction
         return True
 
 
-def _release(key, delivery):
+def _release(key, delivery, *, writing=False):
     if _feedback_in_flight.get(key) is delivery:
         del _feedback_in_flight[key]
+        if not writing:
+            # A refused send has no round to write, but a concurrent stop may still need to transfer counts.
+            rows = _read()
+            cap = _cap_for(rows, key)
+            if cap is not None and cap.get('pending_adoption'):
+                _write(rows)
 
 
 def _call(callback, entry):
@@ -1111,7 +1152,7 @@ def _send_parent_notice(cap, entries, status, send, clear):
                 parent = _cap_for(rows, (entry['id'], helper_tabs._thread(entry))) or _cap_for(rows, (entry['id'], None))
                 if parent is not None and not _saved(parent):
                     parent['review_prompts'] = [*parent.get('review_prompts', ()), ['review-notice', sent_at]]
-            _release(key, delivery)
+            _release(key, delivery, writing=True)
             _write(rows)
     finally:
         with _lock:
@@ -1675,8 +1716,8 @@ def _apply_step(old, updated, snapshot, cap, entries, delivery):
                     rows[rows.index(link)] = merged_link
             merged = _merge(snapshot, cap, stored)
             rows[rows.index(stored)] = merged
-            _release(key, delivery)
-            _write(rows)
+            _release(key, delivery, writing=True)
+            _write(rows, adopt={key} if updated is None else ())
             return True, merged
         finally:
             _release(key, delivery)
@@ -1718,7 +1759,8 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
             for worker in bindable & by_pane.keys():
                 bound |= _bind_worker(rows, worker, helper_tabs._thread(by_pane[worker]))
             upgrade_alerts = _claim_upgrade_alerts(rows, by_pane) if alert is not None else []
-            if bound or upgrade_alerts:
+            if bound or upgrade_alerts or any(_is_cap(row) and row.get('pending_adoption')
+                                             and _cap_key(row) not in _feedback_in_flight for row in rows):
                 _write(rows)
         links = [row for row in rows if _is_link(row)]
         upgrade_paused = {_cap_key(row) for row in rows if _is_cap(row) and row.get('paused') == UPGRADE_PAUSE}
