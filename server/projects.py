@@ -343,7 +343,10 @@ def _fit(parts, budget):
         if room > 200:
             out[index] = part[:room].rpartition('\n')[0] + note
         elif budget >= len(note):
-            out[index] = note   # nothing of the part fits, but the agent must know that text was cut
+            # Too little room for the body. Keep the part's heading line when it fits, so the agent knows what was cut.
+            end = part.find('\n', 1) + 1
+            heading = part[:end] if part.startswith('\n#') and end and end + len(note) <= budget else ''
+            out[index] = heading + note
         break
     return out
 

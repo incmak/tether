@@ -297,6 +297,18 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('- n0.md: Note 0', text)
         self.assertNotIn('body 0', text)
 
+    def test_a_cut_with_little_room_keeps_the_heading_line(self):
+        note = '\n[Cut to fit the project size limit. The full text is in the project folder.]\n'
+        for heading in ('\n### Project notes\n', '\n### Stack notes\n', '\n## Instructions\n'):
+            with self.subTest(heading=heading):
+                part = heading + '\n#### a.md\n' + 'body\n' * 200
+                for room in (len(heading) + len(note), 150, 200):
+                    fitted = projects._fit([((1, 0), 'x' * 100), ((4, 0), part), ((5, 0), 'later')], 100 + room)
+                    self.assertEqual(fitted, ['x' * 100, heading + note, ''])
+        # No heading, or no room for it: the marker alone still says that text was cut.
+        self.assertEqual(projects._fit([((4, 0), 'plain\n' + 'body\n' * 100)], 150), [note])
+        self.assertEqual(projects._fit([((4, 0), '\n### Project notes\n' + 'body\n' * 100)], len(note) + 5), [note])
+
     def test_default_budget_fits_all_five_excerpts_before_the_older_notes_list(self):
         for at in range(30):
             projects.write_note(PID, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
