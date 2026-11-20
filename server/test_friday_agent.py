@@ -272,6 +272,11 @@ class FridayRulesTests(unittest.TestCase):
             ('answer_approval', {}, {'chat': 'Docs', 'decision': 'deny'}, 'Denied in Docs.'),
             ('new_chat', {}, {'chat': 'Docs'}, 'Started Docs.'),
             ('switch_chat', {}, {'chat': 'Docs'}, 'Switched to Docs.'),
+            ('show_chat', {}, {'chat': 'Docs'}, 'Showing Docs.'),
+            ('show_chat', {'chat': 'Unconfirmed'}, {}, 'Showing it.'),
+            ('show_session', {}, {'session': 'Backend', 'chat': 'API'}, 'Showing Backend.'),
+            ('show_session', {}, {'chat': 'API'}, 'Showing API.'),
+            ('show_session', {'session': 'Unconfirmed'}, {}, 'Showing it.'),
             ('open_panel', {}, {}, 'Opened.'),
             ('open_panel', {'open': False}, {}, 'Closed.'),
             ('backlog_add', {}, {'id': 'B318'}, 'Added B318.'),
@@ -303,11 +308,12 @@ class FridayRulesTests(unittest.TestCase):
         self.assertEqual(ack('backlog_send', {}, {'ok': True, 'chat': 'Docs', 'item': 'B12'}), 'Sent B12 to Docs.')
 
     def test_action_ack_requires_confirmed_success(self):
-        for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
-                       {'question': 'Which chat?', 'choices': ['Docs', 'Tests']},
-                       {'ok': False}, {'ok': 1}, None, [], 'sent'):
-            with self.subTest(result=result):
-                self.assertIsNone(friday.action_ack('send_to_chat', {}, result))
+        for name in ('send_to_chat', 'show_chat', 'show_session'):
+            for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
+                           {'question': 'Which chat?', 'choices': ['Docs', 'Tests']},
+                           {'ok': False}, {'ok': 1}, None, [], 'sent'):
+                with self.subTest(name=name, result=result):
+                    self.assertIsNone(friday.action_ack(name, {}, result))
 
     def test_reminder_ack_reports_confirmed_reminders(self):
         saved = [{'text': 'Check usage', 'when': 'Tue 24 Nov 10:00'}]
@@ -327,6 +333,14 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertIsNotNone(friday.check_tool(name, {}, 'event', 'yes', set()))
         for name in ('read_last_reply', 'list_chats', 'open_panel', 'backlog_list', 'reminder_list'):
             self.assertIsNone(friday.check_tool(name, {}, 'event', 'yes', set()))
+
+    def test_show_tools_require_speech_and_can_repeat(self):
+        for name, args in (('show_chat', {'chat': 'Docs'}), ('show_session', {'session': 'Backend'})):
+            with self.subTest(name=name):
+                for source in ('event', 'tool'):
+                    self.assertIsNotNone(friday.check_tool(name, args, source, 'Show it', set()))
+                self.assertIsNone(friday.check_tool(name, args, 'speech', 'Show it', set()))
+                self.assertIsNone(friday.check_tool(name, args, 'speech', 'Show it', {name}))
 
     def test_backlog_send_needs_a_send_word_or_a_confirmed_readback(self):
         args = {'item': 'B12', 'chat': 'api'}
@@ -810,10 +824,11 @@ class FridayRulesTests(unittest.TestCase):
             'speech', 'tell it to take B7', set(), suggestions=('B12',)), friday.READBACK_REQUIRED)
 
     def test_false_success(self):
-        for text in ('I have sent that.', 'Switched to Docs.', 'Done!'):
+        for text in ('I have sent that.', 'Switched to Docs.', 'Done!', 'Showing api-server.', 'I opened it.'):
             self.assertTrue(friday.false_success(text), text)
         for text in ('It was not sent.', "It wasn't sent.", 'It wasn’t approved.',
-                     'Shall I send it?', 'Was it sent?', 'The sender is ready.'):
+                     'Shall I send it?', 'Was it sent?', 'The sender is ready.',
+                     'I could not show it.', "I haven't opened it."):
             self.assertFalse(friday.false_success(text), text)
 
     def test_stray_text(self):
@@ -1010,7 +1025,12 @@ class FridayRulesTests(unittest.TestCase):
         schemas = friday.tool_schemas()
         tools = {t['function']['name']: t['function']['parameters'] for t in schemas}
         self.assertEqual(set(tools), {'list_chats', 'send_to_chat', 'answer_approval', 'read_last_reply', 'new_chat', 'switch_chat', 'open_panel',
-                                      'backlog_list', 'backlog_add', 'backlog_send', 'reminder_add', 'reminder_list'})
+                                      'show_chat', 'show_session', 'backlog_list', 'backlog_add', 'backlog_send',
+                                      'reminder_add', 'reminder_list'})
+        self.assertEqual(tools['show_chat']['required'], ['chat'])
+        self.assertEqual(tools['show_chat']['properties'], {'chat': {'type': 'string'}})
+        self.assertEqual(tools['show_session']['required'], ['session'])
+        self.assertEqual(tools['show_session']['properties'], {'session': {'type': 'string'}})
         self.assertIn('backlog', tools['open_panel']['properties']['panel']['enum'])
         self.assertEqual(tools['backlog_send']['required'], ['item', 'chat'])
         self.assertEqual(tools['list_chats']['required'], [])
@@ -1040,7 +1060,11 @@ class FridayRulesTests(unittest.TestCase):
             self.assertTrue(set(schema['required']) <= schema['properties'].keys())
         self.assertIn('No markdown, lists, code, or Needs you footer.', friday.SYSTEM_PROMPT)
         self.assertIn('Never invent', friday.SYSTEM_PROMPT)
-        self.assertIn('in this turn', friday.SYSTEM_PROMPT)
+        self.assertIn('Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn.',
+                      friday.SYSTEM_PROMPT)
+        self.assertNotIn('You cannot show', friday.SYSTEM_PROMPT)
+        self.assertIn('Call show_chat', friday.SYSTEM_PROMPT)
+        self.assertIn('Call show_session', friday.SYSTEM_PROMPT)
         self.assertIn('Never read more than 3 names aloud.', friday.SYSTEM_PROMPT)
         self.assertIn('Call list_chats for idle names.', friday.SYSTEM_PROMPT)
         self.assertIn('A session is a tmux session: a named group of chats.', friday.SYSTEM_PROMPT)
@@ -1869,6 +1893,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
     async def test_single_successful_action_uses_one_spoken_ack(self):
         for name, args, result, text in (
                 ('send_to_chat', {'prompt': 'Check the docs'}, {'ok': True, 'chat': 'Docs'}, 'Sent to Docs.'),
+                ('show_chat', {'chat': 'Docs'}, {'ok': True, 'chat': 'Docs'}, 'Showing Docs.'),
+                ('show_session', {'session': 'Backend'},
+                 {'ok': True, 'session': 'Backend', 'chat': 'API'}, 'Showing Backend.'),
                 ('open_panel', {'open': False}, {'ok': True}, 'Closed.')):
             with self.subTest(name=name):
                 session, frames = await self.tool_flow('Send the prompt or close the panel', [
@@ -1993,6 +2020,23 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             ('', 1, [cases[0][1]]), (['The prompt was sent', ' to neither chat, not even Docs.'], 1, [])])
         self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                          ['The prompt was sent', ' to neither chat, not even Docs.'])
+
+    async def test_failed_show_tools_replace_false_success_and_keep_the_error_reply(self):
+        error = {'error': 'Friday can act in Tether is off in Settings.'}
+        cases = (
+            ('Show me Docs', 'show_chat', {'chat': 'Docs'}, ['Show', 'ing Docs.']),
+            ('Show me Backend', 'show_session', {'session': 'Backend'}, ['I opened', ' Backend.']),
+        )
+        for user, name, args, claim in cases:
+            action = ('', 1, [(name, args, error)])
+            with self.subTest(name=name), patch('sys.stderr'):
+                _, frames = await self.tool_flow(user, [action, (claim, 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through.'])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+                _, frames = await self.tool_flow(user, [action, (error['error'], 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
+                                 [error['error']])
 
     async def test_successful_send_reply_survives_blocked_second_send(self):
         send = ('send_to_chat', {'chat': 'Docs', 'prompt': 'Fix docs'}, {'ok': True, 'chat': 'Docs'})

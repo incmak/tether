@@ -88,6 +88,17 @@ class PrefsSyncTests(unittest.TestCase):
                 self.assertEqual(stored['prefs']['waitingOrder'], value)
                 self.assertEqual(prefs_sync.load(), stored)
 
+    def test_friday_acts_syncs_only_booleans(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                stored = prefs_sync.save({'fridayActs': value})
+                self.assertIs(stored['prefs']['fridayActs'], value)
+                self.assertEqual(prefs_sync.load(), stored)
+        for value in (1, 'false'):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, r'^Invalid preference: fridayActs\.$'):
+                prefs_sync.save({'fridayActs': value})
+        self.assertEqual(prefs_sync.load(), stored)
+
     def test_invalid_waiting_order_does_not_save(self):
         for value in ('sideways', 42):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, r'^Invalid preference: waitingOrder\.$'):
