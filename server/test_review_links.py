@@ -2839,8 +2839,14 @@ class ReviewLinksTests(unittest.TestCase):
                         self.file.write_text(json.dumps(order))
                         cap, = (row for row in review_links._read() if row.get('cap'))
                         shared = {field: cap[field] for field in fields if field in cap}
-                        self.assertEqual(shared, {'paused': 'upgrade', 'agent_prompt': max(
-                            row['agent_prompt'] for row in order if 'agent_prompt' in row)})
+                        expected = {'paused': 'upgrade', 'agent_prompt': max(
+                            row['agent_prompt'] for row in order if 'agent_prompt' in row)}
+                        if any('saved_at' not in row and row.get('restart', {}).get('agent') for row in order):
+                            # A live row's agent flag is the only evidence of a parent turn whose marker was consumed.
+                            expected['restart'] = {'paused': True, 'agent': True}
+                            shared['restart'] = {key: value for key, value in shared['restart'].items()
+                                                 if key != 'counts'}
+                        self.assertEqual(shared, expected)
 
     def test_legacy_store_queries_leave_the_file_for_the_next_write(self):
         link = dict(self.rows()[0], worker_thread=WORKER_THREAD, paused=True,
@@ -2997,6 +3003,98 @@ class ReviewLinksTests(unittest.TestCase):
                 else:
                     self.assertEqual(self.upgrade_cap()['agent_prompt'], 999)
                     self.send.assert_not_called()
+
+    def test_upgrade_reads_a_parent_marker_recorded_during_the_tick(self):
+        # The parent records its marker before it sends the prompt. A turn readable in this tick must see it.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for observed in (False, True):
+            with self.subTest(observed=observed):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0)
+                self.upgrade_cap()
+                if observed:
+                    self.observe(**{'%13': 'Working'})
+
+                def parent_turn(worker):
+                    review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)
+                    now = review_links.time.time()
+                    return ('user', now + 0.1, now + 0.9)
+                self.turn_source = Mock(side_effect=parent_turn)
+                self.observe(**{'%13': 'Idle'})
+                self.observe()
+                self.assertIn('agent_prompt', self.upgrade_cap())
+                self.send.assert_not_called()
+
+    def test_upgrade_judges_a_timed_turn_by_its_own_start_not_an_earlier_agent_flag(self):
+        # A parent turn seen Working inside the window can end before a Mak turn that starts after it.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        ttl = review_links.AGENT_PROMPT_TTL
+        for label, start in (('Mak after the window', 999 + ttl + 0.1), ('parent inside the window', 999 + ttl - 0.4)):
+            with self.subTest(label=label):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3, paused=True, agent_prompt=999),
+                                                                 dict(empty_rounds=3, paused=True, agent_prompt=999))))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0)
+                self.observe(elapsed=ttl - 1.5, **{'%13': 'Working'})
+                self.turn_source.return_value = ('user', start, 999 + ttl + 0.9)
+                self.observe(elapsed=2, **{'%13': 'Idle'})
+                self.observe()
+                if label == 'Mak after the window':
+                    self.assertEqual(review_links.paused(), {})
+                else:
+                    self.assertEqual(self.upgrade_cap()['agent_prompt'], 999)
+                    self.send.assert_not_called()
+
+    def test_upgrade_keeps_a_live_agent_flag_when_the_marker_was_consumed(self):
+        # Old watchers popped the parent's marker and kept only restart.agent while its turn ran.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for path in ('migration', 'conflicting bind'):
+            with self.subTest(path=path):
+                self.clock.return_value = 1000
+                rows = self.legacy_pair(dict(rounds=3, restart=dict(rounds=1, agent=True)),
+                                        dict(empty_rounds=2, restart=dict(empty_rounds=1, agent=True)))
+                if path == 'conflicting bind':
+                    rows[0].update(limit=5, grant_rounds=3)
+                    rows[1].update(worker_thread=None, paused=False)
+                self.file.write_text(json.dumps(rows))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('user', None, 1001))
+                self.observe(elapsed=0, **{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.observe()
+                self.upgrade_cap()
+                self.send.assert_not_called()
+
+    def test_upgrade_alerts_once_for_bound_and_unbound_caps_of_one_conversation(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        late = [dict(self.reviewer, id=pane) for pane in ('%22', '%23')]
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states.update({'%21': 'Idle', '%22': 'Idle', '%23': 'Idle'})
+        self.turn_source = Mock(return_value=('background', None, None))
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                self.clock.return_value = 1000
+                rows = self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))
+                rows += [dict(row, reviewer=pane, worker_thread=None)
+                         for row, pane in zip(self.legacy_pair(dict(rounds=1), dict(empty_rounds=1)), ('%22', '%23'))]
+                self.file.write_text(json.dumps(rows[::-1] if reverse else rows))
+                self.alert.reset_mock()
+                self.observe(elapsed=0)
+                self.observe(entries=[*self.entries, *late])
+                self.observe(entries=[*self.entries, *late])
+                self.alert.assert_called_once()
+                self.assertTrue(self.upgrade_cap()['upgrade_alerted'])
 
     def test_upgrade_pause_clears_for_a_timed_mak_turn_between_idle_ticks(self):
         self.enterContext(own_time(review_links, time=self.clock))

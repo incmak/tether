@@ -277,6 +277,10 @@ def _migrate(rows, cutoff):
                 cap['restart']['counts'] = {_reviewer_key(row): baseline} if baseline else {}
         if counts:
             cap['counts'] = counts
+        if ambiguous and any(not _saved(row) and isinstance(row.get('restart'), dict) and row['restart'].get('agent')
+                             for row in peers):
+            # An old watcher may have consumed the parent's marker. The flag is the only evidence of its turn.
+            cap['restart'] = {**_restart_state(cap), 'agent': True}
         if all(_saved(row) for row in peers):
             cap['saved_at'] = max(row['saved_at'] for row in peers)
         current[key] = cap
@@ -426,7 +430,8 @@ def _bind_worker(rows, worker, thread):
         rows.remove(unbound)
         first_counts, second_counts = bound.get('counts', {}), unbound.get('counts', {})
         decision = _binding_decision(unbound)
-        if decision and decision != _binding_decision(bound):
+        conflict = bool(decision) and decision != _binding_decision(bound)
+        if conflict:
             first, second = bound.get('restart', {}), unbound.get('restart', {})
             if not first.get('agent'):
                 first_counts = _reviewer_counts_since(first_counts, first.get('counts', {}))
@@ -446,6 +451,8 @@ def _bind_worker(rows, worker, thread):
         counts = _merge_counts(first_counts, second_counts)
         if counts:
             bound['counts'] = counts
+        if conflict and (first.get('agent') or second.get('agent')):
+            bound['restart'] = {**_restart_state(bound), 'agent': True}
         if unbound.get('pending_adoption'):
             bound['pending_adoption'] = True
     for link in rows:
@@ -1377,6 +1384,12 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             read = (_call(turn_source, worker) if between_ticks else
                     turn_source(worker) if turn_source is not None else 'user')
             turn_reads[key] = read if isinstance(read, tuple) else (read, None, None)
+        if upgrade_paused:
+            # A parent records its marker before it sends the prompt. The store has it once its turn is readable.
+            with _lock:
+                stored = _cap_for(_read(), key)
+            if stored is not None:
+                _keep_latest_time(cap, 'agent_prompt', (cap, stored))
         if between_ticks:
             # This probe must leave the queued turn markers alone.
             candidate, started, finished = turn_reads[key]
@@ -1396,9 +1409,13 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         start = start if isinstance(start, dict) else {}
         if upgrade_paused:
             # An older turn may finish before the queued parent prompt starts. Keep the original send time.
-            # Judge the marker at the turn's start. Without a prompt time, judge it now (fail-safe until the TTL ends).
-            by_agent = start.get('agent') or _agent_prompt_fresh(cap, started_at if _is_time(started_at) else None)
-            if start.get('agent') and _is_time(finished_at):
+            if _is_time(started_at):
+                # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
+                # marker means an old watcher consumed the marker: keep the pause.
+                by_agent = _agent_prompt_fresh(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
+            else:
+                by_agent = start.get('agent') or _agent_prompt_fresh(cap)
+            if by_agent and _is_time(finished_at):
                 # Older watchers could consume the prompt marker before the agent turn ended.
                 cap['review_turn_at'] = max(finished_at, cap.get('review_turn_at', float('-inf')))
         else:
@@ -1917,6 +1934,9 @@ def _claim_upgrade_alerts(rows, entries):
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
         key = _cap_key(cap)
+        if key[1] is None and any(_is_cap(other) and other.get('paused') == UPGRADE_PAUSE and other['worker'] == key[0]
+                                  and other.get('worker_thread') is not None for other in rows):
+            continue  # The bound cap alerts; a later bind carries its marker.
         worker = entries.get(key[0])
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
