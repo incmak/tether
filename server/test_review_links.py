@@ -3049,12 +3049,27 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assert_reviews_restarted()
 
     def test_wider_tail_does_not_skip_a_background_prompt_without_a_reply(self):
-        # B289 review r2: a scheduled prompt starts a turn that aborts after long tool output.
-        stop = self.stopped_review_prompt('claude', 3, legacy=True)
+        # B289 review r2/r3: a scheduled prompt or wakeup starts a turn that aborts after long tool output.
+        for start in (claude('user', '<scheduled-task>Check CI.</scheduled-task>', isSystemInjected=True),
+                      dict(type='system', subtype='scheduled_wakeup', content='Wake up.')):
+            with self.subTest(start=start.get('subtype') or 'user'):
+                self.stopped_review_prompt('claude', 3, legacy=True)
+                write_records(Path(self.worker['transcript']), [
+                    claude('user', 'An earlier task from Mak.'), claude('assistant', 'Done.'), start,
+                    claude('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'x' * LONG_REVIEW_OUTPUT}]),
+                ])
+                self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
+                self.request_review()
+                self.assert_stopped_review(3)
+
+    def test_antigravity_stop_turn_without_a_reply_keeps_the_cap(self):
+        # B289 review r3: the whole export is read, but the stop turn ends in an error with no reply.
+        stop = self.stopped_review_prompt('antigravity', 3, legacy=True)
         write_records(Path(self.worker['transcript']), [
-            claude('user', 'An earlier task from Mak.'), claude('assistant', 'Done.'),
-            claude('user', '<scheduled-task>Check CI.</scheduled-task>', isSystemInjected=True),
-            claude('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'x' * LONG_REVIEW_OUTPUT}]),
+            dict(type='USER_INPUT', step_index=1, content='<USER_REQUEST>An earlier task from Mak.</USER_REQUEST>'),
+            dict(type='AGENT_RESPONSE', step_index=2, content='Done.'),
+            dict(type='USER_INPUT', step_index=3, content=f'<USER_REQUEST>{stop}</USER_REQUEST>'),
+            dict(type='ERROR_MESSAGE', step_index=4, content='x' * LONG_REVIEW_OUTPUT),
         ])
         self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
         self.request_review()
@@ -3075,6 +3090,14 @@ class ReviewLinksTests(unittest.TestCase):
             'antigravity', server.notification_records(self.worker), distinguish_missing=True), 'user')
         self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
         self.request_review()
+        self.assert_stopped_review(3)
+        # A partial export cannot show which prompt is newest, even when a new prompt and reply are in the tail.
+        # The handoff rule: a clipped prompt keeps the cap. Mak can still restart reviews from Tether.
+        with open(self.worker['transcript'], 'a') as stream:
+            for record in (dict(type='USER_INPUT', step_index=6, content='<USER_REQUEST>Mak asks again.</USER_REQUEST>'),
+                           dict(type='AGENT_RESPONSE', step_index=7, content='Done.')):
+                stream.write(json.dumps(record) + '\n')
+        self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
         self.assert_stopped_review(3)
         self.write_worker_turn('Mak asks again.')  # a whole export: the newest prompt is known
         self.assert_reviews_restarted()

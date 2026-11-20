@@ -299,7 +299,7 @@ def review_turn_source(entry):
             # Only the whole export shows which prompt is newest.
             records, whole = _transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES, whole=True)
             if whole:
-                result = classify(records)
+                result = classify(records, latest_turn=True)
             elif result[0] == 'user':
                 result = ('unknown', *result[1:])
     elif result[0] in ('unknown', 'unknown-background'):

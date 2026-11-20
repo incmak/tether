@@ -70,7 +70,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             if kind == 'assistant' and not record.get('isMeta'):
                 is_assistant = True
             elif not assistant_seen:
-                if latest_turn and _claude_prompt(record, kind):
+                if latest_turn and _claude_turn_start(record, kind):
                     return result('unknown')
                 continue
             if kind == 'user':
@@ -93,9 +93,9 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                 if attachment.get('type') == 'hook_blocking_error' and identify is not None:
                     hook_blocked = True  # a blocked hook continues the same turn: find the prompt that started it
                     continue
-                if attachment.get('type') in ('hook_blocking_error', 'hook', 'scheduled_task', 'cron', 'loop', 'monitor_event'):
+                if attachment.get('type') in CLAUDE_BACKGROUND_ATTACHMENTS:
                     return result('background')
-            if kind == 'system' and record.get('subtype') in ('hook', 'hook_response', 'scheduled_task', 'scheduled_wakeup', 'cron', 'loop', 'monitor_event'):
+            if kind == 'system' and record.get('subtype') in CLAUDE_BACKGROUND_SYSTEM:
                 return result('background')
         elif agent == 'codex':
             if latest_turn and not assistant_seen and _codex_prompt(kind, payload):
@@ -119,6 +119,8 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
         elif agent == 'antigravity':
             if kind in ('AGENT_RESPONSE', 'PLANNER_RESPONSE'):
                 is_assistant = True
+            elif latest_turn and not assistant_seen and kind == 'USER_INPUT':
+                return result('unknown')
             elif assistant_seen and kind == 'USER_INPUT':
                 if identify is not None and (prompt := transcript_message(record, 0, lambda text: text)):
                     return prompt_source(record, prompt['text'])
@@ -130,6 +132,20 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
     if distinguish_missing:
         return result('unknown-background' if hook_blocked else 'unknown')
     return result('background' if hook_blocked else 'user')
+
+
+CLAUDE_BACKGROUND_ATTACHMENTS = ('hook_blocking_error', 'hook', 'scheduled_task', 'cron', 'loop', 'monitor_event')
+CLAUDE_BACKGROUND_SYSTEM = ('hook', 'hook_response', 'scheduled_task', 'scheduled_wakeup', 'cron', 'loop', 'monitor_event')
+
+
+def _claude_turn_start(record, kind):
+    """A record that starts a turn: a prompt, or a background record other than a blocked hook."""
+    if kind == 'system':
+        return record.get('subtype') in CLAUDE_BACKGROUND_SYSTEM
+    attachment = record.get('attachment') if isinstance(record.get('attachment'), dict) else {}
+    if kind == 'attachment' and attachment.get('type') in CLAUDE_BACKGROUND_ATTACHMENTS:
+        return attachment.get('type') != 'hook_blocking_error'  # a blocked hook continues the same turn
+    return _claude_prompt(record, kind)
 
 
 def _claude_prompt(record, kind):
