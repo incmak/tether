@@ -547,6 +547,43 @@ class FridayRulesTests(unittest.TestCase):
                                      'Yes.', readback, proposal, 5)
         self.assertEqual(args['prompt'], 'Archive the draft.')
 
+    def test_a_question_back_is_not_a_yes(self):
+        proposal = friday.SendProposal('send_to_chat', 'docs', 'Keep option C.', 4)
+        readback = friday.send_readback(proposal)
+        args = {'chat': 'docs', 'prompt': 'Keep option C.'}
+        for answer in ("That's correct?", 'Yes?', 'Okay, go ahead?'):
+            with self.subTest(answer=answer):
+                self.assertFalse(friday.plain_yes(answer, 'docs'))
+                self.assertIsNotNone(friday.check_tool('send_to_chat', args, 'speech', answer, set(),
+                                                       readback, proposal, 5))
+
+    def test_one_yes_allows_one_send_of_any_kind(self):
+        previous = 'Should I send B12 to docs?'
+        for first, second in (('backlog_send', 'send_to_chat'), ('send_to_chat', 'backlog_send')):
+            with self.subTest(first=first):
+                args = {'chat': 'docs', 'prompt': 'B12', 'item': 'B12'}
+                self.assertEqual(friday.check_tool(second, args, 'speech', 'Yes.', {first}, previous),
+                                 'Only one send is allowed per spoken turn.')
+
+    def test_any_question_from_friday_makes_the_next_turn_an_answer(self):
+        # The direct-send path never applies after a question: a send needs Friday's read-back first.
+        for previous in ('Would you like me to send the fix to docs?',
+                         'I can tell docs to fix the header. Want that?',
+                         'Should I send this to docs: fix the header (or should I wait?)',
+                         'Docs replied. Shall I pass anything on?'):
+            for answer in ('Yes, tell docs to fix the header.', 'Tell docs to fix the header.'):
+                with self.subTest(previous=previous, answer=answer):
+                    self.assertIsNotNone(friday.check_tool(
+                        'send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'}, 'speech', answer, set(),
+                        previous))
+        self.assertIsNone(friday.freeform_proposal('Should I tell docs to fix the header (or should I wait?)'))
+        # With no question before it, a direct request still sends.
+        self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
+                                            'speech', 'Tell docs to fix the header.', set(), 'Docs is done.'))
+        self.assertIsNone(friday.check_tool('send_to_chat', {'chat': 'docs', 'prompt': 'Fix the header.'},
+                                            'speech', 'Tell docs to fix the header.', set(),
+                                            'I am listening. What can I help you with today?'))
+
     def test_a_question_about_the_users_own_send_is_not_a_request(self):
         for text in ('Should I just message ci-audit myself', 'Should I ask ci-audit myself',
                      "I'll tell docs myself", 'I’ll just send it later', 'We could message them later',
@@ -1880,7 +1917,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([f for f in frames if isinstance(f, tuple)], [('dispatch', 'send_to_chat')])
         sent, blocked = [f.result for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
         self.assertTrue(sent['ok'])
-        self.assertEqual(blocked, {'error': 'Only one send_to_chat is allowed per spoken turn.'})
+        self.assertEqual(blocked, {'error': 'Only one send is allowed per spoken turn.'})
         self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)],
                          ['Sent to Docs. I could only send once.'])
         self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))

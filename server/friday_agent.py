@@ -478,6 +478,9 @@ FREEFORM_THAT = re.compile(r'(?:shall|should|can|may) i (?:send|do) (?:that|this
 
 def freeform_proposal(readback):
     """(payload, chat) of the one send that Friday's own words propose, else None."""
+    if readback.count('?') != 1:
+        # "... to docs (or should I wait?)": a yes could answer either question.
+        return None
     sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', readback) if part.strip()]
     found = []
     for index, part in enumerate(sentences):
@@ -525,6 +528,8 @@ YES_FILLER = frozenset('do it that this go right now thanks thank you sounds goo
 
 
 def plain_yes(text, chat=''):
+    if '?' in text:
+        return False  # "That's correct?" asks; it does not consent.
     words = norm(text).split()
     allowed = YES_WORDS | YES_FILLER | set(norm(clean_chat(chat)).split())
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
@@ -584,14 +589,17 @@ def send_intent(text):
     return False
 
 
-def proposes_send(text):
-    """True when Friday's message asks whether to send: the user's next turn answers it."""
-    text = text.strip()
-    if text.casefold().startswith(SEND_READBACK_START.casefold()):
-        return True
-    sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', text) if part.strip()]
-    return any(part.endswith('?') and (FREEFORM_THAT.search(part) or FREEFORM_SEND.search(part))
-               for part in sentences)
+# Broad on purpose: any send word in a message that asks something makes it a possible send question.
+SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share)\b', re.I)
+
+
+def asks_user(text):
+    """True when Friday's last message asks a question and names a send: the user's next turn answers it.
+
+    Any such question counts, not only the shapes the parser knows ("Would you like me to send ...").
+    A request in the answer gets a read-back instead of a direct send. "What can I help you with?"
+    names no send, so a direct request after it still sends."""
+    return '?' in text and bool(SEND_WORDS.search(text))
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -608,7 +616,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                     and previous_assistant == send_readback(pending))
     if source == 'speech' and name in SEND_TOOLS and has_proposal and APPROVAL_NO.search(last_user_text):
         return 'The user declined the proposed send.'
-    if name in (*SEND_TOOLS, 'answer_approval', 'backlog_add', 'reminder_add') and name in used:
+    if name in SEND_TOOLS and used.intersection(SEND_TOOLS):
+        return 'Only one send is allowed per spoken turn.'
+    if name in ('answer_approval', 'backlog_add', 'reminder_add') and name in used:
         return 'Only one ' + name + ' is allowed per spoken turn.'
     if name == 'backlog_add' and not re.search(r'\bbacklog\b', last_user_text, re.I):
         return 'The user did not ask to add work to the backlog.'
@@ -651,7 +661,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # An answer to Friday's own send question confirms only the exact text it read back,
         # even when the answer holds send words ("Yes, and can you tell docs ...").
-        if not (has_proposal or proposes_send(previous_assistant)) and send_intent(last_user_text):
+        if not (has_proposal or asks_user(previous_assistant)) and send_intent(last_user_text):
             return None
         readback = previous_assistant.strip()
         # Friday's fixed read-back requires the matching proposal, even after it expires.

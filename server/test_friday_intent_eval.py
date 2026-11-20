@@ -84,7 +84,7 @@ class IntentEvalTests(unittest.TestCase):
         self.assertEqual(trace['actions'], [trace['action']])
         blocked, = trace['blocked']
         self.assertEqual(blocked, {'name': 'send_to_chat', 'args': {'chat': 'Other chat', 'prompt': 'Check it'},
-                                   'blocked': 'Only one send_to_chat is allowed per spoken turn.'})
+                                   'blocked': 'Only one send is allowed per spoken turn.'})
 
     def test_split_speech_joins_fragments_for_guard(self):
         example = case('send_to_chat', user=["let's ask friday test to look at the logs", 'and fix it'])
