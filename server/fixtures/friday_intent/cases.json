@@ -309,7 +309,7 @@
     "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
-     "prompt": "(?i)spec.*\\b(?:call|blocker)|\\b(?:call|blocker).*spec"
+     "prompt": "(?i)\\bspec\\b.*\\b(?:calls?|blocker)\\b|\\b(?:calls?|blocker)\\b.*\\bspec\\b"
     }
    }
   },

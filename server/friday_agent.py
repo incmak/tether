@@ -112,7 +112,9 @@ SEND_INTENT = re.compile(
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
-APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|not|never|reject|stop|don't)\b", re.I)
+APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
+# "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
+APPROVAL_NEGATION = re.compile(r"\b(?:not|never)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
@@ -589,9 +591,12 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
         # A yes to Friday's send question answers that send, not a tool approval in some chat.
+        # Fail-safe boundary: a real approval question that names a send word is refused too; Friday asks again.
         if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
                 or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
             return 'The user answered a send question, not an approval.'
+        if APPROVAL_NEGATION.search(last_user_text):
+            return 'The user did not give unambiguous consent for this decision.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))
         decision = args.get('decision')

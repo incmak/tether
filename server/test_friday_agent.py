@@ -598,9 +598,19 @@ class FridayRulesTests(unittest.TestCase):
                 self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
                                                    'speech', answer, set(), 'Should I send the draft to docs?'),
                                  'The user answered a send question, not an approval.')
-        # "Do not approve" is never an approval.
+        # A negation decides nothing: "Do not approve" never approves, "Not yet" never denies.
+        for answer, decision in (('Do not approve it.', 'approve'), ('Do not approve it.', 'deny'),
+                                 ('Not yet.', 'deny'), ('I have not checked the logs.', 'deny'),
+                                 ('Never mind.', 'deny')):
+            with self.subTest(answer=answer, decision=decision):
+                self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': decision},
+                                                       'speech', answer, set(), 'Deploy wants to run the tests.'))
+        self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'deny'},
+                                            'speech', 'No, deny it.', set(), 'Deploy wants to run the tests.'))
+        # Fail-safe boundary: an approval question that names a send word is refused; Friday asks again.
         self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
-                                               'speech', 'Do not approve it.', set(), 'Deploy wants to run the tests.'))
+                                               'speech', 'Yes, approve it.', set(),
+                                               'Deploy asks to send the build to staging. Should I approve it?'))
 
     def test_a_question_without_its_mark_is_not_a_yes(self):
         for answer in ('You sure', 'you sure then', 'Okay you'):
