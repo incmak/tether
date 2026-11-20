@@ -7178,6 +7178,30 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             self.observe()
         self.assertIn(f"Commit under review: {head}", self.assert_follow_up_requested())
 
+    def test_named_approval_of_unbound_request_can_review_a_follow_up_commit(self):
+        self.worker["cwd"] = str(self.reviewed)
+        self.gate_log.write_text("", encoding="utf-8")
+        approved_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        self.assertEqual(self.commit(self.worker), approved_head)
+
+        with patch.object(self, "scope", return_value=None):
+            self.worker_turn()
+            self.assertEqual(self.send.call_count, 1)
+            self.assertNotIn("Commit under review:", self.send.call_args.args[1])
+            self.deliver_approval(approved_head)
+        # The watcher can defer approval until it can read the full scope.
+        self.deliver_approval(approved_head)
+        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_args.args[0], self.worker)
+
+        self.observe("Working")
+        self.git("commit", "-qm", "Follow-up commit", "--allow-empty", cwd=self.reviewed)
+        new_head = self.git("rev-parse", "HEAD", cwd=self.reviewed)
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        folder = shlex.quote(str(self.reviewed))
+        self.assertIn(f"Commit under review: {new_head} in {folder}", self.assert_follow_up_requested())
+
     def test_rejected_gate_check_preserves_review_of_worktree_with_edit(self):
         alternate = self.another_worktree()
         head = self.approve_reviewed_worktree()
@@ -7338,6 +7362,38 @@ class ApprovalTurnTimingTests(ApprovalTurnTimingFixture):
         self.observe()
         self.assertFalse(self.reviewer_should_stay_open(),
                          f"The completed approval turn {self.turn_source!r} should allow idle close")
+
+    def assert_late_push_skips_review_after_earlier_untimed_prompt(self, prompt):
+        self.worker_turn()
+        transcript = self.root / "worker.jsonl"
+        self.worker["transcript"] = str(transcript)
+        earlier_prompt = {
+            "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": prompt},
+        }
+        transcript.write_text(json.dumps(earlier_prompt) + "\n", encoding="utf-8")
+        self.deliver_approval(self.HEAD)
+        self.assertEqual(self.send.call_count, 2)
+
+        finished = {
+            "type": "assistant",
+            "timestamp": datetime.fromtimestamp(self.now + 1, timezone.utc).isoformat(),
+            "message": {"content": [{"type": "text", "text": "Status checked."}]},
+        }
+        with transcript.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(finished) + "\n")
+        self.turn_source = server.review_turn_source(self.worker)
+        self.observe()
+        self.worker_turn()  # The approval starts now and sends an unchanged push.
+        self.assertEqual(self.send.call_count, 2)
+
+    def test_earlier_untimed_user_prompt_preserves_approval_for_late_push(self):
+        self.assert_late_push_skips_review_after_earlier_untimed_prompt("Check the status without editing files.")
+
+    def test_earlier_untimed_review_feedback_preserves_approval_for_late_push(self):
+        prompt = ("[Tether review] Feedback from the reviewer tab (%21):\n\nCheck the status.\n\n"
+                  "Fix what it raises, then stop and wait.")
+        self.assert_late_push_skips_review_after_earlier_untimed_prompt(prompt)
 
     def test_late_push_skips_review_after_an_unrelated_review_notice(self):
         self.approve_current_work()

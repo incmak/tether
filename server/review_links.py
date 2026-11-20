@@ -128,7 +128,7 @@ def _sanitize(row):
          lambda value: type(value) is int and value >= 0),
         (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
          lambda value: type(value) in (int, float)),
-        (('scope_since', 'scope_retry_at', 'follow_up_checked_at'),
+        (('scope_since', 'scope_retry_at', 'follow_up_checked_at', 'follow_up_untimed_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
         (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
          lambda value: type(value) is bool),
@@ -535,7 +535,12 @@ def unreviewed_work(worker, reviewer, scope):
         cap = _cap_for(rows, _cap_key(link)) or {}
     if cap.get('paused') or _waits_on_mak(cap):
         return False
-    if (any(link.get(key) for key in ('seen_working', 'awaiting', 'stalled', 'request_id', 'approved_turn'))
+    # An approval follow-up is open until it is cleared, or until an unchanged completion after the verdict, whose
+    # prompt has no time, may have been the approval's own turn.
+    verdict_at = (link.get('approved_state') or {}).get('at')
+    open_follow_up = link.get('approved_turn') and not (
+        verdict_at is not None and link.get('follow_up_untimed_at', 0) > verdict_at)
+    if (open_follow_up or any(link.get(key) for key in ('seen_working', 'awaiting', 'stalled', 'request_id'))
             or any(key.startswith('stale_') for key in link)):
         return True
     changed, _ = _follow_up_change(link, worker, scope)
@@ -803,7 +808,7 @@ def _follow_up_change(link, worker, scope):
 
 
 def _clear_follow_up(link):
-    for key in ('approved_turn', 'approved_before', 'approved_dirty', 'confirm_ticks'):
+    for key in ('approved_turn', 'approved_before', 'approved_dirty', 'confirm_ticks', 'follow_up_untimed_at'):
         link.pop(key, None)
 
 
@@ -1601,8 +1606,12 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             if at is None or started_at is None and finished_at is None:
                 # Preserve the observed-turn and reply-digest paths when the transcript has no times.
                 handled_approval = finished_at is None and source in ('review-feedback', 'user')
-            elif started_at is None:  # the prompt has no time: its finish after the verdict places the turn
-                handled_approval = source in ('review-feedback', 'user') and finished_at > at
+            elif started_at is None:
+                # The prompt has no time, so it may be an earlier queued prompt. Keep the marker; the idle guard
+                # still lets the reviewer close once this checked completion left the work unchanged.
+                handled_approval = False
+                if not changed:
+                    link['follow_up_untimed_at'] = finished_at
             else:
                 handled_approval = (source == 'review-feedback' and started_at >= at
                                     or source == 'user' and started_at > at)
