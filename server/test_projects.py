@@ -193,10 +193,10 @@ class ProjectTests(unittest.TestCase):
 
     def test_default_budget_keeps_notes_and_instructions_with_long_paths(self):
         short_tether = paths.TETHER
-        short_checkout = Path(projects.__file__).resolve().parent.parent
-        short_python = Path(sys.executable)
+        # Fixed paths of a typical install, so the real checkout and interpreter paths of the test run do not count (B291).
+        short_checkout, short_python = Path('/srv/user/apps/tether'), Path('/usr/bin/python3')
         # About 150 more characters per path, 7 path copies in all. The guidance stays under BUDGET_MAX - BUDGET,
-        # so the default budget must stay whole (B291). Before 8127a1b the guidance used the budget and cut the notes.
+        # so the default budget must stay whole. Before 8127a1b the guidance used the budget and cut the notes.
         long_tether = short_tether / ('state-' + 'x' * 144)
         long_checkout = short_checkout / ('checkout-' + 'x' * 141)
         long_python = short_python.parent / ('python-' + 'x' * 143) / short_python.name
@@ -213,13 +213,16 @@ class ProjectTests(unittest.TestCase):
 
         for group in (None, stack):
             with self.subTest(group=group):
-                short = projects.render(PID, home=self.home, group=group)
-                with (
-                    mock.patch.object(projects, '__file__', str(long_checkout / 'server/projects.py')),
-                    mock.patch.object(sys, 'executable', str(long_python)),
-                    mock.patch.object(paths, 'TETHER', long_tether),
-                ):
-                    long = projects.render(PID, home=self.home, group=group)
+                rendered = {}
+                for name, tether, checkout, python in (('short', short_tether, short_checkout, short_python),
+                                                       ('long', long_tether, long_checkout, long_python)):
+                    with (
+                        mock.patch.object(projects, '__file__', str(checkout / 'server/projects.py')),
+                        mock.patch.object(sys, 'executable', str(python)),
+                        mock.patch.object(paths, 'TETHER', tether),
+                    ):
+                        rendered[name] = projects.render(PID, home=self.home, group=group)
+                short, long = rendered['short'], rendered['long']
 
                 self.assertNotIn('Cut to fit', long)
                 self.assertNotIn('Cut to fit', short)
@@ -229,7 +232,7 @@ class ProjectTests(unittest.TestCase):
                     self.assertIn(f'\n#### chart.md\n{stack_note}\n', short)
                 normalized = long.replace(str(long_tether), str(short_tether))
                 normalized = normalized.replace(str(long_checkout), str(short_checkout))
-                normalized = normalized.replace(str(long_python), sys.executable)
+                normalized = normalized.replace(str(long_python), str(short_python))
                 self.assertEqual(normalized, short)
 
     def _content(self, group=None):
