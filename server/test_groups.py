@@ -149,9 +149,23 @@ class RenderTests(Bundles):
         self.assertLess(text.index('Only touch the dashboard.'), text.index('## Tab icon'))
         self.assertLess(text.index('## Backlog'), text.index('### Open backlog items (1)'))
         self.assertLess(text.index('### Open backlog items (1)'), text.index('### Project notes'))
-        self.assertLess(text.index('### Project notes\n- setup.md: Setup'), text.index('### Stack notes\n- chart.md: Chart'))
-        self.assertLess(text.index('### Stack notes'), text.index('### setup.md'))
-        self.assertIn('#### chart.md\n# Chart\nUse the bar chart.', text)
+        self.assertLess(text.index('\n### Project notes\n\n#### setup.md\n# Setup\nRun make.'),
+                        text.index('\n### Stack notes\n\n#### chart.md\n# Chart\nUse the bar chart.'))
+        self.assertNotIn('\nOlder notes:\n', text)
+
+    def test_default_budget_fits_the_newest_excerpts_across_project_and_stack(self):
+        for at in range(10):
+            pid = PID if at % 2 == 0 else self.GPID
+            projects.write_note(pid, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(pid) / f'notes/n{at}.md', (mtime, mtime))
+        text = projects.render(PID, home=self.home, group={'pid': self.GPID, 'name': 'Docs'})
+        for at in range(6, 10):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertNotIn('\n#### n0.md\n', text)
+        self.assertLess(text.index('\n### Project notes\n\n#### n8.md\n'),
+                        text.index('\n### Stack notes\n\n#### n9.md\n'))
+        self.assertNotIn('\nOlder notes:\n', text)
 
     def test_group_text_is_cut_to_the_session_budget_and_keeps_the_session_part(self):
         projects.set_budget(PID, projects.BUDGET_MIN, 0)
@@ -174,7 +188,7 @@ class RenderTests(Bundles):
         self.assertEqual(projects.render(PID, 'claude', self.home, group=None), text)
         self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
-        self.assertIn('\n### Project notes\n- setup.md: Setup\n', text)  # the list has its own heading: Notes comes first now
+        self.assertIn('\n### Project notes\n\n#### setup.md\n# Setup\nRun make.\n', text)
         self.assertIn("`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner's stack; `--stack Unstacked` = none)", text)
 
     def test_marks_cover_the_group_revision(self):

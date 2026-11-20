@@ -83,6 +83,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('## Notes', text)
         self.assertIn(str(projects.bundle(PID) / 'notes'), text)
         self.assertNotIn('## Instructions', text)
+        self.assertNotIn('\n### Project notes\n', text)
         self.assertIn('@chat_icon', text)  # agents learn to set their tab icon
         # Count the notes and code paths at a typical install length, not the test or CI folder length.
         code = str(Path(projects.__file__).resolve().parent.parent)
@@ -277,7 +278,7 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse(any(item['new'] for item in projects.notes(PID)))
         claude, codex = projects.render(PID, 'claude'), projects.render(PID, 'codex')
         self.assertEqual(claude, codex)
-        self.assertIn('### MEMORY.md', claude)
+        self.assertIn('\n#### MEMORY.md\n', claude)
         self.assertIn('Run make.', claude)
         self.assertIn('Keep your own memory as before.', claude)
         projects.delete_note(PID, 'build.md')
@@ -292,9 +293,50 @@ class ProjectTests(unittest.TestCase):
             projects.write_note(PID, f'n{at}.md', f'# Note {at}\nbody {at}\n')
             os.utime(projects.bundle(PID) / f'notes/n{at}.md', (time.time() + at, time.time() + at))
         text = projects.render(PID, 'codex')
-        self.assertEqual(text.count('\n### n'), 5)  # five excerpts; the list has its own '### Project notes' heading
+        self.assertEqual(text.count('\n#### n'), 5)
         self.assertIn('- n0.md: Note 0', text)
         self.assertNotIn('body 0', text)
+
+    def test_default_budget_fits_all_five_excerpts_before_the_older_notes_list(self):
+        for at in range(30):
+            projects.write_note(PID, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(PID) / f'notes/n{at}.md', (mtime, mtime))
+        items = [f'B{at} ' + 'Backlog item. ' * 7 for at in range(5)]
+        with mock.patch('backlog.summary', return_value=(items, len(items))):
+            text = projects.render(PID, home=self.home, backlog_project='tether')
+        self.assertIn('### Open backlog items (5)', text)
+        for at in range(25, 30):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertIn('[Cut to fit the project size limit.', text)
+        self.assertLessEqual(len(text) - projects.state(PID, self.home)['fixed_chars'], projects.BUDGET)
+
+    def test_default_budget_fits_instructions_pin_five_excerpts_and_two_older_titles(self):
+        instructions = 'Use the project notes. ' * 9
+        projects.set_instructions(PID, instructions, 0)
+        (self.home / 'guide.md').write_text('Guide')
+        projects.pin(PID, '~/guide.md', 'link', 1, self.home)
+        for at in range(7):
+            projects.write_note(PID, f'n{at}.md', f'# Note {at}\n' + f'body {at} ' * 100)
+            mtime = 1700000000 + at
+            os.utime(projects.bundle(PID) / f'notes/n{at}.md', (mtime, mtime))
+        text = projects.render(PID, home=self.home)
+        self.assertIn(f'\n## Instructions\n{instructions.strip()}\n', text)
+        self.assertIn('\n- guide.md: ~/guide.md\n', text)
+        self.assertIn('\n### Project notes\n\n#### n6.md\n', text)
+        for at in range(2, 7):
+            self.assertIn(f'\n#### n{at}.md\n# Note {at}\nbody {at} ', text)
+        self.assertTrue(text.endswith('\nOlder notes:\n- n1.md: Note 1\n- n0.md: Note 0\n'))
+
+    def test_long_instructions_win_the_default_budget_over_note_excerpts(self):
+        opening = 'Use the project guide.\n'
+        instructions = opening + 'x' * (20000 - len(opening))
+        projects.set_instructions(PID, instructions, 0)
+        projects.write_note(PID, 'setup.md', '# Setup\nRun make.')
+        text = projects.render(PID, home=self.home)
+        self.assertIn(f'\n## Instructions\n{opening}[Cut to fit the project size limit.', text)
+        self.assertNotIn(instructions, text)
+        self.assertNotIn('\n#### setup.md\n', text)
 
     def test_archive_moves_the_bundle(self):
         projects.set_instructions(PID, 'x', 0)
