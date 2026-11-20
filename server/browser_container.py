@@ -145,7 +145,15 @@ class Container:
                     pass
             self.password = secrets.token_urlsafe(24)
             self.run_id = secrets.token_hex(6)
-            result = self.runner(self.run_args(), timeout=120)
+            args = self.run_args()
+            release_by = time.monotonic() + 10
+            while True:
+                result = self.runner(args, timeout=120)
+                # After docker stop, --rm can still be releasing the name when the next launch starts.
+                conflict = f'Conflict. The container name "/{self.name}" is already in use'
+                if result.returncode == 0 or conflict not in result.stderr or time.monotonic() >= release_by:
+                    break
+                time.sleep(0.25)
             if result.returncode != 0:
                 self.password = None
                 raise ContainerError('The browser container did not start: %s' % (result.stderr.strip()[-300:] or 'docker run failed'))

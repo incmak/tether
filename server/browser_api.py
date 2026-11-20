@@ -110,6 +110,8 @@ def get(handler, the_browser=None, the_proxy=None, the_setup=None, signed_browse
             state['browsers'] = _browsers(the_browser if browser_id == 'test' else None,
                                         the_browser if browser_id == 'signed' else signed_browser)
             handler.respond(200, _tag(state, browser_id))
+        elif name == 'snapshot':
+            handler.respond(200, _tag(the_browser.capture_page(query.get('tab', [''])[0]), browser_id))
         elif name == 'stream':
             css = {'css_size': (_int(query, 'cssw', 0), _int(query, 'cssh', 0))} if 'cssw' in query or 'cssh' in query else {}
             if 'sid' in query:

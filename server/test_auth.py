@@ -191,19 +191,33 @@ class AuthTests(unittest.TestCase):
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         upstream.bind(path)
         upstream.listen(4)
-        self.addCleanup(upstream.close)
+        stopping = threading.Event()
         seen = []
 
         def serve():
             for answer in answers:
                 connection, _ = upstream.accept()
+                if stopping.is_set():
+                    connection.close()
+                    return
                 seen.append(connection.recv(4096).decode())
                 connection.sendall(answer)
                 if b'101 Switching' in answer:
                     seen.append(connection.recv(4096))
                     connection.sendall(b'\x81\x02hi')
                 connection.close()
-        threading.Thread(target=serve, daemon=True).start()
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        def stop():
+            stopping.set()
+            if thread.is_alive():
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wake:
+                    wake.connect(path)
+                thread.join(timeout=2)
+            upstream.close()
+
+        self.addCleanup(stop)
         return SimpleNamespace(web_auth=lambda: 'Basic c2VjcmV0', web_sock=path), seen
 
     def test_main_origin_never_serves_the_live_view(self):

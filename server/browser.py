@@ -442,11 +442,14 @@ class Browser:
                 self.agent_proxy.browser_stopped()
             conn, pid = self.conn, self.pid
             self.conn = self.pid = None
-            if conn and not conn.closed and self.container is None:  # the container's watchdog would restart it
+            if conn and not conn.closed and (self.container is None or self.container.persistent):
                 try:
                     conn.call('Browser.close', timeout=3)
                 except BrowserError:
                     pass
+                if self.container is not None:
+                    # Wait for Chromium to flush the signed-in profile before stopping its container.
+                    conn.reader.join(timeout=5)
             if pid:
                 _reap(pid)
             if conn:
@@ -559,6 +562,8 @@ class Browser:
         with self.lock:
             tab = self.tab(target)
             try:
+                if not enabled:
+                    self.conn.call('Target.activateTarget', {'targetId': tab.target})
                 self._set_window_bounds(tab, enabled)
                 if tab.preset != 'desktop':
                     self._apply_preset(tab, tab.preset, window_view=enabled)
@@ -782,8 +787,23 @@ class Browser:
         return {'ok': True}
 
     # screencast ------------------------------------------------------------------------------------------------
+    def capture_page(self, target):
+        """Take one screenshot for Notes in the live view."""
+        if self.container is None:
+            raise ValueError('This browser does not use the live view.')
+        with self.lock:
+            self.ensure()
+            if self.window_view:
+                raise ValueError('Notes are available in page view.')
+            shot = self._capture_jpeg(self.tab(target))
+            if not shot:
+                raise BrowserError('Could not take a picture of the page.')
+            return {'jpeg': shot}
+
     def watch(self, target, max_width, max_height, css_size=None):
         """Register a viewer; start the screencast when it is the first. Returns the Tab."""
+        if self.container is not None:
+            raise BrowserError('This browser uses the live view.')
         self.ensure()
         with self.lock:
             tab = self.tab(target)
@@ -800,7 +820,7 @@ class Browser:
                 if tab.viewers == 1:
                     with tab.changed:
                         tab.frame = None  # a previous viewing interval cannot supply this viewer's first frame
-                if self.signed or self.container:  # headed Chrome paints only the front tab
+                if self.signed:  # Your Chrome paints only the front tab
                     self.conn.call('Page.bringToFront', session=tab.session)
                 size = self._cast_size(tab)
                 if tab.casting != size:
@@ -841,7 +861,7 @@ class Browser:
         """Minimize the window of a user tab that nobody watches. Headless Chrome treats every tab as visible, so a
         page with endless CSS animations kept the software compositor drawing full 2x frames: two Tether chat tabs
         used 87% CPU, and 7% when minimized. Agent tabs stay visible: Playwright waits on requestAnimationFrame,
-        which a hidden page does not run. The headed signed browser paints only its front tab already."""
+        which a hidden page does not run. The headed browsers paint only their front tab already."""
         if (tab.parked or tab.viewers or tab.mode == 'agent' or self.signed or self.container or not self.running()
                 or self.tabs.get(tab.target) is not tab):
             return
@@ -949,13 +969,16 @@ class Browser:
     def _snapshot(self, tab):
         seq = tab.seq
         row = tab.row()  # the emulated viewport; layout metrics can report the window size under phone emulation
-        shot = self.conn.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': QUALITY}, tab.session).get('data') or ''
+        shot = self._capture_jpeg(tab)
         with tab.changed:
             if tab.seq == seq and shot:
                 tab.seq += 1
                 tab.frame = (tab.seq, {'deviceWidth': row['width'], 'deviceHeight': row['height'], 'offsetTop': 0}, shot, 0)
                 tab.changed.notify_all()
             return tab.frame
+
+    def _capture_jpeg(self, tab):
+        return self.conn.call('Page.captureScreenshot', {'format': 'jpeg', 'quality': QUALITY}, tab.session).get('data') or ''
 
     def _event(self, method, params, session):
         if self.agent_proxy and not session:

@@ -141,6 +141,21 @@ class ContainerTests(unittest.TestCase):
             self.container.start()
         self.assertIsNone(self.container.web_auth())
 
+    def test_start_waits_for_docker_to_release_the_container_name(self):
+        def removing(args, timeout):
+            if args[:2] == ['docker', 'run'] and not self.runner.ran('run'):
+                self.runner.calls.append(args)
+                return SimpleNamespace(returncode=125, stderr=(
+                    f'Conflict. The container name "/{self.container.name}" is already in use'))
+            return self.runner(args, timeout=timeout)
+
+        self.container.runner = removing
+        with mock.patch.object(browser_container.time, 'sleep'):
+            self.container.start()
+        first, second = self.runner.ran('run')
+        self.assertEqual(first, second)
+        self.assertIsNotNone(self.container.web_auth())
+
     def test_persistent_container_mounts_its_profile(self):
         container = browser_container.Container('s', root=Path(self.tmp.name) / 's', runner=self.runner, persistent=True)
         container.start()
@@ -240,14 +255,23 @@ class WindowChrome(FakeChrome):
             return {'windowId': 7, 'bounds': {'windowState': self.window_state}}
         if message['method'] == 'Browser.setWindowBounds':
             self.window_state = message['params']['bounds']['windowState']
+        if message['method'] == 'Page.captureScreenshot':
+            return {'data': 'jpeg'}
         return super().answer(message)
+
+    def emit(self, message):
+        super().emit(message)
+        last = self.commands[-1] if self.commands else {}
+        if last.get('method') == 'Browser.close' and last['id'] == message.get('id'):
+            self.close()
 
 
 class FakeContainer:
-    def __init__(self, fake):
+    def __init__(self, fake, *, persistent=False):
         self.fake, self.stopped = fake, 0
         self.live_port = browser_container.LIVE_PORT
         self.run_id = 'fixture-run'
+        self.persistent = persistent
 
     def launch(self, *_args, **_kwargs):
         return self.fake.launcher(None, None)
@@ -294,7 +318,7 @@ class BrowserInContainerTests(unittest.TestCase):
     def test_signed_container_reports_its_port_and_uses_saved_tabs(self):
         fake = WindowChrome()
         self.addCleanup(fake.close)
-        container = FakeContainer(fake)
+        container = FakeContainer(fake, persistent=True)
         container.live_port = browser_container.SIGNED_LIVE_PORT
         container.run_id = 'signed-run'
         signed = browser.Browser(signed=True, container=container)
@@ -308,6 +332,7 @@ class BrowserInContainerTests(unittest.TestCase):
             self.assertEqual(fake.sent('Browser.setDownloadBehavior')[0]['params'], {'behavior': 'deny'})
         finally:
             signed.stop()
+        self.assertTrue(fake.sent('Browser.close'))
 
     def test_show_brings_the_tab_to_the_front(self):
         self.browser.list_tabs()

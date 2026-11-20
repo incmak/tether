@@ -60,6 +60,12 @@ async function main() {
         window.wholeWindow = body.enabled;
         return {window_view:window.wholeWindow};
       }
+      if (path === 'browser/show' && window.holdShow === body.tab) return new Promise(resolve => {
+        window.releaseShow = () => resolve({ok:true});
+      });
+      if (path.startsWith('browser/snapshot?')) return new Promise((resolve,reject) => {
+        window.finishSnapshot = ok => ok ? resolve({jpeg:window.snapshotJpeg()}) : reject(new Error('Fixture capture failed'));
+      });
       if (path === 'browser/device' && body.preset === 'agent') { window.tab = {...window.tab, controller:'agent'}; return window.tab }
       if (path === 'browser/device') {
         const {width,height,touch} = presets.find(preset => preset.id === body.preset)
@@ -89,7 +95,7 @@ async function main() {
     await server.listen()
     browser = await chromium.launch({ executablePath: process.env.MOBILE_TMUX_CHROME || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] })
     for (const [width, height, touch, agent, down, giveBack, signed] of [
-      [1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true],
+      [1280, 900, false], [320, 700, true], [768, 1024, true, true], [1280, 900, false, false, true], [320, 700, true, false, true],
       [1280, 900, false, false, false, true], [1280, 900, false, false, false, false, true], [320, 700, true, false, false, false, true],
     ]) {
       const context = await browser.newContext({ viewport: { width, height }, hasTouch: touch, serviceWorkers: 'block' })
@@ -127,23 +133,37 @@ async function main() {
           constructor(url) { super(); this.url = url; window.sources.push(this); setTimeout(() => this.onopen?.(), 0) }
           close() { this.closed = true; this.readyState = 2 }
         }
-        window.emitFrame = () => {
+        window.snapshotJpeg = () => {
           const image = document.createElement('canvas'); image.width = 640; image.height = 400
           const ctx = image.getContext('2d'); ctx.fillStyle = '#fbe9de'; ctx.fillRect(0, 0, 640, 400)
           ctx.fillStyle = '#603d29'; ctx.font = '20px sans-serif'; ctx.fillText('Still picture for notes', 180, 220)
-          window.sources.at(-1).dispatchEvent(new MessageEvent('frame', {data: JSON.stringify({seq: 1, width: 1280, height: 800, scrollOffsetX: 0, scrollOffsetY: 0, jpeg: image.toDataURL('image/jpeg').split(',')[1]})}))
+          return image.toDataURL('image/jpeg').split(',')[1]
         }
       })
       await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/chat/live-view-fixture/`, { timeout: 60000 })
       if (down) {
-        // The live port does not answer (tailscale serve not set up): say so, and use the picture stream.
-        await page.getByRole('status').filter({ hasText: `Live video is off: port ${closedPort} did not answer. Showing pictures instead.` }).waitFor()
-        await page.waitForFunction(() => window.sockets.some(socket => !socket.closed))
+        const alert = page.getByRole('alert').filter({ hasText: `Could not connect to live video on port ${closedPort}.` })
+        await alert.waitFor()
+        assert.equal(await page.evaluate(() => window.sockets.length + window.sources.length), 0)
         assert.equal(await page.locator('iframe').count(), 0)
-        assert(await page.locator('.browser-screen').isVisible())
-        await page.screenshot({ path: resolve(evidence, 'live-down.png') })
+        assert.equal(await page.locator('.browser-screen').isVisible(), false)
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false)
+        const retry = page.getByRole('button', { name: 'Retry', exact: true })
+        const box = await retry.boundingBox()
+        assert(box.width >= 24 && box.height >= 24 && box.x >= 0 && box.x + box.width <= width)
+        await retry.focus()
+        assert(await retry.evaluate(button => button.matches(':focus-visible')))
+        await page.screenshot({ path: resolve(evidence, `live-down-${width}.png`) })
+        await page.route(`http://127.0.0.1:${closedPort}/browser/live/`, route => route.fulfill({
+          contentType: 'text/html', body: '<!doctype html><p>Live video recovered</p>',
+        }))
+        await page.keyboard.press('Enter')
+        await page.frameLocator('iframe.browser-live').getByText('Live video recovered').waitFor()
+        await alert.waitFor({ state: 'detached' })
+        assert.equal(await page.evaluate(() => document.activeElement.className), 'browser-stage')
+        assert.equal(await page.evaluate(() => window.sockets.length + window.sources.length), 0)
         assert.deepEqual(errors.filter(text => !/Failed to fetch/.test(text)), [])
-        console.log('Browser live view: an unreachable live port falls back to the picture stream and says why')
+        console.log(`Browser live view: ${width}px, unreachable live port shows keyboard-accessible Retry and recovers without a picture stream`)
         await context.close()
         continue
       }
@@ -268,15 +288,15 @@ async function main() {
       assert.equal(liveLoads, loads + 1, 'a new run reloads the live view once')
       assert.equal(await frame.count(), 1)
 
-      // Notes take one still picture from the screencast, then draw on it.
+      // Notes take one CDP screenshot, then draw on it.
       const notes = page.getByRole('button', { name: 'Add notes to this frame', exact: true })
       assert(await notes.isEnabled())
       await notes.click()
-      await page.waitForFunction(() => window.sources.some(source => source.url.includes('/browser/stream?tab=fixture')))
+      await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/snapshot?tab=fixture'))
       await page.getByRole('status').filter({ hasText: 'Taking a picture of the page' }).waitFor()
-      await page.evaluate(() => window.emitFrame())
+      await page.evaluate(() => window.finishSnapshot(true))
       await page.getByRole('toolbar', { name: 'Notes', exact: true }).waitFor()
-      assert.equal(await page.evaluate(() => window.sources.at(-1).closed), true, 'one picture only')
+      assert.equal(await page.evaluate(() => window.sources.length), 0, 'no EventSource for Notes')
       assert.equal(await page.evaluate(() => document.querySelector('.browser-canvas').width), 640)
       assert(await page.locator('.browser-screen').isVisible())
       assert(!(await frame.isVisible()), 'live view hidden while noting')
@@ -286,8 +306,8 @@ async function main() {
 
       // A failed picture says so and leaves the live view in place.
       await notes.click()
-      await page.waitForFunction(() => window.sources.filter(source => source.url.includes('/browser/stream?')).length === 2)
-      await page.evaluate(() => { const source = window.sources.at(-1); source.readyState = 2; source.dispatchEvent(new Event('error')) })
+      await page.waitForFunction(() => window.calls.filter(call => call.path === 'browser/snapshot?tab=fixture').length === 2)
+      await page.evaluate(() => window.finishSnapshot(false))
       await page.getByRole('status').filter({ hasText: 'Could not take a picture of the page. Try again.' }).waitFor()
       assert(await frame.isVisible())
 
@@ -310,14 +330,25 @@ async function main() {
       await page.getByRole('menuitemradio', { name: /Phone/ }).click()
       const phone = await assertPreset(412, 915)
       await page.screenshot({ path: resolve(evidence, `phone-${width}.png`) })
+      await notes.click()
+      await page.waitForFunction(() => window.calls.filter(call => call.path === 'browser/snapshot?tab=fixture').length === 3)
+      await page.evaluate(() => window.finishSnapshot(true))
+      await page.getByRole('toolbar', { name: 'Notes', exact: true }).waitFor()
+      await page.getByRole('button', { name: 'Close notes', exact: true }).click()
+      await frame.waitFor({ state: 'visible' })
       await wheelOver(page, phone, 1)
       const [turn] = (await wheelCalls(page)).slice(-1)
       assert(Math.abs(turn.x - 103) <= 1 && Math.abs(turn.y - 458) <= 1 && turn.dy === 3, JSON.stringify(turn))
+      await page.evaluate(() => { window.holdShow = 'tablet' })
+      const previousShows = await page.evaluate(() => window.calls.filter(call => call.path === 'browser/show' && call.body.tab === 'fixture').length)
       await page.getByRole('tab', { name: /Tablet tab/ }).click()
       await assertPreset(820, 1180)
-      await page.waitForFunction(() => window.calls.some(call => call.path === 'browser/show' && call.body.tab === 'tablet'))
+      await page.waitForFunction(() => typeof window.releaseShow === 'function')
       await page.getByRole('tab', { name: /Fixture tab/ }).click()
       await assertPreset(412, 915)
+      assert.equal(await page.evaluate(() => window.calls.filter(call => call.path === 'browser/show' && call.body.tab === 'fixture').length), previousShows)
+      await page.evaluate(() => window.releaseShow())
+      await page.waitForFunction(previous => window.calls.filter(call => call.path === 'browser/show' && call.body.tab === 'fixture').length > previous, previousShows)
       await page.getByRole('button', { name: 'Device: Phone', exact: true }).click()
       await page.getByRole('menuitemradio', { name: /Desktop/ }).click()
       await page.waitForFunction(() => !document.querySelector('iframe.browser-live').classList.contains('browser-live-preset'))

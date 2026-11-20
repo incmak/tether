@@ -1,7 +1,6 @@
 """Signed browser isolation and lifecycle. Real tests use temporary profiles, never the live bridge."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
-import io
-import json
+from email.message import Message
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,7 +16,7 @@ from test_browser_container import FakeContainer, WindowChrome
 class SignedTests(unittest.TestCase):
     def setUp(self):
         self.fake = WindowChrome()
-        container = FakeContainer(self.fake)
+        container = FakeContainer(self.fake, persistent=True)
         self.launcher = Mock(side_effect=container.launch)
         container.launch = self.launcher
         container.stop = Mock(side_effect=container.stop)
@@ -84,32 +83,26 @@ class SignedTests(unittest.TestCase):
         browser_api.post(handler, self.test, signed_browser=self.signed)
         self.assertEqual(handler.replies[0][1]['browser'], 'signed')
 
-    def test_stream_dispatch_and_frame_tag(self):
-        handler = FakeHandler(browser_api.PREFIX + 'stream?browser=signed&tab=T1&w=600&h=700')
-        with patch.object(browser_api, 'stream') as stream:
-            browser_api.get(handler, self.test, signed_browser=self.signed)
-        stream.assert_called_once_with(handler, self.signed, 'T1', 600, 700, 'signed')
-        frame = (1, {'deviceWidth': 1280, 'deviceHeight': 800}, 'jpeg', 1)
-        self.assertEqual(json.loads(browser.frame_event(frame, 'signed').decode().split('data: ')[1])['browser'], 'signed')
-        self.assertNotIn('browser', json.loads(browser.frame_event(frame).decode().split('data: ')[1]))
-
-    def test_stream_emits_signed_tabs_frames_and_closed(self):
+    def test_container_uses_single_snapshot_for_notes_and_refuses_picture_streams(self):
         target = self.get()[1]['tabs'][0]['id']
-        frame = (1, {'deviceWidth': 1280, 'deviceHeight': 800}, 'jpeg', 0)
-        handler = FakeHandler('unused')
-        handler.wfile = io.BytesIO()
-        for method in ('send_response', 'send_header', 'end_headers'):
-            setattr(handler, method, Mock())
-        def closed(*args):
-            self.signed.tabs.pop(target)
-            return None
-        with patch.object(self.signed, 'first_frame', return_value=frame), \
-                patch.object(self.signed, 'wait_frame', side_effect=closed):
-            browser_api.stream(handler, self.signed, target, 640, 480, 'signed')
-        events = [event.split('\ndata: ', 1) for event in handler.wfile.getvalue().decode().split('\n\n') if '\ndata: ' in event]
-        self.assertEqual([event[0] for event in events], ['event: tabs', 'event: frame', 'event: closed'])
-        self.assertTrue(all(json.loads(event[1])['browser'] == 'signed' for event in events))
-        self.assertEqual(self.signed.by_session['S-' + target].viewers, 0)
+        query = f'browser=signed&tab={target}'
+        self.post('device', browser='signed', tab=target, preset='phone')
+        self.assertEqual(self.get('stream', query)[0], 503)
+        handler = FakeHandler(browser_api.PREFIX + 'live?' + query)
+        handler.headers = Message()
+        for key, value in {'Host': 'fixture.test', 'Origin': 'http://fixture.test', 'Upgrade': 'websocket',
+                           'Connection': 'Upgrade', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+                           'Sec-WebSocket-Version': '13'}.items():
+            handler.headers[key] = value
+        browser_api.get(handler, self.test, signed_browser=self.signed)
+        self.assertEqual(handler.replies[0][0], 503)
+        self.assertEqual(self.get('snapshot', query), (200, {'jpeg': 'jpeg', 'browser': 'signed'}))
+        self.assertEqual(len(self.fake.sent('Page.captureScreenshot')), 1)
+        self.assertEqual(self.fake.sent('Page.captureScreenshot')[0]['sessionId'], 'S-' + target)
+        self.assertFalse(self.fake.sent('Page.startScreencast'))
+        self.post('window-view', browser='signed', tab=target, enabled=True)
+        self.assertEqual(self.get('snapshot', query)[0], 400)
+        self.assertEqual(len(self.fake.sent('Page.captureScreenshot')), 1)
 
     def test_no_agents_or_private_contexts(self):
         self.get()
@@ -143,8 +136,11 @@ class SignedTests(unittest.TestCase):
         stopped = Mock()
         stopped.wait.return_value = False
         stopped.is_set.return_value = False
+        connection = self.signed.conn
+        self.container.stop.side_effect = lambda: self.assertTrue(connection.closed)
         self.signed._watch(stopped)
         self.container.stop.assert_called_once()
+        self.assertEqual(len(self.fake.sent('Browser.close')), 1)
         self.assertFalse(self.signed.running())
         self.launcher.side_effect = OSError('spawn failed')
         with self.assertRaisesRegex(browser.BrowserError, 'spawn failed'):

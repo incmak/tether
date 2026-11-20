@@ -78,7 +78,7 @@ REFUSED = {
     'GET': {
         # These inspect host services, credentials, processes, or live account data.
         'accounts', 'browser/extension/devices', 'browser/extension/download',
-        'browser/live', 'browser/stream', 'browser/tabs',
+        'browser/live', 'browser/snapshot', 'browser/stream', 'browser/tabs',
         'dev-preview', 'foundry-spend', 'host-stats', 'live/agent', 'live/brief',
         'login/state', 'passkeys', 'upkeep/ops', 'upkeep/ops/note', 'upkeep/prune', 'usage?live=1',
         # These browse or expose files outside the fixture chat transcript.

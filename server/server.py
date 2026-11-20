@@ -3754,6 +3754,8 @@ if __name__ == '__main__':
     import detection_rules
     detection_rules.save_last_good()
     panel_browsers = (('test', browser.BROWSER), ('signed', browser.SIGNED_BROWSER))
+    if any(not 1 <= port <= 65535 for port in (browser_container.LIVE_PORT, browser_container.SIGNED_LIVE_PORT)):
+        raise SystemExit('Set each browser live port to a number from 1 to 65535.')
     if browser_container.LIVE_PORT == browser_container.SIGNED_LIVE_PORT:
         raise SystemExit('The Test and Signed-in browsers need distinct live ports.')
     for name, panel_browser in panel_browsers:

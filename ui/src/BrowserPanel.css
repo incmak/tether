@@ -79,3 +79,5 @@
 .browser-panel .mac-pairing > button { min-height: 40px; }
 
 .browser-live.browser-live-preset { inset: 50% auto auto 50%; }
+.browser-empty.browser-live-error { max-width: 100%; max-height: 100%; overflow: auto; color: var(--text); }
+.browser-live-error p { margin: 0; }
