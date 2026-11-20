@@ -459,7 +459,7 @@ MAX_READBACK_REPLAYS = 2
 
 
 class ReadbackBudget:
-    """A replacement for the same send uses another slot, even after a clear."""
+    """Count retries for the same unheard send, even after its proposal clears."""
 
     def __init__(self):
         self.key = None
@@ -469,9 +469,13 @@ class ReadbackBudget:
         if self.key != proposal.key:
             self.key = proposal.key
             self.count = 0
+            return 0
+        n = self.count + 1
+        if n > MAX_READBACK_REPLAYS:
+            self.reset(proposal)
         else:
-            self.count = min(self.count + 1, MAX_READBACK_REPLAYS + 1)
-        return self.count
+            self.count = n
+        return n
 
     def reset(self, proposal):
         if self.key == proposal.key:
@@ -618,7 +622,7 @@ def answers_question(previous):
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
-               *, suggestions=(), block_fresh=False, after_replay_cap=None):
+               *, suggestions=(), readback_debt=False):
     """Return a short refusal, without changing the originating turn's state."""
     guarded_action = name in ACTION_TOOLS and name != 'open_panel'
     if source == 'event' and guarded_action:
@@ -686,8 +690,8 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         return READBACK_REQUIRED
         # An answer to a send question never sends directly, even when it holds send words
         # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
-        capped_yes = after_replay_cap is not None and plain_yes(last_user_text, after_replay_cap)
-        if not (live or block_fresh or capped_yes or answers_question(previous_assistant)) and send_intent(last_user_text):
+        if (not (live or readback_debt or answers_question(previous_assistant))
+                and send_intent(last_user_text)):
             return None
         # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
         # the fixed read-back first, and the next yes sends the stored text once.
@@ -1285,7 +1289,7 @@ def runtime_types():
                 if (proposal and proposal.voice_turn == self.voice_turn
                         and self.session.llm.tool_run and self.session.llm.tool_run.source == 'speech'
                         and data.get('complete') is True and not readback_overlapped(self.session)):
-                    self.session.pending_proposal = replace(proposal, heard=True)
+                    self.session.llm.mark_readback_heard(proposal)
                 await self.session.output.broadcast_frame(BotStoppedSpeakingFrame)
 
         def device_voice_pending(self):
@@ -1403,7 +1407,6 @@ def runtime_types():
             self.tool_followup = None
             self.replay_marker = None
             self.readback_budget = ReadbackBudget()
-            self.replay_cap_chat = None
             self._thought_signatures = {}
             self._request_roles = ''
 
@@ -1467,6 +1470,9 @@ def runtime_types():
                 key = 'prompt' if call.name == 'send_to_chat' else 'item'
                 sent = SendProposal(call.name, str(call.args.get('chat') or ''), str(call.args.get(key) or ''), 0)
                 self.readback_budget.reset(sent)
+                if (run.proposal is not None and run.proposal.heard
+                        and run.proposal is self.session.pending_proposal):
+                    self.session.readback_debt = False
                 self.session.pending_proposal = None
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
@@ -1517,16 +1523,21 @@ def runtime_types():
             await self.push_frame(FridayReadbackSpeechFrame(text, marker_id=marker_id))
 
         def offer_readback(self, proposal, marker_id):
+            self.session.readback_debt = True
             n = self.readback_budget.offer(proposal)
             if n:
                 print('Friday readback replay ' + json.dumps({'n': n, 'tool': proposal.name}, separators=(',', ':')),
                       file=sys.stderr, flush=True)
             if n > MAX_READBACK_REPLAYS:
                 self.session.pending_proposal = None
-                self.replay_cap_chat = proposal.chat
                 return READBACK_CAP, None, False
             self.session.pending_proposal = replace(proposal, marker_id=marker_id, heard=False, voice_turn=None)
             return send_readback(proposal), marker_id, n > 0
+
+        def mark_readback_heard(self, proposal):
+            self.session.pending_proposal = replace(proposal, heard=True)
+            self.session.readback_debt = False
+            self.readback_budget.reset(proposal)
 
         def track_assistant(self, assistant, context):
             response = None
@@ -1600,7 +1611,7 @@ def runtime_types():
                     if (proposal and proposal.marker_id == frame.tool_call_id and not readback_overlapped(s)
                             and self.tool_run and self.tool_run.source == 'speech'):
                         if frame.voice_turn is None and s.voice_mode == 'server':
-                            s.pending_proposal = replace(proposal, heard=True)
+                            self.mark_readback_heard(proposal)
                         elif (s.voice_mode == 'client' and frame.voice_turn == s.tts.voice_turn
                               and not s.tts.voice_cancelled):
                             s.pending_proposal = replace(proposal, voice_turn=frame.voice_turn)
@@ -1704,20 +1715,18 @@ def runtime_types():
                 previous = messages[i].get('content') if i >= 0 else None
                 previous = previous.strip() if isinstance(previous, str) else ''
                 proposal = getattr(self.session, 'pending_proposal', None)
-                declined = replay = block_fresh = False
-                after_replay_cap = None
+                declined = replay = False
                 if self.run_source == 'speech':
                     self.user_turn += 1
                     self.last_user_text = ' '.join(m['content'].strip() for m in messages[i + 1:]
                         if is_real_user(m) and isinstance(m.get('content'), str)
                         and m['content'].strip() and not m['content'].startswith(EVENT_PREFIX))
-                    after_replay_cap, self.replay_cap_chat = self.replay_cap_chat, None
                     live = proposal is not None and proposal.live(self.user_turn)
-                    block_fresh = live and (not proposal.heard or proposal.follows(previous))
                     if not live or (not proposal.follows(previous) and (proposal.heard or previous)):
                         self.session.pending_proposal = proposal = None
                     elif APPROVAL_NO.search(self.last_user_text):
                         self.session.pending_proposal = None
+                        self.session.readback_debt = False
                         self.readback_budget.reset(proposal)
                         declined = True
                     elif not proposal.heard:
@@ -1729,7 +1738,7 @@ def runtime_types():
                     previous_assistant=previous,
                     suggestions=suggested_replies(messages) if self.run_source == 'speech' else (),
                     user_turn=self.user_turn, proposal=proposal, declined=declined,
-                    replay=replay, block_fresh=block_fresh, after_replay_cap=after_replay_cap,
+                    replay=replay, readback_debt=getattr(self.session, 'readback_debt', False),
                     pending={}, filler_spoken=False, failed_action=False, succeeded_action=False, readback_spoken=False)
             else:
                 self.run_source = 'tool'
@@ -1748,12 +1757,13 @@ def runtime_types():
             if run:
                 params.arguments = confirmed_args(params.function_name, params.arguments, run.last_user_text,
                                                   run.previous_assistant, proposal, run.user_turn)
+            # A later turn clearing the debt does not authorize an older tool call.
+            readback_debt = getattr(self.session, 'readback_debt', False) or (run is not None and run.readback_debt)
             reason = check_tool(params.function_name, params.arguments,
                 run.source if run else None, run.last_user_text if run else '',
                 run.used if run else set(), run.previous_assistant if run else '',
                 proposal, run.user_turn if run else 0, suggestions=run.suggestions if run else (),
-                block_fresh=run.block_fresh if run else False,
-                after_replay_cap=run.after_replay_cap if run else None)
+                readback_debt=readback_debt)
             response = self._active_response.get()
             if reason:
                 if run and run.source == 'speech' and params.function_name in ACTION_TOOLS:
@@ -1901,7 +1911,6 @@ def runtime_types():
             if not data.first_push and not reply_at_output:
                 return
             if isinstance(f, VADUserStartedSpeakingFrame):
-                invalidate_readback(s)
                 s.user_speaking = True
                 s.new_turn()
             elif isinstance(f, VADUserStoppedSpeakingFrame):
@@ -2001,6 +2010,7 @@ class Models:
 class Session:
     _pending_metrics = None
     pending_proposal = None
+    readback_debt = False
 
     def __init__(self, rt, models, connection):
         from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
