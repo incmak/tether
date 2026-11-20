@@ -243,6 +243,7 @@ function App() {
   const groupKeys = useRef<(dir: 1 | -1) => boolean>(() => false)
   const previousSelection = useRef<SelectionSnapshot>({ sessions: [] })
   const orderedSessions = useMemo(() => sortByPrefs(sessions, prefs.order), [sessions, prefs.order])
+  // eslint-disable-next-line react-hooks/refs -- selectPane needs the previous render's selection to move a closed tab's focus to a neighbour; the layout effect below stores it after commit.
   const pane = selectPane(orderedSessions, prefs.selected, previousSelection.current, data?.default_thread, prefs.lastPane)
   useActivityPing(api, prefs.activity)
   useUsageLog(prefs.uiUsage)
@@ -311,7 +312,6 @@ function App() {
   const loaded = !!data
   const prefetched = useRef(false)
   useEffect(() => { if (loaded && !prefetched.current) { prefetched.current = true; prefetchPanels(wide) } }, [loaded, wide])
-  useEffect(() => { screenKeys.current = wide ? { files: files || share, home, choose: chooseScreen, toggleSidebar: () => setDesk({ sidebar: !desk.sidebar }) } : null })
   useEffect(() => {
     const open = (event: Event) => { const { path, select } = (event as CustomEvent<Partial<FilesTarget>>).detail ?? {}; if (!path) return; setFilesTarget({ path, select }); setScreen('files') }
     window.addEventListener('tether:open-files', open)
@@ -345,7 +345,7 @@ function App() {
   const slotPanes = view ? view.slots.map(id => panes.find(item => item.id === id)).filter((item): item is Pane => !!item) : []
   const multi = slotPanes.length > 1
   const panesRef = useRef(panes)
-  panesRef.current = panes
+  useLayoutEffect(() => { panesRef.current = panes })
   useEffect(() => {
     setPlaceHandler(place => {
       if (place.pane && panesRef.current.some(item => item.id === place.pane)) update(() => ({ selected: place.pane }))
@@ -353,6 +353,7 @@ function App() {
     })
     return () => setPlaceHandler(null)
   }, [update, chooseScreen])
+  const [reviewing, setReviewing] = useState(false)
   // Forward opens a view again after Back closed it. The names come from the views' useModal calls.
   useEffect(() => {
     setViewOpener(view => {
@@ -418,7 +419,6 @@ function App() {
   const deckCards = useMemo(() => prefs.attention ? deckItems(visiblePanes, now) : [], [prefs.attention, visiblePanes, now])
   // The lessons review joins Waiting on you as one quiet row; it never opens by itself.
   const { data: lessonsReview, error: reviewError, refresh: refreshReview } = useLessonsReview(api, prefs.attention)
-  const [reviewing, setReviewing] = useState(false)
   const review = lessonsReview?.due ? { label: reviewReason(lessonsReview), onOpen: () => { setDrawer(false); setReviewing(true) } } : undefined
   // Due reminders join Waiting on you as one row, like the lessons review.
   const reminderEntry = dueReminders.length ? { items: dueReminders, onOpen: () => { setDrawer(false); setRemindersOpen(true) } } : undefined
@@ -440,6 +440,7 @@ function App() {
     })
   }, [slotKey, deskKey, update])
   const setDesk = (patch: Partial<DesktopLayout>) => update(current => ({ layout: withDesk(current.layout, deskKey, { ...deskFor(current.layout, deskKey), ...patch }) }))
+  useEffect(() => { screenKeys.current = wide ? { files: files || share, home, choose: chooseScreen, toggleSidebar: () => setDesk({ sidebar: !desk.sidebar }) } : null })
   // A layout that starts with the sidebar closed (Zed) closes it once, when you choose it. ⌘B shows it again.
   const lookId = lookKey(lookShown)
   const lookClosesSidebar = !!lookShown.grid.sessionsClosed
@@ -453,7 +454,7 @@ function App() {
   const setPanels: SetPanels = change => update(current => { const stored = deskFor(current.layout, deskKey); return { layout: withDesk(current.layout, deskKey, { ...stored, ...withPanels(stored, change(stored)) }) } })
   // "Watch" in a chat's browser card (AgentBrowser.tsx): show the Browser panel, or the full-screen sheet without a workspace.
   const watchRef = useRef({ panel: false, open: false, setPanels })
-  watchRef.current = { panel: !!view, open: hasPanel(panelCols(desk), 'browser'), setPanels }
+  useLayoutEffect(() => { watchRef.current = { panel: !!view, open: hasPanel(panelCols(desk), 'browser'), setPanels } })
   useEffect(() => {
     const onWatch = () => {
       const { panel, open, setPanels: change } = watchRef.current
@@ -566,9 +567,6 @@ function App() {
   // The global key handler reads the workspace through this ref, so it does not re-subscribe on each render.
   const workspaceKeys = useRef<{ count: number; focus: number; focusSlot: (index: number) => void; setCount: (count: DesktopLayout['count']) => void; closeSlot: (index: number) => void; toggleZoom: () => void; toggleSidebar: () => void; togglePanel: (kind: PanelKind) => void; sideChat: () => void; pane?: Pane } | null>(null)
   useEffect(() => {
-    workspaceKeys.current = view ? { count: slotPanes.length, focus: view.focus, focusSlot, setCount, closeSlot, toggleZoom, toggleSidebar: () => setDesk({ sidebar: !desk.sidebar }), togglePanel: kind => togglePanelKind(setPanels, kind), sideChat: () => void sideChat(), pane } : null
-  })
-  useEffect(() => {
     const open = (id: unknown) => {
       if (typeof id !== 'string' || !id) return
       update(() => ({ selected: id }))
@@ -632,6 +630,7 @@ function App() {
   const watched = (home ? [] : view && !zoomed ? slotPanes : pane ? [pane] : []).map(item => `${item.id} ${item.finished ?? ''}`).join('|')
   useEffect(() => {
     if (!watched) return
+    // eslint-disable-next-line react-hooks/purity -- an effect, not render: it stamps when the user saw these panes.
     const now = Date.now() / 1000
     update(current => ({ seen: { ...current.seen, ...Object.fromEntries(watched.split('|').map(item => [item.split(' ')[0], now])) } }))
   }, [watched, update])
@@ -920,6 +919,9 @@ function App() {
       setNotice(`Opened “${result.name}” beside this chat, with its history.`)
     } catch (error) { setNotice(errorText(error)) }
   }
+  useEffect(() => {
+    workspaceKeys.current = view ? { count: slotPanes.length, focus: view.focus, focusSlot, setCount, closeSlot, toggleZoom, toggleSidebar: () => setDesk({ sidebar: !desk.sidebar }), togglePanel: kind => togglePanelKind(setPanels, kind), sideChat: () => void sideChat(), pane } : null
+  })
   const actionSession = sessions.find(item => item.id === actions)
   const ordered = sortByPrefs(sessions, prefs.order).map(item => item.id)
   // Sessions a pane or a session can move into from the ⋯ menus (the keyboard path for drag to merge).
@@ -1104,6 +1106,7 @@ function App() {
       return owner && <NewTask kind="stack" api={api} pane={newStack.pane} session={owner} at={newStack.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel}
         onClose={() => setNewStack(null)} onStack={() => { setNewStack(null); void refresh() }}
         onCreated={(id, made) => { setNewStack(null); update(current => ({ selected: id, lastPane: { ...current.lastPane, [owner.id]: id } })); void refresh(); if (made) setNotice(worktreeNotice(made)) }}
+        // eslint-disable-next-line react-hooks/refs -- runs on a user action in NewTask, not during render.
         onOpen={item => { setNewStack(null); void refresh(); openPane(item) }} />
     })()}
     {actionSession && pane && <SessionActions mainModel={prefs.mainModel} key={`${actionSession.id}-${actionsDelete}`} tabCount={panes.filter(item => item.tmux_session === actionSession.id).length} startDelete={actionsDelete} at={actionsDelete ? undefined : menuAt} place={placeFor(actionSession.panes[0].id, actionSession)} api={api} session={actionSession} pane={actionSession.panes.find(item => item.id === pane.id)?.id ?? actionSession.panes[0].id} pinned={prefs.pinned.includes(actionSession.id)} archived={isArchived(actionSession, prefs.archived)} canMoveUp={ordered.indexOf(actionSession.id) > 0} canMoveDown={ordered.indexOf(actionSession.id) < ordered.length - 1} targets={moveTargets} marks={marks} onMarks={loadMarks}
@@ -1113,6 +1116,7 @@ function App() {
       groups={prefs.groups} group={prefs.groupOf?.[actionSession.id]}
       onGroup={(group, created) => update(current => ({ groups: created ? [...current.groups, created] : current.groups, groupOf: withGroup(current.groupOf, actionSession.id, group?.id), ...current.groupBy === 'custom' || !group ? {} : { groupBy: 'custom' as const } }))}
       onMove={step => move(actionSession.id, step)} onProject={() => { setActions(null); setProject({ session: actionSession.id }) }} onClose={() => setActions(null)} onDone={(newPane, direction) => { setActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} />}
+    {/* eslint-disable-next-line react-hooks/refs -- onFork and onDone run on a user action in PaneActions, not during render. */}
     {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions key={`${target.id}-${paneClose}`} startClose={paneClose} onSelect={() => { setTabPick(stamp({ ids: [target.id], anchor: target.id }, paneThreads)); setChoosing(true) }} api={api} mainModel={prefs.mainModel} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} alwaysShow={target.helper ? { on: alwaysShown(target, prefs.shownHelpers), onToggle: () => update(current => ({ shownHelpers: withShown(current.shownHelpers, target, !alwaysShown(target, current.shownHelpers), new Set(panes.map(item => item.id))) })) } : undefined} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
     {(choosing || tabPick.ids.length > 0) && <TabSelectionBar api={api} panes={panes} sessions={sessions} ids={tabPick.ids} threads={tabPick.threads} choosing={choosing} mainModel={prefs.mainModel} onKeep={ids => setTabPick(current => ({ ids, anchor: ids[0] ?? null, threads: current.threads }))} onClear={clearPick} onDone={() => void refresh()} />}
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
