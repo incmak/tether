@@ -17,7 +17,8 @@ function load(file, imports = {}) {
 }
 
 const sidebar = load('Sidebar.tsx', { react: { lazy: () => {} } })
-const { approvalTarget } = load('Live.tsx', { './Sidebar': sidebar })
+const names = load('fridayNames.ts', { './Sidebar': sidebar })
+const { approvalTarget } = load('Live.tsx', { './Sidebar': sidebar, './fridayNames': names })
 
 const waiting = (pane_name, id = '%1') => ({
   id, pane_name, agent: 'codex', approval: { id: `approval-${id}`, options: [{ id: '1', text: 'Yes' }] },
