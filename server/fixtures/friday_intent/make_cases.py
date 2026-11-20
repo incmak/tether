@@ -76,10 +76,10 @@ case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh res
 case("log-urgent-feature-ask", "send_direct", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
-# A plain yes sends the exact text Friday read back, whatever words the model puts in its call.
+# A yes to Friday's own words gets the fixed read-back first; only a yes to that read-back sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
-     {"tool": "send_to_chat",
-      "args": {"chat": "(?i)friday test", "prompt": r"(?i)^spin up a new tab and write a spec for an urgent voice call feature\W*$"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True,
+      "args": {"chat": "(?i)friday test", "prompt": r"(?i)spec.*voice call|voice call.*spec"}}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
@@ -183,10 +183,10 @@ case("readback-let", "readback", D, "let docs site update the changelog for the 
      {"tool": None, "readback_chat": "docs-site"})
 RB_API = "I will tell api-server to add rate limiting to the upload endpoint. Shall I send that?"
 case("confirm-yes", "confirm", D, "yes",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)rate"}},
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)api.server", "prompt": "(?i)rate"}},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
 case("confirm-go-ahead", "confirm", D, "yeah go ahead",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}},
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)api.server"}},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
 case("deny-no-wait", "deny", D, "no, wait, not yet", {"tool": None},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
@@ -248,7 +248,7 @@ case("h-readback-want", "readback", H, "I want login fix to also cover the passw
 case("h-readback-idea", "readback", H, "docs site needs a page about the new settings screen",
      {"tool": None, "readback_chat": "docs-site"})
 RB_DOCS = "I will ask docs-site to add a page about the new settings screen. Shall I send that?"
-case("h-confirm-sure", "confirm", H, "sure, do it", {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site"}},
+case("h-confirm-sure", "confirm", H, "sure, do it", {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)docs.site"}},
      history=say("docs site needs a page about the new settings screen", RB_DOCS))
 PENDING_DOCS = {"name": "send_to_chat", "chat": "docs-site", "payload": "Update the changelog for the new release"}
 case("h-fixed-yes", "confirm", H, "yeah go ahead",

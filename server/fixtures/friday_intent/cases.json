@@ -305,9 +305,10 @@
    "user": "Yes, please.",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)friday test",
-     "prompt": "(?i)^spin up a new tab and write a spec for an urgent voice call feature\\W*$"
+     "prompt": "(?i)spec.*voice call|voice call.*spec"
     }
    }
   },
@@ -1033,6 +1034,7 @@
    "user": "yes",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)api.server",
      "prompt": "(?i)rate"
@@ -1057,6 +1059,7 @@
    "user": "yeah go ahead",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)api.server"
     }
@@ -1559,6 +1562,7 @@
    "user": "sure, do it",
    "expect": {
     "tool": "send_to_chat",
+    "readback_ok": true,
     "args": {
      "chat": "(?i)docs.site"
     }

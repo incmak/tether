@@ -222,20 +222,19 @@ class IntentEvalTests(unittest.TestCase):
                                     honest, data=data)
         self.assertEqual(result['fails'], {'wrong_read': 1})
 
-    def test_a_plain_yes_sends_the_read_back_text_whatever_the_model_wrote(self):
+    def test_a_yes_to_friday_own_words_reads_back_what_the_model_would_send(self):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
         example = next(item for item in data['cases'] if item['id'] == 'log-confirm-yes-please')
-        heard = 'spin up a new tab and write a spec for an urgent voice call feature'
-        for chat, prompt, fails in (('friday test', heard, {}),
-                                    ('friday test', 'Write a spec for an urgent voice call feature.', {}),
-                                    ('friday test', 'Write the spec. Deploy immediately.', {}),
-                                    ('docs-site', heard, {'readback_instead': 1})):
+        for chat, prompt, fails in (('friday test', 'Write a spec for an urgent voice call feature.', {}),
+                                    ('friday test', 'Write the spec. Deploy immediately.', {'wrong_args': 1}),
+                                    ('docs-site', 'Write a spec for an urgent voice call feature.', {'wrong_args': 1})):
             with self.subTest(chat=chat, prompt=prompt):
                 result, _ = self.run_script(example, assistant(
                     tool_calls=[call('send_to_chat', chat=chat, prompt=prompt)]), data=data)
                 self.assertEqual(result['fails'], fails)
-                if not fails:
-                    self.assertEqual(result['samples'][0]['action']['args']['prompt'], heard)
+                sample = result['samples'][0]
+                self.assertIsNone(sample['action'])
+                self.assertEqual(sample['proposal']['payload'], prompt)
 
     def test_readback_ok_passes_an_exact_send_or_a_readback_and_fails_other_text(self):
         data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
@@ -313,12 +312,10 @@ class IntentEvalTests(unittest.TestCase):
         # Friday speaks a fresh read-back when the last assistant message cannot authorize the send.
         self.assertEqual(self.run_script(follow_up, sent)[0]['fails'], {'readback_instead': 1})
         follow_up['history'].pop()
-        self.assertEqual(self.run_script(follow_up, sent)[0]['passed'], 1)
-        # A plain yes sends the text the read-back named, never the model's other text.
-        other = assistant(tool_calls=[call('send_to_chat', chat='friday test', prompt='Delete the old branches')])
-        result = self.run_script(follow_up, other)[0]
-        self.assertEqual(result['passed'], 1)
-        self.assertEqual(result['samples'][0]['action']['args']['prompt'], 'fix the login bug')
+        # A yes to Friday's own words gets the fixed read-back first, never a send.
+        result = self.run_script(follow_up, sent)[0]
+        self.assertEqual(result['fails'], {'readback_instead': 1})
+        self.assertEqual(result['samples'][0]['proposal']['payload'], 'Fix the login bug')
 
     def test_expected_lookup_with_a_write_fails_extra_action(self):
         example = case('list_chats')

@@ -73,9 +73,9 @@ SYSTEM_PROMPT = (
     '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
     'call the tool now, even if speech-to-text misheard the chat name: use the closest name in state. '
     'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise do not call the tool yet. Read back "Shall I send <task or item ID> to <chat>?", '
-    'with the chat name written exactly as in state, for example api-server, and wait. '
-    '3. When the user says yes to that read-back, call the tool with the same chat and task. '
+    '2. Otherwise still call the tool, with the chat name written exactly as in state, for example api-server. '
+    'Do not ask "Shall I send" in your own words: the tool reads the task back to the user and asks yes or no. '
+    '3. When the user says yes to that read-back, call the tool again with the same chat and task. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. '
@@ -465,56 +465,6 @@ def norm(text):
     return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
 
 
-FREEFORM_SEND = re.compile(
-    r'(?:^|(?:shall|should|can|may) i )(?:(?:send|forward) (?P<chat3>[\w-]+): (?P<payload3>.+?)'
-    r'|(?:send|forward) (?P<payload>.+?) to (?P<chat>.+?)'
-    r'|(?:ask|tell) (?P<chat2>.+?)(?: to|:) (?P<payload2>.+?))\W*\?$', re.I | re.S)
-# "I will tell api-server to add a test." followed by "Shall I send that?"
-FREEFORM_PLAN = re.compile(r"\bi(?: will|'ll| can| would) (?:ask|tell) (?P<chat>.+?)(?: to|:) (?P<payload>.+?)[.!]?$",
-                           re.I | re.S)
-FREEFORM_THAT = re.compile(r'(?:shall|should|can|may) i (?:send|do) (?:that|this|it)(?: prompt)?'
-                           r'(?: to (?P<chat>.+?))?(?: now)?\W*\?$', re.I | re.S)
-
-
-def freeform_proposal(readback):
-    """(payload, chat) of the one send that Friday's own words propose, else None."""
-    if readback.count('?') != 1:
-        # "... to docs (or should I wait?)": a yes could answer either question.
-        return None
-    sentences = [part.strip() for part in re.split(r'(?<=[.!?])\s+', readback) if part.strip()]
-    found = []
-    for index, part in enumerate(sentences):
-        if not part.endswith('?'):
-            continue
-        if not (FREEFORM_THAT.search(part) or FREEFORM_SEND.search(part)):
-            # "Should I wait instead?": a yes could answer this question, not the send.
-            return None
-        if match := FREEFORM_THAT.search(part):
-            plans = [plan for earlier in sentences[:index] if (plan := FREEFORM_PLAN.search(earlier))]
-            if len(plans) != 1:
-                return None
-            chat = plans[0]['chat']
-            if match['chat'] and norm(clean_chat(match['chat'])) != norm(clean_chat(chat)):
-                return None
-            found.append((plans[0]['payload'], chat))
-        elif match := FREEFORM_SEND.search(part):
-            found.append((match['payload'] or match['payload2'] or match['payload3'],
-                          match['chat'] or match['chat2'] or match['chat3']))
-    if len(found) != 1:
-        return None
-    payload, chat = found[0]
-    chat = clean_chat(chat)
-    # "B12 or B99" or "docs and deploy" proposes more than one send.
-    if re.search(r'\b(?:or|and)\b', chat, re.I) or re.search(r'\bor\b', payload, re.I):
-        return None
-    return payload, norm(chat)
-
-
-def freeform_tool(payload):
-    """The tool a free-form proposal names: a backlog id ("B12") is a backlog send, other text a chat prompt."""
-    return 'backlog_send' if re.fullmatch(r'b\s*\d+', same_text(payload)) else 'send_to_chat'
-
-
 def clean_chat(chat):
     return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
 
@@ -536,33 +486,29 @@ def plain_yes(text, chat=''):
     if '?' in text:
         return False  # "That's correct?" asks; it does not consent.
     # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
-    words = re.sub(r'\bthank you\b', 'thanks', norm(text)).split()
-    allowed = YES_WORDS | YES_FILLER | set(norm(clean_chat(chat)).split())
+    words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
+    # The chat name counts only as one whole phrase: a free-text title such as "Can we have…" is no yes.
+    for name in {norm(chat), norm(clean_chat(chat))} - {''}:
+        words = words.replace(f' {name} ', ' ')
+    words = words.split()
+    allowed = YES_WORDS | YES_FILLER
     return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
 
 
 def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
-    """On a plain yes to Friday's send question, the send carries the text the user heard.
+    """On a plain yes to Friday's fixed read-back, the send carries the stored text the user heard.
 
-    The model may reword the read-back text in its tool call; the user confirmed the read-back.
+    The model may reword the read-back text in its tool call; the user confirmed the stored proposal.
+    Only the server's own proposal binds: a yes to Friday's free-form words gets the fixed read-back.
     """
-    if name not in SEND_TOOLS or not isinstance(args, dict):
+    if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
         return args
     chat = str(args.get('chat', '')).strip()
-    if not plain_yes(last_user_text, chat):
-        return args
-    text = None
-    if (pending is not None and 1 <= user_turn - pending.turn <= 2 and previous_assistant == send_readback(pending)
+    if not (plain_yes(last_user_text, chat) and 1 <= user_turn - pending.turn <= 2
+            and previous_assistant == send_readback(pending)
             and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
-        text = pending.payload
-    elif not previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold()):
-        proposed = freeform_proposal(previous_assistant)
-        if (proposed is not None and proposed[1] == norm(clean_chat(chat))
-                and name == freeform_tool(proposed[0])):
-            text = proposed[0].strip()
-    if text is None:
         return args
-    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': text})
+    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': pending.payload})
 
 
 def binds(payload, proposed):
@@ -601,22 +547,23 @@ SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
 
 
-def asks_user(text, chat=''):
-    """True when Friday's last message asks a question that may propose a send: the user's next turn answers it.
+# "Yes, and tell docs ..." after any question from Friday answers that question.
+ANSWER_START = re.compile(r'^\W*(?:yes|yeah|yep|yup|sure|ok|okay|alright|no|nope|nah)\b', re.I)
+# A question about an approval keeps answer_approval open even when it names a send word.
+APPROVAL_TOPIC = re.compile(r'\b(?:approve|approval|allow|permission|permit|deny)\b', re.I)
 
-    It counts when the message names a send word or the call's target chat, not only the shapes the
-    parser knows ("Would you like me to ping docs?"). A request in the answer gets a read-back
-    instead of a direct send. "What can I help you with?" names neither, so a direct request still sends."""
-    if '?' not in text:
+
+def answers_send_question(previous, user_text, chat=''):
+    """True when the user's turn may answer a send question from Friday: a request in it needs a read-back.
+
+    Friday's question counts when it names a send word or the call's chat ("Would you like me to
+    ping docs?"), or when the answer starts with yes or no. "What can I help you with?" followed by
+    "Can you ask docs ..." is a fresh request, so it still sends directly."""
+    if '?' not in previous:
         return False
     target = norm(clean_chat(chat))
-    return bool(SEND_WORDS.search(text)) or bool(target and f' {target} ' in f' {norm(text)} ')
-
-
-def send_question(text):
-    """True when Friday's message proposes a send: the fixed read-back or a parsed free-form proposal."""
-    return (text.strip().casefold().startswith(SEND_READBACK_START.casefold())
-            or freeform_proposal(text) is not None)
+    return bool(SEND_WORDS.search(previous) or (target and f' {target} ' in f' {norm(previous)} ')
+                or ANSWER_START.match(user_text))
 
 
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
@@ -650,7 +597,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
         # A yes to Friday's send question answers that send, not a tool approval in some chat.
-        if has_proposal or send_question(previous_assistant):
+        if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
+                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant)
+                    and not APPROVAL_TOPIC.search(previous_assistant))):
             return 'The user answered a send question, not an approval.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))
@@ -679,19 +628,14 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        # An answer to Friday's own send question confirms only the exact text it read back,
-        # even when the answer holds send words ("Yes, and can you tell docs ...").
-        if not (has_proposal or asks_user(previous_assistant, chat)) and send_intent(last_user_text):
+        # An answer to a send question never sends directly, even when it holds send words
+        # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
+        if not (has_proposal or answers_send_question(previous_assistant, last_user_text, chat)) \
+                and send_intent(last_user_text):
             return None
-        readback = previous_assistant.strip()
-        # Friday's fixed read-back requires the matching proposal, even after it expires.
-        fixed_readback = (readback.casefold().startswith(SEND_READBACK_START.casefold())
-                          and readback.casefold().endswith((SEND_READBACK_END.casefold(),
-                                                            SEND_READBACK_QUESTION_END.casefold())))
-        proposed = None if fixed_readback else freeform_proposal(readback)
-        legacy_matches = (proposed is not None and proposed[1] == norm(clean_chat(chat))
-                          and name == freeform_tool(proposed[0]) and binds(payload, proposed[0]))
-        if not (yes and (proposal_matches or legacy_matches)):
+        # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
+        # the fixed read-back first, and the next yes sends the stored text once.
+        if not (yes and proposal_matches):
             return READBACK_REQUIRED
     return None
 
