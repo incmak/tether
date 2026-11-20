@@ -90,15 +90,22 @@ async function handle(data) {
     if (!g.ready) refuse('NOT_READY', 'Debugger attachment is not ready');
     if (g.seen.has(m.id)) refuse('DUPLICATE_COMMAND', 'Commands are never replayed');
     if (g.seen.size >= 300000) { end('command_limit'); refuse('LIMIT', 'Request a new grant'); }
-    if (g.commands >= 128) { end('backpressure'); refuse('LIMIT', 'Too many outstanding commands'); }
+    if (g.commands >= 128) refuse('LIMIT', 'Too many outstanding commands');
+    g.seen.add(m.id);
     if (m.method === 'Page.screencastFrameAck') {
-      if (!g.frames.has(params.sessionId)) refuse('UNKNOWN_FRAME', 'Frame was not issued for this grant');
       const count = g.frames.get(params.sessionId);
+      if (count === undefined) {
+        send({type: 'result', id: m.id, epoch, result: {}});
+        return;
+      }
       if (count === 1) g.frames.delete(params.sessionId);
       else g.frames.set(params.sessionId, count - 1);
       g.inFlight--;
+    } else if (m.method === 'Page.startScreencast' || m.method === 'Page.stopScreencast') {
+      g.inFlight = 0;
+      g.frames.clear();
     }
-    g.seen.add(m.id); g.commands++;
+    g.commands++;
     try {
       if (grant !== g || !connected || Date.now() >= g.expires) refuse('EXPIRED', 'Grant ended before dispatch');
       const result = await chrome.debugger.sendCommand({tabId: g.tab}, m.method, params);
@@ -204,11 +211,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   const g = grant;
   if (!g?.ready || source.tabId !== g.tab || source.sessionId || method.startsWith('Target.')) return;
   if (!connected || Date.now() >= g.expires) { end('expired'); return; }
-  if (socket.bufferedAmount > 4000000) { end('stream_backpressure'); return; }
   if (method === 'Page.screencastFrame') {
-    if (g.inFlight >= 3) { end('stream_backpressure'); return; }
+    if (g.inFlight >= 3 || socket.bufferedAmount > 1000000) {
+      void chrome.debugger.sendCommand({tabId: g.tab}, 'Page.screencastFrameAck', {sessionId: params.sessionId})
+        .catch(() => {});
+      return;
+    }
     g.frames.set(params.sessionId, (g.frames.get(params.sessionId) || 0) + 1); g.inFlight++;
-  }
+  } else if (socket.bufferedAmount > 4000000) { end('stream_overflow'); return; }
   send({type: 'event', grant: g.id, tab: g.tab, epoch, method, params});
 });
 const ready = (async () => {

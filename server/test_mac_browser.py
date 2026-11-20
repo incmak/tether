@@ -844,6 +844,12 @@ console.log(JSON.stringify([...ALLOWED].sort()));'''
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(json.loads(run.stdout), sorted(mac.PAGE_ALLOWED))
 
+    def test_extension_grant_survives_backpressure(self):
+        root = Path(__file__).resolve().parents[1]
+        run = subprocess.run(['node', 'server/fixtures/extension_backpressure.mjs'], cwd=root,
+                             capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
