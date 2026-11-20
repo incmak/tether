@@ -14,8 +14,8 @@ OWNER_THREAD = '11111111-1111-4111-8111-111111111111'
 OTHER_THREAD = '22222222-2222-4222-8222-222222222222'
 
 
-def record(owner='%1', thread=OWNER_THREAD):
-    return json.dumps({'owner_pane': owner, 'owner_thread': thread, 'helper_thread': None, 'sent_at': 1.0, 'before': None})
+def record(owner='%1', thread=OWNER_THREAD, **placement):
+    return json.dumps({'owner_pane': owner, 'owner_thread': thread, 'helper_thread': None, 'sent_at': 1.0, 'before': None, **placement})
 
 
 class Tmux:
@@ -26,7 +26,10 @@ class Tmux:
 
     def __call__(self, args, **kwargs):
         if 'list-panes' in args:
-            out = ''.join(f'{pane}\t{role}\t{raw}\n' for pane, (role, raw) in self.panes.items())
+            fields = args[-1].split('\t')
+            out = ''.join('\t'.join(dict(zip(('#{pane_id}', '#{@tether_role}', '#{@tether_helper}', '#{@group_by}'),
+                                                (pane, *values))).get(field, '') for field in fields) + '\n'
+                          for pane, values in self.panes.items())
             return subprocess.CompletedProcess(args, 0, out, '')
         if 'display-message' in args:
             pane = args[args.index('-t') + 1]
@@ -86,22 +89,38 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(self.sweep(tmux, after=helper_close.IDLE - 31), [])
         self.assertEqual(len(self.sweep(tmux, after=31)), 3)
 
+    def test_owner_cleanup_leaves_separate_tasks_open(self):
+        for moved in (False, True):
+            with self.subTest(owner_moved=moved):
+                self.closer = helper_close.Closer(now=lambda: self.clock[0])
+                owner = '%1' if moved else '%9'
+                helper = json.dumps(dict(json.loads(record(owner=owner)), kind='helper'))
+                panes = {'%2': ('', record(owner=owner)), '%3': ('', helper, 'user'), '%4': ('', helper)}
+                if moved:
+                    panes['%1'] = ('', '')
+                tmux = Tmux(panes)
+                threads = {'%1': OTHER_THREAD}
+                self.sweep(tmux, threads=threads)
+                closed = self.sweep(tmux, after=helper_close.GRACE, threads=threads)
+                self.assertEqual([pane for pane, _ in closed], ['%4'])
+                self.assertEqual(tmux.killed, ['%4'])
+
     def test_helper_closes_one_minute_after_its_owner_is_gone(self):
-        tmux = Tmux({'%2': ('', record(owner='%9')), '%3': ('advisor', record(owner='%9'))})
+        tmux = Tmux({'%2': ('', record(owner='%9', kind='helper')), '%3': ('advisor', record(owner='%9', kind='helper'))})
         self.assertEqual(self.sweep(tmux), [])
         closed = self.sweep(tmux, after=helper_close.GRACE)
         self.assertEqual(sorted(pane for pane, _ in closed), ['%2', '%3'])
         self.assertEqual(closed[0][1], 'its owner tab is gone')
 
     def test_owner_changed_conversation_closes_stale_helper(self):
-        tmux = Tmux({'%1': ('', ''), '%2': ('', record())})
+        tmux = Tmux({'%1': ('', ''), '%2': ('', record(kind='helper'))})
         self.sweep(tmux, threads={'%1': OTHER_THREAD})
         self.assertEqual(self.sweep(tmux, after=helper_close.GRACE, threads={'%1': OTHER_THREAD}),
                          [('%2', 'its owner tab changed conversations')])
 
     def test_own_tab_stays_if_its_opener_changes_conversation_or_closes(self):
-        own = json.dumps(dict(json.loads(record()), kind='own', home_pane=None))
-        tmux = Tmux({'%1': ('', ''), '%2': ('', own), '%3': ('', record())})
+        own = json.dumps(dict(json.loads(record(kind='helper')), kind='own', home_pane=None))
+        tmux = Tmux({'%1': ('', ''), '%2': ('', own), '%3': ('', record(kind='helper'))})
         moved = {'%1': OTHER_THREAD}
         self.assertEqual(self.sweep(tmux, threads=moved), [])
         self.assertEqual(self.sweep(tmux, after=helper_close.GRACE, threads=moved),
@@ -245,7 +264,7 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(tmux.killed, [])
 
     def test_grace_starts_when_the_owner_goes_not_when_the_helper_went_quiet(self):
-        tmux = Tmux({'%1': ('', ''), '%2': ('', record())})
+        tmux = Tmux({'%1': ('', ''), '%2': ('', record(kind='helper'))})
         self.sweep(tmux)
         self.sweep(tmux, after=600)
         del tmux.panes['%1']
@@ -258,8 +277,11 @@ class CloserTests(unittest.TestCase):
         self.sweep(tmux)
         self.clock[0] += helper_close.IDLE
 
+        reads = 0
         def run(args, **kwargs):
-            if 'display-message' in args:  # a reuse send landed after the sweep read the panes
+            nonlocal reads
+            reads += args[1] == 'list-panes'
+            if reads == 2:  # a reuse send landed after the sweep read the panes
                 tmux.panes['%2'] = ('advisor', json.dumps({**json.loads(record()), 'sent_at': self.clock[0]}))
             return tmux(args, **kwargs)
         self.assertEqual(self.closer.observe(self.entries(tmux), lambda entry: {'state': 'Idle'}, run,
@@ -328,7 +350,7 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(tmux.killed, [])
 
     def test_busy_orphan_gets_a_fresh_grace_when_it_goes_quiet(self):
-        tmux = Tmux({'%2': ('', record(owner='%9'))})
+        tmux = Tmux({'%2': ('', record(owner='%9', kind='helper'))})
         self.states['%2'] = 'Working'
         self.sweep(tmux)
         self.assertEqual(self.sweep(tmux, after=helper_close.GRACE), [])

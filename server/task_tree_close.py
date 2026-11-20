@@ -3,6 +3,7 @@ import subprocess
 import sys
 import time
 
+import groups
 import helper_tabs
 import task_tree
 import task_tree_api
@@ -64,22 +65,32 @@ class Closer:
                 helper_tabs.SEND_LOCK.release()
                 continue
             try:
-                live = fresh()
-                if pane not in live.entries or pane in live.fields:
-                    continue
+                with groups.LOCK(), helper_tabs.record_lock():
+                    live = fresh()
+                    if pane not in live.entries or pane in live.fields:
+                        continue
 
-                def recheck():
-                    if (self.generation != generation or not enabled()
-                            or self._signature(pane, live, task_tree.done_items(), user_prompt_at, activity, viewed)
-                            != signature):
-                        raise helper_tabs.Stale('A task or helper changed during the auto-close check.')
+                    def recheck():
+                        if (self.generation != generation or not enabled()
+                                or self._signature(pane, live, task_tree.done_items(), user_prompt_at, activity, viewed)
+                                != signature):
+                            raise helper_tabs.Stale('A task or helper changed during the auto-close check.')
 
-                recheck()
-                for member, *_ in signature:
-                    if draft(live.entries[member]):
-                        raise ValueError('A task or helper has an unsent draft.')
-                result = task_tree_api.close_task(pane, live, set(live.children(pane)), recheck=recheck)
-                closed.extend(result['closed'])
+                    recheck()
+                    for member, *_ in signature:
+                        if draft(live.entries[member]):
+                            raise ValueError('A task or helper has an unsent draft.')
+                    idle = {child['pane'] for child in task_tree_api.close_plan(pane, live)['idle']}
+
+                    def before_kill(member):
+                        if task_tree.state(live.status_row(member)) != 'idle':
+                            raise helper_tabs.Stale('A task or helper started work during auto-close.')
+
+                    result = task_tree_api.close_task(pane, live, idle, recheck=recheck, before_kill=before_kill)
+                    closed.extend(result['closed'])
+            except task_tree_api.CloseInterrupted as exc:
+                closed.extend(member for member, _ in exc.members)
+                print(f'task auto-close {pane}: {exc}', file=sys.stderr)
             except helper_tabs.Stale:
                 pass
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

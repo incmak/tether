@@ -169,6 +169,23 @@ def save_plan(folder, *, run=subprocess.run):
 
 IDENTITY = ('thread', 'observed_thread', 'process', 'agent', 'session')
 PLACEMENT = ('name', 'role', 'group_by')
+FIELDS = ('kind', 'home_pane', 'home_thread', 'root_pane', 'root_thread', 'moved_by')
+
+
+def _placement(raw):
+    if not helper_tabs._record(raw):
+        return (raw,) if raw else ()
+    record = json.loads(raw)
+    return {key: record[key] for key in FIELDS if key in record}
+
+
+def _merge(raw, target):
+    result = json.loads(raw)
+    for key in FIELDS:
+        result.pop(key, None)
+    result.update(_placement(target))
+    return target if result == json.loads(target) else json.dumps(result, separators=(',', ':'), allow_nan=False)
+
 
 
 def _document(path):
@@ -204,7 +221,7 @@ def _check(server, rows, expected, snapshot):
         current = _row(pane, panes[pane], entries.get(pane))
         if any(row[key] != current[key] for key in IDENTITY):
             stale.append(f'{pane} changed conversations or sessions')
-        elif current['raw'] != expected[pane]:
+        elif _placement(current['raw']) != _placement(expected[pane]):
             stale.append(f'{pane} changed its helper record')
         elif any(row[key] != current[key] for key in PLACEMENT):
             stale.append(f'{pane} changed its name or placement')
@@ -223,8 +240,11 @@ def _confirm_record(server, row, expected, run):
     fmt = '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}'
     result = run([paths.TMUX, 'display-message', '-p', '-t', pane, fmt],
                  capture_output=True, text=True, timeout=5)
-    if result.returncode or result.stdout.rstrip('\n').split('\t', 3) != [server, pane, row['session'], expected]:
+    fields = result.stdout.rstrip('\n').split('\t', 3)
+    if (result.returncode or len(fields) != 4 or fields[:3] != [server, pane, row['session']]
+            or _placement(fields[3]) != _placement(expected)):
         raise Refused(f'The sort plan is stale: {pane} changed its session or helper record.')
+    return fields[3]
 
 
 def _restore(server, applied, run):
@@ -241,11 +261,11 @@ def _restore(server, applied, run):
         if server != current_server or any(row[key] != current.get(key) for key in IDENTITY):
             failed.append(pane)
             continue
-        if current.get('raw') == old:
+        if _placement(current.get('raw', '')) == _placement(old):
             continue  # a failed tmux call can leave the option unchanged
         try:
-            _confirm_record(server, row, new, run)
-            _set_raw(pane, old, run)
+            raw = _confirm_record(server, row, new, run)
+            _set_raw(pane, _merge(raw, old), run)
         except (OSError, subprocess.SubprocessError, Refused):
             failed.append(pane)
     return failed
@@ -253,6 +273,11 @@ def _restore(server, applied, run):
 
 def replay(folder, *, undo=False, run=subprocess.run):
     """Preflight the entire plan, then apply it or restore its saved records."""
+    with helper_tabs.record_lock():
+        return _replay(folder, undo, run)
+
+
+def _replay(folder, undo, run):
     document = _document(folder / ('undo.json' if undo else 'plan.json'))
     rows, server = document['panes'], document['server']
     expected, target, changed = {}, {}, []
@@ -271,9 +296,9 @@ def replay(folder, *, undo=False, run=subprocess.run):
             pane = row['pane']
             # Conversation IDs and helper records can change while the CLI runs. Recheck before each write.
             _check(server, rows, expected, _snapshot(run))
-            _confirm_record(server, row, expected[pane], run)
-            applied.append((row, expected[pane], target[pane]))
-            _set_raw(pane, target[pane], run)
+            raw = _confirm_record(server, row, expected[pane], run)
+            applied.append((row, raw, target[pane]))
+            _set_raw(pane, _merge(raw, target[pane]), run)
             expected[pane] = target[pane]
     except (OSError, subprocess.SubprocessError, Refused, KeyboardInterrupt) as exc:
         failed = _restore(server, applied, run) if applied else []

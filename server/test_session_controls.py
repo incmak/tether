@@ -927,7 +927,8 @@ class FakePicker:
             if index == 3:
                 rows.append('\u2500' * 20)
             rows.append(f"{'\u276f' if index == self.at else ' '} {index + 1}. {label}")
-        return 'What should I do?\n\n' + '\n'.join(rows) + '\n\nEnter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n'
+        return ('────────────────────\n ☐ Action\n\nWhat should I do?\n\n' + '\n'.join(rows)
+                + '\n\nEnter to select \u00b7 \u2191/\u2193 to navigate \u00b7 Esc to cancel\n')
 
     def run(self, command, **kwargs):
         if 'capture-pane' in command:
@@ -980,7 +981,7 @@ class MenuChooseTests(unittest.TestCase):
         self.assertTrue(menu['question'].endswith('word119'))
 
     def choose(self, picker, *args, **kwargs):
-        with patch.object(terminal, 'verify'), patch.object(terminal, 'capture', lambda entry, run: picker.screen()):
+        with patch.object(terminal, 'verify'):
             terminal.menu_choose(self.ENTRY, *args, run=picker.run, sleep=lambda _: None, **kwargs)
 
     def test_own_answer_row_is_marked_free(self):

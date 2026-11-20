@@ -30,6 +30,7 @@ import helper_tabs
 import paths
 import prefs_sync
 import projects
+import review_links
 import task_tree
 import tmux_merge
 import undo_store
@@ -214,13 +215,11 @@ def record_ungroup(session_id, group, index, by_before, by_user=False, label=Non
                       group=dict(group), index=index, panes=list(by_before), by_before=by_before, by_after=by_user)
 
 
-def group_remove(session_id, group_id, run=subprocess.run):
-    if not undo_store.recording():
-        return groups.remove(session_id, group_id, run)
+def group_remove(session_id, group_id, run=subprocess.run, **check):
     with groups.LOCK():
-        group, index = _group_place(session_id, group_id, run)
-        groups.remove(session_id, group_id, run)
-        if group:
+        removed = groups.remove(session_id, group_id, run, **check)
+        if removed:
+            group, index = removed
             undo_store.record('group.remove', f'Removed stack {_q(group["name"])}', session=session_id, group=group,
                               index=index)
 
@@ -297,6 +296,8 @@ def capture(pane, run=subprocess.run, entry=None):
     if not tab['agent']:
         command = _show(run, pane, '#{pane_current_command}')
         tab['agent'] = 'shell' if command and command[0] in ('bash', 'zsh', 'sh', 'fish', 'dash', 'ksh') else ''
+    if reviews := review_links.capture_close(pane):
+        tab['reviews'] = reviews
     label = options.get('@group')
     try:
         tab['peers'] = [p for p in groups.panes_in(session_id, label, run) if p != pane] if label else []
@@ -851,7 +852,7 @@ class GroupRemove:
             _check_free(a['session'], a['group'], env.run, ctx)
         else:
             _check_group(a['session'], a['group'], env.run, ctx)
-            if groups.panes_in(a['session'], a['group']['id'], env.run):
+            if groups.stack_members(a['session'], a['group']['id'], env.live(), env.run):
                 raise Refused(f'Stack {_q(a["group"]["name"])} has tabs now.')
 
     @staticmethod
@@ -859,7 +860,7 @@ class GroupRemove:
         if d == 'undo':
             _readd(a['session'], a['group'], a['index'], env.run)
         else:
-            groups.remove(a['session'], a['group']['id'], env.run)
+            groups.remove(a['session'], a['group']['id'], env.run, entries=env.live())
 
     @staticmethod
     def effects(a, d, env):
@@ -954,6 +955,21 @@ def _close_effects(pane, env, name=None, agent=None):
 def _close(pane, env):
     helper_close.close_pane(pane, env.run)
     env.forget()
+
+
+def _restore_reviews(tabs, reopened, env, sources=None):
+    snapshots = [tab['reviews'] for tab in tabs if tab.get('reviews')]
+    if not snapshots:
+        return None
+    sources = sources or {}
+    bindings = {sources.get(tab['pane'], tab['pane']): (reopened[tab['pane']], tab['thread']) for tab in tabs}
+    try:
+        threads = {entry['id']: helper_tabs.verified_thread(entry) for entry in env.fresh()}
+        if review_links.restore_close(snapshots, bindings, threads):
+            return None
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        print(f'undo: could not restore review state: {exc}', file=sys.stderr)
+    return 'Tether could not restore all review state. Check the review links.'
 
 
 def _reopen_check(tab, env, session_ok=True):
@@ -1163,9 +1179,11 @@ class TabClose:
     @staticmethod
     def apply(a, d, env):
         if d == 'undo':
-            a['reopened'] = _reopen(a['tab'], env)
+            tab = a['tab']
+            a['reopened'] = _reopen(tab, env)
             a['reopened_server'] = _server(env.run)
-            _restack_released(a['tab'], a['reopened'], env.run)
+            _restack_released(tab, a['reopened'], env.run)
+            return _restore_reviews([tab], {tab['pane']: a['reopened']}, env)
         else:
             a['tab'] = capture(a['reopened'], env.run, env.entry(a['reopened'])) or a['tab']
             _close(a['reopened'], env)
@@ -1288,6 +1306,24 @@ class _TaskTreeInterrupted(Refused):
 class TaskTreeClose:
     @staticmethod
     def check(a, d, env, ctx):
+        if d == 'undo' and a['closed'] and a['closed'][-1].get('pending'):
+            from task_tree_api import kill_outcome
+            member = a['closed'][-1]
+            tab = member['tab']
+            outcome = kill_outcome(tab['pane'], tab['server'], env.run)
+            if outcome is None:
+                raise Refused('Tether could not confirm which task tabs closed. Try Undo again.')
+            if outcome:
+                member.pop('pending')
+                member['release_reviews'] = True
+            else:
+                a['closed'].pop()
+        if not a['closed']:
+            if not a['kept']:
+                raise Refused('No task tabs closed.')
+            for change in a['kept']:
+                TaskTreeMove.check(change, d, env, ctx)
+            return
         _check_tree_server(a, d, env.run)
         rows, entries = _tree_snapshot(env, ctx) if d == 'redo' or a['kept'] else ({}, {})
         panes = a.get('closed_panes', {}) if d == 'undo' else a['reopened']
@@ -1365,12 +1401,17 @@ class TaskTreeClose:
         a['reopened'] = panes
         a['reopened_session'] = session
         a['reopened_server'] = server
+        for member in a['closed']:
+            if member.pop('release_reviews', False):
+                helper_close.release_reviews(member['tab']['pane'])
+        warning = _restore_reviews(tabs, panes, env, sources=a.get('closed_panes'))
         for tab in tabs:
             try:
                 _restack_released(tab, panes[tab['pane']], run)
             except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
-                return 'The task reopened. Tether could not put all of its tabs back in their stack.'
-        return None
+                stack_warning = 'The task reopened. Tether could not put all of its tabs back in their stack.'
+                return f'{stack_warning} {warning}' if warning else stack_warning
+        return warning
 
     @staticmethod
     def _redo(a, env):
@@ -1423,6 +1464,10 @@ class TaskTreeClose:
 
     @staticmethod
     def apply(a, d, env):
+        if not a['closed']:
+            for change in a['kept']:
+                TaskTreeMove.apply(change, d, env)
+            return None
         return TaskTreeClose._undo(a, env) if d == 'undo' else TaskTreeClose._redo(a, env)
 
     @staticmethod
@@ -1460,6 +1505,7 @@ class TabStart:
             a['pane'] = _reopen(a['tab'], env)
             a['pane_server'] = _server(env.run)
             _restack_released(a['tab'], a['pane'], env.run)
+            return _restore_reviews([a['tab']], {a['tab']['pane']: a['pane']}, env)
 
     @staticmethod
     def effects(a, d, env):
@@ -1761,7 +1807,7 @@ def run(direction, entry_id, env, confirmed=None):
     and the preference writes (prefs_sync.LOCK), so a step in between cannot slip past the check."""
     if direction not in ('undo', 'redo'):
         raise ValueError('Choose undo or redo.')
-    with _RUN_LOCK, groups.LOCK(), prefs_sync.LOCK:
+    with _RUN_LOCK, groups.LOCK(), helper_tabs.record_lock(), prefs_sync.LOCK:
         return _run(direction, entry_id, env, confirmed)
 
 

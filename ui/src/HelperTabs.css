@@ -51,6 +51,10 @@
 .task-helper-dots { display: flex; flex: 0 1 auto; align-items: center; flex-wrap: wrap; max-width: 40%; padding-inline: 2px; }
 .task-helper-dots > span { display: grid; place-items: center; width: 11px; height: 18px; }
 .task-helper-dots .task-dot { width: 6px; height: 6px; }
+.task-helper-tooltip { position: absolute; z-index: 5; inset: 100% 0 auto auto; width: max-content; max-width: 100%;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--sidebar); color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.task-helper-tooltip ul { margin: 0; padding: 0; list-style: none; }
 .task-fold { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 220ms cubic-bezier(.2,.8,.2,1); }
 .task-fold.open { grid-template-rows: 1fr; }
 .task-fold > div { min-height: 0; overflow: hidden; }
@@ -66,6 +70,7 @@
   background: color-mix(in srgb, var(--attention) 12%, var(--bg));
   border: 1px solid color-mix(in srgb, var(--attention) 48%, var(--line)); border-radius: var(--radius-lg); }
 .task-answer p { margin: 0; }
+.task-draft-change:empty { position: absolute; width: 1px; height: 1px; overflow: hidden; }
 .task-question strong { color: color-mix(in srgb, var(--attention) 60%, var(--text)); }
 .task-answer-field { display: flex; min-width: 0; min-height: 36px; align-items: center; gap: 4px;
   border: 1px solid color-mix(in srgb, var(--attention) 55%, var(--line)); border-radius: var(--radius); background: var(--bg); padding: 2px; }

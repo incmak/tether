@@ -1,6 +1,7 @@
 """Plan, apply and undo with one fake tmux server."""
 import unittest_isolated  # noqa: F401
 from contextlib import redirect_stderr, redirect_stdout
+import fcntl
 import importlib.util
 import io
 import json
@@ -180,11 +181,42 @@ class TaskTreeSortTests(unittest.TestCase):
         for pane, row in rows.items():
             self.assertEqual(self.tmux.options[pane]['@tether_helper'], row['raw'])
 
+    def test_apply_and_undo_preserve_delivery_between_check_and_write(self):
+        run = self.tmux.run
+        original = {pane: dict(options) for pane, options in self.tmux.options.items()}
+        for action, sent_at in (('apply', 20), ('undo', 30)):
+            with self.subTest(action=action):
+                self.folder = self.folder.with_name(action)
+                self.tmux.options = {pane: dict(options) for pane, options in original.items()}
+                self.tmux.writes.clear()
+                self.run_plan()
+                if action == 'undo':
+                    self.assertEqual(self.cli('apply', str(self.folder))[0], 0)
+
+                def delivery(cmd, **kw):
+                    if cmd[1] == 'set-option':
+                        with (sort.paths.TETHER / 'helper-record.lock').open('a') as handle:
+                            with self.assertRaises(BlockingIOError):
+                                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    if cmd[1] == 'display-message' and '-t' in cmd and cmd[4] == '%2':
+                        record = json.loads(self.tmux.options['%2']['@tether_helper'])
+                        record.update(sent_at=sent_at, before=f'reply-{sent_at}', unknown='keep me')
+                        self.tmux.options['%2']['@tether_helper'] = json.dumps(record)
+                    return run(cmd, **kw)
+
+                with patch.object(self.tmux, 'run', side_effect=delivery):
+                    result, _, error = self.cli(action, str(self.folder))
+                self.assertEqual((result, error), (0, ''))
+                record = json.loads(self.tmux.options['%2']['@tether_helper'])
+                self.assertEqual((record['sent_at'], record['before'], record['unknown']),
+                                 (sent_at, f'reply-{sent_at}', 'keep me'))
+                self.assertEqual(record.get('kind'), 'helper' if action == 'apply' else None)
+
     def test_apply_refuses_when_a_planned_or_unchanged_pane_changes(self):
         self.run_plan()
         self.tmux.entries['%1']['thread'] = thread(9)
         original = self.tmux.options['%3']['@tether_helper']
-        self.tmux.options['%3']['@tether_helper'] = original + ' '
+        self.tmux.options['%3']['@tether_helper'] = json.dumps(dict(json.loads(original), kind='own'))
         result, _, error = self.cli('apply', str(self.folder))
         self.assertEqual(result, 1)
         self.assertIn('%1 changed conversations', error)

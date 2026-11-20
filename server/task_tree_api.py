@@ -1,10 +1,14 @@
 """Pane-bound task tree routes and whole-task closing."""
+from contextlib import nullcontext
+import json
 import os
 import subprocess
-import sys
+from urllib.parse import quote
 import time
 
 import audit
+import auto_resume
+import groups
 import helper_close
 import helper_tabs
 import task_tree
@@ -14,6 +18,7 @@ from terminal_input import UUID
 
 PREFIX = '/mobile/api/task-tree/'
 PLAN = PREFIX + 'close-plan'
+CLOSE_CHANGED = 'The helpers changed. Review the list again.'
 WRITES = {PREFIX + name for name in ('move', 'done', 'close', 'answer')}
 
 
@@ -156,39 +161,70 @@ def close_plan(pane, tree):
         plan['idle' if state == 'idle' else 'working'].append({
             'pane': child, 'thread': helper_tabs.verified_thread(entry), 'name': name(entry),
             'role': tree.fields[child]['task_role'], 'state': state})
+    signature = [pane, helper_tabs.verified_thread(root), sorted(
+        (child['pane'], child['thread'], bucket)
+        for bucket in ('idle', 'working') for child in plan[bucket])]
+    plan['plan'] = helper_tabs.digest(json.dumps(signature))
     return plan
 
 
 def close(body, tree):
     pane = body.get('pane')
-    tree.bound(pane, body.get('thread'))
-    plan = close_plan(pane, tree)
-    also = body.get('close_also')
-    if not isinstance(also, list):
-        raise ValueError('Choose which working helpers to close.')
-    selected = set()
-    children = {child['pane']: child for child in (*plan['idle'], *plan['working'])}
-    for item in also:
-        if not isinstance(item, dict):
-            raise ValueError('Select a helper tab to close.')
-        child = pane_id(item.get('pane'))
-        if child in selected:
+    try:
+        tree.bound(pane, body.get('thread'))
+        plan = close_plan(pane, tree)
+    except helper_tabs.Stale as exc:
+        raise helper_tabs.Stale(CLOSE_CHANGED) from exc
+
+    def ids(key):
+        values = body.get(key)
+        if not isinstance(values, list):
+            raise helper_tabs.Stale(CLOSE_CHANGED)
+        found = set(map(pane_id, values))
+        if len(found) != len(values):
             raise ValueError('Select each helper once.')
-        if child not in children:
-            raise helper_tabs.Stale('A selected helper moved or closed. Open the close dialog again.')
-        tree.bound(child, item.get('thread'))
-        selected.add(child)
-    idle = {child['pane'] for child in plan['idle']}
+        return found
+
+    idle, also = ids('close_idle'), ids('close_also')
+    if (body.get('plan') != plan['plan'] or idle != {child['pane'] for child in plan['idle']}
+            or not also <= {child['pane'] for child in plan['working']}):
+        raise helper_tabs.Stale(CLOSE_CHANGED)
 
     def recheck():
-        for child in idle - selected:
-            if task_tree.state(tree.status_row(child)) != 'idle':
-                raise helper_tabs.Stale('An idle helper started work. Open the close dialog again.')
+        if close_plan(pane, tree)['plan'] != plan['plan']:
+            raise helper_tabs.Stale(CLOSE_CHANGED)
 
-    return close_task(pane, tree, idle | selected, recheck=recheck)
+    try:
+        return close_task(pane, tree, idle | also, recheck=recheck)
+    except helper_tabs.Stale as exc:
+        raise helper_tabs.Stale(CLOSE_CHANGED) from exc
 
 
-def close_task(pane, tree, close_children, *, recheck=None):
+class CloseInterrupted(RuntimeError):
+    def __init__(self, error, members, identifier, label, *, stale=False):
+        super().__init__(error)
+        self.status = 409 if stale else 503
+        self.members = members
+        self.undo = identifier
+        self.label = label
+
+
+def kill_outcome(pane, server, run):
+    """After a transport failure, check whether tmux applied the kill."""
+    try:
+        live = helper_tabs.read_panes(run)
+        kind, current = auto_resume.server_id(run=run)
+        if kind == 'none':
+            return True
+        if kind == 'up' and current == server:
+            return pane not in live
+    except (OSError, subprocess.SubprocessError):
+        if auto_resume.server_id(run=run)[0] == 'none':
+            return True
+    return None
+
+
+def close_task(pane, tree, close_children, *, recheck=None, before_kill=None):
     """Capture Undo first. Detach retained children while their task is still alive."""
     children = tree.children(pane)
     if pane in task_tree.pending_roots(tree.options, tree.entries, tree.fields):
@@ -211,47 +247,88 @@ def close_task(pane, tree, close_children, *, recheck=None):
         saved = undo.capture(member, tree.run, entry)
         if (not saved or saved['agent'] not in ('claude', 'codex')
                 or saved['thread'] != helper_tabs.verified_thread(entry)
-                or not os.path.isdir(saved['folder'])
+                or not saved.get('server') or not os.path.isdir(saved['folder'])
                 or not saved.get('transcript') or not os.path.isfile(saved['transcript'])):
             raise ValueError(f'Tether cannot capture an undo for {name(entry)}. Open that tab before closing it.')
         snapshots[member] = saved
     tree.check_records(before, root=pane)
     if recheck is not None:
         recheck()
-    killed = []
-    detached = []
+    killed, detached = [], []
     label = f'Closed task {name(entries[pane])}'
-    failure = None
-    with undo_store.step(label):
-        try:
-            for child in keep:
-                entry = entries[child]
-                own = moved_record(entry, before[child])
-                helper_tabs.write_record(child, own, tree.run)
-                detached.append((entry, before[child], own))
-            for member in order:
+    identifier = None
+    server = snapshots[pane].get('server')
+    pending = None
+
+    def journal():
+        nonlocal identifier
+        actions = []
+        if killed or pending:
+            actions.append(dict(kind='task-tree.close', closed=killed + ([pending] if pending else []),
+                                kept=detached))
+        else:
+            actions.extend(dict(kind='task-tree.move', **change) for change in detached)
+        identifier = undo_store.checkpoint(identifier, label, actions, server=server)
+
+    try:
+        for child in keep:
+            entry = entries[child]
+            own = moved_record(entry, before[child])
+            detached.append(undo._task_tree_change(entry, before[child], own))
+            helper_tabs.write_record(child, own, tree.run)
+        if keep and recheck:
+            recheck()
+        for member in order:
+            if before_kill:
+                before_kill(member)
+            pending = dict(tab=snapshots[member], record=before[member], pending=True)
+            try:
+                journal()
+            except (OSError, ValueError):
+                pending = None
+                raise
+            try:
                 helper_close.close_pane(member, tree.run)
-                killed.append((snapshots[member], before[member]))
-        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
-            failure = exc
-            if not killed:
-                for item in detached[:]:
-                    entry, old, _ = item
-                    try:
-                        helper_tabs.write_record(entry['id'], old, tree.run)
-                    except (OSError, subprocess.SubprocessError) as exc:
-                        print(f'task close could not restore {entry["id"]}: {exc}', file=sys.stderr)
-                    else:
-                        detached.remove(item)
-        if killed or detached:
-            undo_store.title(label)
-            undo.record_task_tree_close(killed, detached, tree.run)
-    if failure is not None:
-        if killed or detached:
-            raise RuntimeError('The task close only partly completed. Reload the task tree.') from failure
-        raise RuntimeError('Tether could not close the task. Reload the task tree.') from failure
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+                outcome = kill_outcome(member, server, tree.run)
+                if outcome is not None:
+                    pending = None
+                if outcome:
+                    killed.append(dict(tab=snapshots[member], record=before[member]))
+                    helper_close.release_reviews(member)
+                raise
+            killed.append(dict(tab=snapshots[member], record=before[member]))
+            pending = None
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        if not killed and pending is None:
+            for change in detached[:]:
+                try:
+                    helper_tabs.write_record(change['pane'], change['before'], tree.run)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    continue
+                detached.remove(change)
+        if not (killed or detached or pending or identifier) and isinstance(exc, helper_tabs.Stale):
+            raise
+        try:
+            for member in killed:
+                undo.note_released(member['tab'], tree.run)
+            journal()
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+            pass  # the staged kill already has a durable record
+        closed = [item['tab']['pane'] for item in killed]
+        error = ('The task close only partly completed. Reload the task tree.' if killed or detached or pending
+                 else 'Tether could not close the task. Reload the task tree.')
+        raise CloseInterrupted(error, [(item, name(entries[item])) for item in closed],
+                               identifier, label, stale=isinstance(exc, helper_tabs.Stale)) from exc
+    try:
+        for member in killed:
+            undo.note_released(member['tab'], tree.run)
+        journal()
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        raise CloseInterrupted('The tabs closed. Tether could not finish saving Undo.',
+                               [(item, name(entries[item])) for item in order], identifier, label) from exc
     audit.record('tab.close', label, pane=pane, closed=order, kept=keep)
-    return {'ok': True, 'closed': order, 'kept': keep}
+    return {'ok': True, 'closed': order, 'kept': keep, **({'undo': identifier} if identifier else {})}
 
 
 def get(handler, pane, tree_factory):
@@ -269,15 +346,32 @@ def get(handler, pane, tree_factory):
 def post(handler, body, tree_factory, lock, answer, changed):
     try:
         action = handler.path.rsplit('/', 1)[1]
-        with helper_tabs.SEND_LOCK, lock:
+        stack_lock = groups.LOCK() if action == 'close' else nullcontext()
+        record_lock = helper_tabs.record_lock() if action in ('close', 'move') else nullcontext()
+        with helper_tabs.SEND_LOCK, lock, stack_lock, record_lock:
             tree = tree_factory()
             result = {'move': move, 'done': done, 'close': close, 'answer': answer}[action](body, tree)
         step = undo_store.flush()
         if step:
             result['undo'] = step['id']
-        handler.respond(200, result)
+        if action == 'close' and result.get('undo'):
+            handler.respond(200, result, headers={'X-Tether-Undo': result['undo'],
+                                                 'X-Tether-Undo-Label': quote(f'Closed task {name(tree.entries[body["pane"]])}', safe='')})
+        else:
+            handler.respond(200, result)
+    except CloseInterrupted as exc:
+        changed()
+        result = {'error': str(exc), 'closed': [title for _, title in exc.members]}
+        if exc.undo:
+            result['undo'] = exc.undo
+            handler.respond(exc.status, result, headers={'X-Tether-Undo': exc.undo,
+                                                        'X-Tether-Undo-Label': quote(exc.label, safe='')})
+        else:
+            handler.respond(exc.status, result)
     except helper_tabs.Stale as exc:
         handler.respond(409, {'error': str(exc)})
+    except groups.GroupError as exc:
+        handler.respond(exc.status, {'error': str(exc)})
     except ValueError as exc:
         handler.respond(400, {'error': str(exc)})
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:

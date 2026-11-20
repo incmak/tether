@@ -12,6 +12,7 @@ import auto_resume
 import helper_tabs
 import paths
 import prefs_sync
+import review_links
 import undo
 import undo_store
 
@@ -37,6 +38,7 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.enterContext(patch.object(paths, 'CACHE', root / 'cache'))
         self.enterContext(patch.object(paths, 'TETHER', root / 'tether'))
         self.enterContext(patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        self.enterContext(patch.object(review_links, 'FILE', root / 'review-links.json'))
         self.enterContext(patch.object(undo_store, '_server', return_value='1:2'))
         self.enterContext(patch.object(undo_store, '_ENABLED', True))
         self.entries = {}
@@ -45,6 +47,7 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.runner = Mock(side_effect=self.tmux)
         self.fresh = Mock(side_effect=lambda: list(self.entries.values()))
         self.env = undo.Env(run=self.runner, entries=lambda: self.entries.values(), fresh=self.fresh)
+        self.capture_tab = undo.capture
 
     def entry(self, pane, conversation, name='', session='$1'):
         return {'id': pane, 'thread': thread(conversation), 'tmux_session': session,
@@ -140,14 +143,7 @@ class TaskTreeUndoTests(unittest.TestCase):
                 'session': 'task', 'session_id': entry['tmux_session'], 'folder': self.folder,
                 'options': {}, 'session_options': {}, 'order': [int(pane[1:]), 0], 'server': self.server_id}
 
-    def closed_tree(self, *, kept=True, root_record=None):
-        self.root = self.entry('%1', 1, 'Main')
-        self.worker = self.entry('%2', 2, 'Worker')
-        self.review = self.entry('%3', 3, 'Review')
-        self.review_record = helper('%2', thread(2), root='%1', root_thread=thread(1))
-        self.worker_record = helper('%1', thread(1))
-        self.detached = {'kind': 'own', 'owner_pane': '%2', 'owner_thread': thread(2),
-                         'moved_by': 'user', 'sent_at': 0}
+    def mock_reopen(self, *, kept):
         self.next_pane = 9
         self.killed = []
         self.reopen_anchor = []
@@ -156,17 +152,63 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.enterContext(patch.object(undo, '_check_reopen_target'))
         self.enterContext(patch.object(undo, '_check_released'))
         self.enterContext(patch.object(undo, '_restack_released'))
-        self.enterContext(patch.object(undo, '_need_pane', side_effect=lambda pane, _: (self.entries[pane]['tmux_session'], '', '')))
+        self.enterContext(patch.object(undo, '_need_pane', side_effect=lambda pane, *args: (
+            self.entries[pane]['tmux_session'], '', '')))
         self.enterContext(patch.object(undo, '_target_session', return_value='$1' if kept else None))
         self.enterContext(patch.object(undo, '_reopen', side_effect=self.reopen))
         self.enterContext(patch.object(undo, '_close', side_effect=self.close))
-        self.enterContext(patch.object(undo, 'capture', side_effect=lambda pane, run, entry: self.capture(entry)))
-        closed = [(self.capture(self.worker), self.worker_record), (self.capture(self.root), root_record)]
+
+    def real_capture(self, entry):
+        fields = ['Task', entry['tmux_session'], self.folder, entry['id'][1:], '0'] + [''] * (
+            len(auto_resume.OPTIONS) + len(auto_resume.SESSION_OPTIONS))
+        with patch.object(auto_resume, 'saved_tab', return_value=None), patch.object(undo, '_show', return_value=fields):
+            return self.capture_tab(entry['id'], self.runner, entry)
+
+    def seed_review(self):
+        link = {'worker': '%2', 'worker_thread': thread(2), 'reviewer': '%3', 'reviewer_thread': thread(3),
+                'name': 'Worker', 'created': 1, 'seen_working': True, 'agent': 'codex'}
+        cap = {'cap': True, 'worker': '%2', 'worker_thread': thread(2), 'name': 'Worker', 'paused': True,
+               'counts': {f'%3:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}},
+               'restart': {'counts': {f'%3:{thread(3)}': {'rounds': 1}}, 'paused': True},
+               'parent_stage': {'pane': '%1', 'thread': thread(1), 'notice': 'Review paused', 'sent': True}}
+        review_links._write([link, cap])
+
+    def assert_review(self, worker, reviewer, parent):
+        rows = review_links._read()
+        self.assertEqual(len(rows), 2, 'Undo restores the link and the cap')
+        link, cap = rows
+        self.assertEqual((link['worker'], link['worker_thread']), (worker, thread(2)))
+        self.assertEqual((link['reviewer'], link['reviewer_thread']), (reviewer, thread(3)))
+        self.assertEqual(link['created'], 1)
+        self.assertTrue(cap['paused'])
+        self.assertEqual(cap['worker'], worker)
+        self.assertEqual(cap['counts'], {f'{reviewer}:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(cap['restart']['counts'], {f'{reviewer}:{thread(3)}': {'rounds': 1}})
+        self.assertEqual(cap['parent_stage']['pane'], parent)
+
+    def closed_tree(self, *, kept=True, root_record=None, reviews=False):
+        self.root = self.entry('%1', 1, 'Main')
+        self.worker = self.entry('%2', 2, 'Worker')
+        self.review = self.entry('%3', 3, 'Review')
+        self.review_record = helper('%2', thread(2), root='%1', root_thread=thread(1))
+        self.worker_record = helper('%1', thread(1))
+        self.detached = {'kind': 'own', 'owner_pane': '%2', 'owner_thread': thread(2),
+                         'moved_by': 'user', 'sent_at': 0}
+        self.mock_reopen(kept=kept)
+        if reviews:
+            self.seed_review()
+        snapshot = self.real_capture if reviews else self.capture
+        closed = [(snapshot(self.worker), self.worker_record), (snapshot(self.root), root_record)]
         kept_changes = []
         if kept:
             self.put(self.review, self.detached)
             kept_changes.append((self.review, self.review_record, self.detached))
+        elif reviews:
+            closed.insert(0, (snapshot(self.review), self.review_record))
+        for tab, _ in closed:
+            review_links.close(tab['pane'])
         undo.record_task_tree_close(closed, kept_changes, self.runner)
+        self.enterContext(patch.object(undo, 'capture', side_effect=lambda pane, run, entry: snapshot(entry)))
 
     def reopen(self, tab, _, after=None):
         if self.server_id is None:
@@ -181,6 +223,7 @@ class TaskTreeUndoTests(unittest.TestCase):
     def close(self, pane, env):
         self.killed.append(pane)
         del self.entries[pane], self.records[pane]
+        review_links.close(pane)
         env.forget()
 
     def act(self, direction):
@@ -208,6 +251,77 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.assertEqual(self.reopen_anchor, [None, '%10'])
         self.assertEqual({entry['tmux_session'] for entry in self.entries.values()}, {'$2'})
         self.assertEqual(self.records['%11'], helper('%10', thread(1)))
+
+    def test_grouped_close_undo_restores_review_for_the_kept_reviewer(self):
+        self.closed_tree(reviews=True)
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%11', '%3', '%10')
+
+    def test_grouped_close_undo_remaps_both_review_participants(self):
+        self.closed_tree(kept=False, reviews=True)
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%11', '%12', '%10')
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(review_links._read(), [])
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assert_review('%14', '%15', '%13')
+
+    def test_single_tab_close_undo_restores_the_worker_or_reviewer(self):
+        for closed, worker, reviewer in (('%2', '%10', '%3'), ('%3', '%2', '%10')):
+            with self.subTest(closed=closed):
+                self.seed_review()
+                self.put(self.entry('%1', 1))
+                self.put(self.entry('%2', 2))
+                self.put(self.entry('%3', 3))
+                with tempfile.TemporaryDirectory() as temporary, patch.object(paths, 'TETHER', Path(temporary)):
+                    self.mock_reopen(kept=True)
+                    saved = self.real_capture(self.entries[closed])
+                    self.close(closed, self.env)
+                    undo.record_tab_close(saved, self.runner)
+                    self.assertEqual(review_links.reviewed_by(), {})
+                    self.assertEqual(self.act('undo')['state'], 'undone')
+                    self.assert_review(worker, reviewer, '%1')
+
+    def test_reopening_a_reviewer_preserves_a_surviving_workers_new_review_cap(self):
+        self.seed_review()
+        self.put(self.entry('%1', 1))
+        self.put(self.entry('%2', 2))
+        self.put(self.entry('%3', 3))
+        self.put(self.entry('%4', 4))
+        self.mock_reopen(kept=True)
+        saved = self.real_capture(self.entries['%3'])
+        self.close('%3', self.env)
+        undo.record_tab_close(saved, self.runner)
+        review_links.add(worker='%2', worker_thread=thread(2), reviewer='%4', reviewer_thread=thread(4),
+                         name='Worker', agent='codex', reset=True)
+        later = review_links._read()
+        result = self.act('undo')
+        self.assertEqual(result['state'], 'undone')
+        self.assertTrue(any('review state' in warning for warning in result.get('warnings', [])))
+        self.assertEqual(review_links._read(), later)
+
+    def test_reopening_a_reviewer_returns_counts_that_close_transferred_to_its_peer(self):
+        self.seed_review()
+        for number in (1, 2, 3, 4):
+            self.put(self.entry(f'%{number}', number))
+        rows = review_links._read()
+        rows.append(dict(rows[0], reviewer='%4', reviewer_thread=thread(4)))
+        review_links._write(rows)
+        self.mock_reopen(kept=True)
+        saved = self.real_capture(self.entries['%3'])
+        self.close('%3', self.env)
+        undo.record_tab_close(saved, self.runner)
+        cap = review_links._read()[-1]
+        self.assertEqual(cap['counts'], {f'%4:{thread(4)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        remaining = set(review_links.reviewed_by()['%2'])
+        self.assertEqual(remaining, {'%4', '%10'})
+        cap = review_links._read()[-1]
+        self.assertEqual(cap['counts'], {f'%10:{thread(3)}': {'rounds': 3, 'empty_rounds': 1}})
+        self.assertEqual(cap['restart']['counts'], {f'%10:{thread(3)}': {'rounds': 1}})
+        self.assertTrue(cap['paused'])
 
     def test_close_of_the_last_session_can_restart_tmux(self):
         self.closed_tree(kept=False)

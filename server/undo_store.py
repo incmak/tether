@@ -236,6 +236,31 @@ def record(kind, label, **data):
         return None
 
 
+
+def checkpoint(identifier, label, actions, *, server):
+    """Persist the current Undo of a write before its next irreversible operation."""
+    if not recording():
+        return None
+    if identifier is None:
+        if not actions:
+            return None
+        entry = _save(label, actions, server=server)
+        if entry is None:
+            raise LockError('Tether could not save Undo. Review the task before trying again.')
+        return entry['id']
+
+    def update(found):
+        entry = find(found, identifier)
+        if entry is None:
+            raise LockError('Tether could not update Undo. Review the task before trying again.')
+        if actions:
+            entry['actions'] = actions
+        else:
+            found.remove(entry)
+
+    edit(update)
+    return identifier if actions else None
+
 def _server():
     """The tmux server id ('pid:start_time'): pane and session ids repeat after a tmux restart, so undo checks it."""
     try:

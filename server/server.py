@@ -2856,7 +2856,7 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self, sessions=sessions)
+            groups_api.post(self, sessions=sessions, fresh=fresh_sessions, lock=SEND_LOCK, changed=forget_sessions)
             return
         if undo_api.handles(self.path):
             undo_api.post(self, undo_env(), SEND_LOCK)
@@ -3600,10 +3600,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Choose an option first.')
                 if answer is not None and any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in answer):
                     raise ValueError('The answer contains terminal control characters.')
-                with SEND_LOCK:
-                    menu_choose(config, choice, label=label, answer=answer)
-                    if answer is not None:
-                        task_user_delivery(config)
+                from terminal_input import MenuChanged
+                try:
+                    with SEND_LOCK:
+                        menu_choose(config, choice, label=label, answer=answer)
+                        if answer is not None:
+                            task_user_delivery(config)
+                except MenuChanged as exc:
+                    self.respond(409, {'error': str(exc)})
+                    return
                 attention.STORE.clear(config['id'], config.get('thread'))
                 self.respond(200, {'accepted': True})
                 return

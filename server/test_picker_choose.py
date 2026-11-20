@@ -209,14 +209,24 @@ class CodexPickerDetailTests(unittest.TestCase):
 
 class MenuChooseRedrawTests(unittest.TestCase):
     """menu_choose waits for each move to show before the next key, as picker_choose does."""
+    def menu(self, rows, **kwargs):
+        pane = FakePane([*rows, f'{len(rows) + 1}. Type something.', f'{len(rows) + 2}. Chat about this'],
+                        hint='Enter to select · ↑/↓ to navigate · Esc to cancel', **kwargs)
+        original = pane.screen
+        pane.screen = lambda: (
+            original().replace('Pick one\nWhich file', '────────────────────\n ☐ File\n\nWhich file')
+            .replace(f'  {len(rows) + 2}. Chat about this', f'────────────────────\n  {len(rows) + 2}. Chat about this')
+        )
+        return pane
+
     def test_a_slow_redraw_never_queues_a_second_press(self):
-        pane = FakePane(['1. Alpha', '2. Beta', '3. Gamma'], lag=3)
+        pane = self.menu(['1. Alpha', '2. Beta', '3. Gamma'], lag=3)
         with patch.object(terminal, 'verify'):
             terminal.menu_choose({'id': '%m', 'agent': 'claude'}, 2, label='Beta', run=pane, sleep=lambda _: None)
         self.assertEqual(pane.keys, ['Down', 'Enter'])
 
     def test_a_stuck_cursor_stops_without_enter(self):
-        pane = FakePane(['1. Alpha', '2. Beta', '3. Gamma'], stuck=True)
+        pane = self.menu(['1. Alpha', '2. Beta', '3. Gamma'], stuck=True)
         with patch.object(terminal, 'verify'), self.assertRaisesRegex(RuntimeError, 'did not move'):
             terminal.menu_choose({'id': '%m', 'agent': 'claude'}, 3, label='Gamma', run=pane, sleep=lambda _: None)
         self.assertEqual(pane.keys, ['Down'])
@@ -232,7 +242,7 @@ class MenuChooseRedrawTests(unittest.TestCase):
 
     def test_a_draft_after_the_first_move_stops_without_enter(self):
         draft = '● Done.\n\n' + '─' * 40 + '\n❯ 1. Alpha\n  2. Beta\n' + '─' * 40 + '\n  ⏵⏵ auto mode on\n'
-        pane = FakePane(['1. Alpha', '2. Beta', '3. Gamma'])
+        pane = self.menu(['1. Alpha', '2. Beta', '3. Gamma'])
         menu = pane.screen
         pane.screen = lambda: draft if pane.keys else menu()
         with patch.object(terminal, 'verify'), self.assertRaisesRegex(RuntimeError, 'no longer open'):
@@ -241,7 +251,7 @@ class MenuChooseRedrawTests(unittest.TestCase):
 
     def test_option_ten_is_reached_with_arrows(self):
         rows = [f'{n}. Option {n}' for n in range(1, 12)]
-        pane = FakePane(rows)
+        pane = self.menu(rows)
         with patch.object(terminal, 'verify'):
             terminal.menu_choose({'id': '%m', 'agent': 'claude'}, 10, label='Option 10', run=pane, sleep=lambda _: None)
         self.assertEqual(pane.keys, ['Down'] * 9 + ['Enter'])

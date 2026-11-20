@@ -17,7 +17,7 @@ ROW = re.compile(r'^(?P<indent>\s*)(?:(?P<cursor>[>❯›])\s+)?'
 MORE = re.compile(r'^\s*([↑↓])(?:\s+(\d+)\s+more)?\s*$')
 KEY_START = re.compile(r'^\s*(?:Enter|Space|Esc|Tab|left/right|Keyboard:|ctrl\+[abwr]|Type to search)\b|^\s*[↑↓←]', re.I)
 HINT_END = re.compile(r'\besc(?:ape)?(?:\s+to)?\s+(?:cancel|back|close|interrupt|clear)\s*$', re.I)
-ACCEPT = re.compile(r'\benter(?:\s+to)?\s+(?:select|confirm|continue|save|submit answer|edit|open)\b', re.I)
+ACCEPT = re.compile(r'\benter(?:\s+to)?\s+(?:select|confirm|continue|save|submit answer|edit|open|default)\b', re.I)
 CHAT = re.compile(r'^\s*(?:[●⏺✻✶✳✢✽]\s|⎿|[>❯›]\s*$)')
 
 
@@ -305,14 +305,20 @@ def ask_current(frame):
     if footer is None:
         return None
     stop, _, hints = footer
-    if ' '.join(hints) != 'Enter to select Tab/Arrow keys to navigate Esc to cancel':
+    hint = ' '.join(hints)
+    legacy = hint == 'Enter to select ↑/↓ to navigate Esc to cancel'
+    if not legacy and hint != 'Enter to select Tab/Arrow keys to navigate Esc to cancel':
         return None
-    chips = [(i, re.fullmatch(r'\s*←\s+(.+?)\s+✔ Submit\s+→\s*', text))
+    pattern = r'\s*(☐ [^☐☒←→]+?)\s*' if legacy else r'\s*←\s+(.+?)\s+✔ Submit\s+→\s*'
+    chips = [(i, re.fullmatch(pattern, text))
              for i, (text, _) in enumerate(rows[:stop])]
     chips = [(i, match) for i, match in chips if match]
     if len(chips) != 1:
         return None
     top, chip = chips[0]
+    above = next((text for text, _ in reversed(rows[:top]) if text.strip()), '')
+    if not re.fullmatch(r'\s*─{3,}\s*', above):
+        return None
     tabs = []
     text, styles = rows[top]
     for match in re.finditer(r'([☐☒])\s+([^☐☒]+?)(?=\s+[☐☒]|$)', chip[1]):
@@ -320,7 +326,7 @@ def ask_current(frame):
         if not label or '…' in label or '...' in label:
             return None
         start, end = chip.start(1) + match.start(), chip.start(1) + match.end()
-        tabs.append({'label': label, 'active': _emphasis(styles[start:end]),
+        tabs.append({'label': label, 'active': legacy or _emphasis(styles[start:end]),
                      'answered': match[1] == '☒'})
     active = [i for i, tab in enumerate(tabs) if tab['active']]
     if not 1 <= len(tabs) <= 4 or len(active) != 1:
@@ -334,18 +340,20 @@ def ask_current(frame):
     if first is None:
         return None
     question = ' '.join(text.strip() for text, _ in rows[top + 1:first] if text.strip())
-    if not question or '…' in question or any(RULE.fullmatch(text) or CHAT.match(text)
+    if not question or '…' in question or '...' in question or any(RULE.fullmatch(text) or CHAT.match(text)
                                             for text, _ in rows[top + 1:first] if text.strip()):
         return None
     options, divider = [], False
     for text, _ in rows[first:stop]:
         if not text.strip():
             continue
-        if RULE.fullmatch(text):
+        if re.fullmatch(r'\s*─{3,}\s*', text):
+            if divider or not options:
+                return None
             divider = True
             continue
         if match := item_row.fullmatch(text):
-            if divider and match['label'] != 'Chat about this':
+            if divider and (match['label'] != 'Chat about this' or options[-1]['label'] == 'Chat about this'):
                 return None
             option = {'id': int(match['id']), 'label': match['label'], 'text': match['text'],
                       'description': '', 'selected': bool(match['cursor']), 'kind': 'option'}
@@ -354,24 +362,90 @@ def ask_current(frame):
             options.append(option)
         elif options and len(text) - len(text.lstrip()) >= 5 and not divider:
             # Native multiselect draws an unnumbered Next below the free field.
-            if text.strip() != 'Next' or options[-1]['label'] != 'Type something':
+            if text.strip() != 'Next' or options[-1]['label'] not in ('Type something', 'Type something.'):
                 options[-1]['description'] = ' '.join(filter(None, (options[-1]['description'], text.strip())))
         else:
             return None
     if (len(options) < 4 or not divider or options[-1]['label'] != 'Chat about this'
             or [o['id'] for o in options] != list(range(1, len(options) + 1))
-            or sum(o['selected'] for o in options) != 1
-            or any('…' in o['label'] or '...' in o['label'] for o in options)):
+            or sum(o['selected'] for o in options) != 1):
         return None
     multi = 'checked' in options[0]
     if any(('checked' in o) != multi for o in options[:-1]):
         return None
     options[-2]['kind'], options[-1]['kind'] = 'free', 'chat'
+    if any('…' in value or '...' in value for option in options[:-2]
+           for value in (option['label'], option['description'])):
+        return None
     index = active[0]
     return {'index': index, 'total': len(tabs), 'header': tabs[index]['label'],
             'question': question, 'multi': multi, 'options': options, 'tabs': tabs,
             'keys': [str(o['id']) for o in options[:-2]] +
                     ['Up', 'Down', 'Left', 'Right', 'Tab', 'Enter', 'Escape']}
+
+
+def codex_numbered_menu(frame):
+    """Verify a complete numbered settings panel before it can accept keys."""
+    rows = _rows(frame)
+    footer = _footer(rows)
+    if footer is None:
+        return None
+    stop, _, hints = footer
+    hint = ' · '.join(hints)
+    if hint not in ('enter select · esc back', 'enter open · esc back', 'enter default · s session · esc back'):
+        return None
+    first = next((i for i in range(stop - 1, -1, -1) if re.match(r'^\s*› \d+\. ', rows[i][0])), None)
+    if first is None:
+        return None
+    while first > 0:
+        text = rows[first - 1][0]
+        if not text.strip() or re.match(r'^\s*(?:› )?\d+\. |^ {5,}\S', text):
+            first -= 1
+        else:
+            break
+    while first < stop and not rows[first][0].strip():
+        first += 1
+    before = [text.strip() for text, _ in rows[:first] if text.strip()]
+    if hint == 'enter select · esc back':
+        question = 'Select Model and Effort'
+        if not (before[-1:] == [question] or ' '.join(before[-2:]) == question):
+            return None
+    elif hint == 'enter open · esc back':
+        if 'Usage' not in before[-4:]:
+            return None
+        suffix = before[len(before) - 1 - before[::-1].index('Usage'):]
+        question = ' '.join(suffix)
+        if question not in ('Usage', 'Usage Account usage and resets.'):
+            return None
+    else:
+        question = ' '.join(before[-2:] if len(before) >= 2 and before[-2].startswith('Select Reasoning') else before[-1:])
+        if not re.fullmatch(r'Select Reasoning Level for [\w.-]+(?: [\w.-]+)*', question):
+            return None
+
+    body = [text for text, _ in rows[first:stop] if text.strip()]
+    options = []
+    for text in body:
+        if match := re.fullmatch(r'\s*(› )?(\d+)\.\s+(\S.*)', text):
+            label, detail = (re.split(r' {2,}', match[3], maxsplit=1) + [''])[:2]
+            options.append({'id': int(match[2]), 'text': label, 'detail': detail, 'selected': bool(match[1])})
+        elif options and re.fullmatch(r' {5,}(?![↑↓▲▼])\S.*', text):
+            options[-1]['detail'] = ' '.join(filter(None, (options[-1]['detail'], text.strip())))
+        else:
+            return None
+    if (len(options) < 2 or [o['id'] for o in options] != list(range(1, len(options) + 1))
+            or sum(o['selected'] for o in options) != 1
+            or any('…' in value or '...' in value for option in options
+                   for value in (option['text'], option['detail'])
+                   if not (hint == 'enter default · s session · esc back' and option is options[-1]
+                           and value == 'More reasoning…'))):
+        return None
+    # The Usage menu always offers both destinations. A truncated row is not a destination.
+    if hint == 'enter open · esc back' and [o['text'] for o in options] != ['View analytics', 'Redeem reset']:
+        return None
+    if hint == 'enter default · s session · esc back' and (options[0]['text'] != 'Low'
+                                                          or options[-1]['text'] != 'More reasoning…'):
+        return None
+    return {'question': question, 'options': options}
 
 
 def cursor_picker(frame, agent):

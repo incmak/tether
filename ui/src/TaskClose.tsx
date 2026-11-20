@@ -1,5 +1,5 @@
-import { useEffect, useId, useState } from 'react'
-import { errorText } from './api'
+import { useEffect, useId, useRef, useState } from 'react'
+import { ApiError, errorText } from './api'
 import type { Api, Pane } from './api'
 import { paneTitle } from './Sidebar'
 
@@ -12,9 +12,14 @@ interface CloseChild {
 }
 
 export interface ClosePlan {
+  plan: string
   task: { pane: string; name: string }
   idle: CloseChild[]
   working: CloseChild[]
+}
+
+export function closePlanChanged(error: unknown) {
+  return error instanceof ApiError && error.status === 409 && error.message === 'The helpers changed. Review the list again.'
 }
 
 export function loadClosePlan(api: Api, pane: string, signal: AbortSignal) {
@@ -22,8 +27,10 @@ export function loadClosePlan(api: Api, pane: string, signal: AbortSignal) {
 }
 
 export function closeTask(api: Api, pane: Pick<Pane, 'id' | 'thread'>, plan: ClosePlan, checked: string[]) {
-  const close_also = plan.working.filter(child => checked.includes(child.pane)).map(({ pane, thread }) => ({ pane, thread }))
-  return api<{ closed: string[]; kept: string[] }>('task-tree/close', { pane: pane.id, thread: pane.thread, close_also })
+  const close_also = plan.working.filter(child => checked.includes(child.pane)).map(child => child.pane)
+  return api<{ closed: string[]; kept: string[] }>('task-tree/close', {
+    pane: pane.id, thread: pane.thread, plan: plan.plan, close_idle: plan.idle.map(child => child.pane), close_also,
+  })
 }
 
 export function TaskCloseChoices({ plan, pending, checked, setChecked }: {
@@ -57,6 +64,9 @@ export function TaskClose({ api, pane, pending, run, onCancel }: {
   const [error, setError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [checked, setChecked] = useState<string[]>([])
+  const [changed, setChanged] = useState('')
+  const cancel = useRef<HTMLButtonElement>(null)
+  useEffect(() => { if (changed && !pending) cancel.current?.focus() }, [changed, pending])
   useEffect(() => {
     const controller = new AbortController()
     loadClosePlan(api, pane.id, controller.signal).then(
@@ -74,9 +84,24 @@ export function TaskClose({ api, pane, pending, run, onCancel }: {
       <TaskCloseChoices plan={plan} pending={pending} checked={checked} setChecked={setChecked} />
     </>}
     <div className="sheet-buttons">
-      <button type="button" className="secondary" autoFocus disabled={pending} onClick={onCancel}>Cancel</button>
+      <button type="button" className="secondary" ref={cancel} autoFocus disabled={pending} onClick={onCancel}>Cancel</button>
       <button type="button" className="danger" disabled={pending || !plan} onClick={() => {
-        if (plan) void run(async () => { await closeTask(api, pane, plan, checked); return undefined })
+        if (!plan) return
+        setChanged('')
+        void run(async () => {
+          try {
+            await closeTask(api, pane, plan, checked)
+          } catch (failure) {
+            if (closePlanChanged(failure)) {
+              setChanged(errorText(failure))
+              setPlan(undefined)
+              setChecked([])
+              setAttempt(attempt + 1)
+            }
+            throw failure
+          }
+          return undefined
+        })
       }}>{pending ? 'Closing…' : 'Close'}</button>
     </div>
   </div>

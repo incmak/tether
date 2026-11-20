@@ -367,8 +367,8 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
-  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   if (init.method !== 'GET') announceUndo(response)
+  if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
 

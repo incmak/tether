@@ -671,7 +671,7 @@ def discover(config, run, *, repair_zoom=True):
                 transcript = claude_transcript(live['cwd'], live['sessionId'])
                 entry.update(agent='claude', thread=live['sessionId'], transcript=str(transcript),
                              registry=live['registry'], writable=True, owner_pid=owner, process_start=started,
-                             busy=live.get('status') == 'busy')
+                             busy=live.get('status') == 'busy', agent_version=live.get('version'))
                 # A name the user gave (/rename or claude --name). Claude's own derived names ("projects-40") are not shown.
                 if live.get('nameSource') == 'user' and isinstance(live.get('name'), str) and live['name'].strip():
                     entry['agent_name'] = ' '.join(live['name'].split())
@@ -1070,6 +1070,28 @@ def ask_questions(part):
     return {'id': part.get('id'), 'questions': questions} if questions and part.get('id') else None
 
 
+def _update_claude_ask(state, part, role):
+    if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and role == 'assistant':
+        state['ask'] = ask_questions(part)
+    elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
+        state['ask'] = None
+
+
+def open_claude_ask(entry):
+    """Read the outstanding native question without loading the conversation's messages."""
+    def consume(state, _, record):
+        if record.get('isSidechain') or record.get('isMeta') or record.get('type') not in ('assistant', 'user'):
+            return
+        content = (record.get('message') or {}).get('content')
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    _update_claude_ask(state, part, record['type'])
+
+    return history.read(entry.get('transcript'), lambda: {'ask': None}, consume, trim=False,
+                        namespace='claude-ask')['ask']
+
+
 def claude_model(thread):
     """Claude's model name from its status-line JSON (claude_usage.py). Empty when no Tether status line ran."""
     if not isinstance(thread, str) or not re.fullmatch(r'[a-zA-Z0-9-]+', thread):
@@ -1100,10 +1122,7 @@ def claude_snapshot(entry, clean):
                 state['plan'] = {'id': part.get('id') or str(index), 'text': text} if isinstance(text, str) and text.strip() else None
             elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('plan') or {}).get('id'):
                 state['plan'] = None  # A finished request must not pair with a later menu.
-            if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and record['type'] == 'assistant':
-                state['ask'] = ask_questions(part)
-            elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
-                state['ask'] = None
+            _update_claude_ask(state, part, record['type'])
     state = history.read(entry['transcript'], lambda: {'messages': [], 'dropped': 0, 'plan': None, 'ask': None}, consume)
     messages = activity.group_actions(activity.merge(list(state['messages'])))
     metrics = {}

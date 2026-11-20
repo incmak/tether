@@ -1,5 +1,7 @@
 """Owned helper tabs, guarded messages, and short turn polls."""
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
 import re
@@ -25,6 +27,15 @@ MISSING_GRACE = 10
 _missing = {}
 # Record writers take this before the server send lock.
 SEND_LOCK = threading.Lock()
+
+
+@contextmanager
+def record_lock():
+    """Serialize helper record transactions across server and CLI processes."""
+    paths.TETHER.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (paths.TETHER / 'helper-record.lock').open('a') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
 
 
 class Stale(RuntimeError):
@@ -241,7 +252,7 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock, bef
         raise ValueError('Enter a message with 1 to 20000 characters.')
     if any(unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in message):
         raise ValueError('The message contains terminal control characters.')
-    with lock:
+    with lock, record_lock():
         exists, record = load(pane, run)
         if not exists:
             raise ValueError('That session has ended. Select another tab.')

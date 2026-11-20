@@ -19,7 +19,7 @@ function TaskAnswer({ api, task, child, onOpen, onUpdate }: {
   api: Api; task: Pane; child: Pane; onOpen: () => void; onUpdate: () => void
 }) {
   const id = useId()
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState<{ text: string; prompt?: string }>({ text: '' })
   const [busy, setBusy] = useState(false)
   const [sent, setSent] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -35,6 +35,8 @@ function TaskAnswer({ api, task, child, onOpen, onUpdate }: {
   const question = approval?.text || native?.question || menu?.question || child.ask?.next || child.needs?.text || child.attention?.question || 'Open the helper to review its request.'
   const prompt = approval?.id || (native && bridge?.nonce) || child.answer_digest
   const answered = !!prompt && sent === prompt
+  const draftPrompt = native ? JSON.stringify([bridge?.id, bridge?.nonce, native.question]) : child.answer_digest
+  const staleDraft = !!draft.text.trim() && draft.prompt !== draftPrompt
   const canType = !!native || (!!child.answer_digest && (!menu || !!menu.options?.some(option => option.free)))
   const disabled = !child.writable || !child.thread || busy || answered
   const answerLabel = `Answer ${name}`
@@ -58,7 +60,7 @@ function TaskAnswer({ api, task, child, onOpen, onUpdate }: {
         await api('task-tree/answer', { pane: child.id, thread: child.thread, digest: child.answer_digest, ...answer })
       }
       setSent(prompt)
-      setDraft('')
+      setDraft({ text: '' })
       onUpdate()
     } catch (failure) {
       setError(errorText(failure))
@@ -70,11 +72,18 @@ function TaskAnswer({ api, task, child, onOpen, onUpdate }: {
   }
   return <section className="task-answer" aria-label={`${name} needs you`}>
     <p className="task-question"><strong>{name}</strong> needs you: {question}</p>
-    <form className="task-answer-field" onSubmit={event => { event.preventDefault(); if (canType && draft.trim()) void send({ text: draft.trim() }) }}>
-      <input value={draft} onChange={event => setDraft(event.target.value)} aria-label={answerLabel} aria-describedby={`${id}-destination`}
+    {(canType || !!draft.text) && <form className="task-answer-field" onSubmit={event => {
+      event.preventDefault()
+      if (!canType || disabled || !draft.text.trim()) return
+      if (staleDraft) setDraft({ ...draft, prompt: draftPrompt })
+      else void send({ text: draft.text.trim() })
+    }}>
+      <input value={draft.text} onChange={event => setDraft({ text: event.target.value, prompt: draft.text.trim() ? draft.prompt : draftPrompt })}
+        aria-label={answerLabel} aria-describedby={`${id}-destination${staleDraft ? ` ${id}-changed` : ''}`}
         placeholder={`${answerLabel}…`} maxLength={native ? 2000 : 20000} disabled={disabled || !canType} />
-      <button type="submit" className="secondary" disabled={disabled || !canType || !draft.trim()} aria-label={`Send to ${name}`}>{busy ? 'Sending…' : 'Send'}</button>
-    </form>
+      <button type="submit" className="secondary" disabled={disabled || !canType || !draft.text.trim()} aria-label={`Send to ${name}`}>{busy ? 'Sending…' : 'Send'}</button>
+    </form>}
+    <div id={`${id}-changed`} className="task-draft-change" aria-live="polite">{staleDraft && 'The question changed. Check your answer, then send it again.'}</div>
     <div className="task-answer-actions">
       {native?.options.map((option, index) => <button type="button" key={option.label} className={index ? 'secondary' : 'primary'} disabled={disabled}
         aria-describedby={`${id}-destination`} onClick={() => void send({ nativeChoice: option.label })}>{option.label}</button>)}

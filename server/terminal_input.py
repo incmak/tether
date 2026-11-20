@@ -494,6 +494,66 @@ class MenuChanged(RuntimeError):
     pass
 
 
+def menu_refusal(entry, *, helper=False):
+    agent = entry['agent']
+    version = entry.get('agent_version')
+    if agent == 'codex' and not version:
+        try:
+            with open(entry['transcript'], 'rb') as stream:
+                first = json.loads(stream.readline(65536))
+            if first.get('type') == 'session_meta':
+                version = first['payload'].get('cli_version')
+        except (KeyError, AttributeError, OSError, TypeError, ValueError):
+            pass
+    name, captured = {'claude': ('Claude Code', '2.1.316 and 2.1.318'),
+                      'codex': ('Codex', '0.169.0')}.get(agent, (agent, ''))
+    if isinstance(version, str) and re.fullmatch(r'v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?', version):
+        detail = f' {name} {version} may have changed the screen.'
+    elif captured:
+        detail = f' A newer {name} version may have changed the screen. Tether knows version {captured}.'
+    elif agent == 'antigravity':
+        detail = ' The Antigravity version may use an unfamiliar screen.'
+    else:
+        detail = ''
+    where = 'the helper' if helper else 'the terminal'
+    return f'The question changed or is no longer open. Open {where} to review it.{detail}'
+
+
+def verified_numbered_menu(entry, frame):
+    """Keep numbered display parsing separate from the evidence required to write."""
+    if entry['agent'] == 'codex':
+        return choice_state.codex_numbered_menu(frame)
+    if entry['agent'] != 'claude' or not (current := choice_state.ask_current(frame)) or current['multi']:
+        return None
+    options = [{'id': item['id'], 'text': item['text'], 'detail': item['description'],
+                'selected': item['selected'], **({'free': True} if item['kind'] == 'free' else {})}
+               for item in current['options']]
+    question = current['question']
+    ask_id = None
+    if entry.get('transcript'):
+        import agents
+        try:
+            ask = agents.open_claude_ask(entry)
+        except OSError:
+            return None
+        if ask is not None:
+            if len(ask['questions']) != current['total']:
+                return None
+            expected = ask['questions'][current['index']]
+            normalize = lambda text: ' '.join(text.split())
+            if (expected['multi']
+                    or normalize(expected['header']) != current['header']
+                    or normalize(expected['question']) != question
+                    or [(normalize(item['label']), normalize(item['description'])) for item in expected['options']]
+                    != [(item['text'], item['detail']) for item in options[:-2]]):
+                return None
+            question, ask_id = expected['question'], ask['id']
+            for item, source in zip(options, expected['options']):
+                item.update(text=source['label'], detail=source['description'])
+    return {'question': question, 'options': options,
+            'menu_identity': [current['index'], current['total'], current['header'], ask_id]}
+
+
 def menu_digest(menu):
     """Bind the question and all options, independent of cursor position and free-answer draft."""
     question = menu.get('question')
@@ -502,10 +562,11 @@ def menu_digest(menu):
         return None
     content = [(option['id'], option['text'], option.get('detail')) if not option.get('free')
                else (option['id'], None, None) for option in options]
-    return hashlib.sha256(json.dumps([question, content]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([question, content, menu.get('menu_identity')]).encode()).hexdigest()
 
 
-def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, sleep=time.sleep, *, digest=None):
+def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, sleep=time.sleep, *, digest=None,
+                current_prompt=None):
     """Answer a numbered menu by moving the cursor, not by a digit key. A digit types text when the cursor sits on
     Claude's own-answer row, and then every later tap types more ("344"). So: read the cursor row, press Up or Down
     until it is on the chosen row (checking the screen after each press), then Enter. answer: text for the own-answer row;
@@ -513,25 +574,26 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
     def press(*keys):
         run([paths.TMUX, 'send-keys', '-t', entry['id'], *keys], check=True, capture_output=True, timeout=5)
 
-    def look(typed=None):
-        # The same test as attention() and read_picker(): an open menu at the bottom with one marked row. A ruled
-        # Claude draft with numbered lines is not a menu, and Enter there would send the draft.
-        lines = capture(entry, run).rstrip().splitlines()
-        menu = menu_question(menu_lines(lines), entry['agent']) if menu_open(entry['agent'], lines) else None
-        if not menu or sum(1 for option in menu['options'] if option['selected']) != 1:
-            raise MenuChanged('The question is no longer open.')
+    def look(typed=None, *, writing=False):
+        if writing:
+            verify(entry, run)
+        menu = verified_numbered_menu(entry, capture(entry, run, styled=True))
+        if not menu or current_prompt is not None and not current_prompt():
+            raise MenuChanged(menu_refusal(entry, helper=digest is not None))
+        content = menu_digest(menu)
+        if expected is not None and expected != content:
+            raise MenuChanged(menu_refusal(entry, helper=digest is not None))
         if digest is not None:
-            if menu_digest(menu) != digest:
-                raise MenuChanged('The question changed. Reload and review it again.')
             for option in menu['options']:
                 if option.get('free'):
-                    expected = typed if option['id'] == choice and typed is not None else 'Type something.'
+                    answer_text = typed if option['id'] == choice and typed is not None else 'Type something.'
                     current = ' '.join((option['text'] + ' ' + option['detail']).split())
-                    if current != expected:
+                    if current != answer_text:
                         raise DraftError('The free-answer field has different text. Open the helper to check its draft.')
-        return menu['options']
-    verify(entry, run)
-    options = look()
+        return menu['options'], content
+
+    expected = digest
+    options, expected = look(writing=True)
     target = next((i for i, option in enumerate(options) if option['id'] == choice), None)
     if target is None:
         raise RuntimeError('That option is gone. Reload and review the question again.')
@@ -541,14 +603,11 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
     if answer is not None and not free:
         raise ValueError('This option takes no text.')
     if label is not None and not free and options[target]['text'] != label:
-        raise RuntimeError('The question changed. Reload and review it again.')
+        raise MenuChanged(menu_refusal(entry))
     for _ in range(len(options) * 2 + 2):
-        if digest is not None:
-            verify(entry, run)
-            options = look()
         target = next((i for i, option in enumerate(options) if option['id'] == choice), None)
         if target is None or label is not None and not free and options[target]['text'] != label:
-            raise RuntimeError('The question changed. Reload and review it again.')
+            raise MenuChanged(menu_refusal(entry))
         at = next((i for i, option in enumerate(options) if option['selected']), None)
         if at is None:
             raise RuntimeError('Could not find the cursor in the question. Open the terminal to answer it.')
@@ -557,7 +616,7 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
         press('Down' if at < target else 'Up')
         for _ in range(20):  # up to 2 s for the redraw: a second press before it lands past the row
             sleep(.1)
-            options = look()
+            options, _ = look()
             moved = next((i for i, option in enumerate(options) if option['selected']), None)
             if moved != at:
                 break
@@ -565,31 +624,28 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
             raise RuntimeError('The cursor did not move. Open the terminal to answer it.')
         if moved is not None and ((moved > target) if at < target else (moved < target)):
             raise RuntimeError('The cursor jumped past that option. Open the terminal to answer it.')
+        options, _ = look(writing=True)
     else:
         raise RuntimeError('Could not move to that option. Open the terminal to answer it.')
     if answer is not None:
-        old = options[target]['text']
+        old = options[target]['text'] + (' ' + options[target]['detail'] if options[target]['detail'] else '')
         if old != 'Type something.':
             press('End', *['BSpace'] * (len(old) + 2))
             sleep(.2)
-            if look()[target]['text'] != 'Type something.':
+            if look()[0][target]['text'] != 'Type something.':
                 raise RuntimeError('Could not clear the old answer. Open the terminal to answer it.')
         buffer = 'tmux-mobile-' + uuid.uuid4().hex
         typed = ' '.join(answer.split())
         try:
             run([paths.TMUX, 'load-buffer', '-b', buffer, '-'], input=typed.encode(), check=True, capture_output=True, timeout=5)
-            if digest is not None:
-                verify(entry, run)
-                if not look()[target]['selected']:
-                    raise MenuChanged('The selected option changed. Open the helper and try again.')
+            if not look(writing=True)[0][target]['selected']:
+                raise MenuChanged(menu_refusal(entry))
             run([paths.TMUX, 'paste-buffer', '-p', '-d', '-b', buffer, '-t', entry['id']], check=True, capture_output=True, timeout=5)
         finally:
             run([paths.TMUX, 'delete-buffer', '-b', buffer], check=False, capture_output=True, timeout=5)
         sleep(.3)
-    if digest is not None:
-        verify(entry, run)
-        if not look(typed if answer is not None else None)[target]['selected']:
-            raise MenuChanged('The selected option changed. Open the helper and try again.')
+    if not look(typed if answer is not None else None, writing=True)[0][target]['selected']:
+        raise MenuChanged(menu_refusal(entry))
     press('Enter')
 
 
@@ -857,6 +913,8 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     found = {'id': seen['id'], 'text': text, 'reason': reason}
     if reason == 'menu':
         found.update(menu_question(menu_lines(lines), entry['agent']) or {})
+        if menu := verified_numbered_menu(entry, styled_screen or screen):
+            found.update(question=menu['question'], options=menu['options'], menu_verified=menu_digest(menu))
     elif reason == 'picker':
         found.update(picker)
     elif reason == 'panel':

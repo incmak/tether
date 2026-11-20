@@ -11,6 +11,8 @@ const separateName = 'B447 Settings'
 const doneName = 'B300 Cleanup'
 const settingsLabel = 'Close done tasks after 24 hours untouched'
 const replyDigest = 'a'.repeat(64)
+const nextDigest = 'b'.repeat(64)
+const closeDigest = 'c'.repeat(64)
 
 function fixture(id = '%1', thread = 'root-thread') {
   const make = (id, name, fields) => ({
@@ -42,7 +44,7 @@ function plan(listing) {
     pane: pane.id, thread: pane.thread, name: pane.pane_name, role: pane.task_role,
     state: pane.state === 'Approval' ? 'needs' : pane.state === 'Working' ? 'working' : 'idle',
   }))
-  return { task: { pane: root.id, name: root.pane_name }, idle: children.filter(child => child.state === 'idle'), working: children.filter(child => child.state !== 'idle') }
+  return { plan: closeDigest, task: { pane: root.id, name: root.pane_name }, idle: children.filter(child => child.state === 'idle'), working: children.filter(child => child.state !== 'idle') }
 }
 
 const apiFixture = {
@@ -69,6 +71,7 @@ async function main() {
   const errors = []
   let setting = false
   let staleAnswer = true
+  let staleClose = true
   const dist = path.resolve(process.env.DIST || 'dist')
   const origin = 'http://127.0.0.1:9876'
   page.on('pageerror', error => errors.push(error.stack))
@@ -83,6 +86,11 @@ async function main() {
         const body = req.postDataJSON()
         writes.push({ endpoint, body })
         if (endpoint === 'task-tree/answer' && staleAnswer) return route.fulfill({ status: 409, json: { error: 'The helper’s question changed.' } })
+        if (endpoint === 'task-tree/close' && staleClose) {
+          staleClose = false
+          listing.sessions.find(pane => pane.id === '%84').state = 'Working'
+          return route.fulfill({ status: 409, json: { error: 'The helpers changed. Review the list again.' } })
+        }
         if (endpoint === 'prefs' && typeof body.changes.task_auto_close === 'boolean') setting = body.changes.task_auto_close
         if (endpoint !== 'prefs') return route.fulfill({ json: { ok: true, accepted: true } })
       }
@@ -194,7 +202,23 @@ async function main() {
     const done = side().getByRole('button', { name: 'Done 1' })
     assert.equal(await done.getAttribute('aria-expanded'), 'false')
     const selectedRow = id => side().locator(`button[data-select-pane="${id}"][aria-current="page"]`)
-    await selectedRow('%1').focus()
+    const rowButton = selectedRow('%1')
+    await rowButton.focus()
+    await page.keyboard.press('Tab')
+    const folded = side().getByRole('button', { name: `Show helpers of ${taskName}` })
+    await assertFocus(folded)
+    const tooltip = side().getByRole('tooltip')
+    assert.equal(await tooltip.isVisible(), true)
+    assert.match(await tooltip.innerText(), /B446 advisor, Advisor, idle/)
+    assert.match(await tooltip.innerText(), /B446 review, Review, needs you/)
+    assert.equal(await folded.getAttribute('aria-describedby'), await tooltip.getAttribute('id'))
+    await tooltip.hover()
+    await page.keyboard.press('Escape')
+    await assertFocus(folded)
+    assert.equal(await tooltip.isVisible(), false)
+    await rowButton.focus()
+    assert.equal(await tooltip.isVisible(), true)
+    assert.equal(await rowButton.getAttribute('aria-describedby'), await tooltip.getAttribute('id'))
     await page.keyboard.press('Alt+ArrowDown')
     await assertFocus(selectedRow('%81'))
     await page.keyboard.press('Alt+ArrowDown')
@@ -203,6 +227,7 @@ async function main() {
     await assertFocus(selectedRow('%81'))
     await page.keyboard.press('Alt+ArrowUp')
     await assertFocus(selectedRow('%1'))
+    await page.keyboard.press('Escape')
     await done.click()
     await side().getByRole('button', { name: /B300 Cleanup, Task, done/ }).waitFor()
 
@@ -221,8 +246,33 @@ async function main() {
     await page.getByRole('alert').getByText('The helper’s question changed.').waitFor()
     assert.equal(await answer.inputValue(), 'Run the small test')
     staleAnswer = false
+    Object.assign(worker, { ask: { next: 'Which checks should I run?', since: 221, kind: 'reply' }, answer_digest: nextDigest })
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await page.getByText('Which checks should I run?', { exact: false }).waitFor()
+    const changedDraft = page.locator('.task-draft-change').filter({ hasText: 'The question changed. Check your answer, then send it again.' })
+    await changedDraft.waitFor()
+    assert.equal(await changedDraft.getAttribute('aria-live'), 'polite')
+    const priorSends = writes.filter(item => item.endpoint === 'task-tree/answer').length
+    await answer.press('Enter')
+    assert.equal(await answer.inputValue(), 'Run the small test')
+    assert.equal(writes.filter(item => item.endpoint === 'task-tree/answer').length, priorSends)
     await Promise.all([waitWrite('task-tree/answer'), answer.press('Enter')])
+    assert.deepEqual(write('task-tree/answer'), { pane: '%82', thread: 'thread-%82', digest: nextDigest, text: 'Run the small test' })
     await page.getByText('Sent to B446 server.').waitFor()
+
+    const newDigest = 'd'.repeat(64)
+    Object.assign(worker, { ask: { next: 'Which group?', since: 222, kind: 'reply' }, answer_digest: newDigest })
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await page.getByText('Which group?', { exact: false }).waitFor()
+    await answer.fill('The first group')
+    Object.assign(worker, { ask: { next: 'Which checks now?', since: 223, kind: 'reply' }, answer_digest: replyDigest })
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')))
+    await changedDraft.waitFor()
+    const send = page.getByRole('button', { name: 'Send to B446 server' })
+    await send.click()
+    assert.equal(writes.filter(item => item.endpoint === 'task-tree/answer').length, priorSends + 1)
+    await Promise.all([waitWrite('task-tree/answer'), send.click()])
+    assert.deepEqual(write('task-tree/answer'), { pane: '%82', thread: 'thread-%82', digest: replyDigest, text: 'The first group' })
 
     const dialog = page.locator('dialog[open].sheet').last()
     await side().getByRole('button', { name: `Actions for ${separateName}` }).click()
@@ -256,7 +306,14 @@ async function main() {
     await assertFocus(closeReview)
     assert.equal(await closeReview.isChecked(), true)
     await Promise.all([waitWrite('task-tree/close'), close.getByRole('button', { name: 'Close', exact: true }).last().click()])
-    assert.deepEqual(write('task-tree/close'), { pane: '%1', thread: 'root-thread', close_also: [{ pane: '%86', thread: 'thread-%86' }] })
+    await close.getByRole('alert').getByText('The helpers changed. Review the list again.').waitFor()
+    await close.getByRole('checkbox', { name: /B446 second advisor/ }).waitFor()
+    assert.equal(await closeReview.isChecked(), false)
+    await assertFocus(close.getByRole('button', { name: 'Cancel' }))
+    assert.deepEqual(write('task-tree/close'), { pane: '%1', thread: 'root-thread', plan: closeDigest, close_idle: ['%82', '%83', '%84', '%85'], close_also: ['%86'] })
+    await Promise.all([waitWrite('task-tree/close'), close.getByRole('button', { name: 'Close', exact: true }).last().click()])
+    assert.deepEqual(write('task-tree/close'), { pane: '%1', thread: 'root-thread', plan: closeDigest, close_idle: ['%82', '%83', '%85'], close_also: [] })
+    listing.sessions.find(pane => pane.id === '%84').state = 'Idle'
     assert.equal(writes.filter(item => item.endpoint === 'session').length, 0, 'A parent close never takes the legacy DELETE route')
     await close.waitFor({ state: 'hidden' })
 
@@ -283,6 +340,16 @@ async function main() {
     await page.getByRole('button', { name: /^Open sessions/ }).click()
     const drawer = page.getByRole('dialog', { name: 'Sessions' })
     await assertHelperLayout(drawer)
+    await drawer.getByRole('button', { name: `Fold helpers of ${taskName}` }).click()
+    await drawer.locator('button[data-select-pane="%1"]').focus()
+    await page.keyboard.press('Tab')
+    const mobileTooltip = drawer.getByRole('tooltip')
+    await mobileTooltip.waitFor()
+    assert.match(await mobileTooltip.innerText(), /B446 server, Worker, working/)
+    assert.equal(await mobileTooltip.evaluate(node => getComputedStyle(node).transitionDuration), '0s')
+    await page.keyboard.press('Escape')
+    assert.equal(await mobileTooltip.isVisible(), false)
+    await drawer.getByRole('button', { name: `Show helpers of ${taskName}` }).click()
     await drawer.getByRole('button', { name: `Close ${taskName}`, exact: true }).click()
     await assertCloseLayout(close, 2)
     await close.getByRole('button', { name: 'Cancel' }).click()

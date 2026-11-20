@@ -16,6 +16,7 @@ CHANGED = 'The helper’s question changed. Reload the task and review the quest
 def _menu(info):
     prompt = info.get('attention') or {}
     if (info.get('state') != 'Input needed' or prompt.get('reason') != 'menu'
+            or not prompt.get('menu_verified')
             or prompt.get('askBridge') or (prompt.get('ask_current') or {}).get('multi')
             or any(re.match(r'^\[(?: |✔|✓|x)\]', option['text'], re.I) for option in prompt.get('options', []))):
         return None
@@ -59,7 +60,7 @@ def prompt_digest(entry, row, *, reply_turn):
         return None
     menu = _menu(row)
     if menu is not None:
-        return _menu_digest(entry, menu, terminal_input.menu_digest(menu))
+        return _menu_digest(entry, menu, menu['menu_verified'])
     if row.get('state') == 'Idle' and (row.get('ask') or {}).get('kind') == 'reply':
         return _reply_digest(entry, reply_turn, row['ask'])
     return None
@@ -86,9 +87,9 @@ def answer(body, entry, run, status, send, *, reply_turn):
     current = status(entry)
     menu = _menu(current)
     if menu is not None:
-        content = terminal_input.menu_digest(menu)
+        content = menu['menu_verified']
         if digest != _menu_digest(entry, menu, content):
-            raise helper_tabs.Stale(CHANGED)
+            raise helper_tabs.Stale(terminal_input.menu_refusal(entry, helper=True))
         if text is not None:
             options = [option for option in menu['options'] if option.get('free')]
             if len(options) != 1:
@@ -100,12 +101,15 @@ def answer(body, entry, run, status, send, *, reply_turn):
             if not options:
                 raise ValueError('Choose one of the displayed options.')
         try:
-            terminal_input.menu_choose(entry, choice, label=options[0]['text'], answer=text, run=run, digest=content)
+            terminal_input.menu_choose(entry, choice, label=options[0]['text'], answer=text, run=run, digest=content,
+                                       current_prompt=lambda: digest == _menu_digest(entry, menu, content))
         except terminal_input.MenuChanged as exc:
-            raise helper_tabs.Stale(CHANGED) from exc
+            raise helper_tabs.Stale(str(exc)) from exc
         except terminal_input.ConversationChanged as exc:
             raise helper_tabs.Stale(str(exc)) from exc
     else:
+        if current.get('state') == 'Input needed':
+            raise helper_tabs.Stale(terminal_input.menu_refusal(entry, helper=True))
         if current.get('state') != 'Idle' or digest != _reply_digest(entry, reply_turn):
             raise helper_tabs.Stale(CHANGED)
         if text is None:

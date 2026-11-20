@@ -36,6 +36,7 @@ class FakeTmux:
     def __init__(self, entries):
         self.rows = {entry['id']: {'session_id': entry['tmux_session']} for entry in entries}
         self.writes = []
+        self.on_kill = lambda pane: None
 
     def __call__(self, command, **_):
         if command[1] == 'list-panes':
@@ -57,6 +58,7 @@ class FakeTmux:
             return subprocess.CompletedProcess(command, 0)
         if command[1] == 'kill-pane':
             self.rows.pop(command[-1])
+            self.on_kill(command[-1])
             return subprocess.CompletedProcess(command, 0)
         raise AssertionError(command)
 
@@ -127,7 +129,8 @@ class Routes(unittest.TestCase):
         self.lock = threading.Lock()
         self.audit = self.enterContext(patch.object(task_tree_api.audit, 'record'))
         self.undo = self.enterContext(patch.object(task_tree_api.undo, 'record_task_tree_move'))
-        self.record_close = self.enterContext(patch.object(task_tree_api.undo, 'record_task_tree_close'))
+        self.enterContext(patch.object(task_tree_api.undo, 'note_released'))
+        self.enterContext(patch.object(helper_close.auto_resume, 'server_id', return_value=('up', '10:20')))
         self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.trace = self.folder / 'chat.jsonl'
         self.trace.write_text('{}\n')
@@ -138,7 +141,7 @@ class Routes(unittest.TestCase):
 
     def capture(self, pane, run, entry):
         return dict(pane=pane, thread=entry['thread'], agent=entry['agent'], folder=str(self.folder),
-                    transcript=str(self.trace))
+                    transcript=str(self.trace), server='10:20', name=entry['pane_name'], session='Fixture')
 
     def tree(self):
         return task_tree_api.Tree(self.entries, self.run, lambda item: {'state': self.states.get(item['id'], 'Idle')},
@@ -222,6 +225,28 @@ class Routes(unittest.TestCase):
         task_tree_close.clear_obsolete_marks(self.tree(), self.lock, lambda _: 0)
         self.assertEqual(status().reopened, '')
 
+    def close_request(self, also=()):
+        plan = task_tree_api.close_plan('%1', self.tree())
+        return dict(pane='%1', thread=self.root['thread'], plan=plan.get('plan'),
+                    close_idle=[child['pane'] for child in plan['idle']], close_also=list(also))
+
+    def test_close_refuses_changes_to_the_shown_set(self):
+        self.states['%3'] = 'Working'
+        data = self.close_request()
+        for change in ('went idle', 'joined'):
+            with self.subTest(change=change):
+                if change == 'went idle':
+                    self.states['%3'] = 'Idle'
+                else:
+                    self.states['%3'] = 'Working'
+                    late = chat(9)
+                    self.entries.append(late)
+                    self.run.rows['%9'] = {'session_id': '$1'}
+                    self.run.set_record('%9', owner(self.root, kind='helper'))
+                status, result = self.request('close', data)
+                self.assertEqual((status, result), (409, {'error': 'The helpers changed. Review the list again.'}))
+                self.assertEqual(self.run.writes, [])
+
     def test_close_plan_and_close_detach_before_kill(self):
         self.states['%3'] = 'Working'
         self.asks['%3'] = {'kind': 'reply'}
@@ -230,22 +255,22 @@ class Routes(unittest.TestCase):
         self.assertEqual(plan['idle'][0]['pane'], '%2')
         self.assertEqual((plan['working'][0]['role'], plan['working'][0]['state']), ("Worker's review", 'needs'))
         with patch.object(server, 'SEND_LOCK', self.lock):
-            result, body = self.request('close', {'pane': '%1', 'thread': self.root['thread'], 'close_also': []})
+            result, body = self.request('close', self.close_request())
         self.assertEqual((result, body), (200, {'ok': True, 'closed': ['%2', '%1'], 'kept': ['%3']}))
         self.assertEqual([write[0] for write in self.run.writes], ['set-option', 'kill-pane', 'kill-pane'])
         record = self.tree().options['%3'].record
         self.assertEqual((record['kind'], record['moved_by']), ('own', 'user'))
         self.assertNotIn('home_pane', record)
-        self.record_close.assert_called_once()
         self.assertIsNone(helper_close.Closer()._reason('%3', record, 'reviewer', {}, {}, {}, {'%3': 70}))
 
     def test_close_checks_all_selected_threads_before_mutation(self):
         self.states['%3'] = 'Working'
-        data = {'pane': '%1', 'thread': self.root['thread'],
-                'close_also': [{'pane': '%3', 'thread': self.worker['thread']}]}
+        data = self.close_request(('%3',))
+        thread = self.review['thread']
+        self.review['thread'] = self.worker['thread']
         self.assertEqual(self.request('close', data)[0], 409)
         self.assertEqual(self.run.writes, [])
-        data['close_also'][0]['thread'] = self.review['thread']
+        self.review['thread'] = thread
         self.assertEqual(self.request('close', data)[1]['closed'], ['%3', '%2', '%1'])
 
     def test_close_stops_if_an_implicit_idle_helper_starts_work(self):
@@ -253,32 +278,92 @@ class Routes(unittest.TestCase):
             self.states['%2'] = 'Working'
             return self.capture(pane, run, entry)
         task_tree_api.undo.capture.side_effect = start_during_capture
-        data = {'pane': '%1', 'thread': self.root['thread'], 'close_also': []}
+        data = self.close_request()
         self.assertEqual(self.request('close', data)[0], 409)
         self.assertEqual(self.run.writes, [])
 
-    def test_partial_close_keeps_actual_kills_available_for_undo(self):
-        real_close = helper_close.close_pane
+    def close_with_first_kill_timeout(self, automatic):
+        def lost_acknowledgment(pane):
+            steps = undo_store.entries()
+            member = steps[0]['actions'][0]['closed'][-1]
+            self.assertEqual((member['tab']['pane'], member['pending']), (pane, True))
+            raise subprocess.TimeoutExpired(['kill-pane'], 5)
 
-        def close_or_fail(pane, run):
-            if pane == '%1':
-                raise subprocess.CalledProcessError(1, ['kill-pane'])
-            real_close(pane, run)
-
-        def record(killed, kept, run):
-            undo_store.record('fixture', 'Partial close', killed=[tab['pane'] for tab, _ in killed])
-
-        self.record_close.side_effect = record
-        with patch.object(helper_close, 'close_pane', side_effect=close_or_fail), \
-                patch.object(undo_store, '_ENABLED', True), patch.object(undo_store, '_server', return_value='10:20'), \
-                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'):
-            status, result = self.request('close', {'pane': '%1', 'thread': self.root['thread'], 'close_also': []})
-            self.assertEqual(status, 503)
+        self.run.on_kill = lost_acknowledgment
+        with patch.object(undo_store, '_ENABLED', True), patch.object(undo_store, '_server', return_value='10:20'), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
+                patch.object(task_tree, 'done_items', return_value={'B446'}):
+            if automatic:
+                clock = [0]
+                closer = task_tree_close.Closer(now=lambda: clock[0])
+                def sweep():
+                    return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                          activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                          changed=Mock(), user_prompt_at=lambda _: 0)
+                self.assertEqual(sweep(), [])
+                clock[0] = task_tree.CLOSE_AFTER
+                result = sweep()
+            else:
+                plan = self.close_request()
+                status, result = self.request('close', plan)
+                self.assertEqual(status, 503)
             steps = undo_store.entries()
         self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0]['actions'][0]['killed'], ['%3', '%2'])
-        self.assertEqual(result['undo'], steps[0]['id'])
+        action = steps[0]['actions'][0]
+        expected = '%3' if automatic else '%2'
+        self.assertEqual([member['tab']['pane'] for member in action['closed']], [expected])
+        self.assertNotIn('pending', action['closed'][0])
+        if automatic:
+            self.assertEqual(result, [expected])
+        else:
+            self.assertEqual(result['undo'], steps[0]['id'])
+            self.assertEqual(result['closed'], ['Tab 2'])
+            self.assertEqual([change['pane'] for change in action['kept']], ['%3'])
+        self.assertNotIn(expected, self.run.rows)
         self.assertIn('%1', self.run.rows)
+
+    def test_partial_manual_close_journals_the_first_kill_and_detached_helper(self):
+        self.states['%3'] = 'Working'
+        self.close_with_first_kill_timeout(automatic=False)
+
+    def test_partial_auto_close_journals_the_first_kill(self):
+        self.close_with_first_kill_timeout(automatic=True)
+
+    def test_partial_stale_close_reports_only_the_tabs_that_closed(self):
+        close = helper_close.close_pane
+
+        def lost_identity(pane, run):
+            if pane == '%2':
+                raise helper_tabs.Stale('The helper changed.')
+            close(pane, run)
+
+        with patch.object(helper_close, 'close_pane', side_effect=lost_identity), \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'):
+            status, body = self.request('close', self.close_request())
+            step, = undo_store.entries()
+        self.assertEqual(status, 409)
+        self.assertEqual(body['closed'], ['Tab 3'])
+        self.assertEqual(body['undo'], step['id'])
+        self.assertEqual([member['tab']['pane'] for member in step['actions'][0]['closed']], ['%3'])
+        self.assertEqual(set(self.run.rows), {'%1', '%2', '%4'})
+
+    def test_auto_close_refuses_a_helper_that_begins_work_during_capture(self):
+        clock = [0]
+        closer = task_tree_close.Closer(now=lambda: clock[0])
+        def sweep():
+            return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                  activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                  changed=Mock(), user_prompt_at=lambda _: 0)
+        with patch.object(task_tree, 'done_items', return_value={'B446'}):
+            self.assertEqual(sweep(), [])
+            def start_during_capture(pane, run, entry):
+                self.states['%2'] = 'Working'
+                return self.capture(pane, run, entry)
+            task_tree_api.undo.capture.side_effect = start_during_capture
+            clock[0] = task_tree.CLOSE_AFTER
+            self.assertEqual(sweep(), [])
+        self.assertEqual(self.run.writes, [])
 
     def test_unseen_starting_child_blocks_close_and_done(self):
         late = chat(9)
@@ -286,11 +371,12 @@ class Routes(unittest.TestCase):
         self.run.set_record('%9', owner(self.worker, kind='helper'))
         tree = self.tree()
         self.assertEqual(task_tree.pending_roots(tree.options, tree.entries, tree.fields), {'%1'})
-        data = {'pane': '%1', 'thread': self.root['thread'], 'close_also': []}
+        data = self.close_request()
         self.assertEqual(self.request('close', data)[0], 409)
         self.assertEqual(self.run.writes, [])
         self.entries.append(late)
-        self.assertEqual(self.request('close', data)[0], 200)
+        self.assertEqual(self.request('close', data)[0], 409)
+        self.assertEqual(self.request('close', self.close_request())[0], 200)
 
     def test_auto_close_needs_one_continuous_day_with_no_view_or_turn(self):
         clock, enabled = [0], [False]
@@ -315,7 +401,6 @@ class Routes(unittest.TestCase):
             self.assertEqual(sweep(3 * day + 1), [])
             self.assertEqual(sweep(4 * day), [])
             self.assertEqual(sweep(4 * day + 1), ['%3', '%2', '%1'])
-        self.record_close.assert_called_once()
         self.assertEqual([write[-1] for write in self.run.writes], ['%3', '%2', '%1'])
 
 

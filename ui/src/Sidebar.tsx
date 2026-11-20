@@ -752,7 +752,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
 
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
-      const paneRow = (pane: Pane, children: Pane[] = [], controls?: React.ReactNode) => {
+      const paneRow = (pane: Pane, children: Pane[] = [], controls?: React.ReactNode, describedBy?: string) => {
         const state = taskState(pane, children)
         const name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' ')
         const picked = !!tabPick?.picked.has(pane.id)
@@ -767,7 +767,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
           onDrop={drop ? event => { event.stopPropagation(); event.preventDefault(); setOver(null); onCarry(null); onTaskMove(source, pane) } : undefined}>
           <button type="button" {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id, taskSource: pane })}
             data-select-pane={pane.id} className={`task-row-main${pane.id === selected ? ' selected' : ''}${picked ? ' picked' : ''}`}
-            aria-label={picked ? label + ', selected' : label} aria-current={pane.id === selected ? 'page' : undefined}
+            aria-label={picked ? label + ', selected' : label} aria-describedby={describedBy} aria-current={pane.id === selected ? 'page' : undefined}
             onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, name, () => onPaneActions(pane))}
             onClick={event => pickOr(event, pane.id, () => onOpen(pane))}
             onContextMenu={event => { event.preventDefault(); actions(event) }}>

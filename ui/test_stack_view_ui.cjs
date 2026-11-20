@@ -32,6 +32,9 @@ const fixture = {
 async function main() {
   let browser, page, server, failed = 0
   const pageErrors = []
+  const stackWrites = []
+  let allowStackClose = false
+  const staleStack = 'The stack’s tabs changed. Open the stack menu again to review them.'
   const check = (name, ok, why = '') => { if (ok) console.log(`ok ${name}`); else { failed++; console.log(`FAIL ${name} ${why}`) } }
   try {
     await fs.mkdir(SHOTS, { recursive: true })
@@ -60,6 +63,13 @@ async function main() {
       if (url.pathname.endsWith('/sw.js')) return route.fulfill({ status: 404, body: '' })
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
+        if (['groups/close', 'groups/remove'].includes(endpoint) || (endpoint === 'session' && route.request().method() === 'DELETE')) {
+          stackWrites.push({ endpoint, ...route.request().postDataJSON() })
+          if (endpoint === 'groups/remove' || endpoint === 'groups/close' && !allowStackClose) {
+            return route.fulfill({ status: 409, json: { error: staleStack } })
+          }
+          return route.fulfill({ json: { ok: true } })
+        }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
         if (endpoint === 'sessions') return route.fulfill({ json: sessions })
@@ -294,6 +304,34 @@ async function main() {
     // 6. Phone width: no horizontal page scroll; the sidebar drawer is not part of this check.
     await open('%28', 390, 800)
     check('no horizontal page scroll at 390 px', await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+
+    sessions = { default_thread: 't88', groups: { $1: [{ id: 'g00000001', name: 'Tether bugs', project: '' },
+      { id: 'g00000002', name: 'Task tree', project: '' }] }, sessions: [
+      pane('%88', 'B401 Sidebar fix', { group: 'g00000001' }),
+      pane('%1', 'B446 Task tree', { group: 'g00000002' }),
+      pane('%82', 'B446 server', { group: 'g00000001', task: '%1', task_depth: 1, task_role: 'Worker' }),
+    ] }
+    await open('%88')
+    await page.getByRole('button', { name: 'Tether bugs, 1 tab', exact: true }).click({ button: 'right' })
+    const stackDialog = page.getByRole('dialog', { name: 'Tether bugs' })
+    await stackDialog.getByRole('button', { name: 'Close all tabs…' }).click()
+    await stackDialog.getByRole('button', { name: 'Close 1 tab' }).click()
+    await stackDialog.getByRole('alert').getByText(staleStack).waitFor()
+    check('a refused stack close sends no individual Deletes', JSON.stringify(stackWrites) ===
+      JSON.stringify([{ endpoint: 'groups/close', session: '$1', group: 'g00000001', panes: [{ pane: '%88', thread: 't88' }] }]),
+    JSON.stringify(stackWrites))
+
+    allowStackClose = true
+    await open('%88', 320, 800)
+    await page.getByRole('button', { name: /^Stack: Tether bugs/ }).click()
+    await page.getByRole('button', { name: 'Actions for Task tree' }).click()
+    const treeDialog = page.getByRole('dialog', { name: 'Task tree' })
+    await treeDialog.getByRole('button', { name: 'Close all tabs…' }).click()
+    await treeDialog.getByRole('button', { name: 'Close 2 tabs' }).click()
+    await treeDialog.waitFor({ state: 'hidden' })
+    check('320 px: stack close includes a child displayed with its task', JSON.stringify(stackWrites.at(-1)) ===
+      JSON.stringify({ endpoint: 'groups/close', session: '$1', group: 'g00000002',
+        panes: [{ pane: '%1', thread: 't1' }, { pane: '%82', thread: 't82' }] }), JSON.stringify(stackWrites))
     check('no page errors', pageErrors.length === 0, pageErrors.join('\n').slice(0, 800))
   } catch (error) {
     failed++

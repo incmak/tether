@@ -1,17 +1,22 @@
 """HTTP routes for groups (/mobile/api/groups/...). server.py checks sign-in, Origin and the X-Codex-Mobile header
 before it calls post(). The store and its rules are groups.py."""
+from contextlib import nullcontext
 import json
 import subprocess
 from urllib.parse import parse_qs, urlsplit
 
+import audit
 import groups
+import helper_close
+import helper_tabs
 import projects
 from terminal_input import UUID
 import undo
+import undo_store
 
 PREFIX = '/mobile/api/groups/'
 BODY_LIMIT = 16384
-WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange', 'reorder')}  # server.py TMUX_WRITES
+WRITES = {PREFIX + name for name in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange', 'reorder', 'close')}  # server.py TMUX_WRITES
 
 
 def handles(path):
@@ -25,6 +30,8 @@ def _answer(handler, work):
         handler.respond(exc.status, {'error': str(exc)})
     except (ValueError, UnicodeError) as exc:
         handler.respond(400, {'error': str(exc) or 'Invalid request.'})
+    except subprocess.SubprocessError:
+        handler.respond(503, {'error': 'Tether could not read or update the live stacks. Try again.'})
     except OSError:
         handler.respond(500, {'error': 'Tether could not read or write the stack folder.'})
 
@@ -75,7 +82,42 @@ def _threads(sessions):
     return found.get
 
 
-def post(handler, run=subprocess.run, sessions=lambda: []):
+def _close(session_id, group_id, body, entries, run):
+    """The caller holds the send, helper record and stack locks through preflight and close."""
+    requested = body.get('panes')
+    if not isinstance(requested, list) or not requested:
+        raise ValueError('Confirm the tabs to close.')
+    planned = {}
+    for item in requested:
+        if not isinstance(item, dict) or 'thread' not in item:
+            raise ValueError('Confirm each tab and its conversation.')
+        pane = _pane(item.get('pane'))
+        thread = item['thread']
+        if pane in planned or thread is not None and (not isinstance(thread, str) or not UUID.fullmatch(thread)):
+            raise ValueError('Confirm each tab and its conversation.')
+        planned[pane] = thread
+
+    groups.check_group(session_id, group_id, run)
+    members = groups.stack_members(session_id, group_id, entries, run)
+    live = {entry['id']: entry for entry in entries if entry.get('tmux_session') == session_id}
+    if planned.keys() != members.keys() or any(
+        pane not in live or thread != helper_tabs.verified_thread(live[pane])
+        or thread is None and live[pane].get('agent') != 'shell' for pane, thread in planned.items()
+    ):
+        raise groups.GroupError(409, 'The stack’s tabs changed. Open the stack menu again to review them.')
+
+    # Close grandchildren first. Keep the existing separate Undo steps for each tab.
+    for pane in sorted(members, key=members.get, reverse=True):
+        saved = undo.capture_safe(pane, run, [live[pane]])
+        helper_close.close_pane(pane, run)
+        audit.record('tab.close', f'Closed tab {helper_tabs.visible_name(live[pane]) or pane}', pane=pane)
+        undo.record_tab_close(saved, run)
+        undo_store.flush()
+    undo.group_remove(session_id, group_id, run, after_close=True)
+    return {'ok': True}
+
+
+def post(handler, run=subprocess.run, sessions=lambda: [], *, fresh=None, lock=None, changed=lambda: None):
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
@@ -85,7 +127,7 @@ def post(handler, run=subprocess.run, sessions=lambda: []):
         body = json.loads(handler.rfile.read(size))
         if not isinstance(body, dict):
             raise ValueError('Invalid request.')
-        if name not in ('create', 'rename', 'move', 'ungroup', 'remove', 'arrange', 'reorder'):
+        if PREFIX + name not in WRITES:
             raise groups.GroupError(404, 'Not found')
         session_id = _session(body.get('session'))
         if name == 'create':
@@ -108,6 +150,15 @@ def post(handler, run=subprocess.run, sessions=lambda: []):
         if name == 'ungroup':
             undo.group_ungroup(session_id, group_id, run, by_user=True)
         else:
-            undo.group_remove(session_id, group_id, run)
+            with helper_tabs.SEND_LOCK, lock or nullcontext(), groups.LOCK(), helper_tabs.record_lock():
+                entries = (fresh or sessions)()
+                if name == 'close':
+                    try:
+                        return _close(session_id, group_id, body, entries, run)
+                    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                        raise groups.GroupError(503, 'Tether could not finish closing the stack. Refresh its tabs.') from exc
+                    finally:
+                        changed()
+                undo.group_remove(session_id, group_id, run, entries=entries)
         return {'ok': True}
     _answer(handler, work)

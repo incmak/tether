@@ -19,6 +19,7 @@ import groups
 import helper_tabs
 import paths
 import review_links
+import task_tree
 from terminal_input import UUID
 
 IDLE = 30 * 60          # advisors and linked reviewers
@@ -34,6 +35,10 @@ def close_pane(pane, run):
     auto_resume.forget_pane(pane, run=run)
     with groups.closing(pane, run):  # its auto stack goes when empty or root-only
         run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
+    release_reviews(pane)
+
+
+def release_reviews(pane):
     try:
         review_links.close(pane)
     except OSError as exc:
@@ -43,7 +48,7 @@ def close_pane(pane, run):
 
 def _panes(run):
     """{pane: (helper record or None, role)} for every live tmux pane, from one tmux call."""
-    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_role}\t#{' + helper_tabs.OPTION + '}'],
+    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_role}\t#{' + helper_tabs.OPTION + '}\t#{@group_by}'],
                  capture_output=True, text=True, timeout=5)
     if result.returncode:
         return None
@@ -53,8 +58,9 @@ def _panes(run):
         role, _, raw = rest.partition('\t')
         if not PANE.fullmatch(pane):
             continue
+        raw, _, group_by = raw.partition('\t')
         record = helper_tabs._record(raw)
-        panes[pane] = (record, role)
+        panes[pane] = (record, role, group_by)
     return panes
 
 
@@ -102,14 +108,14 @@ class Closer:
         links = review_links.reviewed_by()
         worker_of = {reviewer: worker for worker, reviewers in links.items() for reviewer in reviewers}
         idle = {pane: self._idle(pane, by_id.get(pane), record, status, watching, now)
-                for pane, (record, _) in panes.items()}
+                for pane, (record, _, _) in panes.items()}
         self.active = {pane: when for pane, when in self.active.items() if pane in panes}
         seen = set()
         closed = []
-        for pane, (record, role) in panes.items():
+        for pane, (record, role, group_by) in panes.items():
             if record is None or pane not in by_id:
                 continue  # not a helper, or a discovery miss
-            found = self._reason(pane, record, role, by_id, panes, worker_of, idle)
+            found = self._reason(pane, record, role, by_id, panes, worker_of, idle, group_by)
             if found is None:
                 continue
             condition, reason, wait = found
@@ -122,10 +128,10 @@ class Closer:
                 continue
             try:
                 worker = by_id.get(worker_of.get(pane)) if condition == 'idle' else None
-                if not self._still_quiet(pane, record, by_id[pane], fresh or status, watching, run, lock, worker):
+                if not self._still_quiet(pane, (record, role, group_by), by_id[pane], fresh or status, watching, run, lock, worker):
                     self.active[pane] = self.since[key] = now  # it got work or a viewer: start both timers again
                     continue
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            except (OSError, groups.GroupError, subprocess.SubprocessError, RuntimeError) as exc:
                 print(f'helper close {pane} failed: {exc!r}', file=sys.stderr)
                 continue
             self.active.pop(pane, None)
@@ -134,34 +140,35 @@ class Closer:
         self.since = {key: when for key, when in self.since.items() if key in seen}
         return closed
 
-    def _still_quiet(self, pane, record, entry, status, watching, run, lock, worker=None):
+    def _still_quiet(self, pane, placement, entry, status, watching, run, lock, worker=None):
         """Under the send lock, close an unchanged helper if it and any linked worker are still quiet."""
         if lock is not None and not lock.acquire(timeout=2):
             return False
         try:
-            exists, now_record = helper_tabs.load(pane, run)
-            if not exists or now_record != record:
-                return False
-            if status(entry).get('state') not in QUIET or watching(pane):
-                return False
-            if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])
-                                       or review_links.unreviewed_work(worker, entry, self.scope)):
-                return False
-            import undo  # here: undo.py imports this module
-            closed = undo.capture_safe(pane, run, [entry])
-            close_pane(pane, run)
-            undo.record_tab_close(closed, run)  # Tether closed it: Cmd+Z brings it back
-            return True
+            with groups.LOCK(), helper_tabs.record_lock():
+                current = _panes(run)
+                if current is None or current.get(pane) != placement:
+                    return False
+                if status(entry).get('state') not in QUIET or watching(pane):
+                    return False
+                if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])
+                                           or review_links.unreviewed_work(worker, entry, self.scope)):
+                    return False
+                import undo  # here: undo.py imports this module
+                closed = undo.capture_safe(pane, run, [entry])
+                close_pane(pane, run)
+                undo.record_tab_close(closed, run)  # Tether closed it: Cmd+Z brings it back
+                return True
         finally:
             if lock is not None:
                 lock.release()
 
-    def _reason(self, pane, record, role, by_id, panes, worker_of, idle):
+    def _reason(self, pane, record, role, by_id, panes, worker_of, idle, group_by=''):
         """(condition, reason, wait) when a close condition holds now, else None."""
         quiet = idle[pane]
         if record.get('kind') == 'own' and record.get('moved_by') == 'user':
             return None  # a helper kept open by Mak is now a separate task
-        if record.get('kind') != 'own':
+        if task_tree.is_child(record, role, group_by):
             owner, bound = (helper_tabs.placement_owner(record) if record.get('moved_by') == 'user'
                             else (record['owner_pane'], record.get('owner_thread')))
             if owner not in panes:
