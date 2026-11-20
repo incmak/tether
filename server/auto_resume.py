@@ -26,7 +26,8 @@ VERIFY_SECS = 60
 MAX_PASS = 20
 GAP = 1.5
 OPTIONS = ('@chat_name', '@chat_name_at', '@chat_name_auto', '@chat_name_by', '@chat_icon', '@chat_icon_by',
-           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by')
+           '@project_rev', '@worktree', '@group', '@tether_role', '@group_by',
+           '@tether_done', '@tether_reopened', '@tether_done_at')
 SESSION_OPTIONS = ('@project', '@groups')  # @groups: the session's groups (groups.py), so restored @group labels resolve
 _STATES = ('open', 'pending', 'resuming', 'failed', 'deferred')
 _FORMAT = '\t'.join('#{' + field + '}' for field in

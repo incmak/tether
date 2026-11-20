@@ -99,6 +99,14 @@ export interface Pane {
   opened_by?: { pane: string; name: string | null; live: boolean }  // the tab that ran `start` for this one (B400)
   owner?: string  // the live tab that owns this tab's work; the tab nests under it (B400)
   helper?: boolean  // an agent opened it for its own work; "Hide agent helper tabs" may hide it (helperTabs.ts)
+  task?: string
+  task_role?: string
+  task_depth?: 1 | 2
+  answer_digest?: string
+  from?: { pane: string; name: string; live: boolean }
+  done?: true
+  done_mark?: true
+  moved_by?: 'user'
   escalated?: boolean  // its owner sent a paused review to you (agent_tab_cli.py escalate)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }

@@ -1,4 +1,5 @@
 """Owned helper tabs, guarded messages, and short turn polls."""
+from dataclasses import dataclass
 import hashlib
 import json
 import re
@@ -22,6 +23,7 @@ NO_TURN_GRACE = 60
 START_WAIT = 300
 MISSING_GRACE = 10
 _missing = {}
+# Record writers take this before the server send lock.
 SEND_LOCK = threading.Lock()
 
 
@@ -58,6 +60,14 @@ def visible_name(entry):
 def save(pane, record, run):
     run([paths.TMUX, 'set-option', '-p', '-t', pane, OPTION, json.dumps(record, separators=(',', ':'))],
         check=True, capture_output=True, timeout=5)
+
+
+def write_record(pane, record, run):
+    if record is None:
+        run([paths.TMUX, 'set-option', '-p', '-t', pane, '-u', OPTION],
+            check=True, capture_output=True, timeout=5)
+    else:
+        save(pane, record, run)
 
 
 def _record(raw):
@@ -105,24 +115,50 @@ def load(pane, run):
     return True, _record(raw)
 
 
-def listing_fields(run, entries):
-    """Read the helper fields for each listing row in one tmux call."""
-    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}'],
-                 capture_output=True, text=True, timeout=5)
+
+@dataclass(frozen=True)
+class PaneOptions:
+    record: dict | None
+    raw: str = ''
+    role: str = ''
+    group_by: str = ''
+    session: str = ''
+    done: str = ''
+    reopened: str = ''
+    done_at: str = ''
+
+
+def read_panes(run):
+    """Read placement and marks together for all panes on this tmux server."""
+    names = ('pane_id', '@group_by', '@tether_role', OPTION, 'session_id',
+             '@tether_done', '@tether_reopened', '@tether_done_at')
+    fmt = '\t'.join('#{' + name + '}' for name in names)
+    command = [paths.TMUX, 'list-panes', '-a', '-F', fmt]
+    result = run(command, capture_output=True, text=True, timeout=5)
     if result.returncode:
-        return {}
+        raise subprocess.CalledProcessError(result.returncode, command)
+    panes = {}
+    for line in result.stdout.splitlines():
+        parts = line.split('\t')
+        if len(parts) != len(names) or not PANE.fullmatch(parts[0]):
+            continue
+        pane, group_by, role, raw, session, done, reopened, done_at = parts
+        panes[pane] = PaneOptions(_record(raw), raw, role, group_by, session, done, reopened, done_at)
+    return panes
+
+
+def listing_fields(run, entries, *, options=None):
+    """Read the helper fields for each listing row in one tmux call."""
+    import task_tree
+
+    options = read_panes(run) if options is None else options
     by_id = {entry['id']: entry for entry in entries}
+    tasks = task_tree.placements(options, by_id)
     fields = {}
-    for line in result.stdout.split('\n'):
-        parts = line.split('\t', 3)
-        if len(parts) != 4:
+    for pane, option in options.items():
+        if pane not in by_id or option.record is None:
             continue
-        pane, group_by, role, raw = parts
-        if pane not in by_id or not PANE.fullmatch(pane):
-            continue
-        record = _record(raw)
-        if record is None:
-            continue
+        record, group_by, role = option.record, option.group_by, option.role
         opener_pane = record['owner_pane']
         opener = by_id.get(opener_pane)
         live = opener is not None and opener_pane != pane and opener.get('agent') != 'shell'
@@ -145,6 +181,12 @@ def listing_fields(run, entries):
         if group_by != 'user' and (kind == 'helper' or
                                   kind is None and role in ('reviewer', 'advisor', 'second-advisor')):
             row['helper'] = True
+        if pane in tasks:
+            row.update(tasks[pane])
+        elif opener_pane != pane:
+            row['from'] = dict(row['opened_by'], name=row['opened_by']['name'] or opener_pane)
+        if record.get('moved_by') == 'user':
+            row['moved_by'] = 'user'
     return fields
 
 
@@ -199,25 +241,25 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock, bef
         raise ValueError('Enter a message with 1 to 20000 characters.')
     if any(unicodedata.category(char) == 'Cc' and char not in '\n\t' for char in message):
         raise ValueError('The message contains terminal control characters.')
-    exists, record = load(pane, run)
-    if not exists:
-        raise ValueError('That session has ended. Select another tab.')
-    helper = _helper(entries, pane)
-    check(caller['id'], caller, helper, record, run, pane=pane)
-    if helper is None:
-        if record.get('helper_thread') is None and time.time() - record['sent_at'] < START_WAIT:
-            raise RuntimeError('That helper is still starting. Try again in a moment.')
-        raise ValueError('That session has ended. Select another tab.')
-    if verified_thread(helper) is None:  # no write and no delivery until its conversation is confirmed
-        raise RuntimeError('That helper is still starting. Try again in a moment.')
-    if not helper.get('writable'):
-        raise RuntimeError('Messaging is unavailable for that helper.')
-    state = status(helper)['state']
-    if state == 'Unavailable':
-        raise RuntimeError('Messaging is unavailable for that helper.')
-    if state in ('Approval', 'Input needed'):
-        raise RuntimeError('That helper waits on a prompt. Use wait to read it, then ask the user to answer it.')
     with lock:
+        exists, record = load(pane, run)
+        if not exists:
+            raise ValueError('That session has ended. Select another tab.')
+        helper = _helper(entries, pane)
+        check(caller['id'], caller, helper, record, run, pane=pane)
+        if helper is None:
+            if record.get('helper_thread') is None and time.time() - record['sent_at'] < START_WAIT:
+                raise RuntimeError('That helper is still starting. Try again in a moment.')
+            raise ValueError('That session has ended. Select another tab.')
+        if verified_thread(helper) is None:  # no write and no delivery until its conversation is confirmed
+            raise RuntimeError('That helper is still starting. Try again in a moment.')
+        if not helper.get('writable'):
+            raise RuntimeError('Messaging is unavailable for that helper.')
+        state = status(helper)['state']
+        if state == 'Unavailable':
+            raise RuntimeError('Messaging is unavailable for that helper.')
+        if state in ('Approval', 'Input needed'):
+            raise RuntimeError('That helper waits on a prompt. Use wait to read it, then ask the user to answer it.')
         previous = dict(record)
         record.update(sent_at=time.time(), before=digest(last_reply(helper)))
         save(pane, record, run)

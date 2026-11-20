@@ -874,7 +874,7 @@ class AnswerEndpointTest(unittest.TestCase):
     def test_message_clears_only_after_success(self):
         self.send_text.return_value = 'submitted'
         self.assertEqual(self.post('message', message='Use default'), 200)
-        self.send_text.assert_called_once_with(self.config, 'Use default')
+        self.send_text.assert_called_once_with(self.config, 'Use default', user=True)
         self.clear.assert_called_once_with('%1', 't1')
         self.clear.reset_mock()
         self.send_text.side_effect = RuntimeError('refused')

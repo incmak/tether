@@ -1,3 +1,4 @@
+import { moveIntoTask, taskOf } from './taskTree'
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { flushSync } from 'react-dom'
@@ -37,7 +38,6 @@ import { orderPanes, reorderPanes } from './PaneTabs'
 import { worktreeNotice } from './Worktree'
 import { NewTask } from './NewTask'
 import { isTabArchived, tabNeighbor, withTabArchived, withoutTab } from './tabArchive'
-import { HelperFoldToggle, alwaysShown, helperView, nestHelpers, withShown } from './helperTabs'
 import { selectPane } from './paneSelection'
 import type { SelectionSnapshot } from './paneSelection'
 import { resumeChat } from './ChatPicker'
@@ -231,12 +231,12 @@ function App() {
   useEffect(() => { paneThreadsRef.current = paneThreads }, [paneThreads])
   const tabPick = useMemo(() => keepLive(tabPickState, paneThreads), [tabPickState, paneThreads])
   const clearPick = useCallback(() => { setTabPick(NO_SELECTION); setChoosing(false) }, [])
-  // Agent helper tabs (helperTabs.ts): hidden by default, folded into "N helpers" after the tab that owns them.
-  const helpers = useMemo(() => helperView(panes, { hideHelpers: prefs.hideHelpers, shownHelpers: prefs.shownHelpers }, prefs.selected,
-    item => isTabArchived(item, prefs.archivedTabs) && item.id !== prefs.selected, key => !!prefs.expanded[`helpers:${key}`]),
-  [panes, prefs.hideHelpers, prefs.shownHelpers, prefs.selected, prefs.archivedTabs, prefs.expanded])
-  const toggleHelperFold = useCallback((key: string) => update(current => ({ expanded: { ...current.expanded, [`helpers:${key}`]: !current.expanded[`helpers:${key}`] } })), [update])
-  const sessions = useMemo(() => groupSessions(panes, item => (isTabArchived(item, prefs.archivedTabs) && item.id !== prefs.selected) || helpers.hidden.has(item.id)).map(item => ({ ...item, panes: nestHelpers(orderPanes(item.panes, prefs.paneOrder[item.id])), groups: data?.groups?.[item.id], helperFolds: helpers.bySession.get(item.id) })), [panes, data?.groups, prefs.archivedTabs, prefs.selected, prefs.paneOrder, helpers])
+  const sessions = useMemo(() => {
+    const selectedTask = panes.find(item => item.id === prefs.selected)?.task ?? prefs.selected
+    const hidden = new Set(panes.filter(item => item.id !== prefs.selected && item.id !== selectedTask && isTabArchived(item, prefs.archivedTabs)).map(item => item.id))
+    return groupSessions(panes, item => hidden.has(item.id) || (!!item.task && hidden.has(item.task)))
+      .map(item => ({ ...item, panes: orderPanes(item.panes, prefs.paneOrder[item.id]), groups: data?.groups?.[item.id] }))
+  }, [panes, data?.groups, prefs.archivedTabs, prefs.selected, prefs.paneOrder])
   const archivedTabs = useMemo(() => groupSessions(panes).flatMap(session => session.panes.filter(item => isTabArchived(item, prefs.archivedTabs) && item.id !== prefs.selected)), [panes, prefs.archivedTabs, prefs.selected])
   const livePins = useMemo(() => prefs.sidePins.flatMap(pin => { const pane = panes.find(item => item.id === pin.pane && item.agent !== 'shell'); return pane ? [{ pin, pane }] : [] }), [prefs.sidePins, panes])
   const pinKeys = useRef<(dir: 1 | -1) => boolean>(() => false)
@@ -751,7 +751,7 @@ function App() {
       }
       if (event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown') && !document.querySelector('dialog[open]')) {
         // Every row that opens a pane: one-pane sessions, the pane rows under a session with several panes, and the Catch up rows (also its working list).
-        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button[data-select-pane], .sidebar .session-groups .catchup-row:not(.catchup-review), .sidebar .session-groups .catchup .running-list button')].filter(row => row.offsetParent)
+        const rows = [...document.querySelectorAll<HTMLButtonElement>('.sidebar .session-groups .session-row:not(.session-head) .session-main, .sidebar .session-groups .pane-children button[data-select-pane], .sidebar .session-groups .catchup-row:not(.catchup-review), .sidebar .session-groups .catchup .running-list button')].filter(row => row.offsetParent && !row.closest('[inert]'))
         const at = rows.findIndex(row => row.getAttribute('aria-current') === 'page')
         const next = rows[at < 0 ? 0 : at + (event.key === 'ArrowDown' ? 1 : -1)]
         // Focus follows a row that had focus: the old row can unmount when its folded stack closes again.
@@ -874,7 +874,7 @@ function App() {
   const stepGroup = (dir: 1 | -1) => {
     const owner = pane && sessions.find(item => item.id === pane.tmux_session)
     if (!pane || !owner?.groups?.length) return false
-    const next = stepPlace(placesOf(owner.panes, owner.groups).filter(place => place.panes.length), groupOf(pane, owner.groups), dir)
+    const next = stepPlace(placesOf(owner.panes, owner.groups).filter(place => place.panes.length), groupOf(taskOf(pane, owner.panes), owner.groups), dir)
     const target = next && tabFor(owner.id, next)
     if (!target || target.id === pane.id) return false
     openPane(target)
@@ -940,7 +940,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { now, onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onTaskMove: (source: Pane, target: Pane) => { void moveIntoTask(api, source, target).then(() => refresh(), error => setNotice(errorText(error))) }, now, onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const desktopKeys = wide && !files && !share
   const slotCommands: Command[] = view ? [
@@ -991,7 +991,7 @@ function App() {
     const sidePin = target.agent !== 'shell' ? { pinned: at >= 0, index: at, total: livePins.length, note: at >= 0 ? livePins[at].pin.note ?? '' : '', onToggle: () => at >= 0 ? unpinPane(target.id) : pinPane(target.id), onNote: (text: string) => notePin(target.id, text), onStep: (dir: 1 | -1) => stepPin(dir, target.id) } : undefined
     const ask = prefs.attention ? visibleAsk(target, now) : null
     const groupHooks: GroupHooks | undefined = owner?.groups?.length ? {
-      seen: prefs.seen, selected: openId, hidden: [...archivedTabs, ...panes.filter(item => helpers.hidden.has(item.id))].filter(item => item.tmux_session === owner.id),
+      seen: prefs.seen, selected: openId, hidden: archivedTabs.filter(item => item.tmux_session === owner.id),
       onStart: (group, from) => void split('right', from, group),
       onContext: group => setProject({ session: owner.id, group: group.id }),
       onNewStack: (from, at) => setNewStack({ pane: from, at: view ? at : undefined }),
@@ -1035,7 +1035,7 @@ function App() {
     'data-tint': tint ? '' : undefined, 'data-fill': fill !== undefined ? '' : undefined,
   }
   if (unauthorized) return <main className="signin"><Terminal size={32} strokeWidth={1.4} /><h1>Sign in</h1><p>Sign in to access your terminal sessions.</p><a className="primary" href="/mobile/login?next=/chat/">Sign in</a></main>
-  return <WordsContext.Provider value={words}><HelperFoldToggle.Provider value={toggleHelperFold}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', (home || noTerminal) && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
+  return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', (home || noTerminal) && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
     {pane ? (view ? <Workspace layout={desk} slots={slotPanes} focus={view.focus} zoomed={zoomed && multi} onCount={setCount} onFocus={focusSlot} onLayout={setDesk}
       renderSlot={(target, index, shown) => chatFor(target, shown > 1 || zoomed ? { index, zoomed, onZoom: toggleZoom, onClose: zoomed ? undefined : () => closeSlot(index), onPick: () => setPicking(index), onSwapTo: to => swap(index, to), onDragStart: event => { event.dataTransfer.setData(DRAG_SLOT, String(index)); event.dataTransfer.effectAllowed = 'move' } } : undefined)}
       onDropPane={dropPane} onDropSession={dropSession} onDropChat={dropChat} onSwap={swap}
@@ -1117,7 +1117,7 @@ function App() {
       onGroup={(group, created) => update(current => ({ groups: created ? [...current.groups, created] : current.groups, groupOf: withGroup(current.groupOf, actionSession.id, group?.id), ...current.groupBy === 'custom' || !group ? {} : { groupBy: 'custom' as const } }))}
       onMove={step => move(actionSession.id, step)} onProject={() => { setActions(null); setProject({ session: actionSession.id }) }} onClose={() => setActions(null)} onDone={(newPane, direction) => { setActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} />}
     {/* eslint-disable-next-line react-hooks/refs -- onFork and onDone run on a user action in PaneActions, not during render. */}
-    {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions key={`${target.id}-${paneClose}`} startClose={paneClose} onSelect={() => { setTabPick(stamp({ ids: [target.id], anchor: target.id }, paneThreads)); setChoosing(true) }} api={api} mainModel={prefs.mainModel} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} alwaysShow={target.helper ? { on: alwaysShown(target, prefs.shownHelpers), onToggle: () => update(current => ({ shownHelpers: withShown(current.shownHelpers, target, !alwaysShown(target, current.shownHelpers), new Set(panes.map(item => item.id))) })) } : undefined} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
+    {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions key={`${target.id}-${paneClose}`} startClose={paneClose} onSelect={() => { setTabPick(stamp({ ids: [target.id], anchor: target.id }, paneThreads)); setChoosing(true) }} api={api} mainModel={prefs.mainModel} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
     {(choosing || tabPick.ids.length > 0) && <TabSelectionBar api={api} panes={panes} sessions={sessions} ids={tabPick.ids} threads={tabPick.threads} choosing={choosing} mainModel={prefs.mainModel} onKeep={ids => setTabPick(current => ({ ids, anchor: ids[0] ?? null, threads: current.threads }))} onClear={clearPick} onDone={() => void refresh()} />}
     {resume && <ResumeChat api={api} chat={resume} sessions={sessions} onClose={() => setResume(null)} onOpened={id => { setResume(null); openById(id) }} />}
     {notice && <div className="toast app-toast" role="status">{notice}</div>}
@@ -1133,7 +1133,7 @@ function App() {
     {view && !home && !files && !(wide && share) && <StatusBar panes={panes} loading={loading} error={error} />}
     {updated && <div className="update-banner" role="status"><span>A new version of Tether is ready.</span><button type="button" onClick={reload}>Reload</button></div>}
     {!updated && !!data?.auto_resume?.failed && <AutoResumeNotice api={api} data={data.auto_resume} onChange={refresh} />}
-  </main></HelperFoldToggle.Provider></WordsContext.Provider>
+  </main></WordsContext.Provider>
 }
 export default App
 

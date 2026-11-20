@@ -359,6 +359,17 @@ def _audit_items(text):
     return items, unnumbered
 
 
+def done_ids():
+    """Completed items from both files. The current item wins during an archive write."""
+    archive = folder() / 'DONE.md'
+    if archive.is_symlink():
+        raise invalid('The backlog archive is a link. Tether does not open it.')
+    # Read the current list first: archive writes the destination before removing source items.
+    current = _audit_items(read()['text'])[0]
+    archived = _audit_items(_read(archive))[0]
+    return {ident for ident, item in (archived | current).items() if item[2] == 'done'}
+
+
 def _audit_changes(before, after):
     # The sheet saves a whole list, while the CLI and board change one item. Compare the intended items before
     # automatic archiving so the same action records once and archiving does not look like a deletion.

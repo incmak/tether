@@ -490,21 +490,45 @@ def menu_question(lines, agent=None):
     return {'question': question, 'options': options} if len(options) >= 2 else None
 
 
-def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, sleep=time.sleep):
+class MenuChanged(RuntimeError):
+    pass
+
+
+def menu_digest(menu):
+    """Bind the question and all options, independent of cursor position and free-answer draft."""
+    question = menu.get('question')
+    options = menu.get('options')
+    if not question or not options or [option['id'] for option in options] != list(range(1, len(options) + 1)):
+        return None
+    content = [(option['id'], option['text'], option.get('detail')) if not option.get('free')
+               else (option['id'], None, None) for option in options]
+    return hashlib.sha256(json.dumps([question, content]).encode()).hexdigest()
+
+
+def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, sleep=time.sleep, *, digest=None):
     """Answer a numbered menu by moving the cursor, not by a digit key. A digit types text when the cursor sits on
     Claude's own-answer row, and then every later tap types more ("344"). So: read the cursor row, press Up or Down
     until it is on the chosen row (checking the screen after each press), then Enter. answer: text for the own-answer row;
-    its old text is removed first."""
+    its old text is removed first. With a digest, verify the full prompt and preserve drafts."""
     def press(*keys):
         run([paths.TMUX, 'send-keys', '-t', entry['id'], *keys], check=True, capture_output=True, timeout=5)
 
-    def look():
+    def look(typed=None):
         # The same test as attention() and read_picker(): an open menu at the bottom with one marked row. A ruled
         # Claude draft with numbered lines is not a menu, and Enter there would send the draft.
         lines = capture(entry, run).rstrip().splitlines()
         menu = menu_question(menu_lines(lines), entry['agent']) if menu_open(entry['agent'], lines) else None
         if not menu or sum(1 for option in menu['options'] if option['selected']) != 1:
-            raise RuntimeError('The question is no longer open.')
+            raise MenuChanged('The question is no longer open.')
+        if digest is not None:
+            if menu_digest(menu) != digest:
+                raise MenuChanged('The question changed. Reload and review it again.')
+            for option in menu['options']:
+                if option.get('free'):
+                    expected = typed if option['id'] == choice and typed is not None else 'Type something.'
+                    current = ' '.join((option['text'] + ' ' + option['detail']).split())
+                    if current != expected:
+                        raise DraftError('The free-answer field has different text. Open the helper to check its draft.')
         return menu['options']
     verify(entry, run)
     options = look()
@@ -519,6 +543,9 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
     if label is not None and not free and options[target]['text'] != label:
         raise RuntimeError('The question changed. Reload and review it again.')
     for _ in range(len(options) * 2 + 2):
+        if digest is not None:
+            verify(entry, run)
+            options = look()
         target = next((i for i, option in enumerate(options) if option['id'] == choice), None)
         if target is None or label is not None and not free and options[target]['text'] != label:
             raise RuntimeError('The question changed. Reload and review it again.')
@@ -548,12 +575,21 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
             if look()[target]['text'] != 'Type something.':
                 raise RuntimeError('Could not clear the old answer. Open the terminal to answer it.')
         buffer = 'tmux-mobile-' + uuid.uuid4().hex
+        typed = ' '.join(answer.split())
         try:
-            run([paths.TMUX, 'load-buffer', '-b', buffer, '-'], input=' '.join(answer.split()).encode(), check=True, capture_output=True, timeout=5)
+            run([paths.TMUX, 'load-buffer', '-b', buffer, '-'], input=typed.encode(), check=True, capture_output=True, timeout=5)
+            if digest is not None:
+                verify(entry, run)
+                if not look()[target]['selected']:
+                    raise MenuChanged('The selected option changed. Open the helper and try again.')
             run([paths.TMUX, 'paste-buffer', '-p', '-d', '-b', buffer, '-t', entry['id']], check=True, capture_output=True, timeout=5)
         finally:
             run([paths.TMUX, 'delete-buffer', '-b', buffer], check=False, capture_output=True, timeout=5)
         sleep(.3)
+    if digest is not None:
+        verify(entry, run)
+        if not look(typed if answer is not None else None)[target]['selected']:
+            raise MenuChanged('The selected option changed. Open the helper and try again.')
     press('Enter')
 
 
@@ -1008,6 +1044,10 @@ def _live_status(entry, run, screen, login_screen=None, styled_screen=None):
     return status
 
 
+class ConversationChanged(RuntimeError):
+    pass
+
+
 def verify(entry, run=subprocess.run):
     if not detection_rules.available(entry['agent']):
         raise RuntimeError('Tether could not load its prompt rules for this agent. Check the server log.')
@@ -1016,7 +1056,7 @@ def verify(entry, run=subprocess.run):
     valid_comm = {'claude': ('claude',), 'codex': ('codex',), 'antigravity': ('agy', 'exe')}[entry['agent']]
     process_comm = procinfo.comm(pid, proc)
     if process_start(pid) != entry['process_start'] or process_comm not in valid_comm:
-        raise RuntimeError('The agent restarted. Reload its tab before sending.')
+        raise ConversationChanged('The agent restarted. Reload its tab before sending.')
     result = run([paths.TMUX, 'display-message', '-p', '-t', entry['id'],
                   '#{pane_pid}\t#{pane_current_command}\t#{pane_in_mode}'],
                  check=True, capture_output=True, text=True, timeout=5)
@@ -1030,25 +1070,25 @@ def verify(entry, run=subprocess.run):
     while ancestor != int(root) and ancestor > 1:
         ancestor = procinfo.parent(ancestor, proc)
     if ancestor != int(root):
-        raise RuntimeError('The agent no longer belongs to this tmux pane.')
+        raise ConversationChanged('The agent no longer belongs to this tmux pane.')
     if entry['agent'] == 'claude':
         if not entry.get('pending_conversation'):
             registry = json.loads(Path(entry['registry']).read_text())
             if registry.get('sessionId') != entry['thread'] or registry.get('pid') != pid:
-                raise RuntimeError('The Claude conversation changed. Reload its tab.')
+                raise ConversationChanged('The Claude conversation changed. Reload its tab.')
     elif entry['agent'] == 'antigravity':
         if not entry.get('pending_conversation'):
             lock = AGY_ROOT / 'presence' / (entry['thread'] + '.lock')
             if lock.exists():
                 if not any(target == lock for target in procinfo.resolved_fds(pid, proc)):
-                    raise RuntimeError('The Antigravity conversation changed. Reload its tab.')
+                    raise ConversationChanged('The Antigravity conversation changed. Reload its tab.')
             else:
                 cache_file = AGY_CACHE / (entry['thread'] + '.json')
                 if cache_file.is_file():
                     try:
                         cached = json.loads(cache_file.read_text())
                         if cached.get('conversation_id') != entry['thread']:
-                            raise RuntimeError('The Antigravity conversation changed. Reload its tab.')
+                            raise ConversationChanged('The Antigravity conversation changed. Reload its tab.')
                     except (OSError, ValueError):
                         pass
     elif entry['agent'] == 'codex':
@@ -1076,7 +1116,7 @@ def verify_codex(entry, run):
         raise RuntimeError('Tether could not read the Codex tab title. Try again. A custom tui.terminal_title must '
                            'show "thread-name" and "project-name", or "thread-id".')
     if not fresh or fresh['thread'] != entry['thread'] or bool(fresh.get('pending_conversation')) != bool(entry.get('pending_conversation')):
-        raise RuntimeError('The Codex conversation changed. Reload its tab.')
+        raise ConversationChanged('The Codex conversation changed. Reload its tab.')
     if fresh.get('codex_unresolved'):
         raise RuntimeError('Tether cannot tell which Codex conversation this tab shows. '
                            'Give it a unique name with /rename in Codex, then reload its tab.')

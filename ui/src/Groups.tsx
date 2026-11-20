@@ -1,3 +1,4 @@
+import { taskOf } from './taskTree'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, FolderInput, FolderOutput, Pencil, Plus, ScrollText, Sparkles, Trash2, X } from 'lucide-react'
 import { Spinner } from './Skeleton'
@@ -44,7 +45,7 @@ export function GroupBar({ api, session, pane, hooks, onOpenPane, onUpdate, chil
   api: Api; session: Session; pane: Pane; hooks: GroupHooks; onOpenPane: (pane: Pane) => void; onUpdate: () => void; children?: React.ReactNode
 }) {
   const groups = session.groups
-  const current = groupOf(pane, groups)
+  const current = groupOf(taskOf(pane, session.panes), groups)
   // Each group remembers its last tab on this device, so a switch back opens it again.
   useEffect(() => { if (groups?.length) rememberTab(session.id, current, pane.id) }, [groups?.length, session.id, current, pane.id])
   const [menu, setMenu] = useState<{ place: Place; at?: Anchor } | null>(null)
@@ -215,8 +216,9 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
   const busy = all.filter(item => item.state === 'Working' || needsYou(item.state))
   const endsSession = count > 0 && count === session.panes.length + hooks.hidden.length
   async function closeAll() {
-    // One close at a time with the existing close route, then remove the empty group (the session ends with its last tab).
-    for (const item of all) await api('session', { pane: item.id }, undefined, 'DELETE')
+    // Closing the whole stack already confirms all its tabs. Close helpers before their tasks.
+    const closing = [...all].sort((a, b) => (b.task_depth ?? 0) - (a.task_depth ?? 0))
+    for (const item of closing) await api('session', { pane: item.id, thread: item.thread }, undefined, 'DELETE')
     if (!endsSession) await api('groups/remove', { session: session.id, group: group!.id })
   }
   return <dialog {...dialog} aria-labelledby="group-menu-title">

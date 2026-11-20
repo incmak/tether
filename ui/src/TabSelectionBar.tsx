@@ -1,3 +1,5 @@
+import { closeTask, loadClosePlan, TaskCloseChoices } from './TaskClose'
+import type { ClosePlan } from './TaskClose'
 import { useEffect, useRef, useState } from 'react'
 import { FolderInput, Trash2, X } from 'lucide-react'
 import type { Api, Pane } from './api'
@@ -83,37 +85,69 @@ function CloseTabs({ api, chosen: now, threads, panes, sessions, onClose, onDone
   const words = useWords()
   // The tabs the question names. A refresh while it is open does not change what Close closes.
   const [chosen] = useState(now)
+  const [roots] = useState(() => now.filter(task => !task.task && panes.some(child => child.task === task.id)))
+  const [plans, setPlans] = useState<ClosePlan[]>([])
+  const [planError, setPlanError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  const [checked, setChecked] = useState<string[]>([])
+  const waitingForPlans = plans.length !== roots.length
+  useEffect(() => {
+    if (!roots.length) return
+    const controller = new AbortController()
+    Promise.all(roots.map(pane => loadClosePlan(api, pane.id, controller.signal))).then(
+      result => { if (!controller.signal.aborted) setPlans(result) },
+      failure => { if (!controller.signal.aborted) setPlanError(errorText(failure)) },
+    )
+    return () => controller.abort()
+  }, [api, roots, attempt])
   const [pending, setPending] = useState(false)
   const [failed, setFailed] = useState<{ pane: Pane; error: string }[]>([])
   const dialog = useActionsDialog(undefined, () => { if (!pending) { if (failed.length) onDone(failed.map(item => item.pane.id)); else onClose() } })
-  const busy = chosen.filter(pane => pane.state === 'Working' || needsYou(pane.state))
+  const rootIds = new Set(roots.map(pane => pane.id))
+  const individual = chosen.filter(pane => !rootIds.has(pane.id) && (!pane.task || !rootIds.has(pane.task)))
+  const busy = [...individual, ...roots].filter(pane => pane.state === 'Working' || needsYou(pane.state))
   const chosenIds = new Set(chosen.map(pane => pane.id))
   // A session whose every tab is chosen ends with them, as the last tab's close ends its session.
-  const ending = [...new Set(chosen.map(pane => pane.tmux_session))].filter(id => panes.every(pane => pane.tmux_session !== id || chosenIds.has(pane.id)))
+  const ending = roots.length ? [] : [...new Set(chosen.map(pane => pane.tmux_session))].filter(id => panes.every(pane => pane.tmux_session !== id || chosenIds.has(pane.id)))
     .map(id => sessions.find(session => session.id === id)?.name ?? id)
   async function close() {
     setPending(true)
-    const result = await closeTabs(api, chosen, threads)
+    const taskFailures: typeof failed = []
+    for (const pane of roots) {
+      const plan = plans.find(item => item.task.pane === pane.id)
+      if (!plan) continue
+      const thread = threads && pane.id in threads ? threads[pane.id] : pane.thread
+      try { await closeTask(api, { id: pane.id, thread }, plan, checked) }
+      catch (failure) { taskFailures.push({ pane, error: errorText(failure) }) }
+    }
+    const result = await closeTabs(api, individual, threads)
+    const failures = [...taskFailures, ...result.failed]
     setPending(false)
-    if (result.failed.length) setFailed(result.failed)
+    if (failures.length) setFailed(failures)
     else onDone([])
   }
-  const n = count(words, chosen.length)
+  const n = count(words, roots.length + individual.length)
   return <dialog {...dialog} aria-labelledby="close-tabs-title">
     <div className="sheet-heading"><h2 id="close-tabs-title">Close {n}?</h2><button type="button" className="icon-button" aria-label="Cancel" disabled={pending} onClick={failed.length ? () => onDone(failed.map(item => item.pane.id)) : onClose}><X /></button></div>
     {failed.length
       ? <div className="confirm-box" role="alert">
-          <p><strong>{count(words, failed.length)} did not close.</strong> {chosen.length - failed.length > 0 && `The other ${count(words, chosen.length - failed.length)} closed. `}They stay selected.</p>
+          <p><strong>{count(words, failed.length)} did not close.</strong> {!roots.length && chosen.length - failed.length > 0 && `The other ${count(words, chosen.length - failed.length)} closed. `}They stay selected.</p>
           <ul className="tab-select-list">{failed.map(item => <li key={item.pane.id}><strong>{nameOf(item.pane)}</strong>: {item.error}</li>)}</ul>
           <div className="sheet-buttons"><button type="button" className="primary" onClick={() => onDone(failed.map(item => item.pane.id))}>OK</button></div>
         </div>
       : <div className="confirm-box" role="alertdialog" aria-labelledby="close-tabs-title" aria-describedby="close-tabs-what">
           <div id="close-tabs-what">
-            <ul className="tab-select-list">{chosen.map(pane => <li key={pane.id}>{nameOf(pane)}{(pane.state === 'Working' || needsYou(pane.state)) && <small> · {pane.state === 'Working' ? 'working' : 'needs you'}</small>}</li>)}</ul>
+            <ul className="tab-select-list">{[...roots, ...individual].map(pane => <li key={pane.id}>{nameOf(pane)}{(pane.state === 'Working' || needsYou(pane.state)) && <small> · {pane.state === 'Working' ? 'working' : 'needs you'}</small>}</li>)}</ul>
             <p>{busy.length > 0 && `${count(words, busy.length)} still ${busy.length === 1 ? 'runs' : 'run'}; closing stops ${busy.length === 1 ? 'it' : 'them'}. `}
-              {ending.length > 0 && `This also ends ${ending.length === 1 ? 'the session' : 'the sessions'} ${ending.join(', ')}. `}You cannot undo this.</p>
+              {ending.length > 0 && `This also ends ${ending.length === 1 ? 'the session' : 'the sessions'} ${ending.join(', ')}. `}
+              {individual.length > 0 && 'Individual tab closes cannot be undone.'}</p>
+            {waitingForPlans && !planError && <p role="status">Loading helpers…</p>}
+            {planError && <><p className="error" role="alert">{planError}</p><button type="button" className="secondary" onClick={() => { setPlanError(''); setAttempt(attempt + 1) }}>Try again</button></>}
+            {plans.map(plan => <section key={plan.task.pane} className="task-close-confirm">
+              <h3>{plan.task.name}</h3><TaskCloseChoices plan={plan} pending={pending} checked={checked} setChecked={setChecked} />
+            </section>)}
           </div>
-          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onClose}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void close()}>{pending ? 'Closing…' : `Close ${n}`}</button></div>
+          <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={onClose}>Cancel</button><button type="button" className="danger" disabled={pending || waitingForPlans} onClick={() => void close()}>{pending ? 'Closing…' : `Close ${n}`}</button></div>
         </div>}
   </dialog>
 }

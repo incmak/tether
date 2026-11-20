@@ -599,8 +599,9 @@ def codex_recheck(entry, run):
     return fresh if fresh and (fresh['owner_pid'], fresh['process_start']) == (entry['owner_pid'], entry['process_start']) else None
 
 
-def discover(config, run):
-    pane_view.zoom_repair_all()
+def discover(config, run, *, repair_zoom=True):
+    if repair_zoom:
+        pane_view.zoom_repair_all()
     result = run([paths.TMUX, 'list-panes', '-a', '-F',
                   '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{@chat_name_at}\t#{@chat_name}\t#{@chat_icon}\t#{@worktree}\t#{@group}\t#{@zoom_for}\t#{@tether_role}\t#{pane_dead}'],
                  capture_output=True, text=True, timeout=5)

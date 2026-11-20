@@ -1,3 +1,6 @@
+import { TaskChips } from './TaskChips'
+import { TaskNeeds } from './TaskNeeds'
+import { taskChildren, taskOf } from './taskTree'
 import { RetryButton } from './Retry'
 import type { TabPickControls } from './tabSelection'
 import { takeBootChat } from './boot'
@@ -6,10 +9,10 @@ import { terminalText } from './terminalText'
 import { ShellOutput } from './ShellOutput'
 import { ContinueWith } from './ContinueWith'
 import { shellCommand } from './shellCommand'
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useWords } from './words'
-import { ArrowDown, Ban, CalendarClock, Paperclip, Plus, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
+import { ArrowDown, Ban, CalendarClock, Paperclip, ArrowLeftRight, Blocks, GitFork, Check, ChevronDown, ChevronRight, Clock3, Columns2, CornerDownRight, Gauge, Info, Layers, Maximize2, Menu, MessageSquare, Minimize2, MoreHorizontal, PanelTop, Pencil, Pin, PinOff, Redo2, RefreshCw, RotateCcw, Rows2, Search, Server, Settings2, Shield, ShieldAlert, SquareTerminal, Target, Terminal, TriangleAlert, Undo2, WifiOff, X, Zap } from 'lucide-react'
 import { requestUndo, useUndoNext } from './undoState'
 import { MineBar, MINE_BAR_SPACE, startedLabel } from './MineBar'
 import { AssistantRuntimeProvider, ThreadPrimitive, useExternalStoreRuntime } from '@assistant-ui/react'
@@ -280,6 +283,7 @@ function useSteadyPreview(text: string | undefined) {
 export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api, onMenu, onUpdate, draft, setDraft, onOpenPane, onSessionActions, onPaneActions, onSplit, onFork, onContinued, onReorder, micOk, chime, readAloud, handsFree, slot, running = 0, sidePin, allPanes, headerExtra, askBar, groupHooks, onDropGroup, onBacklogAdd, tabPick }: ChatProps) {
   const agentBrowser = useAgentBrowser(api)
   const words = useWords()
+  const tabPanelId = useId()
   const browserAsk = agentBrowser?.asks.find(item => item.pane === pane.id) ?? null
   const host = useHost()
   const panelRef = useRef<HTMLElement>(null)
@@ -348,7 +352,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // In a session with groups, the strip, the swipe and the prefetch use the open tab's group only.
   const view = useMemo(() => session?.groups?.length ? { ...session, panes: groupPanes(session.panes, session.groups, pane) } : session, [session, pane])
   const grouped = !!session?.groups?.length
-  const groupName = grouped ? placeName(groupOf(pane, session?.groups), session?.groups) : ''
+  const task = taskOf(pane, session?.panes ?? allPanes)
+  const children = taskChildren(task, session?.panes ?? allPanes)
+  const groupName = placeName(groupOf(task, session?.groups), session?.groups)
   const panes = view?.panes ?? []
   const ready = data !== undefined
   const [, setPrefetched] = useState(0)
@@ -1180,12 +1186,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   useLayoutEffect(() => { tellRef.current = (text, thread) => thread !== data?.thread || !writable || ownAnswer || data?.approval ? Promise.resolve(false) : send(text) })
   const tell = useCallback((text: string, thread: string) => tellRef.current(text, thread), [])
   const feedback = useReplyFeedback(api, activePane.agent === 'shell' ? null : data?.thread, writable ? tell : undefined)
-  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} {...fileDrop}>
+  return <AssistantRuntimeProvider runtime={runtime}><MediaOpener.Provider value={openMedia}><TabOpener.Provider value={tabOpener}><FilePane.Provider value={activePane.id}><PreviewOpener.Provider value={previewActions}><ReplyFeedbackProvider value={feedback}><section ref={panelRef} className={activePane.agent === 'shell' && !term ? 'chat-panel shell-page' : 'chat-panel'} aria-label={`Chat with ${pane.label}`} data-pane={activePane.id} data-task-tree={children.length ? '' : undefined} {...fileDrop}>
     <div className="visually-hidden" role="status">{newestNote ? `${commandOf(newestNote.text)} ran in the terminal. It left no chat output.` : ''}</div>
     {dropping !== null && <div className={dropping ? 'chat-drop refused' : 'chat-drop'} aria-hidden="true">{dropping ? <><Ban size={22} />{dropping}</> : <><Paperclip size={22} />Drop to attach to {chatTitle(pane, session)}</>}</div>}
-    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><h1>{chatTitle(pane, session)}</h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
+    <header ref={headerRef} className="chat-header" draggable={!!slot?.onDragStart} onPointerDown={event => { headerFromTouch.current = event.pointerType === 'touch'; headerDragged.current = false }} onDragStart={event => { if (headerFromTouch.current || headerTouch.current) event.preventDefault(); else slot?.onDragStart?.(event) }} onTouchStart={headerStart} onTouchMove={headerMove} onTouchEnd={headerEnd} onTouchCancel={event => headerEnd(event, true)} onClickCapture={event => { if (headerDragged.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation() } }}><button className="icon-button mobile-menu" onClick={onMenu} aria-label={running ? `Open sessions. ${running} agents running or waiting` : 'Open sessions'}><Menu />{running > 0 && <span className="menu-count" aria-hidden="true">{running}</span>}</button>{slot && <kbd className="slot-badge" title={`Focus this slot: Alt+${slot.index + 1}`}>⌥{slot.index + 1}</kbd>}<button ref={headerTitle} type="button" className="chat-title" aria-label="Session details" onClick={() => setInfo(true)}><span className="task-phone-stack">{groupName}</span><h1><span className="task-desktop-title">{chatTitle(pane, session)}</span><span className="task-phone-title">{chatTitle(task, session)}</span></h1><div>{grouped && session && <><bdi className="group-crumb" title={`${session.name} › ${groupName}`}>{session.name} › {groupName}</bdi><span className="header-separator">·</span></>}<AgentIcon agent={activePane.agent} icon={activePane.pane_icon} /><span className="agent-word">{agentNames[activePane.agent]}</span>{activePane.agent === 'codex' && pane.codex_profile && <span className="provider-badge" title={`Runs on codex -p ${pane.codex_profile}`}>{profileName(pane.codex_profile)}</span>}<span className="header-separator agent-word">·</span><State state={state} />{context && <><span className="header-separator">·</span><span className={Number(context) >= 80 ? 'context-high' : ''}>{context}%<span className="context-word"> context</span></span></>}{activePane.worktree && <><span className="header-separator">·</span><WorktreeMark branch={activePane.worktree} /></>}{activePane.dir && !activePane.worktree && <><span className="header-separator">·</span><bdi className="header-folder" dir="ltr" title={activePane.dir} aria-label={`Directory: ${activePane.dir}`}>{activePane.dir.split('/').filter(Boolean).pop() || '/'}</bdi></>}{started && <span className="header-started" title={`Chat started ${started}`} aria-label={`Started ${started}`}><Clock3 size={12} aria-hidden="true" />{started}</span>}{sidePin?.pinned && <PinMark pin={sidePin} />}</div></button>
       {headerExtra}
-      {grouped && panes.length <= 1 && <button type="button" className="icon-button group-new-tab" aria-label={`New tab in ${groupName}`} title={`New tab in ${groupName}`} onClick={() => onSplit('right')}><Plus size={20} /></button>}
       <ReviewLinks api={api} pane={pane} panes={allPanes} onOpen={onOpenPane} onChanged={onUpdate} onToast={setToast} />
       {sidePin && activePane.agent !== 'shell' && <button type="button" className="icon-button side-pin-toggle" aria-pressed={sidePin.pinned} aria-label={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} title={sidePin.pinned ? 'Unpin from side tab' : 'Pin to side tab'} onClick={sidePin.onToggle}>{sidePin.pinned ? <PinOff size={20} /> : <Pin size={20} />}</button>}
       <button type="button" className="icon-button search-toggle" aria-label="Search this chat" title="Search this chat" disabled={!data} onClick={() => setSearching(true)}><Search size={20} /></button>
@@ -1196,15 +1201,16 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     </header>
     {session && view && (grouped && groupHooks
       ? <GroupBar api={api} session={session} pane={pane} hooks={groupHooks} onOpenPane={onOpenPane} onUpdate={onUpdate}>
-          {(panes.length > 1 || !!view.helperFolds?.some(fold => fold.key.startsWith('@') || view.panes.some(item => item.id === fold.key))) && <PaneTabs ref={tabs} session={view} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />}
+          <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={view} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />
         </GroupBar>
-      : <PaneTabs ref={tabs} session={session} pane={pane} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
-    <OpenedBy pane={pane} panes={allPanes} onOpen={onOpenPane} />
+      : <PaneTabs ref={tabs} panelId={term ? undefined : tabPanelId} session={session} pane={task} onOpenPane={onOpenPane} onPaneActions={onPaneActions} onSplit={onSplit} onReorder={onReorder} onDropGroup={onDropGroup} pick={tabPick} api={api} onUpdate={onUpdate} micOk={micOk} chime={chime} onNotice={setToast} />)}
+    {children.length > 0 && <TaskChips panelId={term ? undefined : tabPanelId} task={task} children={children} pane={pane} onOpen={onOpenPane} onActions={onPaneActions} />}
+    {!pane.task && <OpenedBy pane={pane} panes={allPanes} onOpen={onOpenPane} />}
     {term && data?.attention?.askBridge && <AskBar agent={agentNames[activePane.agent]} disabled={!writable || acting} onOpen={() => setTerm(false)} onTerminal={() => askAnswer(data.attention!.askBridge!, null)} />}
     {term ? <LiveTerminal paneId={activePane.id} onChat={() => setTerm(false)} /> : <>
     {(offline || (error && data)) && <div className="reconnect-banner" role="status"><WifiOff size={15} /><span>{offline ? 'You are offline. Tether reconnects when the network is back.' : `Cannot reach ${host}. Reconnecting…`}</span><RetryButton label="Retry now" className="" onRetry={refresh} /></div>}
     {data && activePane.agent === 'shell' && <div className="start-options"><button disabled={!writable || acting} onClick={() => void start('claude')}>Start Claude<ChevronRight size={16} /></button><button disabled={!writable || acting} onClick={() => void start('codex')}><span>Start Codex<FoundryTag api={api} /></span><ChevronRight size={16} /></button></div>}
-    <div className="chat-pager"><div className="chat-page" ref={page}>
+    <div className="chat-pager" id={tabPanelId} role={session ? 'tabpanel' : undefined} aria-label={session ? chatTitle(pane, session) : undefined}><div className="chat-page" ref={page}>
     <ThreadPrimitive.Root className={opening ? 'thread opening' : 'thread'}><div className="chat-scroll" ref={viewport} onTouchStart={swipeStart} onTouchMove={event => { pullMove(event); swipeMove(event) }} onTouchEnd={swipeEnd} onTouchCancel={swipeCancel} onScroll={() => {
       const view = viewport.current
       if (view && hold.current && Date.now() < hold.current.until && Math.abs(view.scrollTop - hold.current.top) > 2) return
@@ -1311,6 +1317,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {planSheet && <PlanUsage api={api} onClose={() => setPlanSheet(false)} />}
     {continueSheet && <ContinueWith api={api} pane={activePane} thread={data?.thread ?? null} idle={state === 'Idle' || state === 'Stopped'} onClose={() => setContinueSheet(false)} onCreated={id => { setContinueSheet(false); onContinued(id) }} />}
     {modelSheet && <ModelSheet onContinue={() => { setModelSheet(false); setContinueSheet(true) }} api={api} pane={activePane} thread={data?.thread ?? null} currentLabel={model} currentEffort={footer.effort} advisor={footer.advisor} onClose={() => setModelSheet(false)} onDone={message => { setModelSheet(false); setToast(message); readFooter.current() }} />}
+    {pane.id === task.id && <TaskNeeds api={api} task={task} children={children} onOpen={onOpenPane} onUpdate={onUpdate} />}
     <Composer onTerminalEscape={() => void sendKey('Escape')} options={activePane.agent === 'shell' ? undefined : <span className="composer-pills">
       <button type="button" className="pill" aria-label={`Model and effort${advisorAlert ? `. Advisor ${footer.advisor?.name} is not attached` : ''}${tierLabel}`} disabled={!writable || state === 'Working'} onClick={() => setModelSheet(true)}>
         {advisorAlert && <TriangleAlert size={13} className="pill-warning" aria-hidden="true" />}

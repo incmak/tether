@@ -95,6 +95,7 @@ REFUSED = {
         'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
+        'task-tree/close-plan',
     },
     # These can close a pane or session.
     'DELETE': {'session', 'tmux-sessions'},
@@ -110,6 +111,7 @@ REFUSED = {
         'quick-tab/route', 'quick-tab/start', 'rename', 'resume', 'review-link', 'review-stop',
         'side-shell', 'side-shell/end', 'split', 'start', 'stop-task', 'subagent-stop',
         'suggest-groups', 'suggest-name', 'tab-brief', 'task-models', 'tmux-sessions', 'type', 'unqueue',
+        'task-tree/answer', 'task-tree/close', 'task-tree/done', 'task-tree/move',
         # These access live browsers, host services, login flows, or external workers.
         'accounts/refresh', 'accounts/switch', 'browser/ack', 'browser/agents', 'browser/agents/setup',
         'browser/ask/dismiss', 'browser/close', 'browser/device', 'browser/extension/pair',

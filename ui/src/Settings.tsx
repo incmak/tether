@@ -1,3 +1,4 @@
+import { errorText } from './api'
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, ArrowUpRight, ChevronRight, Search, X } from 'lucide-react'
@@ -42,6 +43,40 @@ function Field({ children, scope }: { children: ReactNode; scope: Scope }) {
   return <div className="preferences-field">{children}<span className="preferences-scope">{scope}</span></div>
 }
 
+const TASK_AUTO_CLOSE = 'Close done tasks after 24 hours untouched'
+
+function TaskAutoClose({ api }: { api: Api }) {
+  const [checked, setChecked] = useState<boolean>()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  type Result = { prefs: { task_auto_close?: boolean } }
+  useEffect(() => {
+    const controller = new AbortController()
+    api<Result>('prefs', undefined, controller.signal).then(
+      result => { if (!controller.signal.aborted) setChecked(result.prefs.task_auto_close === true) },
+      failure => { if (!controller.signal.aborted) setError(errorText(failure)) },
+    )
+    return () => controller.abort()
+  }, [api, attempt])
+  async function change(value: boolean) {
+    setPending(true)
+    setError('')
+    try {
+      const result = await api<Result>('prefs', { changes: { task_auto_close: value } })
+      setChecked(result.prefs.task_auto_close === true)
+    } catch (failure) { setError(errorText(failure)) }
+    finally { setPending(false) }
+  }
+  return <>
+    <Toggle title={TASK_AUTO_CLOSE} note="Close the task and its helpers after 24 hours without activity or a visit." scope="This server"
+      checked={checked ?? false} disabled={checked === undefined || pending} onChange={value => void change(value)} />
+    {checked === undefined && !error && <p className="setting-note" role="status">Loading setting…</p>}
+    {error && <p className="error" role="alert">{error}</p>}
+    {checked === undefined && error && <button type="button" className="secondary" onClick={() => { setError(''); setAttempt(attempt + 1) }}>Try again</button>}
+  </>
+}
+
 export function Settings({ api, prefs, update, onReload, onClose, start }: { api: Api; prefs: Prefs; update: (change: (current: Prefs) => Partial<Prefs>) => void; onReload: () => void; onClose: () => void; start?: 'layout-maker' | 'notifications' }) {
   const modal = useModal(true, onClose, undefined, { view: 'settings' })
   const [selected, setSelected] = useState<SettingsGroup | null>(start === 'layout-maker' ? 'appearance' : start === 'notifications' ? 'voice' : null)
@@ -59,7 +94,6 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('text-size', 'appearance', 'Text size', 'font small large readability zoom', <Field scope="This device"><Choice legend="Text size" name="text-size" value={prefs.textSize} options={[["small", "Small"], ["default", "Default"], ["large", "Large"]]} onChange={textSize => update(() => ({ textSize }))} /></Field>),
     item('folder', 'workspace', 'Default folder', 'working directory path home new session start projects', <Field scope="This server"><SessionSettings api={api} /></Field>),
     item('sort', 'workspace', 'Session order', 'sidebar sort smart manual recent', <Field scope="All devices"><Choice legend="Session order" name="sort" value={prefs.sort} options={[["smart", "Smart"], ["recent", "Recent"], ["name", "Name"], ["manual", "Manual"]]} onChange={sort => update(() => ({ sort }))} /><p className="setting-note">{prefs.sort === 'smart' ? 'Needs you, then Done, Working, and most recent.' : prefs.sort === 'recent' ? 'Needs you, then the latest agent activity.' : prefs.sort === 'name' ? 'Needs you, then A to Z.' : 'Use Reorder in the sidebar to arrange sessions.'}</p></Field>),
-    item('helpers', 'workspace', 'Hide agent helper tabs', 'reviewer advisor worker helper agent tabs hide filter clutter owner notifications push quiet', <Toggle title="Hide agent helper tabs" note="Hide reviewer, advisor and worker tabs that agents open for their own work. They fold into “N helpers” next to the tab that owns them. A hidden tab shows again while it needs you, and it notifies you only then. Tabs you open yourself always show." checked={prefs.hideHelpers} onChange={hideHelpers => update(() => ({ hideHelpers }))} />),
     item('paths', 'workspace', 'Folder paths', 'sidebar location directory', <Toggle title="Folder paths" note="Show the folder under each session name." checked={prefs.showPaths} onChange={showPaths => update(() => ({ showPaths }))} />),
     item('terms', 'workspace', 'tmux words', 'pane split tab terminology ctrl-b', <Toggle title="tmux words" note="Use pane, split and Ctrl-b in place of Tether’s terms." checked={prefs.tmuxWords} onChange={tmuxWords => update(() => ({ tmuxWords }))} />),
     item('header-swipe', 'workspace', 'Swipe on the tab bar scrolls it', 'trackpad two finger swipe gesture header tab bar stacks scroll back forward history mac', <Toggle title="Swipe on the tab bar scrolls it" note="On a trackpad, swipe with two fingers over a chat’s tabs or stacks, or just above them, to scroll that row. The swipe does not go Back or Forward anywhere in the chat’s header. Off: it goes Back or Forward, as on the rest of the page." scope="This device" checked={prefs.headerSwipe} onChange={headerSwipe => update(() => ({ headerSwipe }))} />),
@@ -79,6 +113,7 @@ export function Settings({ api, prefs, update, onReload, onClose, start }: { api
     item('sound-test', 'voice', 'Test the sound', 'chime play volume audio', <div className="switch-row"><span><strong>Test the sound</strong><small>Uses this device’s media volume.</small></span><button type="button" className="secondary" onClick={() => { prepareChime(); void playChime() }}>Play</button></div>),
     item('notifications', 'voice', 'Push notifications', 'alerts permissions approvals urgent important background delivery sound silent test', <section className="preferences-nested"><h3>Notifications</h3><Notifications api={api} /></section>),
     item('main-model', 'agents', 'Main AI model', 'main model ai claude codex haiku local suggest groups helper tab name description brief', <Field scope="All devices"><Choice legend="Main AI model" name="main-model" value={prefs.mainModel} options={[["auto", "Automatic"], ["claude", "Claude"], ["codex", "Codex"], ["none", "Local only"]]} onChange={mainModel => update(() => ({ mainModel }))} /><p className="setting-note">{prefs.mainModel === 'auto' ? 'Suggest groups uses the first installed agent: Claude, then Codex. It sends session, folder and tab names to that agent. With no agent, it uses the local model.' : prefs.mainModel === 'claude' ? 'Suggest groups uses Claude Haiku. It sends session, folder and tab names to Claude.' : prefs.mainModel === 'codex' ? 'Suggest groups uses Codex at low effort. It sends session, folder and tab names to Codex.' : 'Suggest groups uses the local model on this server, then folders.'} {prefs.mainModel === 'none' ? 'AI tab names and descriptions are off.' : 'AI tab names and descriptions use the tab’s own agent: Claude Haiku, or Codex at low effort. They send the first prompts and replies of that tab.'}</p></Field>),
+    item('task-auto-close', 'agents', TASK_AUTO_CLOSE, 'done tasks auto close 24 hours tabs untouched', <TaskAutoClose api={api} />),
     item('autonomy-setup', 'agents', 'Setup', 'setup install hook teams briskbot urgent ping notification approve', <Field scope="This server"><AutonomySetup api={api} /></Field>),
     item('autonomy', 'agents', 'Autonomy level', 'automation autopilot full auto ask questions check-in guided trusted level urgent', <Field scope="This server"><GlobalAutonomy api={api} /></Field>),
     item('advisor', 'agents', 'Advisor and reviewers', 'advisor reviewers review reviewer second opinion consult never guess decide critical normal light latest model effort claude codex fable opus gpt', <Field scope="This server"><HelperSettings api={api} /></Field>),

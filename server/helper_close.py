@@ -9,7 +9,6 @@ closed them, and owners often forgot, so idle helpers piled up. The server now c
 A task helper stays until its owner is gone: its result can matter to the user.
 A tab that works, waits on a prompt, or that someone views stays open. Timers start fresh after a server restart.
 """
-import json
 import re
 import subprocess
 import sys
@@ -35,7 +34,11 @@ def close_pane(pane, run):
     auto_resume.forget_pane(pane, run=run)
     with groups.closing(pane, run):  # its auto stack goes when empty or root-only
         run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
-    review_links.close(pane)
+    try:
+        review_links.close(pane)
+    except OSError as exc:
+        # The pane is gone even if its review record cannot be updated. Keep the close eligible for Undo.
+        print(f'could not release review links for {pane}: {exc}', file=sys.stderr)
 
 
 def _panes(run):
@@ -50,15 +53,7 @@ def _panes(run):
         role, _, raw = rest.partition('\t')
         if not PANE.fullmatch(pane):
             continue
-        record = None
-        if raw:
-            try:
-                record = json.loads(raw)
-            except ValueError:
-                record = None
-            if not isinstance(record, dict) or not isinstance(record.get('owner_pane'), str) \
-                    or not PANE.fullmatch(record['owner_pane']):
-                record = None
+        record = helper_tabs._record(raw)
         panes[pane] = (record, role)
     return panes
 
@@ -88,7 +83,7 @@ class Closer:
             self.active[pane] = sent  # a new request to a reused helper restarts its timer
         return now - self.active[pane]
 
-    def observe(self, entries, status, run, watching=lambda pane: False, log=None, lock=None, fresh=None):
+    def observe(self, entries, status, run, watching=lambda pane: False, log=None, lock=None, fresh=None, task_sweep=None):
         """Call often; it sweeps every SWEEP seconds. Returns [(pane, reason)] for the tabs it closed.
 
         lock is the server send lock and fresh an uncached status read: a helper that got a message or a prompt after
@@ -98,6 +93,8 @@ class Closer:
         if now - self.last_sweep < SWEEP:
             return []
         self.last_sweep = now
+        if task_sweep is not None:
+            task_sweep()
         panes = _panes(run)
         if panes is None:
             return []
@@ -143,7 +140,7 @@ class Closer:
             return False
         try:
             exists, now_record = helper_tabs.load(pane, run)
-            if not exists or now_record is None or now_record.get('sent_at') != record.get('sent_at'):
+            if not exists or now_record != record:
                 return False
             if status(entry).get('state') not in QUIET or watching(pane):
                 return False
@@ -162,12 +159,15 @@ class Closer:
     def _reason(self, pane, record, role, by_id, panes, worker_of, idle):
         """(condition, reason, wait) when a close condition holds now, else None."""
         quiet = idle[pane]
+        if record.get('kind') == 'own' and record.get('moved_by') == 'user':
+            return None  # a helper kept open by Mak is now a separate task
         if record.get('kind') != 'own':
-            owner = record['owner_pane']
+            owner, bound = (helper_tabs.placement_owner(record) if record.get('moved_by') == 'user'
+                            else (record['owner_pane'], record.get('owner_thread')))
             if owner not in panes:
                 return 'owner-gone', 'its owner tab is gone', GRACE
-            owner_thread, now_thread = record.get('owner_thread'), _thread(by_id.get(owner))
-            if owner_thread and now_thread and owner_thread != now_thread:
+            now_thread = _thread(by_id.get(owner))
+            if bound and now_thread and bound != now_thread:
                 return 'owner-moved', 'its owner tab changed conversations', GRACE
         worker = worker_of.get(pane)
         if role == 'reviewer' and worker is None:

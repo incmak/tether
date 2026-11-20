@@ -13,6 +13,7 @@ import subprocess
 from urllib.parse import quote
 
 import groups
+import helper_tabs
 import undo
 import undo_store
 
@@ -52,7 +53,7 @@ def post(handler, env, lock):
         confirmed = body.get('confirmed')
         if confirmed is not None and (not isinstance(confirmed, str) or len(confirmed) > 64):
             raise ValueError('Invalid request.')
-        with lock:
+        with helper_tabs.SEND_LOCK, lock:
             result = undo.run(body['action'], entry_id, env, confirmed=confirmed)
         handler.respond(200, result)
     except undo.Refused as exc:

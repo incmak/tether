@@ -21,13 +21,16 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 
 import auto_resume
 import groups
 import helper_close
+import helper_tabs
 import paths
 import prefs_sync
 import projects
+import task_tree
 import tmux_merge
 import undo_store
 from terminal_input import UUID, create_session, new_window_after, resume_command, valid_name
@@ -281,7 +284,8 @@ def capture(pane, run=subprocess.run, entry=None):
            'session_options': session_options, 'name': options.get('@chat_name', ''), 'order': [int(window), int(index)],
            'agent': '', 'thread': '', 'profile': None, 'transcript': '', 'server': _server(run)}
     saved = auto_resume.saved_tab(pane)
-    if saved:
+    if saved and (entry is None or (saved['thread'] == helper_tabs._thread(entry)
+                                     and saved['agent'] == entry.get('agent'))):
         tab.update(agent=saved['agent'], thread=saved['thread'], profile=saved.get('profile'),
                    transcript=saved.get('transcript') or '', folder=saved.get('folder') or folder)
     elif entry is not None:
@@ -359,6 +363,36 @@ def record_tab_close(tab, run=subprocess.run):
         except Exception as error:  # noqa: BLE001 - as capture_safe: the close happened, so record it all the same
             print(f'undo: could not read the stack of closed tab {tab["pane"]}: {error!r}', file=sys.stderr)
         undo_store.record('tab.close', f'Closed tab {_q(tab["name"] or tab["session"])}', tab=tab)
+
+
+def _task_tree_change(entry, before, after):
+    return {'pane': entry['id'], 'thread': helper_tabs.verified_thread(entry),
+            'session': entry['tmux_session'], 'before': before, 'after': after}
+
+
+def record_task_tree_move(entry, before, after):
+    if before != after:
+        return undo_store.record('task-tree.move', f'Moved tab {_q(helper_tabs.visible_name(entry))}',
+                                 **_task_tree_change(entry, before, after))
+
+
+def record_task_tree_close(closed, kept, run):
+    """Save the tabs that actually closed and the placement changes to tabs that stayed."""
+    if not undo_store.recording():
+        return
+    if not closed:
+        for entry, before, after in kept:
+            record_task_tree_move(entry, before, after)
+        return
+    for tab, _ in closed:
+        try:
+            note_released(tab, run)
+        except Exception as error:  # noqa: BLE001 - as with a single tab close
+            print(f'undo: could not read the stack of closed tab {tab["pane"]}: {error!r}', file=sys.stderr)
+    root = closed[-1][0]
+    return undo_store.record('task-tree.close', f'Closed task {_q(root["name"] or root["session"])}',
+                             closed=[{'tab': tab, 'record': record} for tab, record in closed],
+                             kept=[_task_tree_change(entry, before, after) for entry, before, after in kept])
 
 
 def capture_session(session_id, run=subprocess.run, entries=()):
@@ -453,9 +487,10 @@ class Env:
     """What the inverses read from the server. server.py passes its own; tests pass fakes."""
 
     def __init__(self, run=subprocess.run, entries=lambda: [], status=lambda entry: {}, draft=lambda entry: [],
-                 web_draft=lambda pane: '', name_window=lambda pane, name: None):
+                 web_draft=lambda pane: '', name_window=lambda pane, name: None, fresh=None):
         self.run, self.entries, self.status, self.draft, self.web_draft = run, entries, status, draft, web_draft
         self.name_window = name_window  # server.py name_in_tmux: the window shows the tab name
+        self.fresh = fresh or entries
         self._cache = None
 
     def live(self):
@@ -468,6 +503,9 @@ class Env:
 
     def forget(self):
         self._cache = None
+
+    def refresh(self):
+        self._cache = list(self.fresh())
 
 
 def _server(run):
@@ -922,7 +960,8 @@ def _reopen_check(tab, env, session_ok=True):
     if tab['agent'] in ('claude', 'codex'):
         if not tab.get('thread'):
             raise Refused(f'Tab {_q(tab["name"] or tab["session"])} had no conversation yet, so there is nothing to resume.')
-        holder = next((entry for entry in env.live() if entry.get('thread') == tab['thread']), None)
+        holder = next((entry for entry in env.live() if entry.get('id') != 'saved'
+                       and entry.get('thread') == tab['thread']), None)
         if holder is not None:
             raise Refused(f'That conversation is open in tab {_q(holder.get("pane_name") or holder.get("label"))}.')
         import history  # slow import: only when a reopen is checked
@@ -1036,8 +1075,7 @@ def _options_for(tab, existing):
         return tab
     own = _saved_stack(tab)
     options = dict(tab['options'])
-    if own is None:
-        options.pop('@group', None)
+    if own is None and options.pop('@group', None):
         options.pop('@group_by', None)
     session_options = {'@groups': json.dumps([own])} if own else {}
     return dict(tab, options=options, session_options=session_options)
@@ -1138,6 +1176,263 @@ class TabClose:
         if d == 'undo':
             return _reopen_effects(a['tab'])
         return _close_effects(a['reopened'], env, a['tab']['name'], a['tab'].get('agent'))
+
+
+def _tree_snapshot(env, ctx):
+    if 'tree' not in ctx:
+        try:
+            rows = helper_tabs.read_panes(env.run)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise Refused('Tether could not read the task tree. Try again.') from exc
+        ctx['tree'] = rows, {entry['id']: entry for entry in env.live()}
+    return ctx['tree']
+
+
+def _tree_check(pane, session, thread, record, rows, entries):
+    entry, options = entries.get(pane), rows.get(pane)
+    if entry is None or options is None or options.session != session:
+        raise Refused(f'Tab {pane} closed or moved to another tmux session.')
+    if thread:
+        same = helper_tabs.verified_thread(entry) == thread
+    else:
+        same = entry.get('agent') == 'shell'
+    if not same:
+        raise Refused(f'Tab {pane} changed conversations. Reload its tab.')
+    if options.record != record or (record is None and options.raw):
+        raise Refused(f'Tab {pane} changed task placement. Reload its tab.')
+
+
+def _tree_parent(pane, rows, entries):
+    if pane in entries:
+        return task_tree.placement(pane, rows, entries)
+    # A tab starting in tmux may not yet be in discovery. Treat its recorded parent as possible.
+    row = rows[pane]
+    if task_tree.is_child(row.record, row.role, row.group_by):
+        return helper_tabs.placement_owner(row.record)[0]
+    return None
+
+
+class TaskTreeMove:
+    @staticmethod
+    def check(a, d, env, ctx):
+        rows, entries = _tree_snapshot(env, ctx)
+        pane = a['pane']
+        current, target = (a['after'], a['before']) if d == 'undo' else (a['before'], a['after'])
+        _tree_check(pane, a['session'], a['thread'], current, rows, entries)
+        row = rows[pane]
+        if not task_tree.is_child(target, row.role, row.group_by):
+            return
+        if d == 'redo' and any(_tree_parent(child, rows, entries) == pane for child in rows):
+            raise Refused('That tab now has helpers of its own. Move them out first.')
+        prospective = {**rows, pane: replace(row, record=target)}
+        home = task_tree.placement(pane, prospective, entries)
+        if not home or not helper_tabs.verified_thread(entries[home]):
+            raise Refused(f'The task for tab {pane} closed or changed conversations.')
+        seen = {pane}
+        while home:
+            if home in seen:
+                raise Refused('That placement would make a task loop.')
+            seen.add(home)
+            home = task_tree.placement(home, prospective, entries)
+            if home and d == 'redo':
+                raise Refused('The destination is now a helper. Choose its task instead.')
+
+    @staticmethod
+    def apply(a, d, env):
+        helper_tabs.write_record(a['pane'], a['before'] if d == 'undo' else a['after'], env.run)
+
+    @staticmethod
+    def effects(a, d, env):
+        return []
+
+
+_PANE_REFS = ('owner_pane', 'home_pane', 'root_pane')
+
+
+def _remap_helper(record, panes):
+    if record is None:
+        return None
+    return {key: panes.get(value, value) if key in _PANE_REFS and isinstance(value, str)
+            else value for key, value in record.items()}
+
+
+def _check_tree_server(a, direction, run):
+    if direction == 'redo':
+        _same_tmux(a['reopened_server'], run, 'the reopened task')
+        return
+    kind, current = auto_resume.server_id(run=run)
+    saved = a['closed'][-1]['tab']['server']
+    if saved and current == saved:
+        return
+    if kind == 'none' and not a['kept']:
+        # The task may have been the last session. A new tmux can reuse any old pane ID.
+        # Internal references get mapped to the new IDs; an external reference must be bound
+        # to a conversation that will not be in the new session.
+        panes = {member['tab']['pane'] for member in a['closed']}
+        threads = {member['tab']['thread'] for member in a['closed']}
+        for member in a['closed']:
+            record = member['record'] or {}
+            for key in _PANE_REFS:
+                if record.get(key) and record[key] not in panes:
+                    bound = record.get(key.replace('_pane', '_thread'))
+                    if not bound or bound in threads:
+                        raise Refused('tmux stopped. Tether cannot confirm an old relationship to another task.')
+        return
+    raise Refused('tmux restarted or could not be reached. Tether cannot confirm the task’s tabs.')
+
+
+class _TaskTreeInterrupted(Refused):
+    """Keep the task-tree redo's journal so a failed close can resume."""
+
+
+class TaskTreeClose:
+    @staticmethod
+    def check(a, d, env, ctx):
+        _check_tree_server(a, d, env.run)
+        rows, entries = _tree_snapshot(env, ctx) if d == 'redo' or a['kept'] else ({}, {})
+        panes = a.get('closed_panes', {}) if d == 'undo' else a['reopened']
+        detached = set(a.get('detached', ()))
+        for change in a['kept']:
+            field = 'after' if d == 'undo' or change['pane'] in detached else 'before'
+            _tree_check(change['pane'], change['session'], change['thread'], _remap_helper(change[field], panes),
+                        rows, entries)
+        if d == 'undo':
+            for member in a['closed']:
+                tab = member['tab']
+                _reopen_check(tab, env)
+                _check_reopen_target(tab, env.run)
+                _check_released(tab, env.run)
+            return
+
+        closing = set()
+        for member in a['closed']:
+            tab = member['tab']
+            if tab['pane'] not in a.get('redone', ()):
+                pane = panes[tab['pane']]
+                _tree_check(pane, a['reopened_session'], tab['thread'], _remap_helper(member['record'], panes),
+                            rows, entries)
+                closing.add(pane)
+        TaskTreeClose._check_new_children(a, closing, rows, entries)
+
+    @staticmethod
+    def _check_new_children(a, closing, rows, entries):
+        expected = closing | {change['pane'] for change in a['kept']}
+        placed = task_tree.placements(rows, entries)
+        for pane in rows:
+            if pane in expected:
+                continue
+            if _tree_parent(pane, rows, entries) in closing or placed.get(pane, {}).get('task') in closing:
+                raise Refused(f'Tab {pane} joined the task since. Review the new task before closing it.')
+
+    @staticmethod
+    def _undo(a, env):
+        run = env.run
+        tabs = [member['tab'] for member in a['closed']]
+        new_session = _target_session(tabs[0], run) is None
+        panes, attached, after = {}, [], None
+        try:
+            for tab in sorted(tabs, key=lambda tab: tab['order']):
+                pane = _reopen(tab, env, after=after)
+                panes[tab['pane']] = pane
+                if new_session:
+                    after = pane
+            session = _need_pane(next(iter(panes.values())), run)[0]
+            server = _server(run)
+            if server is None:
+                raise Refused('Tether could not confirm the tmux server of the reopened task.')
+            for member in a['closed']:
+                if member['record'] is not None:
+                    helper_tabs.write_record(panes[member['tab']['pane']], _remap_helper(member['record'], panes), run)
+            for change in a['kept']:
+                helper_tabs.write_record(change['pane'], _remap_helper(change['before'], panes), run)
+                attached.append(change)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+            failed = []
+            for change in reversed(attached):
+                try:
+                    expected = _remap_helper(change['after'], a.get('closed_panes', {}))
+                    helper_tabs.write_record(change['pane'], expected, run)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    failed.append(change['pane'])
+            for pane in reversed(list(panes.values())):
+                try:
+                    _close(pane, env)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    failed.append(pane)
+            if failed:
+                raise Refused(f'Tether could not restore the task. Check tabs {", ".join(failed)} before retrying.') from None
+            raise
+        a['reopened'] = panes
+        a['reopened_session'] = session
+        a['reopened_server'] = server
+        for tab in tabs:
+            try:
+                _restack_released(tab, panes[tab['pane']], run)
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                return 'The task reopened. Tether could not put all of its tabs back in their stack.'
+        return None
+
+    @staticmethod
+    def _redo(a, env):
+        run, panes = env.run, a['reopened']
+        redone, detached = a.setdefault('redone', []), a.setdefault('detached', [])
+        pending = []
+        for member in a['closed']:
+            old = member['tab']['pane']
+            if old in redone:
+                continue
+            tab = capture(panes[old], run, env.entry(panes[old]))
+            if tab is None or tab['thread'] != member['tab']['thread'] or tab['agent'] != member['tab']['agent']:
+                raise Refused(f'Tether could not save tab {panes[old]} for undo. Try again.')
+            pending.append((member, old, dict(tab, pane=old)))
+        warning = None
+        try:
+            for change in a['kept']:
+                pane = change['pane']
+                if pane not in detached:
+                    helper_tabs.write_record(pane, _remap_helper(change['after'], panes), run)
+                    detached.append(pane)
+            for member, old, tab in pending:
+                pane = panes[old]
+                try:
+                    _close(pane, env)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    kind, _ = auto_resume.server_id(run=run)
+                    if kind == 'none' or (kind == 'up' and pane not in helper_tabs.read_panes(run)):
+                        member['tab'] = tab
+                        redone.append(old)
+                    raise
+                member['tab'] = tab
+                redone.append(old)
+        except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+            if len(redone) == len(a['closed']) and len(detached) == len(a['kept']):
+                warning = 'The tabs closed. Tether could not finish cleaning up the task.'
+            elif redone or detached:
+                raise _TaskTreeInterrupted(str(exc)) from exc
+            else:
+                raise
+        for member in a['closed']:
+            try:
+                note_released(member['tab'], run)
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
+                print(f'undo: could not read the stack of closed tab {member["tab"]["pane"]}: {exc!r}', file=sys.stderr)
+        a['closed_panes'] = a.pop('reopened')
+        for key in ('redone', 'detached', 'reopened_session', 'reopened_server'):
+            del a[key]
+        return warning
+
+    @staticmethod
+    def apply(a, d, env):
+        return TaskTreeClose._undo(a, env) if d == 'undo' else TaskTreeClose._redo(a, env)
+
+    @staticmethod
+    def effects(a, d, env):
+        if d == 'undo':
+            reopened = [effect for member in reversed(a['closed']) for effect in _reopen_effects(member['tab'])]
+            return reopened + ['Restores the task placement of the helpers that stayed open.'] if a['kept'] else reopened
+        return [effect for member in a['closed'] if member['tab']['pane'] not in a.get('redone', ())
+                for effect in _close_effects(a['reopened'][member['tab']['pane']], env, member['tab']['name'],
+                                             member['tab']['agent'])]
 
 
 class TabStart:
@@ -1371,11 +1666,13 @@ class PrefsOrder:
 KINDS = {'group.create': GroupCreate, 'group.rename': GroupRename, 'group.move': GroupMove,
          'group.ungroup': GroupUngroup, 'group.remove': GroupRemove, 'pane.name': PaneName,
          'session.name': SessionName, 'tab.close': TabClose, 'tab.start': TabStart, 'session.close': SessionClose, 'merge.pane': MergePane, 'merge.break': MergePane,
-         'merge.session': MergeSession, 'prefs.order': PrefsOrder}
+         'merge.session': MergeSession, 'prefs.order': PrefsOrder,
+         'task-tree.move': TaskTreeMove, 'task-tree.close': TaskTreeClose}
 # Kinds whose recorded pane and session ids belong to the tmux server of the entry. tab.start, tab.close and
 # session.close check the server of the pane or session they hold themselves (_same_tmux): an undo or redo makes a new one.
+TASK_TREE_STEPS = {'task-tree.move', 'task-tree.close'}
 LIVE_IDS = {'group.create', 'group.rename', 'group.move', 'group.ungroup', 'group.remove', 'pane.name', 'session.name',
-            'merge.pane', 'merge.break', 'merge.session'}
+            'merge.pane', 'merge.break', 'merge.session', 'task-tree.move'}
 
 
 # ---------------------------------------------------------------- planning and running
@@ -1477,7 +1774,10 @@ def _run(direction, entry_id, env, confirmed):
         raise Refused('Nothing to undo.' if direction == 'undo' else 'Nothing to redo.')
     if (direction == 'undo') != (entry['state'] == 'done') or direction == 'redo' and not entry.get('redo', True):
         raise Refused('That step is already undone.' if direction == 'undo' else 'That step cannot be redone now.')
-    env.forget()
+    if any(action['kind'] in TASK_TREE_STEPS for action in entry['actions']):
+        env.refresh()
+    else:
+        env.forget()
     _check(entry, direction, env)
     effects = _effects(entry, direction, env)
     if effects and confirmed != token(entry, direction, effects):
@@ -1492,6 +1792,8 @@ def _run(direction, entry_id, env, confirmed):
                 if warning:
                     warnings.append(warning)
                 done += 1
+        except _TaskTreeInterrupted:
+            failed = True
         except Refused:
             if not done:
                 raise

@@ -18,6 +18,7 @@ import paths
 import procinfo
 import review_links
 import self_close
+import task_tree
 import undo
 import undo_store
 import worktrees
@@ -154,13 +155,14 @@ def _start_group(body, caller, run, entries=(), *, branch=None):
     token = session_id = None
     with groups.LOCK():
         session_id, group_id, stack_goal = _pick_group(body, caller, home, run)
-        owner = _owner(caller, home, entries, run)
         if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
             token = groups.start_begin(session_id, group_id, run)
     try:
         name = auto_stacks.helper_tab_name(role=body.get('role'), review=delegate.normalize_review(body.get('review', False)) == 'new',
                                            name=body.get('name'), branch=branch, stack=body.get('group'),
                                            message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
+        role = 'reviewer' if delegate.normalize_review(body.get('review', False)) == 'new' else body.get('role')
+        owner = _owner(caller, home, entries, run, name=name, message=body.get('message'), role=role)
         yield group_id, name, owner
     finally:
         _end_start(session_id, token, run)
@@ -174,9 +176,14 @@ def _end_start(session_id, token, run):
         pass  # the marker expires (groups.START_LIMIT)
 
 
-def _owner(caller, home, entries, run):
+def _owner(caller, home, entries, run, *, name=None, message=None, role=None):
     """Record the opener's authority and the new tab's placement."""
     home_pane = home['id'] if home is not None else None
+    record = dict(helper_tabs.new_record(caller), kind='helper' if home is not None else 'own',
+                  home_pane=home_pane)
+    placement, _ = task_tree.classify(record, role, name, message, caller)
+    if placement == 'separate':
+        home = home_pane = None
     root = root_thread = None
     if home_pane is not None:
         by_id = {entry['id']: entry for entry in entries}
@@ -184,7 +191,7 @@ def _owner(caller, home, entries, run):
         root = auto_stacks.root_of(home_pane, lambda pane: by_id.get(pane, {}).get('thread'), run)
         root_thread = helper_tabs._thread(by_id.get(root, {}))
     name = helper_tabs.visible_name(caller)
-    return dict(helper_tabs.new_record(caller), root_pane=root, root_thread=root_thread,
+    return dict(record, root_pane=root, root_thread=root_thread,
                 kind='helper' if home is not None else 'own',
                 home_pane=home_pane, home_thread=helper_tabs.verified_thread(home),
                 opener_name=name[:40] if name else None)
@@ -241,7 +248,8 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                                           worker_thread=helper_tabs._thread(worker) or '')
             else:
                 handler.keep_sessions = True
-                result = 200, helper_tabs.poll(body, caller, entries, run, status, last_reply, timeline)
+                with helper_tabs.SEND_LOCK:
+                    result = 200, helper_tabs.poll(body, caller, entries, run, status, last_reply, timeline)
         except helper_tabs.Stale as exc:
             result = 409, {'error': str(exc)}
         handler.respond(*result)
