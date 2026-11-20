@@ -592,10 +592,15 @@ class FridayRulesTests(unittest.TestCase):
                                  'The user answered a send question, not an approval.')
         self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
                                             'speech', 'Yes, approve it.', set(), 'Deploy wants to run the tests.'))
-        # An approval question stays an approval question, even when it names a send word.
-        self.assertIsNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
-                                            'speech', 'Yes, approve it.', set(),
-                                            'Deploy asks to send the build to staging. Should I approve it?'))
+        # After any send question no answer opens answer_approval, not even the word approve.
+        for answer in ('Yes, approve it.', 'Do not approve it.', 'Yes, ask docs to approve the draft.'):
+            with self.subTest(answer=answer):
+                self.assertEqual(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
+                                                   'speech', answer, set(), 'Should I send the draft to docs?'),
+                                 'The user answered a send question, not an approval.')
+        # "Do not approve" is never an approval.
+        self.assertIsNotNone(friday.check_tool('answer_approval', {'chat': 'deploy', 'decision': 'approve'},
+                                               'speech', 'Do not approve it.', set(), 'Deploy wants to run the tests.'))
 
     def test_a_question_without_its_mark_is_not_a_yes(self):
         for answer in ('You sure', 'you sure then', 'Okay you'):

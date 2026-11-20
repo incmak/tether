@@ -112,7 +112,7 @@ SEND_INTENT = re.compile(
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
-APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
+APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|not|never|reject|stop|don't)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
@@ -549,10 +549,6 @@ SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
 
 
-# The user's own approval words. Friday's words ("the approval checklist") never open answer_approval.
-USER_APPROVAL_WORDS = re.compile(r'\b(?:approve|approved|allow|deny|denied|reject)\b', re.I)
-
-
 def answers_question(previous):
     """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
 
@@ -594,8 +590,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name == 'answer_approval':
         # A yes to Friday's send question answers that send, not a tool approval in some chat.
         if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
-                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant)
-                    and not USER_APPROVAL_WORDS.search(last_user_text))):
+                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
             return 'The user answered a send question, not an approval.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))

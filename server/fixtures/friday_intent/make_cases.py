@@ -79,7 +79,7 @@ case("log-urgent-feature-ask", "send_direct", "dev",
 # A yes to Friday's own words gets the fixed read-back first; only a yes to that read-back sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
      {"tool": "send_to_chat", "readback_ok": True,
-      "args": {"chat": "(?i)friday test", "prompt": r"(?i)spec"}}, "log",
+      "args": {"chat": "(?i)friday test", "prompt": r"(?i)spec.*\b(?:call|blocker)|\b(?:call|blocker).*spec"}}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
