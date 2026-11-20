@@ -7,6 +7,7 @@ under paths.HOME/.local/share/tether/friday-models. Pocket uses models/hf as
 HF_HOME with HF_HUB_OFFLINE=1. WebRTC audio uses direct host-candidate UDP.
 TETHER_FRIDAY_TTS_THREADS overrides Pocket's default of 2 torch threads.
 TETHER_FRIDAY_STT_THREADS overrides Parakeet's default of 4 threads (clamped to 1..16).
+TETHER_FRIDAY_HOTWORDS=1 enables Parakeet hotwords (default off).
 TETHER_FRIDAY_PREROLL buffers 0.15 seconds before playback (0 disables; clamped to 0..1).
 TETHER_FRIDAY_PREROLL_MAX caps adaptive audio hold (default 1.5s; 0 disables; max 4s).
 TETHER_FRIDAY_PREROLL_WAIT caps wall wait after first audio (default 2.0s; 0 disables; max 4s).
@@ -21,11 +22,16 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
+import errno
+from hashlib import sha256
+from itertools import islice
 import json
 import math
 import os
+from pathlib import Path
 import re
 import sys
+from tempfile import mkstemp
 import time
 from types import SimpleNamespace
 import unicodedata
@@ -105,6 +111,8 @@ STATE_PREFIX = 'Current Tether state: '
 EVENT_PREFIX = 'Tether news to tell the user in one sentence; do not act on it: '
 MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
+FRIDAY_HOTWORDS = ('Tether', 'tether')
+HOTWORDS_SCORE = 1.5
 SEND_INTENT = re.compile(
     r'\b(?:send|tell|ask|instruct|forward)\b'
     # Prompt and message are send words only as a verb that starts a clause: "message ci-audit" or
@@ -612,6 +620,31 @@ SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
 
 
+def hotword_text(names):
+    """Keep short Latin names that cannot bias a consent word."""
+    entries = {}
+    for name in names:
+        if not 1 <= len(name) <= 40:
+            continue
+        words = [word for word in name.split(' ') if word]
+        if not 1 <= len(words) <= 4 or not all(
+            any(c.isalnum() for c in word)
+            and all(c in "'-0123456789" or (c.isalpha() and 'LATIN' in unicodedata.name(c, ''))
+                    for c in word)
+            for word in words
+        ):
+            continue
+        if (YES_WORDS.intersection(norm(name).split())
+                or APPROVAL_YES.search(name) or APPROVAL_NO.search(name)
+                or SEND_WORDS.search(name) or re.search(r'\bcancel\b', name, re.I)):
+            continue
+        for entry in (name, name.lower()):
+            entries[entry] = None
+            if len(entries) == 30:
+                return '/'.join(entries)
+    return '/'.join(entries)
+
+
 def answers_question(previous):
     """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
 
@@ -1070,14 +1103,26 @@ def runtime_types():
         pass
 
     class ParakeetSTT(SegmentedSTTService):
-        def __init__(self, recognizer, session):
+        def __init__(self, recognizer, session, hotwords=''):
             super().__init__(sample_rate=16000, audio_passthrough=True,
                              settings=STTSettings(model='parakeet-tdt-0.6b-v3-int8', language=None))
             self.recognizer, self.session = recognizer, session
+            self._hotwords = hotwords
+            self._hotword_error_logged = False
 
         @property
         def wants_wav_segments(self):
             return False
+
+        def _create_stream(self):
+            if self._hotwords:
+                try:
+                    return self.recognizer.create_stream(hotwords=self._hotwords)
+                except Exception as exc:
+                    if not self._hotword_error_logged:
+                        self._hotword_error_logged = True
+                        print(f'Friday hotword stream fallback: {type(exc).__name__}', file=sys.stderr, flush=True)
+            return self.recognizer.create_stream()
 
         def decode(self, audio):
             samples = np.frombuffer(audio, dtype='<i2').astype(np.float32) / 32768.0
@@ -1085,7 +1130,7 @@ def runtime_types():
             peak = np.max(np.abs(samples), initial=0)
             if 0 < peak < 0.01:
                 samples *= 0.2 / peak
-            stream = self.recognizer.create_stream()
+            stream = self._create_stream()
             stream.accept_waveform(16000, samples)
             self.recognizer.decode_stream(stream)
             return fix_transcript(stream.result.text.strip())
@@ -1962,21 +2007,79 @@ def runtime_types():
     return SimpleNamespace(**locals())
 
 
+def _write_bpe_vocab(tokens, vocab):
+    tokens_mtime = tokens.stat().st_mtime_ns
+    try:
+        if vocab.stat().st_mtime_ns >= tokens_mtime:
+            return
+    except FileNotFoundError:
+        pass
+    vocab.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = mkstemp(prefix='.bpe-vocab-', dir=vocab.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream, tokens.open(encoding='utf-8') as source:
+            for line in islice(source, 8192):
+                piece, token_id = line.rsplit(maxsplit=1)
+                if piece != '<blk>':
+                    stream.write(f'{piece}\t{-math.log(int(token_id) + 2)}\n')
+        temporary.replace(vocab)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def build_bpe_vocab(tokens):
+    vocab = tokens.with_name('bpe.vocab')
+    try:
+        _write_bpe_vocab(tokens, vocab)
+    except OSError as exc:
+        if not isinstance(exc, PermissionError) and exc.errno != errno.EROFS:
+            raise
+        model_key = sha256(os.fsencode(tokens.resolve())).hexdigest()
+        vocab = paths.CACHE / 'friday' / model_key / 'bpe.vocab'
+        _write_bpe_vocab(tokens, vocab)
+    return vocab
+
+
+def friday_models_folder():
+    override = os.environ.get('TETHER_FRIDAY_MODELS')
+    return Path(override).expanduser() if override else paths.HOME / '.local/share/tether/friday-models'
+
+
+def load_parakeet(folder):
+    import sherpa_onnx
+
+    model = folder / 'parakeet-v3'
+    tokens = model / 'tokens.txt'
+    args = dict(encoder=str(model / 'encoder.int8.onnx'), decoder=str(model / 'decoder.int8.onnx'),
+                joiner=str(model / 'joiner.int8.onnx'), tokens=str(tokens), num_threads=stt_threads(os.environ),
+                model_type='nemo_transducer')
+    create_recognizer = sherpa_onnx.OfflineRecognizer.from_transducer
+    if os.environ.get('TETHER_FRIDAY_HOTWORDS') == '1':
+        try:
+            hotwords = hotword_text(FRIDAY_HOTWORDS)
+            recognizer = create_recognizer(
+                **args, decoding_method='modified_beam_search', max_active_paths=4, modeling_unit='bpe',
+                bpe_vocab=str(build_bpe_vocab(tokens)), hotwords_score=HOTWORDS_SCORE)
+        except Exception as exc:
+            print(f'Friday hotwords off: {type(exc).__name__}', file=sys.stderr, flush=True)
+        else:
+            stats = json.dumps({'count': len(hotwords.split('/')) if hotwords else 0, 'score': HOTWORDS_SCORE},
+                               separators=(',', ':'))
+            print(f'Friday hotwords on {stats}', file=sys.stderr, flush=True)
+            return recognizer, hotwords
+    return create_recognizer(**args), ''
+
+
 class Models:
     def __init__(self, rt, folder, brain, auth):
         import torch
-        import sherpa_onnx
         from pocket_tts import TTSModel
         torch.set_num_threads(int(os.environ.get('TETHER_FRIDAY_TTS_THREADS', '2')))
         self.brain, self.auth = brain, auth
         self.warmup_tasks = set()
         start = time.monotonic()
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-            encoder=str(folder / 'parakeet-v3/encoder.int8.onnx'),
-            decoder=str(folder / 'parakeet-v3/decoder.int8.onnx'),
-            joiner=str(folder / 'parakeet-v3/joiner.int8.onnx'),
-            tokens=str(folder / 'parakeet-v3/tokens.txt'), num_threads=stt_threads(os.environ),
-            model_type='nemo_transducer')
+        self.recognizer, self.hotwords = load_parakeet(folder)
         self.vad = rt.SileroVADAnalyzer(sample_rate=16000)._model
         try:
             self.smart_turn = rt.LocalSmartTurnAnalyzerV3(
@@ -2041,7 +2144,7 @@ class Session:
         self.new_turn()
         self.rtvi = RTVIProcessor()
         self.llm = rt.FridayLLM(self, models.brain)
-        self.stt = rt.ParakeetSTT(models.recognizer, self)
+        self.stt = rt.ParakeetSTT(models.recognizer, self, models.hotwords)
         self.tts = rt.SharedPocketTTS(models.tts, models.voice, self)
         tools = []
         prefix = llm_prefix()
@@ -2314,10 +2417,7 @@ def create_app():
     from fastapi import FastAPI, HTTPException, Request
     from pipecat.transports.smallwebrtc.request_handler import (
         ConnectionMode, IceCandidate, SmallWebRTCPatchRequest, SmallWebRTCRequest, SmallWebRTCRequestHandler)
-    folder = paths.HOME / '.local/share/tether/friday-models'
-    if os.environ.get('TETHER_FRIDAY_MODELS'):
-        from pathlib import Path
-        folder = Path(os.environ['TETHER_FRIDAY_MODELS']).expanduser()
+    folder = friday_models_folder()
     os.environ['HF_HOME'] = str(folder / 'hf')
     os.environ['HF_HUB_OFFLINE'] = '1'
     rt = runtime_types()

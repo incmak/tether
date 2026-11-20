@@ -1,10 +1,17 @@
 """Pure rules run on system Python. Optional API tests skip without Pipecat."""
 import copy
 import asyncio
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
 import importlib.util
 import inspect
+import io
 import json
+import math
+import os
+from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
 import threading
 import unittest
 from types import SimpleNamespace
@@ -12,10 +19,147 @@ from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 from own_time import own_time
 
+# Read-only model fixtures live outside the home that paths isolates for unittest.
+FRIDAY_MODEL_FIXTURES = Path(
+    os.environ.get('TETHER_FRIDAY_MODELS')
+    or Path(os.environ.get('MOBILE_TMUX_HOME') or Path.home()) / '.local/share/tether/friday-models'
+).expanduser()
+
 try:
     from . import friday_agent as friday
 except ImportError:
     import friday_agent as friday
+
+
+class ParakeetHotwordTests(unittest.TestCase):
+    def test_filters_consent_words_and_names_outside_the_allowed_format(self):
+        names = ('Yes', 'no', 'Send it', 'Okay', 'stop', '👍', '東京', 'one two three four five six',
+                 'A' * 60, 'Tether', 'automation tether', 'B12', 'Café-42', "D'Arcy", 'TETHER',
+                 'deny-now', 'Nope Tools', 'docs-CANCEL', 'YUP', 'Draft, Review', 'A/B', 'A\tB',
+                 'Message Queue', 'Ahead', 'Approve', 'Sentry')
+        self.assertEqual(friday.hotword_text(names),
+                         "Tether/tether/automation tether/B12/b12/Café-42/café-42/D'Arcy/d'arcy/TETHER/Sentry/sentry")
+
+    def test_deduplicates_and_caps_entries(self):
+        names = ['Tether', 'tether', 'Tether', *(f'B{i}' for i in range(30))]
+        expected = ['Tether', 'tether', *(entry for i in range(14) for entry in (f'B{i}', f'b{i}'))]
+        self.assertEqual(friday.hotword_text(names).split('/'), expected)
+
+    def test_vocab_uses_ids_and_publishes_atomically_only_when_stale(self):
+        with TemporaryDirectory() as directory:
+            tokens = Path(directory) / 'tokens.txt'
+            vocab = tokens.with_name('bpe.vocab')
+            tokens.write_text('▁T 8\n<blk> 0\net 2\nher 30\n', encoding='utf-8')
+            self.assertEqual(friday.build_bpe_vocab(tokens), vocab)
+            expected = f'▁T\t{-math.log(10)}\net\t{-math.log(4)}\nher\t{-math.log(32)}\n'
+            self.assertEqual(vocab.read_text(encoding='utf-8'), expected)
+            with patch.object(Path, 'replace', side_effect=AssertionError('fresh vocab was replaced')):
+                self.assertEqual(friday.build_bpe_vocab(tokens), vocab)
+
+            os.utime(vocab, ns=(0, 0))
+            tokens.write_text('▁B 3\n' * 8192 + 'ignored 1\n', encoding='utf-8')
+            new_vocab = f'▁B\t{-math.log(5)}\n' * 8192
+            replace = Path.replace
+
+            def publish(source, target):
+                self.assertEqual(source.parent, target.parent)
+                self.assertEqual(source.read_text(encoding='utf-8'), new_vocab)
+                self.assertEqual(target.read_text(encoding='utf-8'), expected)
+                return replace(source, target)
+
+            with patch.object(Path, 'replace', autospec=True, side_effect=publish) as rename:
+                self.assertEqual(friday.build_bpe_vocab(tokens), vocab)
+            rename.assert_called_once()
+            self.assertEqual(vocab.read_text(encoding='utf-8'), new_vocab)
+            self.assertCountEqual(tokens.parent.iterdir(), [tokens, vocab])
+
+    def test_vocab_uses_paths_cache_when_model_directory_is_read_only(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            tokens = root / 'tokens.txt'
+            tokens.write_text('T 0\n', encoding='utf-8')
+            mkstemp = friday.mkstemp
+
+            def make_temporary(*, prefix, dir):
+                if dir == root:
+                    raise PermissionError('model directory is read-only')
+                return mkstemp(prefix=prefix, dir=dir)
+
+            cache = root / 'cache'
+            with patch.object(friday.paths, 'CACHE', cache), patch.object(friday, 'mkstemp', make_temporary):
+                vocab = friday.build_bpe_vocab(tokens)
+                self.assertEqual(friday.build_bpe_vocab(tokens), vocab)
+            self.assertTrue(vocab.is_relative_to(cache))
+            self.assertEqual(vocab.name, 'bpe.vocab')
+            self.assertEqual(vocab.read_text(encoding='utf-8'), f'T\t{-math.log(2)}\n')
+            self.assertFalse(tokens.with_name('bpe.vocab').exists())
+
+    def load_model(self, env, error=None, vocab_error=None):
+        folder = Path('models')
+        recognizer = Mock()
+        create = Mock(return_value=recognizer)
+        if error:
+            create.side_effect = [error, recognizer]
+        sherpa = SimpleNamespace(OfflineRecognizer=SimpleNamespace(from_transducer=create))
+        stderr = io.StringIO()
+        with (patch.dict(sys.modules, sherpa_onnx=sherpa), patch.dict(os.environ, env, clear=True),
+              patch.object(friday, 'build_bpe_vocab', return_value=Path('bpe.vocab'),
+                           side_effect=vocab_error) as build, redirect_stderr(stderr)):
+            result = friday.load_parakeet(folder)
+        args = dict(encoder='models/parakeet-v3/encoder.int8.onnx', decoder='models/parakeet-v3/decoder.int8.onnx',
+                    joiner='models/parakeet-v3/joiner.int8.onnx', tokens='models/parakeet-v3/tokens.txt',
+                    num_threads=4, model_type='nemo_transducer')
+        self.assertIs(result[0], recognizer)
+        return result[1], create, args, build, stderr.getvalue()
+
+    def test_switch_defaults_to_the_original_recognizer(self):
+        for env in ({}, {'TETHER_FRIDAY_HOTWORDS': '0'}):
+            with self.subTest(env=env):
+                words, create, args, build, log = self.load_model(env)
+                create.assert_called_once_with(**args)
+                build.assert_not_called()
+                self.assertEqual((words, log), ('', ''))
+
+    def test_switch_loads_beam_search_and_logs_only_count_and_score(self):
+        words, create, args, build, log = self.load_model({'TETHER_FRIDAY_HOTWORDS': '1'})
+        build.assert_called_once_with(Path(args['tokens']))
+        create.assert_called_once_with(**args, bpe_vocab='bpe.vocab', decoding_method='modified_beam_search',
+                                       max_active_paths=4, modeling_unit='bpe', hotwords_score=1.5)
+        self.assertEqual(words, 'Tether/tether')
+        self.assertEqual(log, 'Friday hotwords on {"count":2,"score":1.5}\n')
+
+    def test_beam_or_vocab_failure_loads_greedy_and_logs_only_type(self):
+        for stage, error, attempts in (('error', RuntimeError('private names'), 2),
+                                       ('vocab_error', ValueError('private tokens'), 1)):
+            with self.subTest(stage=stage):
+                words, create, args, _, log = self.load_model({'TETHER_FRIDAY_HOTWORDS': '1'}, **{stage: error})
+                self.assertEqual(create.call_count, attempts)
+                create.assert_called_with(**args)
+                self.assertEqual(words, '')
+                self.assertEqual(log, f'Friday hotwords off: {type(error).__name__}\n')
+
+    @unittest.skipUnless(importlib.util.find_spec('sherpa_onnx'), 'sherpa_onnx is only installed in the Friday venv')
+    def test_real_model_accepts_hotwords_and_decodes(self):
+        import numpy as np
+
+        model = FRIDAY_MODEL_FIXTURES / 'parakeet-v3'
+        files = ('tokens.txt', 'encoder.int8.onnx', 'decoder.int8.onnx', 'joiner.int8.onnx')
+        if not all((model / name).is_file() for name in files):
+            self.skipTest('Parakeet model files are missing')
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            test_model = folder / 'parakeet-v3'
+            test_model.mkdir()
+            for name in files:
+                (test_model / name).symlink_to((model / name).resolve())
+            with patch.dict(os.environ, TETHER_FRIDAY_HOTWORDS='1'):
+                recognizer, hotwords = friday.load_parakeet(folder)
+            self.assertEqual(hotwords, 'Tether/tether')
+            stream = recognizer.create_stream(hotwords='Tether/tether')
+            samples = (.1 * np.sin(2 * np.pi * 440 * np.arange(8000) / 16000)).astype(np.float32)
+            stream.accept_waveform(16000, samples)
+            recognizer.decode_stream(stream)
+            self.assertIsInstance(stream.result.text, str)
 
 
 class AudioPrerollTests(unittest.TestCase):
@@ -3331,12 +3475,34 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service.wants_wav_segments)
         frames = [f async for f in service.run_stt(b'\x00\x80\xff\x7f')]
         self.assertEqual(frames[0].text, 'hello')
+        recognizer.create_stream.assert_called_once_with()
         rate, samples = recognizer.create_stream.return_value.accept_waveform.call_args.args
         self.assertEqual(rate, 16000)
         self.assertAlmostEqual(float(samples[0]), -1.0)
         self.assertGreater(session.stt_seconds, 0)
         recognizer.create_stream.return_value.result.text = '  '
         self.assertIsInstance([f async for f in service.run_stt(b'\0\0')][0], self.rt.EmptySTTSegmentFrame)
+
+    async def test_parakeet_retries_stream_without_hotwords_and_logs_once(self):
+        recognizer = Mock()
+        stream = recognizer.create_stream.return_value
+        stream.result.text = 'hello'
+
+        def create(**kwargs):
+            if kwargs:
+                self.assertEqual(kwargs, {'hotwords': 'Tether/tether'})
+                raise RuntimeError('private names')
+            return stream
+
+        recognizer.create_stream.side_effect = create
+        service = self.rt.ParakeetSTT(recognizer, SimpleNamespace(stt_seconds=0), 'Tether/tether')
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            for _ in range(2):
+                self.assertEqual(service.decode(b'\0\0'), 'hello')
+        self.assertEqual(recognizer.create_stream.call_count, 4)
+        self.assertEqual(recognizer.decode_stream.call_count, 2)
+        self.assertEqual(stderr.getvalue(), 'Friday hotword stream fallback: RuntimeError\n')
 
     async def test_parakeet_normalizes_quiet_pcm_without_changing_silence(self):
         import numpy as np
