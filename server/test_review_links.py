@@ -3082,15 +3082,15 @@ class ReviewLinksTests(unittest.TestCase):
         self.entries.append(dict(self.reviewer, id='%21'))
         self.states.update({'%21': 'Idle', '%22': 'Idle', '%23': 'Idle'})
         self.turn_source = Mock(return_value=('background', None, None))
-        for reverse in (False, True):
-            with self.subTest(reverse=reverse):
+        for reverse, gap in ((False, False), (True, False), (False, True)):
+            with self.subTest(reverse=reverse, discovery_gap=gap):
                 self.clock.return_value = 1000
                 rows = self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))
                 rows += [dict(row, reviewer=pane, worker_thread=None)
                          for row, pane in zip(self.legacy_pair(dict(rounds=1), dict(empty_rounds=1)), ('%22', '%23'))]
                 self.file.write_text(json.dumps(rows[::-1] if reverse else rows))
                 self.alert.reset_mock()
-                self.observe(elapsed=0)
+                self.observe(elapsed=0, entries=[dict(self.worker, thread=None), *self.entries[1:]] if gap else None)
                 self.observe(entries=[*self.entries, *late])
                 self.observe(entries=[*self.entries, *late])
                 self.alert.assert_called_once()
@@ -3098,17 +3098,26 @@ class ReviewLinksTests(unittest.TestCase):
 
     def test_hold_agent_prompt_marks_live_caps_and_undo_keeps_a_newer_marker(self):
         self.enterContext(own_time(review_links, time=self.clock))
-        for newer in (False, True):
-            with self.subTest(newer=newer):
+        for newer, bind in ((False, False), (True, False), (False, True)):
+            with self.subTest(newer=newer, bind=bind):
                 self.clock.return_value = 1000
-                rows = [dict(row, worker_thread=WORKER_THREAD) for row in self.rows() if not row.get('cap')]
-                rows += [dict(cap=True, worker='%13', worker_thread=WORKER_THREAD, name='Live', agent_prompt=900),
+                thread = None if bind else WORKER_THREAD
+                rows = [dict(row, worker_thread=thread) for row in self.rows() if not row.get('cap')]
+                rows += [dict(cap=True, worker='%13', worker_thread=thread, name='Live',
+                              agent_prompt=900),
                          dict(cap=True, worker='%13', worker_thread=None, name='Saved', saved_at=990)]
                 self.file.write_text(json.dumps(rows))
                 caps = lambda: {row['name']: row for row in self.rows() if row.get('cap')}
                 undo = review_links.hold_agent_prompt('%13', worker_thread=WORKER_THREAD)
                 self.assertEqual(caps()['Live']['agent_prompt'], 1000)
                 self.assertNotIn('agent_prompt', caps()['Saved'])
+                if bind:
+                    # The watcher binds the cap while the send is still in flight.
+                    rows = self.rows()
+                    for row in rows:
+                        if row.get('name') in ('Live', 'Fix the bug'):
+                            row['worker_thread'] = WORKER_THREAD
+                    self.file.write_text(json.dumps(rows))
                 if newer:
                     self.clock.return_value = 1001
                     review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)

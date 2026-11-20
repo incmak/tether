@@ -684,10 +684,10 @@ def hold_agent_prompt(worker, *, worker_thread=None):
     with _lock:
         rows = _read()
         at = time.time()
-        held = []
+        held = {}
         for cap in rows:
             if _is_cap(cap) and _matches(cap, worker, worker_thread) and not _saved(cap):
-                held.append((_cap_key(cap), cap.get('agent_prompt')))
+                held[_cap_key(cap)] = cap.get('agent_prompt')
                 cap['agent_prompt'] = at
         if held:
             _write(rows)
@@ -696,10 +696,12 @@ def hold_agent_prompt(worker, *, worker_thread=None):
         with _lock:
             rows = _read()
             changed = False
-            for key, previous in held:
-                cap = _cap_for(rows, key)
-                if cap is None or cap.get('agent_prompt') != at:
+            for cap in rows:
+                # A bind during delivery can move the marker to another key of the same worker.
+                if not (_is_cap(cap) and cap['worker'] == worker and cap.get('agent_prompt') == at):
                     continue
+                previous = held.get(_cap_key(cap), max((time for time in held.values() if time is not None),
+                                                       default=None))
                 if previous is None:
                     cap.pop('agent_prompt')
                 else:
@@ -1972,10 +1974,14 @@ def _claim_upgrade_alerts(rows, entries):
         key = _cap_key(cap)
         worker = entries.get(key[0])
         current = helper_tabs._thread(worker) if worker is not None else None
-        if key[1] is None and current is not None and any(
-                _is_cap(other) and other.get('paused') == UPGRADE_PAUSE and _cap_key(other) == (key[0], current)
-                for other in rows):
-            continue  # The current conversation's cap alerts; the bind carries its marker.
+        if key[1] is None:
+            bound = {other['worker_thread'] for other in rows
+                     if _is_cap(other) and other['worker'] == key[0] and other.get('worker_thread') is not None
+                     and other.get('paused') == UPGRADE_PAUSE}
+            # The current conversation's bound cap alerts. Without a discovered thread the unbound cap may be the
+            # same conversation, so it waits. The bind carries the marker.
+            if current in bound or current is None and bound:
+                continue
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
             name = worker.get('pane_name') or worker.get('agent_name') or worker.get('label') or name
