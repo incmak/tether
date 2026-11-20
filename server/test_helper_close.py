@@ -1,9 +1,13 @@
+from contextlib import nullcontext
 import json
 import subprocess
+from threading import Lock
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import helper_close
+import undo
+from test_review_links import ApprovalTurnTimingFixture
 
 OWNER_THREAD = '11111111-1111-4111-8111-111111111111'
 OTHER_THREAD = '22222222-2222-4222-8222-222222222222'
@@ -142,7 +146,7 @@ class CloserTests(unittest.TestCase):
         head, folder = 'a' * 40, '/work/reviewed'
         baseline = dict(commit=head, dirty=True, mark='reviewed tree', folder=folder)
         self.rows = [dict(worker='%1', reviewer='%2', worker_thread=OWNER_THREAD, approved_state=baseline,
-                          review_commit='b' * 40, review_folder='/work/new-request', stalled='1234abcd')]
+                          review_commit='b' * 40, review_folder='/work/new-request')]
         tmux = Tmux({'%1': ('', ''), '%2': ('reviewer', record())})
         live = dict(baseline)
         self.scope.side_effect = lambda entry: live if entry.get('review_folder') == folder else dict(
@@ -154,27 +158,29 @@ class CloserTests(unittest.TestCase):
 
     def test_idle_reviewer_checks_pending_work_and_live_scope(self):
         head, next_head = 'a' * 40, 'b' * 40
-        baseline = {'commit': head, 'dirty': False, 'mark': None}
+        baseline = {'commit': head, 'dirty': False, 'mark': 'before'}
+        clean = dict(baseline)
         cases = (
-            ('new HEAD', {}, {}, {'commit': next_head, 'dirty': False}, True, True),
-            ('new HEAD already requested', {'review_commit': next_head, 'awaiting': True}, {},
-             {'commit': next_head, 'dirty': False}, True, True),
-            ('new dirty tree', {}, {}, {'commit': head, 'dirty': True}, True, True),
+            ('new HEAD', {}, {}, dict(clean, commit=next_head), True, 1),
+            ('new HEAD already requested', {'review_commit': next_head, 'awaiting': True}, {}, None, True, 0),
+            ('new dirty tree', {}, {}, dict(clean, dirty=True), True, 1),
             ('edit in a dirty tree', {'approved_state': dict(baseline, dirty=True, mark='before', folder=None)}, {},
-             {'commit': head, 'dirty': True, 'mark': 'after'}, True, True),
-            ('same HEAD and clean', {}, {}, {'commit': head, 'dirty': False}, False, True),
-            ('paused cap', {}, {'paused': True}, {'commit': next_head, 'dirty': False}, False, False),
-            ('waits on Mak', {}, {'escalate': 'notice'}, None, False, False),
-            ('unreadable scope', {}, {}, OSError('git failed'), False, True),
-            ('review pending', {'seen_working': True}, {}, None, True, False),
-            ('review already requested', {'seen_working': True, 'awaiting': True}, {},
-             {'commit': head, 'dirty': False}, False, True),
-            ('stale correction', {'stale_correction': {'commit': head}}, {}, None, True, False),
-            ('stale commit', {'stale_commit': ''}, {}, None, True, False),
-            ('legacy baseline', {'approved_state': None}, {}, {'commit': next_head, 'dirty': False}, True, True),
-            ('no baseline', {'approved_state': None, 'review_commit': None}, {}, None, False, False),
+             dict(clean, dirty=True, mark='after'), True, 1),
+            ('same HEAD and clean', {}, {}, clean, False, 2),
+            ('paused cap with a review pending', {'awaiting': True}, {'paused': True}, None, False, 0),
+            ('waits on Mak with a review pending', {'awaiting': True}, {'escalate': 'notice'}, None, False, 0),
+            ('unreadable scope', {}, {}, OSError('git failed'), False, 2),
+            ('unreadable mark', {}, {}, dict(clean, commit=next_head, mark=None), False, 2),
+            ('review pending', {'seen_working': True}, {}, None, True, 0),
+            ('review requested without verdict', {'request_id': '1234abcd'}, {}, None, True, 0),
+            ('review stalled', {'stalled': '1234abcd'}, {}, None, True, 0),
+            ('follow-up still open', {'approved_turn': True}, {}, None, True, 0),
+            ('stale correction', {'stale_correction': {'commit': head}}, {}, None, True, 0),
+            ('stale commit', {'stale_commit': ''}, {}, None, True, 0),
+            ('legacy baseline', {'approved_state': None}, {}, dict(clean, commit=next_head), True, 1),
+            ('no baseline', {'approved_state': None, 'review_commit': None}, {}, None, False, 0),
         )
-        for name, changes, cap, live, keep, read in cases:
+        for name, changes, cap, live, keep, reads in cases:
             with self.subTest(name=name):
                 self.closer = helper_close.Closer(now=lambda: self.clock[0], scope=self.scope)
                 self.scope.reset_mock(return_value=True, side_effect=True)
@@ -194,10 +200,8 @@ class CloserTests(unittest.TestCase):
                 self.assertEqual(self.sweep(tmux, after=helper_close.IDLE + 1),
                                  [] if keep else [('%2', 'the review has been idle for 30 minutes')])
                 self.assertEqual(tmux.killed, [] if keep else ['%2'])
-                if read:
-                    self.scope.assert_called_once_with({'id': '%1', 'thread': OWNER_THREAD})
-                else:
-                    self.scope.assert_not_called()
+                self.assertEqual(self.scope.call_args_list,
+                                 [call({'id': '%1', 'thread': OWNER_THREAD, 'review_after': None})] * reads)
 
     def test_non_helpers_and_discovery_misses_stay(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', 'not json'), '%3': ('advisor', record())})
@@ -329,6 +333,62 @@ class CloserTests(unittest.TestCase):
         self.states.clear()
         self.assertEqual(self.sweep(tmux, after=helper_close.SWEEP), [])  # 30 s since it was last seen busy
         self.assertEqual(self.sweep(tmux, after=helper_close.SWEEP), [('%2', 'its owner tab is gone')])
+
+
+class MockPanes:
+    def __init__(self, worker, reviewer):
+        self.worker_id = worker["id"]
+        self.reviewer_id = reviewer["id"]
+        self.closed = []
+        self.record = json.dumps({
+            "owner_pane": self.worker_id, "owner_thread": worker["thread"],
+            "helper_thread": reviewer["thread"], "sent_at": 1.0, "before": None,
+        })
+
+    def __call__(self, args, **kwargs):
+        command = args[1]
+        output = ""
+        if command == "list-panes":
+            output = f"{self.worker_id}\t\t\n{self.reviewer_id}\treviewer\t{self.record}\n"
+        elif command == "display-message":
+            pane = args[args.index("-t") + 1]
+            record = self.record if pane == self.reviewer_id else ""
+            output = f"{pane}\t{record}\n"
+        elif command == "kill-pane":
+            self.closed.append(args[args.index("-t") + 1])
+        else:
+            raise AssertionError(f"Unexpected tmux test command {command}")
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+
+class ApprovalTurnCloseTests(ApprovalTurnTimingFixture):
+    def test_reviewer_stays_open_if_worker_finishes_edit_during_idle_check(self):
+        self.approve_current_work()
+        self.worker_turn()
+        self.assertEqual(self.send.call_count, 2)
+        self.enterContext(patch.object(undo, "capture_safe"))
+        self.enterContext(patch.object(undo, "record_tab_close"))
+        self.enterContext(patch.object(helper_close.auto_resume, "forget_pane"))
+        self.enterContext(patch.object(helper_close.groups, "closing", return_value=nullcontext()))
+
+        def scope(entry):
+            snapshot = dict(self.live)
+            self.live.update(dirty=True, mark="new edit")
+            return snapshot
+
+        panes = MockPanes(self.worker, self.reviewer)
+        closer = helper_close.Closer(now=lambda: self.now, scope=lambda entry: self.scope(entry))
+        entries = [self.worker, self.reviewer]
+        send_lock = Lock()
+
+        def idle(entry):
+            return {"state": "Idle"}
+
+        closer.observe(entries, idle, panes, lock=send_lock, fresh=idle)
+        self.now += helper_close.IDLE + 1
+        self.scope = scope
+        closer.observe(entries, idle, panes, lock=send_lock, fresh=idle)
+        self.assertEqual(panes.closed, [])
 
 
 if __name__ == '__main__':

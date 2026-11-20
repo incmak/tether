@@ -137,8 +137,7 @@ class Closer:
         self.since = {key: when for key, when in self.since.items() if key in seen}
         return closed
 
-    @staticmethod
-    def _still_quiet(pane, record, entry, status, watching, run, lock, worker=None):
+    def _still_quiet(self, pane, record, entry, status, watching, run, lock, worker=None):
         """Under the send lock, close an unchanged helper if it and any linked worker are still quiet."""
         if lock is not None and not lock.acquire(timeout=2):
             return False
@@ -148,7 +147,8 @@ class Closer:
                 return False
             if status(entry).get('state') not in QUIET or watching(pane):
                 return False
-            if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])):
+            if worker is not None and (status(worker).get('state') not in QUIET or watching(worker['id'])
+                                       or review_links.unreviewed_work(worker, entry, self.scope)):
                 return False
             import undo  # here: undo.py imports this module
             closed = undo.capture_safe(pane, run, [entry])

@@ -339,38 +339,45 @@ def review_gate_records():
 
 
 def review_folder(entry):
-    """Use a sent request's folder, or find the latest commit folder for a new request."""
-    if folder := entry.get('review_folder'):
+    """Resolve a bound request, a post-verdict scope, or a new request's folder."""
+    folder, after = entry.get('review_folder'), entry.get('review_after')
+    follow_up = 'review_after' in entry
+    if folder and not follow_up:
         return folder
     source = entry.get('agent')
     thread = helper_tabs._thread(entry)
     started = entry.get('process_start')
-    if source in ('claude', 'codex') and thread and not entry.get('codex_unresolved') and started:
+    use_gate = after is not None if follow_up else started
+    if source in ('claude', 'codex') and thread and not entry.get('codex_unresolved') and use_gate:
         record = review_gate_records().get((source, thread))
         if record is not None:
-            at, folder = record
-            try:
-                started_ms = agents.started_ms(started)
-            except (OSError, TypeError, ValueError, OverflowError):
-                started_ms = None
-            if started_ms is not None and at > started_ms / 1000 and review_scope.head(folder):
-                return folder
-    return agent_folder(entry)
+            at, gate_folder = record
+            if after is not None:
+                if at > after:
+                    return gate_folder  # the scope read checks this exact worktree
+            elif started:
+                try:
+                    started_ms = agents.started_ms(started)
+                except (OSError, TypeError, ValueError, OverflowError):
+                    started_ms = None
+                if started_ms is not None and at > started_ms / 1000 and review_scope.head(gate_folder):
+                    return gate_folder
+    return folder if after is not None else folder or agent_folder(entry)
 
 
 REVIEW_SCOPES = {}  # pane id -> ((folder, work mark), monotonic time, scope)
 REVIEW_SCOPE_AGE = 60
 
 
-def review_scope_of(entry):
+def review_scope_of(entry, *, fresh=False):
     """The review scope of a worker. A request that cannot be delivered (a draft in the reviewer's composer) is tried
     again on each monitor tick. The checklist run and the UI listing then repeat only when the work changed
     (review_scope.fingerprint: commit, base, status, tracked, staged and untracked files), or after REVIEW_SCOPE_AGE
-    seconds."""
+    seconds. Idle close asks for a fresh snapshot even when the fingerprint agrees with the cache."""
     folder = review_folder(entry)
     mark = review_scope.fingerprint(folder)
     key, now = (folder, mark), time.monotonic()
-    cached = REVIEW_SCOPES.get(entry.get('id'))
+    cached = None if fresh else REVIEW_SCOPES.get(entry.get('id'))
     if mark is not None and cached is not None and cached[0] == key and now - cached[1] < REVIEW_SCOPE_AGE:
         return dict(cached[2])
     found = review_scope.scope(folder)
@@ -468,7 +475,7 @@ def _observe_push(entries):
             continue
 
 
-HELPER_CLOSER = helper_close.Closer(scope=review_scope_of)
+HELPER_CLOSER = helper_close.Closer(scope=lambda entry: review_scope_of(entry, fresh=True))
 
 
 def monitor_notices():

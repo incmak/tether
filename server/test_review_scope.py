@@ -207,7 +207,7 @@ class ReviewFolderTests(unittest.TestCase):
                                  scope=server.review_scope_of, commit=server.review_commit,
                                  work_mark=server.review_work_mark)
 
-        with own_time(review_links, monotonic=Mock(side_effect=range(0, 1200, 10))):
+        with own_time(review_links, time=lambda: 101.5, monotonic=Mock(side_effect=range(0, 1200, 10))):
             observe('Working')
             observe()
             self.assertIn(f"Commit under review: {work_head} in '{self.work}'", send.call_args.args[1])
@@ -240,3 +240,15 @@ class ReviewFolderTests(unittest.TestCase):
     def test_no_confirm_note_for_a_commit_in_another_worktree(self):
         work_head, text = self.approve_dirty_then_commit(commit_in_review_folder=False)
         self.assertNotIn('plus uncommitted changes', text)
+
+    def test_idle_close_reads_scope_even_when_the_fingerprint_matches_cache(self):
+        clean = dict(commit=self.start_head, dirty=False, folder=str(self.start))
+        edited = dict(clean, dirty=True)
+        with patch.object(server, 'REVIEW_SCOPES', {}), \
+                patch.object(server.review_scope, 'fingerprint', return_value='same'), \
+                patch.object(server.review_scope, 'scope', side_effect=[clean, edited]) as snapshot:
+            self.assertFalse(server.review_scope_of(self.entry)['dirty'])
+            self.assertFalse(server.review_scope_of(self.entry)['dirty'])
+            snapshot.assert_called_once()
+            self.assertTrue(server.HELPER_CLOSER.scope(self.entry)['dirty'])
+            self.assertEqual(snapshot.call_count, 2)
