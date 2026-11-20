@@ -17,6 +17,9 @@ import type { Place } from './groups'
 // The stack row remounts with each tab, like the tab strip: keep its scroll place for each session.
 const rowScroll = new Map<string, number>()
 
+const closeBucket = (pane: Pane) => (pane.state === 'Idle' || pane.agent === 'shell') && !pane.ask && !pane.escalated
+  ? 'idle' : 'working'
+
 /** What the group row needs from the app, beyond what a chat already has. */
 export interface GroupHooks {
   seen: Record<string, number>
@@ -182,7 +185,7 @@ function GroupSwitcher({ api, onUpdate, session, places, current, hooks, onPick,
 }
 
 /** The menu of one group: start a tab, rename, context, ungroup, close all tabs, remove. */
-function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDone }: {
+export function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDone }: {
   api: Api; session: Session; place: Place; order: string[]; at?: Anchor; from: Pane; hooks: GroupHooks; onClose: () => void; onDone: () => void
 }) {
   const group = session.groups?.find(item => item.id === place.id)
@@ -219,7 +222,7 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
     void run(() => api('groups/reorder', { session: session.id, groups: next }))
   }
   // Agents that a close would stop in the middle of a turn, or that wait on you.
-  const busy = all.filter(item => item.state === 'Working' || needsYou(item.state))
+  const busy = all.filter(item => closeBucket(item) === 'working')
   return <dialog {...dialog} aria-labelledby="group-menu-title">
     <div className="sheet-heading"><h2 id="group-menu-title">{group.name}</h2>{!at && <button type="button" className="icon-button" aria-label="Close" disabled={pending} onClick={onClose}><X /></button>}</div>
     <p className="sheet-sub">Stack in {session.name} · {count ? tabs : 'no tabs'}</p>
@@ -232,9 +235,9 @@ function GroupMenu({ api, session, place, order, at, from, hooks, onClose, onDon
         </form>
       : mode === 'close' && closePlan
       ? <div className="confirm-box" role="alertdialog" aria-labelledby="group-close-title">
-          <p id="group-close-title"><strong>{count === 1 ? 'Close the tab' : `Close all ${tabs}`} in {group.name}?</strong> {archived ? `${archived === 1 ? '1 of them is' : `${archived} of them are`} archived. ` : ''}{busy.length ? `This stops ${busy.map(item => `${chatTitle(item)} (${needsYou(item.state) ? 'needs you' : 'working'})`).join(', ')}. ` : ''}{endsSession ? `${count === 1 ? 'It is the last tab' : 'They are the last tabs'}, so this also ends the session ${session.name}. ` : 'Then the empty stack is removed. '}You cannot undo this.</p>
+          <p id="group-close-title"><strong>{count === 1 ? 'Close the tab' : `Close all ${tabs}`} in {group.name}?</strong> {archived ? `${archived === 1 ? '1 of them is' : `${archived} of them are`} archived. ` : ''}{busy.length ? `This stops ${busy.map(item => `${chatTitle(item)} (${needsYou(item.state) || item.ask || item.escalated ? 'needs you' : 'working'})`).join(', ')}. ` : ''}{endsSession ? `${count === 1 ? 'It is the last tab' : 'They are the last tabs'}, so this also ends the session ${session.name}. ` : 'Then the empty stack is removed. '}You cannot undo this.</p>
           <div className="sheet-buttons"><button type="button" className="secondary" disabled={pending} onClick={() => { setClosePlan(null); setMode('menu'); setError('') }}>Cancel</button><button type="button" className="danger" disabled={pending} onClick={() => void run(() => api('groups/close', {
-            session: session.id, group: group.id, panes: closePlan.panes.map(item => ({ pane: item.id, thread: item.thread ?? null })),
+            session: session.id, group: group.id, panes: closePlan.panes.map(item => ({ pane: item.id, thread: item.thread ?? null, bucket: closeBucket(item) })),
           }, undefined, undefined, 60000))}>{pending ? 'Closing…' : `Close ${tabs}`}</button></div>
         </div>
       : <div className="action-list">

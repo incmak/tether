@@ -159,7 +159,7 @@ class ReviewDraftTests(unittest.TestCase):
                 patch.object(server, 'send_text', return_value='queued') as send, \
                 patch.object(server, 'restore_check', side_effect=restore):
             self.assertEqual(server.review_send(self.entry, self.message, 'Working'), 'queued')
-        send.assert_called_once_with(dict(self.entry, _review=True), self.message, 'Working')
+        send.assert_called_once_with(dict(self.entry, _review=True), self.message, 'Working', held=False)
         self.run.assert_not_called()
 
     def test_every_review_send_marks_config_without_mutating_the_caller(self):
@@ -169,7 +169,7 @@ class ReviewDraftTests(unittest.TestCase):
                     patch.object(server, 'send_text') as send:
                 entry = dict(self.entry, agent=agent)
                 server.review_send(entry, self.message)
-                send.assert_called_once_with(dict(entry, _review=True), self.message, None)
+                send.assert_called_once_with(dict(entry, _review=True), self.message, None, held=False)
                 self.assertNotIn('_review', entry)
 
     def test_failed_submit_clears_our_placeholder_or_folder_note_directly(self):
@@ -246,7 +246,7 @@ class ReviewDraftTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout='')
         self.run.side_effect = run
         with patch.object(server, 'stash_quiet_draft', side_effect=lambda entry: self.stash()), \
-                patch.object(server, 'send_text', side_effect=lambda entry, text, state: terminal.submit(entry, text, self.run)), \
+                patch.object(server, 'send_text', side_effect=lambda entry, text, state, **_: terminal.submit(entry, text, self.run)), \
                 patch.object(server, 'restore_check', side_effect=lambda entry, text: terminal.restore_check(entry, text, self.run, Mock())), \
                 patch.object(terminal, 'leave_scrollback'):
             server.review_send(self.entry, self.message, 'Working')
@@ -981,7 +981,9 @@ class MenuChooseTests(unittest.TestCase):
         self.assertTrue(menu['question'].endswith('word119'))
 
     def choose(self, picker, *args, **kwargs):
-        with patch.object(terminal, 'verify'):
+        ask = {'id': 'tool-ask', 'questions': [{'header': 'Action', 'question': 'What should I do?', 'multi': False,
+            'options': [{'label': label, 'description': ''} for label in picker.ROWS[:2]]}]}
+        with patch.object(terminal, 'verify'), patch('agents.open_claude_ask', return_value=ask):
             terminal.menu_choose(self.ENTRY, *args, run=picker.run, sleep=lambda _: None, **kwargs)
 
     def test_own_answer_row_is_marked_free(self):
@@ -1060,12 +1062,12 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(found['reason'], 'menu')
         self.assertIn('Type something.', found['text'])
 
-    def test_menu_is_split_into_question_and_options(self):
+    def test_unverified_menu_keeps_only_the_question(self):
         terminal.attention(self.CLAUDE, self.MENU, False, now=0)
         found = terminal.attention(self.CLAUDE, self.MENU, False, now=4)
         self.assertEqual(found['question'], 'Which look should every plate match?')
-        self.assertEqual([option['id'] for option in found['options']], [1, 2, 3])
-        self.assertEqual(found['options'][1]['text'], 'New style')
+        self.assertIs(found['menu_verified'], False)
+        self.assertNotIn('options', found)
 
     def test_moving_the_cursor_does_not_restart_the_delay(self):
         terminal.attention(self.CLAUDE, self.MENU, False, now=0)

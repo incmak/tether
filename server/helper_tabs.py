@@ -1,4 +1,13 @@
-"""Owned helper tabs, guarded messages, and short turn polls."""
+"""Owned helper tabs, guarded messages, and short turn polls.
+
+Lock order for helper writes: server SEND_LOCK, Undo's run lock, stack
+lock (thread then file), helper record lock (thread then file), then any
+preference, review-store, or pane status locks used by the operation.
+Status takes its lock-table mutex only to look up the pane lock. It releases
+the mutex before taking the pane lock. Readers and the sort CLI can start
+later in the order, but they must never take an earlier lock while holding
+a later one. Delivery calls the send implementation with SEND_LOCK held.
+"""
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
@@ -25,17 +34,29 @@ NO_TURN_GRACE = 60
 START_WAIT = 300
 MISSING_GRACE = 10
 _missing = {}
-# Record writers take this before the server send lock.
-SEND_LOCK = threading.Lock()
+_RECORD_THREADS = threading.RLock()
+_record_depth = 0
 
 
 @contextmanager
 def record_lock():
-    """Serialize helper record transactions across server and CLI processes."""
-    paths.TETHER.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (paths.TETHER / 'helper-record.lock').open('a') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
+    """Serialize helper record transactions across threads and processes."""
+    global _record_depth
+    with _RECORD_THREADS:
+        handle = None
+        try:
+            if _record_depth == 0:
+                paths.TETHER.mkdir(mode=0o700, parents=True, exist_ok=True)
+                handle = (paths.TETHER / 'helper-record.lock').open('a')
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            _record_depth += 1
+            try:
+                yield
+            finally:
+                _record_depth -= 1
+        finally:
+            if handle is not None:
+                handle.close()
 
 
 class Stale(RuntimeError):
@@ -68,17 +89,49 @@ def visible_name(entry):
     return entry.get('pane_name') or entry.get('agent_name') or entry.get('label') or None
 
 
-def save(pane, record, run):
-    run([paths.TMUX, 'set-option', '-p', '-t', pane, OPTION, json.dumps(record, separators=(',', ':'))],
-        check=True, capture_output=True, timeout=5)
+_ABSENT = object()
 
 
-def write_record(pane, record, run):
-    if record is None:
-        run([paths.TMUX, 'set-option', '-p', '-t', pane, '-u', OPTION],
-            check=True, capture_output=True, timeout=5)
-    else:
-        save(pane, record, run)
+def _changed_fields(before, after):
+    return [key for key in dict.fromkeys((*before, *after))
+            if before.get(key, _ABSENT) != after.get(key, _ABSENT)]
+
+
+def record_matches(current, before, after):
+    """Compare the fields a write will change, or the whole record for creation or removal."""
+    if current is None or before is None or after is None:
+        return current == before
+    return all(current.get(key, _ABSENT) == before.get(key, _ABSENT) for key in _changed_fields(before, after))
+
+
+def write_record(pane, before, after, run, *, read=None):
+    """Change only fields that differ in the two snapshots. Accept raw JSON for sort replay."""
+    def fields(value):
+        return json.loads(value) if isinstance(value, str) else value
+
+    old, new = fields(before), fields(after)
+    changes = _changed_fields(old or {}, new or {})
+    with record_lock():
+        exists, raw = (read or _read_raw)(pane, run)
+        if not exists or raw and _record(raw) is None:
+            raise Stale('The helper record changed. Reload its tab.')
+        current = fields(raw or None)
+        if not record_matches(current, old, new):
+            raise Stale('The helper record changed. Reload its tab.')
+        if not changes:
+            return
+        args = ['-u', OPTION]
+        if new is not None:
+            current = current or {}
+            for key in changes:
+                if key in new:
+                    current[key] = new[key]
+                else:
+                    current.pop(key, None)
+            raw = after if isinstance(after, str) and current == new else json.dumps(
+                current, separators=(',', ':'), allow_nan=False)
+            args = [OPTION, raw]
+        run([paths.TMUX, 'set-option', '-p', '-t', pane, *args], check=True, capture_output=True, timeout=5)
 
 
 def _record(raw):
@@ -114,7 +167,7 @@ def placement_owner(record):
     return record['owner_pane'], record.get('owner_thread')
 
 
-def load(pane, run):
+def _read_raw(pane, run):
     try:
         result = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{@tether_helper}'],
                      capture_output=True, text=True, timeout=5)
@@ -122,8 +175,13 @@ def load(pane, run):
         raise RuntimeError('Could not read the helper tab.') from exc
     found, _, raw = result.stdout.rstrip('\n').partition('\t')
     if result.returncode or found != pane:
-        return False, None
-    return True, _record(raw)
+        return False, ''
+    return True, raw
+
+
+def load(pane, run):
+    found, raw = _read_raw(pane, run)
+    return found, _record(raw)
 
 
 
@@ -225,8 +283,8 @@ def check(caller_pane, caller, helper, record, run, *, pane=None):
         elif bound is None and seen is not None:
             bindings[key] = seen
     if bindings and verified_thread(helper) is not None:  # a refused or unconfirmed call writes nothing
+        write_record(pane, record, dict(record, **bindings), run)
         record.update(bindings)
-        save(pane, record, run)
 
 
 def _pane(body):
@@ -272,8 +330,8 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock, bef
         if state in ('Approval', 'Input needed'):
             raise RuntimeError('That helper waits on a prompt. Use wait to read it, then ask the user to answer it.')
         previous = dict(record)
-        record.update(sent_at=time.time(), before=digest(last_reply(helper)))
-        save(pane, record, run)
+        record = dict(record, sent_at=time.time(), before=digest(last_reply(helper)))
+        write_record(pane, previous, record, run)
         try:
             # Inside the lock and before delivery, so the helper's turn cannot finish before this runs.
             if before_send is not None:
@@ -281,7 +339,7 @@ def send_message(body, caller, entries, run, status, send, last_reply, lock, bef
             delivery = send(helper, message, state)
         except BaseException:
             try:
-                save(pane, previous, run)
+                write_record(pane, record, previous, run)
             except Exception:
                 pass
             raise
@@ -312,28 +370,29 @@ def _approval_prompt(text, options):
 
 def poll(body, caller, entries, run, status, last_reply, timeline, now=time.time):
     pane = _pane(body)
-    exists, record = load(pane, run)
-    if not exists:
-        _missing.pop(pane, None)
-        return {'status': 'gone', 'pane': pane}
-    caller_pane = caller['id'] if caller is not None else body.get('session')
-    if record is None or record['owner_pane'] != caller_pane:
-        raise ValueError('That tab is not a helper of this tab.')
-    if caller is None:
-        raise RuntimeError('Could not read this tab. Try again.')
-    helper = _helper(entries, pane)
-    check(caller['id'], caller, helper, record, run, pane=pane)
-    current = now()
     running = {'status': 'running', 'pane': pane}
-    if helper is None:
-        if record.get('helper_thread') is None and current - record['sent_at'] < START_WAIT:
-            return dict(running, state='Starting')
-        missing = _missing.setdefault(pane, current)
-        if current - missing >= MISSING_GRACE:
+    with record_lock():
+        exists, record = load(pane, run)
+        if not exists:
             _missing.pop(pane, None)
             return {'status': 'gone', 'pane': pane}
-        return dict(running, state='Missing')
-    _missing.pop(pane, None)
+        caller_pane = caller['id'] if caller is not None else body.get('session')
+        if record is None or record['owner_pane'] != caller_pane:
+            raise ValueError('That tab is not a helper of this tab.')
+        if caller is None:
+            raise RuntimeError('Could not read this tab. Try again.')
+        helper = _helper(entries, pane)
+        check(caller['id'], caller, helper, record, run, pane=pane)
+        current = now()
+        if helper is None:
+            if record.get('helper_thread') is None and current - record['sent_at'] < START_WAIT:
+                return dict(running, state='Starting')
+            missing = _missing.setdefault(pane, current)
+            if current - missing >= MISSING_GRACE:
+                _missing.pop(pane, None)
+                return {'status': 'gone', 'pane': pane}
+            return dict(running, state='Missing')
+        _missing.pop(pane, None)
     info = status(helper)
     state = info['state']
     if state in ('Approval', 'Input needed'):

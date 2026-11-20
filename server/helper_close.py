@@ -28,14 +28,51 @@ SWEEP = 30
 QUIET = ('Idle', 'Shell')  # only a confirmed quiet state counts; Unavailable or Unknown never closes a tab
 ADVISOR = ('advisor', 'second-advisor')
 PANE = re.compile(r'%[0-9]+')
+CLOSE_CHANGED = 'The helpers changed. Review the list again.'
+CLOSE_FORMAT = '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{pane_pid}'
 
 
-def close_pane(pane, run):
+def close_pane(pane, run, *, guard=None):
     """The shared close: forget the resume record, end the pane, drop its review links."""
-    auto_resume.forget_pane(pane, run=run)
+    if guard is None:
+        auto_resume.forget_pane(pane, run=run)
     with groups.closing(pane, run):  # its auto stack goes when empty or root-only
+        if guard is not None:
+            guard()
         run([paths.TMUX, 'kill-pane', '-t', pane], check=True, capture_output=True, timeout=5)
+        if guard is not None:
+            auto_resume.forget_pane(pane, run=run)
     release_reviews(pane)
+
+
+def close_identity(entry):
+    return (entry['id'], entry.get('tmux_session'), entry.get('agent'), helper_tabs.verified_thread(entry),
+            entry.get('owner_pid'), entry.get('process_start'), entry.get('pane_pid'), entry.get('pane_start'))
+
+
+def close_bucket(status):
+    state = status.get('state')
+    if state not in ('Idle', 'Shell', 'Working', 'Approval', 'Input needed'):
+        return None
+    if state == 'Shell':
+        status = dict(status, state='Idle')
+    return 'idle' if task_tree.state(status) == 'idle' else 'working'
+
+
+def close_matching_pane(pane, run, *, expected, bucket, server, fresh, status):
+    """Read the conversation and its state after Undo is ready, immediately before the kill."""
+    def guard():
+        current = next((entry for entry in fresh() if entry['id'] == pane), None)
+        if current is None or expected != close_identity(current) or bucket != close_bucket(status(current)):
+            raise helper_tabs.Stale(CLOSE_CHANGED)
+        result = run([paths.TMUX, 'display-message', '-p', '-t', pane, CLOSE_FORMAT],
+                     capture_output=True, text=True, timeout=5)
+        identity = result.stdout.rstrip('\n').split('\t')
+        if (result.returncode or len(identity) != 4 or identity[:3] != [server, pane, current['tmux_session']]
+                or current.get('pane_pid') is not None and identity[3] != str(current['pane_pid'])):
+            raise helper_tabs.Stale(CLOSE_CHANGED)
+
+    close_pane(pane, run, guard=guard)
 
 
 def release_reviews(pane):

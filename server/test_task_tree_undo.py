@@ -58,6 +58,11 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.records[entry['id']] = record
 
     def tmux(self, command, **_):
+        if command[-1] == '#{pane_id}\t#{@tether_helper}':
+            pane = command[4]
+            value = self.records.get(pane)
+            raw = json.dumps(value) if value else ''
+            return CompletedProcess(command, 0 if pane in self.entries else 1, stdout=f'{pane}\t{raw}\n')
         if command[1:4] == ['display-message', '-p', '#{pid}:#{start_time}']:
             if self.server_id is None:
                 return CompletedProcess(command, 1, stdout='', stderr='no server running')
@@ -110,6 +115,22 @@ class TaskTreeUndoTests(unittest.TestCase):
             undo.run('undo', None, self.env)
         self.assertEqual(self.records['%2']['sent_at'], 1)
         self.assertFalse(any(call.args[0][1] == 'set-option' for call in self.runner.call_args_list))
+
+    def test_move_undo_and_redo_preserve_new_helper_binding_and_delivery(self):
+        self.put(self.entry('%1', 1))
+        child = self.entry('%2', 2)
+        old = helper('%1', thread(1), moved=True)
+        detached = {key: old[key] for key in ('owner_pane', 'owner_thread', 'sent_at', 'moved_by')}
+        detached['kind'] = 'own'
+        self.put(child, dict(detached, helper_thread=thread(2)))
+        undo.record_task_tree_move(child, old, detached)
+
+        self.assertEqual(undo.run('undo', None, self.env)['state'], 'undone')
+        self.assertEqual(self.records['%2'], dict(old, helper_thread=thread(2)))
+
+        self.records['%2'].update(sent_at=45, before='latest-reply')
+        self.assertEqual(undo.run('redo', None, self.env)['state'], 'done')
+        self.assertEqual(self.records['%2'], dict(detached, helper_thread=thread(2), sent_at=45, before='latest-reply'))
 
     def test_undo_move_refuses_a_stale_home_or_a_new_loop(self):
         child = self.entry('%2', 2)

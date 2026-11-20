@@ -363,7 +363,7 @@ def record_tab_close(tab, run=subprocess.run):
             note_released(tab, run)
         except Exception as error:  # noqa: BLE001 - as capture_safe: the close happened, so record it all the same
             print(f'undo: could not read the stack of closed tab {tab["pane"]}: {error!r}', file=sys.stderr)
-        undo_store.record('tab.close', f'Closed tab {_q(tab["name"] or tab["session"])}', tab=tab)
+        return undo_store.record('tab.close', f'Closed tab {_q(tab["name"] or tab["session"])}', tab=tab)
 
 
 def _task_tree_change(entry, before, after):
@@ -1206,7 +1206,7 @@ def _tree_snapshot(env, ctx):
     return ctx['tree']
 
 
-def _tree_check(pane, session, thread, record, rows, entries):
+def _tree_check(pane, session, thread, record, rows, entries, *, target=None):
     entry, options = entries.get(pane), rows.get(pane)
     if entry is None or options is None or options.session != session:
         raise Refused(f'Tab {pane} closed or moved to another tmux session.')
@@ -1216,7 +1216,7 @@ def _tree_check(pane, session, thread, record, rows, entries):
         same = entry.get('agent') == 'shell'
     if not same:
         raise Refused(f'Tab {pane} changed conversations. Reload its tab.')
-    if options.record != record or (record is None and options.raw):
+    if not helper_tabs.record_matches(options.record, record, target) or (options.record is None and options.raw):
         raise Refused(f'Tab {pane} changed task placement. Reload its tab.')
 
 
@@ -1236,7 +1236,7 @@ class TaskTreeMove:
         rows, entries = _tree_snapshot(env, ctx)
         pane = a['pane']
         current, target = (a['after'], a['before']) if d == 'undo' else (a['before'], a['after'])
-        _tree_check(pane, a['session'], a['thread'], current, rows, entries)
+        _tree_check(pane, a['session'], a['thread'], current, rows, entries, target=target)
         row = rows[pane]
         if not task_tree.is_child(target, row.role, row.group_by):
             return
@@ -1257,7 +1257,8 @@ class TaskTreeMove:
 
     @staticmethod
     def apply(a, d, env):
-        helper_tabs.write_record(a['pane'], a['before'] if d == 'undo' else a['after'], env.run)
+        before, after = (a['after'], a['before']) if d == 'undo' else (a['before'], a['after'])
+        helper_tabs.write_record(a['pane'], before, after, env.run)
 
     @staticmethod
     def effects(a, d, env):
@@ -1331,7 +1332,7 @@ class TaskTreeClose:
         for change in a['kept']:
             field = 'after' if d == 'undo' or change['pane'] in detached else 'before'
             _tree_check(change['pane'], change['session'], change['thread'], _remap_helper(change[field], panes),
-                        rows, entries)
+                        rows, entries, target=_remap_helper(change['before' if field == 'after' else 'after'], panes))
         if d == 'undo':
             for member in a['closed']:
                 tab = member['tab']
@@ -1378,16 +1379,18 @@ class TaskTreeClose:
                 raise Refused('Tether could not confirm the tmux server of the reopened task.')
             for member in a['closed']:
                 if member['record'] is not None:
-                    helper_tabs.write_record(panes[member['tab']['pane']], _remap_helper(member['record'], panes), run)
+                    helper_tabs.write_record(panes[member['tab']['pane']], None,
+                                             _remap_helper(member['record'], panes), run)
             for change in a['kept']:
-                helper_tabs.write_record(change['pane'], _remap_helper(change['before'], panes), run)
+                expected = _remap_helper(change['after'], a.get('closed_panes', {}))
+                helper_tabs.write_record(change['pane'], expected, _remap_helper(change['before'], panes), run)
                 attached.append(change)
         except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
             failed = []
             for change in reversed(attached):
                 try:
                     expected = _remap_helper(change['after'], a.get('closed_panes', {}))
-                    helper_tabs.write_record(change['pane'], expected, run)
+                    helper_tabs.write_record(change['pane'], _remap_helper(change['before'], panes), expected, run)
                 except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
                     failed.append(change['pane'])
             for pane in reversed(list(panes.values())):
@@ -1431,7 +1434,8 @@ class TaskTreeClose:
             for change in a['kept']:
                 pane = change['pane']
                 if pane not in detached:
-                    helper_tabs.write_record(pane, _remap_helper(change['after'], panes), run)
+                    helper_tabs.write_record(pane, _remap_helper(change['before'], panes),
+                                             _remap_helper(change['after'], panes), run)
                     detached.append(pane)
             for member, old, tab in pending:
                 pane = panes[old]

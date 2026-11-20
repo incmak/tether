@@ -59,10 +59,7 @@ class Closer:
             if key != last:
                 since = now
             self.timers[pane] = since, key
-            if now - since < task_tree.CLOSE_AFTER or not helper_tabs.SEND_LOCK.acquire(timeout=2):
-                continue
-            if not lock.acquire(timeout=2):
-                helper_tabs.SEND_LOCK.release()
+            if now - since < task_tree.CLOSE_AFTER or not lock.acquire(timeout=2):
                 continue
             try:
                 with groups.LOCK(), helper_tabs.record_lock():
@@ -80,13 +77,11 @@ class Closer:
                     for member, *_ in signature:
                         if draft(live.entries[member]):
                             raise ValueError('A task or helper has an unsent draft.')
-                    idle = {child['pane'] for child in task_tree_api.close_plan(pane, live)['idle']}
-
-                    def before_kill(member):
-                        if task_tree.state(live.status_row(member)) != 'idle':
-                            raise helper_tabs.Stale('A task or helper started work during auto-close.')
-
-                    result = task_tree_api.close_task(pane, live, idle, recheck=recheck, before_kill=before_kill)
+                    plan, captures, server = task_tree_api.prepare_close(pane, live)
+                    idle = {child['pane'] for child in plan['idle']}
+                    if plan['working'] or plan['task']['state'] != 'idle' or len(captures) != len(idle) + 1:
+                        continue
+                    result = task_tree_api.close_task(pane, live, idle, plan, captures, server, recheck=recheck)
                     closed.extend(result['closed'])
             except task_tree_api.CloseInterrupted as exc:
                 closed.extend(member for member, _ in exc.members)
@@ -99,7 +94,6 @@ class Closer:
                 self.timers.pop(pane, None)
                 changed()
                 lock.release()
-                helper_tabs.SEND_LOCK.release()
         return closed
 
 

@@ -313,6 +313,7 @@ export interface DialogHint { keys: { key: string; label: string }[]; effect: st
 export interface ClaudeDialog { title: string; note?: string; tabs?: string[]; tab?: string; tab_focus?: boolean; blocks: DialogBlock[]; hints: DialogHint[]; focus: 'list' | 'search' | 'none'; mode: string; text: string }
 export type DialogAction = { action: 'key'; key: string } | { action: 'row'; row: number; label: string; then?: 'Up' | 'Down' } | { action: 'tab'; tab: string } | { action: 'scale'; value: string } | { action: 'filter'; text: string } | { action: 'subtab'; tab: string } | { action: 'option'; value: string }
 export interface Attention { id: string; text: string; reason: 'menu' | 'prompt' | 'no-input-box' | 'panel' | 'picker' | 'info' | 'permissions' | 'side' | 'dialog'; permissions?: PermissionsDialog; dialog?: ClaudeDialog;
+  menu_verified?: false | string;
   /** reason 'side' (Claude's /btw): pending = no answer yet, markdown = text is the raw Markdown answer, fork = the fork key is offered. */
   pending?: boolean; markdown?: boolean; fork?: boolean;
   promptId?: string; revision?: string; requiresResponse?: boolean; body?: string; hints?: string[]; actions?: PromptAction[]; title?: string; subtitle?: string; items?: PickerItem[]; more_above?: number; more_below?: number; hint?: string; question?: string; options?: Choice[]; choice?: ChoiceState; ask?: { id: string; questions: AskQuestion[] }; askBridge?: AskBridge; ask_current?: AskCurrent; login?: { url: string; code: boolean; user_code?: string; message?: string } }

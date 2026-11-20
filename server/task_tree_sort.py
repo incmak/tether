@@ -230,11 +230,6 @@ def _check(server, rows, expected, snapshot):
         raise Refused('The sort plan is stale: ' + ', '.join(stale) + '.')
 
 
-def _set_raw(pane, value, run):
-    run([paths.TMUX, 'set-option', '-p', '-t', pane, helper_tabs.OPTION, value],
-        check=True, capture_output=True, timeout=5)
-
-
 def _confirm_record(server, row, expected, run):
     pane = row['pane']
     fmt = '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}'
@@ -244,7 +239,12 @@ def _confirm_record(server, row, expected, run):
     if (result.returncode or len(fields) != 4 or fields[:3] != [server, pane, row['session']]
             or _placement(fields[3]) != _placement(expected)):
         raise Refused(f'The sort plan is stale: {pane} changed its session or helper record.')
-    return fields[3]
+    return True, fields[3]
+
+
+def _write(server, row, before, after, run):
+    helper_tabs.write_record(row['pane'], before, after, run,
+                             read=lambda _, runner: _confirm_record(server, row, before, runner))
 
 
 def _restore(server, applied, run):
@@ -264,9 +264,8 @@ def _restore(server, applied, run):
         if _placement(current.get('raw', '')) == _placement(old):
             continue  # a failed tmux call can leave the option unchanged
         try:
-            raw = _confirm_record(server, row, new, run)
-            _set_raw(pane, _merge(raw, old), run)
-        except (OSError, subprocess.SubprocessError, Refused):
+            _write(server, row, new, old, run)
+        except (OSError, subprocess.SubprocessError, Refused, helper_tabs.Stale):
             failed.append(pane)
     return failed
 
@@ -283,7 +282,8 @@ def _replay(folder, undo, run):
     expected, target, changed = {}, {}, []
     for row in rows:
         pane, old = row['pane'], row['raw']
-        new = json.dumps(row['new'], separators=(',', ':'), allow_nan=False) if row['old'] != row['new'] else old
+        new = (_merge(old, json.dumps(row['new'], separators=(',', ':'), allow_nan=False))
+               if row['old'] != row['new'] else old)
         expected[pane], target[pane] = (new, old) if undo else (old, new)
         if new != old:
             changed.append(row)
@@ -296,13 +296,12 @@ def _replay(folder, undo, run):
             pane = row['pane']
             # Conversation IDs and helper records can change while the CLI runs. Recheck before each write.
             _check(server, rows, expected, _snapshot(run))
-            raw = _confirm_record(server, row, expected[pane], run)
-            applied.append((row, raw, target[pane]))
-            _set_raw(pane, _merge(raw, target[pane]), run)
+            applied.append((row, expected[pane], target[pane]))
+            _write(server, row, expected[pane], target[pane], run)
             expected[pane] = target[pane]
-    except (OSError, subprocess.SubprocessError, Refused, KeyboardInterrupt) as exc:
+    except (OSError, subprocess.SubprocessError, Refused, helper_tabs.Stale, KeyboardInterrupt) as exc:
         failed = _restore(server, applied, run) if applied else []
-        reason = str(exc) if isinstance(exc, Refused) else f'Tmux could not write pane {pane}.'
+        reason = str(exc) if isinstance(exc, (Refused, helper_tabs.Stale)) else f'Tmux could not write pane {pane}.'
         if isinstance(exc, KeyboardInterrupt):
             reason = 'The sort was interrupted.'
         if failed:

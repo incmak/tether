@@ -2,18 +2,27 @@
 import unittest_isolated  # noqa: F401
 from contextlib import nullcontext
 import json
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
 import groups
 import groups_api
-from test_groups import Handler
+import undo_store
+from test_groups import Handler as GroupHandler
 from test_task_tree import FakeTmux, chat, owner
 
 
 BUGS = 'g00000001'
 TREE = 'g00000002'
+
+
+class Handler(GroupHandler):
+    def respond(self, status, body, headers=None):
+        self.response_headers = headers or {}
+        super().respond(status, body)
 
 
 class StackTmux(FakeTmux):
@@ -52,15 +61,22 @@ class StackCloseTests(unittest.TestCase):
 
     def post(self, route, group, *entries):
         handler = Handler(groups_api.PREFIX + route, {'session': '$1', 'group': group,
-                          **({'panes': [{'pane': item['id'], 'thread': item['thread']} for item in entries]}
+                          **({'panes': [{'pane': item['id'], 'thread': item['thread'],
+                                         'bucket': item.get('bucket', 'idle')} for item in entries]}
                              if route == 'close' else {})})
-        groups_api.post(handler, self.run, sessions=lambda: self.entries)
+        groups_api.post(handler, self.run, sessions=lambda: self.entries,
+                        status=lambda entry: {'state': entry.get('state', 'Idle')})
         return handler.status, handler.body
 
     def test_b446_close_preserves_helpers_listed_in_another_stack(self):
         self.assertEqual(self.post('close', BUGS, self.root)[0], 200)
         self.assertEqual(list(self.run.rows), ['%1', '%82', '%85'])
         self.assertEqual([stack['id'] for stack in self.run.stacks], [TREE])
+
+    def test_stack_can_close_a_shell_without_agent_status(self):
+        self.root.update(agent='shell', thread=None, state='Unavailable')
+        self.assertEqual(self.post('close', BUGS, self.root)[0], 200)
+        self.assertNotIn(self.root['id'], self.run.rows)
 
     def test_stale_members_or_conversations_refuse_before_any_write(self):
         for entries in ([self.other, self.worker], [self.other, self.worker, dict(self.review, thread=None)]):
@@ -79,6 +95,36 @@ class StackCloseTests(unittest.TestCase):
         self.assertEqual(self.post('close', TREE, self.other, self.worker, self.review)[0], 200)
         self.assertEqual(list(self.run.rows), ['%88'])
         self.assertEqual([call[-1] for call in self.run.writes if call[0] == 'kill-pane'], ['%85', '%82', '%1'])
+
+    def test_close_rechecks_the_next_conversation_after_each_kill(self):
+        def first_kill(pane):
+            if pane == self.review['id']:
+                self.entries[2] = dict(self.worker, thread=self.root['thread'])
+
+        self.run.on_kill = first_kill
+        saved = {'pane': '%85', 'name': 'B446 server review', 'session': 'Tether'}
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=Path(folder) / 'history.json'), \
+                patch('undo.capture_safe', return_value=saved), patch('undo.note_released'):
+            status, body = self.post('close', TREE, self.other, self.worker, self.review)
+            step, = undo_store.entries()[:1]
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {'error': 'The helpers changed. Review the list again.',
+                                'closed': ['B446 server review'], 'undo': step['id']})
+        self.assertEqual([call[-1] for call in self.run.writes if call[0] == 'kill-pane'], ['%85'])
+        self.assertIn(TREE, [stack['id'] for stack in self.run.stacks])
+
+    def test_close_rechecks_a_working_pane_that_became_idle_during_undo_capture(self):
+        self.root['state'] = 'Working'
+
+        def finish_during_capture(*_):
+            self.root['state'] = 'Idle'
+
+        with patch('undo.capture_safe', side_effect=finish_during_capture):
+            status, body = self.post('close', BUGS, dict(self.root, bucket='working'))
+        self.assertEqual((status, body), (409, {'error': 'The helpers changed. Review the list again.', 'closed': []}))
+        self.assertEqual(self.run.writes, [])
 
     def test_remove_uses_effective_membership_instead_of_saved_helper_labels(self):
         self.run.rows.pop(self.root['id'])

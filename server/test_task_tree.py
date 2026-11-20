@@ -47,6 +47,18 @@ class FakeTmux:
         if command[1] == 'display-message' and command[-1] == '#{pane_id}\t#{@tether_done}':
             pane = command[4]
             return subprocess.CompletedProcess(command, 0, stdout=f'{pane}\t{self.rows[pane].get(task_tree.DONE, "")}\n')
+        if command[1] == 'display-message' and command[-1] == '#{pane_id}\t#{@tether_helper}':
+            pane = command[4]
+            row = self.rows.get(pane)
+            return subprocess.CompletedProcess(command, 0 if row else 1,
+                                               stdout=f'{pane}\t{row.get(helper_tabs.OPTION, "")}\n' if row else '')
+        if command[1] == 'display-message' and command[-1] == helper_close.CLOSE_FORMAT:
+            pane = command[4]
+            row = self.rows.get(pane)
+            identity = f'10:20\t{pane}\t{row["session_id"]}\t{row.get("pane_pid", "")}\n' if row else ''
+            return subprocess.CompletedProcess(command, 0 if row else 1, stdout=identity)
+        if command[1:] == ['display-message', '-p', '#{pid}:#{start_time}']:
+            return subprocess.CompletedProcess(command, 0, stdout='10:20\n')
         self.writes.append(command[1:])
         if command[1] == 'set-option':
             for part in ' '.join(command[1:]).split(' ; '):
@@ -145,7 +157,8 @@ class Routes(unittest.TestCase):
 
     def tree(self):
         return task_tree_api.Tree(self.entries, self.run, lambda item: {'state': self.states.get(item['id'], 'Idle')},
-                                  lambda pane, _: self.asks.get(pane), lambda _: self.escalated)
+                                  lambda pane, _: self.asks.get(pane), lambda _: self.escalated,
+                                  fresh_entries=lambda: self.entries)
 
     def request(self, action, payload, headers=None, deny=False):
         handler = object.__new__(server.Handler)
@@ -228,7 +241,7 @@ class Routes(unittest.TestCase):
     def close_request(self, also=()):
         plan = task_tree_api.close_plan('%1', self.tree())
         return dict(pane='%1', thread=self.root['thread'], plan=plan.get('plan'),
-                    close_idle=[child['pane'] for child in plan['idle']], close_also=list(also))
+                    close_idle=[child['pane'] for child in plan['idle'] if child.get('undo', True)], close_also=list(also))
 
     def test_close_refuses_changes_to_the_shown_set(self):
         self.states['%3'] = 'Working'
@@ -251,7 +264,7 @@ class Routes(unittest.TestCase):
         self.states['%3'] = 'Working'
         self.asks['%3'] = {'kind': 'reply'}
         plan = task_tree_api.close_plan('%1', self.tree())
-        self.assertEqual(plan['task'], {'pane': '%1', 'name': 'B446 Task'})
+        self.assertEqual(plan['task'], {'pane': '%1', 'name': 'B446 Task', 'state': 'idle', 'undo': True})
         self.assertEqual(plan['idle'][0]['pane'], '%2')
         self.assertEqual((plan['working'][0]['role'], plan['working'][0]['state']), ("Worker's review", 'needs'))
         with patch.object(server, 'SEND_LOCK', self.lock):
@@ -280,6 +293,109 @@ class Routes(unittest.TestCase):
         task_tree_api.undo.capture.side_effect = start_during_capture
         data = self.close_request()
         self.assertEqual(self.request('close', data)[0], 409)
+        self.assertEqual(self.run.writes, [])
+
+    def check_after_checkpoint(self, pane, change, closed):
+        checkpoint = undo_store.checkpoint
+
+        def change_after_checkpoint(identifier, label, actions, **kwargs):
+            saved = checkpoint(identifier, label, actions, **kwargs)
+            if actions and actions[0]['kind'] == 'task-tree.close':
+                member = actions[0]['closed'][-1]
+                if member.get('pending') and member['tab']['pane'] == pane:
+                    change()
+            return saved
+
+        with patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
+                patch.object(undo_store, 'checkpoint', side_effect=change_after_checkpoint):
+            status, body = self.request('close', self.close_request())
+            steps = undo_store.entries()
+        self.assertEqual(status, 409)
+        self.assertEqual(body['error'], task_tree_api.CLOSE_CHANGED)
+        self.assertEqual(body['closed'], closed)
+        self.assertIn(pane, self.run.rows)
+        self.assertIn('%1', self.run.rows)
+        if closed:
+            step, = steps
+            self.assertEqual(body['undo'], step['id'])
+            self.assertEqual([item['tab']['pane'] for item in step['actions'][0]['closed']], ['%3'])
+        else:
+            self.assertEqual(steps, [])
+
+    def test_close_rechecks_state_after_the_undo_checkpoint(self):
+        self.check_after_checkpoint('%3', lambda: self.states.update({'%3': 'Working'}), [])
+
+    def test_close_refuses_a_reused_pane_id_after_the_first_kill(self):
+        def reuse_id():
+            self.entries[1] = dict(self.worker, pane_pid=123, pane_start='new')
+
+        self.check_after_checkpoint('%2', reuse_id, ['Tab 3'])
+
+    def test_close_asks_for_explicit_selection_of_a_child_without_undo(self):
+        self.review['agent'] = 'antigravity'
+        plan = task_tree_api.close_plan('%1', self.tree())
+        self.assertIs(plan['task']['undo'], True)
+        self.assertIs(next(item for item in plan['idle'] if item['pane'] == '%3')['undo'], False)
+        body = self.close_request()
+        self.assertEqual(self.request('close', dict(body, close_idle=['%2', '%3']))[0], 409)
+        self.assertEqual(self.run.writes, [])
+        with patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'):
+            status, result = self.request('close', dict(body, close_idle=['%2'], close_also=['%3']))
+            step, = undo_store.entries()
+        self.assertEqual(status, 200)
+        self.assertEqual(result['closed_without_undo'], ['Tab 3'])
+        self.assertEqual(result['undo'], step['id'])
+        self.assertEqual([item['tab']['pane'] for item in step['actions'][0]['closed']], ['%2', '%1'])
+
+    def test_close_without_undo_keeps_unselected_child(self):
+        self.review['agent'] = 'antigravity'
+        request = dict(self.close_request(), close_idle=['%2'])
+        status, result = self.request('close', request)
+        self.assertEqual(status, 200)
+        self.assertEqual(result['kept'], ['%3'])
+        self.assertEqual(self.tree().options['%3'].record['kind'], 'own')
+
+    def test_close_undo_capability_is_bound_to_the_plan(self):
+        data = self.close_request()
+        self.trace.unlink()
+        self.assertEqual(self.request('close', data)[0], 409)
+        self.assertEqual(self.run.writes, [])
+
+    def test_antigravity_root_closes_without_undo_and_restores_eligible_children(self):
+        self.root['agent'] = 'antigravity'
+        self.assertIs(task_tree_api.close_plan('%1', self.tree())['task']['undo'], False)
+        with patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'):
+            status, result = self.request('close', self.close_request())
+            step, = undo_store.entries()
+        self.assertEqual(status, 200)
+        self.assertEqual(result['closed_without_undo'], ['B446 Task'])
+        self.assertEqual(result['undo'], step['id'])
+        members = step['actions'][0]['closed']
+        self.assertEqual([item['tab']['pane'] for item in members], ['%3', '%2'])
+        self.assertEqual(members[1]['record']['kind'], 'own')
+
+    def test_auto_close_keeps_task_if_any_tab_has_no_undo(self):
+        clock = [0]
+        closer = task_tree_close.Closer(now=lambda: clock[0])
+
+        def sweep():
+            return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                  activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                  changed=Mock(), user_prompt_at=lambda _: 0)
+
+        with patch.object(task_tree, 'done_items', return_value={'B446'}):
+            self.review['agent'] = 'antigravity'
+            self.assertEqual(sweep(), [])
+            clock[0] += task_tree.CLOSE_AFTER
+            self.assertEqual(sweep(), [])
+            self.review['agent'] = 'codex'
+            self.assertEqual(sweep(), [])
+            self.trace.unlink()  # all agents are eligible, but their Undo is now unavailable
+            clock[0] += task_tree.CLOSE_AFTER
+            self.assertEqual(sweep(), [])
         self.assertEqual(self.run.writes, [])
 
     def close_with_first_kill_timeout(self, automatic):
@@ -332,10 +448,10 @@ class Routes(unittest.TestCase):
     def test_partial_stale_close_reports_only_the_tabs_that_closed(self):
         close = helper_close.close_pane
 
-        def lost_identity(pane, run):
+        def lost_identity(pane, run, **kwargs):
             if pane == '%2':
                 raise helper_tabs.Stale('The helper changed.')
-            close(pane, run)
+            close(pane, run, **kwargs)
 
         with patch.object(helper_close, 'close_pane', side_effect=lost_identity), \
                 patch.object(undo_store, '_ENABLED', True), \
@@ -363,6 +479,33 @@ class Routes(unittest.TestCase):
             task_tree_api.undo.capture.side_effect = start_during_capture
             clock[0] = task_tree.CLOSE_AFTER
             self.assertEqual(sweep(), [])
+        self.assertEqual(self.run.writes, [])
+
+    def test_auto_close_rechecks_state_after_the_undo_checkpoint(self):
+        clock = [0]
+        closer = task_tree_close.Closer(now=lambda: clock[0])
+
+        def sweep():
+            return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                  activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                  changed=Mock(), user_prompt_at=lambda _: 0)
+
+        checkpoint = undo_store.checkpoint
+
+        def ask_after_checkpoint(identifier, label, actions, **kwargs):
+            saved = checkpoint(identifier, label, actions, **kwargs)
+            if actions:
+                self.asks['%3'] = {'kind': 'reply'}
+            return saved
+
+        with patch.object(task_tree, 'done_items', return_value={'B446'}), \
+                patch.object(undo_store, '_ENABLED', True), \
+                patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
+                patch.object(undo_store, 'checkpoint', side_effect=ask_after_checkpoint):
+            self.assertEqual(sweep(), [])
+            clock[0] = task_tree.CLOSE_AFTER
+            self.assertEqual(sweep(), [])
+            self.assertEqual(undo_store.entries(), [])
         self.assertEqual(self.run.writes, [])
 
     def test_unseen_starting_child_blocks_close_and_done(self):

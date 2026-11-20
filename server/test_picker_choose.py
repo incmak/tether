@@ -210,6 +210,9 @@ class CodexPickerDetailTests(unittest.TestCase):
 class MenuChooseRedrawTests(unittest.TestCase):
     """menu_choose waits for each move to show before the next key, as picker_choose does."""
     def menu(self, rows, **kwargs):
+        self.enterContext(patch('agents.open_claude_ask', return_value={
+            'id': 'tool-ask', 'questions': [{'header': 'File', 'question': 'Which file', 'multi': False,
+                'options': [{'label': row.split('. ', 1)[1], 'description': ''} for row in rows]}]}))
         pane = FakePane([*rows, f'{len(rows) + 1}. Type something.', f'{len(rows) + 2}. Chat about this'],
                         hint='Enter to select · ↑/↓ to navigate · Esc to cancel', **kwargs)
         original = pane.screen

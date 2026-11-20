@@ -52,7 +52,7 @@ function InfoPanel({ info, disabled, onAction }: { info: Attention; disabled: bo
   </div>
 }
 
-export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null
+export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoose, onKey, onAction, onDialog, onAsk, onAskEngage, onType, onFocusReply, onPick, onOpenTerminal, permissionsTab }: { onDialog?: (action: DialogAction) => Promise<string | null>; plan?: ChatData['plan']; approval: Approval | null; attention: Attention | null; agent: string; disabled: boolean; permissionsTab?: string | null; onOpenTerminal?: () => void
   onChoose: (kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) => Promise<void>; onKey: (key: string) => unknown; onAction?: (action: PromptAction) => Promise<string | null>; onAsk?: (ask: AskBridge, answers: Record<string, string | string[]> | null) => Promise<string | null>; onAskEngage?: (ask: AskBridge) => Promise<number | null>; onType?: (text: string, loginUrl?: string) => Promise<boolean>; onFocusReply?: () => void; onPick?: (row: number, labels: string[], then: PickKey) => Promise<unknown> }) {
   const [feedback, setFeedback] = useState('')
   const [feedbackVoiceBusy, setFeedbackVoiceBusy] = useState(false)
@@ -113,6 +113,15 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
     if (chat(option)) focusBox() }
   // A Claude slash-command dialog (/mcp, /config, /resume ...): its rows, tabs and keys as controls.
   const dialog = !approval && !plan && attention?.reason === 'dialog' ? attention.dialog : undefined
+  if (!approval && !plan && !bridge && attention?.menu_verified === false) {
+    const questions = attention.question ? [attention.question] : attention.ask?.questions.map(item => item.question) ?? [attention.text]
+    return <section className="choice-dock open" aria-label={`${agent} asks`}>
+      <div className="choice-head"><span className="choice-mark" />{agent} asks</div>
+      <div className="choice-text">{questions.map((question, index) => <p key={index}><Linked text={question} /></p>)}</div>
+      <p className="choice-text">Answer this in the terminal.</p>
+      {onOpenTerminal && <div className="choice-keys"><button type="button" onClick={onOpenTerminal}>Open terminal</button></div>}
+    </section>
+  }
   if (dialog) return <section ref={root} className="choice-dock dialog-dock open" aria-label={`${agent} · ${dialog.title}`}>
     <div className="choice-head"><span className="choice-mark" />{agent} · {dialog.title}</div>
     <DialogCard dialog={dialog} disabled={disabled} onAction={onDialog ?? (async action => { await onKey(action.action === 'key' ? action.key : 'Escape'); return null })} />

@@ -334,6 +334,10 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   const [term, setTermState] = useState(() => terminalPanes.has(pane.id))
   // The chat box unmounts while the terminal shows. On the way back, go to the saved place (or the bottom) again.
   const setTerm = (on: boolean) => { if (on) { terminalPanes.add(pane.id); restore.current = scrollByPane.get(pane.id) ?? null } else terminalPanes.delete(pane.id); setTermState(on) }
+  const openTerminal = () => {
+    setTerm(true)
+    requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+  }
   const [jump, setJump] = useState(false)
   const viewport = useRef<HTMLDivElement>(null)
   const page = useRef<HTMLDivElement>(null)  // everything under the tabs: it slides as one card on a side swipe
@@ -887,13 +891,15 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     } finally { setActing(false) }
   }
   // While Claude asks a question, the message box answers it through its own-answer row (checked on the server).
-  const ownAnswer = !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
+  const terminalOnlyMenu = !data?.approval && data?.attention?.menu_verified === false
+  const menuRevision = data?.attention?.menu_verified || undefined
+  const ownAnswer = !terminalOnlyMenu && !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
   async function send(text: string, retryOf?: Pending) {
     text = terminalText(text)
     setPending(list => list.some(item => item.terminal) ? list.filter(item => !item.terminal) : list)
     // Claude shows these as a terminal panel that a phone sees only a slice of. Show Tether's own sheet instead, as T3 Code does.
     if (!retryOf && activePane.agent === 'claude' && /^\/(usage|cost|stats|status)$/.test(text.trim())) { setPlanSheet(true); return true }
-    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text })
+    if (ownAnswer && !retryOf) return write('menu', { session: pane.id, thread: data?.thread ?? null, choice: ownAnswer.id, answer: text, revision: menuRevision })
     const key = squash(text).slice(0, 80)
     // The send must go out even when the delivery check cannot read the chat.
     let images: ReturnType<typeof codexSendEvidence>
@@ -1127,14 +1133,14 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     setActing(true)
     try { if (await write('clear-draft', { session: pane.id, thread: data?.thread ?? null })) setToast('Cleared the input box in the terminal.') } finally { setActing(false) }
   }
-  // An approval goes through the checked route (it confirms the cursor before Enter); a plain menu takes the option's number key.
+  // Both routes verify the cursor before sending Enter.
   async function choose(kind: 'approval' | 'menu', option: Choice, approval: Approval | null, feedback?: string) {
     if (acting) return
     setActing(true)
     try {
       if (kind === 'approval' && approval?.id) await write('approval', { session: pane.id, thread: data?.thread ?? null, approval: approval.id, choice: option.id, feedback })
       // Arrows plus Enter, checked on the screen: a digit key types text when the cursor sits on the own-answer row.
-      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text })
+      else await write('menu', { session: pane.id, thread: data?.thread ?? null, choice: option.id, label: option.text, revision: menuRevision })
     } finally { setActing(false) }
   }
   async function start(agent: 'claude' | 'codex') {
@@ -1249,7 +1255,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     {state === 'Stopped' && <div className="working-line" role="status"><span className="state-dot" aria-hidden="true" /><span><strong>Stopped by a restart</strong><small>Send a message to continue.</small></span></div>}
     {state === 'Working' && <div className="working-line" role="status"><WorkGlyph /><span><span className="working-head"><strong className="work-verb">{footer.spinner?.verb ?? 'Working…'}<span className="work-glint" aria-hidden="true"><span>{footer.spinner?.verb ?? 'Working…'}</span></span></strong>{footer.spinner?.detail ? <small>{footer.spinner.detail}</small> : workingSince && <Elapsed since={workingSince.at} />}</span>{footer.running && <span className="running-tool"><Terminal size={13} /><span><span className="running-title">{footer.running.title}{footer.running.elapsed && <small> · {footer.running.elapsed}</small>}</span>{footer.running.command && footer.running.command !== footer.running.title && <code>{footer.running.command}</code>}</span></span>}{footer.denied && <button type="button" className="running-tool denied-tool" disabled={!writable || acting} title="Open /permissions, tab Recently blocked" onClick={() => void openPermissions('Recently blocked')}><ShieldAlert size={13} /><span>{footer.denied.text}{footer.denied.reason && <small>{footer.denied.reason}</small>}</span><span className="denied-review">Review</span></button>}</span></div>}
     <StatusStack priorityKey={data?.approval ? `approval:${(data.approval as Approval).id}` : data?.attention ? `attention:${data.attention.id}` : data?.plan ? `plan:${data.plan.id}` : footer.heads_up ? 'heads' : browserAsk ? `browser-ask:${browserAsk.id}` : ''} chips={(footer.goal || !!footer.tasks?.length || !!footer.crons?.length || (footer.suggestion && !draft.trim() && state !== 'Working')) ? <>{(footer.goal || !!footer.tasks?.length || !!footer.crons?.length) ? <div className="live-chips">{footer.goal && <button type="button" className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('goal')}><Target size={14} />{footer.goal_status ? `Goal · ${goalStatusLabel(footer.goal_status)}` : `Goal active${footer.goal !== 'active' ? ` · ${footer.goal}` : ''}`}<ChevronRight size={13} /></button>}{footer.tasks?.map(task => <button type="button" key={task} className="live-chip" aria-haspopup="dialog" onClick={() => setLiveSheet('tasks')}><Layers size={14} /><span className="live-chip-text">{taskLabel(task, footer.task_details)}</span><ChevronRight size={13} /></button>)}{!!footer.crons?.length && <button type="button" className="live-chip" aria-haspopup="dialog" title={cronSummary(footer.crons)} onClick={() => setLiveSheet('crons')}><CalendarClock size={14} /><span className="live-chip-text">{cronsLabel(footer.crons)}</span><ChevronRight size={13} /></button>}</div> : null}{(footer.suggestion && !draft.trim() && state !== 'Working' ? <button type="button" className="prompt-suggestion" title="Use this suggested prompt" onClick={() => setDraft(footer.suggestion ?? '')}><CornerDownRight size={15} /><span>{footer.suggestion}</span></button> : null)}</> : null} items={[
-      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
+      { id: 'action', label: data?.plan ? 'Review plan' : data?.approval ? `${agentNames[activePane.agent]} needs permission` : data?.attention?.reason === 'permissions' ? 'Permissions' : data?.attention?.reason === 'side' ? 'Side question' : data?.attention?.reason === 'dialog' ? data.attention.dialog?.title ?? 'Dialog' : data?.attention?.reason === 'panel' || data?.attention?.reason === 'info' ? `${agentNames[activePane.agent]} panel open` : `${agentNames[activePane.agent]} needs attention`, active: !!(data?.approval || data?.attention || data?.plan), content: <>{data && (data.approval != null || data.attention || data.plan) && <ChoiceDock key={(data.approval as Approval | null)?.id ?? data.attention?.id ?? 'choice'} approval={data.approval as Approval | null} attention={data.attention ?? null} plan={data.plan} agent={agentNames[activePane.agent]} disabled={!writable || acting} onChoose={choose} onKey={key => sendKey(key)} onOpenTerminal={openTerminal} permissionsTab={permissionsTab} onAction={action => promptAction(data.attention!, action)} onDialog={action => dialogAction(data.attention!, action)} onPick={pickRow} onAsk={askAnswer} onAskEngage={askEngage} onType={(text, loginUrl) => write('type', { session: activePane.id, thread: data?.thread ?? null, text, enter: true, ...loginUrl ? { login_url: loginUrl } : {} })} />}</> },
       { id: 'heads', label: '✦ Heads up', active: !!footer.heads_up, content: <>{footer.heads_up && <HeadsUp card={footer.heads_up} disabled={!writable || acting} onKey={headsUpKey} onChat={note => { setDraft(note); requestAnimationFrame(() => { const box = panelRef.current?.querySelector<HTMLTextAreaElement>('.composer textarea'); box?.focus(); box?.setSelectionRange(box.value.length, box.value.length) }) }} />}</> },
       { id: 'agents', label: `${background.length} agents running`, active: background.length > 0, content: <>{background.length > 0 && <div className="agents-strip"><ul>{background.map((agent, index) => <li key={index}><strong>{agent.name}</strong><span>{agent.task}</span><small>{agent.detail}</small></li>)}</ul></div>}</> },
       { id: 'queue', label: queueLabel, active: queued.length > 0, content: <>      {queued.map(item => item.failed ? <div key={item.id} className="user-message pending-message failed-message"><span>{item.text}</span><small role="alert">{item.offline ? <><WifiOff size={12} />Not sent</> : <span className="failed-reason">Not sent: {item.failed}</span>}
@@ -1266,8 +1272,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
             <span className="terminal-note-text"><SquareTerminal size={12} aria-hidden="true" />Ran in the terminal. No chat output.</span>
             <button type="button" className="failed-action" aria-label={`Open terminal to see ${command}`} onClick={() => {
               dismiss()
-              setTerm(true)
-              requestAnimationFrame(() => panelRef.current?.querySelector<HTMLButtonElement>('.terminal-toggle')?.focus())
+              openTerminal()
             }}><SquareTerminal size={13} aria-hidden="true" />Open terminal</button>
             <button type="button" aria-label={`Dismiss note: ${command} ran in the terminal`} onClick={dismiss}><X size={12} aria-hidden="true" /></button>
           </small>
@@ -1330,7 +1335,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>
         {modeMenu && <div className="attach-menu mode-menu" role="menu">{Object.entries(MODES).map(([key, label]) => <button key={key} role="menuitemradio" aria-checked={key === currentMode} type="button" onClick={() => void chooseMode(key)}>{label}{key === currentMode && <Check size={16} />}</button>)}</div>}</span>}
-    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
+    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable || terminalOnlyMenu} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
     </div>{nextPane && <ChatPeek id={nextPane.id} data={chatCache.get(nextPane.id)} api={api} side={1} peekRef={peekNext} />}{previousPane && <ChatPeek id={previousPane.id} data={chatCache.get(previousPane.id)} api={api} side={-1} peekRef={peekPrevious} />}</div>
     </>}
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />

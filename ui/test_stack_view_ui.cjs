@@ -309,7 +309,8 @@ async function main() {
       { id: 'g00000002', name: 'Task tree', project: '' }] }, sessions: [
       pane('%88', 'B401 Sidebar fix', { group: 'g00000001' }),
       pane('%1', 'B446 Task tree', { group: 'g00000002' }),
-      pane('%82', 'B446 server', { group: 'g00000001', task: '%1', task_depth: 1, task_role: 'Worker' }),
+      pane('%82', 'B446 server', { group: 'g00000001', task: '%1', task_depth: 1, task_role: 'Worker', state: 'Working' }),
+      pane('%83', 'Task shell', { group: 'g00000002', agent: 'shell', thread: null, state: 'Unavailable', writable: false }),
     ] }
     await open('%88')
     await page.getByRole('button', { name: 'Tether bugs, 1 tab', exact: true }).click({ button: 'right' })
@@ -318,8 +319,12 @@ async function main() {
     await stackDialog.getByRole('button', { name: 'Close 1 tab' }).click()
     await stackDialog.getByRole('alert').getByText(staleStack).waitFor()
     check('a refused stack close sends no individual Deletes', JSON.stringify(stackWrites) ===
-      JSON.stringify([{ endpoint: 'groups/close', session: '$1', group: 'g00000001', panes: [{ pane: '%88', thread: 't88' }] }]),
+      JSON.stringify([{ endpoint: 'groups/close', session: '$1', group: 'g00000001', panes: [{ pane: '%88', thread: 't88', bucket: 'idle' }] }]),
     JSON.stringify(stackWrites))
+    // Close the dialog and wait for its history step: a Back still in flight would abort the next page load.
+    await page.keyboard.press('Escape')
+    await stackDialog.waitFor({ state: 'hidden' })
+    await page.waitForFunction(() => history.state?.layer === 0)
 
     allowStackClose = true
     await open('%88', 320, 800)
@@ -327,11 +332,13 @@ async function main() {
     await page.getByRole('button', { name: 'Actions for Task tree' }).click()
     const treeDialog = page.getByRole('dialog', { name: 'Task tree' })
     await treeDialog.getByRole('button', { name: 'Close all tabs…' }).click()
-    await treeDialog.getByRole('button', { name: 'Close 2 tabs' }).click()
+    await treeDialog.getByText(/This stops B446 server .*working/).waitFor()
+    await treeDialog.getByRole('button', { name: 'Close 3 tabs' }).click()
     await treeDialog.waitFor({ state: 'hidden' })
-    check('320 px: stack close includes a child displayed with its task', JSON.stringify(stackWrites.at(-1)) ===
+    check('320 px: stack close includes the task’s child and a quiet shell', JSON.stringify(stackWrites.at(-1)) ===
       JSON.stringify({ endpoint: 'groups/close', session: '$1', group: 'g00000002',
-        panes: [{ pane: '%1', thread: 't1' }, { pane: '%82', thread: 't82' }] }), JSON.stringify(stackWrites))
+        panes: [{ pane: '%1', thread: 't1', bucket: 'idle' }, { pane: '%82', thread: 't82', bucket: 'working' },
+          { pane: '%83', thread: null, bucket: 'idle' }] }), JSON.stringify(stackWrites))
     check('no page errors', pageErrors.length === 0, pageErrors.join('\n').slice(0, 800))
   } catch (error) {
     failed++

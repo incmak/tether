@@ -1,5 +1,6 @@
 """B446 answers are bound to the helper and the current question."""
 import unittest_isolated  # noqa: F401
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -9,6 +10,7 @@ from unittest.mock import Mock, patch
 
 import attention
 import helper_tabs
+import server
 import task_tree_answer as answers
 import terminal_input
 
@@ -22,7 +24,7 @@ SCREEN = ('────────────────────\n ☐ Fo
           'Enter to select · ↑/↓ to navigate · Esc to cancel\n')
 
 
-def menu_row(screen, entry=HELPER):
+def menu_row(screen, entry):
     styled = screen
     screen = terminal_input.prompt_actions.plain(screen)
     with patch.dict(terminal_input._attention_seen, clear=True):
@@ -57,7 +59,7 @@ class HelperAnswerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.transcript = Path(self.temp.name) / 'chat.jsonl'
-        self.transcript.write_text(REPLY)
+        self.transcript_records(self.tool_ask('tool-1'))
         self.entry = dict(HELPER, transcript=str(self.transcript))
         self.store = attention.Attention(Path(self.temp.name) / 'asks.json')
         self.store.note_reply(HELPER['id'], THREAD, REPLY, 'reply-1')
@@ -73,6 +75,104 @@ class HelperAnswerTests(unittest.TestCase):
     def answer(self, row, digest, run, **kwargs):
         body = {'pane': HELPER['id'], 'thread': THREAD, 'digest': digest, **kwargs}
         return answers.answer(body, self.entry, run, lambda _: row, self.send, reply_turn=self.reply_turn)
+
+    def transcript_records(self, *records):
+        replacement = self.transcript.with_suffix('.new')
+        replacement.write_text(''.join(json.dumps(record) + '\n' for record in records))
+        replacement.replace(self.transcript)
+
+    def tool_ask(self, identifier, question='Which format should I use?'):
+        return {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'name': 'AskUserQuestion', 'id': identifier, 'input': {'questions': [
+                {'header': 'Format', 'question': question, 'multiSelect': False,
+                 'options': [{'label': 'Text', 'description': ''}, {'label': 'Image', 'description': ''}]},
+            ]}},
+        ]}}
+
+    def tool_result(self, identifier):
+        return {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': identifier,
+                                                         'content': 'The user chose Text.'}]}}
+
+    def request_menu(self, run, **body):
+        payload = json.dumps(dict(session=HELPER['id'], thread=THREAD, choice=1, **body)).encode()
+        handler = object.__new__(server.Handler)
+        handler.path = '/mobile/api/menu'
+        handler.rfile = io.BytesIO(payload)
+        handler.headers = {'Host': 'phone.test', 'Origin': 'http://phone.test', 'X-Codex-Mobile': '1',
+                           'Content-Length': str(len(payload))}
+        handler.respond = Mock()
+        handler.deny = Mock(return_value=False)
+        choose = terminal_input.menu_choose
+        with patch.object(server, 'sessions', return_value=[self.entry]), patch.object(
+                server, 'menu_choose', side_effect=lambda *args, **kwargs: choose(*args, **kwargs, run=run)):
+            handler.do_POST()
+        return handler.respond.call_args.args[0]
+
+    def test_menu_route_refuses_answered_and_superseded_questions(self):
+        first = self.tool_ask('old')
+        second = self.tool_ask('new', 'Which layout should I use?')
+        malformed = self.tool_ask('malformed')
+        malformed['message']['content'][0]['input'] = 1
+        second_frame = SCREEN.replace('Which format should I use?', 'Which layout should I use?')
+        cases = (
+            ('no recorded ask', (), SCREEN),
+            ('answered', (first, self.tool_result('old')), SCREEN),
+            ('older outstanding', (first, second, self.tool_result('new')), SCREEN),
+            ('newest answered', (first, second, self.tool_result('new')), second_frame),
+            ('earlier frame', (first, second), SCREEN),
+            ('newer unreadable ask', (first, malformed), SCREEN),
+        )
+        for name, records, frame in cases:
+            with self.subTest(name=name), patch.object(terminal_input, 'verify'):
+                self.transcript_records(*records)
+                run = FakeTerminal(frame)
+                self.assertEqual(self.request_menu(run), 409)
+                self.assertEqual(run.writes, [])
+
+    def test_menu_route_accepts_the_newest_outstanding_question(self):
+        self.transcript_records(self.tool_ask('old'), self.tool_ask('new'), self.tool_result('old'))
+        revision = menu_row(SCREEN, self.entry)['attention']['menu_verified']
+        with patch.object(terminal_input, 'verify'):
+            run = FakeTerminal(SCREEN)
+            self.assertEqual(self.request_menu(run, revision=revision), 200)
+        self.assertEqual([command[-1] for command in run.writes], ['Enter'])
+
+    def test_menu_route_refuses_when_the_question_is_answered_before_enter(self):
+        def verify(*_):
+            if checks:
+                with self.transcript.open('a') as stream:
+                    stream.write(json.dumps(self.tool_result('tool-1')) + '\n')
+            checks.append(True)
+
+        checks = []
+        run = FakeTerminal(SCREEN)
+        with patch.object(terminal_input, 'verify', side_effect=verify):
+            self.assertEqual(self.request_menu(run), 409)
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(run.writes, [])
+
+    def test_menu_route_binds_the_click_to_the_transcript_call_even_for_identical_text(self):
+        revision = menu_row(SCREEN, self.entry)['attention']['menu_verified']
+        self.transcript_records(self.tool_ask('tool-1'), self.tool_result('tool-1'), self.tool_ask('tool-2'))
+        with patch.object(terminal_input, 'verify'):
+            run = FakeTerminal(SCREEN)
+            self.assertEqual(self.request_menu(run, revision=revision), 409)
+        self.assertEqual(run.writes, [])
+
+    def test_status_publishes_choices_only_for_verified_menu(self):
+        for records, frame in (
+            ((self.tool_ask('current'), self.tool_result('current')), SCREEN),
+            ((self.tool_ask('current'),), SCREEN.replace('☐ Format', 'Format')),
+        ):
+            with self.subTest(records=records, frame=frame):
+                self.transcript_records(*records)
+                status = menu_row(frame, self.entry)['attention']
+                self.assertFalse(status.get('options'))
+                self.assertIs(status['menu_verified'], False)
+                self.assertEqual(status['question'], 'Which format should I use?')
+        status = menu_row(SCREEN, self.entry)['attention']
+        self.assertTrue(status['menu_verified'])
+        self.assertEqual([option['text'] for option in status['options'][:2]], ['Text', 'Image'])
 
     def test_idle_reply_goes_to_the_child(self):
         row = {'state': 'Idle', 'ask': self.store.ask(HELPER['id'], THREAD)}
@@ -103,11 +203,11 @@ class HelperAnswerTests(unittest.TestCase):
         for path in sorted(fixtures.glob('*.txt')):
             with self.subTest(fixture=path.name), patch.object(terminal_input, 'verify'):
                 screen = path.read_text()
-                row = menu_row(screen)
+                row = menu_row(screen, self.entry)
                 digest = self.digest(row)
                 run = FakeTerminal(screen)
                 with self.assertRaises(helper_tabs.Stale):
-                    self.answer(row, digest or self.digest(menu_row(SCREEN)), run, choice=1)
+                    self.answer(row, self.digest(menu_row(SCREEN, self.entry)), run, choice=1)
                 self.assertIsNone(digest)
                 self.assertEqual(run.writes, [])
                 with self.assertRaises(terminal_input.MenuChanged):
@@ -134,6 +234,17 @@ class HelperAnswerTests(unittest.TestCase):
             with self.subTest(file=file), patch.object(terminal_input, 'verify'):
                 screen = (here / file).read_text()
                 entry = dict(self.entry, agent=agent, codex_binding='open')
+                if agent == 'claude':
+                    # The captures contain one active question. Provide its transcript plus the other tab headers.
+                    current = terminal_input.choice_state.ask_current(screen)
+                    record = self.tool_ask('captured')
+                    template = record['message']['content'][0]['input']
+                    template['questions'] = [
+                        {'header': tab['label'], 'question': current['question'] if tab['active'] else 'Another question?',
+                         'options': [{'label': option['label'], 'description': option['description']}
+                                     for option in current['options'][:-2]]}
+                        for tab in current['tabs']]
+                    self.transcript_records(record)
                 row = menu_row(screen, entry)
                 digest = answers.prompt_digest(entry, row, reply_turn=self.reply_turn)
                 self.assertIsNotNone(digest)
@@ -166,7 +277,7 @@ class HelperAnswerTests(unittest.TestCase):
                 self.assertEqual(run.writes, [])
 
     def test_loss_of_frame_during_navigation_stops_before_enter(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         for broken in (lambda frame: frame.replace('Enter to select', 'Enter to sel'),
                        lambda frame: frame.replace('☐ Format', 'Format')):
             with self.subTest(broken=broken), patch.object(terminal_input, 'verify'):
@@ -183,7 +294,7 @@ class HelperAnswerTests(unittest.TestCase):
                 self.assertEqual([command[-1] for command in run.writes], ['Down'])
 
     def test_changed_menu_with_same_options_refuses_before_any_write(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         digest = self.digest(row)
         for question in ('Which image size?', 'Use the existing format?'):
             with self.subTest(question=question):
@@ -193,7 +304,7 @@ class HelperAnswerTests(unittest.TestCase):
                 self.assertEqual(run.writes, [])
 
     def test_same_menu_from_new_transcript_activity_refuses_old_digest(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         digest = self.digest(row)
         self.transcript.write_text(REPLY + '\nNew tool question')
         run = Mock()
@@ -202,7 +313,7 @@ class HelperAnswerTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_conversation_change_after_discovery_is_stale(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         run = Mock()
         with patch.object(terminal_input, 'verify', side_effect=terminal_input.ConversationChanged('Different chat.')):
             with self.assertRaisesRegex(helper_tabs.Stale, 'Different chat'):
@@ -210,23 +321,23 @@ class HelperAnswerTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_menu_option_uses_the_child_and_preserves_cursor_independent_digest(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         run = FakeTerminal(SCREEN.replace('❯ 1.', '  1.').replace('  2.', '❯ 2.'))
-        self.assertEqual(self.digest(row), self.digest(menu_row(run.screen)))
+        self.assertEqual(self.digest(row), self.digest(menu_row(run.screen, self.entry)))
         with patch.object(terminal_input, 'verify'):
             self.assertEqual(self.answer(row, self.digest(row), run, choice=2), {'ok': True})
         self.assertEqual([command[1:] for command in run.writes], [['send-keys', '-t', '%12', 'Enter']])
         self.send.assert_not_called()
 
     def test_menu_draft_is_never_erased_or_submitted(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         run = FakeTerminal(SCREEN.replace('Type something.', 'Keep this draft'))
         with patch.object(terminal_input, 'verify'), self.assertRaises(terminal_input.DraftError):
             self.answer(row, self.digest(row), run, text='Use text')
         self.assertEqual(run.writes, [])
 
     def test_menu_text_reuses_guarded_navigation_and_paste(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         run = FakeTerminal(SCREEN)
         choose = terminal_input.menu_choose
         with patch.object(terminal_input, 'verify'), patch.object(
@@ -238,13 +349,13 @@ class HelperAnswerTests(unittest.TestCase):
         self.assertEqual(run.buffer, 'Use custom text')
 
     def test_bridge_multi_menu_and_unbound_helper_need_another_path(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         for detail in ({'askBridge': {'id': 'bridge'}}, {'ask_current': {'multi': True}}):
             self.assertIsNone(self.digest(dict(row, attention=dict(row['attention'], **detail))))
         self.assertIsNone(answers.prompt_digest(dict(self.entry, registry=None), row, reply_turn=self.reply_turn))
 
     def test_requires_one_valid_answer(self):
-        row = menu_row(SCREEN)
+        row = menu_row(SCREEN, self.entry)
         for fields in ({}, {'choice': True}, {'text': '\x1b'}, {'text': 'Yes', 'choice': 1}, {'choice': 4}):
             run = Mock()
             with self.subTest(fields=fields), self.assertRaises(ValueError):

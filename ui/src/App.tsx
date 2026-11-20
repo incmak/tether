@@ -87,6 +87,7 @@ import { AgentsPage } from './AgentsView'
 import { Factory } from './Factory'
 import { choosePhoneScreen, toggleButton } from './phoneScreen'
 import { WordsContext, wordsFor } from './words'
+import { GroupMenu } from './Groups'
 import type { GroupHooks } from './Groups'
 import { groupOf, placesOf, stepPlace, tabFor } from './groups'
 import './App.css'
@@ -141,6 +142,8 @@ function App() {
   const [actions, setActions] = useState<string | null>(null)
   const [actionsDelete, setActionsDelete] = useState(false)
   const [paneActions, setPaneActions] = useState<string | null>(null)
+  // The stack menu opened from a sidebar stack heading (session id, stack id).
+  const [stackMenu, setStackMenu] = useState<{ session: string; stack: string; at?: Anchor } | null>(null)
   // The × on a tab opens the tab menu at its close question (PaneActions startClose).
   const [paneClose, setPaneClose] = useState(false)
   // Several chosen tabs (tabSelection.ts); choosing = the touch "Select" mode, where a tap picks.
@@ -940,7 +943,7 @@ function App() {
   }
   const canMessage = sessions.some(item => item.panes.some(p => p.agent !== 'shell' && p.writable))
   const words = useMemo(() => wordsFor(prefs.tmuxWords), [prefs.tmuxWords])
-  const sidebarProps = { onTaskMove: (source: Pane, target: Pane) => { void moveIntoTask(api, source, target).then(() => refresh(), error => setNotice(errorText(error))) }, now, onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
+  const sidebarProps = { onStackActions: (item: Session, stack: string, at?: Anchor) => { setDrawer(false); setStackMenu({ session: item.id, stack, at: view ? at : undefined }) }, onTaskMove: (source: Pane, target: Pane) => { void moveIntoTask(api, source, target).then(() => refresh(), error => setNotice(errorText(error))) }, now, onDeck: () => setDeck(true), review, archivedTabs, stacks: data?.groups, onRestoreTab: restoreTab, api, sessions, marks, onMarks: loadMarks, selected: openId, slots: multi && !home ? view?.slots : undefined, drag: !!view && !home, onDropPane: view && !home ? dropPane : undefined, onDropSession: view && !home ? dropSession : undefined, onDropChat: view && !home ? dropChat : undefined, prefs, update, loading, loaded: !!data, error, onRetry: () => refresh(), onReload: reload, onOpen: openPane, onNew: (at?: Anchor) => { setDrawer(false); setNewSession({ at: view ? at : undefined }) }, onActions: (item: Session, remove?: boolean, at?: Anchor) => { if (remove) setDrawer(false); setMenuAt(view ? at : undefined); setActionsDelete(!!remove); setActions(item.id) }, onPaneActions: (item: Pane, at?: Anchor) => { setDrawer(false); setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(item.id) }, tabPick: tabPickControls, onPastChat: pickPastChat, onSettings: () => { setDrawer(false); setSettings(true) }, onUndoHistory: () => { setDrawer(false); setUndoHistory(true) }, onBacklog: () => { setDrawer(false); setBacklog({ mode: 'sheet' }) }, reminders: { due: dueReminders.length, onOpen: () => { setDrawer(false); setRemindersOpen(true) } }, reminder: reminderEntry, work: workLinks, onCommandMenu: view && !home ? () => setMenu('commands') : undefined, onFactory: () => { setDrawer(false); setFactory(true) }, onMessageAll: canMessage ? () => { setDrawer(false); setAgentsPage('message') } : undefined, onOpenShell: view ? openShell : undefined, onShellsEnded: shellsEnded, onAddPane: (item: Session, at: Anchor) => { setDrawer(false); setTabTask({ pane: item.panes.find(entry => entry.id === prefs.lastPane[item.id]) ?? item.panes[0], at }) } }
   // The command menu runs the same actions as the keys. A command shows only when it would do something now.
   const desktopKeys = wide && !files && !share
   const slotCommands: Command[] = view ? [
@@ -985,18 +988,19 @@ function App() {
   // The phone shows no key hints: its sheets have no shortcut keys to learn.
   const commands = wide ? commandList : commandList.map(command => ({ ...command, key: undefined }))
   const running = runningPanes(sessions).length
+  const groupHooksFor = (owner: Session | undefined): GroupHooks | undefined => owner?.groups?.length ? {
+    seen: prefs.seen, selected: openId, hidden: archivedTabs.filter(item => item.tmux_session === owner.id),
+    onStart: (group, from) => void split('right', from, group),
+    onContext: group => setProject({ session: owner.id, group: group.id }),
+    onNewStack: (from, at) => setNewStack({ pane: from, at: view ? at : undefined }),
+    mainModel: prefs.mainModel,
+  } : undefined
   const chatFor = (target: Pane, slot?: SlotControls) => {
     const owner = sessions.find(item => item.id === target.tmux_session)
     const at = livePins.findIndex(item => item.pane.id === target.id)
     const sidePin = target.agent !== 'shell' ? { pinned: at >= 0, index: at, total: livePins.length, note: at >= 0 ? livePins[at].pin.note ?? '' : '', onToggle: () => at >= 0 ? unpinPane(target.id) : pinPane(target.id), onNote: (text: string) => notePin(target.id, text), onStep: (dir: 1 | -1) => stepPin(dir, target.id) } : undefined
     const ask = prefs.attention ? visibleAsk(target, now) : null
-    const groupHooks: GroupHooks | undefined = owner?.groups?.length ? {
-      seen: prefs.seen, selected: openId, hidden: archivedTabs.filter(item => item.tmux_session === owner.id),
-      onStart: (group, from) => void split('right', from, group),
-      onContext: group => setProject({ session: owner.id, group: group.id }),
-      onNewStack: (from, at) => setNewStack({ pane: from, at: view ? at : undefined }),
-      mainModel: prefs.mainModel,
-    } : undefined
+    const groupHooks = groupHooksFor(owner)
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}
       groupHooks={groupHooks} onDropGroup={onDropGroup} askBar={ask && target.writable ? <AskChips api={api} pane={target} ask={ask} onDone={setNotice} onUpdate={() => void refresh()} /> : undefined} allPanes={panes} sidePin={sidePin} liveReplyPreview={prefs.liveReplyPreview} headerSwipe={prefs.headerSwipe} key={target.id} pane={target} session={owner} api={api} onMenu={() => setDrawer(true)} onUpdate={() => void refresh()} draft={prefs.drafts[target.id]?.text ?? ''} setDraft={text => setDraft(target.id, text)} onOpenPane={slot ? (next: Pane) => openInSlot(next, slot.index) : openPane} onSessionActions={at => { if (owner) { setMenuAt(view ? at : undefined); setActionsDelete(false); setActions(owner.id) } }} onPaneActions={(id, at) => { setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(id) }} tabPick={tabPickControls} onSplit={direction => void split(direction, target)} onFork={() => void fork(target)} onContinued={id => void openNewPane(id).catch(error => setNotice(errorText(error)))} onReorder={ids => { if (owner) update(current => ({ paneOrder: { ...current.paneOrder, [owner.id]: reorderPanes(groupSessions(panes).find(item => item.id === owner.id)!.panes, current.paneOrder[owner.id], ids) } })) }} micOk={!prefs.voiceOff} chime={prefs.voiceSound} readAloud={prefs.readAloud} handsFree={prefs.handsFree} slot={slot} running={running} />
@@ -1035,6 +1039,16 @@ function App() {
     'data-tint': tint ? '' : undefined, 'data-fill': fill !== undefined ? '' : undefined,
   }
   if (unauthorized) return <main className="signin"><Terminal size={32} strokeWidth={1.4} /><h1>Sign in</h1><p>Sign in to access your terminal sessions.</p><a className="primary" href="/mobile/login?next=/chat/">Sign in</a></main>
+  const stackOwner = stackMenu ? sessions.find(item => item.id === stackMenu.session) : undefined
+  const stackHooks = groupHooksFor(stackOwner)
+  const stackPlaces = stackOwner ? placesOf(stackOwner.panes, stackOwner.groups) : []
+  const stackPlace = stackPlaces.find(item => item.id === stackMenu?.stack)
+  const stackFrom = stackOwner?.panes.find(item => item.id === openId) ?? stackPlace?.panes[0] ?? stackOwner?.panes[0]
+  // eslint-disable-next-line react-hooks/refs -- the stack menu calls its hooks and onDone on a user action, not during render.
+  const stackMenuView = stackMenu && stackOwner && stackHooks && stackPlace && stackFrom
+    ? <GroupMenu api={api} session={stackOwner} place={stackPlace} order={stackPlaces.filter(item => item.id).map(item => item.id)} at={stackMenu.at}
+        from={stackFrom} hooks={stackHooks} onClose={() => setStackMenu(null)} onDone={() => { setStackMenu(null); void refresh() }} />
+    : null
   return <WordsContext.Provider value={words}><main className={['app-shell', (view || (wide && home)) && !desk.sidebar && 'no-sidebar', wide && 'with-rail', files && 'screen-files', wide && share && 'screen-share', home && wide && 'screen-home', (home || noTerminal) && !wide && 'phone-home', !wide && 'phone-tabs', phoneFiles && 'phone-files', !wide && share && 'phone-share'].filter(Boolean).join(' ')} style={shellStyle} {...lookAttrs}>{wide && <Rail screen={home ? 'home' : screen} waiting={waitingCount} onScreen={chooseScreen} onLive={openLive} nav={{ ...navAvailable, onBack: goBack, onForward: goForward }} />}<aside className="sidebar"><Sidebar {...sidebarProps} /></aside><dialog {...drawerModal} className="drawer" aria-label="Sessions" onClick={event => { const box = event.currentTarget.getBoundingClientRect(); if (event.target === event.currentTarget && (event.clientX > box.right || event.clientX < box.left || event.clientY < box.top || event.clientY > box.bottom)) setDrawer(false) }} onClose={() => setDrawerPresent(false)}>{(drawer || drawerPresent) && <Sidebar {...sidebarProps} onClose={() => setDrawer(false)} />}</dialog>
     {pane ? (view ? <Workspace layout={desk} slots={slotPanes} focus={view.focus} zoomed={zoomed && multi} onCount={setCount} onFocus={focusSlot} onLayout={setDesk}
       renderSlot={(target, index, shown) => chatFor(target, shown > 1 || zoomed ? { index, zoomed, onZoom: toggleZoom, onClose: zoomed ? undefined : () => closeSlot(index), onPick: () => setPicking(index), onSwapTo: to => swap(index, to), onDragStart: event => { event.dataTransfer.setData(DRAG_SLOT, String(index)); event.dataTransfer.effectAllowed = 'move' } } : undefined)}
@@ -1116,6 +1130,7 @@ function App() {
       groups={prefs.groups} group={prefs.groupOf?.[actionSession.id]}
       onGroup={(group, created) => update(current => ({ groups: created ? [...current.groups, created] : current.groups, groupOf: withGroup(current.groupOf, actionSession.id, group?.id), ...current.groupBy === 'custom' || !group ? {} : { groupBy: 'custom' as const } }))}
       onMove={step => move(actionSession.id, step)} onProject={() => { setActions(null); setProject({ session: actionSession.id }) }} onClose={() => setActions(null)} onDone={(newPane, direction) => { setActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} />}
+    {stackMenuView}
     {/* eslint-disable-next-line react-hooks/refs -- onFork and onDone run on a user action in PaneActions, not during render. */}
     {paneActions && panes.find(item => item.id === paneActions) && (() => { const target = panes.find(item => item.id === paneActions)!; const shown = sessions.find(item => item.id === target.tmux_session); const archived = isTabArchived(target, prefs.archivedTabs) || (!!shown && shown.panes.length <= 1 && isArchived(shown, prefs.archived)); return <PaneActions key={`${target.id}-${paneClose}`} startClose={paneClose} onSelect={() => { setTabPick(stamp({ ids: [target.id], anchor: target.id }, paneThreads)); setChoosing(true) }} api={api} mainModel={prefs.mainModel} panes={panes} tabCount={panes.filter(item => item.tmux_session === target.tmux_session).length} archived={archived} onArchive={() => archived ? restoreTab(target) : archiveTab(target)} pane={target} color={prefs.colors?.[target.id]} onColor={color => update(current => ({ colors: withColor(current.colors, target.id, color) }))} at={menuAt} place={placeFor(target.id)} session={sessions.find(item => item.id === target.tmux_session)} targets={moveTargets} onClose={() => setPaneActions(null)} onFork={() => { setPaneActions(null); void fork(target) }} onDone={(newPane, direction) => { setPaneActions(null); if (newPane) void openNewPane(newPane, direction); else void refresh() }} /> })()}
     {(choosing || tabPick.ids.length > 0) && <TabSelectionBar api={api} panes={panes} sessions={sessions} ids={tabPick.ids} threads={tabPick.threads} choosing={choosing} mainModel={prefs.mainModel} onKeep={ids => setTabPick(current => ({ ids, anchor: ids[0] ?? null, threads: current.threads }))} onClear={clearPick} onDone={() => void refresh()} />}

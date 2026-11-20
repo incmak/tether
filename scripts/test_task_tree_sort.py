@@ -1,6 +1,6 @@
 """Plan, apply and undo with one fake tmux server."""
 import unittest_isolated  # noqa: F401
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import fcntl
 import importlib.util
 import io
@@ -9,13 +9,16 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location('task_tree_sort_cli', Path(__file__).with_name('task_tree_sort.py'))
 cli = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cli)
 sort = cli.sort
+import agent_tabs
 
 
 def thread(number):
@@ -58,9 +61,12 @@ class FakeTmux:
         if action == 'display-message':
             if cmd[3] == '-t':
                 pane = cmd[4]
-                self.assert_command(cmd[5], '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}')
                 state = self.options[pane]
-                output = '\t'.join((self.server, pane, state['session_id'], state['@tether_helper']))
+                if cmd[5] == '#{pane_id}\t#{@tether_helper}':
+                    output = '\t'.join((pane, state['@tether_helper']))
+                else:
+                    self.assert_command(cmd[5], '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}')
+                    output = '\t'.join((self.server, pane, state['session_id'], state['@tether_helper']))
             else:
                 self.assert_command(cmd[2:], ['-p', '#{pid}:#{start_time}'])
                 output = self.server
@@ -211,6 +217,117 @@ class TaskTreeSortTests(unittest.TestCase):
                 self.assertEqual((record['sent_at'], record['before'], record['unknown']),
                                  (sent_at, f'reply-{sent_at}', 'keep me'))
                 self.assertEqual(record.get('kind'), 'helper' if action == 'apply' else None)
+
+    def test_sort_write_and_first_wait_binding_serialize_for_apply_and_undo(self):
+        helpers = sort.helper_tabs
+        guard = helpers.record_lock
+        for action in ('apply', 'undo'):
+            with self.subTest(action=action):
+                self.tmux.pane(2, 'B446 Workers', 1)
+                self.tmux.pane(3, 'B887 Handoff', 2, kind='helper')
+                self.tmux.writes.clear()
+                self.folder = self.folder.with_name(action)
+                self.run_plan()
+                if action == 'undo':
+                    self.assertEqual(self.cli('apply', str(self.folder))[0], 0)
+                reading, wait_attempted = threading.Event(), threading.Event()
+                run = self.tmux.run
+
+                @contextmanager
+                def record_lock():
+                    if threading.current_thread().name == 'wait':
+                        wait_attempted.set()
+                    with guard():
+                        yield
+
+                def hook(cmd, **kwargs):
+                    result = run(cmd, **kwargs)
+                    if cmd[1] == 'set-option' and threading.current_thread().name == 'wait':
+                        wait_attempted.set()  # An unguarded wait has already written the binding.
+                    if cmd[1] == 'display-message' and cmd[-1].startswith('#{pid}:#{start_time}\t') and cmd[4] == '%2':
+                        reading.set()
+                        if not wait_attempted.wait(2):
+                            raise AssertionError('The wait route did not try to bind the conversation')
+                    return result
+
+                failed = []
+
+                def poll():
+                    try:
+                        if not reading.wait(2):
+                            raise AssertionError('Sort did not finish reading the record')
+                        helpers.poll({'pane': '%2'}, self.tmux.entries['%1'], list(self.tmux.entries.values()),
+                                     hook, lambda _: {'state': 'Working'}, lambda _: '', lambda _: {})
+                    except BaseException as exc:
+                        failed.append(exc)
+
+                lane = threading.Thread(name='wait', target=poll, daemon=True)
+                with patch.object(helpers, 'record_lock', record_lock), patch.object(self.tmux, 'run', side_effect=hook):
+                    lane.start()
+                    result, _, error = self.cli(action, str(self.folder))
+                    lane.join(3)
+                self.assertFalse(lane.is_alive())
+                self.assertEqual(failed, [])
+                self.assertEqual((result, error), (0, ''))
+                current = json.loads(self.tmux.options['%2']['@tether_helper'])
+                self.assertEqual(current['helper_thread'], thread(2))
+                self.assertEqual(current.get('kind'), 'helper' if action == 'apply' else None)
+
+    def test_sort_apply_and_delivery_finish_in_send_lock_order(self):
+        self.run_plan()
+        helpers = sort.helper_tabs
+        guard = helpers.record_lock
+        send_lock = threading.Lock()
+        reading, sort_attempted = threading.Event(), threading.Event()
+        results, failed = [], []
+        run = self.tmux.run
+
+        @contextmanager
+        def record_lock():
+            if threading.current_thread().name == 'sort':
+                sort_attempted.set()
+            with guard():
+                yield
+
+        def hook(cmd, **kwargs):
+            if cmd[1] == 'display-message' and threading.current_thread().name == 'delivery':
+                reading.set()
+                if not sort_attempted.wait(2):
+                    raise AssertionError('Sort did not request the record lock')
+                self.assertTrue(send_lock.locked())
+            return run(cmd, **kwargs)
+
+        def task(action):
+            try:
+                results.append(action())
+            except BaseException as exc:
+                failed.append(exc)
+
+        entries = list(self.tmux.entries.values())
+        self.tmux.entries['%2']['writable'] = True
+        handler = SimpleNamespace(client_address=('127.0.0.1', 0), headers={'X-Tether-Hook': 'fixture'}, respond=Mock())
+
+        def deliver():
+            agent_tabs.serve(handler, {'action': 'send', 'session': '%1', 'pane': '%2', 'message': 'Follow up'},
+                             sessions=lambda: entries, folder=None, snapshot=None, last_reply=lambda _: 'Last reply',
+                             run=hook, lock=send_lock, status=lambda _: {'state': 'Idle'}, send=lambda *_: 'submitted',
+                             timeline=None)
+            return handler.respond.call_args.args[0]
+
+        delivery = threading.Thread(name='delivery', target=task, args=(deliver,), daemon=True)
+        apply = threading.Thread(name='sort', target=task, args=(lambda: sort.replay(self.folder, run=hook),), daemon=True)
+        with patch.object(helpers, 'record_lock', record_lock), patch.object(agent_tabs.auth, 'session_value', return_value='fixture'):
+            delivery.start()
+            self.assertTrue(reading.wait(2))
+            apply.start()
+            for lane in (delivery, apply):
+                lane.join(3)
+                self.assertFalse(lane.is_alive(), lane.name)
+        self.assertEqual(failed, [])
+        self.assertCountEqual(results, [200, 2])
+        current = json.loads(self.tmux.options['%2']['@tether_helper'])
+        self.assertEqual((current['kind'], current['helper_thread'], current['before']),
+                         ('helper', thread(2), helpers.digest('Last reply')))
 
     def test_apply_refuses_when_a_planned_or_unchanged_pane_changes(self):
         self.run_plan()

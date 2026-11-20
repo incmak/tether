@@ -684,13 +684,13 @@ STATUS_LOCK = threading.Lock()
 STATUS_PANE_LOCKS = {}
 
 
-def shared_status(entry):
+def shared_status(entry, *, fresh=False):
     """live_status for the session list and the monitor, which would otherwise each re-read the pane every few seconds."""
     with STATUS_LOCK:
         pane_lock = STATUS_PANE_LOCKS.setdefault(entry['id'], threading.Lock())
     with pane_lock:
         when, status = STATUS_CACHE.get(entry['id'], (0.0, None))
-        if time.monotonic() - when > 1:
+        if fresh or time.monotonic() - when > 1:
             try:
                 status = auto_resume.overlay(entry, live_status(entry))
             except (OSError, ValueError, KeyError, subprocess.SubprocessError):  # a pane that just closed must not fail the whole tab list
@@ -705,8 +705,7 @@ def shared_status(entry):
 
 def fresh_status(entry):
     """shared_status without the one-second cache: for a check that must see a prompt sent a moment ago."""
-    STATUS_CACHE.pop(entry['id'], None)
-    return shared_status(entry)
+    return shared_status(entry, fresh=True)
 
 
 TRANSITIONS = {}  # entry id -> {'state', 'since', 'finished'}: wall-clock times, so the phone can sort and mark finished turns
@@ -1720,12 +1719,12 @@ def send_text(config, message, state=None, *, held=False, user=False):
     return 'queued' if state == 'Working' else 'submitted'
 
 
-def review_send(config, message, state=None):
+def review_send(config, message, state=None, *, held=False):
     """Deliver a review around a quiet Claude draft, preserving ordinary send guards."""
     config = dict(config, _review=True)
     stashed = stash_quiet_draft(config) if config.get('agent') == 'claude' else None
     try:
-        result = send_text(config, message, state)
+        result = send_text(config, message, state, held=held)
     except Exception as exc:
         try:
             if 'reached the agent input' in str(exc):
@@ -2856,7 +2855,13 @@ class Handler(BaseHTTPRequestHandler):
             work_api.post(self, sessions=sessions, status=shared_status, send=review_send, run=subprocess.run, lock=SEND_LOCK)
             return
         if groups_api.handles(self.path):
-            groups_api.post(self, sessions=sessions, fresh=fresh_sessions, lock=SEND_LOCK, changed=forget_sessions)
+            def close_status(entry):
+                pane = entry['id']
+                return dict(fresh_status(entry), ask=attention.STORE.ask(pane, entry.get('thread')),
+                            escalated=pane in review_links.escalated([entry]))
+
+            groups_api.post(self, sessions=sessions, fresh=fresh_sessions, status=close_status,
+                            lock=SEND_LOCK, changed=forget_sessions)
             return
         if undo_api.handles(self.path):
             undo_api.post(self, undo_env(), SEND_LOCK)
@@ -2968,7 +2973,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == agent_tabs.PATH:
                 agent_tabs.serve(self, body, sessions=sessions, fresh=fresh_sessions, folder=agent_folder, snapshot=snapshot,
                                  last_reply=last_reply, run=subprocess.run, lock=SEND_LOCK,
-                                 status=shared_status, send=review_send, timeline=timeline)
+                                 status=shared_status, send=partial(review_send, held=True), timeline=timeline)
                 return
             if self.path == '/mobile/api/dev-preview':
                 # Forward a dev server on this machine (http://localhost:5173/) on a preview port: dev_previews.py.
@@ -3595,15 +3600,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/menu':
                 choice, label, answer = body.get('choice'), body.get('label'), body.get('answer')
+                revision = body.get('revision')
                 if (not isinstance(choice, int) or isinstance(choice, bool) or not (label is None or isinstance(label, str))
-                        or not (answer is None or isinstance(answer, str) and answer.strip())):
+                        or not (answer is None or isinstance(answer, str) and answer.strip())
+                        or not (revision is None or isinstance(revision, str) and re.fullmatch('[a-f0-9]{64}', revision))):
                     raise ValueError('Choose an option first.')
                 if answer is not None and any(ord(c) < 32 and c not in '\n\t' or ord(c) == 127 for c in answer):
                     raise ValueError('The answer contains terminal control characters.')
                 from terminal_input import MenuChanged
                 try:
                     with SEND_LOCK:
-                        menu_choose(config, choice, label=label, answer=answer)
+                        menu_choose(config, choice, label=label, answer=answer, revision=revision)
                         if answer is not None:
                             task_user_delivery(config)
                 except MenuChanged as exc:

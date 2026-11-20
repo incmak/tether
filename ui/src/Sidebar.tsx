@@ -275,6 +275,8 @@ interface Props {
   onActions: (session: Session, remove?: boolean, at?: Anchor) => void
   onPaneActions: (pane: Pane, at?: Anchor) => void
   onTaskMove: (pane: Pane, target: Pane) => void
+  /** The actions of one stack (rename, close all, remove). Phones reach the stack menu only here inside a task tree. */
+  onStackActions?: (session: Session, stack: string, at?: Anchor) => void
   /** The × close and multi-select on chat rows (tabSelection.ts). */
   tabPick?: TabPickControls
   archivedTabs: Pane[]
@@ -314,7 +316,7 @@ interface Props {
 // The drawer unmounts on close; the wide sidebar keeps its own scroll.
 let drawerScrollTop = 0
 
-export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onTaskMove, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
+export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api, sessions, selected, prefs, update, loaded, error, onRetry, onReload, onOpen, onNew, onActions, onPaneActions, onTaskMove, onStackActions, onPastChat, onSettings, onUndoHistory, onBacklog, work, onClose, slots, drag, onDropPane, onDropSession, onDropChat, onCommandMenu, onMessageAll, onFactory, marks, onMarks, onOpenShell, onShellsEnded, onAddPane, archivedTabs, onRestoreTab, stacks, tabPick }: Props) {
   const host = useHost()
   const [query, setQuery] = useState('')
   const [reorder, setReorder] = useState<Section | null>(null)
@@ -589,7 +591,7 @@ export function Sidebar({ onDeck, now: appNow, review, reminder, reminders, api,
           {isOpen(group.key) && group.items.length > 1 && !search && manual && group.key !== 'archived' && <button className="group-edit" onClick={() => setReorder(reorder === group.key ? null : group.key)}>{reorder === group.key ? 'Done' : 'Reorder'}</button>}
         </div>
         {isOpen(group.key) && group.key === 'archived' && !group.items.length ? null : isOpen(group.key) && (group.items.length
-          ? <SessionList workMarks={work?.marks} items={items} now={now} activeOnly={foldQuiet(group.key)} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onTaskMove={onTaskMove} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} tabPick={tabPick} />
+          ? <SessionList workMarks={work?.marks} items={items} now={now} activeOnly={foldQuiet(group.key)} reorder={reorder === group.key} selected={selected} prefs={prefs} update={update} onOpen={onOpen} onActions={onActions} onPaneActions={onPaneActions} onTaskMove={onTaskMove} onStackActions={onStackActions} onMove={ids => moveWithin(group.items, ids)} pinned={group.key === 'pinned'} slots={slots ?? []} canDrag={!!drag} swipe={!drawer} api={api} carry={carry} onCarry={startCarry} onDrop={dropOn} onHold={holdStart} touchOver={touchOver} renaming={renameRow} onRenamed={renamed} marks={marks} onAddPane={onAddPane} matches={matches} tabPick={tabPick} />
           : !loaded ? !error && <SkeletonRows count={rememberedCount(`sidebar.${group.key}`, 2, 6)} label="Finding sessions…" className="sidebar-skeleton" meta={false} />
           : <p className="group-empty">{search ? 'No sessions or tabs match.' : group.key === 'terminals' ? 'No plain terminals. Create one with New session.' : 'Nothing here yet.'}</p>)}
         {isOpen(group.key) && quiet.length > 0 && <button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietOpen(list => showQuiet ? list.filter(key => key !== group.key) : [...list, group.key])}>{showQuiet ? 'Fold' : 'Show'} {quiet.length} quiet {quiet.length === 1 ? 'session' : 'sessions'}</button>}
@@ -634,7 +636,7 @@ function projectMark(mark: ProjectMark | undefined) {
 // The stack state dot, as in the chat header's stack row (Groups.tsx).
 const STACK_DOT = { needs: 'approval', done: 'done', working: 'working', idle: 'idle' } as const
 
-function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onTaskMove, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane, tabPick }: { tabPick?: TabPickControls; now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onTaskMove: Props['onTaskMove']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
+function SessionList({ now, activeOnly, matches, workMarks, items, reorder, selected, prefs, update, onOpen, onActions, onPaneActions, onTaskMove, onStackActions, onMove, pinned, slots, canDrag, swipe, api, carry, onCarry, onDrop, onHold, touchOver, renaming, onRenamed, marks, onAddPane, tabPick }: { tabPick?: TabPickControls; now: number; activeOnly: boolean; workMarks?: WorkLinks['marks']; onAddPane?: Props['onAddPane']; marks?: ProjectMarks; onHold: (event: React.TouchEvent, carried: Carry, label: string, menu: () => void) => void; touchOver: string | null; items: Session[]; reorder: boolean; selected: string | undefined; prefs: Prefs; update: Props['update']; onOpen: Props['onOpen']; onActions: Props['onActions']; onPaneActions: Props['onPaneActions']; onTaskMove: Props['onTaskMove']; onStackActions?: Props['onStackActions']; onMove: (ids: string[]) => void; pinned: boolean; slots: string[]; canDrag: boolean; swipe: boolean; api: Api; carry: Carry | null; onCarry: (carry: Carry | null) => void; onDrop: (target: Session) => void; renaming: Moved | null; onRenamed: () => void; matches?: Map<string, SessionMatch> | null }) {
   const stackListId = useId()
   // A row with focus unmounts when its stack folds again (the selection moved out of it). Focus then goes to that stack's fold button.
   // Only a removed row counts: a blur while the row is still in the page clears the record, so focus the user moved stays put.
@@ -908,6 +910,9 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
                     onClick={() => { if (!containsSelected) update(current => ({ expanded: { ...current.expanded, [key]: !stackOpen } })) }}>
                     <ChevronRight size={14} className="chevron" aria-hidden="true" />
                   </button>
+                  {place.id && onStackActions && <button type="button" className="pane-stack-actions" aria-haspopup="dialog"
+                    aria-label={`Actions for stack ${place.name}`} title={`Actions for stack ${place.name}`}
+                    onClick={event => onStackActions(session, place.id, anchorOf(event))}><MoreHorizontal size={14} aria-hidden="true" /></button>}
                 </div>
                 {/* The folded list stays as an empty hidden node, so aria-controls always names an element. */}
                 <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && rows(place.panes)}</ul>

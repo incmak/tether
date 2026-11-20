@@ -6,10 +6,12 @@ import subprocess
 from urllib.parse import parse_qs, urlsplit
 
 import audit
+import auto_resume
 import groups
 import helper_close
 import helper_tabs
 import projects
+from task_tree_api import CloseInterrupted, interrupted_response
 from terminal_input import UUID
 import undo
 import undo_store
@@ -26,6 +28,8 @@ def handles(path):
 def _answer(handler, work):
     try:
         handler.respond(200, work())
+    except CloseInterrupted as exc:
+        interrupted_response(handler, exc)
     except (groups.GroupError, projects.ProjectError) as exc:
         handler.respond(exc.status, {'error': str(exc)})
     except (ValueError, UnicodeError) as exc:
@@ -82,22 +86,29 @@ def _threads(sessions):
     return found.get
 
 
-def _close(session_id, group_id, body, entries, run):
+def _close(session_id, group_id, body, fresh, run, status):
     """The caller holds the send, helper record and stack locks through preflight and close."""
     requested = body.get('panes')
     if not isinstance(requested, list) or not requested:
         raise ValueError('Confirm the tabs to close.')
-    planned = {}
+    planned, buckets = {}, {}
     for item in requested:
         if not isinstance(item, dict) or 'thread' not in item:
             raise ValueError('Confirm each tab and its conversation.')
         pane = _pane(item.get('pane'))
         thread = item['thread']
-        if pane in planned or thread is not None and (not isinstance(thread, str) or not UUID.fullmatch(thread)):
+        bucket = item.get('bucket')
+        if (pane in planned or bucket not in ('idle', 'working')
+                or thread is not None and (not isinstance(thread, str) or not UUID.fullmatch(thread))):
             raise ValueError('Confirm each tab and its conversation.')
         planned[pane] = thread
+        buckets[pane] = bucket
 
     groups.check_group(session_id, group_id, run)
+    kind, server = auto_resume.server_id(run=run)
+    if kind != 'up':
+        raise groups.GroupError(409, helper_close.CLOSE_CHANGED)
+    entries = fresh()
     members = groups.stack_members(session_id, group_id, entries, run)
     live = {entry['id']: entry for entry in entries if entry.get('tmux_session') == session_id}
     if planned.keys() != members.keys() or any(
@@ -106,18 +117,34 @@ def _close(session_id, group_id, body, entries, run):
     ):
         raise groups.GroupError(409, 'The stack’s tabs changed. Open the stack menu again to review them.')
 
+    def close_status(entry):
+        row = status(entry)
+        return dict(row, state='Shell') if entry.get('agent') == 'shell' else row
+
+    if any(helper_close.close_bucket(close_status(live[pane])) != buckets[pane] for pane in planned):
+        raise groups.GroupError(409, helper_close.CLOSE_CHANGED)
+    identities = {pane: helper_close.close_identity(live[pane]) for pane in planned}
+
     # Close grandchildren first. Keep the existing separate Undo steps for each tab.
+    closed, saved_step = [], None
     for pane in sorted(members, key=members.get, reverse=True):
         saved = undo.capture_safe(pane, run, [live[pane]])
-        helper_close.close_pane(pane, run)
-        audit.record('tab.close', f'Closed tab {helper_tabs.visible_name(live[pane]) or pane}', pane=pane)
-        undo.record_tab_close(saved, run)
-        undo_store.flush()
+        try:
+            helper_close.close_matching_pane(pane, run, expected=identities[pane], bucket=buckets[pane],
+                                            server=server, fresh=fresh, status=close_status)
+        except helper_tabs.Stale as exc:
+            raise CloseInterrupted(helper_close.CLOSE_CHANGED, closed, saved_step['id'] if saved_step else None,
+                                   saved_step['label'] if saved_step else '', stale=True) from exc
+        title = helper_tabs.visible_name(live[pane]) or pane
+        closed.append((pane, title))
+        audit.record('tab.close', f'Closed tab {title}', pane=pane)
+        step = undo.record_tab_close(saved, run)
+        saved_step = undo_store.flush() or step or saved_step
     undo.group_remove(session_id, group_id, run, after_close=True)
     return {'ok': True}
 
 
-def post(handler, run=subprocess.run, sessions=lambda: [], *, fresh=None, lock=None, changed=lambda: None):
+def post(handler, run=subprocess.run, sessions=lambda: [], *, fresh=None, status=None, lock=None, changed=lambda: None):
     name = handler.path.split('?', 1)[0][len(PREFIX):]
 
     def work():
@@ -150,15 +177,16 @@ def post(handler, run=subprocess.run, sessions=lambda: [], *, fresh=None, lock=N
         if name == 'ungroup':
             undo.group_ungroup(session_id, group_id, run, by_user=True)
         else:
-            with helper_tabs.SEND_LOCK, lock or nullcontext(), groups.LOCK(), helper_tabs.record_lock():
-                entries = (fresh or sessions)()
+            with lock or nullcontext(), groups.LOCK(), helper_tabs.record_lock():
                 if name == 'close':
                     try:
-                        return _close(session_id, group_id, body, entries, run)
+                        return _close(session_id, group_id, body, fresh or sessions, run, status)
+                    except CloseInterrupted:
+                        raise
                     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
                         raise groups.GroupError(503, 'Tether could not finish closing the stack. Refresh its tabs.') from exc
                     finally:
                         changed()
-                undo.group_remove(session_id, group_id, run, entries=entries)
+                undo.group_remove(session_id, group_id, run, entries=(fresh or sessions)())
         return {'ok': True}
     _answer(handler, work)

@@ -43,8 +43,9 @@ function plan(listing) {
   const children = listing.sessions.filter(pane => pane.task === root.id).map(pane => ({
     pane: pane.id, thread: pane.thread, name: pane.pane_name, role: pane.task_role,
     state: pane.state === 'Approval' ? 'needs' : pane.state === 'Working' ? 'working' : 'idle',
+    undo: pane.agent !== 'antigravity',
   }))
-  return { plan: closeDigest, task: { pane: root.id, name: root.pane_name }, idle: children.filter(child => child.state === 'idle'), working: children.filter(child => child.state !== 'idle') }
+  return { plan: closeDigest, task: { pane: root.id, name: root.pane_name, undo: root.agent !== 'antigravity' }, idle: children.filter(child => child.state === 'idle'), working: children.filter(child => child.state !== 'idle') }
 }
 
 const apiFixture = {
@@ -360,6 +361,29 @@ async function main() {
     await waitChoice('%86')
     assert.equal(await panel.locator('h1').innerText(), taskName)
 
+    // Phone, task with helpers: the stack row is hidden, so the session sheet's stack heading owns the stack actions.
+    assert.equal(await panel.getByRole('button', { name: /^Stack: / }).isVisible(), false)
+    await page.getByRole('button', { name: /^Open sessions/ }).click()
+    await drawer.getByRole('button', { name: /^Stack Task tree, / }).focus()
+    await page.keyboard.press('Tab')
+    await page.keyboard.press('Tab')
+    const stackActions = drawer.getByRole('button', { name: 'Actions for stack Task tree', exact: true })
+    await assertFocus(stackActions)
+    const stackBox = await stackActions.boundingBox()
+    assert(stackBox.width >= 24 && stackBox.height >= 24, 'The stack actions button has a 24 × 24 px target')
+    await page.keyboard.press('Enter')
+    const stackMenu = page.getByRole('dialog', { name: 'Task tree' })
+    const closeAll = stackMenu.getByRole('button', { name: 'Close all tabs…' })
+    await closeAll.waitFor()
+    await closeAll.focus()
+    await page.keyboard.press('Enter')
+    await stackMenu.locator('#group-close-title').waitFor()
+    assert.match(await stackMenu.locator('#group-close-title').innerText(), /^Close all \d+ tabs in Task tree\?/)
+    await stackMenu.getByRole('button', { name: 'Cancel' }).click()
+    await page.keyboard.press('Escape')
+    await stackMenu.waitFor({ state: 'hidden' })
+    assert.equal(writes.some(item => item.endpoint === 'groups/close'), false, 'Cancel closes nothing')
+
     const reviewPane = listing.sessions.find(pane => pane.id === '%86')
     reviewPane.state = 'Idle'
     reviewPane.approval = null
@@ -386,8 +410,60 @@ async function main() {
     assert.equal(await side().locator('button[data-select-pane="%83"]').count(), 0)
     await side().getByRole('button', { name: 'Show 5 quiet tabs' }).click()
     assert.equal(await side().locator('button[data-select-pane="%83"]').isVisible(), true)
+
+    const nonUndo = listing.sessions.find(pane => pane.id === '%83')
+    nonUndo.agent = 'antigravity'
+    await open()
+    await panel.locator('[data-close-for="%1"]').click()
+    const irreversible = close.getByRole('group', { name: 'Cannot be undone' })
+    const optIn = irreversible.getByRole('checkbox', { name: /B446 advisor/ })
+    await optIn.waitFor()
+    assert.equal(await optIn.isChecked(), false, 'An idle tab without Undo requires opt-in')
+    assert.equal(await close.getByRole('list', { name: 'Close with the task' }).getByText('B446 advisor', { exact: false }).count(), 0)
+    const confirm = close.getByRole('button', { name: 'Close', exact: true }).last()
+    await Promise.all([waitWrite('task-tree/close'), confirm.click()])
+    assert.deepEqual(write('task-tree/close').close_also, [])
+    assert(!write('task-tree/close').close_idle.includes('%83'))
+    assert(write('task-tree/close').close_idle.includes('%84'), 'Other idle tabs with Undo still close')
+    await close.waitFor({ state: 'hidden' })
+
+    await panel.locator('[data-close-for="%1"]').click()
+    await optIn.press('Space')
+    await Promise.all([waitWrite('task-tree/close'), confirm.click()])
+    assert.deepEqual(write('task-tree/close').close_also, ['%83'], 'An idle tab without Undo closes after opt-in')
+    assert(!write('task-tree/close').close_idle.includes('%83'))
+    await close.waitFor({ state: 'hidden' })
+
+    listing.sessions[0].agent = 'antigravity'
+    nonUndo.state = 'Working'
+    await open('%1', 320)
+    await page.getByRole('button', { name: /^Open sessions/ }).click()
+    await drawer.getByRole('button', { name: `Close ${taskName}`, exact: true }).click()
+    const rootWarning = close.getByText(`You cannot undo closing ${taskName}.`, { exact: true })
+    await rootWarning.waitFor()
+    assert.equal(await optIn.isChecked(), false, 'A working tab without Undo also requires opt-in')
+    const [groupBox, warningBox, buttonBox, checkBox] = await Promise.all([irreversible.boundingBox(), rootWarning.boundingBox(), confirm.boundingBox(), optIn.boundingBox()])
+    for (const box of [groupBox, warningBox]) assert(box.x >= 0 && box.x + box.width <= 320, 'The 320 px viewport contains the warning and checks')
+    assert(warningBox.y + warningBox.height <= buttonBox.y, 'The root warning sits above the buttons')
+    assert(checkBox.width >= 24 && checkBox.height >= 24, 'The checkbox has a 24 × 24 px target')
+    assert.equal(await confirm.evaluate(node => document.getElementById(node.getAttribute('aria-describedby')).textContent), `You cannot undo closing ${taskName}.`)
+    await close.getByRole('button', { name: 'Cancel' }).focus()
+    await page.keyboard.press('Shift+Tab')
+    await assertFocus(optIn)
+    await page.keyboard.press('Space')
+    assert.equal(await optIn.isChecked(), true)
+    await Promise.all([waitWrite('task-tree/close'), confirm.click()])
+    assert.equal(write('task-tree/close').pane, '%1')
+    assert.deepEqual(write('task-tree/close').close_also, ['%83'])
+    assert(!write('task-tree/close').close_idle.includes('%83'))
+    await close.waitFor({ state: 'hidden' })
+
+    await open()
+    await side().getByRole('button', { name: 'Settings', exact: true }).click()
+    await page.getByRole('searchbox', { name: 'Search settings' }).fill(settingsLabel)
+    await page.getByText('Tasks with a tab that cannot be undone, such as Antigravity, stay open.', { exact: false }).waitFor()
     assert.deepEqual(errors, [])
-    console.log('Task tree: root tabs, roving focus, dots and folds, child answers, move menu and drag, Done, close plan, setting and 320 px navigation pass')
+    console.log('Task tree: root tabs, roving focus, dots and folds, child answers, move menu and drag, Done, close plan, no-Undo opt-in, setting, 320 px navigation and phone stack actions pass')
   } catch (error) {
     if (errors.length) console.error(errors)
     if (process.env.DEBUG_TASK_TREE) console.error((await page.locator('.crash-details pre, body').last().textContent()).slice(0, 2500))

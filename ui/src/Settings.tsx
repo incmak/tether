@@ -69,7 +69,7 @@ function TaskAutoClose({ api }: { api: Api }) {
     finally { setPending(false) }
   }
   return <>
-    <Toggle title={TASK_AUTO_CLOSE} note="Close the task and its helpers after 24 hours without activity or a visit." scope="This server"
+    <Toggle title={TASK_AUTO_CLOSE} note="Close the task and its helpers after 24 hours without activity or a visit. Tasks with a tab that cannot be undone, such as Antigravity, stay open." scope="This server"
       checked={checked ?? false} disabled={checked === undefined || pending} onChange={value => void change(value)} />
     {checked === undefined && !error && <p className="setting-note" role="status">Loading setting…</p>}
     {error && <p className="error" role="alert">{error}</p>}

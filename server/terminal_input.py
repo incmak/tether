@@ -525,33 +525,28 @@ def verified_numbered_menu(entry, frame):
         return choice_state.codex_numbered_menu(frame)
     if entry['agent'] != 'claude' or not (current := choice_state.ask_current(frame)) or current['multi']:
         return None
+    import agents
+    try:
+        ask = agents.open_claude_ask(entry)
+    except OSError:
+        return None
+    if ask is None or len(ask['questions']) != current['total']:
+        return None
+    expected = ask['questions'][current['index']]
     options = [{'id': item['id'], 'text': item['text'], 'detail': item['description'],
                 'selected': item['selected'], **({'free': True} if item['kind'] == 'free' else {})}
                for item in current['options']]
-    question = current['question']
-    ask_id = None
-    if entry.get('transcript'):
-        import agents
-        try:
-            ask = agents.open_claude_ask(entry)
-        except OSError:
-            return None
-        if ask is not None:
-            if len(ask['questions']) != current['total']:
-                return None
-            expected = ask['questions'][current['index']]
-            normalize = lambda text: ' '.join(text.split())
-            if (expected['multi']
-                    or normalize(expected['header']) != current['header']
-                    or normalize(expected['question']) != question
-                    or [(normalize(item['label']), normalize(item['description'])) for item in expected['options']]
-                    != [(item['text'], item['detail']) for item in options[:-2]]):
-                return None
-            question, ask_id = expected['question'], ask['id']
-            for item, source in zip(options, expected['options']):
-                item.update(text=source['label'], detail=source['description'])
-    return {'question': question, 'options': options,
-            'menu_identity': [current['index'], current['total'], current['header'], ask_id]}
+    normalize = lambda text: ' '.join(text.split())
+    if (expected['multi']
+            or [normalize(item['header']) for item in ask['questions']] != [tab['label'] for tab in current['tabs']]
+            or normalize(expected['question']) != current['question']
+            or [(normalize(item['label']), normalize(item['description'])) for item in expected['options']]
+            != [(item['text'], item['detail']) for item in options[:-2]]):
+        return None
+    for item, source in zip(options, expected['options']):
+        item.update(text=source['label'], detail=source['description'])
+    return {'question': expected['question'], 'options': options,
+            'menu_identity': [current['index'], current['total'], current['header'], ask['id']]}
 
 
 def menu_digest(menu):
@@ -566,7 +561,7 @@ def menu_digest(menu):
 
 
 def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, sleep=time.sleep, *, digest=None,
-                current_prompt=None):
+                current_prompt=None, revision=None):
     """Answer a numbered menu by moving the cursor, not by a digit key. A digit types text when the cursor sits on
     Claude's own-answer row, and then every later tap types more ("344"). So: read the cursor row, press Up or Down
     until it is on the chosen row (checking the screen after each press), then Enter. answer: text for the own-answer row;
@@ -592,7 +587,7 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
                         raise DraftError('The free-answer field has different text. Open the helper to check its draft.')
         return menu['options'], content
 
-    expected = digest
+    expected = digest or revision
     options, expected = look(writing=True)
     target = next((i for i, option in enumerate(options) if option['id'] == choice), None)
     if target is None:
@@ -912,9 +907,13 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     seen.update(fingerprint=fingerprint, last=now, shown=True, id=fingerprint if reason in ('menu', 'picker') else seen['id'])
     found = {'id': seen['id'], 'text': text, 'reason': reason}
     if reason == 'menu':
-        found.update(menu_question(menu_lines(lines), entry['agent']) or {})
-        if menu := verified_numbered_menu(entry, styled_screen or screen):
-            found.update(question=menu['question'], options=menu['options'], menu_verified=menu_digest(menu))
+        menu = verified_numbered_menu(entry, styled_screen or screen)
+        revision = menu_digest(menu) if menu else None
+        found['menu_verified'] = revision or False
+        if revision:
+            found.update(question=menu['question'], options=menu['options'])
+        elif parsed := menu_question(menu_lines(lines), entry['agent']):
+            found['question'] = parsed['question']
     elif reason == 'picker':
         found.update(picker)
     elif reason == 'panel':
@@ -927,7 +926,7 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
         found['permissions'] = permissions
     elif link:
         found['login'] = link
-    if reason in ('menu', 'picker'):
+    if reason == 'picker' or found.get('menu_verified'):
         choice = choice_state.parse(styled_screen or screen, entry['agent'])
         if choice is not None:
             found['choice'] = choice

@@ -1067,11 +1067,13 @@ def ask_questions(part):
                    for option in (item.get('options') or [])[:8] if isinstance(option, dict) and text(option.get('label'), 300)]
         questions.append({'question': text(item.get('question'), 2000), 'header': text(item.get('header'), 60),
                           'multi': bool(item.get('multiSelect')), 'options': options})
-    return {'id': part.get('id'), 'questions': questions} if questions and part.get('id') else None
+    identifier = part.get('id')
+    return {'id': identifier, 'questions': questions} if questions and isinstance(identifier, str) and identifier else None
 
 
 def _update_claude_ask(state, part, role):
     if part.get('type') == 'tool_use' and part.get('name') == 'AskUserQuestion' and role == 'assistant':
+        state['ask'] = None  # A newer call supersedes the previous one even if its input cannot be read.
         state['ask'] = ask_questions(part)
     elif part.get('type') == 'tool_result' and part.get('tool_use_id') == (state.get('ask') or {}).get('id'):
         state['ask'] = None
