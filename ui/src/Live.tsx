@@ -417,7 +417,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     answer_approval: async ({ chat, decision }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
-      const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.approvalPane
+      const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.approvalPane)
       const approval = pane && approvalOf(pane)
       if (!pane || !approval) return { error: 'No chat is waiting for approval.' }
       await flow.current.answer(pane, approval, decision === 'approve' ? yesOption(approval) : noOption(approval))
@@ -426,7 +426,7 @@ export function Live({ api, panes, selected, commands, onClose, onBacklog, revea
     read_last_reply: async ({ chat, offset, reply_id }) => {
       const choice = sessionChoice(live.current.agents, String(chat ?? ''))
       if (choice) return choice
-      const pane = findPane(live.current.agents, String(chat ?? '')) ?? live.current.target
+      const pane = findPane(live.current.agents, String(chat ?? '')) ?? (chat ? undefined : live.current.target)
       if (!pane) return { error: `No chat called ${chat}.` }
       const { message, searchedAll } = await findLastReply(limit => live.current.api<ChatData>(`chat?session=${encodeURIComponent(pane.id)}&limit=${limit}`))
       if (!message) return { chat: paneTitle(pane), text: searchedAll ? 'No reply yet.' : 'No reply in the last 2000 messages.' }

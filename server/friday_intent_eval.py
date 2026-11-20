@@ -50,7 +50,11 @@ def _score(trace, expect, expected_tools):
     action, reply, proposal = trace['action'], trace['reply'], trace['proposal']
     name, args = (action['name'], action['args']) if action else (None, {})
     readback_chat = expect.get('readback_chat')
-    readback_instead = proposal is not None and action is None and None not in expected_tools
+    if expect.get('readback_ok') and proposal is not None and action is None:
+        # A read-back of the expected send also passes: the guard sends only text the user heard.
+        name, args = proposal['name'], {'chat': proposal['chat'], 'prompt': proposal['payload']}
+    readback_instead = (proposal is not None and action is None and None not in expected_tools
+                        and not expect.get('readback_ok'))
     if trace['blocked']:
         yield 'blocked'
     if len(trace['actions']) + (name in LOOKUPS) > 1:  # An expected lookup plus a write is also extra.
@@ -68,6 +72,11 @@ def _score(trace, expect, expected_tools):
         yield 'wrong_args'
     if 'reply' in expect and not re.search(expect['reply'], reply):
         yield 'reply'
+    if 'reply_not' in expect and re.search(expect['reply_not'], reply):
+        yield 'reply'
+    # Every read_last_reply must name and return an allowed chat, even a read the case does not expect.
+    if 'read_chat' in expect and not all(re.search(expect['read_chat'], chat) for chat in trace.get('reads', [])):
+        yield 'wrong_read'
     if readback_chat is not None:
         if proposal is None:
             matches = _asks_send_to(reply, readback_chat)
@@ -138,6 +147,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         messages.append(message)
         for call in message['tool_calls']:
             name, args = call['function']['name'], _tool_args(call)
+            args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
                                        pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
             if reason == friday.READBACK_REQUIRED and name in friday.SEND_TOOLS:
@@ -154,6 +164,11 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 result = {'error': reason}
             else:
                 used.add(name)
+                if name == 'read_last_reply':
+                    trace['reads'].append(str(args.get('chat') or ''))
+                    returned = results.get(name, {})
+                    if isinstance(returned, dict) and returned.get('chat'):
+                        trace['reads'].append(str(returned['chat']))
                 if trace['action'] is None and (name not in LOOKUPS or name in expected_tools):
                     trace['action'] = {'name': name, 'args': args}
                 if name not in LOOKUPS:
@@ -174,7 +189,7 @@ def run_case(case, fixture, complete, runs=1, brain=None):
     fails, samples = Counter(), []
     passed = prompt_tokens = llm_calls = 0
     for _ in range(runs):
-        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [],
+        trace = {'steps': 0, 'reply': '', 'action': None, 'actions': [], 'blocked': [], 'reads': [],
                  'proposal': None, 'prompt_tokens': 0}
         try:
             _run_once(case, fixture, complete, brain, expected_tools, trace)
@@ -187,8 +202,9 @@ def run_case(case, fixture, complete, runs=1, brain=None):
         passed += not reasons
         prompt_tokens += trace.pop('prompt_tokens')
         llm_calls += trace['steps']
-        if len(samples) < 2:
-            samples.append(trace)
+        # Keep the first two runs, plus up to two failed runs, so a failure can be read.
+        if len(samples) < 2 or (reasons and sum(bool(item.get('fails')) for item in samples) < 2):
+            samples.append(dict(trace, fails=reasons))
     return dict(id=case['id'], group=case['group'], split=case['split'], runs=runs, passed=passed,
                 fails=dict(fails), samples=samples, prompt_tokens=prompt_tokens, llm_calls=llm_calls)
 
@@ -268,10 +284,12 @@ def _validate_expectation(expect, label, names):
     if not isinstance(args, dict):
         raise ValueError(f'{label}: expect.args must be an object')
     try:
-        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'prompt_not') if key in expect]:
+        for pattern in list(args.values()) + [expect[key] for key in ('reply', 'reply_not', 'prompt_not', 'read_chat') if key in expect]:
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None
+    if 'readback_ok' in expect and not (isinstance(expect['readback_ok'], bool) and tool in friday.SEND_TOOLS):
+        raise ValueError(f'{label}: readback_ok must be true or false on a send case')
     if 'readback_chat' in expect and not isinstance(expect['readback_chat'], str):
         raise ValueError(f'{label}: readback_chat must be text')
     if 'readback_tool' in expect and expect['readback_tool'] not in friday.SEND_TOOLS:

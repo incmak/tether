@@ -43,7 +43,7 @@ NEEDS = say("Yeah, see which chat needs my attention. Let's start with the oldes
 # ---- From the 19 Nov 2026 log (names replaced) ----
 case("log-ask-why-slow", "send_direct", "dev",
      "Okay, so I reckon you took too much uh But I'll can you ask the Frida test session, like why did Friday took too long to respond?",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test"}}, "log",
      history=say("Hi. Hi Friday are you listening?", "I am listening. What can I help you with today?"))
 case("log-catch-up-count", "backlog_list", "dev",
      "Okay, okay, that's great. And can you check like what's on my table, like what I have to catch up with? How many items?",
@@ -68,15 +68,18 @@ case("log-split-ask", "split_turn", "dev",
       "Create and work on this log and then accordingly fine-tune this model so that it can understand intent."],
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log")
 READBACK = "I will ask the friday test chat to go through the logs, spin up a new tab, and work on fine-tuning the model for intent. Shall I send that?"
+# Added words are new text: Friday reads the new send back first (readback_ok).
 case("log-confirm-plus-more", "confirm", "dev", ["Please do that.", "And also ask it to fix B three one eight."],
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)friday test", "prompt": "(?i)318|three one eight"}}, "log",
      history=say("Okay, let's ask Friday test to go through the logs and fine-tune the model to understand intent.", READBACK))
 case("log-praise", "no_tool", "dev", "Great, I love it. I love how you're uh responding well", {"tool": None}, "log")
 case("log-urgent-feature-ask", "send_direct", "dev",
      "And kind of I was thinking if I am needed, um at times we should have a feature if I'm needed urgently, like very urgently, not urgent, like very urgently, and it's a critical blocker and no way out. And you can just call me through Friday and then I can answer it. Can we have that feature and can we ask the Friday test session to spin up a new tab? And like ask um to write a spec and use the skill grill me with dogs.",
      {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)spec"}}, "log")
+# A yes to Friday's own words gets the fixed read-back first; only a yes to that read-back sends.
 case("log-confirm-yes-please", "confirm", "dev", "Yes, please.",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test"}}, "log",
+     {"tool": "send_to_chat", "readback_ok": True,
+      "args": {"chat": "(?i)friday test", "prompt": r"(?i)\bspec\b.*\b(?:calls?|blocker)\b|\b(?:calls?|blocker)\b.*\bspec\b"}}, "log",
      history=say("We should have a feature where Friday calls me when a critical blocker needs me. Friday test should write a spec for it.",
                  "I will ask the friday test chat to spin up a new tab and write a spec for an urgent voice call feature. Shall I send that?"))
 case("log-queue-question", "no_tool", "dev",
@@ -124,14 +127,18 @@ case("log-not-approval", "no_tool", "dev",
                                            "I am sorry, there was a technical block. Shall I send that prompt to the automation tether chat now?"))
 case("log-unknown-session", "misheard", "dev",
      "Okay, okay. Now hold on, I'll see what's happening in The teeth. Sorry in the predicta session.",
-     {"tool": None, "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find"}, "log",
+     {"tool": None, "reply": "(?i)which|no session|couldn't find|could not find|can't find|don't see|not find|didn't find",
+      "read_chat": "(?i)predicta"}, "log",
      tool_results={"list_chats": {"error": "No session called predicta. Sessions: Tether, Backend, Docs, Automation, Friday chats"}})
 
 # ---- From the 19 Nov 2026 13:51-13:52 call (user evidence) ----
 AUTO_CHAT = r"(?i)^Automation tether \. Can we have…$"
+# The prompt answers C and nothing else ("observe mode" is option C's own name). A list of allowed words, because a list of banned words
+# missed "Keep option C. Deploy immediately."
+ONLY_C = (r"(?i)^\W*(?:(?:let'?s|let us|we(?:'ll| will)?|i(?:'ll| will)?|please|answer|reply|choose|pick|select|"
+          r"keep|go|with|use|stay|on|option|the|is|it|decision|choice|observe|mode)\W+)*C\W*(?:for now\W*)?$")
 case("log-answer-only-c", "send_direct", "dev", "tell it let's keep option C",
-     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": r"(?i)\bC\b"},
-      "prompt_not": "(?i)yes to all"}, "log", state=AUTO_STATE,
+     {"tool": "send_to_chat", "args": {"chat": AUTO_CHAT, "prompt": ONLY_C}}, "log", state=AUTO_STATE,
      history=turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
                   "read_last_reply", {"chat": AUTO}, {"chat": AUTO, "text":
                       'B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\n'
@@ -176,10 +183,10 @@ case("readback-let", "readback", D, "let docs site update the changelog for the 
      {"tool": None, "readback_chat": "docs-site"})
 RB_API = "I will tell api-server to add rate limiting to the upload endpoint. Shall I send that?"
 case("confirm-yes", "confirm", D, "yes",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)rate"}},
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)api.server", "prompt": "(?i)rate"}},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
 case("confirm-go-ahead", "confirm", D, "yeah go ahead",
-     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}},
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)api.server"}},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
 case("deny-no-wait", "deny", D, "no, wait, not yet", {"tool": None},
      history=say("the api server should add rate limiting to the upload endpoint", RB_API))
@@ -189,8 +196,9 @@ FIXED_API = say("the api server should add rate limiting to the upload endpoint"
 case("fixed-yes", "confirm", D, "yes please",
      {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
 case("fixed-no", "deny", D, "no, not now", {"tool": None}, history=FIXED_API, pending=PENDING_API)
+# Added words are new text: a send of the new text, or Friday's read-back of it, both pass.
 case("fixed-yes-plus-more", "split_turn", D, ["Yes, please do.", "And also check the logs after."],
-     {"tool": "send_to_chat", "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
+     {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "api-server"}}, history=FIXED_API, pending=PENDING_API)
 case("approve", "approval", D, "approve it",
      {"tool": "answer_approval", "args": {"chat": "(?i)deploy", "decision": "approve"}})
 case("deny-approval", "approval", D, "deny that request",
@@ -240,7 +248,7 @@ case("h-readback-want", "readback", H, "I want login fix to also cover the passw
 case("h-readback-idea", "readback", H, "docs site needs a page about the new settings screen",
      {"tool": None, "readback_chat": "docs-site"})
 RB_DOCS = "I will ask docs-site to add a page about the new settings screen. Shall I send that?"
-case("h-confirm-sure", "confirm", H, "sure, do it", {"tool": "send_to_chat", "args": {"chat": "(?i)docs.site"}},
+case("h-confirm-sure", "confirm", H, "sure, do it", {"tool": "send_to_chat", "readback_ok": True, "args": {"chat": "(?i)docs.site"}},
      history=say("docs site needs a page about the new settings screen", RB_DOCS))
 PENDING_DOCS = {"name": "send_to_chat", "chat": "docs-site", "payload": "Update the changelog for the new release"}
 case("h-fixed-yes", "confirm", H, "yeah go ahead",
@@ -275,6 +283,89 @@ case("h-no-tool-joke", "no_tool", H, "ha, that was quick", {"tool": None})
 case("h-split-tell", "split_turn", H, ["okay tell api server to", "add logging to the upload handler"],
      {"tool": "send_to_chat", "args": {"chat": "(?i)api.server", "prompt": "(?i)log"}})
 case("h-status-needs", "status", H, "does anything need me right now?", {"tool": None, "reply": "(?i)deploy"})
+
+# ---- From the 19 Nov 2026 08:23 call (B339; names replaced) ----
+QS = {"read_last_reply": {"chat": "release-notes", "text": "Round 1 waits for your answers. Q1: Who decides what is critical? Q2: How should an urgent call reach you? Q3: How do approvals work during an urgent call? Q4: What are quiet hours?"}}
+QS_STATE = dict(STATE, target="release-notes")
+QS_CTX = say("For the release notes chat, can you check what questions it has asked me?",
+             "The release-notes chat is waiting for your answers to four questions about urgent calls.")
+case("log2-go-question-one", "read_reply", "dev", "Can you uh go question by question? Let's start with question one.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
+case("log2-already-asked", "read_reply", "dev",
+     "It has already It has already asked those questions. You just have to check it. You have to ask me those.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", state=QS_STATE, tool_results=QS,
+     history=QS_CTX + say("No no no don't send it. No no no.",
+                          "Shall I send the request to go question by question to release-notes?"))
+case("log2-read-the-questions", "read_reply", "dev", "Can you read the questions?",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)release.notes"}}, "log", history=QS_CTX, state=QS_STATE, tool_results=QS)
+case("log2-ask-other-session", "send_direct", "dev",
+     "Okay ask Friday test uh session to read latest. Uh logs I had. the call with Friday.",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": "(?i)log"}}, "log", history=QS_CTX, state=QS_STATE)
+case("h-read-asked-me", "read_reply", "holdout", "what questions did docs site ask me? read them out",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)docs.site"}}, state=QS_STATE)
+case("h-ask-other-session", "send_direct", "holdout", "get the api server session to rebase on main",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)api.server"}}, state=QS_STATE)
+
+# ---- Call audit 19 Nov 2026 (B339; fixes 1-3, 5-10 in tether-notes call-audit-2026-11-19.md) ----
+AGENCY = ["Why cannot you? Why why cannot you do that? You can let us that we should have full agency workflow and interactions.",
+          "It should be like an environment where I talk to Friday.",
+          "And it should be able to interact with teeth as well when I tell it to do so. And it toggles within the ID. If I enable that, then it should be able to interact with the environment. Can you ask Friday test what did you what did he do about it?"]
+AGENCY_PROMPT = r"(?is)(?=.*\b(toggle|setting|enabl\w*|switch\w*))(?=.*\b(act\w*|interact\w*|control\w*|agen(cy|tic)))"
+case("log-agency-ask-it", "split_turn", "dev", AGENCY,
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test", "prompt": AGENCY_PROMPT}},
+     "log", history=say("Can you switch to that tab within Tither?",
+                        "I cannot show or open a chat in the window, but I have switched your target to Automation tether."),
+     state=AUTO_STATE)
+C_CTX = (turn("Uh so like what's happening in automation Ther? Like can you check it? Is there a dependency on me?",
+              "read_last_reply", {"chat": AUTO},
+              {"chat": AUTO, "text": "B240 and B241 are still in progress in B232 Extension Zip. I am watching that tab.\n\nYou still have 2 open decisions:\nAuto-merge: \"C\" keeps Observe mode.\nFactory floor: grill questions Q1 to Q5.\n\nNext: reply \"C, yes to all\", or give the numbers you want changed.\n\nNeeds you: yes", "truncated": False},
+              "B240 and B241 are still in progress, and it is waiting for your answers on auto-merge and factory floor questions.", "c1")
+         + say("So what is the auto-most question?", "It asks whether to keep Observe mode with option C.")
+         + say("Do you think we should keep that?", "I cannot judge your design choices, but option C keeps Observe mode active."))
+case("log-keep-that-readback", "readback", "dev", "Okay, let's keep that.",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
+     history=C_CTX, state=AUTO_STATE)
+case("log-resend-long-text", "send_direct", "dev",
+     "No see you sent the wrong text. You sent only the what do you do about it, but it was a long text. So Tell f uh tell uh the Friday test session that And why did it make that mistake?",
+     {"tool": "send_to_chat", "args": {"chat": "(?i)friday test",
+                                        "prompt": r"(?is)(?=.*\bfriday\b)(?=.*\b(toggle|setting|agen(cy|tic)|interact\w*|act\w*))"}},
+     "log", history=[{"role": "user", "content": part} for part in AGENCY] + [
+         {"role": "assistant", "content": None, "tool_calls": [call("r1", "send_to_chat",
+             {"chat": "friday test", "prompt": "What did you do about it?"})]},
+         {"role": "tool", "tool_call_id": "r1",
+          "content": json.dumps({"ok": True, "chat": "friday test", "delivery": "submitted"})},
+         {"role": "assistant", "content": "Sent to friday test."}])
+case("log-urgent-q1", "read_reply", "dev", "Okay so go question by question. Start with question one.",
+     {"tool": None, "any_tool": ["read_last_reply"],
+      "reply": CANT + r"|not in|doesn't (say|include|list)|only says|ask (it|the chat)"}, "log",
+     history=turn("What questions has the urgent call chat asked me?", "read_last_reply", {"chat": "Urgent Call Spec"},
+                  {"chat": "Urgent Call Spec", "text": "Round 1 (Q1-Q4) still waits for your answers. Answer Q1-Q4 above.", "truncated": False},
+                  "It is waiting for your answers to four questions.", "q1"))
+case("log-whats-happening-session", "read_reply", "dev",
+     "Uh ignore ignore it. It was a dumb ex uh agent. Uh so Friday, uh what's been happening lately? Like Uh what's been happening in the Friday test session.",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)friday test"}}, "log")
+case("log-automation-data", "misheard", "dev", "Okay what about the automation data session?",
+     {"tool": "read_last_reply", "args": {"chat": "(?i)automation"}}, "log",
+     history=say("Hi Friday.", "Hi, I am listening."), state=dict(STATE, busy=[AUTO]))
+case("log-echo-ignore", "no_tool", "dev",
+     "It also found and fixed a third gap in the same book. Filings with several parts lost their images. It must be.",
+     # Echo of an agent reply: a short reply that does not take up its content. The audio fix is B394.
+     {"tool": None, "reply": r"(?s)^.{0,120}$",
+      "reply_not": r"(?i)image|filing|gap|book|tell me more|regression|edition|affected|fix"}, "log")
+case("log-keep-option-c", "read_reply", "dev", "Do you think we should keep that?",
+     {"tool": None, "reply": r"(?is)(?=.*(\bC\b|observe))(?=.*(recommend|suggest|propos|advis|it says|next step))",
+      "reply_not": r"(?i)(over|instead of|rather than|not) (option )?C\b|option [ABD]\b"}, "log",
+     history=C_CTX[:-2], state=AUTO_STATE)
+# "Answer it" is not a send word: Friday reads back the answer and sends only after a yes.
+case("log-answer-it-keep-c", "readback", "dev", "Well like answer it like let's keep option C",
+     {"tool": None, "readback_chat": AUTO, "args": {"prompt": ONLY_C}}, "log",
+     history=C_CTX + say("Okay, let's keep that.", "Should I send C to the automation tether chat?"), state=AUTO_STATE)
+case("log-ask-friday-test-new-tab", "send_direct", "dev",
+     "No, I think you should ask Friday test session that there is bug and I'm not able to check uh the responses and properly the chat sessions. I'm not able to are not able to read that. Friday is not able to read that. So investigation is n needed. In another tab.",
+     {"tool": "send_to_chat", "readback_ok": True,
+      "args": {"chat": "(?i)friday test", "prompt": "(?i)read|reply|response|cut|trunc"}}, "log",
+     history=say("The chat already has the first question. Why are you not able to see it?",
+                 "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
 
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:

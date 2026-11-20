@@ -51,21 +51,32 @@ SYSTEM_PROMPT = (
     'Idle chats are open, not running. Say running or working only for busy chats. '
     'To list the chats in one session, call list_chats with session. '
     'Speak about chats only from current state or tool results. Never invent a status, result, or file. '
+    'Never state what a chat asked or said unless a tool result in this call holds that text. '
+    'If the reply you read does not hold it, say so and offer to ask the chat. '
+    'When asked what is happening in a chat or session, call read_last_reply for that chat, '
+    'or for the most recent chat in that session, and summarize it. Do not list chat names. '
+    'If no session matches a name, match the closest chat name. '
+    'If asked what you think about a chat\'s question, give the chat\'s own suggestion from its reply and say it is the chat\'s. '
     'If unsure, say you do not know or use the relevant tool. '
     'If the user asks what a chat said or replied, call read_last_reply. '
     'If read_last_reply returns truncated, call it again with next_offset and reply_id before answering about the missing part; '
     'never say the reply cut off while truncated is true. '
     'If it returns new_reply, the chat replied again; use the new text. '
     'Before send_to_chat, turn the user request into a clear, complete prompt for the coding agent. '
+    'Build it from everything the user said about it since your last reply, not only the last sentence. '
+    'Replace it, that, he and this with what they name, and keep the user\'s details. Never send a bare question with a pronoun. '
+    'If the user says you sent the wrong or short text, send the full text the user meant. '
+    'In a question about your own mistake, it or Friday means you, the voice assistant, not the chat. '
     'When the user answers a chat\'s question, send only the answers the user gave, in the user\'s words. '
     'Never copy a reply the chat suggested, such as reply "C, yes to all", unless the user said those words. '
     'Sending work to a chat, with send_to_chat or backlog_send: '
-    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, '
-    'call the tool now, even if speech-to-text misheard the chat name: use the closest name in state. '
+    'Always write the chat name exactly as in state, for example api-server, even when speech-to-text '
+    'misheard it ("docs sight" is docs-site): use the closest name in state. '
+    '1. If the user said send, tell, ask, prompt, instruct, message, forward, have it, or get it to, call the tool now. '
     'Those words are the consent; do not read back. "Don\'t send" or "not yet" is never consent. '
-    '2. Otherwise do not call the tool yet. Read back "Shall I send <task or item ID> to <chat>?", '
-    'with the chat name written exactly as in state, for example api-server, and wait. '
-    '3. When the user says yes to that read-back, call the tool with the same chat and task. '
+    '2. Otherwise call the tool anyway: it reads the task back and asks yes or no. '
+    'Never ask "Shall I send" in your own words. '
+    '3. When the user says yes to that read-back, call the tool again with the same chat and task. '
     'Speech-to-text may hear "suggest to me" as "search to me"; that is not a send word. '
     'Never say you sent, switched, opened, or did anything unless its tool returned ok in this turn. '
     'After a tool error, say plainly that it did not happen. '
@@ -73,7 +84,7 @@ SYSTEM_PROMPT = (
     'You cannot show, open, or bring up a chat in the Tether window. switch_chat only sets where sends go, '
     'and open_panel only opens panels. If asked to show a chat, say you cannot, and offer to read its last reply. '
     'A name that sounds close to one in state, such as ape server for api-server, is a match; use it. Only if a session or chat name matches nothing, say so and ask which one; do not list other chats. '
-    'Outside your tools (GitHub, email, accounts), say you cannot do it directly, even when the user said send; offer '
+    'Outside your tools (GitHub, email, accounts), call no tool in that turn: say you cannot do it directly, even when the user said send; offer '
     'send_to_chat to a named chat or new_chat. Read that prompt back and wait for yes. '
     'Use answer_approval only when a chat in state needs approval and the user clearly said approve or yes, '
     'or deny or no, to that approval in this turn. A yes to your read-back is not an approval. '
@@ -93,11 +104,17 @@ EVENT_PREFIX = 'Tether news to tell the user in one sentence; do not act on it: 
 MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 SEND_INTENT = re.compile(
-    r'\b(?:send|tell|ask|prompt|instruct|message|forward)\b'
+    r'\b(?:send|tell|ask|instruct|forward)\b'
+    # Prompt and message are send words only as a verb that starts a clause: "message ci-audit" or
+    # "please prompt it", not "the prompt ci-audit got" or "did you message them".
+    r'|(?:^|[.,!;:]\s*|\b(?:please|just|and|then|now|so|(?:can|could|would) you)\s+)'
+    r'(?:prompt|message)\s+(?:it|them|\w+(?:-\w+)*)\b(?![^.!]*\?)'
     r'|\bhave\s+(?:it|them|\w+(?:-\w+)+)\s+\w+'
     r'|\bget\s+(?:it|them)\s+to\b', re.I)
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
+# "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
+APPROVAL_NEGATION = re.compile(r"\b(?:not|never)\b", re.I)
 SEND_TOOLS = ('send_to_chat', 'backlog_send')
 ACTION_TOOLS = (*SEND_TOOLS, 'answer_approval', 'new_chat', 'switch_chat', 'backlog_add', 'open_panel', 'reminder_add')
 READBACK_REQUIRED = 'Read the prompt back and ask the user to confirm before sending.'
@@ -417,13 +434,12 @@ class SendProposal:
 
 
 def send_readback(proposal):
-    chat = re.split(r' \. |…', proposal.chat, maxsplit=1)[0][:40].rstrip()
+    # The whole name: "Release . Staging" and "Release . Production" must sound different.
+    chat = ' '.join(proposal.chat.replace(' . ', ', ').split())
     if proposal.name == 'backlog_send':
         return f'{SEND_READBACK_START}{proposal.payload} to {chat}{SEND_READBACK_QUESTION_END}'
+    # The whole prompt, never a cut: a yes confirms only the words the user heard.
     prompt = ' '.join(proposal.payload.split())
-    if len(prompt) > 160:
-        end = prompt.rfind(' ', 0, 160)
-        prompt = prompt[:end if end > 0 else 159] + '…'
     prompt = prompt[:-1] if prompt.endswith(('?', '!')) else prompt.removesuffix('.')
     return f'{SEND_READBACK_START}this to {chat}? {prompt}{SEND_READBACK_END}'
 
@@ -452,6 +468,98 @@ def norm(text):
     return re.sub(r'[\W_]+', ' ', text.casefold()).strip()
 
 
+def clean_chat(chat):
+    return re.sub(r'^the\s+|\s+(?:chat|session|tab)$', '', chat.strip(), flags=re.I)
+
+
+def same_text(text):
+    """Text as compared for consent: case, spacing, quotes and the end mark do not count; all else does ("-10")."""
+    text = ' '.join(text.split()).strip('"“”\'‘’ ')
+    return text.rstrip('.!?').rstrip().casefold()
+
+
+# A yes to a read-back is only these words (and the chat's own name). "Yes, but later",
+# "Okay, once the tests pass" or "Sure, but make it D" hold more, so they are not a plain yes.
+YES_WORDS = frozenset('yes yeah yep yup ok okay sure please send alright absolutely correct ahead'.split())
+YES_FILLER = frozenset('do it that this go right now thanks thank sounds good great perfect fine '
+                       'uh um and just so then all s to the chat session tab'.split())  # "you" only in "thank you"
+
+
+def plain_yes(text, chat=''):
+    if '?' in text:
+        return False  # "That's correct?" asks; it does not consent.
+    # "You sure" (STT drops the "?") asks too; "you" is a yes word only in "thank you".
+    words = f' {norm(text)} '.replace(' thank you ', ' thanks ')
+    # The chat name counts only as one whole phrase right after "to" ("send it to docs"): a title such
+    # as "Hold Off" or "Can we have…" never turns other words into a yes.
+    for name in {norm(chat), norm(clean_chat(chat))} - {''}:
+        words = words.replace(f' to {name} ', ' to ')
+    words = words.split()
+    allowed = YES_WORDS | YES_FILLER
+    return any(word in YES_WORDS for word in words) and all(word in allowed for word in words)
+
+
+def confirmed_args(name, args, last_user_text, previous_assistant, pending=None, user_turn=0):
+    """On a plain yes to Friday's fixed read-back, the send carries the stored text the user heard.
+
+    The model may reword the read-back text in its tool call; the user confirmed the stored proposal.
+    Only the server's own proposal binds: a yes to Friday's free-form words gets the fixed read-back.
+    """
+    if name not in SEND_TOOLS or not isinstance(args, dict) or pending is None:
+        return args
+    chat = str(args.get('chat', '')).strip()
+    if not (plain_yes(last_user_text, chat) and 1 <= user_turn - pending.turn <= 2
+            and previous_assistant == send_readback(pending)
+            and name == pending.name and chat.casefold() == pending.chat.strip().casefold()):
+        return args
+    return dict(args, **{'prompt' if name == 'send_to_chat' else 'item': pending.payload})
+
+
+def binds(payload, proposed):
+    """True when the sent text is the read-back text, character for character.
+
+    No added words: "Yes, but do not archive the draft" holds the words "archive the draft",
+    so any change gets a fresh read-back of the whole new text instead.
+    """
+    return bool(same_text(proposed)) and same_text(payload) == same_text(proposed)
+
+
+# "Should I ask docs myself" or "I'll message it": the user plans their own send. STT drops the "?".
+OWN_SEND = re.compile(r"\b(?:i|we)(?:['’](?:ll|d))?(?:\s+\w+){0,2}\s*$"
+                      r"|\b(?:did|have|has)\s+(?:you|it|they)\b"  # "Did you by any chance tell docs"
+                      r"|\b(?:not|never|don['’]?t)(?:\s+\w+)?\s*$", re.I)  # "do not send it yet"
+# "Tell me when it replies": the user is the one told.
+TOLD_USER = re.compile(r"\s+(?:me|us)\b", re.I)
+
+# "But I'll can you ask docs" (STT): "can you" asks Friday, whatever comes before it.
+ASKS_FRIDAY = re.compile(r'\b(?:can|could|would|will)\s+you\s+(?:please\s+|just\s+)?$', re.I)
+
+
+def send_intent(text):
+    """True when the user asks Friday to send, not when they ask about or plan their own send."""
+    for match in SEND_INTENT.finditer(text):
+        if TOLD_USER.match(text, match.end()):
+            continue
+        clause = re.split(r'[.,!;:?]', text[:match.start()])[-1]
+        if ASKS_FRIDAY.search(clause) or not OWN_SEND.search(clause):
+            return True
+    return False
+
+
+# Broad on purpose: any send word in a message that asks something makes it a possible send question.
+SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share|ping|poke|'
+                        r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
+
+
+def answers_question(previous):
+    """True when Friday's last reply asks something: the next turn may answer it, so it never sends directly.
+
+    Filler ("Um, yes, send it") or a question with no send word ("Shall I do that?") cannot be told
+    apart from a fresh request by its words, so any question counts. A send then gets the fixed read-back.
+    """
+    return '?' in previous
+
+
 def check_tool(name, args, source, last_user_text, used, previous_assistant='', pending=None, user_turn=0,
                *, suggestions=()):
     """Return a short refusal, without changing the originating turn's state."""
@@ -466,7 +574,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                     and previous_assistant == send_readback(pending))
     if source == 'speech' and name in SEND_TOOLS and has_proposal and APPROVAL_NO.search(last_user_text):
         return 'The user declined the proposed send.'
-    if name in (*SEND_TOOLS, 'answer_approval', 'backlog_add', 'reminder_add') and name in used:
+    if name in SEND_TOOLS and used.intersection(SEND_TOOLS):
+        return 'Only one send is allowed per spoken turn.'
+    if name in ('answer_approval', 'backlog_add', 'reminder_add') and name in used:
         return 'Only one ' + name + ' is allowed per spoken turn.'
     if name == 'backlog_add' and not re.search(r'\bbacklog\b', last_user_text, re.I):
         return 'The user did not ask to add work to the backlog.'
@@ -480,6 +590,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                    for key in ('text', 'when')) for item in items):
             return 'Each reminder needs text and a time.'
     if name == 'answer_approval':
+        # A yes to Friday's send question answers that send, not a tool approval in some chat.
+        # Fail-safe boundary: a real approval question that names a send word is refused too; Friday asks again.
+        if (has_proposal or previous_assistant.strip().casefold().startswith(SEND_READBACK_START.casefold())
+                or ('?' in previous_assistant and SEND_WORDS.search(previous_assistant))):
+            return 'The user answered a send question, not an approval.'
+        if APPROVAL_NEGATION.search(last_user_text):
+            return 'The user did not give unambiguous consent for this decision.'
         approve = bool(APPROVAL_YES.search(last_user_text))
         deny = bool(APPROVAL_NO.search(last_user_text))
         decision = args.get('decision')
@@ -492,8 +609,10 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS:
         payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
-        proposal_matches = has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
-        yes = APPROVAL_YES.search(last_user_text) and not APPROVAL_NO.search(last_user_text)
+        # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
+        proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
+                            and binds(payload, pending.payload))
+        yes = plain_yes(last_user_text, chat)
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -505,18 +624,13 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
                         continue
                     if words == normalized_payload or (' ' in words and f' {words} ' in f' {normalized_payload} '):
                         return READBACK_REQUIRED
-        if SEND_INTENT.search(last_user_text):
+        # An answer to a send question never sends directly, even when it holds send words
+        # ("Yes, and can you tell docs ..."). A fresh, explicit request does.
+        if not (has_proposal or answers_question(previous_assistant)) and send_intent(last_user_text):
             return None
-        prompt = payload.strip().casefold()
-        readback = previous_assistant.strip().casefold()
-        # Friday's fixed read-back requires the matching proposal, even after it expires.
-        fixed_readback = (readback.startswith(SEND_READBACK_START.casefold())
-                          and readback.endswith((SEND_READBACK_END.casefold(), SEND_READBACK_QUESTION_END.casefold())))
-        legacy_matches = (not fixed_readback
-                          and ((prompt and prompt in readback)
-                               or (chat and re.search(r'\bsend\b', readback)
-                                   and re.search(r'(?<![\w-])' + re.escape(chat) + r'(?![\w-])', readback))))
-        if not (yes and (proposal_matches or legacy_matches)):
+        # Only the server's own stored proposal binds a yes. A yes to Friday's free-form words gets
+        # the fixed read-back first, and the next yes sends the stored text once.
+        if not (yes and proposal_matches):
             return READBACK_REQUIRED
     return None
 
@@ -796,13 +910,15 @@ def runtime_types():
     from pipecat.audio.turn.smart_turn.base_smart_turn import BaseSmartTurn
     from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
     from pipecat.frames.frames import (BotStartedSpeakingFrame, BotStoppedSpeakingFrame, DataFrame,
-        FunctionCallCancelFrame, FunctionCallResultFrame, FunctionCallResultProperties, InterruptionFrame, LLMContextFrame,
+        FunctionCallCancelFrame, FunctionCallResultFrame, FunctionCallResultProperties, FunctionCallsStartedFrame,
+        InterruptionFrame, LLMContextFrame,
         LLMFullResponseEndFrame, LLMFullResponseStartFrame, LLMTextFrame,
         LLMAssistantPushAggregationFrame, MetricsFrame,
         TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame, TTSTextFrame, TranscriptionFrame,
         InterimTranscriptionFrame, VADUserStartedSpeakingFrame, VADUserStoppedSpeakingFrame)
     from pipecat.metrics.metrics import TTFBMetricsData
     from pipecat.observers.base_observer import BaseObserver
+    from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.frame_processor import FrameDirection
     from pipecat.processors.frameworks.rtvi.observer import RTVIFunctionCallReportLevel, RTVIObserverParams
     from pipecat.services.stt_service import SegmentedSTTService
@@ -1060,6 +1176,10 @@ def runtime_types():
                 self.voice_playback_ended = True
                 await self.session.output.broadcast_frame(BotStoppedSpeakingFrame)
 
+        def device_voice_pending(self):
+            return (self.voice_client and self.voice_count
+                    and not self.voice_playback_ended and not self.voice_cancelled)
+
         async def run_tts(self, text, context_id):
             start = time.monotonic()
             first = True
@@ -1129,6 +1249,14 @@ def runtime_types():
                             'worst_gap_ms': round(-worst * 1000, 3), 'chars': len(text)}
                     print('Friday tts ' + json.dumps(data, separators=(',', ':')), file=sys.stderr, flush=True)
 
+    @dataclass
+    class FridayToolSpeechCompleteFrame(DataFrame):
+        tool_call_id: str
+
+    @dataclass(kw_only=True)
+    class FridaySpokenToolResult(FunctionCallResultProperties):
+        text: str
+
     class FridayLLM(OpenAILLMService):
         supports_developer_role = False
 
@@ -1147,8 +1275,17 @@ def runtime_types():
             self._run_message = None
             self._active_run = ContextVar('friday_tool_run', default=None)
             self._active_response = ContextVar('friday_llm_response', default=None)
+            self._request_messages = ContextVar('friday_request_messages', default=None)
+            self._last_reply = (None, ())
+            self.tools_in_flight = set()
+            # An aggregated result awaiting inference, or the context frame that runs it.
+            self.tool_followup = None
             self._thought_signatures = {}
             self._request_roles = ''
+
+        @property
+        def tool_work_pending(self):
+            return bool(self.tools_in_flight) or self.tool_followup is not None
 
         def _token_usage(self, usage):
             # Usage is metrics only. A provider may send null counts; that must not fail the reply.
@@ -1161,12 +1298,16 @@ def runtime_types():
                     and frame.friday_event_generation != self.session.event_generation):
                 return
             if isinstance(frame, LLMContextFrame):
+                if isinstance(self.tool_followup, FunctionCallResultFrame):
+                    # A new user turn can pick up a deferred result.
+                    self.tool_followup = frame
                 turn = getattr(self.session, 'turn', None)
                 if turn is not None:
                     self.session.llm_calls += 1
                     self.session.waiting_for_read = False
                 response = SimpleNamespace(turn=turn, text=False, tool_output=False,
-                                           ttfb=None, completed=False, call_count=0, buffered_text=None)
+                                           ttfb=None, completed=False, call_count=0, buffered_text=None,
+                                           request_messages=(), context_frame=frame)
                 token = self._active_response.set(response)
                 try:
                     await super().process_frame(frame, direction)
@@ -1200,18 +1341,23 @@ def runtime_types():
                 self.session.pending_proposal = None
             if (call.response.turn == getattr(self.session, 'turn', None) and call.response.call_count == 1
                     and frame.properties is None and frame.run_llm is None):
-                frame.properties = FunctionCallResultProperties(run_llm=False)
-                return ack
-            return None
+                frame.properties = FridaySpokenToolResult(run_llm=False, text=ack)
 
         async def push_frame(self, frame, direction=FrameDirection.DOWNSTREAM):
             response = self._active_response.get()
-            ack = None
-            if (direction == FrameDirection.DOWNSTREAM
-                    and isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame))):
-                ack = self.finish_browser_tool(frame)
+            speech = None
+            if direction == FrameDirection.DOWNSTREAM:
+                if isinstance(frame, FunctionCallsStartedFrame):
+                    self.tools_in_flight.update(call.tool_call_id for call in frame.function_calls)
+                elif isinstance(frame, (FunctionCallResultFrame, FunctionCallCancelFrame)):
+                    self.finish_browser_tool(frame)
+                    if (isinstance(frame, FunctionCallResultFrame)
+                            and isinstance(frame.properties, FridaySpokenToolResult)):
+                        speech = frame.properties.text
             if response and direction == FrameDirection.DOWNSTREAM:
-                if isinstance(frame, LLMTextFrame):
+                if isinstance(frame, LLMFullResponseStartFrame):
+                    frame.friday_response = response
+                elif isinstance(frame, LLMTextFrame):
                     if stray_text(frame.text):
                         print(f'Friday dropped stray text: {len(frame.text)} chars', file=sys.stderr, flush=True)
                         return
@@ -1223,8 +1369,75 @@ def runtime_types():
                     response.ttfb = next((m.value for m in frame.data if isinstance(m, TTFBMetricsData)
                                           and m.processor == self.name and m.value > 0), None)
             await super().push_frame(frame, direction)
-            if ack:
-                await self.push_frame(TTSSpeakFrame(ack))
+            if speech:
+                await self.push_frame(TTSSpeakFrame(speech))
+                # TTS and the output transport serialize this behind the spoken result.
+                await self.push_frame(FridayToolSpeechCompleteFrame(frame.tool_call_id))
+
+        def track_assistant(self, assistant, context):
+            response = None
+            speech_snapshot = ()
+            # Pipecat can process a system frame while a data frame is in progress.
+            processing = ContextVar('friday_assistant_frame', default=(None, None))
+
+            @assistant.event_handler('on_before_process_frame')
+            async def before_process(processor, frame):
+                nonlocal response, speech_snapshot
+                messages = context.get_messages()
+                processing.set((frame, messages[-1] if messages else None))
+                if isinstance(frame, LLMFullResponseStartFrame):
+                    response = getattr(frame, 'friday_response', None)
+                elif isinstance(frame, TTSStartedFrame) and frame.append_to_context and response is None:
+                    speech_snapshot = tuple(messages)
+
+            @assistant.event_handler('on_before_push_frame')
+            async def before_push(processor, frame):
+                if not isinstance(frame, LLMContextFrame):
+                    return
+                cause, previous_tail = processing.get()
+                # These paths push context upstream to run inference. Take over the
+                # tool gate before the result settles or the request reaches the LLM.
+                if ((isinstance(cause, (FunctionCallResultFrame, FunctionCallCancelFrame))
+                        and cause.tool_call_id in self.tools_in_flight)
+                        or (isinstance(cause, BotStoppedSpeakingFrame)
+                            and isinstance(self.tool_followup, FunctionCallResultFrame))):
+                    self.tool_followup = frame
+                messages = context.get_messages()
+                if messages:
+                    reply = messages[-1]
+                    if reply is not previous_tail and reply['role'] == 'assistant' and not reply.get('tool_calls'):
+                        # The aggregator pushes a context frame immediately after committing speech.
+                        snapshot = response.request_messages if response is not None else speech_snapshot
+                        self._last_reply = (reply, snapshot)
+
+            @assistant.event_handler('on_after_process_frame')
+            async def after_process(processor, frame):
+                nonlocal response, speech_snapshot
+                processing.set((None, None))
+                s = self.session
+                if (isinstance(frame, LLMFullResponseEndFrame) and response is not None
+                        and self.tool_followup is response.context_frame):
+                    self.tool_followup = None
+                    s.wake.set()
+                if isinstance(frame, (LLMFullResponseEndFrame, InterruptionFrame, LLMAssistantPushAggregationFrame)):
+                    response, speech_snapshot = None, ()
+                if isinstance(frame, InterruptionFrame):
+                    self.tools_in_flight.clear()
+                    self.tool_followup = None
+                    s.wake.set()
+                elif (isinstance(frame, FunctionCallResultFrame) and frame.tool_call_id in self.tools_in_flight
+                        and getattr(processor, '_context_push_owed', False)):
+                    # Pipecat 1.15 leaves this set when it defers a result's inference.
+                    self.tool_followup = frame
+                if isinstance(frame, (FunctionCallCancelFrame, FridayToolSpeechCompleteFrame)) or (
+                        isinstance(frame, FunctionCallResultFrame)
+                        and (frame.properties is None or frame.properties.is_final)
+                        and not isinstance(frame.properties, FridaySpokenToolResult)):
+                    if (isinstance(frame, FridayToolSpeechCompleteFrame)
+                            and frame.tool_call_id in self.tools_in_flight and s.tts.device_voice_pending()):
+                        s.busy = True
+                    self.tools_in_flight.discard(frame.tool_call_id)
+                    s.wake.set()
 
         def record_llm_ttft(self, response):
             if (response.completed and (response.text or response.tool_output)
@@ -1241,6 +1454,9 @@ def runtime_types():
             await super().run_function_calls(function_calls)
 
         async def get_chat_completions(self, context):
+            messages = self._request_messages.get()
+            if messages is not None:
+                context = LLMContext(messages, tools=context.tools, tool_choice=context.tool_choice)
             stream = await super().get_chat_completions(context)
             if self.brain.kind != 'gemini':
                 return stream
@@ -1349,6 +1565,9 @@ def runtime_types():
             proposal = None
             if run and (run.declined or run.proposal is getattr(self.session, 'pending_proposal', None)):
                 proposal = run.proposal
+            if run:
+                params.arguments = confirmed_args(params.function_name, params.arguments, run.last_user_text,
+                                                  run.previous_assistant, proposal, run.user_turn)
             reason = check_tool(params.function_name, params.arguments,
                 run.source if run else None, run.last_user_text if run else '',
                 run.used if run else set(), run.previous_assistant if run else '',
@@ -1367,10 +1586,10 @@ def runtime_types():
                                                 str(params.arguments.get(key) or ''), run.user_turn)
                         run.readback_spoken = True
                         self.session.pending_proposal = proposal
+                    properties = (FridaySpokenToolResult(run_llm=False, text=send_readback(proposal))
+                                  if speak else FunctionCallResultProperties(run_llm=False))
                     await params.result_callback({'error': 'Not sent yet. Friday asked the user to confirm.'},
-                        properties=FunctionCallResultProperties(run_llm=False))
-                    if speak:
-                        await self.push_frame(TTSSpeakFrame(send_readback(proposal)))
+                                                 properties=properties)
                     return
                 await params.result_callback({'error': reason})
                 return
@@ -1401,15 +1620,35 @@ def runtime_types():
             self._settings.system_instruction = None
 
         async def _process_context(self, context):
-            run = self.prepare_run(context.get_messages())
+            run_messages = context.get_messages()
+            if run_messages and run_messages[-1]['role'] == 'assistant':
+                reply, snapshot = self._last_reply
+                index = len(run_messages) - 1
+                if run_messages[-1] is reply and snapshot:
+                    # Match identity so context trimming and duplicate text don't shift the boundary.
+                    seen = {id(message) for message in snapshot}
+                    index = next((i + 1 for i in range(index - 1, -1, -1)
+                                  if id(run_messages[i]) in seen), 0)
+                if index == len(run_messages) - 1 or run_messages[-2]['role'] == 'assistant':
+                    print('Friday skipped request ending with assistant', file=sys.stderr, flush=True)
+                    return
+                run_messages = run_messages[:index] + [reply] + run_messages[index:-1]
+                print('Friday reordered reply before newer messages', file=sys.stderr, flush=True)
+            messages = self.session.prepare_messages(run_messages)
+            run = self.prepare_run(run_messages)
+            context.set_messages(messages)
             response = self._active_response.get()
             if response and run and run.failed_action and not run.succeeded_action:
                 # Check the full reply before speaking: a later chunk can negate an earlier one.
                 response.buffered_text = []
             token = self._active_run.set(run)
-            context.set_messages(self.session.prepare_messages(context.get_messages()))
+            # The aggregator can add a reply while Gemini refreshes its credentials.
+            request_messages = messages[:]
+            if response:
+                response.request_messages = request_messages
+            request_token = self._request_messages.set(request_messages)
             self._request_roles = ','.join(m['role'] + ('(tool_calls)' if m.get('tool_calls') else '')
-                                           for m in context.get_messages())
+                                           for m in messages)
             try:
                 if self.brain.kind == 'gemini':
                     self._client.api_key = await self.session.models.auth.token()
@@ -1448,17 +1687,23 @@ def runtime_types():
                     if not response.text and not response.call_count and not (run and run.source == 'event'):
                         await self.push_frame(TTSSpeakFrame('Sorry, I lost my words. Say that again?'))
             finally:
+                self._request_messages.reset(request_token)
                 if response:
                     await self.cancel_ttfb_metrics()
                 self._active_run.reset(token)
 
     class FridayObserver(BaseObserver):
         def __init__(self, session):
-            super().__init__(observe_every_push=False)
+            super().__init__(observe_every_push=True)
             self.session = session
+            self.reply_end = None
 
         async def on_push_frame(self, data):
             s, f = self.session, data.frame
+            reply_at_output = (isinstance(f, LLMFullResponseEndFrame)
+                               and data.direction == FrameDirection.DOWNSTREAM and data.source is s.output)
+            if not data.first_push and not reply_at_output:
+                return
             if isinstance(f, VADUserStartedSpeakingFrame):
                 s.user_speaking = True
                 s.new_turn()
@@ -1471,12 +1716,21 @@ def runtime_types():
                 s.user_speaking = False
                 s.busy = True
             elif isinstance(f, LLMFullResponseStartFrame):
+                self.reply_end = None
+                s.reply_open = True
                 s.llm_running = True
                 s.busy = True
             elif isinstance(f, LLMFullResponseEndFrame):
-                s.llm_running = False
-                if s.tts.voice_cancelled and not s.bot_speaking and not s.waiting_for_read:
-                    s.busy = False
+                if data.first_push:
+                    self.reply_end = f
+                    s.llm_running = False
+                # A tool follow-up can start before the preceding end reaches output.
+                if reply_at_output and f is self.reply_end:
+                    self.reply_end = None
+                    s.reply_open = False
+                    # Device speech may be queued even if playback has not started.
+                    if not s.bot_speaking and not s.waiting_for_read and not s.tts.device_voice_pending():
+                        s.busy = False
             elif isinstance(f, BotStartedSpeakingFrame):
                 # A tap can overtake the start broadcast from spoken(start).
                 if s.tts.voice_client and not s.tts.voice_speaking:
@@ -1486,9 +1740,11 @@ def runtime_types():
                     await s.report_metrics()
             elif isinstance(f, BotStoppedSpeakingFrame):
                 s.bot_speaking = False
-                if not s.llm_running and not s.waiting_for_read:
+                if not s.llm_running and not s.reply_open and not s.waiting_for_read:
                     s.busy = False
             elif isinstance(f, InterruptionFrame):
+                self.reply_end = None
+                s.reply_open = False
                 s.bot_speaking = False
                 s.busy = False
                 s.llm_running = False
@@ -1568,7 +1824,7 @@ class Session:
         self.last_sent = None
         self.events = EventQueue()
         self.wake = asyncio.Event()
-        self.user_speaking = self.bot_speaking = self.busy = self.llm_running = False
+        self.user_speaking = self.bot_speaking = self.busy = self.llm_running = self.reply_open = False
         self.event_generation = 0
         self.offline_spoken = False
         self.voice_mode = 'server'
@@ -1592,6 +1848,7 @@ class Session:
             vad_analyzer=rt.SharedVAD(models.vad, vad_stop(os.environ, models.smart_turn is not None)),
             user_turn_strategies=UserTurnStrategies(
                 start=[rt.FridayUserTurnStartStrategy(self)], stop=[stop])))
+        self.llm.track_assistant(self.aggregators.assistant(), self.context)
         transport = SmallWebRTCTransport(connection, TransportParams(
             audio_in_enabled=True, audio_out_enabled=True,
             audio_in_sample_rate=16000, audio_out_sample_rate=models.tts.sample_rate))
@@ -1736,7 +1993,7 @@ class Session:
             pending_voice = (not self.tts.voice_cancelled and (
                 self.tts.voice_open or (self.tts.voice_client and self.tts.voice_count
                                        and not self.tts.voice_playback_ended)))
-            acted = bool(self.bot_speaking or self.llm_running or pending_voice
+            acted = bool(self.bot_speaking or self.llm_running or pending_voice or self.llm.tool_work_pending
                          or (self.busy and not self.user_speaking))
             details = {key: data[key] if isinstance(data.get(key), str) and len(data[key]) <= 20
                        else None for key in ('source', 'phase')}
@@ -1786,7 +2043,8 @@ class Session:
             except asyncio.TimeoutError:
                 continue
             self.wake.clear()
-            item = self.events.pop(self.user_speaking, self.bot_speaking, self.busy)
+            busy = self.busy or self.reply_open or self.llm.tool_work_pending
+            item = self.events.pop(self.user_speaking, self.bot_speaking, busy)
             if not item:
                 continue
             self.busy = True
