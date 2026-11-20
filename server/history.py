@@ -38,6 +38,52 @@ def keep_tail(state):
         state['dropped'] += excess
 
 
+def advance(path, cached, fresh, consume, trim, *, info=None):
+    """Advance a caller-owned parser record under the path lock. Return None if stat fails."""
+    if info is None:
+        try:
+            info = os.stat(path)
+        except (OSError, TypeError):
+            return None
+    if cached and (cached['inode'] != info.st_ino or info.st_size < cached['offset']):
+        cached = None  # replaced or truncated: start over
+    if cached is None:
+        cached = {'inode': info.st_ino, 'offset': 0, 'index': 0, 'state': fresh()}
+    if info.st_size > cached['offset']:
+        with open(path, 'rb') as stream:
+            stream.seek(cached['offset'])
+            if cached.pop('unterminated', False) and stream.read(1) == b'\n':
+                cached['offset'] += 1  # the newline that finished a record already consumed
+            stream.seek(cached['offset'])
+            since_trim = 0
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                complete = line.endswith(b'\n')
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    if not complete:
+                        break  # a record still being written is picked up on the next call
+                    record = None
+                cached['offset'] += len(line)
+                index, cached['index'] = cached['index'], cached['index'] + 1
+                cached['unterminated'] = not complete
+                if record is not None:
+                    try:
+                        consume(cached['state'], index, record)
+                    except (AttributeError, TypeError):  # one odd record (an unexpected null) must not break the whole chat
+                        pass
+                    since_trim += 1
+                    if trim and since_trim >= 2000:  # keep the first load of a huge file bounded too
+                        trim(cached['state'])
+                        since_trim = 0
+        if trim:
+            trim(cached['state'])
+    return cached
+
+
 def read(path, fresh, consume, trim=None, *, namespace=None):
     """Bring the cached state for `path` up to date and return it.
 
@@ -48,48 +94,10 @@ def read(path, fresh, consume, trim=None, *, namespace=None):
     path = str(path)
     key = path if namespace is None else (path, namespace)
     trim = keep_tail if trim is None else trim  # looked up now, so it can be replaced; pass False to disable
-    try:
-        info = os.stat(path)
-    except (OSError, TypeError):
-        return fresh()
     with _lock_for(path):
-        cached = _states.get(key)
-        if cached and (cached['inode'] != info.st_ino or info.st_size < cached['offset']):
-            cached = None  # replaced or truncated: start over
+        cached = advance(path, _states.get(key), fresh, consume, trim)
         if cached is None:
-            cached = {'inode': info.st_ino, 'offset': 0, 'index': 0, 'state': fresh()}
-        if info.st_size > cached['offset']:
-            with open(path, 'rb') as stream:
-                stream.seek(cached['offset'])
-                if cached.pop('unterminated', False) and stream.read(1) == b'\n':
-                    cached['offset'] += 1  # the newline that finished a record already consumed
-                stream.seek(cached['offset'])
-                since_trim = 0
-                while True:
-                    line = stream.readline()
-                    if not line:
-                        break
-                    complete = line.endswith(b'\n')
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        if not complete:
-                            break  # a record still being written is picked up on the next call
-                        record = None
-                    cached['offset'] += len(line)
-                    index, cached['index'] = cached['index'], cached['index'] + 1
-                    cached['unterminated'] = not complete
-                    if record is not None:
-                        try:
-                            consume(cached['state'], index, record)
-                        except (AttributeError, TypeError):  # one odd record (an unexpected null) must not break the whole chat
-                            pass
-                        since_trim += 1
-                        if trim and since_trim >= 2000:  # keep the first load of a huge file bounded too
-                            trim(cached['state'])
-                            since_trim = 0
-            if trim:
-                trim(cached['state'])
+            return fresh()
         with _registry_lock:
             _states.pop(key, None)
             _states[key] = cached  # most recently used goes last

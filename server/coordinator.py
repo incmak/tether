@@ -514,6 +514,7 @@ class Feed:
         self.seen = {}      # peer pane -> state and report identities
         self.queues = {}    # coordinator pane -> chat, report mode, and delivery state
         self.outcomes = {}  # peer pane -> transcript signature and last outcome
+        self.parsers = {}   # peer pane -> parser key and incremental history record
 
     def latest_outcome(self, entry):
         """The latest turn's outcome, with no transcript read when its file is unchanged."""
@@ -521,30 +522,38 @@ class Feed:
         pane, agent, path = entry['id'], entry.get('agent'), entry.get('transcript')
         if agent not in AGENTS or not path or entry.get('ambiguous'):
             return empty
+        path = str(path)
         try:
-            info = os.stat(path)
-            key = (agent, path, info.st_dev, info.st_ino)
-            signature = (info.st_size, info.st_mtime_ns)
-            revision = 0
-            cached = self.outcomes.get(pane)
-            if cached and cached[0] == key:
-                _, previous, revision, outcome = cached
-                if previous == signature:
-                    return outcome
-                if previous[0] >= signature[0]:
-                    revision = info.st_mtime_ns  # a same-size rewrite or truncation needs a new parser state
-            consume = _claude_turn if agent == 'claude' else _codex_turn
-            state = history.read(path, empty.copy, consume, trim=False, namespace=('coordinator', pane, key, revision))
+            with history._lock_for(path):
+                info = os.stat(path)
+                key = (agent, path, info.st_dev, info.st_ino)
+                signature = (info.st_size, info.st_mtime_ns)
+                revision = 0
+                cached = self.outcomes.get(pane)
+                if cached and cached[0] == key:
+                    _, previous, revision, outcome = cached
+                    if previous == signature:
+                        return outcome
+                    if previous[0] >= signature[0]:
+                        revision = info.st_mtime_ns  # a same-size rewrite or truncation needs a new parser state
+                parser_key = (*key, revision)
+                previous_key, parser = self.parsers.get(pane, (None, None))
+                if previous_key != parser_key:
+                    parser = None
+                consume = _claude_turn if agent == 'claude' else _codex_turn
+                parser = history.advance(path, parser, empty.copy, consume, trim=False, info=info)
+                state = parser['state']
+                kind, text = state['kind'], state['text']
+                if kind == 'done' and attention.reply_ask(text)[0] == 'yes':
+                    kind = 'asks'
+                # open: a reply of a turn arrived and the turn has not ended, so `identity` may be the running turn.
+                outcome = {'kind': kind, 'text': push.reply_summary(text, SUMMARY), 'identity': state['identity'],
+                           'open': bool(state.get('active'))}
+                self.parsers[pane] = (parser_key, parser)
+                self.outcomes[pane] = (key, signature, revision, outcome)
+                return outcome
         except OSError:
             return empty
-        kind, text = state['kind'], state['text']
-        if kind == 'done' and attention.reply_ask(text)[0] == 'yes':
-            kind = 'asks'
-        # open: a reply of a turn arrived and the turn has not ended, so `identity` may be the running turn.
-        outcome = {'kind': kind, 'text': push.reply_summary(text, SUMMARY), 'identity': state['identity'],
-                   'open': bool(state.get('active'))}
-        self.outcomes[pane] = (key, signature, revision, outcome)
-        return outcome
 
     def _event(self, entry, info, latest_outcome, now):
         """The update that this tab's state gives now, once per change, else None."""
@@ -623,6 +632,8 @@ class Feed:
             del self.seen[pane]
         for pane in [pane for pane in self.outcomes if pane not in by_pane]:
             del self.outcomes[pane]
+        for pane in [pane for pane in self.parsers if pane not in by_pane]:
+            del self.parsers[pane]
         for pane, queue in list(self.queues.items()):
             entry = by_pane.get(pane)
             away = queue['away_since']

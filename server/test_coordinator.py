@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import agent_coordinator_cli as cli
 import coordinator
+import history
 import paths
 
 
@@ -675,6 +676,120 @@ class TurnOutcome(unittest.TestCase):
         metadata = self.path.stat()
         os.utime(self.path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1000000))
         self.assertEqual(self.outcome(entry)['text'], 'Next.')
+
+
+class OutcomeCache(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(history, '_states', {}))
+
+    def fixture(self, agent):
+        path = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{agent}.jsonl'
+        lines = path.read_bytes().splitlines(keepends=True)
+        end = 3 if agent == 'claude' else 2
+        return lines[:end], lines[end:]
+
+    def tabs(self, agent, count, lines):
+        entries = []
+        for i in range(count):
+            path = self.folder / f'{agent}-{i}.jsonl'
+            path.write_bytes(b''.join(lines))
+            entries.append(tab(f'%{i}', agent=agent, transcript=str(path)))
+        return entries
+
+    def assert_incremental_poll(self, agent, count, *, chat_reads=0):
+        initial, appended = self.fixture(agent)
+        entries = self.tabs(agent, count, initial)
+        latest = coordinator.Feed().latest_outcome
+        parser = f'_{agent}_turn'
+        with patch.object(coordinator, parser, wraps=getattr(coordinator, parser)) as consume:
+            for entry in entries:
+                self.assertEqual(latest(entry)['text'], 'Done.')
+            self.assertEqual(consume.call_count, count * len(initial))
+            consume.reset_mock()
+            self.read_chats(chat_reads)
+            for entry in entries:
+                with open(entry['transcript'], 'ab') as stream:
+                    stream.writelines(appended)
+            for entry in entries:
+                self.assertEqual(latest(entry)['kind'], 'failed' if agent == 'claude' else None)
+            self.assertEqual(consume.call_count, count * len(appended))
+
+    def read_chats(self, count):
+        for i in range(count):
+            path = self.folder / f'chat-{i}.jsonl'
+            path.write_text('{"text":"Chat message."}\n')
+            history.read(path, list, lambda state, index, record: state.append(record['text']))
+
+    def test_busy_polls_parse_only_appended_records(self):
+        for agent in ('claude', 'codex'):
+            for count in (13, 30):
+                with self.subTest(agent=agent, count=count):
+                    self.assert_incremental_poll(agent, count)
+
+    def test_chat_reads_do_not_evict_coordinator_parsers(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.assert_incremental_poll(agent, 5, chat_reads=21)
+
+    def test_coordinator_reads_leave_the_shared_lru_unchanged(self):
+        self.read_chats(21)
+        before = list(history._states.items())
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                for entry in self.tabs(agent, 30, self.fixture(agent)[0]):
+                    self.assertEqual(feed.latest_outcome(entry)['text'], 'Done.')
+                self.assertEqual(list(history._states.items()), before)
+
+    def test_truncation_and_same_size_rewrite_reset_the_parser(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                initial, appended = self.fixture(agent)
+                entry, = self.tabs(agent, 1, initial + appended)
+                pane = entry['id']
+                path = Path(entry['transcript'])
+                self.assertEqual(feed.latest_outcome(entry)['kind'], 'failed' if agent == 'claude' else None)
+                old_parser = feed.parsers[pane][1]
+                path.write_bytes(b''.join(initial))
+                outcome = feed.latest_outcome(entry)
+                self.assertEqual((outcome['kind'], outcome['text']), ('done', 'Done.'))
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+                old_parser = feed.parsers[pane][1]
+                before = path.stat()
+                path.write_bytes(b''.join(initial).replace(b'Done.', b'Next.'))
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000000))
+                self.assertEqual(feed.latest_outcome(entry), dict(outcome, text='Next.'))
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+    def test_path_change_replaces_the_panes_only_parser(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                first, second = self.tabs(agent, 2, self.fixture(agent)[0])
+                pane = first['id']
+                self.assertEqual(feed.latest_outcome(first)['text'], 'Done.')
+                old_parser = feed.parsers[pane][1]
+                second_path = Path(second['transcript'])
+                second_path.write_bytes(second_path.read_bytes().replace(b'Done.', b'Next.'))
+                self.assertEqual(feed.latest_outcome(dict(second, id=pane))['text'], 'Next.')
+                self.assertEqual(set(feed.parsers), {pane})
+                self.assertIsNot(feed.parsers[pane][1], old_parser)
+
+    def test_observe_prunes_closed_panes(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                feed = coordinator.Feed()
+                entries = self.tabs(agent, 2, self.fixture(agent)[0])
+                for entry in entries:
+                    feed.latest_outcome(entry)
+                remaining = entries[:1]
+                feed.observe(remaining, None, None, feed.latest_outcome, lock=threading.Lock(),
+                             fresh=lambda: remaining)
+                self.assertEqual(set(feed.parsers), {remaining[0]['id']})
+                self.assertEqual(set(feed.outcomes), {remaining[0]['id']})
 
 
 class Feed(unittest.TestCase):
