@@ -40,6 +40,9 @@ REVIEW_REQUEST = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) 
                   r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
                   r'( This is the last round: your reply stays here\.)?\s*$')
 CLAUDE_DONE = {'type': 'system', 'subtype': 'turn_duration'}
+LONG_REVIEW_OUTPUT = 300 * 1024
+CLIPPED_REVIEW_OUTPUT = 9 * 1024 * 1024
+REVIEW_TRANSCRIPT_AGENTS = ('claude', 'codex', 'antigravity')
 
 
 def claude_final(text):
@@ -2926,36 +2929,158 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assert_mak_alert(rounds=limit)
                 self.assertEqual(review_links.paused(), {'%13': ['%12', '%21']})
 
+    def stopped_review_prompt(self, agent, limit, *, legacy=False):
+        self.file.write_text('[]')
+        self.entries = [self.worker, self.reviewer]
+        self.states.update({'%13': 'Idle', '%12': 'Idle'})
+        self.worker.update(agent=agent, transcript=str(self.file.parent / 'worker.jsonl'))
+        self.turn_source = None
+        self.alert.reset_mock()
+        self.add(agent=agent, worker_thread=WORKER_THREAD)
+        parent = self.add_parent(limit)
+        self.fail_to_limit()
+        if limit == 5:
+            summary = next(call.args[1] for call in reversed(self.send.call_args_list) if call.args[0] == self.worker)
+            self.write_worker_turn(summary)
+            self.turn_source = server.review_turn_source
+            self.request_review()
+            self.turn_source = None
+            self.assertTrue(review_links.agent_prompt('%13', parent['id'], parent['thread']))
+            self.alert.reset_mock()
+            for _ in range(2):
+                self.request_review()
+                self.finish_review(FINDINGS)
+        self.assert_mak_stop(rounds=limit)
+        stop = self.send.call_args.args[1]
+        if legacy:
+            row, = self.links()
+            row.pop('feedback_turn')
+            self.file.write_text(json.dumps([row]))
+        self.send.reset_mock()
+        self.turn_source = server.review_turn_source
+        return stop
+
+    def write_worker_turn(self, prompt, output_size=0, *, hook_blocked=False):
+        agent = self.worker['agent']
+        now = int(time.time())
+        started_at, finished_at = now + 1, now + 2
+        if agent == 'antigravity':
+            records = [dict(type='USER_INPUT', step_index=1, content=f'<USER_REQUEST>{prompt}</USER_REQUEST>')]
+            if output_size:
+                records.append(dict(type='PLANNER_RESPONSE', step_index=2, content='x' * output_size))
+            records.append(dict(type='AGENT_RESPONSE', step_index=3, content='Done.'))
+            started_at = finished_at = None
+        else:
+            message = claude if agent == 'claude' else codex
+            records = [message('user', prompt)]
+            if output_size:
+                records.append(message('assistant', 'x' * output_size))
+            if hook_blocked:
+                records.append(dict(type='attachment', attachment={'type': 'hook_blocking_error'}))
+            records.append(message('assistant', 'Done.'))
+            records[0]['timestamp'] = datetime.fromtimestamp(started_at, timezone.utc).isoformat()
+            records[-1]['timestamp'] = datetime.fromtimestamp(finished_at, timezone.utc).isoformat()
+        write_records(Path(self.worker['transcript']), records)
+        if output_size:
+            # The normal notification reader starts inside the large output record.
+            self.assertEqual(server.notification_records(self.worker), records[2:])
+        return started_at, finished_at
+
+    def assert_stopped_review(self, limit):
+        self.observe()  # An extra idle tick must not reinterpret the same turn.
+        self.send.assert_not_called()
+        self.assert_one_cap(limit)
+        self.assertEqual(review_links.paused(), {'%13': ['%12']})
+        self.assertEqual(review_links.escalated(self.entries), {'%13'})
+        self.assertNotIn('restart', self.links()[0])
+
+    def assert_reviews_restarted(self):
+        self.request_review()
+        self.send.assert_called_once()
+        self.assertTrue(self.links()[0]['awaiting'])
+        self.assertEqual(review_links.paused(), {})
+        self.assertEqual(review_links.escalated(self.entries), set())
+        self.finish_review()
+        self.assert_one_cap(1)
+
     def test_watcher_restart_during_stopped_feedback_preserves_cap_until_mak_answers(self):
-        for limit in (3, 5):
-            with self.subTest(limit=limit):
-                self.file.write_text('[]')
-                self.entries = [self.worker, self.reviewer]
-                self.states.update({'%13': 'Idle', '%12': 'Idle'})
-                self.add(worker_thread=WORKER_THREAD)
-                parent = self.add_parent(limit)
-                self.fail_to_limit()
-                if limit == 5:
-                    self.request_review()
-                    self.assertTrue(review_links.agent_prompt('%13', parent['id'], parent['thread']))
-                    self.alert.reset_mock()
-                    for _ in range(2):
-                        self.request_review()
-                        self.finish_review(FINDINGS)
-                self.assert_mak_stop(rounds=limit)
+        for agent, limit in product(REVIEW_TRANSCRIPT_AGENTS, (3, 5)):
+            with self.subTest(agent=agent, limit=limit):
+                stop = self.stopped_review_prompt(agent, limit)
+                self.write_worker_turn(stop, CLIPPED_REVIEW_OUTPUT)
                 self.observe(**{'%13': 'Working'})  # persist the running turn before the restart
+                self.assertEqual(self.links()[0]['feedback_turn']['phase'], 'working')
                 with patch.object(review_links, '_last_sent', {}), patch.object(review_links, '_feedback_in_flight', {}):
-                    self.send.reset_mock()
                     self.observe(**{'%13': 'Idle'})  # the stop turn finishes after the watcher restarts
-                    self.send.assert_not_called()
-                    self.assert_one_cap(limit)
-                    self.assertEqual(review_links.paused(), {'%13': ['%12']})
-                    self.assertEqual(review_links.escalated(self.entries), {'%13'})  # B400: shown until Mak answers
-                    self.request_review()  # Mak starts a new task
-                    self.send.assert_called_once()
-                    self.finish_review()
-                    self.assert_one_cap(1)
-                    self.assertEqual(review_links.escalated(self.entries), set())
+                    self.assert_stopped_review(limit)
+                    self.write_worker_turn('Mak starts another task.')
+                    self.assert_reviews_restarted()
+
+    def test_unread_stop_prompt_preserves_an_upgraded_cap_without_a_delivery_marker(self):
+        for agent, limit in product(REVIEW_TRANSCRIPT_AGENTS, (3, 5)):
+            with self.subTest(agent=agent, limit=limit):
+                stop = self.stopped_review_prompt(agent, limit, legacy=True)
+                before, = self.links()
+                _, finished_at = self.write_worker_turn(stop, CLIPPED_REVIEW_OUTPUT)
+                self.assertEqual(self.turn_source(self.worker), ('unknown', None, finished_at))
+                self.request_review()
+                self.assert_stopped_review(limit)
+                after, = self.links()
+                for field in ('cap_reset', 'limit', 'grant_rounds'):
+                    self.assertEqual(after.get(field), before.get(field), field)
+                self.write_worker_turn('Mak starts another task.')
+                self.assert_reviews_restarted()
+
+    def test_long_stop_turn_preserves_an_upgraded_cap_without_a_delivery_marker(self):
+        for agent, limit in product(REVIEW_TRANSCRIPT_AGENTS, (3, 5)):
+            with self.subTest(agent=agent, limit=limit):
+                stop = self.stopped_review_prompt(agent, limit, legacy=True)
+                times = self.write_worker_turn(stop, LONG_REVIEW_OUTPUT)
+                self.assertEqual(self.turn_source(self.worker), ('review-feedback', *times))
+                self.request_review()
+                self.assert_stopped_review(limit)
+
+    def test_long_mak_turn_restarts_a_paused_cap(self):
+        for agent in REVIEW_TRANSCRIPT_AGENTS:
+            with self.subTest(agent=agent):
+                self.stopped_review_prompt(agent, 3, legacy=True)
+                times = self.write_worker_turn('Mak asks to fix the findings.', LONG_REVIEW_OUTPUT)
+                self.assertEqual(self.turn_source(self.worker), ('user', *times))
+                self.assert_reviews_restarted()
+
+    def test_second_unread_turn_preserves_the_cap(self):
+        for agent in REVIEW_TRANSCRIPT_AGENTS:
+            with self.subTest(agent=agent):
+                stop = self.stopped_review_prompt(agent, 3, legacy=True)
+                for prompt in (stop, 'Mak asks to fix the findings.'):
+                    self.write_worker_turn(prompt, CLIPPED_REVIEW_OUTPUT)
+                    self.request_review()
+                    self.assert_stopped_review(3)
+
+    def test_unread_work_turn_requests_review_without_resetting_rounds(self):
+        for agent in REVIEW_TRANSCRIPT_AGENTS:
+            with self.subTest(agent=agent):
+                self.add(agent=agent, worker_thread=WORKER_THREAD)
+                rows = self.rows()
+                cap = next(row for row in rows if row.get('cap'))
+                self.set_counts(cap, '%12', rounds=1)
+                self.file.write_text(json.dumps(rows))
+                self.worker.update(agent=agent, transcript=str(self.file.parent / 'worker.jsonl'))
+                self.turn_source = server.review_turn_source
+                self.send.reset_mock()
+                self.write_worker_turn('Fix the remaining finding.', CLIPPED_REVIEW_OUTPUT)
+                self.request_review()
+                self.send.assert_called_once()
+                self.assertTrue(self.links()[0]['awaiting'])
+                self.assertEqual(self.links()[0].get('rounds'), 1)
+                self.assertEqual(self.links()[0].get('cap_reset'), cap.get('cap_reset'))
+
+    def test_long_hook_blocked_stop_turn_recovers_review_feedback(self):
+        stop = self.stopped_review_prompt('claude', 3, legacy=True)
+        times = self.write_worker_turn(stop, LONG_REVIEW_OUTPUT, hook_blocked=True)
+        self.assertEqual(self.turn_source(self.worker), ('review-feedback', *times))
+        self.request_review()
+        self.assert_stopped_review(3)
 
     def test_visible_stop_prompt_preserves_an_upgraded_cap_without_a_delivery_marker(self):
         self.fail_to_limit()
@@ -3733,7 +3858,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(own['awaiting'])
         self.assertNotIn('limit', own)
 
-    def test_notice_finishes_between_ticks_and_does_not_mask_a_later_clipped_prompt(self):
+    def test_notice_finishes_between_ticks_and_does_not_mask_a_later_long_prompt(self):
         for agent, message, short_mak in (('claude', claude, False), ('claude', claude, True),
                                           ('codex', codex, False), ('codex', codex, True)):
             with self.subTest(agent=agent, short_mak=short_mak):
@@ -3742,7 +3867,8 @@ class ReviewLinksTests(unittest.TestCase):
                 self.entries = [self.worker, self.reviewer]
                 self.states.update({'%13': 'Idle', '%12': 'Idle'})
                 parent = self.add_parent()
-                parent['agent'] = agent
+                transcript = self.file.parent / 'parent.jsonl'
+                parent.update(agent=agent, transcript=str(transcript))
                 self.entries.append(dict(id='%14', agent='codex', thread=THREAD, writable=True))
                 self.states['%14'] = 'Idle'
                 review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
@@ -3754,24 +3880,32 @@ class ReviewLinksTests(unittest.TestCase):
                     self.fail_to_limit()
                 notice = self.send.call_args.args[1]
                 self.turn_source = server.review_turn_source
-                records = [dict(message('user', 'Earlier Mak prompt.'), timestamp='1970-01-01T00:16:39Z'),
-                           dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:40.500Z')]
-                with patch.object(server, 'notification_records',
-                                  side_effect=lambda entry: records if entry is parent else []):
-                    self.observe()  # Mak's earlier prompt finished after Tether sent the notice
-                    self.assertIn('review_prompts', self.links()[1])
-                    records.extend([message('user', notice),
-                                    dict(message('assistant', 'Read.'), timestamp='1970-01-01T00:16:41Z')])
-                    if short_mak:
-                        records.extend([
-                            dict(message('user', 'Mak asks a short question.'), timestamp='1970-01-01T00:16:42Z'),
-                            dict(message('assistant', 'Answered.'), timestamp='1970-01-01T00:16:43Z'),
-                        ])
-                    self.observe()  # the notice and any short Mak turn ended without a Working tick
-                    self.assertTrue(self.links()[1]['paused'])
-                    records[:] = [dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:44Z')]
-                    self.observe(**{'%11': 'Working'})
-                    self.observe(**{'%11': 'Idle'})
+                write_records(transcript, [
+                    dict(message('user', 'Earlier Mak prompt.'), timestamp='1970-01-01T00:16:39Z'),
+                    dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:40.500Z'),
+                ])
+                self.observe()  # Mak's earlier prompt finished after Tether sent the notice
+                self.assertIn('review_prompts', self.links()[1])
+                write_records(transcript, [
+                    message('user', notice),
+                    dict(message('assistant', 'Read.'), timestamp='1970-01-01T00:16:41Z'),
+                ], 'a')
+                if short_mak:
+                    write_records(transcript, [
+                        dict(message('user', 'Mak asks a short question.'), timestamp='1970-01-01T00:16:42Z'),
+                        dict(message('assistant', 'Answered.'), timestamp='1970-01-01T00:16:43Z'),
+                    ], 'a')
+                self.observe()  # the notice and any short Mak turn ended without a Working tick
+                self.assertTrue(self.links()[1]['paused'])
+                self.assertNotIn('review_prompts', self.links()[1])
+                self.observe(**{'%11': 'Working'})
+                reply = dict(message('assistant', 'Done.'), timestamp='1970-01-01T00:16:45Z')
+                write_records(transcript, [
+                    dict(message('user', 'Mak asks for more work.'), timestamp='1970-01-01T00:16:44Z'),
+                    message('assistant', 'x' * LONG_REVIEW_OUTPUT), reply,
+                ], 'a')
+                self.assertEqual(server.notification_records(parent), [reply])
+                self.observe(**{'%11': 'Idle'})
                 own = self.links()[1]
                 self.assertNotIn('limit', own)
                 self.assertTrue(own['awaiting'])
@@ -3784,7 +3918,8 @@ class ReviewLinksTests(unittest.TestCase):
                 self.add()
                 self.entries = [self.worker, self.reviewer]
                 parent = self.add_parent()
-                parent['agent'] = agent
+                transcript = self.file.parent / 'parent.jsonl'
+                parent.update(agent=agent, transcript=str(transcript))
                 self.entries.append(dict(id='%14', agent='codex', thread=THREAD, writable=True))
                 self.states['%14'] = 'Idle'
                 review_links.add(worker=parent['id'], reviewer='%14', reviewer_thread=THREAD,
@@ -3798,11 +3933,13 @@ class ReviewLinksTests(unittest.TestCase):
                 self.file.write_text(json.dumps([self.links()[0], own]))
                 self.turn_source = server.review_turn_source
                 for at, pending in ((999, True), (1001, False)):
-                    records = [dict(message('assistant', 'Reply.'), timestamp=datetime.fromtimestamp(
-                        at, timezone.utc).isoformat())]
-                    with patch.object(server, 'notification_records',
-                                      side_effect=lambda entry: records if entry is parent else []):
-                        self.observe()
+                    write_records(transcript, [
+                        message('user', 'A prompt beyond the review tail.'),
+                        message('assistant', 'x' * CLIPPED_REVIEW_OUTPUT),
+                        dict(message('assistant', 'Reply.'), timestamp=datetime.fromtimestamp(at, timezone.utc).isoformat()),
+                    ])
+                    self.assertEqual(self.turn_source(parent), ('unknown', None, at))
+                    self.observe()
                     self.assertEqual(bool(self.links()[1].get('review_prompts')), pending)
 
     def test_escalate_during_the_tick_stops_the_pending_parent_notice(self):
@@ -7421,6 +7558,25 @@ class ApprovalTurnTimingTests(ApprovalTurnTimingFixture):
         self.observe()
         self.assertFalse(self.reviewer_should_stay_open(),
                          f"The completed approval turn {self.turn_source!r} should allow idle close")
+
+    def test_clipped_untimed_approval_turn_without_a_marker_allows_idle_close(self):
+        self.approve_current_work()
+        approval = self.send.call_args.args[1]
+        rows = json.loads(self.store.read_text())
+        next(row for row in rows if row.get("cap")).pop("feedback_turn")
+        self.store.write_text(json.dumps(rows))
+        self.observe("Working")
+        transcript = self.root / "worker.jsonl"
+        write_records(transcript, [
+            claude("user", approval), claude("assistant", "x" * CLIPPED_REVIEW_OUTPUT), claude("assistant", "Pushed."),
+        ])
+        self.worker["transcript"] = str(transcript)
+        self.turn_started_at = None  # Use the transcript here instead of the fixture's clock.
+        self.turn_source = server.review_turn_source(self.worker)
+        self.assertEqual(self.turn_source, ("unknown", None, None))
+        self.observe()
+        self.assertEqual(self.send.call_count, 2)
+        self.assertFalse(self.reviewer_should_stay_open())
 
     def assert_late_push_skips_review_after_earlier_untimed_prompt(self, prompt):
         self.worker_turn()

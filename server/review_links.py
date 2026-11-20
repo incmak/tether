@@ -1089,10 +1089,10 @@ def _idle_source(link, cap, worker, turn_source):
         # Only a new user prompt can release an upgrade pause. An old turn may still be running at migration.
         if source == 'unknown' or (source == 'user' and started_at is not None
                                    and started_at < cap.get('upgrade_at', float('-inf'))):
-            return 'background', started_at, finished_at
+            return 'background', started_at, finished_at, clipped
     if source in ('unknown', 'unknown-background'):
         source = 'background' if source == 'unknown-background' else 'user'
-    return source, started_at, finished_at
+    return source, started_at, finished_at, clipped
 
 
 def _restart_state(cap):
@@ -1326,11 +1326,12 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
     correction_turn = ((feedback := cap.get('feedback_turn')) is not None
                        and ['review-correction', feedback['sent_at']] in cap.get('review_prompts', ()))
     source = started_at = finished_at = None
+    clipped = False
     if state == 'Idle' and ('restart' in cap or link['seen_working'] or link.get('approved_turn') or cap.get('review_prompts')
                             or cap.get('feedback_turn') or turn in sources):
         if turn not in sources:
             sources[turn] = _idle_source(link, cap, worker, turn_source)
-        source, started_at, finished_at = sources[turn]
+        source, started_at, finished_at, clipped = sources[turn]
     summary = source == 'review-summary'
     if state == 'Idle' and 'restart' in cap:
         start = cap.pop('restart')
@@ -1338,7 +1339,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         by_agent = start.get('agent', False) or _agent_prompt_fresh(cap)
         if not (summary or source == 'review-notice' or source == 'background' and cap.get('review_prompts')):
             cap.pop('agent_prompt', None)
-        if not by_agent and source == 'user':
+        # A clipped turn can request a review, but it cannot authorize a cap reset.
+        if not by_agent and source == 'user' and not clipped:
             for field in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds', 'escalate'):
                 cap.pop(field, None)
             baseline = start.get('counts', {})

@@ -282,11 +282,20 @@ def auto_merge_roots():
     return roots
 
 
+REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
+
+
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
-    return notification_priority.turn_source(entry.get('agent'), notification_records(entry),
-                                             identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
-                                             distinguish_missing=True, with_time=True)
+    def classify(records):
+        return notification_priority.turn_source(entry.get('agent'), records,
+                                                 identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
+                                                 distinguish_missing=True, with_time=True)
+
+    result = classify(notification_records(entry))
+    if result[0] in ('unknown', 'unknown-background'):
+        return classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES))
+    return result
 
 
 REVIEW_GATE_TAIL_BYTES = 256 * 1024
@@ -1313,14 +1322,18 @@ NOTIFICATION_TAIL_BYTES = 256 * 1024
 
 def notification_records(entry):
     """Read a bounded tail without tmux or history cache locks."""
+    return _transcript_tail_records(entry, NOTIFICATION_TAIL_BYTES)
+
+
+def _transcript_tail_records(entry, tail_bytes):
     if entry.get('agent') not in ('claude', 'codex', 'antigravity') or entry.get('ambiguous'):
         return []
     try:
         with open(entry['transcript'], 'rb') as stream:
             size = stream.seek(0, os.SEEK_END)
-            start = max(0, size - NOTIFICATION_TAIL_BYTES)
+            start = max(0, size - tail_bytes)
             stream.seek(start)
-            tail = stream.read(NOTIFICATION_TAIL_BYTES)
+            tail = stream.read(tail_bytes)
         if start:
             tail = tail.partition(b'\n')[2]  # discard a record clipped by the byte limit
         records = []
