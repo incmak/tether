@@ -3036,17 +3036,63 @@ class ReviewLinksTests(unittest.TestCase):
             with self.subTest(agent=agent, limit=limit):
                 stop = self.stopped_review_prompt(agent, limit, legacy=True)
                 times = self.write_worker_turn(stop, LONG_REVIEW_OUTPUT)
-                self.assertEqual(self.turn_source(self.worker), ('review-feedback', *times))
+                # Antigravity has no wider reread: its exports rewrite old steps out of order.
+                expected = ('unknown', None, None) if agent == 'antigravity' else ('review-feedback', *times)
+                self.assertEqual(self.turn_source(self.worker), expected)
                 self.request_review()
                 self.assert_stopped_review(limit)
 
     def test_long_mak_turn_restarts_a_paused_cap(self):
-        for agent in REVIEW_TRANSCRIPT_AGENTS:
+        for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
                 self.stopped_review_prompt(agent, 3, legacy=True)
                 times = self.write_worker_turn('Mak asks to fix the findings.', LONG_REVIEW_OUTPUT)
                 self.assertEqual(self.turn_source(self.worker), ('user', *times))
                 self.assert_reviews_restarted()
+
+    def test_long_antigravity_mak_turn_waits_for_a_readable_prompt(self):
+        self.stopped_review_prompt('antigravity', 3, legacy=True)
+        self.write_worker_turn('Mak asks to fix the findings.', LONG_REVIEW_OUTPUT)
+        self.assertEqual(self.turn_source(self.worker), ('unknown', None, None))
+        self.request_review()
+        self.assert_stopped_review(3)
+        self.write_worker_turn('Mak asks again.')
+        self.assert_reviews_restarted()
+
+    def test_wider_tail_does_not_credit_an_earlier_mak_prompt_to_a_turn_without_a_reply(self):
+        # B289 review: the stop turn aborts after long tool output, before any assistant record.
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                stop = self.stopped_review_prompt(agent, 3, legacy=True)
+                message = claude if agent == 'claude' else codex
+                if agent == 'claude':
+                    output = claude('user', [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'x' * LONG_REVIEW_OUTPUT}])
+                else:
+                    output = {'type': 'response_item',
+                              'payload': {'type': 'function_call_output', 'call_id': 't1', 'output': 'x' * LONG_REVIEW_OUTPUT}}
+                write_records(Path(self.worker['transcript']), [
+                    message('user', 'An earlier task from Mak.'), message('assistant', 'Done.'),
+                    message('user', stop), output,
+                ])
+                self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
+                self.request_review()
+                self.assert_stopped_review(3)
+
+    def test_out_of_order_antigravity_export_does_not_restart_from_an_older_prompt(self):
+        # B289 review: an older Mak step is rewritten after the clipped stop prompt.
+        stop = self.stopped_review_prompt('antigravity', 3, legacy=True)
+        write_records(Path(self.worker['transcript']), [
+            dict(type='USER_INPUT', step_index=1, content='<USER_REQUEST>An earlier task from Mak.</USER_REQUEST>'),
+            dict(type='AGENT_RESPONSE', step_index=2, content='Done.'),
+            dict(type='USER_INPUT', step_index=3, content=f'<USER_REQUEST>{stop}</USER_REQUEST>'),
+            dict(type='PLANNER_RESPONSE', step_index=4, content='x' * CLIPPED_REVIEW_OUTPUT),
+            dict(type='USER_INPUT', step_index=1, content='<USER_REQUEST>An earlier task from Mak.</USER_REQUEST>'),
+            dict(type='PLANNER_RESPONSE', step_index=5, content='x' * LONG_REVIEW_OUTPUT),
+            dict(type='AGENT_RESPONSE', step_index=6, content='Done.'),
+        ])
+        self.assertEqual(self.turn_source(self.worker)[0], 'unknown')
+        self.request_review()
+        self.assert_stopped_review(3)
 
     def test_second_unread_turn_preserves_the_cap(self):
         for agent in REVIEW_TRANSCRIPT_AGENTS:

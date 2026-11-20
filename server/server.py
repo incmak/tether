@@ -287,14 +287,16 @@ REVIEW_SOURCE_TAIL_BYTES = 8 * 1024 * 1024
 
 def review_turn_source(entry):
     """Return the source and transcript times of the latest turn for the review watcher."""
-    def classify(records):
+    def classify(records, **options):
         return notification_priority.turn_source(entry.get('agent'), records,
                                                  identify=lambda text: review_links.prompt_source(continuations.unwrap(text)),
-                                                 distinguish_missing=True, with_time=True)
+                                                 distinguish_missing=True, with_time=True, **options)
 
     result = classify(notification_records(entry))
-    if result[0] in ('unknown', 'unknown-background'):
-        return classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES))
+    # Antigravity exports rewrite old steps out of order, so a wider tail can bring back an older prompt.
+    if result[0] in ('unknown', 'unknown-background') and entry.get('agent') in ('claude', 'codex'):
+        # The wider tail must not credit an earlier turn's prompt to a turn that has no reply yet.
+        return classify(_transcript_tail_records(entry, REVIEW_SOURCE_TAIL_BYTES), latest_turn=True)
     return result
 
 
