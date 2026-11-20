@@ -111,6 +111,8 @@ async function main() {
           card.getByRole('button', { name: 'Hold' }).click(),
         ])
         assert.ok(answer.ok(), 'Hold did not answer')
+        // The page has handled the reply when it says so; only then can the checks below prove nothing else happened.
+        await page.getByText('T-020: answer saved. Not sent: test').first().waitFor()
         assert.equal(await page.locator('#home-group-decisions').count(), 1, 'Hold left Home')
         assert.ok(!gets.slice(before).some(entry => entry.startsWith('chat?session=%25195') && entry.includes('watch=1')), `Hold opened the tab: ${gets.slice(before).join(', ')}`)
         await context.close()
