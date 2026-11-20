@@ -198,6 +198,15 @@ class PrefsSyncTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prefs_sync.save({'archivedTabs': ['%1']})
 
+    def test_helper_tab_filter_syncs(self):
+        shown = {'%2': {'thread': 'review-thread', 'dir': '/work'}}
+        stored = prefs_sync.save({'hideHelpers': False, 'shownHelpers': shown})
+        self.assertEqual(stored['prefs'], {'hideHelpers': False, 'shownHelpers': shown})
+        self.assertEqual(prefs_sync.load(), stored)
+        for bad in ({'hideHelpers': 'yes'}, {'shownHelpers': ['%2']}):
+            with self.assertRaises(ValueError):
+                prefs_sync.save(bad)
+
     def test_rejects_unknown_or_badly_typed_keys(self):
         for changes in ({}, {'selected': '%1'}, {'pinned': 'x'}, {'showPaths': 1}, []):
             with self.assertRaises(ValueError):

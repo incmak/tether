@@ -51,6 +51,10 @@ def new_record(caller):
             'helper_thread': None, 'sent_at': time.time(), 'before': None}
 
 
+def visible_name(entry):
+    return entry.get('pane_name') or entry.get('agent_name') or entry.get('label') or None
+
+
 def save(pane, record, run):
     run([paths.TMUX, 'set-option', '-p', '-t', pane, OPTION, json.dumps(record, separators=(',', ':'))],
         check=True, capture_output=True, timeout=5)
@@ -66,7 +70,27 @@ def _record(raw):
             or not isinstance(record.get('sent_at'), (int, float))
             or isinstance(record.get('sent_at'), bool)):
         return None
+    if record.get('kind') not in ('helper', 'own'):
+        record.pop('kind', None)
+    home_pane = record.get('home_pane')
+    if home_pane is not None and not (isinstance(home_pane, str) and PANE.fullmatch(home_pane)):
+        record.pop('home_pane')
+    home_thread = record.get('home_thread')
+    if home_thread is not None and not (isinstance(home_thread, str) and UUID.fullmatch(home_thread)):
+        record.pop('home_thread')
+    name = record.get('opener_name')
+    if not isinstance(name, str) or not 1 <= len(name) <= 40:
+        record.pop('opener_name', None)
     return record
+
+
+def placement_owner(record):
+    """The pane and conversation used for placement, including legacy records."""
+    if record.get('kind') == 'own':
+        return None, None
+    if record.get('home_pane'):
+        return record['home_pane'], record.get('home_thread')
+    return record['owner_pane'], record.get('owner_thread')
 
 
 def load(pane, run):
@@ -81,30 +105,47 @@ def load(pane, run):
     return True, _record(raw)
 
 
-def parents(run, entries):
-    """Read the helper-to-owner pane IDs for this session listing in one tmux call."""
-    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_helper}'],
+def listing_fields(run, entries):
+    """Read the helper fields for each listing row in one tmux call."""
+    result = run([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}'],
                  capture_output=True, text=True, timeout=5)
     if result.returncode:
         return {}
     by_id = {entry['id']: entry for entry in entries}
-    links = {}
+    fields = {}
     for line in result.stdout.split('\n'):
-        pane, _, raw = line.partition('\t')
-        if not raw or pane not in by_id or not PANE.fullmatch(pane):
+        parts = line.split('\t', 3)
+        if len(parts) != 4:
+            continue
+        pane, group_by, role, raw = parts
+        if pane not in by_id or not PANE.fullmatch(pane):
             continue
         record = _record(raw)
         if record is None:
             continue
-        owner_pane = record['owner_pane']
-        owner = by_id.get(owner_pane)
-        if owner is None or owner_pane == pane or owner.get('agent') == 'shell':
-            continue
-        bound, current = record.get('owner_thread'), _thread(owner)
-        if bound and current and bound != current:
-            continue
-        links[pane] = owner_pane
-    return links
+        opener_pane = record['owner_pane']
+        opener = by_id.get(opener_pane)
+        live = opener is not None and opener_pane != pane and opener.get('agent') != 'shell'
+        if live:
+            bound, current = record.get('owner_thread'), _thread(opener)
+            live = not (bound and current and bound != current)
+        row = fields[pane] = {'opened_by': {'pane': opener_pane, 'live': live,
+                                            'name': visible_name(opener) if live else record.get('opener_name')}}
+        kind = record.get('kind')
+        if live:
+            row['parent'] = opener_pane
+            if kind is None:
+                row['owner'] = opener_pane
+        if kind == 'helper':
+            home_pane, home_thread = placement_owner(record)
+            home = by_id.get(home_pane)
+            if (home is not None and home_pane != pane and home.get('agent') != 'shell'
+                    and home_thread is not None and _thread(home) == home_thread):
+                row['owner'] = home_pane
+        if group_by != 'user' and (kind == 'helper' or
+                                  kind is None and role in ('reviewer', 'advisor', 'second-advisor')):
+            row['helper'] = True
+    return fields
 
 
 def check(caller_pane, caller, helper, record, run, *, pane=None):

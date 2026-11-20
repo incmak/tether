@@ -499,6 +499,8 @@ def arrange(session_id, plan, run=subprocess.run, unstack=(), thread_of=lambda p
     The tabs in unstack go to no stack (Unstacked). Other tabs stay where they are. A stack that the apply leaves empty
     is removed, unless a helper start is about to fill it. thread_of(pane): the conversation the tab holds now, or None.
     Returns the stacks that got tabs, in plan order."""
+    import helper_tabs  # helper_tabs imports terminal_input, which imports groups
+
     if (not isinstance(plan, list) or len(plan) > 20 or not isinstance(unstack, (list, tuple)) or len(unstack) > 200
             or not plan and not unstack):
         raise GroupError(400, 'Send 1 to 20 stacks.')
@@ -527,13 +529,11 @@ def arrange(session_id, plan, run=subprocess.run, unstack=(), thread_of=lambda p
         for line in live.stdout.splitlines():
             pane, label, record = (line.split('\t', 2) + ['', ''])[:3]
             old[pane] = label
-            try:
-                found = json.loads(record) if record else None
-            except ValueError:
-                found = None
-            found = found if isinstance(found, dict) else {}
-            link, linked_thread = found.get('owner_pane'), found.get('owner_thread')
-            if isinstance(link, str) and link != pane:
+            found = helper_tabs._record(record) if record else None
+            if found is None:
+                continue
+            link, linked_thread = helper_tabs.placement_owner(found)
+            if link is not None and link != pane:
                 known = thread_of(link)
                 # The owner now holds another conversation: the link is broken, and this tab is its own root
                 # (the same rule as auto_stacks.root_of).

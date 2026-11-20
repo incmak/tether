@@ -96,6 +96,10 @@ export interface Pane {
   reviewers?: string[]
   reviewers_paused?: string[]  // the panes that review each finished turn of this one (server/review_links.py)
   parent?: string  // the tab that started this one, from @tether_helper (server/helper_tabs.py)
+  opened_by?: { pane: string; name: string | null; live: boolean }  // the tab that ran `start` for this one (B400)
+  owner?: string  // the live tab that owns this tab's work; the tab nests under it (B400)
+  helper?: boolean  // an agent opened it for its own work; "Hide agent helper tabs" may hide it (helperTabs.ts)
+  escalated?: boolean  // its owner sent a paused review to you (agent_tab_cli.py escalate)
   brief?: TabBrief | null  // the AI name and description of this conversation (server/tab_brief.py)
 }
 /** A session cron job. every: the schedule in words; next: the next run in Unix seconds, approximate (Claude Code adds jitter). */

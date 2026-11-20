@@ -57,6 +57,27 @@ class Bundles(unittest.TestCase):
 
 
 class NameAndParseTests(unittest.TestCase):
+    def test_arrange_follows_placement_owner_and_treats_own_tab_as_root(self):
+        thread = '11111111-1111-4111-8111-111111111111'
+        now = '22222222-2222-4222-8222-222222222222'
+        legacy = {'owner_pane': '%1', 'sent_at': 1.0}
+        records = {
+            '%2': dict(legacy, kind='own', home_pane=None),
+            '%3': dict(legacy, kind='helper', home_pane='%2', home_thread=now),
+            '%4': dict(legacy, kind='helper', home_pane='%2', home_thread=thread),
+            '%5': legacy,
+        }
+        output = '%1\t\t\n' + ''.join(f'{pane}\t\t{json.dumps(record)}\n' for pane, record in records.items())
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=output))
+        stacks = [{'id': 'gabcdef12', 'name': 'Opener'}, {'id': 'gabcdef13', 'name': 'Task'}]
+        plan = [{'name': 'Opener', 'panes': ['%1']}, {'name': 'Task', 'panes': ['%2']}]
+        with mock.patch.object(groups, 'LOCK', mock.MagicMock()), \
+                mock.patch.object(groups, 'read', return_value=stacks), \
+                mock.patch.object(groups, '_label') as label:
+            groups.arrange('$1', plan, run, thread_of={'%2': now}.get)
+        self.assertEqual({call.args[0]: call.args[1] for call in label.call_args_list},
+                         {'%1': 'gabcdef12', '%5': 'gabcdef12', '%2': 'gabcdef13', '%3': 'gabcdef13'})
+
     def test_name_rules(self):
         self.assertEqual(groups.clean_name('  Home dashboard  '), 'Home dashboard')
         self.assertEqual(groups.clean_name('x' * 40), 'x' * 40)
@@ -154,7 +175,7 @@ class RenderTests(Bundles):
         self.assertNotIn('Stack', text.replace('--stack GOAL', ''))
         self.assertIn('\n## Notes\n', text)
         self.assertIn('\n### Project notes\n- setup.md: Setup\n', text)  # the list has its own heading: Notes comes first now
-        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner's stack; `--stack Unstacked` = none)", text)
 
     def test_marks_cover_the_group_revision(self):
         projects.set_instructions(PID, 'Use pnpm.', 0)
@@ -471,7 +492,7 @@ class TmuxTests(Bundles):
         self.assertEqual([self.label(p) for p in (inherited, main, chosen, plain)], [docs['id'], '', api['id'], ''])
 
     def start_group(self, body, caller, entries=(), **kwargs):
-        with agent_tabs._start_group(body, caller, self.run_tmux, entries, **kwargs) as (group, root, name):
+        with agent_tabs._start_group(body, caller, self.run_tmux, entries, **kwargs) as (group, name, owner):
             return group
 
     def names(self, session):
@@ -507,9 +528,9 @@ class TmuxTests(Bundles):
         self.helper(self.a2, self.a1)
         self.helper(third, self.a2)
         with agent_tabs._start_group({}, {'id': third, 'pane_name': 'Deep'}, run,
-                                     [{'id': self.a1, 'pane_name': 'Billing fix'}]) as (group, root, name):
+                                     [{'id': self.a1, 'pane_name': 'Billing fix'}]) as (group, name, owner):
             pass
-        self.assertEqual((group, root), ('', self.a1))
+        self.assertEqual((group, owner['root_pane']), ('', self.a1))
         self.assertEqual(([self.label(p) for p in (self.a1, self.a2, third)], self.names(self.a)), (['', '', ''], []),
                          'nothing moves')
         one = '11111111-1111-4111-8111-111111111111'
@@ -650,7 +671,7 @@ class TmuxTests(Bundles):
         run = self.run_tmux
         caller = {'id': self.a1, 'pane_name': 'Billing'}
         made = self.auto_stack(self.a, 'Billing', self.a1)  # root-only: its last helper closed
-        with agent_tabs._start_group({}, caller, run) as (group, root, name):
+        with agent_tabs._start_group({}, caller, run) as (group, name, owner):
             self.assertEqual(group, made, "the helper opens in its caller's stack")
             self.assertEqual(groups.panes_in(self.a, group, run), [self.a1], 'root-only while the tab launches')
             self.assertEqual(groups.drop_lone_auto(run), [])
@@ -662,7 +683,7 @@ class TmuxTests(Bundles):
                          'the marker goes when the start ends')
         # A later helper of the same root, while the first helper closes: the stack stays for the new one.
         self.helper(new, self.a1)
-        with agent_tabs._start_group({}, caller, run) as (again, root, name):
+        with agent_tabs._start_group({}, caller, run) as (again, name, owner):
             self.assertEqual(again, group)
             self.tmux('kill-pane', '-t', new)
             self.assertEqual(groups.drop_lone_auto(run), [])
@@ -675,7 +696,7 @@ class TmuxTests(Bundles):
         env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
         sweep = ['import groups', 'print(groups.drop_lone_auto())']
         self.auto_stack(self.a, 'Billing', self.a1)
-        with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+        with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
             out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
                                  capture_output=True, text=True, timeout=60)
             self.assertEqual((out.returncode, out.stdout.strip()), (0, '[]'), out.stderr)
@@ -688,7 +709,7 @@ class TmuxTests(Bundles):
         made = self.family()
         self.tmux('kill-pane', '-t', self.a2)
         with self.assertRaises(RuntimeError):
-            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+            with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
                 self.assertEqual(group, made)
                 raise RuntimeError('launch failed')
         self.assertEqual(groups.drop_lone_auto(run), [(self.a, 'Billing')])
@@ -705,7 +726,7 @@ class TmuxTests(Bundles):
 
             def start():
                 barrier.wait()
-                with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, root, name):
+                with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
                     new.append(terminal_input.new_window_after(self.a1, run, group=group))
 
             def sweep():
@@ -805,8 +826,11 @@ class TmuxTests(Bundles):
         changed = {self.a1: one, self.a2: three}.get  # A now holds another chat
         self.assertEqual({auto_stacks.root_of(p, changed, run) for p in (third, fourth)}, {third})
         self.assertEqual(auto_stacks.root_of(fourth, {self.a1: one, self.a2: two}.get, run), self.a1)
-        self.assertEqual(agent_tabs._owner({'id': self.a2, 'thread': one}, self.a1, [{'id': self.a1, 'thread': two}])
-                         ['root_thread'], two)
+        caller = {'id': self.a2, 'thread': one}
+        home = {'id': self.a1, 'thread': two}
+        read_root = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout=f'{self.a1}\t\n'))
+        owner = agent_tabs._owner(caller, home, [caller, home], read_root)
+        self.assertEqual((owner['root_pane'], owner['root_thread']), (self.a1, two))
 
     def cleanup_snapshot(self, entries=()):
         import auto_stacks_cleanup

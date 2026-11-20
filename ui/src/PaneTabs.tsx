@@ -1,7 +1,8 @@
 import { createPortal, flushSync } from 'react-dom'
 import { Fragment, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import { useWords } from './words'
-import { Eye, Lightbulb, Plus, X } from 'lucide-react'
+import { CornerDownRight, Eye, Lightbulb, Plus, X } from 'lucide-react'
+import { HelperFoldButton } from './HelperFold'
 import { pickMode, orderAround } from './tabSelection'
 import type { TabPickControls } from './tabSelection'
 import type { Api, Pane } from './api'
@@ -378,10 +379,15 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
 
   const byId = new Map(session.panes.map(item => [item.id, item]))
   const shown = preview ? preview.map(id => byId.get(id)).filter((item): item is Pane => !!item) : session.panes
+  // Hidden agent helpers fold into "N helpers" after their owner tab; helpers with no owner here fold at the end.
+  const folds = new Map((session.helperFolds ?? []).map(fold => [fold.key, fold]))
+  const orphans = (session.helperFolds ?? []).filter(fold => fold.key.startsWith('@'))
+    .map(fold => ({ ...fold, panes: session.groups?.length ? fold.panes.filter(item => (item.group ?? '') === (pane.group ?? '')) : fold.panes }))
+    .filter(fold => fold.panes.length)
   // While tabs are reordered, each tab draws its own highlight again.
   return <div className={[preview ? 'pane-tabs' : 'pane-tabs has-pill', pick ? 'closable' : ''].filter(Boolean).join(' ')} ref={strip} role="tablist" aria-label={`Panes of ${session.name}`} data-select-scope="">
     <span className="pane-tab-pill" aria-hidden="true" />
-    {shown.map(item => { const picked = !!pick?.picked.has(item.id); return <Fragment key={item.id}><button data-pane={item.id} data-select-pane={item.id} role="tab" aria-selected={item.id === pane.id} aria-keyshortcuts={pick ? 'Delete' : undefined} className={[item.id === pane.id ? 'active' : '', picked ? 'picked' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', item.role === 'advisor' ? 'advisor-tab' : '', item.role === 'advisor' && item.state === 'Working' ? 'advising' : ''].filter(Boolean).join(' ')}
+    {shown.map(item => { const picked = !!pick?.picked.has(item.id); return <Fragment key={item.id}><button data-pane={item.id} data-select-pane={item.id} role="tab" aria-selected={item.id === pane.id} aria-keyshortcuts={pick ? 'Delete' : undefined} className={[item.id === pane.id ? 'active' : '', picked ? 'picked' : '', dragging === item.id ? 'dragging' : '', fresh === item.id ? 'task-new' : '', item.role === 'advisor' ? 'advisor-tab' : '', item.role === 'advisor' && item.state === 'Working' ? 'advising' : '', item.owner && byId.has(item.owner) ? 'nested-tab' : ''].filter(Boolean).join(' ')}
       onClick={event => {
         if (suppressClick.current) return
         // Ctrl/Cmd+click adds or removes the tab, Shift+click picks a range; while choosing on touch, a tap picks.
@@ -393,15 +399,19 @@ export const PaneTabs = forwardRef<HTMLDivElement, Props>(function PaneTabs({ se
       onKeyDown={event => { if (pick && event.key === 'Delete' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) { event.preventDefault(); const box = event.currentTarget.getBoundingClientRect(); pick.onCloseTab(item.id, { x: box.left, y: box.bottom + 4 }) } }}
       // A touch long press is handled above (drag, or actions on release). A right-click still opens the actions.
       onMouseEnter={clipTitle} onContextMenu={event => { event.preventDefault(); if (!drag.current?.touch && !suppressClick.current) onPaneActions(item.id, anchorOf(event)) }}>
+      {item.owner && byId.has(item.owner) && <CornerDownRight size={12} className="tab-nest" aria-hidden="true" />}
       {item.role === 'advisor' ? <><AgentIcon agent={item.agent} size={14} /><Lightbulb size={13} className="tab-advisor" aria-hidden="true" /></> : <AgentIcon agent={item.agent} icon={item.pane_icon} size={14} />}<span className="pane-tab-name">{paneTitle(item)}</span>{shownIndex(item) && <span className="pane-index">{shownIndex(item)}</span>}{item.worktree && <WorktreeMark branch={item.worktree} />}{!!item.reviewers?.length && <Eye size={12} className="tab-reviewed" aria-label={`Reviewed by ${item.reviewers.map(id => { const other = byId.get(id); return other ? paneTitle(other) : 'another tab' }).join(', ')}`} />}
       {item.state === 'Working' || needsYou(item.state) ? <span className={`state-dot ${item.state === 'Working' ? 'working' : 'approval'}`} aria-label={item.state === 'Working' ? item.role === 'advisor' ? 'Advising' : 'Working' : 'Needs you'} /> : item.state === 'Stopped' ? <span className="state-dot" aria-label="Stopped" /> : null}
+      {item.owner && byId.has(item.owner) && <span className="visually-hidden">, helper of {paneTitle(byId.get(item.owner)!)}</span>}
       {picked && <span className="visually-hidden">, selected</span>}
     </button>
     {/* A sibling, not inside the tab: a tab holds no other control. It sits over the tab's right edge (App.css). Not a
         Tab stop: the focused tab's Delete key does the same. Hidden while tabs are dragged, so it never lags behind. */}
     {pick && !preview && <button type="button" className={item.id === pane.id ? 'tab-close current' : 'tab-close'} data-close-for={item.id} tabIndex={-1} aria-label={`Close ${paneTitle(item)}`} title={`Close ${words.pane} (Delete)`}
       onClick={event => pick.onCloseTab(item.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}
+    {!preview && folds.has(item.id) && <HelperFoldButton fold={folds.get(item.id)!} owner={item} variant="strip" />}
     </Fragment> })}
+    {!preview && orphans.map(fold => <HelperFoldButton key={fold.key} fold={fold} variant="strip" />)}
     <button className="tab-add" aria-label={`${words.newRight} with a task`} title={`${words.newRight} with a task`} aria-haspopup="dialog" aria-expanded={!!taskAt}
       onClick={event => { const box = event.currentTarget.getBoundingClientRect(); setTaskAt({ x: box.right - 360, y: box.bottom + 6 }) }}><Plus size={16} /></button>
     {taskAt && createPortal(<NewTask api={api} pane={pane} at={taskAt} micOk={micOk} chime={chime} onClose={() => setTaskAt(null)} onEmpty={() => { setTaskAt(null); onSplit('right') }}

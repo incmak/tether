@@ -1,7 +1,9 @@
 """Session list sharing and ETag tests: mocked discovery, no tmux, no terminals."""
 import io
 import json
+from pathlib import Path
 import subprocess
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -15,7 +17,7 @@ class ListingParentsTests(unittest.TestCase):
     def setUp(self):
         thread = '0f8fad5b-d9cb-469f-a165-70867728950e'
         self.entries = [
-            {'id': '%1', 'agent': 'claude', 'thread': thread},
+            {'id': '%1', 'agent': 'claude', 'thread': thread, 'agent_name': 'Current opener'},
             {'id': '%2', 'agent': 'codex'},
             {'id': '%3', 'agent': 'shell'},
             {'id': '%4', 'agent': 'antigravity', 'thread': '1f8fad5b-d9cb-469f-a165-70867728950e',
@@ -31,13 +33,18 @@ class ListingParentsTests(unittest.TestCase):
         self.enterContext(patch.object(server.auto_resume, 'notice', return_value={'failed': False}))
         self.enterContext(patch.object(server.review_links, 'reviewed_by', return_value={'%1': ['%5']}))
         self.enterContext(patch.object(server.review_links, 'paused', return_value={}))
+        temp = self.enterContext(tempfile.TemporaryDirectory())
+        self.review_file = Path(temp) / 'review-links.json'
+        self.enterContext(patch.object(server.review_links, 'FILE', self.review_file))
 
     def listing(self):
         return {row['id']: row for row in server.build_listing()['sessions']}
 
-    def tmux_rows(self, rows, returncode=0):
+    def tmux_rows(self, rows, returncode=0, *, roles=None, grouping=None):
+        roles, grouping = roles or {}, grouping or {}
         self.run.return_value = subprocess.CompletedProcess(
-            [], returncode, stdout=''.join(f'{pane}\t{raw}\n' for pane, raw in rows))
+            [], returncode, stdout=''.join(f'{pane}\t{grouping.get(pane, "")}\t{roles.get(pane, "")}\t{raw}\n'
+                                          for pane, raw in rows))
 
     def test_valid_parent_records_use_one_tmux_call(self):
         self.tmux_rows([('%2', json.dumps(self.record)), ('%5', json.dumps(dict(self.record, owner_pane='%2')))])
@@ -46,8 +53,9 @@ class ListingParentsTests(unittest.TestCase):
         self.assertEqual(rows['%5']['parent'], '%2')
         self.assertEqual(rows['%1']['reviewers'], ['%5'])
         self.assertNotIn('parent', rows['%1'])
-        self.run.assert_called_once_with([paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@tether_helper}'],
-                                         capture_output=True, text=True, timeout=5)
+        self.run.assert_called_once_with(
+            [paths.TMUX, 'list-panes', '-a', '-F', '#{pane_id}\t#{@group_by}\t#{@tether_role}\t#{@tether_helper}'],
+            capture_output=True, text=True, timeout=5)
 
     def test_invalid_parent_records_are_ignored(self):
         for raw in ('{', '[]', json.dumps(dict(self.record, sent_at=True)),
@@ -68,7 +76,75 @@ class ListingParentsTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 record = dict(self.record, **changes)
                 self.tmux_rows([('%2', json.dumps(record))])
-                self.assertEqual(self.listing()['%2']['parent'], record['owner_pane'])
+                row = self.listing()['%2']
+                self.assertEqual(row['parent'], record['owner_pane'])
+                self.assertEqual(row['owner'], row['parent'])
+                self.assertTrue(row['opened_by']['live'])
+
+    def test_lists_placement_and_opener_separately_when_opener_leaves(self):
+        home_thread = '1f8fad5b-d9cb-469f-a165-70867728950e'
+        home = self.entries[-1]
+        home['thread'] = home_thread
+        record = dict(self.record, kind='helper', home_pane='%5', home_thread=home_thread, opener_name='Old opener')
+        self.tmux_rows([('%2', json.dumps(record))])
+        row = self.listing()['%2']
+        self.assertEqual(row, {'id': '%2', 'parent': '%1', 'owner': '%5', 'helper': True, 'reviewers_paused': [],
+                               'opened_by': {'pane': '%1', 'name': 'Current opener', 'live': True}})
+        self.entries[0]['thread'] = home_thread
+        for opener_present in (True, False):
+            with self.subTest(opener_present=opener_present):
+                if not opener_present:
+                    self.entries.pop(0)
+                row = self.listing()['%2']
+                self.assertNotIn('parent', row)
+                self.assertEqual(row['owner'], '%5')
+                self.assertEqual(row['opened_by'], {'pane': '%1', 'name': 'Old opener', 'live': False})
+        for changes in ({'thread': self.record['owner_thread']}, {'thread': None},
+                        {'thread': home_thread, 'agent': 'shell'}):
+            with self.subTest(changes=changes):
+                home.update(changes)
+                self.assertNotIn('owner', self.listing()['%2'])
+        self.assertNotIn('opened_by', self.listing()['%5'])
+
+    def test_helper_filter_requires_valid_record_role_or_kind_and_no_manual_placement(self):
+        helper = dict(self.record, kind='helper', home_pane='%1', home_thread=self.record['owner_thread'])
+        for record, role, group_by, expected in (
+                (self.record, '', '', False), (self.record, 'reviewer', '', True),
+                (self.record, 'advisor', '', True), (self.record, 'second-advisor', '', True),
+                (self.record, 'advisor', 'user', False), (helper, '', '', True),
+                (helper, '', 'user', False), (dict(self.record, kind='own', home_pane=None), '', '', False),
+                (dict(self.record, sent_at=True), 'reviewer', '', False)):
+            with self.subTest(record=record, role=role, group_by=group_by):
+                self.tmux_rows([('%2', json.dumps(record))], roles={'%2': role}, grouping={'%2': group_by})
+                row = self.listing()['%2']
+                self.assertEqual(row.get('helper'), True if expected else None)
+                if record.get('kind') == 'own':
+                    self.assertNotIn('owner', row)
+                    self.assertEqual(row['parent'], '%1')
+
+    def test_invalid_new_values_are_ignored_and_legacy_record_still_applies(self):
+        record = dict(self.record, kind=['helper'], home_pane='5', home_thread=17, opener_name='A' * 41)
+        raw = json.dumps(record)
+        self.assertEqual(server.helper_tabs._record(raw), self.record)
+        self.entries.pop(0)
+        self.tmux_rows([('%2', raw)], roles={'%2': 'reviewer'})
+        row = self.listing()['%2']
+        self.assertEqual(row['opened_by'], {'pane': '%1', 'name': None, 'live': False})
+        self.assertEqual(row['helper'], True)
+
+    def test_escalated_only_for_the_current_worker_with_an_escalation_entry(self):
+        self.tmux_rows([])
+        cap = {'cap': True, 'worker': '%1', 'worker_thread': self.record['owner_thread'], 'escalate': 'Review needed.'}
+        stale = dict(cap, worker='%2', worker_thread='1f8fad5b-d9cb-469f-a165-70867728950e')
+        waiting = {'cap': True, 'worker': '%5', 'paused': True}
+        self.review_file.write_text(json.dumps([cap, stale, waiting]))
+        rows = self.listing()
+        self.assertIs(rows['%1']['escalated'], True)
+        self.assertNotIn('escalated', rows['%2'])
+        self.assertNotIn('escalated', rows['%5'])
+        with patch.object(server.review_links, '_read', side_effect=OSError('Unreadable')):
+            self.assertNotIn('escalated', self.listing()['%1'])
+            self.assertEqual(self.listing()['%1']['reviewers'], ['%5'])
 
     def test_tmux_read_error_keeps_listing_and_reviewers(self):
         self.tmux_rows([('%2', json.dumps(self.record))], returncode=1)

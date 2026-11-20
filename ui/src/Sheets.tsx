@@ -198,8 +198,10 @@ export function SessionActions({ api, session, tabCount, pane, pinned, archived,
   </dialog>
 }
 
-export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel, startClose = false, onSelect }: {
+export function PaneActions({ api, session, tabCount, archived, pane, panes, at, place, targets, onArchive, onFork, onDone, onClose, color, onColor, mainModel, startClose = false, onSelect, alwaysShow }: {
   mainModel?: MainModel
+  /** An agent helper tab (helperTabs.ts): "Always show this tab" keeps it out of the helper filter. */
+  alwaysShow?: { on: boolean; onToggle: () => void }
   startClose?: boolean  // the × on a tab opens this sheet at the close question; Cancel then closes the sheet
   onSelect?: () => void  // "Select tabs": start choosing several tabs (the way to multi-select on touch)
   color?: string; onColor?: (color: TagColor | null) => void
@@ -266,6 +268,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           {onFork && canFork(pane) && <button disabled={pending} onClick={onFork}><GitFork size={18} />New chat from this</button>}
           <hr />
           {onSelect && <button disabled={pending} onClick={() => { onSelect(); onClose() }}><ListChecks size={18} />Select {words.panes}</button>}
+          {alwaysShow && <button disabled={pending} aria-pressed={alwaysShow.on} onClick={() => { alwaysShow.onToggle(); onClose() }}><Pin size={18} />Always show this {words.pane}{alwaysShow.on && <Check size={16} aria-hidden="true" />}</button>}
           <button disabled={pending} onClick={() => { onArchive(); onClose() }}>{archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}{archived ? 'Restore' : 'Archive'} {words.pane}</button>
           <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close {words.pane}{words.tmux && <kbd>Ctrl-b x</kbd>}</button>
         </div>}

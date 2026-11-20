@@ -42,11 +42,13 @@ class AgentTabsTests(unittest.TestCase):
         self.reply = self.enterContext(patch.object(server, 'last_reply', return_value='Work done.'))
         self.status = self.enterContext(patch.object(agent_tabs, 'live_status', return_value={'state': 'Idle'}))
         self.stack_calls = []
+        self.start_group = agent_tabs._start_group
 
         @contextlib.contextmanager
         def start_group(body, caller, run, entries=(), **kwargs):  # the real rules run against tmux in test_groups.py
             self.stack_calls.append((body, caller['id'], kwargs))
-            yield 'gabcdef12', caller['id'], 'Task'
+            owner = dict(agent_tabs.helper_tabs.new_record(caller), root_pane=caller['id'])
+            yield 'gabcdef12', 'Task', owner
         self.enterContext(patch.object(agent_tabs, '_start_group', start_group))
 
     def request(self, payload, headers=None, peer='127.0.0.1', denied=False, path=agent_tabs.PATH):
@@ -222,6 +224,103 @@ class AgentTabsTests(unittest.TestCase):
             self.assertEqual(self.request({'action': 'start', 'message': '', 'review': 'new',
                                            'thread': 'ignored', 'name': 'New tab', 'cwd': str(self.root)}),
                              (201, {'pane': '%15', 'name': 'New tab'}))
+
+    def mock_placement(self):
+        for entry in self.entries:
+            entry['tmux_session'] = 'here'
+        self.enterContext(patch.object(agent_tabs, '_start_group', self.start_group))
+        self.enterContext(patch.object(agent_tabs.groups, 'LOCK', contextlib.nullcontext))
+        stack = {'%12': {'id': 'gabcdef12', 'name': 'Source stack'},
+                 '%13': {'id': 'gabcdef13', 'name': 'Owner stack'}}
+        self.enterContext(patch.object(agent_tabs.groups, 'group_of_pane',
+                                       side_effect=lambda pane, run: ('$1', stack[pane])))
+        self.enterContext(patch.object(agent_tabs.groups, 'start_begin', return_value='token'))
+        self.enterContext(patch.object(agent_tabs.groups, 'start_end'))
+        self.run.return_value = subprocess.CompletedProcess([], 0, stdout='%12\t\n')
+
+    def test_default_and_explicit_caller_owner_use_callers_stack(self):
+        self.mock_placement()
+        self.entries[0]['pane_name'] = 'o' * 45
+        with patch.object(delegate, 'start', return_value=('%15', 'Task')) as start:
+            for options in ({}, {'owner': '%12'}):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', message='Task', **options))[0], 201)
+                    launch = start.call_args.kwargs
+                    self.assertEqual(launch['group'], 'gabcdef12')
+                    self.assertEqual(launch['owner']['kind'], 'helper')
+                    self.assertEqual(launch['owner']['home_pane'], '%12')
+                    self.assertEqual(launch['owner']['home_thread'], THREAD)
+                    self.assertEqual(launch['owner']['opener_name'], 'o' * 40)
+
+    def test_self_owner_starts_unstacked_and_saves_its_own_root(self):
+        self.mock_placement()
+        with patch.object(delegate, 'new_window_after', return_value='%15') as window, \
+                patch.object(delegate, 'write_prompt', return_value=self.root / 'prompt.md'):
+            reply = self.request({'action': 'start', 'owner': 'self', 'agent': 'claude',
+                                  'message': 'a task', 'group': 'Other goal'})
+        self.assertEqual(reply[0], 201)
+        self.assertEqual(window.call_args.kwargs['group'], '')
+        options = [call.args[0] for call in self.run.call_args_list if '@tether_helper' in call.args[0]]
+        record = json.loads(options[0][-1])
+        self.assertEqual((record['kind'], record['root_pane'], record['home_pane'], record['home_thread']),
+                         ('own', '%15', None, None))
+        self.assertEqual(record['owner_pane'], '%12')
+
+    def test_placement_owner_uses_its_stack_but_gets_no_command_authority(self):
+        self.mock_placement()
+        home_thread = '1f8fad5b-d9cb-469f-a165-70867728950e'
+        self.entries[1]['thread'] = home_thread
+        with patch.object(delegate, 'start', return_value=('%15', 'Task')) as start:
+            self.assertEqual(self.request({'action': 'start', 'owner': '%13', 'message': 'Task'})[0], 201)
+            launch = start.call_args.kwargs
+            self.assertEqual(launch['group'], 'gabcdef13')
+            record = launch['owner']
+            self.assertEqual((record['root_pane'], record['home_pane'], record['home_thread']),
+                             ('%13', '%13', home_thread))
+            self.assertEqual((record['owner_pane'], record['owner_thread']), ('%12', THREAD))
+            self.assertEqual(self.request({'action': 'start', 'owner': '%13', 'message': 'Task',
+                                           'group': 'Unstacked'})[0], 201)
+            self.assertEqual(start.call_args.kwargs['group'], '')
+            for options in ({'review': 'new'}, {'role': 'advisor'}):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', owner='%13', message='Task', **options))[0], 201)
+                    self.assertEqual(start.call_args.kwargs['owner']['owner_pane'], '%12')
+                    self.assertEqual(start.call_args.kwargs['owner']['home_pane'], '%13')
+        self.entries.append(dict(id='%15', agent='claude', registry='/fake/15.json', thread=THREAD, writable=True))
+        with patch.object(agent_tabs.helper_tabs, 'load', return_value=(True, record)), \
+                patch.object(agent_tabs.helper_tabs, 'save'), \
+                patch.object(server, 'shared_status', return_value={'state': 'Idle'}), \
+                patch.object(server, 'timeline', return_value={}), \
+                patch.object(server, 'review_send', return_value='queued') as send, \
+                patch.object(agent_tabs.helper_close, 'close_pane') as close:
+            for action in ('send', 'wait', 'close'):
+                with self.subTest(action=action):
+                    body = dict(action=action, pane='%15', message='Follow up.')
+                    self.assertEqual(self.request(dict(body, session='%13'))[0], 400)
+                    self.assertEqual(self.request(body)[0], 200)
+            send.assert_called_once()
+            close.assert_called_once_with('%15', self.run)
+
+    def test_start_refuses_invalid_placement_before_launch_or_worktree(self):
+        self.mock_placement()
+        self.entries[1]['tmux_session'] = 'elsewhere'
+        self.entries[2]['agent'] = 'shell'
+        wrong_tab = 'Choose an owner tab in this tmux session.'
+        wrong_value = 'Choose self or a pane ID like %12 for the owner.'
+        needs_owner = 'A reviewer or advisor needs an owner tab.'
+        with patch.object(delegate, 'start') as start, patch.object(agent_tabs.worktrees, 'from_body') as worktree:
+            for options, error in (
+                    ({'owner': '%13'}, wrong_tab), ({'owner': '%14'}, wrong_tab),
+                    ({'owner': '%90', 'worktree': 'feature/no-owner'}, wrong_tab),
+                    ({'owner': 'not-a-pane'}, wrong_value), ({'owner': None}, wrong_value),
+                    ({'owner': 'self', 'review': 'new'}, needs_owner),
+                    ({'owner': 'self', 'role': 'advisor'}, needs_owner)):
+                with self.subTest(options=options):
+                    self.assertEqual(self.request(dict(action='start', message='Task', **options)),
+                                     (400, {'error': error}))
+            self.run.assert_not_called()
+            start.assert_not_called()
+            worktree.assert_not_called()
 
     def test_audit_records_one_start_and_close_with_cli_actor(self):
         headers = {'X-Tether-Client': 'agent-cli', 'X-Tether-Pane': '%12'}
@@ -624,6 +723,12 @@ class AgentTabsTests(unittest.TestCase):
 
 
 class CLITests(unittest.TestCase):
+    def test_start_passes_placement_owner(self):
+        for owner in ('self', '%13'):
+            with self.subTest(owner=owner):
+                self.assertEqual(cli.arguments(['start', '--owner', owner, 'Task'])['owner'], owner)
+        self.assertNotIn('owner', cli.arguments(['start', 'Task']))
+
     def test_worktree_body_is_unchanged_and_uses_long_timeout(self):
         for branch in ('feature/foo', ' feature/foo ', ''):
             with self.subTest(branch=branch):

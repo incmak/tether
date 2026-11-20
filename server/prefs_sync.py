@@ -19,7 +19,7 @@ import paths
 FILE = paths.CACHE / 'prefs.json'
 KEYS = {'pinned': list, 'sidePins': list, 'order': list, 'paneOrder': dict, 'sort': str, 'seen': dict, 'collapsed': dict,
         'showPaths': bool, 'tmuxWords': bool, 'liveReplyPreview': bool, 'voiceOff': bool, 'voiceSound': bool, 'theme': str, 'scheme': str, 'drafts': dict,
-        'archived': dict, 'archivedTabs': dict, 'autoResume': bool, 'layout': dict, 'repos': dict, 'files.pinned': list, 'hosts': list, 'sessionFolder': str,
+        'archived': dict, 'archivedTabs': dict, 'hideHelpers': bool, 'shownHelpers': dict, 'autoResume': bool, 'layout': dict, 'repos': dict, 'files.pinned': list, 'hosts': list, 'sessionFolder': str,
         'colors': dict, 'groups': list, 'groupOf': dict, 'groupBy': str, 'waitingOrder': str, 'attention': bool, 'imagePromptTuned': bool, 'mainModel': str,
         'activity': bool, 'activityAgents': bool, 'uiUsage': bool}
 GROUP_ID = re.compile(r'[a-z0-9-]{1,40}')

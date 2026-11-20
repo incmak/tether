@@ -126,21 +126,42 @@ def close_tab(body, caller, entries, run, status, sessions=None, lock=None):
     return {'closed': pane}
 
 
+def _start_home(body, caller, entries):
+    """Resolve the placement owner. None means the new tab is a main tab."""
+    if 'owner' not in body:
+        return caller
+    value = body['owner']
+    if value == 'self':
+        if delegate.normalize_review(body.get('review', False)) == 'new' or body.get('role'):
+            raise ValueError('A reviewer or advisor needs an owner tab.')
+        return None
+    if not isinstance(value, str) or not helper_tabs.PANE.fullmatch(value):
+        raise ValueError('Choose self or a pane ID like %12 for the owner.')
+    if value == caller['id']:
+        return caller
+    home = next((entry for entry in entries if entry['id'] == value), None)
+    session = caller.get('tmux_session')
+    if (home is None or home.get('agent') not in ('claude', 'codex')
+            or not session or home.get('tmux_session') != session):
+        raise ValueError('Choose an owner tab in this tmux session.')
+    return home
+
+
 @contextlib.contextmanager
 def _start_group(body, caller, run, entries=(), *, branch=None):
-    """Yield (group id, root pane, new tab name) for a new helper tab ("" = Unstacked): the caller's place (_pick_group).
-    branch: the --worktree branch."""
+    """Yield the group ID, tab name and helper record for a new tab."""
+    home = _start_home(body, caller, entries)
     token = session_id = None
     with groups.LOCK():
-        session_id, current = groups.group_of_pane(caller['id'], run)
-        group_id, root, stack_goal = _pick_group(body, caller, run, entries, session_id, current)
+        session_id, group_id, stack_goal = _pick_group(body, caller, home, run)
+        owner = _owner(caller, home, entries, run)
         if group_id:  # until the new tab has its @group, the stack must not look empty or root-only (groups.py)
             token = groups.start_begin(session_id, group_id, run)
     try:
         name = auto_stacks.helper_tab_name(role=body.get('role'), review=delegate.normalize_review(body.get('review', False)) == 'new',
                                            name=body.get('name'), branch=branch, stack=body.get('group'),
                                            message=body.get('message') or '', caller=caller, stack_goal=stack_goal)
-        yield group_id, root, name
+        yield group_id, name, owner
     finally:
         _end_start(session_id, token, run)
 
@@ -153,27 +174,35 @@ def _end_start(session_id, token, run):
         pass  # the marker expires (groups.START_LIMIT)
 
 
-def _owner(caller, root, entries):
-    """The helper record of a new tab: its owner, and its root with the root's conversation (auto_stacks.root_of)."""
-    root_entry = next((entry for entry in entries if entry['id'] == root), caller if root == caller['id'] else {})
-    return dict(helper_tabs.new_record(caller), root_pane=root, root_thread=helper_tabs._thread(root_entry))
+def _owner(caller, home, entries, run):
+    """Record the opener's authority and the new tab's placement."""
+    home_pane = home['id'] if home is not None else None
+    root = root_thread = None
+    if home_pane is not None:
+        by_id = {entry['id']: entry for entry in entries}
+        by_id.setdefault(caller['id'], caller)
+        root = auto_stacks.root_of(home_pane, lambda pane: by_id.get(pane, {}).get('thread'), run)
+        root_thread = helper_tabs._thread(by_id.get(root, {}))
+    name = helper_tabs.visible_name(caller)
+    return dict(helper_tabs.new_record(caller), root_pane=root, root_thread=root_thread,
+                kind='helper' if home is not None else 'own',
+                home_pane=home_pane, home_thread=helper_tabs.verified_thread(home),
+                opener_name=name[:40] if name else None)
 
 
-def _pick_group(body, caller, run, entries, session_id, current):
-    """(group id, root pane, stack goal). A new helper tab opens in its caller's place: the caller's stack, or Unstacked.
-    Tether makes no stack and moves no tab here: stacks come from the user, New stack, or Suggest stacks, so a session
-    keeps fewer stacks than tabs (notes/auto-stacks.md). --stack GOAL only names the helper tab; --stack Unstacked puts
-    it in no stack."""
-    by_id = {entry['id']: entry for entry in entries}
-    by_id.setdefault(caller['id'], caller)
-    root = auto_stacks.root_of(caller['id'], lambda pane: by_id.get(pane, {}).get('thread'), run)
+def _pick_group(body, caller, home, run):
+    """(session ID, group ID, stack goal). Place a helper with its owner, or start a main tab Unstacked."""
     goal = body.get('group') if isinstance(body.get('group'), str) else None
-    if goal is not None and groups.clean_name(goal).lower() in groups.RESERVED:
-        return '', root, None  # --stack Unstacked: the agent asked for no stack
-    named = auto_stacks.goal(goal) if goal else None  # a fallback for the helper tab name
-    if current is None:
-        return '', root, named
-    return current['id'], root, named or current['name']
+    unstacked = goal is not None and groups.clean_name(goal).lower() in groups.RESERVED
+    named = auto_stacks.goal(goal) if goal and not unstacked else None
+    if home is None:
+        return None, '', named
+    session_id, current = groups.group_of_pane(home['id'], run)
+    if home['id'] != caller['id'] and groups.group_of_pane(caller['id'], run)[0] != session_id:
+        raise ValueError('Choose an owner tab in this tmux session.')
+    if unstacked or current is None:
+        return session_id, '', named
+    return session_id, current['id'], named or current['name']
 
 
 def serve(handler, body, **kwargs):
@@ -223,6 +252,7 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
         request = dict(body, thread=caller.get('thread'))
         request.setdefault('agent', caller['agent'] if caller.get('agent') in ('claude', 'codex') else 'claude')
         delegate.validate(request, entries)
+        _start_home(body, caller, entries)  # before the worktree is made
         if 'group' in body:
             groups.clean_name(body['group'])  # before the worktree is made
         if 'cwd' in body and (not isinstance(body['cwd'], str) or not os.path.isabs(body['cwd'])
@@ -234,11 +264,11 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
         with lock, worktrees.keeping(made):
             fresh = sessions()
             caller = delegate.validate(request, fresh)
-            with _start_group(body, caller, run, fresh, branch=made['branch']) as (group, root, title):
+            with _start_group(body, caller, run, fresh, branch=made['branch']) as (group, title, owner):
                 pane, name = delegate.start(caller, request, directory, run=run,
                                             recent=lambda: snapshot(caller).get('messages') or [],
                                             cwd=made['path'], worktree=made['branch'],
-                                            owner=_owner(caller, root, fresh), group=group,
+                                            owner=owner, group=group,
                                             name=title)
         audit.record('tab.start', f"Started tab {name} ({request['agent']})", pane=pane)
         undo.record_tab_start(pane, run)
@@ -259,11 +289,11 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
                                   or not os.path.isdir(body['cwd'])):
                 raise ValueError('Choose an absolute path to an existing directory.')  # before a stack is made
             directory = folder(caller)
-            with _start_group(body, caller, run, entries) as (group, root, title):
+            with _start_group(body, caller, run, entries) as (group, title, owner):
                 pane, name = delegate.start(caller, request,
                                             directory if directory and os.path.isdir(directory) else str(paths.HOME),
                                             run=run, recent=lambda: snapshot(caller).get('messages') or [],
-                                            cwd=body.get('cwd'), owner=_owner(caller, root, entries),
+                                            cwd=body.get('cwd'), owner=owner,
                                             group=group, name=title)
             audit.record('tab.start', f"Started tab {name} ({request['agent']})", pane=pane)
             undo.record_tab_start(pane, run)

@@ -419,7 +419,9 @@ def _render(pid, data, home, group=None, backlog_project=None):
                  'Other tabs are for reviewers, advisors or work the user wants to steer.\n'
                  f'To start a new tab or session, or a reviewer, run `{sys.executable} {cli} start ...`, not raw tmux. '
                  'Options: `--review-it` (this tab reviews each turn of the new tab), `--reviews-me` (the new tab reviews this tab), '
-                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, `--stack GOAL` (1–3 words; names the new tab. It opens in this tab\'s stack, or in none; `--stack Unstacked` = none). '
+                 '`--agent claude|codex`, `--name NAME`, `--cwd DIR`, `--worktree BRANCH` (new branch and folder), `--context`, '
+                 '`--owner self|%N` (who owns the new tab: self = a separate task, not a helper; default: this tab), '
+                 '`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner\'s stack; `--stack Unstacked` = none). '
                  '`stop --worker %N [--reviewer %N]` ends a review; `list` shows this tab\'s links. '
                  '`escalate --pane %N` sends a helper tab\'s paused review to Mak. '
                  '`link --worker %N --reviewer %N` makes one open tab review another. '
@@ -440,7 +442,7 @@ def _render(pid, data, home, group=None, backlog_project=None):
                  'Run `start` first. When finished, run `done` with the commit, PR, or outcome.\n'
                  '- An item that is not the task this tab was started for goes to a new tab, at every autonomy level, also mid-work. '
                  'Write a handoff note in the work-notes folder (goal, state, decisions, evidence, files, open PRs and branches, what not to redo). '
-                 'Run `agent_tab_cli.py start --name "B12 two to four words" --cwd ITEM_REPO "TASK"`; TASK gives the note path and says to run `start B12` first. '
+                 'Run `agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`; TASK gives the note path and says to run `start B12` first. '
                  'Then leave the item and report the new tab name. Hand off one item, then stop.\n'
                  '- Reminders for the user, only when asked: `agent_reminder_cli.py` in the same folder, `add "text" --at "tomorrow 10:00"` (IST), `list`, `done R3`.\n')
     listing, excerpts, waiting = [], [], []

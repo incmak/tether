@@ -158,12 +158,13 @@ class Closer:
     def _reason(pane, record, role, by_id, panes, worker_of, idle):
         """(condition, reason, wait) when a close condition holds now, else None."""
         quiet = idle[pane]
-        owner = record['owner_pane']
-        if owner not in panes:
-            return 'owner-gone', 'its owner tab is gone', GRACE
-        owner_thread, now_thread = record.get('owner_thread'), _thread(by_id.get(owner))
-        if owner_thread and now_thread and owner_thread != now_thread:
-            return 'owner-moved', 'its owner tab changed conversations', GRACE
+        if record.get('kind') != 'own':
+            owner = record['owner_pane']
+            if owner not in panes:
+                return 'owner-gone', 'its owner tab is gone', GRACE
+            owner_thread, now_thread = record.get('owner_thread'), _thread(by_id.get(owner))
+            if owner_thread and now_thread and owner_thread != now_thread:
+                return 'owner-moved', 'its owner tab changed conversations', GRACE
         worker = worker_of.get(pane)
         if role == 'reviewer' and worker is None:
             return 'unlinked', 'its review ended', GRACE

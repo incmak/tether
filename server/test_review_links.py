@@ -59,6 +59,7 @@ def guard_subprocess(test):
 
 def isolate_notice_monitor(test):
     guard_subprocess(test)
+    test.enterContext(patch.object(server.helper_tabs, 'listing_fields', return_value={}))
     # Keep the monitor loop real. Other observers can read or write panes,
     # start background jobs, or change shared state between tests.
     for observer in (
@@ -3623,6 +3624,7 @@ class ReviewLinksTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'That tab has no review waiting on this tab.'):
             review_links.escalate('%13', '%14', PARENT_THREAD)
         review_links.escalate('%13', parent['id'], parent['thread'])
+        self.assertEqual(review_links.escalated([self.worker, self.reviewer]), {'%13'})
         self.alert.assert_not_called()
         self.request_review()
         self.observe()
@@ -3631,6 +3633,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertTrue(link['paused'])
         self.assertNotIn('parent_stage', link)
         self.assertNotIn('escalate', link)
+        self.assertEqual(review_links.escalated([self.worker, self.reviewer]), set())
 
     def test_third_failed_review_asks_mak_with_the_findings_instead_of_a_third_fix(self):
         self.assertEqual(review_links.MAX_ROUNDS, 3)

@@ -91,6 +91,18 @@ class CloserTests(unittest.TestCase):
         self.assertEqual(self.sweep(tmux, after=helper_close.GRACE, threads={'%1': OTHER_THREAD}),
                          [('%2', 'its owner tab changed conversations')])
 
+    def test_own_tab_stays_if_its_opener_changes_conversation_or_closes(self):
+        own = json.dumps(dict(json.loads(record()), kind='own', home_pane=None))
+        tmux = Tmux({'%1': ('', ''), '%2': ('', own), '%3': ('', record())})
+        moved = {'%1': OTHER_THREAD}
+        self.assertEqual(self.sweep(tmux, threads=moved), [])
+        self.assertEqual(self.sweep(tmux, after=helper_close.GRACE, threads=moved),
+                         [('%3', 'its owner tab changed conversations')])
+        tmux.panes.pop('%1')
+        self.assertEqual(self.sweep(tmux, after=helper_close.SWEEP), [])
+        self.assertEqual(self.sweep(tmux, after=helper_close.GRACE), [])
+        self.assertEqual(tmux.killed, ['%3'])
+
     def test_owner_without_a_known_thread_keeps_helper(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('', record())})
         self.sweep(tmux, threads={'%1': None})

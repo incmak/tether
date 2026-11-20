@@ -236,9 +236,11 @@ def deliver_reminder_push(reminder):
 
 REMINDERS = reminders.Ticker({'push': deliver_reminder_push, 'ping': urgent_ping.remind})
 HELPER_CLOSER = helper_close.Closer()
+_QUIET_HELPERS = set()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings,
                         context=lambda entry: notification_context(entry),
-                        finished_low=lambda entry: review_links.in_parent_stage(entry['id'], entry.get('thread')))
+                        finished_low=lambda entry: review_links.in_parent_stage(entry['id'], entry.get('thread')),
+                        quiet=lambda entry: entry['id'] in _QUIET_HELPERS)
 WORK_WATCHER = work_api.Watcher(notify, delivery=push.delivery_settings)
 # The worktree sweep (B210), the weekly clean-up check (B211) and the daily ops report (B212).
 UPKEEP = upkeep_api.Upkeep(notify, push.delivery_settings)
@@ -430,6 +432,41 @@ def review_work_mark(entry):
         return None
 
 
+def _helper_always_shown(entry, shown):
+    if not isinstance(shown, dict) or not isinstance(saved := shown.get(entry['id']), dict):
+        return False
+    if not isinstance(saved.get('dir'), str) or 'thread' not in saved:
+        return False
+    saved_thread = saved['thread']
+    if saved_thread is not None and not isinstance(saved_thread, str):
+        return False
+    thread = entry.get('thread')
+    return (saved['dir'] == home_path(tab_folder(entry))
+            and (thread == saved_thread or thread is None or saved_thread is None))
+
+
+def _observe_push(entries):
+    global _QUIET_HELPERS
+    try:
+        fields = helper_tabs.listing_fields(subprocess.run, entries)
+        prefs = prefs_sync.load()['prefs']
+        shown = prefs.get('shownHelpers')
+        # Hiding is on unless the synced value is explicitly false.
+        _QUIET_HELPERS = {entry['id'] for entry in entries
+                          if prefs.get('hideHelpers') is not False
+                          and fields.get(entry['id'], {}).get('helper') is True
+                          and not _helper_always_shown(entry, shown)}
+    except Exception as exc:
+        _QUIET_HELPERS = set()
+        print(f'helper notification visibility failed: {exc!r}', file=sys.stderr)
+    for entry in entries:
+        try:
+            if entry.get('owner_pid') and entry.get('writable'):
+                NOTIFIER.observe(entry, shared_status(entry))
+        except Exception:  # one odd pane must never stop the monitor for everyone
+            continue
+
+
 def monitor_notices():
     """Keep native quota notices even when the phone page is closed."""
     while True:
@@ -439,12 +476,7 @@ def monitor_notices():
             print(f'session discovery failed: {exc!r}', file=sys.stderr)
             time.sleep(2)
             continue
-        for entry in entries:
-            try:
-                if entry.get('owner_pid') and entry.get('writable'):
-                    NOTIFIER.observe(entry, shared_status(entry))
-            except Exception:  # one odd pane must never stop the monitor for everyone
-                continue
+        _observe_push(entries)
         review_links.observe(entries, shared_status, review_send, last_reply,
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
@@ -672,15 +704,20 @@ def build_listing():
         links = {}
         paused = {}
     try:
-        parents = helper_tabs.parents(subprocess.run, entries)
+        escalations = review_links.escalated(entries)
+    except Exception:  # a review-store read error must not hide the session list
+        escalations = set()
+    try:
+        helper_fields = helper_tabs.listing_fields(subprocess.run, entries)
     except Exception:  # a helper record read error must not hide the session list
-        parents = {}
+        helper_fields = {}
     for row in rows:
         if links.get(row['id']):
             row['reviewers'] = links[row['id']]
         row['reviewers_paused'] = paused.get(row['id'], [])
-        if row['id'] in parents:
-            row['parent'] = parents[row['id']]
+        row.update(helper_fields.get(row['id'], {}))
+        if row['id'] in escalations:
+            row['escalated'] = True
     listing = {'sessions': rows, 'default_thread': settings()['thread']}
     try:
         found_groups = groups.all_groups()

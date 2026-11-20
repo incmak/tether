@@ -42,6 +42,9 @@ import { useNow } from './attention'
 import { HOLD_MS } from './gesture'
 import { field, matchSessions, searchWords } from './search'
 import type { SearchEntry, SessionMatch } from './search'
+import type { HelperFold } from './helperTabs'
+import { nestDepth } from './helperTabs'
+import { HelperFoldButton } from './HelperFold'
 
 // The avatars layout variant (layouts.css) shows a round avatar per session and tab: up to two initials, a colour from the name.
 const initials = (name: string) => (name.match(/[\p{L}\p{N}]+/gu) ?? ['?']).slice(0, 2).map(word => [...word][0]).join('').toUpperCase()
@@ -77,7 +80,7 @@ export function AgentIcon({ agent, icon, size = 16 }: { agent: Agent; icon?: str
 export const chatTitle = (pane: Pane, session?: { name: string }) => pane.pane_name || pane.agent_name || session?.name || pane.label
 
 // One tmux session with all its panes. "ESEF:0.1" is session ESEF, window 0, pane 1.
-export interface Session { id: string; name: string; panes: Pane[]; agent: Agent; state: string; dir: string; groups?: GroupInfo[] }
+export interface Session { id: string; name: string; panes: Pane[]; agent: Agent; state: string; dir: string; groups?: GroupInfo[]; helperFolds?: HelperFold[] }
 
 export { needsYou, isDone } from './paneState'
 type Status = { kind: 'approval' | 'working' | 'done' | 'background' | 'unknown' | 'idle' | 'unavailable'; label: string; at: number }
@@ -721,12 +724,13 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
   return <ul className={`session-list ${reorder ? 'reordering' : ''}`} ref={list}>
     {/* eslint-disable-next-line react-hooks/refs -- Sample the drag marker on reorder renders; state would add visible updates on pointer down and up. */}
     {(preview ? [...items].sort((a, b) => preview.indexOf(a.id) - preview.indexOf(b.id)) : items).map((session, sessionIndex) => {
-      const multi = session.panes.length > 1
+      const multi = session.panes.length > 1 || !!session.helperFolds?.length  // a fold of hidden helpers needs the tab rows
       const active = session.panes.some(pane => pane.id === selected)
       const state = statusOf(session.panes)
       // During a search each session shows its matching tabs, open, and the session row opens the first match (not the last-used tab).
       const only = matches?.get(session.id)
       const tabs = !only ? session.panes : (only.tabs instanceof Set ? session.panes.filter(pane => only.tabScores.has(pane.id)) : [...session.panes]).sort((a, b) => only.tabScores.get(b.id)! - only.tabScores.get(a.id)!)
+      const tabById = new Map(tabs.map(pane => [pane.id, pane]))
       const target = (only ? undefined : session.panes.find(pane => pane.id === prefs.lastPane[session.id])) ?? tabs[0]
       const archived = isArchived(session, prefs.archived)
       // A session with several panes is open by default; its heading folds the pane rows away.
@@ -740,8 +744,13 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
       const visibleTab = (pane: Pane) => showQuiet || !quietTabs.includes(pane)
       const dropping = (over === session.id || touchOver === session.id) && !!carry
       const tag = tagDot(prefs.colors?.[session.id] ?? (session.panes.length === 1 ? prefs.colors?.[session.panes[0].id] : undefined))
-      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]), picked = !!tabPick?.picked.has(pane.id), name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' '); return <li key={pane.id} data-ui-item className={tabPick ? 'pane-row' : undefined}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} data-select-pane={pane.id} className={[pane.id === selected ? 'selected' : '', picked ? 'picked' : ''].filter(Boolean).join(' ')} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={event => pickOr(event, pane.id, () => onOpen(pane))} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{name} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{paneTag}{slotKey(pane.id)}{picked && <span className="visually-hidden">, selected</span>}</button>
+      const paneRow = (pane: Pane) => { const paneState = statusOf([pane]), paneTag = tagDot(prefs.colors?.[pane.id]), picked = !!tabPick?.picked.has(pane.id), name = [paneTitle(pane), shownIndex(pane)].filter(Boolean).join(' '); const depth = Math.min(nestDepth(pane, tabById), 3); return <li key={pane.id} data-ui-item className={[tabPick ? 'pane-row' : '', depth ? 'nested-row' : ''].filter(Boolean).join(' ') || undefined} style={depth ? { '--nest': depth } as React.CSSProperties : undefined}><button {...dragAs(DRAG_PANE, pane.id, { session: session.id, pane: pane.id })} data-select-pane={pane.id} className={[pane.id === selected ? 'selected' : '', picked ? 'picked' : ''].filter(Boolean).join(' ')} aria-current={pane.id === selected ? 'page' : undefined} onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, paneTitle(pane) || session.name, () => onPaneActions(pane))} onClick={event => pickOr(event, pane.id, () => onOpen(pane))} onContextMenu={event => { event.preventDefault(); onPaneActions(pane, anchorOf(event)) }}>{dot(paneState)}{avatar(paneTitle(pane) || session.name)}<span className="pane-child-name">{name} · {agentNames[pane.agent]}{profileSuffix(pane)}</span><WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{paneTag}{slotKey(pane.id)}{depth > 0 && <span className="visually-hidden">, helper of {paneTitle(tabById.get(pane.owner!)!)}</span>}{picked && <span className="visually-hidden">, selected</span>}</button>
         {tabPick && !reorder && <button type="button" className="row-close" aria-label={`Close ${name || session.name}`} title={`Close ${words.pane}`} onClick={event => tabPick.onCloseTab(pane.id, anchorOf(event))}><X size={14} aria-hidden="true" /></button>}</li> }
+      // Hidden agent helpers: "N helpers" after the owner row; helpers with no owner here go after the stack's rows.
+      const folds = only ? new Map<string, HelperFold>() : new Map((session.helperFolds ?? []).map(fold => [fold.key, fold]))
+      const foldRow = (fold: HelperFold, owner?: Pane) => <li key={`fold-${fold.key}`} className={owner && nestDepth(owner, tabById) ? 'nested-row' : undefined} style={owner ? { '--nest': Math.min(nestDepth(owner, tabById), 3) } as React.CSSProperties : undefined}><HelperFoldButton fold={fold} owner={owner} variant="list" /></li>
+      const orphanRows = (group: string | null) => [...folds.values()].filter(fold => fold.key.startsWith('@')).map(fold => ({ ...fold, panes: group === null ? fold.panes : fold.panes.filter(item => (item.group ?? '') === group) })).filter(fold => fold.panes.length).map(fold => foldRow(fold))
+      const rows = (list: Pane[], group: string | null) => [...list.flatMap(pane => { const fold = folds.get(pane.id); return fold ? [paneRow(pane), foldRow(fold, pane)] : [paneRow(pane)] }), ...orphanRows(group)]
       const stacked = !only && session.groups?.length ? placesOf(tabs, session.groups).map(place => ({ ...place, shown: place.panes.filter(visibleTab) })).filter(place => place.shown.length) : null
       return <li key={session.id} data-id={session.id} className={`${dragging.current === session.id ? 'dragging' : ''} ${dropping ? 'drop-over' : ''} ${carry && !carry.pane && carry.session === session.id ? 'carried' : ''}`} {...dropTarget(session)}>
         <div className={`swipe-row ${swiped === session.id ? 'swiped' : ''}`}
@@ -856,10 +865,10 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
                   </button>
                 </div>
                 {/* The folded list stays as an empty hidden node, so aria-controls always names an element. */}
-                <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && place.shown.map(paneRow)}</ul>
+                <ul id={tabsId} className="pane-stack-tabs" hidden={!stackOpen}>{stackOpen && rows(place.shown, place.id || '')}</ul>
               </li>
             })
-          : tabs.filter(visibleTab).map(paneRow)}
+          : rows(tabs.filter(visibleTab), null)}
           {quietTabs.length > 0 && <li><button type="button" className="quiet-more" aria-expanded={showQuiet} onClick={() => setQuietShown(list => showQuiet ? list.filter(id => id !== session.id) : [...list, session.id])}>{showQuiet ? 'Fold' : 'Show'} {quietTabs.length} quiet {quietTabs.length === 1 ? 'tab' : 'tabs'}</button></li>}</ul>}
       </li>
     })}

@@ -41,7 +41,12 @@ def arguments(argv):
     start.add_argument('--role', choices=('advisor', 'second-advisor'), help='name the tab after this tab and mark it with the role icon')
     start.add_argument('--cwd')
     start.add_argument('--worktree', metavar='BRANCH')
-    start.add_argument('--stack', '--group', dest='group', metavar='NAME', help='1 to 3 words that name the new tab. The tab opens in your stack, or in no stack; Tether makes no stack for it (Unstacked or Main = no stack); --group is the old name')
+    start.add_argument('--owner', metavar='self|%N',
+                       help='The placement owner defaults to this tab. Use self for a separate task in Unstacked. '
+                            'Use %%N for a Claude or Codex tab in this tmux session.')
+    start.add_argument('--stack', '--group', dest='group', metavar='NAME',
+                       help='1 to 3 words that name the new tab. A helper opens in its owner’s stack. '
+                            'Use Unstacked or Main for no stack. --group is the old name.')
     start.add_argument('task', nargs='?', default='')
     stop = actions.add_parser('stop')
     stop.add_argument('--worker', required=True)
@@ -70,7 +75,7 @@ def arguments(argv):
             parser.error('a task is required unless --reviews-me is set')
         body.update(message=message, context=args.context,
                     review='new' if args.reviews_me else 'source' if args.review_it else False)
-        for key in ('agent', 'model', 'effort', 'name', 'role', 'cwd', 'worktree', 'group'):
+        for key in ('agent', 'model', 'effort', 'name', 'role', 'cwd', 'worktree', 'owner', 'group'):
             value = getattr(args, key)
             if value is not None:
                 body[key] = os.path.abspath(value) if key == 'cwd' else value

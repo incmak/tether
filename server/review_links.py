@@ -459,6 +459,15 @@ def paused():
     return _reviewers(paused_only=True)
 
 
+def escalated(entries):
+    """Live worker panes whose cap holds an escalation for the watcher."""
+    threads = {entry['id']: helper_tabs._thread(entry) for entry in entries}
+    with _lock:
+        return {row['worker'] for row in _read()
+                if _is_cap(row) and 'escalate' in row and row['worker'] in threads
+                and row.get('worker_thread') in (None, threads[row['worker']])}
+
+
 def in_parent_stage(pane, thread=None):
     try:
         with _lock:

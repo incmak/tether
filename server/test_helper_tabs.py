@@ -631,7 +631,7 @@ class HelperTests(unittest.TestCase):
             self.assertFalse(any(call.args[0][1] == 'send-keys' for call in launch.call_args_list))
             prompt.assert_not_called()
         with patch.object(delegate, 'start', return_value=('%13', 'Task')) as start, \
-                patch.object(agent_tabs, '_start_group', return_value=contextlib.nullcontext(('', '%12', 'Task'))), \
+                patch.object(agent_tabs, '_start_group', return_value=contextlib.nullcontext(('', 'Task', owner))), \
                 patch.object(server, 'agent_folder', return_value=str(self.root)):
             self.assertEqual(self.request('start')[0], 201)
             self.assertEqual(start.call_args.kwargs['owner']['owner_thread'], OWNER)

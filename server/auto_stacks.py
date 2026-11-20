@@ -1,8 +1,8 @@
 """Auto stacks: one stack per main session. agent_tabs.py applies the rules under groups.LOCK.
 
-- A main session is a tab that no other agent tab started. Every helper (worker, reviewer, advisor) has a root: follow
-  the helper records (helper_tabs.py, owner_pane) up to the main session. A helper of a helper has the same root. Each
-  new helper record also stores root_pane, so the root stays known after a tab in between closes.
+- A main session has no placement owner. Every helper (worker, reviewer, advisor) has a root. Follow the placement
+  owner in helper records up to the main session. A helper of a helper has the same root. Each new helper record
+  stores root_pane so the root stays known after a tab in between closes.
 - The first helper of a root makes the stack and moves the root and the helper into it. Later helpers of that root, at
   any depth, join the root's stack. A main session with no helpers stays in Unstacked.
 - --worktree does not make a stack of its own. --stack NAME only names the root's stack when it is made.
@@ -147,9 +147,9 @@ def helper_tab_name(*, role=None, review=False, name=None, branch=None, stack=No
 
 
 def root_of(pane, thread_of, run=subprocess.run):
-    """The main session of a tab: follow helper records to the tab no other tab started. A record whose owner now holds
-    another conversation (thread_of(pane) differs from owner_thread) is a broken link: the chain stops there, and the
-    tab below it is the root. When a tab in the chain has closed, the stored root_pane of the nearest record below it
+    """The main session of a tab: follow helper records to a tab with no placement owner. A record whose placement
+    owner now holds another conversation is a broken link: the chain stops there, and the tab below it is the root.
+    When a tab in the chain has closed, the stored root_pane of the nearest record below it
     gives the root, but only if that record has root_thread and the root does not hold another conversation.
     Returns a pane id. It may be a closed tab when the root has closed."""
     current, seen, stored = pane, {pane}, None
@@ -157,11 +157,11 @@ def root_of(pane, thread_of, run=subprocess.run):
         exists, record = helper_tabs.load(current, run)
         if not exists:
             return stored or current  # a closed tab in the chain
-        if record is None:
+        if record is None or record.get('kind') == 'own':
             return current
-        owner = record['owner_pane']
+        owner, bound = helper_tabs.placement_owner(record)
         known = thread_of(owner)
-        if owner in seen or (record.get('owner_thread') and known and known != record['owner_thread']):
+        if owner in seen or (bound and known and known != bound):
             return current  # the owner now holds another conversation: this tab is its own root
         root, root_thread = record.get('root_pane'), record.get('root_thread')
         if stored is None and isinstance(root, str) and groups.PANE.fullmatch(root) and root_thread \

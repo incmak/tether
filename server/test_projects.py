@@ -103,7 +103,7 @@ class ProjectTests(unittest.TestCase):
         self.assertIn('Use your own subagents', text[text.index('## New tabs and reviewers'):text.index('## Backlog')])
         self.assertIn(str(Path(projects.__file__).with_name('agent_tab_cli.py')), text)
         for option in ('--review-it', '--reviews-me', '--agent claude|codex', '--name NAME',
-                       '--cwd DIR', '--worktree BRANCH', '--context', 'stop --worker %N [--reviewer %N]', '`list`',
+                       '--cwd DIR', '--worktree BRANCH', '--context', '--owner self|%N', 'stop --worker %N [--reviewer %N]', '`list`',
                        '`escalate --pane %N` sends a helper tab\'s paused review to Mak.',
                        '`link --worker %N --reviewer %N` makes one open tab review another.', 'Start your review reply with APPROVED when nothing is wrong.',
                        'send --pane %N "text"', 'wait --pane %N [--timeout SECONDS]',
@@ -113,7 +113,7 @@ class ProjectTests(unittest.TestCase):
             'not raw tmux. Options: `--review-it` '
             '(this tab reviews each turn of the new tab), '
             '`--reviews-me` (the new tab reviews this tab), ', text)
-        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. It opens in this tab's stack, or in none; `--stack Unstacked` = none)", text)
+        self.assertIn("`--stack GOAL` (1–3 words; names the new tab. A helper opens in its owner's stack; `--stack Unstacked` = none)", text)
         self.assertIn(
             'Start your review reply with APPROVED when nothing is wrong. '
             '`send --pane %N "text"` (`-` = stdin) steers a tab you started. '
@@ -142,7 +142,7 @@ class ProjectTests(unittest.TestCase):
                 handoff = next(line for line in backlog_section.splitlines()
                                if line.startswith('- An item that is not the task this tab was started for goes to a new tab'))
                 for part in ('at every autonomy level, also mid-work', 'handoff note in the work-notes folder',
-                             'what not to redo', '`agent_tab_cli.py start --name "B12 two to four words" --cwd ITEM_REPO "TASK"`',
+                             'what not to redo', '`agent_tab_cli.py start --owner self --name "B12 two to four words" --cwd ITEM_REPO "TASK"`',
                              'run `start B12` first', 'report the new tab name', 'Hand off one item, then stop.'):
                     self.assertIn(part, handoff)
 
