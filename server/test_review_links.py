@@ -2668,6 +2668,105 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.alert.call_count, int(conflict))
                 self.send.assert_not_called()
 
+    def test_binding_new_unbound_reviewer_keeps_bound_decision_and_epoch(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for grant in ({}, dict(limit=5, grant_rounds=3)):
+            with self.subTest(grant=grant):
+                self.file.write_text('[]')
+                review_links._last_sent.clear()
+                self.send.reset_mock()
+                self.add(worker_thread=WORKER_THREAD)
+                self.request_review()
+                self.send.assert_called_once()
+                rows = self.rows()
+                cap = next(row for row in rows if row.get('cap'))
+                cap.update(review_turn_at=self.clock.return_value, **grant)
+                self.assertFalse(cap.get('counts'))
+                self.file.write_text(json.dumps(rows))
+                self.add(reviewer='%21', worker_thread=None, reset=False)
+                self.observe(entries=[dict(self.worker, thread=None), *self.entries[1:]])
+                self.assertEqual(review_links.linked_worker_threads('%13', '%21', THREAD), {None})
+                self.send.reset_mock()
+                self.alert.reset_mock()
+
+                self.observe()
+                bound, = (row for row in self.rows() if row.get('cap'))
+                self.assertEqual(bound, cap)
+                self.assertEqual(review_links.linked_worker_threads('%13', '%21', THREAD), {WORKER_THREAD})
+                self.assertEqual(review_links.paused(), {})
+                self.send.assert_not_called()
+                self.alert.assert_not_called()
+
+    def test_binding_merges_turn_tracking_without_a_decision_conflict(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        feedback = dict(sent_at=996, phase='queued')
+        first_baseline = dict(counts={f'%12:{THREAD}': {'rounds': 2}}, paused=True)
+        second_baseline = dict(counts={f'%21:{THREAD}': {'empty_rounds': 1}}, agent=True)
+        for baselines in ((first_baseline, second_baseline), (first_baseline, None), (None, second_baseline)):
+            with self.subTest(baselines=baselines):
+                self.clock.return_value = 1000
+                first = dict(cap=True, worker='%13', worker_thread=WORKER_THREAD, review_turn_at=997,
+                             review_prompts=[['review-summary', 995], 'review-notice', ['review-feedback', 994]],
+                             agent_prompt=995, feedback_turn=feedback, cap_reset='bound')
+                second = dict(cap=True, worker='%13', worker_thread=None, review_turn_at=999,
+                              review_prompts=['review-notice', ['review-summary', 995], ['review-notice', 993]],
+                              agent_prompt=998, feedback_turn=dict(sent_at=999, phase='pending'), cap_reset='unbound')
+                for cap, baseline in zip((first, second), baselines):
+                    if baseline is not None:
+                        cap['restart'] = baseline
+                links = self.legacy_pair({}, {})
+                links[1]['worker_thread'] = None
+                self.file.write_text(json.dumps([*links, first, second]))
+                self.states['%21'] = 'Idle'
+                self.observe(entries=[*self.entries, dict(self.reviewer, id='%21')], **{'%13': 'Starting'})
+
+                bound, = (row for row in self.rows() if row.get('cap'))
+                expected = baselines[0] or baselines[1]
+                if all(baselines):
+                    expected = dict(counts={**first_baseline['counts'], **second_baseline['counts']},
+                                    paused=True, agent=True)
+                self.assertEqual(bound['restart'], expected)
+                self.assertEqual(bound['review_prompts'], [
+                    'review-notice', ['review-notice', 993], ['review-feedback', 994], ['review-summary', 995]])
+                self.assertEqual((bound['review_turn_at'], bound['agent_prompt']), (999, 998))
+                self.assertEqual((bound['feedback_turn'], bound['cap_reset']), (feedback, 'bound'))
+                self.assertEqual(review_links.paused(), {})
+                self.alert.assert_not_called()
+
+    def test_binding_conflict_keeps_only_counts_since_each_restart(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        prompts = [['review-feedback', 1001]]
+        feedback = dict(sent_at=1001, phase='working')
+        for field, reverse in (('rounds', False), ('empty_rounds', True)):
+            with self.subTest(field=field, reverse=reverse):
+                self.clock.return_value = 1000
+                # The explicit unbound pause is a decision; the restart baseline is turn tracking.
+                rows = self.legacy_pair(
+                    {field: 3, 'restart': {field: 2}, 'limit': 5, 'grant_rounds': 3, 'agent_prompt': 998,
+                     'review_prompts': prompts, 'feedback_turn': feedback, 'review_turn_at': 997},
+                    {field: 2, 'restart': {field: 2}, 'paused': False, 'agent_prompt': 999},
+                )
+                rows[1]['worker_thread'] = None
+                self.file.write_text(json.dumps(rows[::-1] if reverse else rows))
+                self.alert.reset_mock()
+                self.observe(elapsed=0, **{'%13': 'Working'})
+                self.turn_source = Mock(return_value=('user', 995, 1005))
+                self.observe(**{'%13': 'Idle'})
+
+                cap = self.upgrade_cap()
+                self.assertEqual(cap['counts'], {f'%12:{THREAD}': {field: 1}})
+                self.assertEqual(cap['agent_prompt'], 999)
+                self.assertEqual(cap['review_prompts'], prompts)
+                self.assertEqual(cap['feedback_turn'], feedback)
+                self.assertGreaterEqual(cap['review_turn_at'], 997)
+                self.assertFalse({'limit', 'grant_rounds', 'restart'} & cap.keys())
+                self.alert.assert_called_once()
+                self.send.assert_not_called()
+
     def test_legacy_saved_counts_follow_a_sole_reviewer_across_relinks(self):
         for named in (False, True):
             with self.subTest(named=named):
@@ -2740,7 +2839,8 @@ class ReviewLinksTests(unittest.TestCase):
                         self.file.write_text(json.dumps(order))
                         cap, = (row for row in review_links._read() if row.get('cap'))
                         shared = {field: cap[field] for field in fields if field in cap}
-                        self.assertEqual(shared, {'paused': 'upgrade'})
+                        self.assertEqual(shared, {'paused': 'upgrade', 'agent_prompt': max(
+                            row['agent_prompt'] for row in order if 'agent_prompt' in row)})
 
     def test_legacy_store_queries_leave_the_file_for_the_next_write(self):
         link = dict(self.rows()[0], worker_thread=WORKER_THREAD, paused=True,
@@ -2828,42 +2928,198 @@ class ReviewLinksTests(unittest.TestCase):
                         self.send.assert_not_called()
                         self.alert.assert_called_once()
 
-    def test_upgrade_does_not_import_another_reviewers_agent_prompt(self):
-        for limit in (3, 5):
-            for reverse in (False, True):
-                with self.subTest(limit=limit, reverse=reverse):
-                    now = time.time()
-                    first = dict(worker='%13', worker_thread=WORKER_THREAD, reviewer='%12', reviewer_thread=THREAD,
-                                 name='Fix the bug', agent='codex', seen_working=False, created=now,
-                                 rounds=limit, paused=True)
-                    if limit == 5:
-                        first.update(limit=5, grant_rounds=3)
-                    second = dict(first, reviewer='%21', seen_working=True,
-                                  restart=dict(rounds=limit, empty_rounds=0, stale_rounds=0, paused=True))
-                    first['agent_prompt'] = now - 1  # Only the reviewer that saw the agent turn consumed its marker.
-                    self.file.write_text(json.dumps([second, first] if reverse else [first, second]))
-                    self.states['%21'] = 'Idle'
-                    self.turn_source = lambda _: 'user'
-                    self.review_reply = Mock(return_value=FINDINGS)
-                    self.send.reset_mock()
-                    self.alert.reset_mock()
-                    entries = [self.worker, dict(self.reviewer, id='%21')]
-                    self.observe(entries=entries)
-                    self.assertNotIn('agent_prompt', self.upgrade_cap())
+    def test_upgrade_keeps_a_queued_parent_prompt_from_legacy_reviewers(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        ttl = review_links.AGENT_PROMPT_TTL
+        for case in ('browser relink', 'TTL elapsed', 'earlier turn first', 'parent finishes after TTL'):
+            with self.subTest(case=case):
+                self.clock.return_value = 1000
+                first = dict(rounds=3, paused=True, agent_prompt=999)
+                second = dict(empty_rounds=3, paused=True, agent_prompt=999)
+                if case == 'TTL elapsed':
+                    second.pop('agent_prompt')  # One reviewer already consumed its copy.
+                    second.update(restart=dict(empty_rounds=2, paused=True), seen_working=True)
+                self.file.write_text(json.dumps(self.legacy_pair(first, second)))
+                self.send.reset_mock()
+                self.alert.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0, **{'%13': 'Working'})
+                if case == 'earlier turn first':
+                    self.turn_source.return_value = ('user', 995, 1001)
+                    self.observe(elapsed=2, **{'%13': 'Idle'})
+                    self.assertEqual(self.upgrade_cap().get('agent_prompt'), 999)
                     self.send.assert_not_called()
-                    self.observe(entries=entries, **{'%13': 'Working'})
-                    self.observe(entries=entries, **{'%13': 'Idle'})
-                    self.observe(entries=entries)
-                    self.assert_one_cap(1, '%21')
+                    self.observe(elapsed=1, **{'%13': 'Working'})
+                self.turn_source.return_value = ('user', 1004, 1005)
+                elapsed = 6
+                if case == 'parent finishes after TTL':
+                    self.turn_source.return_value = ('user', 1004, 999 + ttl + 1)
+                    elapsed = ttl + 2
+                self.observe(elapsed=elapsed, **{'%13': 'Idle'})
+                self.observe()
+                self.send.assert_not_called()
+                self.assertEqual(self.upgrade_cap()['agent_prompt'], 999)
+                self.alert.assert_called_once()
+
+                if case == 'browser relink':
+                    self.add(worker_thread=WORKER_THREAD)
                     self.assertEqual(review_links.paused(), {})
+                elif case == 'TTL elapsed':
+                    self.turn_source.return_value = ('user', 999 + ttl + 1, 999 + ttl + 2)
+                    self.observe(elapsed=ttl)
+                    self.assertEqual(review_links.paused(), {})
+
+    def test_upgrade_judges_an_untimed_turn_against_the_kept_parent_marker(self):
+        # Antigravity turns have no prompt time. A watched turn inside the marker window stays an agent turn;
+        # a watched Mak turn after the window clears the pause.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        ttl = review_links.AGENT_PROMPT_TTL
+        for label, start in (('inside the window', 1002), ('after the window', 999 + ttl + 1)):
+            with self.subTest(label=label):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3, paused=True, agent_prompt=999),
+                                                                 dict(empty_rounds=3, paused=True, agent_prompt=999))))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0)
+                self.upgrade_cap()
+                self.turn_source.return_value = 'user'
+                self.observe(elapsed=start - 1000, **{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.observe()
+                if start > 999 + ttl:
+                    self.assertEqual(review_links.paused(), {})
+                    self.assertFalse(self.rows()[-1].get('counts'))
+                else:
+                    self.assertEqual(self.upgrade_cap()['agent_prompt'], 999)
+                    self.send.assert_not_called()
+
+    def test_upgrade_pause_clears_for_a_timed_mak_turn_between_idle_ticks(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for label, source, marker in (
+                ('new Mak turn', ('user', 1002, 1004), {}),
+                ('starts at upgrade', ('user', 1000, 1004), {}),
+                ('old Mak turn', ('user', 999, 1004), {}),
+                ('queued parent', ('user', 1002, 1004), dict(agent_prompt=999)),
+                ('queued parent finishes after TTL', ('user', 1002, 1604), dict(agent_prompt=999)),
+                ('already seen', ('user', 1002, 1004), dict(review_turn_at=1004)),
+                ('background', ('background', 1002, 1004), {}),
+                ('clipped', ('unknown', 1002, 1004), {}),
+                ('untimed', 'user', {}),
+                ('missing finish', ('user', 1002, None), {}),
+        ):
+            with self.subTest(label=label):
+                self.clock.return_value = 1000
+                rows = self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))
+                self.file.write_text(json.dumps(rows))
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.alert.reset_mock()
+                self.observe(elapsed=0)
+                self.upgrade_cap()
+                rows = self.rows()
+                next(row for row in rows if row.get('cap')).update(marker)
+                self.file.write_text(json.dumps(rows))
+                self.turn_source.reset_mock()
+                self.turn_source.return_value = source
+                elapsed = 606 if label == 'queued parent finishes after TTL' else 6
+                self.observe(elapsed=elapsed)
+                self.turn_source.assert_called_once_with(self.worker)
+                if label in ('new Mak turn', 'starts at upgrade'):
+                    cap, = (row for row in self.rows() if row.get('cap'))
+                    self.assertEqual(review_links.paused(), {})
+                    self.assertFalse({'upgrade_alerted', 'upgrade_at'} & cap.keys())
+                    self.assertFalse(cap.get('counts'))
+                    self.assertIn('cap_reset', cap)
+                else:
+                    cap = self.upgrade_cap()
+                    self.assertEqual({field: cap.get(field) for field in marker}, marker)
+                self.alert.assert_called_once()
+                self.send.assert_not_called()
+
+    def test_upgrade_alerts_once_before_discovery_and_keeps_the_alert_on_binding(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        self.turn_source = Mock(return_value=('background', None, None))
+        for bind in (False, True):
+            with self.subTest(bind=bind):
+                self.clock.return_value = 1000
+                rows = self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))
+                for row in rows:
+                    row['worker_thread'] = None
+                self.file.write_text(json.dumps(rows))
+                self.alert.reset_mock()
+                undiscovered = [dict(self.worker, thread=None, pane_name='Worker tab'), *self.entries[1:]]
+                self.observe(entries=undiscovered, elapsed=0)
+                self.observe(entries=undiscovered)
+                self.alert.assert_called_once()
+                self.assertIn('Worker tab', self.alert.call_args.args[1])
+                cap = self.upgrade_cap()
+                self.assertIsNone(cap['worker_thread'])
+                self.assertTrue(cap['upgrade_alerted'])
+                if bind:
+                    # Binding to a newer paused cap must keep the alert and time of the unresolved cap.
+                    rows = self.rows()
+                    rows.append(dict(cap=True, worker='%13', worker_thread=WORKER_THREAD,
+                                     paused='upgrade', upgrade_at=1003))
+                    self.file.write_text(json.dumps(rows))
+                    self.observe()
+                    cap = self.upgrade_cap()
+                    self.assertEqual((cap['worker_thread'], cap['upgrade_at']), (WORKER_THREAD, 1000))
+                    self.assertTrue(cap['upgrade_alerted'])
                     self.alert.assert_called_once()
+                self.send.assert_not_called()
+
+    def test_upgrade_retries_failed_alert_until_one_success_across_watcher_restart(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        self.turn_source = Mock(return_value=('background', None, None))
+        for failures in (1, 2):
+            with self.subTest(failures=failures):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=1), dict(empty_rounds=2))))
+                successful = Mock()
+                self.alert.reset_mock()
+
+                def alert(*args):
+                    if self.alert.call_count <= failures:
+                        raise OSError('cannot queue alert')
+                    successful(*args)
+
+                self.alert.side_effect = alert
+                for _ in range(failures):
+                    self.observe()
+                    successful.assert_not_called()
+                    self.assertFalse(self.upgrade_cap().get('upgrade_alerted'))
+                self.observe()
+                successful.assert_called_once()
+                self.assertEqual(self.alert.call_count, failures + 1)
+                self.assertTrue(self.upgrade_cap()['upgrade_alerted'])
+
+                spec = importlib.util.spec_from_file_location('restarted_review_links', review_links.__file__)
+                restarted = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(restarted)
+                restarted.FILE = self.file
+                with own_time(restarted, time=self.clock, monotonic=self.clock):
+                    restarted.observe(self.entries, self.status, self.send, self.reply, alert=self.alert,
+                                      turn_source=self.turn_source)
+                successful.assert_called_once()
+                self.assertEqual(self.alert.call_count, failures + 1)
+                self.send.assert_not_called()
 
     def test_binding_keeps_live_unbound_progress_and_pauses_on_conflicting_saved_cap(self):
         for limit in (3, 5):
             with self.subTest(limit=limit):
                 self.states.update({'%13': 'Idle', '%12': 'Idle'})
                 live = dict(worker='%13', reviewer='%12', reviewer_thread=None, name='Fix the bug', agent='codex',
-                            seen_working=True, created=time.time(), rounds=1)
+                            seen_working=True, created=time.time(), rounds=1, paused=False)
                 saved = dict(worker='%13', worker_thread=WORKER_THREAD, saved_at=time.time(), rounds=limit, paused=True)
                 if limit == 5:
                     saved.update(limit=5, grant_rounds=3)

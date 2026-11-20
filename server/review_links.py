@@ -116,6 +116,10 @@ def _clean_reviewer_counts(values):
             if isinstance(entry, dict) and (counts := _clean_counts(entry))}
 
 
+def _is_time(value):
+    return type(value) is int or type(value) is float and math.isfinite(value)
+
+
 def _sanitize(row):
     """Validate the values that migration and the watcher read from the store."""
     if not _has_worker(row):
@@ -126,8 +130,8 @@ def _sanitize(row):
         ((*COUNTS, 'limit', 'grant_rounds', 'parent_missing', 'confirm_ticks', 'lost_ticks', 'idle_ticks',
           'pending_idle_ticks', 'scope_ticks', 'verify_ticks'),
          lambda value: type(value) is int and value >= 0),
-        (('agent_prompt', 'review_turn_at', 'created', 'saved_at', 'upgrade_at'),
-         lambda value: type(value) in (int, float)),
+        (('created', 'saved_at'), lambda value: type(value) in (int, float)),
+        (('agent_prompt', 'review_turn_at', 'upgrade_at'), _is_time),
         (('scope_since', 'scope_retry_at', 'follow_up_checked_at', 'follow_up_untimed_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
         (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted', 'stale_unreadable'),
@@ -195,7 +199,7 @@ def _sanitize(row):
     if isinstance(prompts, list):
         valid = [marker for marker in prompts if isinstance(marker, str) or
                  (isinstance(marker, list) and len(marker) == 2 and isinstance(marker[0], str)
-                  and type(marker[1]) in (int, float))]
+                  and _is_time(marker[1]))]
         if valid:
             row['review_prompts'] = valid
     feedback = row.get('feedback_turn')
@@ -210,6 +214,11 @@ def _counts_since(counts, baseline):
             if count > baseline.get(field, 0)}
 
 
+def _reviewer_counts_since(counts, baseline):
+    return {reviewer: left for reviewer, own in counts.items()
+            if (left := _counts_since(own, baseline.get(reviewer, {})))}
+
+
 def _merge_counts(first, second):
     merged = dict(first)
     for reviewer, counts in second.items():
@@ -218,9 +227,10 @@ def _merge_counts(first, second):
     return merged
 
 
-def _pause_for_upgrade(cap):
-    cap['paused'] = UPGRADE_PAUSE
-    cap['upgrade_at'] = time.time()
+def _keep_latest_time(cap, field, rows):
+    latest = max((row[field] for row in rows if field in row), default=None)
+    if latest is not None:
+        cap[field] = latest
 
 
 def _migrate(rows, cutoff):
@@ -255,7 +265,8 @@ def _migrate(rows, cutoff):
             if own:
                 counts = _merge_counts(counts, {reviewer: own})
         if ambiguous:
-            _pause_for_upgrade(cap)
+            cap.update(paused=UPGRADE_PAUSE, upgrade_at=time.time())
+            _keep_latest_time(cap, 'agent_prompt', peers)
         else:
             row, = peers
             cap.update({field: row[field] for field in CAP_FIELDS if field in row})
@@ -371,11 +382,31 @@ def check_cap(worker, thread):
         _check_cap(_read(), worker, thread)
 
 
-def _shared_state(cap):
-    state = {field: cap[field] for field in CAP_FIELDS if field in cap and field != 'counts'}
-    if 'restart' in state:
-        state['restart'] = {field: value for field, value in state['restart'].items() if field != 'counts'}
-    return state
+def _binding_decision(cap):
+    return {field: cap[field] for field in CAP_DECISION if field in cap and field not in ('counts', 'cap_reset')}
+
+
+def _merge_turn_tracking(bound, unbound):
+    first, second = bound.get('restart'), unbound.get('restart')
+    if first is not None and second is not None:
+        bound['restart'] = {
+            'counts': _merge_counts(first.get('counts', {}), second.get('counts', {})),
+            **{field: first.get(field, False) or second.get(field, False) for field in ('paused', 'agent')},
+        }
+    elif second is not None:
+        bound['restart'] = second
+    prompts = []
+    for marker in [*bound.get('review_prompts', ()), *unbound.get('review_prompts', ())]:
+        if marker not in prompts:
+            prompts.append(marker)
+    if prompts:
+        bound['review_prompts'] = sorted(prompts, key=lambda marker: float('-inf') if isinstance(marker, str)
+                                         else marker[1])
+    for field in ('review_turn_at', 'agent_prompt'):
+        _keep_latest_time(bound, field, (bound, unbound))
+    for field in ('feedback_turn', 'cap_reset'):
+        if field in unbound:
+            bound.setdefault(field, unbound[field])
 
 
 def _bind_worker(rows, worker, thread):
@@ -393,14 +424,26 @@ def _bind_worker(rows, worker, thread):
         unbound['worker_thread'] = thread
     else:
         rows.remove(unbound)
-        counts = _merge_counts(bound.get('counts', {}), unbound.get('counts', {}))
-        if _shared_state(bound) != _shared_state(unbound):
-            for field in CAP_FIELDS:
+        first_counts, second_counts = bound.get('counts', {}), unbound.get('counts', {})
+        decision = _binding_decision(unbound)
+        if decision and decision != _binding_decision(bound):
+            first, second = bound.get('restart', {}), unbound.get('restart', {})
+            if not first.get('agent'):
+                first_counts = _reviewer_counts_since(first_counts, first.get('counts', {}))
+            if not second.get('agent'):
+                second_counts = _reviewer_counts_since(second_counts, second.get('counts', {}))
+            for field in (*CAP_DECISION, 'restart'):
                 bound.pop(field, None)
-            _pause_for_upgrade(bound)
-        elif 'restart' in bound:
-            bound['restart']['counts'] = _merge_counts(bound['restart'].get('counts', {}),
-                                                     unbound['restart'].get('counts', {}))
+            bound['paused'] = UPGRADE_PAUSE
+            _keep_latest_time(bound, 'agent_prompt', (bound, unbound))
+        else:
+            _merge_turn_tracking(bound, unbound)
+        if bound.get('paused') == UPGRADE_PAUSE:
+            bound['upgrade_at'] = min((cap['upgrade_at'] for cap in (bound, unbound) if 'upgrade_at' in cap),
+                                      default=time.time())
+            if unbound.get('upgrade_alerted'):
+                bound['upgrade_alerted'] = True
+        counts = _merge_counts(first_counts, second_counts)
         if counts:
             bound['counts'] = counts
         if unbound.get('pending_adoption'):
@@ -714,9 +757,9 @@ def _lost(link, reason):
     return None if link['lost_ticks'] >= LOSS_TICKS else link
 
 
-def _agent_prompt_fresh(cap):
+def _agent_prompt_fresh(cap, at=None):
     sent = cap.get('agent_prompt')
-    return isinstance(sent, (int, float)) and not isinstance(sent, bool) and time.time() - sent < AGENT_PROMPT_TTL
+    return sent is not None and (time.time() if at is None else at) < sent + AGENT_PROMPT_TTL
 
 
 def _round_limit(cap):
@@ -1031,9 +1074,8 @@ def _prompt_kind(marker):
     return marker if isinstance(marker, str) else marker[0]  # old stores have no send time
 
 
-def _idle_source(link, cap, worker, turn_source):
-    source = turn_source(worker) if turn_source is not None else 'user'
-    source, started_at, finished_at = source if isinstance(source, tuple) else (source, None, None)
+def _idle_source(link, cap, turn_read):
+    source, started_at, finished_at = turn_read
     pending = cap.get('review_prompts', [])
     feedback = cap.get('feedback_turn')
     observed = ('restart' in cap or link['seen_working'] or
@@ -1061,9 +1103,9 @@ def _idle_source(link, cap, worker, turn_source):
             cap['review_prompts'] = pending
         else:
             cap.pop('review_prompts', None)
-    if not pending:
+    if not pending and cap.get('paused') != UPGRADE_PAUSE:
         cap.pop('review_turn_at', None)
-    elif finished_at is not None and fresh:
+    elif pending and finished_at is not None and fresh:
         cap['review_turn_at'] = finished_at
     if feedback:
         sent_at = feedback['sent_at']
@@ -1294,7 +1336,7 @@ def _turn_ended_on_limit(worker):
 
 
 def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clear, delivery,
-          work_mark, review_reply, stalled_replies, turn_source, sources, level, parent, reply_effect,
+          work_mark, review_reply, stalled_replies, turn_source, turn_reads, sources, level, parent, reply_effect,
           scope=None, commit=None, fresh=None, folder=None):
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
@@ -1327,25 +1369,48 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                        and ['review-correction', feedback['sent_at']] in cap.get('review_prompts', ()))
     source = started_at = finished_at = None
     clipped = False
-    if state == 'Idle' and ('restart' in cap or link['seen_working'] or link.get('approved_turn') or cap.get('review_prompts')
-                            or cap.get('feedback_turn') or turn in sources):
-        if turn not in sources:
-            sources[turn] = _idle_source(link, cap, worker, turn_source)
-        source, started_at, finished_at, clipped = sources[turn]
+    upgrade_paused = cap.get('paused') == UPGRADE_PAUSE
+    between_ticks = state == 'Idle' and upgrade_paused and 'restart' not in cap
+    if state == 'Idle' and (between_ticks or 'restart' in cap or link['seen_working'] or link.get('approved_turn')
+                            or cap.get('review_prompts') or cap.get('feedback_turn') or turn in sources):
+        if key not in turn_reads:
+            read = (_call(turn_source, worker) if between_ticks else
+                    turn_source(worker) if turn_source is not None else 'user')
+            turn_reads[key] = read if isinstance(read, tuple) else (read, None, None)
+        if between_ticks:
+            # This probe must leave the queued turn markers alone.
+            candidate, started, finished = turn_reads[key]
+            if (candidate == 'user' and _is_time(started) and _is_time(finished)
+                    and started >= cap.get('upgrade_at', float('inf'))
+                    and finished > cap.get('review_turn_at', float('-inf'))
+                    and not _agent_prompt_fresh(cap, started)):
+                source, started_at, finished_at = candidate, started, finished
+                cap['restart'] = _restart_state(cap)
+        else:
+            if turn not in sources:
+                sources[turn] = _idle_source(link, cap, turn_reads[key])
+            source, started_at, finished_at, clipped = sources[turn]
     summary = source == 'review-summary'
     if state == 'Idle' and 'restart' in cap:
         start = cap.pop('restart')
         start = start if isinstance(start, dict) else {}
-        by_agent = start.get('agent', False) or _agent_prompt_fresh(cap)
-        if not (summary or source == 'review-notice' or source == 'background' and cap.get('review_prompts')):
-            cap.pop('agent_prompt', None)
+        if upgrade_paused:
+            # An older turn may finish before the queued parent prompt starts. Keep the original send time.
+            # Judge the marker at the turn's start. Without a prompt time, judge it now (fail-safe until the TTL ends).
+            by_agent = start.get('agent') or _agent_prompt_fresh(cap, started_at if _is_time(started_at) else None)
+            if start.get('agent') and _is_time(finished_at):
+                # Older watchers could consume the prompt marker before the agent turn ended.
+                cap['review_turn_at'] = max(finished_at, cap.get('review_turn_at', float('-inf')))
+        else:
+            by_agent = start.get('agent', False) or _agent_prompt_fresh(cap)
+            if not (summary or source == 'review-notice' or source == 'background' and cap.get('review_prompts')):
+                cap.pop('agent_prompt', None)
         # A clipped turn can request a review, but it cannot authorize a cap reset.
         if not by_agent and source == 'user' and not clipped:
+            cap.pop('agent_prompt', None)
             for field in ('parent_stage', 'parent_missing', 'limit', 'grant_rounds', 'escalate'):
                 cap.pop(field, None)
-            baseline = start.get('counts', {})
-            cap['counts'] = {reviewer: left for reviewer, counts in cap.get('counts', {}).items()
-                             if (left := _counts_since(counts, baseline.get(reviewer, {})))}
+            cap['counts'] = _reviewer_counts_since(cap.get('counts', {}), start.get('counts', {}))
             if start.get('paused') or not _at_round_limit(cap):
                 cap.pop('paused', None)
                 cap.pop('unreadable', None)
@@ -1371,7 +1436,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             cap.setdefault('restart', _restart_state(cap))
     if state == 'Working' and isinstance(cap.get('restart'), dict) and _agent_prompt_fresh(cap):
         cap['restart'] = {**cap['restart'], 'agent': True}
-        if 'limit' not in cap and not cap.get('review_prompts'):
+        # During an upgrade pause the marker stays: a queued parent turn may start after this one.
+        if not upgrade_paused and 'limit' not in cap and not cap.get('review_prompts'):
             cap.pop('agent_prompt', None)
     if cap.get('paused') == UPGRADE_PAUSE:
         # Keep watching for a new Mak turn while all review requests and reply delivery are on hold.
@@ -1851,14 +1917,11 @@ def _claim_upgrade_alerts(rows, entries):
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
         key = _cap_key(cap)
-        if key[1] is None:
-            continue  # wait for binding so the same conversation cannot alert twice
         worker = entries.get(key[0])
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
             name = worker.get('pane_name') or worker.get('agent_name') or worker.get('label') or name
-        cap['upgrade_alerted'] = True
-        alerts.append((key, ('Review needs you', f'“{name}”: {UPGRADE_ERROR}')))
+        alerts.append((key, cap.get('upgrade_at'), ('Review needs you', f'“{name}”: {UPGRADE_ERROR}')))
     return alerts
 
 
@@ -1896,12 +1959,24 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 try:
                     alert(*message, key[0], **kwargs)
                 except Exception:  # a failed notification must not lose other alerts
-                    pass
+                    return False
+                return True
+            return False
 
-        for key, message in upgrade_alerts:
-            notify(key, message)
+        for key, upgrade_at, message in upgrade_alerts:
+            # Success means the callback returned. Push delivery runs in a daemon thread and is not tracked here.
+            if notify(key, message):
+                with _lock:
+                    stored_rows = _read()
+                    stored = _cap_for(stored_rows, key)
+                    if (stored is not None and stored.get('paused') == UPGRADE_PAUSE
+                            and stored.get('upgrade_at') == upgrade_at):
+                        stored['upgrade_alerted'] = True
+                        _write(stored_rows)
+                        _cap_for(rows, key)['upgrade_alerted'] = True
 
         stalled_replies = {}
+        turn_reads = {}
         sources = {}
         for original in links:
             key = _cap_key(original)
@@ -1919,7 +1994,7 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 cap = dict(snapshot)
                 updated = _step(link, cap, snapshot, by_pane, status, send, last_reply, awaiting, clear,
                                 delivery, work_mark, review_reply, stalled_replies, turn_source,
-                                sources, level, parent, reply_effect, scope, commit, fresh, folder)
+                                turn_reads, sources, level, parent, reply_effect, scope, commit, fresh, folder)
                 # Give any new verdict priority. Only a correction already stored before this tick can be sent.
                 if (updated is not None and 'lost_reason' not in updated and 'verdict' not in reply_effect
                         and (correction := current.get('stale_correction')) and 'stale_correction' in updated):
