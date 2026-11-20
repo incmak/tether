@@ -63,10 +63,13 @@ function pageClosed(route) {
   try { return route.request().frame().page().isClosed() } catch { return false }  // a service worker request has no page
 }
 
+// Each fetch closes its socket. Playwright shares one keep-alive agent across all contexts, and Node's http server
+// closes idle sockets after keepAliveTimeout (5 s). A fetch sent on a socket as the server closes it got ECONNRESET
+// with the page still open (B285). The headers are route.fetch's default, plus Connection: close.
 async function serveLocal(route) {
   let response
   try {
-    response = await route.fetch()
+    response = await route.fetch({ headers: { ...route.request().headers(), connection: 'close' } })
   } catch (error) {
     // Closing the browser context can cancel an in-flight asset fetch after the page closes.
     if (/^route\.fetch: Request context disposed\.(?:\n|$)/.test(error?.message)) return route.abort()

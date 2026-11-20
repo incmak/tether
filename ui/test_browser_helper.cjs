@@ -63,12 +63,15 @@ async function testConnections() {
 async function testServingDuringTeardown() {
   const disposed = new Error('route.fetch: Request context disposed.\nCall log:\n  - GET fixture asset')
   let aborts = 0
+  const sent = []
   const route = {
-    fetch: async () => { throw disposed },
+    fetch: async options => { sent.push(options); throw disposed },
     abort: async () => { aborts++ },
+    request: () => ({ headers: () => ({ accept: '*/*' }), frame: () => ({ page: () => ({ isClosed: () => false }) }) }),
   }
   await serveLocal(route)
   assert.equal(aborts, 1, 'Cancel the intercepted request when its request context is disposed')
+  assert.deepEqual(sent, [{ headers: { accept: '*/*', connection: 'close' } }], 'Keep the request headers and close the socket (B285)')
 
   const networkError = new Error('route.fetch: read ECONNRESET')
   await assert.rejects(serveLocal({ ...route, fetch: async () => { throw networkError } }), error => error === networkError)
@@ -77,12 +80,12 @@ async function testServingDuringTeardown() {
   // Teardown closes the page, then resets the local server: a fetch still in flight (often a prefetch) fails late.
   const closedPage = { isClosed: () => true }, livePage = { isClosed: () => false }
   const late = { fetch: async () => { throw networkError }, abort: async () => { aborts++; throw new Error('route.abort: Target closed') },
-    request: () => ({ frame: () => ({ page: () => closedPage }) }) }
+    request: () => ({ headers: () => ({}), frame: () => ({ page: () => closedPage }) }) }
   await serveLocal(late)
   assert.equal(aborts, 2, 'A fetch error after the page closed is teardown, not a test failure')
-  const live = { ...late, request: () => ({ frame: () => ({ page: () => livePage }) }) }
+  const live = { ...late, request: () => ({ headers: () => ({}), frame: () => ({ page: () => livePage }) }) }
   await assert.rejects(serveLocal(live), error => error === networkError)
-  const worker = { ...late, request: () => ({ frame: () => { throw new Error('Service Worker requests do not have an associated frame.') } }) }
+  const worker = { ...late, request: () => ({ headers: () => ({}), frame: () => { throw new Error('Service Worker requests do not have an associated frame.') } }) }
   await assert.rejects(serveLocal(worker), error => error === networkError)
   assert.equal(aborts, 2, 'An open page or a request with no page still fails the test')
 }
