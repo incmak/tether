@@ -509,6 +509,16 @@ function App() {
     const list = placePane(view.slots, id, index)
     update(current => { const stored = deskFor(current.layout, deskKey); return { selected: id, layout: withDesk(current.layout, deskKey, { ...stored, panes: storeSlots(list, list), focus: index, guests: guestsWith(stored, id) }) } })
   }
+  // A tab clicked in a slot's own tab strip (or a link inside that chat) opens in that slot. The plain openPane would
+  // open the tab's own session layout, so a split that shows a tab of another session collapsed to one slot.
+  // A tab that already shows in another slot gets the focus. A zoomed slot stays zoomed.
+  const openInSlot = (target: Pane, index: number) => {
+    if (!view || !live.has(target.id)) return openPane(target)
+    const at = view.slots.indexOf(target.id)
+    if (at >= 0) { setZoomed(false); return focusSlot(at) }
+    const list = placePane(view.slots, target.id, index)
+    update(current => { const stored = deskFor(current.layout, deskKey); return { selected: target.id, lastPane: { ...current.lastPane, [target.tmux_session]: target.id }, layout: withDesk(current.layout, deskKey, { ...stored, panes: storeSlots(stored.panes, list), focus: index, guests: guestsWith(stored, target.id) }) } })
+  }
   const showSession = (target: Session) => {
     if (!view) return
     setZoomed(false)
@@ -987,7 +997,7 @@ function App() {
     } : undefined
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}
-      groupHooks={groupHooks} onDropGroup={onDropGroup} askBar={ask && target.writable ? <AskChips api={api} pane={target} ask={ask} onDone={setNotice} onUpdate={() => void refresh()} /> : undefined} allPanes={panes} sidePin={sidePin} liveReplyPreview={prefs.liveReplyPreview} headerSwipe={prefs.headerSwipe} key={target.id} pane={target} session={owner} api={api} onMenu={() => setDrawer(true)} onUpdate={() => void refresh()} draft={prefs.drafts[target.id]?.text ?? ''} setDraft={text => setDraft(target.id, text)} onOpenPane={openPane} onSessionActions={at => { if (owner) { setMenuAt(view ? at : undefined); setActionsDelete(false); setActions(owner.id) } }} onPaneActions={(id, at) => { setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(id) }} tabPick={tabPickControls} onSplit={direction => void split(direction, target)} onFork={() => void fork(target)} onContinued={id => void openNewPane(id).catch(error => setNotice(errorText(error)))} onReorder={ids => { if (owner) update(current => ({ paneOrder: { ...current.paneOrder, [owner.id]: reorderPanes(groupSessions(panes).find(item => item.id === owner.id)!.panes, current.paneOrder[owner.id], ids) } })) }} micOk={!prefs.voiceOff} chime={prefs.voiceSound} readAloud={prefs.readAloud} handsFree={prefs.handsFree} slot={slot} running={running} />
+      groupHooks={groupHooks} onDropGroup={onDropGroup} askBar={ask && target.writable ? <AskChips api={api} pane={target} ask={ask} onDone={setNotice} onUpdate={() => void refresh()} /> : undefined} allPanes={panes} sidePin={sidePin} liveReplyPreview={prefs.liveReplyPreview} headerSwipe={prefs.headerSwipe} key={target.id} pane={target} session={owner} api={api} onMenu={() => setDrawer(true)} onUpdate={() => void refresh()} draft={prefs.drafts[target.id]?.text ?? ''} setDraft={text => setDraft(target.id, text)} onOpenPane={slot ? (next: Pane) => openInSlot(next, slot.index) : openPane} onSessionActions={at => { if (owner) { setMenuAt(view ? at : undefined); setActionsDelete(false); setActions(owner.id) } }} onPaneActions={(id, at) => { setMenuAt(view ? at : undefined); setPaneClose(false); setPaneActions(id) }} tabPick={tabPickControls} onSplit={direction => void split(direction, target)} onFork={() => void fork(target)} onContinued={id => void openNewPane(id).catch(error => setNotice(errorText(error)))} onReorder={ids => { if (owner) update(current => ({ paneOrder: { ...current.paneOrder, [owner.id]: reorderPanes(groupSessions(panes).find(item => item.id === owner.id)!.panes, current.paneOrder[owner.id], ids) } })) }} micOk={!prefs.voiceOff} chime={prefs.voiceSound} readAloud={prefs.readAloud} handsFree={prefs.handsFree} slot={slot} running={running} />
   }
   // Layouts (layouts.ts, layouts.css): the grid shows on the wide workspace screen only. Home, Files, Share and the
   // phone keep today's arrangement and take only the colours and the Style. Classic adds no attribute and no style.
