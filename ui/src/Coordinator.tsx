@@ -1,7 +1,7 @@
 // The coordinator tab of a tmux session (server/coordinator.py, B115/B296): it takes the user's tasks, gives them to the
 // other tabs, and gets a short [Tether status] message when a tab finishes, fails or needs the user.
 import { Check } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import type { Pane } from './api'
 import { paneTitle } from './Sidebar'
@@ -37,6 +37,8 @@ export function CoordinatorPicker({ pane, panes, thread, pending, error, onPick,
   const list = useRef<HTMLDivElement>(null)
   // With no role yet, focus starts on the first choice; the checked "Not the coordinator" row shows the state only.
   const start = current === null ? 0 : CHOICES.findIndex(([mode]) => mode === current)
+  // Roving tabindex: the item that had focus last is the one Tab returns to (focus sets it).
+  const [active, setActive] = useState(start)
   useEffect(() => { list.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]')[start]?.focus() }, [start])
   const move = (event: KeyboardEvent<HTMLDivElement>) => {
     const items = [...(list.current?.querySelectorAll<HTMLElement>('[role="menuitemradio"]') ?? [])]
@@ -51,7 +53,7 @@ export function CoordinatorPicker({ pane, panes, thread, pending, error, onPick,
     <p className="hint">The coordinator takes your tasks, gives them to the other tabs of this session, and tells you about them.</p>
     <div className="action-list" role="menu" aria-label="Coordinator updates" ref={list} onKeyDown={move}>
       {CHOICES.map(([mode, label, detail], index) => <button type="button" key={mode ?? 'none'} role="menuitemradio" aria-checked={current === mode}
-          tabIndex={index === start ? 0 : -1} aria-disabled={pending || stale || mode === current || undefined} aria-busy={pending || undefined}
+          tabIndex={index === active ? 0 : -1} onFocus={() => setActive(index)} aria-disabled={pending || stale || mode === current || undefined} aria-busy={pending || undefined}
           onClick={() => { if (!pending && !stale && mode !== current) onPick(mode, !current && !!other) }}>
         <span className="coordinator-choice"><span>{label}</span>{detail && <small>{detail}</small>}</span>
         {current === mode && <Check size={16} aria-hidden="true" />}

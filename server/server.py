@@ -536,7 +536,8 @@ def monitor_notices():
             latest_outcome = coordinator.FEED.latest_outcome
             deliver = partial(coordinator.deliver, lock=SEND_LOCK, fresh=fresh_sessions, fresh_status=fresh_status,
                               latest_outcome=latest_outcome, submit_locked=submit_locked)
-            coordinator.FEED.observe(entries, shared_status, deliver, latest_outcome)
+            coordinator.FEED.observe(entries, shared_status, deliver, latest_outcome,
+                                     lock=SEND_LOCK, fresh=fresh_sessions)
         except Exception as exc:  # the coordinator feed must never stop the monitor
             print(f'coordinator feed failed: {exc!r}', file=sys.stderr)
         try:

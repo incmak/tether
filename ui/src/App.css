@@ -1479,7 +1479,7 @@ button.live-chip:active { background: var(--line); }
 .sheet.popover .action-list button { min-height: var(--control); gap: 10px; padding: 0 8px; border-radius: var(--radius-sm); font-size: 13.5px; }
 .sheet.popover .coordinator-picker .action-list button { padding-block: 6px; }
 .sheet.popover .action-list button svg { width: 16px; height: 16px; flex: none; }
-.sheet.popover .action-list button:focus-visible { outline: none; background: var(--hover); }
+.sheet.popover .action-list button:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--hover); }
 .sheet.popover .action-list hr { margin: 4px 0; }
 .sheet.popover :is(.rename-form, .confirm-box) { padding: 2px 8px 8px; font-size: 13.5px; }
 .sheet.popover .error { margin: 6px 8px; font-size: 13px; }

@@ -119,7 +119,8 @@ class World:
 
     def tick(self, seconds=2, *, entries=None):
         self.now += seconds
-        self.feed.observe(self.fresh() if entries is None else entries, self.status, self.deliver, self.outcome)
+        self.feed.observe(self.fresh() if entries is None else entries, self.status, self.deliver, self.outcome,
+                          lock=self.lock, fresh=self.fresh)
 
     def run_turn(self, pane, work=10):
         """One turn of `pane`: it works, then it is idle long enough to count."""
@@ -406,6 +407,46 @@ class BrowserRole(unittest.TestCase):
                 self.assertEqual(world.feed.queues['%1']['events'], queued)
                 self.assertEqual(world.sent, [])
 
+    def test_failed_browser_and_command_takeovers_keep_queued_reports(self):
+        for claim in ('browser', 'command'):
+            with self.subTest(claim=claim):
+                world = World()
+                world.entries[1]['thread'] = 'thread-2'
+                world.act('%1', action='claim')
+                world.run_turn('%3')
+                queued = world.feed.queues['%1']['events'].copy()
+                self.assertEqual(len(queued), 1)
+                snapshots = []
+
+                def fail_while_observing(*args, **kwargs):
+                    snapshots.append(world.fresh())
+                    self.assertNotIn('%1', coordinator.marks(snapshots[-1]))
+                    world.tick(0, entries=snapshots[-1])
+                    raise RuntimeError('Takeover failed.')
+
+                tmux = world.tmux
+
+                def fail_new_mark(args, **kwargs):
+                    if args[1:5] == ['set-option', '-p', '-t', '%2']:
+                        fail_while_observing()
+                    return tmux(args, **kwargs)
+
+                if claim == 'browser':
+                    with patch.object(world, 'send', side_effect=fail_while_observing), self.assertRaisesRegex(
+                            RuntimeError, 'Takeover failed'):
+                        world.change_role(take=True)
+                else:
+                    # The command returns its rules to the caller. Its new tmux mark can fail before that reply.
+                    with patch.object(world, 'tmux', side_effect=fail_new_mark), self.assertRaisesRegex(
+                            RuntimeError, 'Takeover failed'):
+                        world.act('%2', action='claim', take=True)
+                self.assertEqual(world.marked(), {'%1': 'all'})
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                world.tick(0, entries=snapshots[-1])  # discovery may still cache the temporary marks
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                world.tick(coordinator.JOIN)
+                self.assertEqual([pane for pane, _ in world.sent], ['%1'])
+
     def test_a_working_tab_can_be_claimed_and_gets_the_rules_held(self):
         # A held send waits for the turn to end, like the coordinator's own messages to a working tab.
         for state in ('Working', 'Idle'):
@@ -446,7 +487,7 @@ class TurnOutcome(unittest.TestCase):
     def test_claude_api_error_has_a_new_identity_even_after_a_good_reply(self):
         entry = self.fixture('claude', 3)
         self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'prompt-1', 'text': 'Done.'})
-        failed = self.fixture('claude')
+        failed = self.fixture('claude', 5)
         self.assertEqual(self.outcome(failed), {'kind': 'failed', 'identity': 'prompt-2',
                                                 'text': 'You have reached your usage limit.'})
 
@@ -464,21 +505,40 @@ class TurnOutcome(unittest.TestCase):
                 self.assertNotEqual(first['identity'], second['identity'])
                 self.assertEqual((first['identity'], second['identity']), ('notice-1', 'notice-2'))
 
-    def test_claude_slash_command_records_keep_the_turn_identity(self):
-        # A local command (/model, /cost) writes user text records but runs no turn: the last reply stays the outcome.
-        for records in (
-                [{'type': 'user', 'uuid': 'cmd', 'message': {'content': '<command-name>/model</command-name>\n<command-args></command-args>'}}],
-                [{'type': 'user', 'uuid': 'out', 'message': {'content': '<local-command-stdout>Set model</local-command-stdout>'}}],
-                [{'type': 'user', 'uuid': 'cmd', 'message': {'content': '<command-name>/cost</command-name>'}},
-                 {'type': 'user', 'uuid': 'out', 'message': {'content': '<local-command-stdout>$0.10</local-command-stdout>'}},
-                 {'type': 'assistant', 'uuid': 'late', 'message': {'content': [{'type': 'text', 'text': 'Done.'}]}}],
-                [{'type': 'user', 'uuid': 'sh', 'message': {'content': '<bash-input>ls</bash-input>'}},
-                 {'type': 'user', 'uuid': 'sh-out', 'message': {'content': '<bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>'}}]):
-            with self.subTest(records=records[0]['uuid']):
-                entry = self.fixture('claude', 3)
-                before = self.outcome(entry)
-                self.append(*records)
-                self.assertEqual(self.outcome(entry), before)
+    def test_claude_hidden_inputs_start_answered_turns(self):
+        for name, text in (('claude_peer', 'Peer message result.'),
+                           ('claude_idle_notice', 'Idle notice result.')):
+            with self.subTest(name=name):
+                before = self.outcome(self.fixture('claude', 3, name=name))
+                after = self.outcome(self.fixture('claude', name=name))
+                self.assertEqual((before['kind'], before['text']), ('done', 'First result.'))
+                self.assertEqual((after['kind'], after['text']), ('done', text))
+                self.assertNotEqual(before['identity'], after['identity'])
+
+    def test_claude_shell_input_changes_outcome_only_when_answered(self):
+        name = 'claude_shell'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        self.assertEqual(self.outcome(self.fixture('claude', 7, name=name)), before)
+        answered = self.outcome(self.fixture('claude', 8, name=name))
+        self.assertEqual((answered['kind'], answered['text']), ('done', 'Shell command result.'))
+        self.assertNotEqual(before['identity'], answered['identity'])
+        self.assertEqual(self.outcome(self.fixture('claude', name=name)), answered)
+
+    def test_claude_local_model_command_without_answer_keeps_last_outcome(self):
+        name = 'claude_local_command'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        self.assertEqual((before['kind'], before['text']), ('done', 'First result.'))
+        self.assertEqual(self.outcome(self.fixture('claude', name=name)), before)
+
+    def test_claude_answered_shell_input_recovers_from_interrupt(self):
+        name = 'claude_interrupt_shell'
+        before = self.outcome(self.fixture('claude', 3, name=name))
+        interrupted = self.outcome(self.fixture('claude', 7, name=name))
+        self.assertIsNone(interrupted['kind'])
+        self.assertEqual(self.outcome(self.fixture('claude', 12, name=name)), interrupted)
+        answered = self.outcome(self.fixture('claude', name=name))
+        self.assertEqual((answered['kind'], answered['text']), ('done', 'Shell command result.'))
+        self.assertNotIn(answered['identity'], (before['identity'], interrupted['identity']))
 
     def test_claude_skill_command_starts_a_turn_when_claude_answers(self):
         # Real shape (Claude Code 2.1): the command record, then the skill text as isMeta, then the reply.
@@ -518,7 +578,7 @@ class TurnOutcome(unittest.TestCase):
                 self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'next', 'text': 'Checked.'})
 
     def test_claude_system_error_recovery_and_user_interrupt(self):
-        entry = self.fixture('claude')
+        entry = self.fixture('claude', 5)
         self.append({'type': 'assistant', 'uuid': 'retry-reply',
                      'message': {'content': [{'type': 'text', 'text': 'Which branch?\nNeeds you: yes'}]}})
         self.assertEqual(self.outcome(entry), {'kind': 'asks', 'identity': 'prompt-2',
@@ -531,7 +591,7 @@ class TurnOutcome(unittest.TestCase):
         self.assertIsNone(self.outcome(entry)['kind'])
 
     def test_claude_system_error_reads_the_notice_message(self):
-        entry = self.fixture('claude', 3)
+        entry = self.fixture('claude', 2)
         self.append({'type': 'system', 'subtype': 'error', 'message': 'Invalid credentials.'},
                     {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Read'}]}})
         self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'prompt-1',
@@ -966,6 +1026,25 @@ class Feed(unittest.TestCase):
                 world.tick(coordinator.GAP)
                 self.assertEqual(len(world.sent), 1)
                 self.assertIn('finished: Finished text.', world.sent[0][1])
+
+    def test_first_known_running_state_reports_an_immediate_outcome(self):
+        for state in ('Working', 'Approval', 'Input needed'):
+            for kind, word in (('failed', 'failed'), ('done', 'finished')):
+                with self.subTest(state=state, kind=kind):
+                    world = World()
+                    world.act('%1', action='claim')
+                    world.states['%2'] = 'Unknown'
+                    world.tick()
+                    world.states['%2'] = state
+                    world.tick(0)
+                    world.outcomes['%2'] = {'kind': kind, 'text': 'Turn result.', 'identity': 'new'}
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual(len(world.sent), 1)
+                    self.assertIn(f'{word}: Turn result.', world.sent[0][1])
 
     def test_failed_turn_waits_for_idle_to_settle(self):
         self.world.states['%2'] = 'Working'

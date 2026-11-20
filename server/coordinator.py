@@ -349,50 +349,66 @@ def _claude_turn(state, index, record):
     kind = record.get('type')
     if any(record.get(flag) for flag in ('isSidechain', 'isCompactSummary', 'isAutoCompactSummary')):
         return
-    # Claude marks real scheduled prompts as hidden metadata.
-    scheduled = (kind == 'user' and record.get('turnOrigin') == 'scheduled'
-                 and isinstance(record.get('scheduledTaskId'), str))
-    if record.get('isMeta') and not scheduled:
-        return
     if kind not in ('user', 'assistant', 'system', 'attachment'):
         return
+    subtype = record.get('subtype')
+    if kind == 'system' and subtype == 'turn_duration':
+        if state.get('draft'):
+            identity, text = state['draft']
+            state.update(kind='done', text=text, identity=identity)
+        state.update(active=None, pending=None, draft=None, interrupted=False)
+        return
+    system_error = kind == 'system' and subtype in ('error', 'api_error')
+    if kind == 'system' and not system_error:
+        return
+
     message = record.get('message')
-    content = message.get('content') if isinstance(message, dict) else None
+    message = message if isinstance(message, dict) else {}
+    content = message.get('content')
     if kind == 'attachment':
         attachment = record.get('attachment')
         if not isinstance(attachment, dict) or attachment.get('type') != 'queued_command':
             return
         content = attachment.get('prompt')
     parts = [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
-    text = content if isinstance(content, str) else ''
-    if parts:
-        text = '\n'.join(part['text'] for part in parts if part.get('type') == 'text' and isinstance(part.get('text'), str))
-    # A prompt starts a turn only once Claude answers it (or the user interrupts it). A local command (/model) or
-    # shell input (!ls) writes prompt-like records that get no answer: they keep the last turn as the outcome.
-    if kind in ('assistant', 'system') and state.get('pending') and (
-            kind == 'assistant' or record.get('subtype') in ('error', 'api_error')):
-        state.update(kind=None, text='', identity=state['pending'], interrupted=False, pending=None)
-    if kind == 'user' and text.startswith('[Request interrupted by user'):
-        if state.get('pending'):
-            state['identity'] = state['pending']
-        state.update(kind=None, text='', interrupted=True, pending=None)
-    elif (kind in ('user', 'attachment') and text.strip()
-          and not any(part.get('type') == 'tool_result' for part in parts)):
-        answered = text.lstrip().startswith(('<local-command', '<bash-stdout>', '<bash-stderr>'))
-        state['pending'] = None if answered else str(record.get('uuid') or index)
-    elif not state.get('interrupted'):
-        if kind == 'assistant':
-            if record.get('isApiErrorMessage') is True:
-                state.update(kind='failed', text=_error_text(dict(record, message=text), 'API error.'),
-                             assistant_error=True)
-            elif text.strip():
-                state.update(kind='done', text=text)
-            elif state['kind'] == 'failed' and state.get('assistant_error'):
-                state.update(kind=None, text='')
-        elif kind == 'system' and record.get('subtype') in ('error', 'api_error'):
-            state.update(kind='failed', text=_error_text(record, 'API error.'), assistant_error=False)
-        if state['kind'] and not state['identity']:
-            state['identity'] = str(record.get('uuid') or index)
+    text = content if isinstance(content, str) else '\n'.join(
+        part['text'] for part in parts if part.get('type') == 'text' and isinstance(part.get('text'), str))
+    record_id = str(record.get('uuid') or index)
+    pending = state.get('pending')
+    active = state.get('active')
+    if kind in ('user', 'attachment'):
+        if kind == 'user' and (record.get('interruptedMessageId') or text.startswith('[Request interrupted by user')):
+            if active and not pending:
+                state['identity'] = active[0]
+            state.update(kind=None, text='', active=None, pending=None, draft=None, interrupted=True)
+        elif isinstance(content, (str, list)) and not any(part.get('type') == 'tool_result' for part in parts):
+            # Shell output and skill bodies can be additional records for the same prompt.
+            prompt = record.get('promptId')
+            current = pending or active
+            companion = (record.get('turnCompanion')
+                         or pending and record.get('isMeta') and not prompt and not record.get('turnOrigin'))
+            if not (current and (companion or prompt and prompt == current[1])):
+                state['pending'] = (record_id, prompt)
+        return
+
+    api_error = kind == 'assistant' and record.get('isApiErrorMessage') is True
+    aborted = kind == 'assistant' and record.get('isAbortedMidStream')
+    if not (api_error or system_error or aborted or text.strip()) or (state.get('interrupted') and not pending):
+        return
+    # Some versions omit turn_duration, including after completed replies and usage-limit errors.
+    # Keep input pending until a response arrives. A turn with no input record uses its first response.
+    active = pending or active or (record_id, None)
+    identity = active[0]
+    state.update(active=active, pending=None, interrupted=False)
+    if aborted:
+        state.update(kind=None, text='', identity=identity, active=None, draft=None, interrupted=True)
+    elif api_error or system_error:
+        error = dict(record, message=text) if api_error else record
+        state.update(kind='failed', text=_error_text(error, 'API error.'), identity=identity, draft=None)
+    elif message.get('stop_reason') == 'tool_use':
+        state['draft'] = (identity, text)
+    else:
+        state.update(kind='done', text=text, identity=identity, draft=None)
 
 
 def _codex_turn(state, index, record):
@@ -535,11 +551,14 @@ class Feed:
             # First sight of this tab: a prompt that is already on screen is in the tabs list, so it is no update.
             record = self.seen[entry['id']] = {'state': state, 'prompt': prompt, 'since': now, 'worked': None,
                                                'sent_prompt': prompt, 'finished': None, 'seeded': False,
+                                               'running_at_first_sight': False,
                                                'tmux_session': entry.get('tmux_session'), 'transcript': entry.get('transcript')}
-        if not record['seeded'] and state in ('Idle', 'Working'):
-            # The first Idle read hides an old turn. The first Working read lets that turn report when it ends.
+        if not record['seeded'] and state in KNOWN:
             if state == 'Idle':
                 record['finished'] = latest_outcome(entry)['identity'] or None
+            else:
+                # This turn already started. We cannot measure its full duration from the first poll.
+                record['running_at_first_sight'] = True
             record['seeded'] = True
         if state != record['state'] or prompt != record['prompt']:
             record['state'], record['prompt'], record['since'] = state, prompt, now
@@ -558,18 +577,32 @@ class Feed:
         if state != 'Idle':
             return None
         worked = record['worked']
-        record['worked'] = None
+        first_turn = record['running_at_first_sight']
+        record.update(worked=None, running_at_first_sight=False)
         outcome = latest_outcome(entry)
         if (outcome['kind'] not in FINISHED or outcome['identity'] == record['finished']
-                or outcome['kind'] != 'failed' and (worked is None or record['since'] - worked < MINIMUM_WORK)):
+                or outcome['kind'] != 'failed' and not first_turn
+                and (worked is None or record['since'] - worked < MINIMUM_WORK)):
             return None
         record['finished'] = outcome['identity']
         return outcome
 
-    def observe(self, entries, status, deliver, latest_outcome):
+    def observe(self, entries, status, deliver, latest_outcome, *, lock, fresh):
         now = self.clock()
         found = marks(entries)
         by_pane = {entry['id']: entry for entry in entries}
+        if any(entry['id'] in self.queues and entry['id'] not in found
+               and _chat_known(entry) and entry.get('agent') in AGENTS for entry in entries):
+            # A takeover can restore an old mark on failure. Discovery can also cache the temporary marks.
+            # Confirm the marks under the same lock that covers the takeover and its rollback.
+            if not lock.acquire(blocking=False):
+                return
+            try:
+                entries = fresh()
+            finally:
+                lock.release()
+            found = marks(entries)
+            by_pane = {entry['id']: entry for entry in entries}
         for pane in [pane for pane in self.seen if pane not in by_pane]:
             del self.seen[pane]
         for pane in [pane for pane in self.outcomes if pane not in by_pane]:
