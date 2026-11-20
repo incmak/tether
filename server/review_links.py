@@ -145,6 +145,12 @@ def _sanitize(row):
         row.setdefault('seen_working', False)
     if 'counts' in row:
         row['counts'] = _clean_reviewer_counts(row['counts'])
+    approved = row.pop('approved_state', None)
+    if (_is_link(row) and isinstance(approved, dict) and approved.keys() == {'commit', 'dirty', 'mark'}
+            and (approved['commit'] is None or isinstance(approved['commit'], str))
+            and (approved['dirty'] is None or type(approved['dirty']) is bool)
+            and (approved['mark'] is None or isinstance(approved['mark'], str))):
+        row['approved_state'] = approved
     correction = row.pop('stale_correction', None)
     if (_is_link(row) and isinstance(correction, dict)
             and correction.keys() == {'commit', 'now', 'request', 'requested'}
@@ -503,6 +509,36 @@ def _waits_on_mak(cap):
     return 'parent_stage' not in cap and cap.get('paused') != UPGRADE_PAUSE and bool(_at_cap(cap) or cap.get('unreadable'))
 
 
+def unreviewed_work(worker, reviewer, scope):
+    """Whether pending review work or a live Git change should keep this idle reviewer open."""
+    worker_thread = helper_tabs._thread(worker)
+    reviewer_thread = helper_tabs._thread(reviewer)
+    with _lock:
+        rows = _read()
+        link = next((row for row in rows if _is_link(row) and _matches(row, worker['id'], worker_thread)
+                     and row['reviewer'] == reviewer['id']
+                     and (reviewer_thread is None or row.get('reviewer_thread') in (None, reviewer_thread))), None)
+        if link is None:
+            return False
+        cap = _cap_for(rows, _cap_key(link)) or {}
+    if cap.get('paused') or _waits_on_mak(cap):
+        return False
+    if (link.get('seen_working') and not link.get('awaiting')
+            or 'stale_correction' in link or 'stale_commit' in link):
+        return True
+    approved = link.get('approved_state') or {}
+    commit = approved.get('commit')
+    clean = approved.get('dirty') is False
+    if commit is None:
+        commit = link.get('review_commit')
+        clean = link.get('review_clean') is True
+    if not isinstance(commit, str):
+        return False
+    live = _call(scope, worker)
+    return (isinstance(live, dict) and isinstance(live.get('commit'), str)
+            and (live['commit'] != commit or clean and live.get('dirty') is True))
+
+
 def escalated(entries):
     """Live worker panes whose review waits on Mak (B400: a hidden helper tab shows again until Mak answers)."""
     threads = {entry['id']: helper_tabs._thread(entry) for entry in entries}
@@ -735,31 +771,38 @@ REQUEST_PATTERN = re.compile(
     + r'\s+'.join(re.escape(word) for word in INTRO.split()) + r'\s+Review\s+id:\s+([0-9a-f]{8})\.', re.S)
 
 
-def _committed_since_approval(link, worker, scope):
-    """The last approval covered uncommitted work, and the tab has committed it since (a new commit, a clean tree).
-    That commit has no approval yet, so the turn that made it is reviewed. True, False, or None: not readable yet."""
-    approved = link.get('approved_dirty')
-    if not isinstance(approved, str):
-        link.pop('approved_dirty', None)
-        return False
-    target = _call(scope, worker)
-    if not isinstance(target, dict) or not isinstance(target.get('commit'), str):
-        # Not readable now. One failed read must not lose the confirmation: None = ask again on the next tick.
-        link['confirm_ticks'] = link.get('confirm_ticks', 0) + 1
-        if link['confirm_ticks'] < VERIFY_TICKS:
-            return None
-        target = None
-    elif target.get('dirty') is None and target['commit'] != approved:
-        # A new commit, but the status is not readable: the tree may be clean. Ask again, as above.
+def _changed_since_approval(link, worker, scope, work_mark):
+    """Return None while a needed Git read can still be retried, else whether the follow-up changed the work."""
+    approved = link.get('approved_state') or {}
+    before = approved.get('commit')
+    approved_dirty = link.get('approved_dirty')
+    confirm = isinstance(approved_dirty, str)
+    needs_scope = confirm or before is not None
+    target = _call(scope, worker) if needs_scope else None
+    target = target if isinstance(target, dict) else {}
+    commit, dirty = target.get('commit'), target.get('dirty')
+    unreadable = needs_scope and not isinstance(commit, str)
+    if unreadable or (confirm and commit != approved_dirty and dirty is None):
+        # A new commit with unknown status might still qualify for the uncommitted-work confirmation.
         link['confirm_ticks'] = link.get('confirm_ticks', 0) + 1
         if link['confirm_ticks'] < VERIFY_TICKS:
             return None
     link.pop('approved_dirty', None)
     link.pop('confirm_ticks', None)
-    if target is None or target['commit'] == approved or target.get('dirty') is not False:
+    if unreadable:
+        # As before, give up on this follow-up after VERIFY_TICKS failed scope reads.
         return False
-    link['confirm_commit'] = approved
-    return True
+    if confirm and commit != approved_dirty and dirty is False:
+        link['confirm_commit'] = approved_dirty
+        return True
+    if before is not None and (commit != before or approved.get('dirty') is False and dirty is True):
+        return True
+    mark = approved.get('mark')
+    if mark is None:
+        return False
+    entry = _review_entry(worker, target.get('folder') or link.get('review_folder'))
+    current_mark = _call(work_mark, entry)
+    return current_mark is not None and current_mark != mark
 
 
 def _named_commit(reply):
@@ -1433,15 +1476,20 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                         cap['counts'] = {owner: counts for owner, counts in cap.get('counts', {}).items()
                                          if owner != reviewer_key}
                         _clear_restart_counts(cap, reviewer_key, COUNTS)
-                        for key in ('stale_commit', 'approved_commit', 'approved_at',
+                        for key in ('stale_commit', 'approved_commit', 'approved_at', 'approved_state',
                                     'approved_dirty', 'confirm_commit', 'confirm_ticks', 'stale_delivered',
                                     'stale_unreadable', 'stale_correction'):
                             link.pop(key, None)
+                        now = _call(scope, review_entry) if bound else None
+                        now = now if isinstance(now, dict) else {}
+                        # Idle close still needs this baseline after the follow-up turn ends.
+                        link['approved_state'] = dict(commit=now.get('commit'), dirty=now.get('dirty'),
+                                                      mark=_call(work_mark, review_entry))
                         # Proof of an approved commit needs a clean tree and a reply at the transcript anchor of this
                         # request. "Send latest reply" has no anchor: that reply may answer an earlier request.
                         # The tree must also be clean now: it can change during the review with HEAD in place.
-                        now = _call(scope, review_entry) if bound and link.get('review_clean') and anchored else None
-                        if isinstance(now, dict) and now.get('commit') == bound and now.get('dirty') is False:
+                        if (bound and link.get('review_clean') and anchored
+                                and now.get('commit') == bound and now.get('dirty') is False):
                             link['approved_commit'] = bound
                             link['approved_at'] = int(time.time())
                         if uncommitted:
@@ -1504,23 +1552,21 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link['seen_working'] = True
     elif state == 'Idle' and link.get('approved_turn') and not link['seen_working']:
         if _digest(last_reply(worker)) != link.get('approved_before'):
-            committed = _committed_since_approval(link, worker, scope)
-            if committed is None:
+            changed = _changed_since_approval(link, worker, scope, work_mark)
+            if changed is None:
                 return link
             link.pop('approved_turn', None)
             link.pop('approved_before', None)
-            if committed:
-                link['seen_working'] = True  # the next tick asks for a review of the new commit
+            if changed:
+                link['seen_working'] = True  # the next tick asks for a review of the changed work
     elif link['seen_working'] and state == 'Idle':
         if link.get('approved_turn', False):
-            # The turn that follows an approval is not reviewed, unless it committed work that was approved while
-            # it was uncommitted.
-            committed = _committed_since_approval(link, worker, scope)
-            if committed is None:
+            changed = _changed_since_approval(link, worker, scope, work_mark)
+            if changed is None:
                 return link
             link.pop('approved_turn', None)
             link.pop('approved_before', None)
-            if not committed:
+            if not changed:
                 link['seen_working'] = False
                 return link
         if _turn_ended_on_limit(worker):
@@ -1635,6 +1681,7 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             link.pop('stale_delivered', None)
             link.pop('stale_unreadable', None)
             link.pop('confirm_commit', None)
+            link.pop('approved_state', None)  # this request is now the newest baseline for the idle close
             for key in SCOPE_RETRY_FIELDS:
                 link.pop(key, None)
             link.pop('review_folder', None)

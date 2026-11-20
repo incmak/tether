@@ -4,7 +4,8 @@ Agents start helper tabs (advisors, reviewers, task helpers) with agent_tab_cli.
 closed them, and owners often forgot, so idle helpers piled up. The server now closes a helper when:
 - its owner tab is gone, or the owner changed conversations (the helper no longer accepts its commands);
 - it is a reviewer whose review link ended;
-- it is an advisor or reviewer that has been idle for IDLE seconds (a reviewer only while its worker is idle too).
+- it is an advisor or reviewer that has been idle for IDLE seconds (a linked reviewer also needs a quiet worker
+  with no work pending review).
 A task helper stays until its owner is gone: its result can matter to the user.
 A tab that works, waits on a prompt, or that someone views stays open. Timers start fresh after a server restart.
 """
@@ -68,8 +69,9 @@ def _thread(entry):
 
 
 class Closer:
-    def __init__(self, now=time.time):
+    def __init__(self, now=time.time, *, scope=None):
         self.now = now
+        self.scope = scope
         self.active = {}     # pane -> last time it was busy, viewed or sent a message (or first seen)
         self.since = {}      # (pane, condition) -> when the close condition was first seen
         self.last_sweep = float('-inf')
@@ -154,8 +156,7 @@ class Closer:
             if lock is not None:
                 lock.release()
 
-    @staticmethod
-    def _reason(pane, record, role, by_id, panes, worker_of, idle):
+    def _reason(self, pane, record, role, by_id, panes, worker_of, idle):
         """(condition, reason, wait) when a close condition holds now, else None."""
         quiet = idle[pane]
         if record.get('kind') != 'own':
@@ -171,6 +172,9 @@ class Closer:
         if worker is not None:
             # A linked reviewer waits for the next turn; close it only when both tabs have been quiet a long time.
             if min(quiet, idle.get(worker, quiet)) >= IDLE:
+                worker_entry = by_id.get(worker)
+                if worker_entry is not None and review_links.unreviewed_work(worker_entry, by_id[pane], self.scope):
+                    return None
                 return 'idle', 'the review has been idle for 30 minutes', 0
             return None
         if role in ADVISOR and quiet >= IDLE:

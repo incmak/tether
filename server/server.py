@@ -235,7 +235,6 @@ def deliver_reminder_push(reminder):
 
 
 REMINDERS = reminders.Ticker({'push': deliver_reminder_push, 'ping': urgent_ping.remind})
-HELPER_CLOSER = helper_close.Closer()
 _QUIET_HELPERS = set()
 NOTIFIER = push.Notifier(notify, watching, levels=push.pane_levels, delivery=push.delivery_settings,
                         context=lambda entry: notification_context(entry),
@@ -465,6 +464,9 @@ def _observe_push(entries):
                 NOTIFIER.observe(entry, shared_status(entry))
         except Exception:  # one odd pane must never stop the monitor for everyone
             continue
+
+
+HELPER_CLOSER = helper_close.Closer(scope=review_scope_of)
 
 
 def monitor_notices():

@@ -1,7 +1,7 @@
 import json
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import helper_close
 
@@ -38,15 +38,18 @@ class CloserTests(unittest.TestCase):
     def setUp(self):
         self.clock = [1000.0]
         self.links = {}
+        self.rows = []
         self.states = {}
         self.viewed = set()
         patches = [patch.object(helper_close.review_links, 'reviewed_by', side_effect=lambda: self.links),
+                   patch.object(helper_close.review_links, '_read', side_effect=lambda: self.rows),
                    patch.object(helper_close.review_links, 'close'),
                    patch.object(helper_close.auto_resume, 'forget_pane')]
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
-        self.closer = helper_close.Closer(now=lambda: self.clock[0])
+        self.scope = Mock()
+        self.closer = helper_close.Closer(now=lambda: self.clock[0], scope=self.scope)
 
     def entries(self, tmux, threads=None):
         threads = threads or {}
@@ -133,6 +136,51 @@ class CloserTests(unittest.TestCase):
         closed = self.sweep(tmux, after=helper_close.SWEEP)
         self.assertEqual(closed, [('%2', 'the review has been idle for 30 minutes')])
         helper_close.review_links.close.assert_called_once_with('%2')
+
+    def test_idle_reviewer_checks_pending_work_and_live_scope(self):
+        head, next_head = 'a' * 40, 'b' * 40
+        baseline = {'commit': head, 'dirty': False, 'mark': None}
+        cases = (
+            ('new HEAD', {}, {}, {'commit': next_head, 'dirty': False}, True, True),
+            ('new HEAD already requested', {'review_commit': next_head, 'awaiting': True}, {},
+             {'commit': next_head, 'dirty': False}, True, True),
+            ('new dirty tree', {}, {}, {'commit': head, 'dirty': True}, True, True),
+            ('same HEAD and clean', {}, {}, {'commit': head, 'dirty': False}, False, True),
+            ('paused cap', {}, {'paused': True}, {'commit': next_head, 'dirty': False}, False, False),
+            ('waits on Mak', {}, {'escalate': 'notice'}, None, False, False),
+            ('unreadable scope', {}, {}, OSError('git failed'), False, True),
+            ('review pending', {'seen_working': True}, {}, None, True, False),
+            ('review already requested', {'seen_working': True, 'awaiting': True}, {},
+             {'commit': head, 'dirty': False}, False, True),
+            ('stale correction', {'stale_correction': {'commit': head}}, {}, None, True, False),
+            ('stale commit', {'stale_commit': ''}, {}, None, True, False),
+            ('legacy baseline', {'approved_state': None}, {}, {'commit': next_head, 'dirty': False}, True, True),
+            ('no baseline', {'approved_state': None, 'review_commit': None}, {}, None, False, False),
+        )
+        for name, changes, cap, live, keep, read in cases:
+            with self.subTest(name=name):
+                self.closer = helper_close.Closer(now=lambda: self.clock[0], scope=self.scope)
+                self.scope.reset_mock(return_value=True, side_effect=True)
+                if isinstance(live, Exception):
+                    self.scope.side_effect = live
+                else:
+                    self.scope.return_value = live
+                self.links = {'%1': ['%2']}
+                self.rows = [
+                    dict(worker='%1', reviewer='%2', worker_thread=OWNER_THREAD, seen_working=False, awaiting=False,
+                         approved_state=baseline, review_commit=head, review_clean=True) | changes,
+                    dict(cap=True, worker='%1', worker_thread=OWNER_THREAD) | cap,
+                ]
+                tmux = Tmux({'%1': ('', ''), '%2': ('reviewer', record())})
+                self.assertEqual(self.sweep(tmux), [])
+                self.scope.assert_not_called()
+                self.assertEqual(self.sweep(tmux, after=helper_close.IDLE + 1),
+                                 [] if keep else [('%2', 'the review has been idle for 30 minutes')])
+                self.assertEqual(tmux.killed, [] if keep else ['%2'])
+                if read:
+                    self.scope.assert_called_once_with({'id': '%1', 'thread': OWNER_THREAD})
+                else:
+                    self.scope.assert_not_called()
 
     def test_non_helpers_and_discovery_misses_stay(self):
         tmux = Tmux({'%1': ('', ''), '%2': ('advisor', 'not json'), '%3': ('advisor', record())})

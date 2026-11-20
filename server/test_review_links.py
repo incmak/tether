@@ -5386,32 +5386,128 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertNotIn('confirm_commit', link)
         self.assertNotIn('uncommitted changes', self.send.call_args.args[1])
         count = self.send.call_count
-        self.request_review()  # the turn after a clean approval is not reviewed, as before
+        self.request_review()  # the follow-up leaves the approved work as it was
         self.assertEqual(self.send.call_count, count)
 
-    def test_follow_up_turn_without_a_commit_is_not_reviewed(self):
-        for after in ({'dirty': True}, {'commit': None}, {}):
+    def test_clean_approval_then_new_commit_requests_review_on_normal_and_short_turns(self):
+        for short in (False, True):
+            with self.subTest(short=short):
+                self.add()
+                self.bind()
+                self.request_review()
+                self.finish_review(f'APPROVED {self.HASH}')
+                count = self.send.call_count
+                self.bind(self.NEXT)
+                if short:
+                    self.reply.return_value = 'Committed.'
+                    self.observe()
+                    self.observe()
+                else:
+                    self.request_review()
+                self.assertEqual(self.send.call_count, count + 1)
+                self.assertEqual(self.send.call_args.args[0], self.reviewer)
+                self.assertIn(f'Commit under review: {self.NEXT}', self.send.call_args.args[1])
+                self.assertNotIn('You approved this work as commit', self.send.call_args.args[1])
+
+    def test_clean_approval_then_dirty_tree_requests_review(self):
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        count = self.send.call_count
+        self.bind(dirty=True)
+        self.request_review()
+        self.assertEqual(self.send.call_count, count + 1)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f"Commit under review: {self.HASH} in '/work/my tree' plus uncommitted changes",
+                      self.send.call_args.args[1])
+
+    def test_dirty_approval_then_further_edit_requests_review(self):
+        self.bind(dirty=True)
+        self.work_mark = Mock(return_value='reviewed tree')
+        self.request_review()
+        self.work_mark.return_value = 'approved tree'
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.assertEqual(self.links()[0]['approved_state'], dict(commit=self.HASH, dirty=True, mark='approved tree'))
+        count = self.send.call_count
+        self.work_mark.return_value = 'edited tree'
+        self.request_review()
+        self.assertEqual(self.send.call_count, count + 1)
+        self.assertEqual(self.send.call_args.args[0], self.reviewer)
+        self.assertIn(f'Commit under review: {self.HASH}', self.send.call_args.args[1])
+        self.assertNotIn('You approved this work as commit', self.send.call_args.args[1])
+
+    def test_unbound_approval_requests_review_only_for_a_changed_mark(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed):
+                self.add()
+                self.work_mark = Mock(return_value='reviewed tree')
+                self.request_review()
+                self.finish_review('APPROVED')
+                count = self.send.call_count
+                if changed:
+                    self.work_mark.return_value = 'edited tree'
+                self.request_review()
+                self.assertEqual(self.send.call_count, count + int(changed))
+                if changed:
+                    self.assertEqual(self.send.call_args.args[0], self.reviewer)
+
+    def test_clean_approval_then_push_with_same_commit_and_mark_skips_review(self):
+        self.bind()
+        self.work_mark = Mock(return_value='same tree')
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        count = self.send.call_count
+        self.reply.return_value = 'Pushed.'
+        self.request_review()
+        self.observe()
+        self.assertEqual(self.send.call_count, count)
+        self.assertNotIn('approved_turn', self.links()[0])
+        self.assertEqual(self.links()[0]['approved_state'], dict(commit=self.HASH, dirty=False, mark='same tree'))
+
+    def test_newer_request_replaces_the_approval_as_idle_close_baseline(self):
+        # After the follow-up of NEXT is reviewed with feedback, NEXT is the reviewed work, not the old approval.
+        self.bind()
+        self.request_review()
+        self.finish_review(f'APPROVED {self.HASH}')
+        self.bind(self.NEXT)
+        self.request_review()
+        self.assertIn(f'Commit under review: {self.NEXT} in', self.send.call_args.args[1])
+        self.assertNotIn('approved_state', self.links()[0])
+        self.finish_review('Needs a regression test.')
+        worker = {**self.worker, 'id': '%13'}
+        self.assertFalse(review_links.unreviewed_work(worker, self.reviewer, self.scope))
+        self.bind(self.HASH)  # the worker moved again and nobody reviewed it
+        self.assertTrue(review_links.unreviewed_work(worker, self.reviewer, self.scope))
+
+    def test_dirty_approval_reviews_partial_commit_and_skips_unreadable_or_unchanged_tree(self):
+        for after in ('partial commit', 'unreadable', 'unchanged'):
             with self.subTest(after=after):
                 self.add()
                 self.bind(dirty=True)
                 self.request_review()
                 self.finish_review(f'APPROVED {self.HASH}')
                 count = self.send.call_count
-                if 'commit' in after:
+                if after == 'unreadable':
                     self.scope = lambda entry: None  # unreadable
-                elif after:
+                elif after == 'partial commit':
                     self.bind(self.NEXT, dirty=True)  # committed a part, more changes are open
                 self.request_review()  # the follow-up turn
-                if 'commit' in after:
+                if after == 'unreadable':
                     for _ in range(review_links.VERIFY_TICKS):  # git stays unreadable: Tether stops asking
                         self.observe()
-                self.assertEqual(self.send.call_count, count)
+                if after == 'partial commit':
+                    self.assertEqual(self.send.call_count, count + 1)
+                    self.assertEqual(self.send.call_args.args[0], self.reviewer)
+                    self.assertIn(f'Commit under review: {self.NEXT}', self.send.call_args.args[1])
+                    self.assertNotIn('You approved this work as commit', self.send.call_args.args[1])
+                else:
+                    self.assertEqual(self.send.call_count, count)
                 self.assertNotIn('approved_dirty', self.links()[0])
                 self.assertNotIn('confirm_ticks', self.links()[0])
-                if 'commit' in after:
-                    self.bind(dirty=True)  # git answers again
-                self.request_review()  # the turn after it is reviewed as usual
-                self.assertEqual(self.send.call_count, count + 1)
+                if after != 'partial commit':
+                    self.bind(dirty=True)
+                    self.request_review()  # the turn after it is reviewed as usual
+                    self.assertEqual(self.send.call_count, count + 1)
 
     def test_commit_in_a_follow_up_turn_shorter_than_a_tick_is_reviewed(self):
         self.bind(dirty=True)
