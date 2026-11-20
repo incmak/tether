@@ -3208,7 +3208,9 @@ class ReviewLinksTests(unittest.TestCase):
                     continue
                 self.assertTrue(paused())
                 self.assertFalse(self.send.called)
-                self.turn_source = Mock(return_value=('user', 1006, 1008))
+                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                self.clock.return_value = after + 5
+                self.turn_source = Mock(return_value=('user', after, after + 2))
                 self.observe(**{'%13': 'Working'})
                 self.observe(**{'%13': 'Idle'})
                 self.assertFalse(paused())
@@ -3238,8 +3240,48 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe(**{'%13': 'Idle'})
                 self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
                 self.send.assert_not_called()
-                # The next Mak turn clears the pause.
-                self.turn_source = Mock(return_value=('user', 1006, 1008))
+                # The next Mak turn after the parent window clears the pause.
+                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                self.clock.return_value = after + 5
+                self.turn_source = Mock(return_value=('user', after, after + 2))
+                self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])
+
+    def test_upgrade_agent_flag_spent_on_an_earlier_turn_still_covers_the_queued_parent_turn(self):
+        # An older watcher saw a turn Working while a parent prompt was queued, set the flag and consumed the
+        # marker. The flag cannot say which turn was the parent's, so spending it opens a parent window.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        for seen in ('between polls', 'Working'):
+            with self.subTest(parent_turn_seen=seen):
+                self.clock.return_value = 1000
+                self.send.reset_mock()
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0, **{'%13': 'Idle'})
+                rows = self.rows()
+                cap, = (row for row in rows if row.get('cap'))
+                cap['restart'] = dict(review_links._restart_state(cap), agent=True)
+                cap.pop('agent_prompt', None)
+                self.file.write_text(json.dumps(rows))
+                self.clock.return_value = 1004
+                self.turn_source = Mock(return_value=('user', 1001, 1004))
+                self.observe(**{'%13': 'Idle'})
+                self.clock.return_value = 1006
+                self.turn_source = Mock(return_value=('user', 1005, 1006))
+                if seen == 'Working':
+                    self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
+                self.send.assert_not_called()
+                self.assertGreaterEqual(self.upgrade_cap()['parent_send_at'], 1004)
+                # A Mak turn that starts after the window clears the pause.
+                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                self.clock.return_value = after + 5
+                self.turn_source = Mock(return_value=('user', after, after + 2))
                 self.observe(**{'%13': 'Working'})
                 self.observe(**{'%13': 'Idle'})
                 self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])

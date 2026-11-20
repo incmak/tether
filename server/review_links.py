@@ -1449,8 +1449,12 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             elif _is_time(started_at):
                 # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
                 # marker comes from an older watcher that consumed the marker. That turn's owner is unknown, so
-                # the pause holds; the next Mak turn clears it.
-                by_agent = _parent_sent(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
+                # the pause holds. The parent prompt may still be queued behind this turn, so spending the flag
+                # opens a parent window now; a Mak turn that starts after it clears the pause.
+                by_agent = _parent_sent(cap, started_at)
+                if not by_agent and 'agent_prompt' not in cap and start.get('agent'):
+                    by_agent = True
+                    _keep_latest_time(cap, 'parent_send_at', (cap, {'parent_send_at': time.time()}))
             else:
                 by_agent = start.get('agent') or _parent_sent(cap)
             if by_agent and _is_time(finished_at):
