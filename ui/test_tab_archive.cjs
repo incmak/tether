@@ -9,7 +9,7 @@ function load(file) {
   const exports = {}
   runInNewContext(transpile(readFileSync(file, 'utf8')), {
     exports,
-    require: name => name === './paneState' ? load('src/paneState.ts') : name === 'react' ? { lazy: () => null, forwardRef: component => component } : {},
+    require: name => name === './paneState' ? load('src/paneState.ts') : name === 'react' ? { lazy: () => null, forwardRef: component => component, createContext: value => ({ value }) } : {},
   })
   return exports
 }
@@ -20,6 +20,7 @@ const { groupSessions, isArchived } = sidebar
 const ordering = load('src/PaneTabs.tsx')
 const { orderPanes, reorderPanes } = ordering
 const { selectPane } = load('src/paneSelection.ts')
+const helperTabs = load('src/helperTabs.ts')
 const plain = value => JSON.parse(JSON.stringify(value))
 const ids = panes => Array.from(panes, pane => pane.id)
 const pane = (id, extra = {}) => ({ id, tmux_session: 'work', label: `Work:0.${id}`, dir: '/work', thread: id, agent: 'codex', state: 'Idle', ...extra })
@@ -91,16 +92,18 @@ const appConst = name => {
 }
 const layoutEffect = app.body.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(appSource) === 'useLayoutEffect' && node.getText(appSource).includes('previousSelection.current'))
 function fixture(panes, initial) {
-  let prefs = { archivedTabs: {}, archived: {}, paneOrder: {}, lastPane: {}, selected: 'b', ...initial }
+  let prefs = { archivedTabs: {}, archived: {}, paneOrder: {}, lastPane: {}, selected: 'b', hideHelpers: true, shownHelpers: {}, expanded: {}, ...initial }
   let updates = 0
   const context = {
-    ...archive, ...sidebar, ...ordering, panes, exports: {}, data: {},
+    ...archive, ...sidebar, ...ordering, ...helperTabs, panes, exports: {}, data: {},
     useMemo: calculate => calculate(), useLayoutEffect: effect => effect(),
     previousSelection: { current: { sessions: [] } },
     update: change => { updates++; prefs = { ...prefs, ...change(prefs) } },
   }
   function render() {
     context.prefs = prefs
+    runInNewContext(appConst('helpers'), context)
+    context.helpers = context.exports.helpers
     runInNewContext(appConst('sessions'), context)
     context.sessions = context.exports.sessions
     context.orderedSessions = context.sessions
@@ -158,6 +161,18 @@ assert.equal(hiddenSession.prefs.archived.work, undefined, 'Restore of the only 
 const multi = fixture([other, a, b], { selected: 'other', archivedTabs: { a: entry(a) }, archived: { work: 'Work' } })
 multi.render().restoreTab(a)
 assert.equal(multi.prefs.archived.work, 'Work', 'Restore preserves session archive when other tabs show')
+// B400: a hidden helper tab leaves the sessions and desktop slots, folds under its owner, and shows while selected.
+const helper = pane('h', { helper: true, owner: 'a' })
+const helped = fixture([a, b, helper], { selected: 'b' })
+const helpedView = helped.render()
+assert.deepEqual(ids(helpedView.sessions.flatMap(session => session.panes)), ['a', 'b'], 'A hidden helper leaves the session tabs')
+assert.equal(helpedView.live.has('h'), false, 'A hidden helper leaves desktop slots')
+assert.deepEqual(plain(helpedView.sessions[0].helperFolds.map(fold => [fold.key, ids(fold.panes), fold.open])), [['a', ['h'], false]], 'The helper folds under its owner')
+assert.deepEqual(ids(helpedView.archivedTabs), [], 'A hidden helper is not an archived tab')
+helped.update(() => ({ selected: 'h' }))
+assert(helped.render().live.has('h'), 'A selected helper shows')
+helped.update(() => ({ selected: 'b', hideHelpers: false }))
+assert.deepEqual(ids(helped.render().sessions.flatMap(session => session.panes)), ['a', 'h', 'b'], 'With the filter off the helper shows, nested after its owner')
 const empty = fixture([], { selected: null })
 assert.equal(empty.render().live.size, 0)
 console.log('Tab archive: App atomic selection, current prefs, selected exception, slots, last-tab/session restore and empty polling pass')
