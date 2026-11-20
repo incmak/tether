@@ -2,3 +2,4 @@
 063edff35fc2fab1bd81df985c238becac5ffaa8:server/test_browser_cdp.py:generic-api-key:464
 655a9ecc80d2eb6b4004a6994f4c786a7a5bf646:server/test_tab_brief.py:private-key:80
 655a9ecc80d2eb6b4004a6994f4c786a7a5bf646:server/test_tab_brief.py:aws-access-token:102
+6340832da7d062db03127106c90a94e97c4bee95:server/test_signed_browser.py:generic-api-key:94
