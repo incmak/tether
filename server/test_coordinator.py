@@ -472,7 +472,9 @@ class TurnOutcome(unittest.TestCase):
     def setUp(self):
         folder = self.enterContext(tempfile.TemporaryDirectory())
         self.path = Path(folder) / 'transcript.jsonl'
-        self.outcome = coordinator.Feed().latest_outcome
+        self.latest = coordinator.Feed().latest_outcome
+        # Most tests check kind, text and identity; test_open_marks_a_turn_in_progress checks `open`.
+        self.outcome = lambda entry: {key: value for key, value in self.latest(entry).items() if key != 'open'}
 
     def fixture(self, agent, count=None, *, name=None):
         source = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{name or agent}.jsonl'
@@ -483,6 +485,20 @@ class TurnOutcome(unittest.TestCase):
         with self.path.open('a') as stream:
             for row in records:
                 stream.write(json.dumps(row) + '\n')
+
+    def test_open_marks_a_turn_in_progress(self):
+        # open: a reply of the turn arrived and the turn has not ended. A prompt with no reply (a local command,
+        # a sign-in) is not open, so the feed treats the last outcome as old on first sight.
+        for agent, name, count, expected in (
+                ('claude', 'claude_shell', 6, False),   # a tool_use reply with no text keeps the old identity
+                ('claude', 'claude_shell', None, False),
+                ('claude', 'claude_local_command', None, False),
+                ('claude', 'claude_peer', 7, True),     # final text, no turn_duration yet (Stop hooks run)
+                ('codex', 'codex_task_complete', 3, True),  # task_started
+                ('codex', 'codex_task_complete', None, False),
+                ('codex', 'codex', None, False)):          # turn_aborted
+            with self.subTest(name=name, count=count):
+                self.assertIs(self.latest(self.fixture(agent, count, name=name))['open'], expected)
 
     def test_claude_api_error_has_a_new_identity_even_after_a_good_reply(self):
         entry = self.fixture('claude', 3)
@@ -993,7 +1009,7 @@ class Feed(unittest.TestCase):
         world.act('%1', action='claim')
         world.tick()
         world.states['%2'] = 'Working'
-        world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'new'}
+        world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'new', 'open': True}
         world.tick()
         world.outcomes['%2'] = {'kind': 'done', 'text': 'Finished text.', 'identity': 'new'}
         world.states['%2'] = 'Idle'
@@ -1009,7 +1025,7 @@ class Feed(unittest.TestCase):
             with self.subTest(restart=restart):
                 world = World()
                 world.states['%2'] = 'Working'
-                world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'running'}
+                world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'running', 'open': True}
                 if restart:
                     world.act('%1', action='claim')
                     world.feed = coordinator.Feed(clock=lambda: world.now)
@@ -1045,6 +1061,26 @@ class Feed(unittest.TestCase):
                     world.tick(coordinator.GAP)
                     self.assertEqual(len(world.sent), 1)
                     self.assertIn(f'{word}: Turn result.', world.sent[0][1])
+
+    def test_first_sight_of_a_waiting_tab_reports_no_old_turn(self):
+        # A sign-in or approval prompt on first sight is not a new turn. Only an outcome identity that differs
+        # from the one at first sight is reported.
+        for state in ('Input needed', 'Approval', 'Working'):
+            for kind in ('done', 'failed'):
+                with self.subTest(state=state, kind=kind):
+                    world = World()
+                    world.act('%1', action='claim')
+                    world.outcomes['%2'] = {'kind': kind, 'text': 'Old turn.', 'identity': 'old'}
+                    world.states['%2'] = 'Unknown'
+                    world.tick()
+                    world.states['%2'] = state
+                    world.tick(0)
+                    world.states['%2'] = 'Idle'
+                    world.tick(0)
+                    world.tick(coordinator.SETTLE)
+                    world.tick(coordinator.JOIN)
+                    world.tick(coordinator.GAP)
+                    self.assertEqual([text for _, text in world.sent if 'Old turn.' in text], [])
 
     def test_failed_turn_waits_for_idle_to_settle(self):
         self.world.states['%2'] = 'Working'

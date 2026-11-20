@@ -536,7 +536,9 @@ class Feed:
         kind, text = state['kind'], state['text']
         if kind == 'done' and attention.reply_ask(text)[0] == 'yes':
             kind = 'asks'
-        outcome = {'kind': kind, 'text': push.reply_summary(text, SUMMARY), 'identity': state['identity']}
+        # open: a reply of a turn arrived and the turn has not ended, so `identity` may be the running turn.
+        outcome = {'kind': kind, 'text': push.reply_summary(text, SUMMARY), 'identity': state['identity'],
+                   'open': bool(state.get('active'))}
         self.outcomes[pane] = (key, signature, revision, outcome)
         return outcome
 
@@ -554,11 +556,13 @@ class Feed:
                                                'running_at_first_sight': False,
                                                'tmux_session': entry.get('tmux_session'), 'transcript': entry.get('transcript')}
         if not record['seeded'] and state in KNOWN:
-            if state == 'Idle':
-                record['finished'] = latest_outcome(entry)['identity'] or None
-            else:
-                # This turn already started. We cannot measure its full duration from the first poll.
-                record['running_at_first_sight'] = True
+            # The latest outcome at first sight is old unless a turn is in progress in the transcript: only a turn
+            # with another identity is new. A sign-in prompt that closes with no new turn reports nothing.
+            seen = latest_outcome(entry)
+            if state == 'Idle' or not seen.get('open'):
+                record['finished'] = seen['identity'] or None
+            # A turn that runs now started before the first poll, so its full duration is not known.
+            record['running_at_first_sight'] = state != 'Idle'
             record['seeded'] = True
         if state != record['state'] or prompt != record['prompt']:
             record['state'], record['prompt'], record['since'] = state, prompt, now
