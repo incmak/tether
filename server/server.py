@@ -496,7 +496,8 @@ def monitor_notices():
                              alert=review_alert, work_mark=review_work_mark, review_reply=review_reply,
                              turn_source=review_turn_source, level=review_level,
                              parent=lambda entry: review_parent(entry, entries),
-                             scope=review_scope_of, commit=review_commit, fresh=fresh_status)
+                             scope=review_scope_of, commit=review_commit, fresh=fresh_status,
+                             folder=review_folder)
         try:
             # B213: each commit a reviewer approved is checked once. Observe mode records the decision and merges nothing.
             auto_merge.observe(entries, review_links.approved_commits(), agent_folder, auto_merge_alert,

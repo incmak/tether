@@ -6224,7 +6224,7 @@ class ServerWatcherTests(unittest.TestCase):
                                    review_reply=server.review_reply, turn_source=server.review_turn_source,
                                    level=server.review_level, parent=ANY,
                                    scope=server.review_scope_of, commit=server.review_commit,
-                                   fresh=server.fresh_status)
+                                   fresh=server.fresh_status, folder=server.review_folder)
         with patch.object(server, 'review_parent') as parent:
             observe.call_args.kwargs['parent'](entries[0])
             parent.assert_called_once_with(entries[0], entries)
@@ -6244,7 +6244,7 @@ class ServerWatcherTests(unittest.TestCase):
                                         review_reply=server.review_reply, turn_source=server.review_turn_source,
                                         level=server.review_level, parent=ANY,
                                         scope=server.review_scope_of, commit=server.review_commit,
-                                        fresh=server.fresh_status)
+                                        fresh=server.fresh_status, folder=server.review_folder)
         self.assertEqual([call.args for call in clock.call_args_list], [(2,), (2,)])
         self.assertEqual(stderr.getvalue(), "session discovery failed: KeyError('pane')\n")
 
@@ -6877,7 +6877,7 @@ class ApprovalTurnFixture(unittest.TestCase):
             lambda entry: "Done." if entry["id"] == self.worker["id"] else "Ready.",
             work_mark=self.work_mark, scope=self.scope, commit=self.commit, fresh=status,
             review_reply=lambda entry, request_id: self.verdict,
-            turn_source=lambda entry: self.turn_source,
+            turn_source=lambda entry: self.turn_source, folder=getattr(self, 'folder', None),
         )
 
     def worker_turn(self):
@@ -6919,6 +6919,7 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
         self.enterContext(patch.object(server, "REVIEW_SCOPES", {}))
         self.scope = server.review_scope_of
         self.commit = server.review_commit
+        self.folder = server.review_folder
         self.work_mark = server.review_work_mark
 
     def git(self, *args, cwd=None):
@@ -7243,6 +7244,22 @@ class ApprovalTurnWorktreeTests(ApprovalTurnFixture):
             self.observe()
         self.assertIn(f"Commit under review: {head} in {shlex.quote(str(self.reviewed))}",
                       self.assert_follow_up_requested())
+
+    def test_named_approval_reviews_commit_in_verified_worktree_after_gate_log_rotates(self):
+        # Both worktrees start at the approved commit. The gate record identifies the reviewed one.
+        self.git("merge", "--ff-only", "reviewed")
+        self.assertEqual(server.review_folder(self.worker), str(self.reviewed))
+        self.approve_named_without_scope()
+
+        self.observe("Working")
+        head = self.commit_in(self.reviewed, "Follow-up commit in the verified worktree")
+        # Rotation moves the records out of the file read by the worktree resolver.
+        self.gate_log.replace(self.gate_log.with_suffix(".log.1"))
+        self.gate_log.touch()
+        for _ in range(review_links.VERIFY_TICKS + 1):
+            self.observe()
+        folder = shlex.quote(str(self.reviewed))
+        self.assertIn(f"Commit under review: {head} in {folder}", self.assert_follow_up_requested())
 
     def test_rejected_gate_check_preserves_review_of_worktree_with_edit(self):
         alternate = self.another_worktree()

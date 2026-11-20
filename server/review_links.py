@@ -925,10 +925,10 @@ def _review_entry(worker, folder):
     return dict(worker, review_folder=folder) if isinstance(folder, str) and folder else worker
 
 
-def _verdict_state(link, worker, scope, commit=None):
+def _verdict_state(link, worker, scope, commit=None, verified_folder=None):
     """Read the verdict's worktree before delivery can start another worker turn. When the scope read fails, keep the
-    approved commit that the HEAD read just verified, so a later commit is still a change."""
-    folder = link.get('review_folder')
+    approved commit and the worktree that the HEAD read just verified, so a later commit there is still a change."""
+    folder = link.get('review_folder') or verified_folder
     live = _call(scope, _review_entry(worker, folder))
     live = live if isinstance(live, dict) else {}
     return dict(commit=live.get('commit') or commit, dirty=live.get('dirty'), mark=live.get('mark'),
@@ -1295,7 +1295,7 @@ def _turn_ended_on_limit(worker):
 
 def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clear, delivery,
           work_mark, review_reply, stalled_replies, turn_source, sources, level, parent, reply_effect,
-          scope=None, commit=None, fresh=None):
+          scope=None, commit=None, fresh=None, folder=None):
     worker = entries.get(link['worker'])
     reviewer = entries.get(link['reviewer'])
     if link['reviewer_thread'] is None:
@@ -1424,6 +1424,11 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                 if (bound or named) and state != 'Idle':
                     # A working tab can still commit. The approval waits until the tab is idle.
                     return link
+                # Resolve the worktree once, so the HEAD read and the saved baseline name the same folder.
+                verified_folder = _call(folder, review_entry) if bound or named else None
+                verified_folder = verified_folder if isinstance(verified_folder, str) and verified_folder else None
+                if verified_folder:
+                    review_entry = _review_entry(worker, verified_folder)
                 current = _call(commit, review_entry) if bound or named else None
                 current = current if isinstance(current, str) else None
                 misnamed = bool(bound) and named != bound  # the full hash: a prefix can be ambiguous
@@ -1441,7 +1446,8 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
                     stale = named  # no binding (no readable commit at the request), but the reply names a commit
                 if approved and stale is None:
                     verdict = _verdict_state(link, worker, scope,
-                                             current if current and current == (bound or named) else None)
+                                             current if current and current == (bound or named) else None,
+                                             verified_folder)
                     if (bound or named) and verdict['commit'] is not None and verdict['commit'] != (bound or named):
                         stale = bound or named
                 if bound or named:
@@ -1855,7 +1861,7 @@ def _claim_upgrade_alerts(rows, entries):
 
 
 def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, review_reply=None, turn_source=None,
-            level=None, parent=None, scope=None, commit=None, fresh=None):
+            level=None, parent=None, scope=None, commit=None, fresh=None, folder=None):
     """Callbacks run outside the store lock: send takes SEND_LOCK, while add already holds it."""
     try:
         by_pane = {entry['id']: entry for entry in entries}
@@ -1911,7 +1917,7 @@ def observe(entries, status, send, last_reply, *, alert=None, work_mark=None, re
                 cap = dict(snapshot)
                 updated = _step(link, cap, snapshot, by_pane, status, send, last_reply, awaiting, clear,
                                 delivery, work_mark, review_reply, stalled_replies, turn_source,
-                                sources, level, parent, reply_effect, scope, commit, fresh)
+                                sources, level, parent, reply_effect, scope, commit, fresh, folder)
                 # Give any new verdict priority. Only a correction already stored before this tick can be sent.
                 if (updated is not None and 'lost_reason' not in updated and 'verdict' not in reply_effect
                         and (correction := current.get('stale_correction')) and 'stale_correction' in updated):
