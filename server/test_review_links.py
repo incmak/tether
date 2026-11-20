@@ -3106,6 +3106,55 @@ class ReviewLinksTests(unittest.TestCase):
                     self.assert_mak_alert()
                     self.assertFalse(review_links.in_parent_stage('%13', WORKER_THREAD))
 
+    def test_parent_stage_outlives_the_capped_reviewer_at_levels_four_and_five(self):
+        # B283 (B278 review r2, finding 3): reviewer A reaches the cap while the parent is busy, then stops. Reviewer B
+        # never paused: its draft blocked every request. The parent stage belongs to the worker conversation's cap row,
+        # so the parent gets the notice, or Mak gets the alert, while B stays linked.
+        for level, outcome in ((5, 'notice'), (4, 'notice'), (5, 'parent gone')):
+            with self.subTest(level=level, outcome=outcome):
+                self.file.write_text('[]')
+                self.turn_source = None
+                self.send.reset_mock(side_effect=True)
+                self.entries = [self.worker, self.reviewer]
+                parent = self.add_parent(level=level)
+                self.states['%11'] = 'Working'
+                self.add(worker_thread=WORKER_THREAD)
+                self.add(reviewer='%21', worker_thread=WORKER_THREAD, reset=False)
+                sibling = dict(self.reviewer, id='%21')
+                self.entries.append(sibling)
+                self.states['%21'] = 'Idle'
+                draft = [True]
+
+                def hold_siblings_draft(entry, *_):
+                    if entry == sibling and draft[0]:
+                        raise DraftError('Keep the draft.')
+
+                self.send.side_effect = hold_siblings_draft
+                self.review_reply = lambda entry, _: FINDINGS if entry == self.reviewer else None
+                self.fail_to_limit(FINDINGS)
+                self.assertFalse(self.links()[0]['parent_stage']['sent'])
+                self.assertTrue(review_links.remove('%13', '%12'))
+                self.turn_source = lambda _: 'review-summary'
+                self.request_review()  # The worker finishes the findings summary while the parent is still busy.
+                self.send.reset_mock()
+                self.alert.reset_mock()
+                if outcome == 'parent gone':
+                    self.entries.remove(parent)
+                draft[0] = False  # B's draft clears as the parent becomes idle.
+                self.observe(**{'%11': 'Idle'})
+                for _ in range(review_links.LOSS_TICKS * 4):
+                    self.observe()
+                to_parent = [call for call in self.send.call_args_list if call.args[0] == parent]
+                if outcome == 'notice':
+                    self.assertEqual(len(to_parent), 1, self.send.call_args_list)
+                    self.assert_parent_notice(parent)
+                    self.alert.assert_not_called()
+                    self.assertTrue(review_links.in_parent_stage('%13', WORKER_THREAD))
+                else:
+                    self.assertEqual(to_parent, [])
+                    self.assert_mak_alert()
+                    self.assertFalse(review_links.in_parent_stage('%13', WORKER_THREAD))
+
     def test_parent_grant_reopens_the_shared_cap_for_both_reviewers(self):
         parent = self.add_parent()
         self.add(worker_thread=WORKER_THREAD)
