@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import agents
 import auto_resume
 import paths
 import server
@@ -122,13 +123,38 @@ class AutoResumeTests(unittest.TestCase):
         self.sleeps = []
         self.changed = Mock()
 
-    def tick(self):
-        auto_resume.tick(entries=lambda: self.entries, folder_of=lambda e: e['cwd'],
-                         status_of=lambda e: {'state': self.states.get(e['id'], 'Idle')}, display_dir=lambda e: e['cwd'],
+    def tick(self, entries=None, status_of=None):
+        auto_resume.tick(entries=entries or (lambda: self.entries), folder_of=lambda e: e['cwd'],
+                         status_of=status_of or (lambda e: {'state': self.states.get(e['id'], 'Idle')}),
+                         display_dir=lambda e: e['cwd'],
                          run=self.tmux, now=lambda: self.clock, sleep=self.sleeps.append, on_change=self.changed)
 
     def saved(self):
         return json.loads((self.cache / 'open-tabs.json').read_text())
+
+    def test_tick_saves_live_tab_when_another_panes_pid_disappears_in_discovery(self):
+        self.tmux.panes.clear()
+        gone = dict(self.entry, id='%2', position='1.0')
+        self.tmux.add(gone, pane_pid='200', pane_dead='0')
+        self.tmux.add(self.entry, pane_pid='100', pane_dead='0')
+        processes = {200: (1, 'zsh'), 100: (1, 'claude')}
+        registry = dict(pid=100, tmux='fake.%1', cwd=self.entry['cwd'], sessionId=THREAD, registry='/fake/100.json')
+        with patch.object(agents, 'HOME', self.cache), \
+                patch.object(agents.pane_view, 'zoom_repair_all'), \
+                patch.object(agents.procinfo, 'table', return_value=processes), \
+                patch.object(agents, 'claude_registries', return_value=[registry]), \
+                patch.object(agents, 'codex_database'), \
+                patch.object(agents, 'process_start', side_effect=[FileNotFoundError('/proc/200/stat'), '100', '100']):
+            self.tick(entries=lambda: agents.discover({}, self.tmux))
+        self.assertEqual({thread: tab['pane'] for thread, tab in self.saved()['tabs'].items()}, {THREAD: '%1'})
+
+    def test_tick_saves_other_tabs_when_a_pid_disappears_during_status(self):
+        live = self.add(2)
+        status = Mock(side_effect=[ProcessLookupError(100), {'state': 'Working'}])
+        self.tick(status_of=status)
+        tabs = self.saved()['tabs']
+        self.assertEqual(list(tabs), [live['thread']])
+        self.assertTrue(tabs[live['thread']]['working'])
 
     def test_closed_tab_stays_gone_after_loss_and_stale_discovery(self):
         self.tick()

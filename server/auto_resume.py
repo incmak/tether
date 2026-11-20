@@ -258,15 +258,20 @@ def tick(*, entries, folder_of, status_of, display_dir, run=subprocess.run,
             if _archived(entry, prefs, display_dir):
                 archived.add(thread)
                 continue
+            folder = folder_of(entry) or ''
+            try:
+                working = status_of(entry).get('state') == 'Working'
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # The pane process can exit after discovery.
             row = rows.get(entry['id'], {})
             refreshed[thread] = dict(
                 thread=thread, agent=entry['agent'], profile=entry.get('codex_profile'), pane=entry['id'],
                 session=_session(entry), session_id=entry.get('tmux_session', ''),
                 order=_order(entry.get('position')),
-                folder=folder_of(entry) or '', name=row.get('@chat_name') or entry.get('pane_name') or '',
+                folder=folder, name=row.get('@chat_name') or entry.get('pane_name') or '',
                 icon=entry.get('pane_icon') or '', options={opt: row[opt] for opt in OPTIONS if row.get(opt)},
                 session_options={opt: row[opt] for opt in SESSION_OPTIONS if row.get(opt)},
-                working=status_of(entry).get('state') == 'Working', state='open', error='', started=0,
+                working=working, state='open', error='', started=0,
                 missing_since=None, stopped=False, offset=0, transcript=entry.get('transcript') or '')
 
         # Terminal probes and cleanup must stay outside the snapshot lock.
