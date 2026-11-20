@@ -230,8 +230,10 @@ def _serve(handler, body, *, sessions, folder, snapshot, last_reply, run, lock, 
             if body['action'] == 'send':
                 if caller is None:
                     raise ValueError('That session has ended. Select another tab.')
-                result = helper_tabs.send_message(body, caller, entries, run, status, send, last_reply,
-                                                  helper_tabs.SEND_LOCK)
+                result = helper_tabs.send_message(
+                    body, caller, entries, run, status, send, last_reply, helper_tabs.SEND_LOCK,
+                    before_send=lambda helper: review_links.hold_agent_prompt(
+                        helper['id'], worker_thread=helper_tabs._thread(helper) or ''))
                 # A prompt from another agent continues the worker's current review task (B189).
                 pane = result[1]['pane']
                 worker = next((entry for entry in entries if entry['id'] == pane), {})

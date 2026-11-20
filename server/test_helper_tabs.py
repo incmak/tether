@@ -290,6 +290,30 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(self.request('send', message=message)[0], 200)
             self.assertEqual(self.send.call_args.args[1], message)
 
+    def test_agent_send_holds_the_review_marker_before_delivery_and_undoes_it_on_failure(self):
+        # B292: a parent's turn can finish before the send returns. The marker must already be stored.
+        undo = Mock()
+        with patch.object(review_links, 'hold_agent_prompt', return_value=undo) as hold, \
+                patch.object(review_links, 'agent_prompt') as mark:
+            def delivered(*args):
+                hold.assert_called_once_with('%13', worker_thread=HELPER)
+                return 'submitted'
+            self.send.side_effect = delivered
+            self.assertEqual(self.request('send')[0], 200)
+            undo.assert_not_called()
+            mark.assert_called_once()
+            for failure in (RuntimeError('tmux failed'), OSError('pane gone')):
+                with self.subTest(failure=type(failure).__name__):
+                    hold.reset_mock()
+                    mark.reset_mock()
+                    undo.reset_mock()
+                    self.reset_record()
+                    self.send.side_effect = failure
+                    self.assertNotEqual(self.request('send')[0], 200)
+                    hold.assert_called_once()
+                    undo.assert_called_once()
+                    mark.assert_not_called()
+
     def test_agent_send_marks_the_worker_review_links_only_when_delivered(self):
         # B189: a prompt from another agent must not restart a paused review of that worker.
         with patch.object(review_links, 'agent_prompt') as mark:

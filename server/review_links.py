@@ -451,7 +451,7 @@ def _bind_worker(rows, worker, thread):
         counts = _merge_counts(first_counts, second_counts)
         if counts:
             bound['counts'] = counts
-        if conflict and (first.get('agent') or second.get('agent')):
+        if conflict and (first.get('agent') and not _saved(bound) or second.get('agent') and not _saved(unbound)):
             bound['restart'] = {**_restart_state(bound), 'agent': True}
         if unbound.get('pending_adoption'):
             bound['pending_adoption'] = True
@@ -676,6 +676,38 @@ def _parent_can_decide(cap):
     stage = cap['parent_stage']
     # A detached worker can get its grant after terminal delivery but before the watcher records the notice.
     return not _saved(cap) or stage.get('sent') or _feedback_in_flight.get(_cap_key(cap)) == stage
+
+
+def hold_agent_prompt(worker, *, worker_thread=None):
+    """Mark the worker's live caps before a parent prompt is delivered: its turn can finish before the send
+    returns. Returns an undo for a failed send. agent_prompt() still runs after delivery for the grant."""
+    with _lock:
+        rows = _read()
+        at = time.time()
+        held = []
+        for cap in rows:
+            if _is_cap(cap) and _matches(cap, worker, worker_thread) and not _saved(cap):
+                held.append((_cap_key(cap), cap.get('agent_prompt')))
+                cap['agent_prompt'] = at
+        if held:
+            _write(rows)
+
+    def undo():
+        with _lock:
+            rows = _read()
+            changed = False
+            for key, previous in held:
+                cap = _cap_for(rows, key)
+                if cap is None or cap.get('agent_prompt') != at:
+                    continue
+                if previous is None:
+                    cap.pop('agent_prompt')
+                else:
+                    cap['agent_prompt'] = previous
+                changed = True
+            if changed:
+                _write(rows)
+    return undo
 
 
 def agent_prompt(worker, sender=None, sender_thread=None, *, worker_thread=None):
@@ -1409,10 +1441,14 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         start = start if isinstance(start, dict) else {}
         if upgrade_paused:
             # An older turn may finish before the queued parent prompt starts. Keep the original send time.
-            if _is_time(started_at):
+            if _is_time(finished_at) and finished_at <= snapshot.get('review_turn_at', float('-inf')):
+                by_agent = True  # A transcript can return a turn that was judged before.
+            elif _is_time(started_at):
                 # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
-                # marker means an old watcher consumed the marker: keep the pause.
-                by_agent = _agent_prompt_fresh(cap, started_at) or ('agent_prompt' not in cap and start.get('agent'))
+                # marker comes from an old watcher that consumed the marker: it covers only a turn from before
+                # the pause.
+                by_agent = _agent_prompt_fresh(cap, started_at) or (
+                    'agent_prompt' not in cap and start.get('agent') and started_at < cap.get('upgrade_at', float('inf')))
             else:
                 by_agent = start.get('agent') or _agent_prompt_fresh(cap)
             if by_agent and _is_time(finished_at):
@@ -1934,10 +1970,12 @@ def _claim_upgrade_alerts(rows, entries):
         if not _is_cap(cap) or cap.get('paused') != UPGRADE_PAUSE or cap.get('upgrade_alerted'):
             continue
         key = _cap_key(cap)
-        if key[1] is None and any(_is_cap(other) and other.get('paused') == UPGRADE_PAUSE and other['worker'] == key[0]
-                                  and other.get('worker_thread') is not None for other in rows):
-            continue  # The bound cap alerts; a later bind carries its marker.
         worker = entries.get(key[0])
+        current = helper_tabs._thread(worker) if worker is not None else None
+        if key[1] is None and current is not None and any(
+                _is_cap(other) and other.get('paused') == UPGRADE_PAUSE and _cap_key(other) == (key[0], current)
+                for other in rows):
+            continue  # The current conversation's cap alerts; the bind carries its marker.
         name = cap['name']
         if worker is not None and helper_tabs._thread(worker) == key[1]:
             name = worker.get('pane_name') or worker.get('agent_name') or worker.get('label') or name
