@@ -828,7 +828,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
             {multi && !filtered && <ChevronRight size={14} className="chevron" aria-hidden="true" />}
             {!multi && dot(state)}
             {!multi && avatar(session.name)}
-            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <><WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
+            <span className="session-text"><span className="session-title">{session.name}{tag}{pinned ? null : prefs.pinned.includes(session.id) && <Pin size={11} aria-label="Pinned" />}{projectMark(marks?.[session.id])}{!multi && <>{session.panes[0].coordinator && <Network size={13} className="side-coordinator" role="img" aria-label="Coordinator" />}<WorkMark mark={workMarks?.[session.panes[0].id]} /><CronMark pane={session.panes[0]} /></>}</span>{prefs.showPaths && <span className="session-folder"><bdi dir="ltr">{session.dir}</bdi></span>}</span>
             {!multi && slotKey(session.panes[0].id)}
             {multi && (waits > 0 ? <span className="rollup">{waits}<span className="visually-hidden"> need you</span></span> : !open && state.kind !== 'idle' && dot(state))}
             {!multi && tabPick?.picked.has(session.panes[0].id) && <span className="visually-hidden">, selected</span>}

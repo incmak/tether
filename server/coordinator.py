@@ -155,6 +155,10 @@ def _same_chat(entry, session, transcript):
     return entry is not None and (entry.get('tmux_session'), entry.get('transcript')) == (session, transcript)
 
 
+def _chat_known(entry):
+    return entry is not None and entry.get('transcript') is not None and not entry.get('pending_conversation')
+
+
 def _change_mark(body, caller, entries, run, *, on_claim=None):
     """Change the mark using fresh entries while the caller holds the lock."""
     action = body['action']
@@ -223,8 +227,9 @@ def browser_role(body, *, fresh, lock, run, status, send):
             raise ValueError('A reviewer or advisor tab cannot be the coordinator.')
         new_claim = mode is not None and target.get('coordinator') not in MODES
         if new_claim:
+            state = _send_state(target, status)   # refuse before any mark changes; a Working tab gets a held send
+
             def notify():
-                state = _send_state(target, status)
                 send(target, '[Tether] The user made this tab the coordinator of this session in Tether.\n' + rules(), state)
 
             changed = _change_mark({'action': 'claim', 'events': mode, 'take': body.get('take')},
@@ -341,21 +346,40 @@ def _error_text(record, fallback):
 
 
 def _claude_turn(state, index, record):
-    if any(record.get(flag) for flag in ('isSidechain', 'isMeta', 'isCompactSummary', 'isAutoCompactSummary')):
-        return
     kind = record.get('type')
+    if any(record.get(flag) for flag in ('isSidechain', 'isCompactSummary', 'isAutoCompactSummary')):
+        return
+    # Claude marks real scheduled prompts as hidden metadata.
+    scheduled = (kind == 'user' and record.get('turnOrigin') == 'scheduled'
+                 and isinstance(record.get('scheduledTaskId'), str))
+    if record.get('isMeta') and not scheduled:
+        return
     if kind not in ('user', 'assistant', 'system', 'attachment'):
         return
     message = record.get('message')
     content = message.get('content') if isinstance(message, dict) else None
+    if kind == 'attachment':
+        attachment = record.get('attachment')
+        if not isinstance(attachment, dict) or attachment.get('type') != 'queued_command':
+            return
+        content = attachment.get('prompt')
+    parts = [part for part in content if isinstance(part, dict)] if isinstance(content, list) else []
     text = content if isinstance(content, str) else ''
-    if isinstance(content, list):
-        text = '\n'.join(part['text'] for part in content if isinstance(part, dict) and part.get('type') == 'text'
-                         and isinstance(part.get('text'), str))
+    if parts:
+        text = '\n'.join(part['text'] for part in parts if part.get('type') == 'text' and isinstance(part.get('text'), str))
+    # A prompt starts a turn only once Claude answers it (or the user interrupts it). A local command (/model) or
+    # shell input (!ls) writes prompt-like records that get no answer: they keep the last turn as the outcome.
+    if kind in ('assistant', 'system') and state.get('pending') and (
+            kind == 'assistant' or record.get('subtype') in ('error', 'api_error')):
+        state.update(kind=None, text='', identity=state['pending'], interrupted=False, pending=None)
     if kind == 'user' and text.startswith('[Request interrupted by user'):
-        state.update(kind=None, text='', interrupted=True)
-    elif agents.person_prompt(record):
-        state.update(kind=None, text='', identity=str(record.get('uuid') or index), interrupted=False)
+        if state.get('pending'):
+            state['identity'] = state['pending']
+        state.update(kind=None, text='', interrupted=True, pending=None)
+    elif (kind in ('user', 'attachment') and text.strip()
+          and not any(part.get('type') == 'tool_result' for part in parts)):
+        answered = text.lstrip().startswith(('<local-command', '<bash-stdout>', '<bash-stderr>'))
+        state['pending'] = None if answered else str(record.get('uuid') or index)
     elif not state.get('interrupted'):
         if kind == 'assistant':
             if record.get('isApiErrorMessage') is True:
@@ -388,15 +412,22 @@ def _codex_turn(state, index, record):
     elif kind == 'turn_aborted':
         reason = payload.get('reason')
         identity = str(turn or (state['identity'] if state.get('active') else index))
-        state.update(kind=None if reason == 'interrupted' else 'failed', active=False, identity=identity,
-                     text='' if reason == 'interrupted' else 'Turn ' + str(reason or 'aborted') + '.')
+        cancelled = reason in ('interrupted', 'replaced', 'review_ended')
+        state.update(kind=None if cancelled else 'failed', active=False, identity=identity,
+                     text='' if cancelled else 'Turn ' + str(reason or 'aborted') + '.')
     elif kind == 'error':
         identity = str(turn or (state['identity'] if state.get('active') else index))
         state.update(kind='failed', text=_error_text(payload, 'Agent error.'), identity=identity, active=True)
     elif kind == 'task_complete':
-        text = payload.get('last_agent_message') or state.get('draft') or ''
         identity = str(turn or (state['identity'] if state.get('active') else index))
-        state.update(kind='done', text=text, identity=identity, active=False)
+        error = payload.get('error')
+        if isinstance(error, dict):
+            text = error.get('message')
+            state.update(kind='failed', text=text if isinstance(text, str) else 'Agent error.',
+                         identity=identity, active=False)
+        else:
+            text = payload.get('last_agent_message') or state.get('draft') or ''
+            state.update(kind='done', text=text, identity=identity, active=False)
     elif state.get('active'):
         if state['kind'] == 'failed':
             state.update(kind=None, text='')
@@ -413,7 +444,7 @@ def deliver(pane, queue, events, *, lock, fresh, fresh_status, latest_outcome, s
         by_pane = {entry['id']: entry for entry in entries}
         found = marks(entries)
         coordinator = by_pane.get(pane)
-        if coordinator is None or coordinator.get('agent') not in AGENTS:
+        if not _chat_known(coordinator) or coordinator.get('agent') not in AGENTS:
             return None
         if pane not in found or not _same_chat(coordinator, queue['session'], queue['chat']):
             return []
@@ -423,8 +454,12 @@ def deliver(pane, queue, events, *, lock, fresh, fresh_status, latest_outcome, s
         live, held = [], []
         for event in events:
             tab = by_pane.get(event['pane'])
-            if (mode == 'off' or not _same_chat(tab, event['session'], event['chat'])
-                    or tab['id'] in found or tab.get('role') or tab.get('helper')):
+            if mode == 'off' or tab is None or tab['id'] in found or tab.get('role') or tab.get('helper'):
+                continue
+            if not _chat_known(tab):
+                held.append(event)
+                continue
+            if not _same_chat(tab, event['session'], event['chat']):
                 continue
             info = fresh_status(tab)
             state = info.get('state')
@@ -491,17 +526,21 @@ class Feed:
 
     def _event(self, entry, info, latest_outcome, now):
         """The update that this tab's state gives now, once per change, else None."""
+        if not _chat_known(entry):
+            return None
         state = info.get('state')
         record = self.seen.get(entry['id'])
         prompt = prompt_identity(info)
         if record is None or not _same_chat(entry, record['tmux_session'], record['transcript']):
             # First sight of this tab: a prompt that is already on screen is in the tabs list, so it is no update.
             record = self.seen[entry['id']] = {'state': state, 'prompt': prompt, 'since': now, 'worked': None,
-                                               # A turn that ended before first sight is no update. A running turn
-                                               # already has its identity, so seed only an idle tab.
-                                               'sent_prompt': prompt,
-                                               'finished': (latest_outcome(entry)['identity'] or None) if state == 'Idle' else None,
+                                               'sent_prompt': prompt, 'finished': None, 'seeded': False,
                                                'tmux_session': entry.get('tmux_session'), 'transcript': entry.get('transcript')}
+        if not record['seeded'] and state in ('Idle', 'Working'):
+            # The first Idle read hides an old turn. The first Working read lets that turn report when it ends.
+            if state == 'Idle':
+                record['finished'] = latest_outcome(entry)['identity'] or None
+            record['seeded'] = True
         if state != record['state'] or prompt != record['prompt']:
             record['state'], record['prompt'], record['since'] = state, prompt, now
         if state == 'Working':
@@ -540,7 +579,7 @@ class Feed:
             away = queue['away_since']
             if away is not None and now - away >= HOLD:
                 del self.queues[pane]
-            elif entry is not None and entry.get('agent') in AGENTS:
+            elif _chat_known(entry) and entry.get('agent') in AGENTS:
                 if pane not in found or not _same_chat(entry, queue['session'], queue['chat']):
                     del self.queues[pane]
                 else:
@@ -552,6 +591,8 @@ class Feed:
                     queue['mode'] = entry['coordinator']
         coordinators = {}   # session id -> coordinator pane, preferring a live agent
         for pane, (session, mode) in found.items():
+            if not _chat_known(by_pane[pane]):
+                continue
             queue = self.queues.setdefault(pane, {'events': [], 'sent_at': None, 'retry_at': None,
                                                   'session': session, 'chat': by_pane[pane].get('transcript'),
                                                   'away_since': None, 'mode': mode})
@@ -573,7 +614,7 @@ class Feed:
                 continue    # reviewers and advisors report to the tab they help
             try:
                 info = status(entry)
-                if pane in queued and info.get('state') == 'Working':
+                if pane in queued and _chat_known(entry) and info.get('state') == 'Working':
                     for queue in self.queues.values():
                         queue['events'] = [old for old in queue['events'] if old['pane'] != pane]
                 if not eligible:
@@ -591,7 +632,8 @@ class Feed:
                                         session=entry.get('tmux_session'), chat=entry.get('transcript')))
             del queue['events'][:-MAX_EVENTS]
         for pane in found:
-            self._flush(pane, by_pane[pane], self.queues[pane], status, deliver, now)
+            if _chat_known(by_pane[pane]):
+                self._flush(pane, by_pane[pane], self.queues[pane], status, deliver, now)
 
     def _flush(self, pane, coordinator, queue, status, deliver, now):
         """Wait for the send window before checking the live panes."""

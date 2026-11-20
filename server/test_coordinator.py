@@ -41,7 +41,7 @@ class Tmux:
 
 def tab(pane, session='$0', agent='claude', **extra):
     return dict({'id': pane, 'tmux_session': session, 'agent': agent, 'writable': True, 'owner_pid': 1,
-                 'pane_name': 'tab ' + pane[1:]}, **extra)
+                 'pane_name': 'tab ' + pane[1:], 'transcript': 'tab-' + pane[1:] + '.jsonl'}, **extra)
 
 
 class World:
@@ -382,6 +382,41 @@ class BrowserRole(unittest.TestCase):
                 self.assertEqual(self.world.marked(), {})
         self.assertEqual(self.world.sent, [])
 
+    def test_refused_take_preserves_both_marks_and_the_old_queue(self):
+        for state, writable in (('Approval', True), ('Input needed', True), ('Unknown', True), ('Idle', False)):
+            with self.subTest(state=state, writable=writable):
+                world = World()
+                world.entries[1].update(thread='thread-2', writable=writable)
+                world.act('%1', action='claim')
+                world.run_turn('%3')
+                queue = world.feed.queues['%1']
+                queued = queue['events'].copy()
+                self.assertEqual(len(queued), 1)
+                world.states['%2'] = state
+                tmux = world.tmux
+
+                def observe_after_mark(*args, **kwargs):
+                    result = tmux(*args, **kwargs)
+                    world.tick(0)
+                    return result
+
+                with patch.object(world, 'tmux', side_effect=observe_after_mark), self.assertRaises(RuntimeError):
+                    world.change_role(take=True)
+                self.assertEqual(world.marked(), {'%1': 'all'})
+                self.assertEqual(world.feed.queues['%1']['events'], queued)
+                self.assertEqual(world.sent, [])
+
+    def test_a_working_tab_can_be_claimed_and_gets_the_rules_held(self):
+        # A held send waits for the turn to end, like the coordinator's own messages to a working tab.
+        for state in ('Working', 'Idle'):
+            with self.subTest(state=state):
+                world = World()
+                world.entries[1]['thread'] = 'thread-2'
+                world.states['%2'] = state
+                self.assertTrue(world.change_role(mode='all')['sent'])
+                self.assertEqual(world.marked(), {'%2': 'all'})
+                self.assertEqual(len(world.sent), 1)
+
     def test_claim_rejects_invalid_modes_and_unsupported_panes(self):
         with self.assertRaisesRegex(ValueError, 'all, needs or off'):
             self.world.change_role(mode='loud')
@@ -398,8 +433,8 @@ class TurnOutcome(unittest.TestCase):
         self.path = Path(folder) / 'transcript.jsonl'
         self.outcome = coordinator.Feed().latest_outcome
 
-    def fixture(self, agent, count=None):
-        source = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{agent}.jsonl'
+    def fixture(self, agent, count=None, *, name=None):
+        source = Path(__file__).parent / 'fixtures' / 'coordinator_failed' / f'{name or agent}.jsonl'
         self.path.write_bytes(b''.join(source.read_bytes().splitlines(keepends=True)[:count]))
         return tab('%2', agent=agent, transcript=str(self.path))
 
@@ -414,6 +449,73 @@ class TurnOutcome(unittest.TestCase):
         failed = self.fixture('claude')
         self.assertEqual(self.outcome(failed), {'kind': 'failed', 'identity': 'prompt-2',
                                                 'text': 'You have reached your usage limit.'})
+
+    def test_claude_task_notification_starts_a_new_turn(self):
+        for kind, text in (('failed', 'API Error: Authentication failed.'), ('done', 'Second result.')):
+            with self.subTest(kind=kind):
+                entry = self.fixture('claude', 3, name='claude_notifications')
+                first = self.outcome(entry)
+                self.assertEqual(first['kind'], 'done')
+                entry = self.fixture('claude', None if kind == 'failed' else 6, name='claude_notifications')
+                if kind == 'done':
+                    self.append({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+                second = self.outcome(entry)
+                self.assertEqual((second['kind'], second['text']), (kind, text))
+                self.assertNotEqual(first['identity'], second['identity'])
+                self.assertEqual((first['identity'], second['identity']), ('notice-1', 'notice-2'))
+
+    def test_claude_slash_command_records_keep_the_turn_identity(self):
+        # A local command (/model, /cost) writes user text records but runs no turn: the last reply stays the outcome.
+        for records in (
+                [{'type': 'user', 'uuid': 'cmd', 'message': {'content': '<command-name>/model</command-name>\n<command-args></command-args>'}}],
+                [{'type': 'user', 'uuid': 'out', 'message': {'content': '<local-command-stdout>Set model</local-command-stdout>'}}],
+                [{'type': 'user', 'uuid': 'cmd', 'message': {'content': '<command-name>/cost</command-name>'}},
+                 {'type': 'user', 'uuid': 'out', 'message': {'content': '<local-command-stdout>$0.10</local-command-stdout>'}},
+                 {'type': 'assistant', 'uuid': 'late', 'message': {'content': [{'type': 'text', 'text': 'Done.'}]}}],
+                [{'type': 'user', 'uuid': 'sh', 'message': {'content': '<bash-input>ls</bash-input>'}},
+                 {'type': 'user', 'uuid': 'sh-out', 'message': {'content': '<bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>'}}]):
+            with self.subTest(records=records[0]['uuid']):
+                entry = self.fixture('claude', 3)
+                before = self.outcome(entry)
+                self.append(*records)
+                self.assertEqual(self.outcome(entry), before)
+
+    def test_claude_skill_command_starts_a_turn_when_claude_answers(self):
+        # Real shape (Claude Code 2.1): the command record, then the skill text as isMeta, then the reply.
+        for reply, kind in (({'type': 'assistant', 'uuid': 'r', 'message': {'content': [{'type': 'text', 'text': 'Shots pass.'}]}}, 'done'),
+                            ({'type': 'assistant', 'uuid': 'r', 'isApiErrorMessage': True,
+                              'message': {'content': [{'type': 'text', 'text': 'API Error: Overloaded.'}]}}, 'failed')):
+            with self.subTest(kind=kind):
+                entry = self.fixture('claude', 3)
+                before = self.outcome(entry)
+                self.append({'type': 'user', 'uuid': 'skill', 'message': {
+                                'content': '<command-message>verify</command-message>\n<command-name>/verify</command-name>'}},
+                            {'type': 'user', 'uuid': 'skill-text', 'isMeta': True, 'message': {'content': [{'type': 'text', 'text': 'Skill body.'}]}},
+                            reply)
+                after = self.outcome(entry)
+                self.assertEqual((after['kind'], after['identity']), (kind, 'skill'))
+                self.assertNotEqual(after['identity'], before['identity'])
+
+    def test_claude_non_prompt_records_keep_the_turn_identity(self):
+        entry = self.fixture('claude', 3)
+        prompt = {'type': 'user', 'uuid': 'non-prompt', 'message': {'content': 'Text outside a turn.'}}
+        self.append(*(dict(prompt, **{flag: True}) for flag in (
+            'isMeta', 'isSidechain', 'isCompactSummary', 'isAutoCompactSummary')),
+            dict(prompt, message={'content': [{'type': 'tool_result', 'content': 'Tool output.'},
+                                             {'type': 'text', 'text': 'Tool context.'}]}))
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'prompt-1', 'text': 'Done.'})
+
+    def test_claude_scheduled_fire_and_queued_prompt_start_turns(self):
+        for prompt in (
+                {'type': 'user', 'isMeta': True, 'turnOrigin': 'scheduled', 'scheduledTaskId': 'job',
+                 'message': {'role': 'user', 'content': 'Check the job.'}},
+                {'type': 'attachment', 'attachment': {'type': 'queued_command', 'prompt': 'Check the job.'}}):
+            with self.subTest(kind=prompt['type']):
+                entry = self.fixture('claude', 3)
+                self.append({'type': 'user', 'message': {'content': '[Request interrupted by user]'}},
+                            dict(prompt, uuid='next'),
+                            {'type': 'assistant', 'message': {'content': 'Checked.'}})
+                self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'next', 'text': 'Checked.'})
 
     def test_claude_system_error_recovery_and_user_interrupt(self):
         entry = self.fixture('claude')
@@ -456,6 +558,34 @@ class TurnOutcome(unittest.TestCase):
         self.append(self.codex_event('task_started', turn_id='turn-3', root_turn_id='turn-3'),
                     self.codex_event('turn_aborted', turn_id='turn-3', root_turn_id='turn-3', reason='error'))
         self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-3', 'text': 'Turn error.'})
+
+    def test_codex_task_complete_with_error_reports_a_failed_turn(self):
+        entry = self.fixture('codex', 2, name='codex_task_complete')
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'turn-1', 'text': 'Done.'})
+        self.fixture('codex', name='codex_task_complete')
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-2',
+                                               'text': 'The requested model is unavailable.'})
+        error_text = 'API Error: You have hit your usage limit.'
+        self.append(self.codex_event('task_started', turn_id='turn-3'),
+                    self.codex_event('task_complete', turn_id='turn-3', last_agent_message=None,
+                                     error={'message': error_text, 'codex_error_info': 'usage_limit_exceeded'}))
+        self.assertEqual(self.outcome(entry), {'kind': 'failed', 'identity': 'turn-3', 'text': error_text})
+
+    def test_codex_task_complete_with_null_reply_and_no_error_is_done(self):
+        entry = self.fixture('codex', 3, name='codex_task_complete')
+        self.append(self.codex_event('task_complete', turn_id='turn-2', root_turn_id='turn-2',
+                                     last_agent_message=None))
+        self.assertEqual(self.outcome(entry), {'kind': 'done', 'identity': 'turn-2', 'text': ''})
+
+    def test_codex_abort_reports_only_failure_reasons(self):
+        reasons = {'interrupted': None, 'replaced': None, 'review_ended': None, 'budget_limited': 'failed'}
+        for reason, kind in reasons.items():
+            with self.subTest(reason=reason):
+                entry = self.fixture('codex', 3)
+                self.assertIsNone(self.outcome(entry)['kind'])
+                self.append(self.codex_event('turn_aborted', turn_id='turn-2', root_turn_id='turn-2', reason=reason))
+                self.assertEqual(self.outcome(entry), {'kind': kind, 'identity': 'turn-2',
+                                                       'text': 'Turn budget_limited.' if kind else ''})
 
     def test_transcript_is_read_only_when_its_signature_changes(self):
         entry = self.fixture('codex', 2)
@@ -641,6 +771,96 @@ class Feed(unittest.TestCase):
                 self.assertIn('tab 3', world.sent[0][1])
                 self.assertEqual('tab 2' in world.sent[0][1], queued)
 
+    def test_unbound_coordinator_keeps_its_queue_until_its_chat_returns(self):
+        for middle in (dict(agent='claude', transcript=None, pending_conversation=True),
+                       dict(agent='claude', transcript='pending.jsonl', pending_conversation=True),
+                       dict(agent='codex', transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                entry = world.entries[0]
+                entry['agent'] = middle['agent']
+                world.act('%1', action='claim')
+                world.tick()
+                world.run_turn('%2')
+                bound = entry.copy()
+                entry.update(agent='shell', transcript=None, writable=False)
+                world.tick()
+                entry.update(middle, writable=True)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+                self.assertTrue(world.feed.queues['%1']['events'])
+                entry.pop('pending_conversation', None)
+                entry.update(bound)
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
+    def test_unbound_coordinator_is_away_until_hold_expires(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                world.entries[0].update(middle)
+                world.tick()
+                world.tick(coordinator.HOLD - 1)
+                self.assertTrue(world.feed.queues['%1']['events'])
+                world.tick(1)
+                self.assertEqual((world.sent, world.feed.queues), ([], {}))
+
+    def test_delivery_retries_an_unbound_coordinator_seen_under_the_lock(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                snapshot = world.fresh()
+                world.entries[0].update(middle)
+                queue = world.feed.queues['%1']
+                self.assertIsNone(world.deliver('%1', queue, queue['events']))
+                world.tick(coordinator.JOIN, entries=snapshot)
+                self.assertEqual(world.sent, [])
+                self.assertTrue(world.feed.queues['%1']['events'])
+                world.entries[0] = snapshot[0]
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+
+    def test_unbound_source_keeps_its_previous_turn_state(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.tick()
+                world.states['%2'] = 'Working'
+                world.tick()
+                bound = world.entries[1].copy()
+                world.entries[1].update(middle)
+                world.states['%2'] = 'Unknown'
+                world.tick(coordinator.MINIMUM_WORK)
+                world.entries[1] = bound
+                world.states['%2'] = 'Idle'
+                world.turns['%2'] = 1
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
+    def test_unbound_source_keeps_its_queued_update(self):
+        for middle in (dict(transcript='pending.jsonl', pending_conversation=True), dict(transcript=None)):
+            with self.subTest(middle=middle):
+                world = World()
+                world.act('%1', action='claim')
+                world.run_turn('%2')
+                bound = world.entries[1].copy()
+                world.entries[1].update(middle)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+                world.entries[1] = bound
+                world.tick()
+                self.assertEqual(len(world.sent), 1)
+                self.assertIn('tab 2', world.sent[0][1])
+
     def test_release_drops_an_existing_queue_immediately(self):
         self.world.run_turn('%2')
         self.world.act('%1', action='release')
@@ -654,7 +874,7 @@ class Feed(unittest.TestCase):
         self.world.tick()
         self.assertTrue(self.world.feed.queues['%1']['events'])
         self.world.entries[0].update(agent='claude', transcript='another.jsonl', writable=True)
-        self.wait_for_send()
+        self.world.tick(0)
         self.assertEqual(self.world.sent, [])
         self.assertFalse(self.world.feed.queues.get('%1', {}).get('events'))
 
@@ -692,6 +912,36 @@ class Feed(unittest.TestCase):
                 world.tick(coordinator.GAP)
                 self.assertEqual(len(world.sent), 1)
                 self.assertIn('failed: New failure.', world.sent[0][1])
+
+    def test_first_idle_after_an_unknown_or_unavailable_read_seeds_the_old_turn(self):
+        for first in ('Unknown', 'Unavailable'):
+            with self.subTest(first=first):
+                world = World()
+                world.outcomes['%2'] = {'kind': 'failed', 'text': 'Old failure.', 'identity': 'old'}
+                world.states['%2'] = first
+                world.act('%1', action='claim')
+                world.tick()
+                world.states['%2'] = 'Idle'
+                world.tick()
+                world.tick(coordinator.SETTLE)
+                world.tick(coordinator.JOIN)
+                self.assertEqual(world.sent, [])
+
+    def test_first_working_after_an_unknown_read_reports_the_turn_when_it_ends(self):
+        world = World()
+        world.states['%2'] = 'Unknown'
+        world.act('%1', action='claim')
+        world.tick()
+        world.states['%2'] = 'Working'
+        world.outcomes['%2'] = {'kind': 'done', 'text': 'Partial text.', 'identity': 'new'}
+        world.tick()
+        world.outcomes['%2'] = {'kind': 'done', 'text': 'Finished text.', 'identity': 'new'}
+        world.states['%2'] = 'Idle'
+        world.tick(coordinator.MINIMUM_WORK)
+        world.tick(coordinator.SETTLE)
+        world.tick(coordinator.JOIN)
+        self.assertEqual(len(world.sent), 1)
+        self.assertIn('finished: Finished text.', world.sent[0][1])
 
     def test_a_turn_running_at_first_sight_is_reported_when_it_ends(self):
         # The real parsers fix a turn's identity when it starts, so first sight during the turn sees its identity.
@@ -967,9 +1217,10 @@ class ServerSend(unittest.TestCase):
         return patch.object(self.server, 'fresh_status', side_effect=read)
 
     def deliver(self):
-        event = {'pane': '%2', 'session': '$0', 'chat': None, 'kind': 'needs', 'text': 'update',
+        event = {'pane': '%2', 'session': '$0', 'chat': self.source['transcript'], 'kind': 'needs', 'text': 'update',
                  'name': 'tab 2', 'token': ('approval', 'id', 'a1')}
-        return coordinator.deliver('%1', {'session': '$0', 'chat': None}, [event], lock=self.server.SEND_LOCK,
+        queue = {'session': '$0', 'chat': self.entry['transcript']}
+        return coordinator.deliver('%1', queue, [event], lock=self.server.SEND_LOCK,
                                    fresh=lambda: [self.entry, self.source], fresh_status=self.server.fresh_status,
                                    latest_outcome=coordinator.FEED.latest_outcome, submit_locked=self.server.submit_locked)
 

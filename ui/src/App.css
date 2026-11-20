@@ -328,6 +328,8 @@ label.broadcast-row:hover { background: var(--hover); }
 .coordinator-choice { flex: 1 1 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; text-align: left; }
 [aria-labelledby="pane-title"] .coordinator-picker .action-list button .coordinator-choice small { flex: none; margin-left: 0; text-align: left; white-space: normal; }
 .coordinator-picker .action-list button { padding-block: 10px; }
+.coordinator-picker .coordinator-name { overflow-wrap: anywhere; }
+.coordinator-picker .action-list button[aria-disabled="true"]:not([aria-checked="true"]) { opacity: .55; cursor: default; }
 .pane-tabs button.advisor-tab .pane-tab-name { max-width: 22ch; }
 .pane-tabs button.advising { color: var(--text); border-color: color-mix(in srgb, var(--advisor) 70%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--advisor) 35%, transparent), 0 0 12px color-mix(in srgb, var(--advisor) 45%, transparent); animation: advise-glow 1.8s ease-in-out infinite alternate; }
 .pane-tabs button.advising .state-dot.working { border-color: color-mix(in srgb, var(--advisor) 25%, transparent); border-top-color: var(--advisor); }

@@ -210,6 +210,9 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
 }) {
   const words = useWords()
   const [mode, setMode] = useState<'menu' | 'rename' | 'icon' | 'close' | 'move' | 'review' | 'coordinator' | 'group' | 'new-group'>(startClose ? 'close' : 'menu')
+  // The chat the Coordinator picker opened for, and the menu item that gets focus back after Back.
+  const [coordinatorThread, setCoordinatorThread] = useState<string | null>(null)
+  const [backFrom, setBackFrom] = useState<'coordinator' | null>(null)
   const [name, setName] = useState(pane.pane_name ?? '')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
@@ -248,7 +251,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
       : mode === 'review'
       ? <ReviewLinkPicker pane={pane} panes={panes} pending={pending} onBack={() => setMode('menu')} onPick={(worker, reviewer) => void run(async () => { await api('review-link', { worker, reviewer }); return undefined })} />
       : mode === 'coordinator'
-      ? <CoordinatorPicker pane={pane} panes={panes} pending={pending} onBack={() => setMode('menu')} onPick={(choice, take) => void run(async () => { await api('coordinator-role', { pane: pane.id, thread: pane.thread, mode: choice, take }); return undefined })} />
+      ? <CoordinatorPicker pane={pane} panes={panes} thread={coordinatorThread} pending={pending} error={error} onBack={() => { setError(''); setBackFrom('coordinator'); setMode('menu') }} onPick={(choice, take) => void run(async () => { await api('coordinator-role', { pane: pane.id, thread: coordinatorThread, mode: choice, take }); return undefined })} />
       : mode === 'icon'
       ? <IconPicker api={api} pane={pane} pending={pending} run={run} onBack={() => setMode('menu')} />
       : mode === 'close'
@@ -264,7 +267,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <button disabled={pending} onClick={() => setMode('move')}><ArrowRightLeft size={18} />Move to session…</button>
           {session && <button disabled={pending} onClick={() => setMode('group')}><FolderInput size={18} />Move to stack…{!!session.groups?.length && <small>{placeName(pane.group ?? '', session.groups)}</small>}</button>}
           {(pane.agent === 'claude' || pane.agent === 'codex') && <button disabled={pending} onClick={() => setMode('review')}><Eye size={18} />Link a review…</button>}
-          {canCoordinate(pane) && <button disabled={pending} onClick={() => setMode('coordinator')}><Network size={18} />Coordinator…{pane.coordinator && <small>{coordinatorLabel(pane.coordinator)}</small>}</button>}
+          {canCoordinate(pane) && <button disabled={pending} autoFocus={backFrom === 'coordinator'} onClick={() => { setError(''); setCoordinatorThread(pane.thread); setMode('coordinator') }}><Network size={18} />Coordinator…{pane.coordinator && <small>{coordinatorLabel(pane.coordinator)}</small>}</button>}
           <hr />
           <PlaceItems place={place} pending={pending} onClose={onClose} />
           <button disabled={pending} onClick={() => void split('right')}><Columns2 size={18} />{words.newRight}{words.tmux && <kbd>Ctrl-b %</kbd>}</button>
@@ -276,7 +279,7 @@ export function PaneActions({ api, session, tabCount, archived, pane, panes, at,
           <button disabled={pending} onClick={() => { onArchive(); onClose() }}>{archived ? <ArchiveRestore size={18} /> : <Archive size={18} />}{archived ? 'Restore' : 'Archive'} {words.pane}</button>
           <button className="danger-item" disabled={pending} onClick={() => setMode('close')}><Trash2 size={18} />Close {words.pane}{words.tmux && <kbd>Ctrl-b x</kbd>}</button>
         </div>}
-    {error && <p className="error" role="alert">{error}</p>}
+    {error && mode !== 'coordinator' && <p className="error" role="alert">{error}</p>}
   </dialog>
 }
 
