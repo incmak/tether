@@ -36,8 +36,9 @@ EXTRA_ROUNDS = 2
 COUNTS = ('rounds', 'empty_rounds', 'stale_rounds')
 CAP_DECISION = ('counts', 'limit', 'grant_rounds', 'paused', 'unreadable', 'parent_stage', 'parent_missing',
                 'escalate', 'cap_reset')
-CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', 'agent_prompt', 'parent_send_at',
-              'feedback_turn')
+# Parent evidence: the marker after delivery, the stamp before delivery, and the window renewed after an earlier turn.
+PARENT_FIELDS = ('agent_prompt', 'parent_send_at', 'parent_window_at')
+CAP_FIELDS = (*CAP_DECISION, 'restart', 'review_prompts', 'review_turn_at', *PARENT_FIELDS, 'feedback_turn')
 LEGACY_COUNTS = (*COUNTS, 'round_sources')
 UNOWNED = ''  # B268 saved records can predate reviewer identity.
 SAVED_CAP_TTL = 24 * 60 * 60
@@ -132,7 +133,7 @@ def _sanitize(row):
           'pending_idle_ticks', 'scope_ticks', 'verify_ticks'),
          lambda value: type(value) is int and value >= 0),
         (('created', 'saved_at'), lambda value: type(value) in (int, float)),
-        (('agent_prompt', 'parent_send_at', 'review_turn_at', 'upgrade_at'), _is_time),
+        ((*PARENT_FIELDS, 'review_turn_at', 'upgrade_at'), _is_time),
         (('scope_since', 'scope_retry_at', 'follow_up_checked_at', 'follow_up_untimed_at'),
          lambda value: (type(value) is int or type(value) is float and math.isfinite(value)) and value >= 0),
         (('unreadable', 'pending_reset', 'pending_adoption', 'seen_working', 'upgrade_alerted',
@@ -268,7 +269,7 @@ def _migrate(rows, cutoff):
                 counts = _merge_counts(counts, {reviewer: own})
         if ambiguous:
             cap.update(paused=UPGRADE_PAUSE, upgrade_at=time.time())
-            for field in ('agent_prompt', 'parent_send_at'):
+            for field in PARENT_FIELDS:
                 _keep_latest_time(cap, field, peers)
         else:
             row, = peers
@@ -409,7 +410,7 @@ def _merge_turn_tracking(bound, unbound):
     if prompts:
         bound['review_prompts'] = sorted(prompts, key=lambda marker: float('-inf') if isinstance(marker, str)
                                          else marker[1])
-    for field in ('review_turn_at', 'agent_prompt', 'parent_send_at'):
+    for field in ('review_turn_at', *PARENT_FIELDS):
         _keep_latest_time(bound, field, (bound, unbound))
     for field in ('feedback_turn', 'cap_reset'):
         if field in unbound:
@@ -443,7 +444,7 @@ def _bind_worker(rows, worker, thread):
             for field in (*CAP_DECISION, 'restart'):
                 bound.pop(field, None)
             bound['paused'] = UPGRADE_PAUSE
-            for field in ('agent_prompt', 'parent_send_at'):
+            for field in PARENT_FIELDS:
                 _keep_latest_time(bound, field, (bound, unbound))
         else:
             _merge_turn_tracking(bound, unbound)
@@ -791,8 +792,23 @@ def _agent_prompt_fresh(cap, at=None):
 
 def _parent_sent(cap, at=None):
     """An upgrade pause also counts a parent send that started before delivery, and one that failed."""
-    sent, at = cap.get('parent_send_at'), time.time() if at is None else at
+    sent = max((cap[field] for field in ('parent_send_at', 'parent_window_at') if field in cap), default=None)
+    at = time.time() if at is None else at
     return _agent_prompt_fresh(cap, at) or sent is not None and at < sent + AGENT_PROMPT_TTL
+
+
+def _renew_parent_window(cap, started_at, finished_at, *, legacy_agent=False):
+    """Carry parent evidence across a fresh completion during an upgrade pause."""
+    sent = max((cap[field] for field in ('agent_prompt', 'parent_send_at') if field in cap), default=None)
+    # A completion with no start time cannot show that it started after the send, so it carries the evidence too.
+    carry = legacy_agent if sent is None else (not _is_time(started_at) or started_at < sent) and sent <= finished_at
+    if not carry:
+        return False
+    # A timestamp cannot identify a queued parent turn if the watcher misses this completion
+    # or the prompt stays queued beyond the renewed window.
+    # The send time stays, so a later turn is judged from the send and the window renews only once.
+    _keep_latest_time(cap, 'parent_window_at', (cap, {'parent_window_at': finished_at}))
+    return True
 
 
 def _round_limit(cap):
@@ -903,7 +919,9 @@ def _merge(old, updated, stored):
     for key in set(old) | set(updated):
         if old.get(key, missing) == updated.get(key, missing):
             continue
-        if key in ('agent_prompt', 'parent_send_at') and stored.get(key, missing) != old.get(key, missing):
+        if key in PARENT_FIELDS and stored.get(key, missing) != old.get(key, missing):
+            if key == 'parent_window_at':
+                _keep_latest_time(merged, key, (stored, updated))  # Two watchers can renew the same window.
             continue
         if key == 'review_prompts':
             before, after = old.get(key, []), updated.get(key, [])
@@ -1415,15 +1433,18 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
             with _lock:
                 stored = _cap_for(_read(), key)
             if stored is not None:
-                for field in ('agent_prompt', 'parent_send_at'):
+                for field in PARENT_FIELDS:
                     _keep_latest_time(cap, field, (cap, stored))
+            candidate, started, finished = turn_reads[key]
+            judged = snapshot.get('review_turn_at', float('-inf'))
+            fresh_completion = _is_time(finished) and finished > max(judged, cap.get('upgrade_at', float('-inf')))
         if between_ticks:
             # This probe must leave the queued turn markers alone.
-            candidate, started, finished = turn_reads[key]
-            if (candidate == 'user' and _is_time(started) and _is_time(finished)
-                    and started >= cap.get('upgrade_at', float('inf'))
-                    and finished > cap.get('review_turn_at', float('-inf'))
-                    and not _parent_sent(cap, started)):
+            if fresh_completion and _renew_parent_window(cap, started, finished):
+                cap['review_turn_at'] = finished
+            elif (candidate == 'user' and _is_time(started) and _is_time(finished)
+                  and started >= cap.get('upgrade_at', float('inf'))
+                  and finished > judged and not _parent_sent(cap, started)):
                 source, started_at, finished_at = candidate, started, finished
                 cap['restart'] = _restart_state(cap)
         else:
@@ -1435,26 +1456,20 @@ def _step(link, cap, snapshot, entries, status, send, last_reply, awaiting, clea
         start = cap.pop('restart')
         start = start if isinstance(start, dict) else {}
         if upgrade_paused:
-            # An older turn may finish before the queued parent prompt starts. Keep the original send time.
-            judged = snapshot.get('review_turn_at', float('-inf'))
-            if start.get('agent') and not (_is_time(finished_at) and finished_at > max(
-                    judged, cap.get('upgrade_at', float('-inf')))):
+            if start.get('agent') and not fresh_completion:
                 # A parent turn was seen Working, but this read does not show its completion. Keep the evidence
                 # until a completion after the pause is read.
                 cap['restart'] = start
                 by_agent = True
                 finished_at = None
+            elif fresh_completion and _renew_parent_window(cap, started_at, finished_at,
+                                                          legacy_agent=start.get('agent', False)):
+                by_agent = True
             elif _is_time(finished_at) and finished_at <= judged:
                 by_agent = True  # A transcript can return a turn that was judged before.
             elif _is_time(started_at):
-                # The latest turn may not be the one seen Working. Judge it by its own start. A flag without a
-                # marker comes from an older watcher that consumed the marker. That turn's owner is unknown, so
-                # the pause holds. The parent prompt may still be queued behind this turn, so spending the flag
-                # opens a parent window now; a Mak turn that starts after it clears the pause.
+                # The latest turn may not be the one seen Working. Judge it by its own start.
                 by_agent = _parent_sent(cap, started_at)
-                if not by_agent and 'agent_prompt' not in cap and start.get('agent'):
-                    by_agent = True
-                    _keep_latest_time(cap, 'parent_send_at', (cap, {'parent_send_at': time.time()}))
             else:
                 by_agent = start.get('agent') or _parent_sent(cap)
             if by_agent and _is_time(finished_at):

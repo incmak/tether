@@ -2810,7 +2810,7 @@ class ReviewLinksTests(unittest.TestCase):
             'restart': (dict(paused=True, agent=True), dict(paused=False)),
             'review_prompts': ([['review-summary', now - 10]], [['review-notice', now - 5]]),
             'review_turn_at': (now - 8, now - 3), 'agent_prompt': (now - 11, now - 6),
-            'parent_send_at': (now - 12, now - 7),
+            'parent_send_at': (now - 12, now - 7), 'parent_window_at': (now - 9, now - 4),
             'feedback_turn': (dict(sent_at=now - 2, phase='pending'), dict(sent_at=now - 1, phase='queued')),
         }
         fields = tuple(field for field in review_links.CAP_FIELDS if field != 'counts')
@@ -2841,7 +2841,7 @@ class ReviewLinksTests(unittest.TestCase):
                         cap, = (row for row in review_links._read() if row.get('cap'))
                         shared = {field: cap[field] for field in fields if field in cap}
                         expected = {'paused': 'upgrade', **{field: max(row[field] for row in order if field in row)
-                                                            for field in ('agent_prompt', 'parent_send_at')}}
+                                                            for field in review_links.PARENT_FIELDS}}
                         if any('saved_at' not in row and row.get('restart', {}).get('agent') for row in order):
                             # A live row's agent flag is the only evidence of a parent turn whose marker was consumed.
                             expected['restart'] = {'paused': True, 'agent': True}
@@ -3208,7 +3208,7 @@ class ReviewLinksTests(unittest.TestCase):
                     continue
                 self.assertTrue(paused())
                 self.assertFalse(self.send.called)
-                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                after = self.upgrade_cap()['parent_window_at'] + review_links.AGENT_PROMPT_TTL
                 self.clock.return_value = after + 5
                 self.turn_source = Mock(return_value=('user', after, after + 2))
                 self.observe(**{'%13': 'Working'})
@@ -3241,7 +3241,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
                 self.send.assert_not_called()
                 # The next Mak turn after the parent window clears the pause.
-                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                after = self.upgrade_cap()['parent_window_at'] + review_links.AGENT_PROMPT_TTL
                 self.clock.return_value = after + 5
                 self.turn_source = Mock(return_value=('user', after, after + 2))
                 self.observe(**{'%13': 'Working'})
@@ -3277,14 +3277,164 @@ class ReviewLinksTests(unittest.TestCase):
                 self.observe(**{'%13': 'Idle'})
                 self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
                 self.send.assert_not_called()
-                self.assertGreaterEqual(self.upgrade_cap()['parent_send_at'], 1004)
+                self.assertGreaterEqual(self.upgrade_cap()['parent_window_at'], 1004)
                 # A Mak turn that starts after the window clears the pause.
-                after = self.upgrade_cap()['parent_send_at'] + review_links.AGENT_PROMPT_TTL
+                after = self.upgrade_cap()['parent_window_at'] + review_links.AGENT_PROMPT_TTL
                 self.clock.return_value = after + 5
                 self.turn_source = Mock(return_value=('user', after, after + 2))
                 self.observe(**{'%13': 'Working'})
                 self.observe(**{'%13': 'Idle'})
                 self.assertFalse([row for row in self.rows() if row.get('cap') and row.get('paused') == 'upgrade'])
+
+    def test_upgrade_parent_evidence_survives_a_turn_that_started_before_it(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.enterContext(own_time(sys.modules[__name__], time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        ttl = review_links.AGENT_PROMPT_TTL
+        earlier_end = 1002 + ttl + 5
+        for evidence, seen, first_read in product(('stamp', 'marker', 'both', 'flag'),
+                                                   ('Working', 'between polls'),
+                                                   ('completion', 'none', 'replay', 'untimed start')):
+            # A legacy flag requires a Working poll by the old watcher. Its stored restart forces that path.
+            if evidence == 'flag' and seen == 'between polls':
+                continue
+            with self.subTest(evidence=evidence, seen=seen, first_read=first_read):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0, **{'%13': 'Idle'})
+                self.assertEqual(self.upgrade_cap()['upgrade_at'], 1000)
+
+                self.turn_source.return_value = ('user', 1001, None)
+                if seen == 'Working':
+                    self.observe(elapsed=1, **{'%13': 'Working'})
+                self.clock.return_value = 1002
+                if evidence in ('stamp', 'both'):
+                    review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+                if evidence in ('marker', 'both'):
+                    review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)
+                if evidence == 'flag':
+                    rows = self.rows()
+                    cap, = (row for row in rows if row.get('cap'))
+                    cap['restart']['agent'] = True
+                    self.file.write_text(json.dumps(rows))
+                elif seen == 'Working':
+                    self.observe(elapsed=0, **{'%13': 'Working'})
+
+                self.clock.return_value = earlier_end
+                if first_read == 'none':
+                    self.turn_source.return_value = ('unknown', None, None)
+                    self.observe(elapsed=0, **{'%13': 'Idle'})
+                # Review round 7: a completion can carry a finish time and no start time.
+                self.turn_source.return_value = ('user', None if first_read == 'untimed start' else 1001, earlier_end)
+                self.observe(elapsed=0.25, **{'%13': 'Idle'})
+                if first_read == 'replay':
+                    self.observe(elapsed=0.25, **{'%13': 'Idle'})
+
+                self.clock.return_value = earlier_end + 1
+                self.turn_source.return_value = ('user', earlier_end + 1, None)
+                if seen == 'Working':
+                    self.observe(elapsed=0, **{'%13': 'Working'})
+                self.clock.return_value = earlier_end + 3
+                self.turn_source.return_value = ('user', earlier_end + 1, earlier_end + 3)
+                self.observe(elapsed=0, **{'%13': 'Idle'})
+                self.send.assert_not_called()
+                cap, = (row for row in self.rows() if row.get('cap'))
+                self.assertEqual(cap.get('paused'), 'upgrade')
+                self.assertEqual(cap['parent_window_at'], earlier_end)
+                if evidence in ('marker', 'both'):
+                    self.assertEqual(cap['agent_prompt'], 1002)
+
+                after = cap['parent_window_at'] + ttl + 1
+                self.clock.return_value = after
+                self.turn_source.return_value = ('user', after, None)
+                if seen == 'Working':
+                    self.observe(elapsed=0, **{'%13': 'Working'})
+                self.turn_source.return_value = ('user', after, after + 2)
+                self.observe(elapsed=2, **{'%13': 'Idle'})
+                self.assertEqual(review_links.paused(), {})
+
+    def test_upgrade_parent_window_is_judged_from_the_send_not_the_renewal(self):
+        # Review round 8: a Claude queued prompt reads with the queue time as its start. That turn started after the
+        # send, so it is the parent's own turn; it must not renew the window a second time.
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        ttl = review_links.AGENT_PROMPT_TTL
+        earlier_end = 1002 + ttl + 5
+        for seen in ('Working', 'between polls'):
+            with self.subTest(seen=seen):
+                self.clock.return_value = 1000
+                self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+                self.send.reset_mock()
+                self.turn_source = Mock(return_value=('background', None, None))
+                self.observe(elapsed=0, **{'%13': 'Idle'})
+                self.clock.return_value = 1002
+                review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+                self.clock.return_value = earlier_end
+                self.turn_source = Mock(return_value=('user', 1001, earlier_end))
+                self.observe(**{'%13': 'Idle'})
+                self.clock.return_value = earlier_end + 3
+                self.turn_source = Mock(return_value=('user', 1003, earlier_end + 3))
+                if seen == 'Working':
+                    self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertEqual(self.upgrade_cap()['paused'], 'upgrade')
+                self.send.assert_not_called()
+                # Mak's turn starts 1 s after the one renewed window ends.
+                mak = earlier_end + ttl + 1
+                self.clock.return_value = mak + 2
+                self.turn_source = Mock(return_value=('user', mak, mak + 2))
+                if seen == 'Working':
+                    self.observe(**{'%13': 'Working'})
+                self.observe(**{'%13': 'Idle'})
+                self.assertEqual(review_links.paused(), {})
+
+    def test_upgrade_parent_window_renews_once(self):
+        self.enterContext(own_time(review_links, time=self.clock))
+        self.enterContext(own_time(sys.modules[__name__], time=self.clock))
+        self.entries.append(dict(self.reviewer, id='%21'))
+        self.states['%21'] = 'Idle'
+        self.clock.return_value = 1000
+        self.file.write_text(json.dumps(self.legacy_pair(dict(rounds=3), dict(empty_rounds=2))))
+        self.turn_source = Mock(return_value=('background', None, None))
+        self.observe(elapsed=0)
+        self.clock.return_value = 1002
+        review_links.agent_prompt('%13', worker_thread=WORKER_THREAD)
+        self.clock.return_value = 1004
+
+        # The unrelated user turn started after the marker and before the newer stamp.
+        earlier_end = 1004 + review_links.AGENT_PROMPT_TTL + 5
+        earlier_turn = ('user', 1003, earlier_end)
+
+        def read_after_parent_send(_worker):
+            review_links.mark_parent_send('%13', worker_thread=WORKER_THREAD)
+            self.clock.return_value = earlier_end + 1
+            self.turn_source.side_effect = None
+            return earlier_turn
+
+        self.turn_source.side_effect = read_after_parent_send
+        self.turn_source.return_value = earlier_turn
+        for elapsed in (0, 1, 2):
+            self.observe(elapsed=elapsed)
+            cap = self.upgrade_cap()
+            self.assertEqual(cap['parent_window_at'], earlier_end)
+            self.assertEqual(cap['review_turn_at'], earlier_end)
+
+        self.turn_source.return_value = ('user', earlier_end + 5, earlier_end + 7)
+        self.observe(elapsed=1, **{'%13': 'Working'})
+        self.observe(elapsed=2, **{'%13': 'Idle'})
+        self.assertEqual(self.upgrade_cap()['parent_window_at'], earlier_end)
+        self.send.assert_not_called()
+
+        # The transcript now shows Mak's new turn. The earlier user completion is no longer returned.
+        after = earlier_end + review_links.AGENT_PROMPT_TTL + 1
+        self.clock.return_value = after + 2
+        self.turn_source.return_value = ('user', after, after + 2)
+        self.observe(elapsed=0)
+        self.assertEqual(review_links.paused(), {})
 
     def test_upgrade_alert_for_an_unbound_cap_waits_only_for_the_current_conversation(self):
         self.enterContext(own_time(review_links, time=self.clock))
