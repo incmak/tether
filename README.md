@@ -393,6 +393,17 @@ Friday uses Pocket TTS's `alba` voice with offline Hugging Face access.
 
 The two Friday units are `tether-friday.service` (worker, loopback port 7686) and `tether-llm.service` (llama-server, loopback port 7687).
 The unit files live in `server/deploy/`. They require the prepared venv and models; the installer does not install these units.
+
+Run only one Friday worker. A second copy fails with "address already in use" on port 7686 and, with `Restart=always`, restarts every few seconds.
+To give voice a higher CPU share on a busy host, you can run the worker as a system unit in its own slice instead of the user unit:
+
+1. Copy `server/deploy/tether-friday.service` to `/etc/systemd/system/`.
+2. In `[Service]`, add `User=`, `Group=`, `Slice=voice.slice`, `Environment=HOME=…` and `Environment=XDG_RUNTIME_DIR=/run/user/<uid>`. Replace each `%h` with the home folder, and set `WantedBy=multi-user.target`.
+3. Create `/etc/systemd/system/voice.slice` with `CPUWeight=1000` under `[Slice]`.
+4. Run `sudo systemctl daemon-reload && sudo systemctl enable --now tether-friday.service`.
+5. Remove the user copy: `systemctl --user disable --now tether-friday.service`, then delete `~/.config/systemd/user/tether-friday.service`.
+
+Check which copy runs with `systemctl status tether-friday.service` and `systemctl --user status tether-friday.service`.
 `TETHER_FRIDAY_PORT`, `TETHER_LLM_URL`, and `TETHER_FRIDAY_MODELS` override the worker defaults.
 `TETHER_FRIDAY_URL` sets the server's signaling proxy destination.
 Set `TETHER_FRIDAY_BRAIN=gemini` for Vertex AI; `local` is the default. STT, VAD, Smart Turn, and TTS stay local.
