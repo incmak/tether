@@ -95,5 +95,5 @@ diff is ignored.
 ## R14: Tests stop their private tmux servers
 - Paths: `^server/test_.*\.py$`
 - Text: `new-session`
-- Check: Use `private_tmux` from `server/test_tmux_isolation.py`. Register cleanup before the first tmux call. Start tmux with `-f /dev/null` and a private socket.
+- Check: Use `private_tmux` from `server/test_tmux_isolation.py`. The detached watcher starts each server as its own foreground child on a private socket with `-f /dev/null`. Clients use `-N` to prevent replacement servers. The watcher reaps its children before it removes their folders, even if `timeout` kills the test process.
 - Incident: B465; note test-tmux-leak.md

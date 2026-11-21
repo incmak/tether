@@ -839,11 +839,10 @@ class WrapperTests(unittest.TestCase):
                             f'open({str(self.temp / "argv")!r}, "a").write(json.dumps([sys.argv[0]] + sys.argv[1:] + [os.environ.get("TETHER_LAUNCH", "")]) + "\\n")\n')
             fake.chmod(0o755)
         env = dict(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'),
-                   CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh', MOBILE_TMUX_CONFIG=str(self.temp / 'config'))
+                   CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh', MOBILE_TMUX_CONFIG=str(self.temp / 'config'),
+                   TETHER_LAUNCH=None, INVOCATION_ID=None, TETHER_CDP_URL=None)  # the panes inherit the server env
         self.private = private_tmux(self, 'tlaunch-', env)
         self.env = self.private.env
-        for key in ('TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL'):
-            self.env.pop(key, None)
         self.socket = self.private.socket
         self.tmux = self.private.tmux
         # The launcher reads its pane context. The tmux client needs only the socket.

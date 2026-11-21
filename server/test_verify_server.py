@@ -23,7 +23,7 @@ from urllib.parse import parse_qs
 import urllib.request
 from unittest.mock import Mock, patch
 
-from test_tmux_isolation import stop_server
+from test_tmux_isolation import private_tmux, watch_request
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / 'dev'))
@@ -70,6 +70,57 @@ class Configuration(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertIn('MOBILE_TMUX_TMUX and PATH must select the fixture wrapper', run.stderr)
 
+    def test_supplied_root_requires_a_private_directory_and_only_allows_its_socket(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        other = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        self.assertEqual(verify_server.check_supplied_root(root), root)
+        root.chmod(0o755)
+        with self.assertRaisesRegex(SystemExit, 'private 0700 directory'):
+            verify_server.check_supplied_root(root)
+        root.chmod(0o700)
+        with patch.object(verify_server.os, 'getuid', return_value=os.getuid() + 1):
+            with self.assertRaisesRegex(SystemExit, 'owned by this user'):
+                verify_server.check_supplied_root(root)
+        alias = other.with_name(other.name + '-link')
+        alias.symlink_to(root, target_is_directory=True)
+        self.addCleanup(alias.unlink)
+        with self.assertRaisesRegex(SystemExit, 'private 0700 directory'):
+            verify_server.check_supplied_root(alias)
+        sock = root / 'tmux.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind(str(other / 'tmux.sock'))
+            sock.symlink_to(other / 'tmux.sock')
+            with self.assertRaisesRegex(SystemExit, 'empty except for'):
+                verify_server.check_supplied_root(root)
+            sock.unlink()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_socket:
+            server_socket.bind(str(sock))
+            self.assertEqual(verify_server.check_supplied_root(root), root)
+            (root / 'extra').touch()
+            with self.assertRaisesRegex(SystemExit, 'empty except for'):
+                verify_server.check_supplied_root(root)
+
+    def test_supplied_root_uses_client_only_tmux_and_leaves_cleanup_to_the_watcher(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='tv-', dir=verify_server.TEMP)))
+        dist = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (dist / 'index.html').touch()
+        fake = dist / 'tmux'
+        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$0.log"\nexit 1\n')
+        fake.chmod(0o700)
+        done = subprocess.run([sys.executable, SCRIPT, '--root', str(root), '--dist', str(dist)],
+                              env={**os.environ, 'PATH': str(dist) + os.pathsep + os.defpath},
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn('tmux did not start', done.stderr)
+        self.assertTrue((root / verify_server.MARKER).is_file())
+        log = dist / 'tmux.log'
+        client = ['-N', '-S', str(root / 'tmux.sock'), '-f', '/dev/null']
+        self.assertEqual(log.read_text().splitlines()[:6], [*client, 'new-session'])
+        shown = subprocess.run([str(root / 'bin/tmux'), 'list-sessions'],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(shown.returncode, 1, shown.stderr)
+        self.assertEqual(log.read_text().splitlines(), [*client, 'list-sessions'])
+
     def test_signals_while_root_and_tmux_are_being_created(self):
         script = r'''
 import os, signal, sys, tempfile
@@ -89,7 +140,7 @@ def temporary(*args, **kwargs):
 original = tempfile.mkdtemp
 tempfile.mkdtemp = temporary
 commands = []
-def tmux(executable, root, env, *args):
+def tmux(executable, root, env, *args, client_options=()):
     assert root == tracked[0]
     commands.append(args[0])
     if args[0] == 'new-session':
@@ -988,23 +1039,32 @@ class ProxyDecoys(unittest.TestCase):
 class Boot(unittest.TestCase):
     def setUp(self):
         require_loopback(self)
-        self.dist = Path(self.enterContext(tempfile.TemporaryDirectory(dir=verify_server.TEMP)))
+        self.dist = Path(tempfile.mkdtemp(dir=verify_server.TEMP))
+        watch_request('own', self.dist)
+        self.addCleanup(watch_request, 'stop', self.dist)
         (self.dist / 'index.html').write_text('<!doctype html><title>Fixture build</title>')
-        self.decoy = self.dist / 'other.sock'
         self.env = verify_server.clean_env(self.dist, self.dist)
-        self.addCleanup(stop_server, self.decoy)
-        started = self.tmux(self.decoy, 'new-session', '-d', '-s', 'Decoy', 'exec sleep 60')
-        if 'Operation not permitted' in started.stderr or 'Permission denied' in started.stderr:
-            self.skipTest('not run (sandbox): private tmux socket: ' + started.stderr.strip())
-        started.check_returncode()
+        decoy = private_tmux(self, 'ttz', self.env)
+        self.decoy = Path(decoy.socket)
+        decoy.tmux('new-session', '-d', '-s', 'Decoy', 'exec sleep 60').check_returncode()
 
     def tmux(self, sock, *args):
-        return subprocess.run([TMUX, '-S', str(sock), '-f', '/dev/null', *args], env=self.env,
+        return subprocess.run([TMUX, '-N', '-S', str(sock), '-f', '/dev/null', *args], env=self.env,
                               capture_output=True, text=True, timeout=10)
 
+    def launch(self, launcher=(SCRIPT,), *, pass_fds=()):
+        root = Path(tempfile.mkdtemp(prefix='tv-', dir=verify_server.TEMP))
+        watch_request('own', root)
+        watch_request('start', root, env=verify_server.clean_env(root, self.dist))
+        self.addCleanup(watch_request, 'stop', root)
+        process = subprocess.Popen([sys.executable, *launcher, '--dist', str(self.dist), '--until-stdin-closes',
+                                    '--root', str(root)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
+                                   pass_fds=pass_fds)
+        return process, root
+
     def start(self):
-        process = subprocess.Popen([sys.executable, SCRIPT, '--dist', str(self.dist), '--until-stdin-closes'],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+        process, _ = self.launch()
 
         def stop():
             if process.poll() is None:
@@ -1086,6 +1146,9 @@ class Boot(unittest.TestCase):
         pid = int(panes.stdout.strip())
         process.send_signal(signal.SIGTERM)
         self.assertEqual(process.wait(timeout=15), 0)
+        self.assertTrue(root.is_dir())
+        self.tmux(sock, 'list-sessions').check_returncode()
+        self.assertTrue(self.doCleanups())
         self.assertFalse(root.exists())
         self.assertNotEqual(self.tmux(sock, 'list-sessions').returncode, 0)
         # A session killed with its private server can briefly leave a zombie until its parent reaps it.
