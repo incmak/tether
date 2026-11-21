@@ -5,16 +5,16 @@ import { needsYou } from './paneState'
 
 // state: the tab waits by its state only (an approval or a question with no ask); its ask is made up from the pane.
 export interface Waiting { pane: Pane; ask: Ask; state?: boolean }
-export type AskAction = 'handled' | 'snooze' | 'opened'
+export type AskAction = 'handled' | 'snooze' | 'opened' | 'later' | 'back'
 export interface AskResult { ask: Ask | null; waiting: number }
 export interface Digest { enabled: boolean; hour: number }
 
 /** Waited this long (seconds): the age shows in bold. */
 export const LATE = 12 * 3600
 
-/** The asks that show now: not snoozed, oldest first. */
+/** The asks that show now: not snoozed and not in Later, oldest first. */
 export function waitingAsks(panes: Pane[], now: number): Waiting[] {
-  return panes.flatMap(pane => pane.ask && pane.agent !== 'shell' && !(pane.ask.snoozed_until && pane.ask.snoozed_until > now) ? [{ pane, ask: pane.ask }] : [])
+  return panes.flatMap(pane => pane.ask && pane.agent !== 'shell' && !pane.ask.later && !(pane.ask.snoozed_until && pane.ask.snoozed_until > now) ? [{ pane, ask: pane.ask }] : [])
     .sort((a, b) => a.ask.since - b.ask.since)
 }
 
@@ -30,8 +30,24 @@ export function deckItems(panes: Pane[], now: number): Waiting[] {
 
 export const visibleAsk = (pane: Pane, now: number) => waitingAsks([pane], now)[0]?.ask ?? null
 
-export const askAction = (api: Api, pane: Pane, action: AskAction) =>
-  api<AskResult>(`attention/${action}`, { session: pane.id, thread: pane.thread ?? null })
+/** ask: the occurrence id the page saw. The server refuses the write (409) when the ask changed since. */
+export const askAction = (api: Api, pane: Pane, action: AskAction, ask?: Ask | null) =>
+  api<AskResult>(`attention/${action}`, { session: pane.id, thread: pane.thread ?? null, ...(ask?.id ? { ask: ask.id } : {}) })
+
+/** The tabs whose ask is in Later, newest move first. */
+export const laterAsks = (panes: Pane[]): Waiting[] =>
+  panes.flatMap(pane => pane.ask?.later && pane.agent !== 'shell' ? [{ pane, ask: pane.ask }] : [])
+    .sort((a, b) => (b.ask.later?.at ?? 0) - (a.ask.later?.at ?? 0))
+
+/** One line of the automation log (server/attention.py GET attention/log, audit kinds auto.*). */
+export interface AutoEntry {
+  id: string; kind: string; summary: string; at: number
+  detail?: Record<string, string | number | boolean | null>
+  undone?: boolean
+  undo?: { session: string; thread: string | null; ask: string } | null
+}
+export interface AutoLog { entries: AutoEntry[]; handled_today: number }
+export interface AttentionState { later: Ask[]; handled_today: number; rules: { stale: boolean }; digest: Digest }
 
 export const stillWait = (count: number) => count ? `${count} still wait${count === 1 ? 's' : ''}.` : 'Nothing else waits on you.'
 

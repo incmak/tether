@@ -12,7 +12,7 @@ import type { HomeCard, HomeGroups } from './homeGroups'
 import { KIND_LABEL } from './needs'
 import { WorktreeMark } from './Worktree'
 import { LATE, useNow } from './attention'
-import { OldestButton, SortButton, ordered } from './Attention'
+import { HandledButton, OldestButton, SortButton, ordered } from './Attention'
 import type { WaitSort } from './Attention'
 import type { Waiting } from './attention'
 import type { DueReminders } from './Attention'
@@ -188,8 +188,8 @@ export function NoTerminal({ loaded, loading, error, onRetry, onMenu }: { loaded
   </Blank>
 }
 
-export function Home({ api, groups: all, asks = [], reminders, sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
-  api: Api; groups: HomeGroups; asks?: Waiting[]; reminders?: DueReminders; sessions?: Session[]; sort?: WaitSort; decisions?: ReactNode; decisionCount?: number; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
+export function Home({ api, groups: all, asks = [], later, reminders, sessions = [], sort, decisions, decisionCount = 0, hasAgents, loaded, loading, error, onRetry, onOpen, onMarkRead, onUpdate, onNew, onMenu, onBacklog }: {
+  api: Api; groups: HomeGroups; asks?: Waiting[]; later?: Waiting[] | null; reminders?: DueReminders; sessions?: Session[]; sort?: WaitSort; decisions?: ReactNode; decisionCount?: number; hasAgents: boolean; loaded: boolean; loading: boolean; error: string
   onRetry: () => unknown; onOpen: (pane: Pane) => void; onMarkRead: (panes: string[]) => void; onUpdate: () => void; onNew: () => void; onMenu: () => void; onBacklog?: () => void
 }) {
   const root = useRef<HTMLElement>(null)
@@ -262,6 +262,7 @@ export function Home({ api, groups: all, asks = [], reminders, sessions = [], so
         <button type="button" className="icon-button mobile-menu" aria-label="Open sessions" onClick={onMenu}><Menu /></button>
         <h1 tabIndex={-1} aria-live="polite">{loaded ? headline(groups.needs.length, asks.length, reminders?.items.length ?? 0) : <><Bone w="9.5em" className="home-head-bone" /><span className="visually-hidden">Finding your agents…</span></>}</h1>
         {loaded && asks.length > 0 && <OldestButton items={asks} sessions={sessions} onOpen={onOpen} />}
+        {loaded && later && <HandledButton api={api} later={later} sessions={sessions} refreshKey={later.map(item => item.ask.id ?? item.pane.id).join(',')} onOpen={onOpen} onUpdate={onUpdate} />}
         <button type="button" className="secondary home-new" onClick={onNew} aria-label="New session" title="New session"><Plus size={16} /><span>New session</span></button>
         {loaded && cards.length > 0 && <p className="home-scope">{plural(cards.length, 'active agent')} across {plural(sessionCount, 'session')}</p>}
         {!loaded && <div className="home-summary home-summary-bone" aria-hidden="true">{GROUPS.map(group => <span key={group.key}><Bone w={group.key === 'needs' ? 74 : 62} /></span>)}</div>}

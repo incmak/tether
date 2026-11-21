@@ -27,6 +27,27 @@ def entry(pane='%1', thread='t1', agent='claude', **extra):
 APPROVAL = {'state': 'Approval', 'approval': {'text': 'Bash command\nRun the migration?'}}
 
 
+class FakeLog:
+    def __init__(self, clock):
+        self.clock, self.entries, self.fail = clock, [], set()
+        self.record = mock.Mock(side_effect=self._record)
+        self.query = mock.Mock(side_effect=self._query)
+
+    def _record(self, kind, summary, *, actor=None, **detail):
+        if kind in self.fail:
+            return None
+        row = dict(kind=kind, summary=summary, actor=actor, detail=detail,
+                   id=f'{len(self.entries):04d}', at=self.clock())
+        self.entries.append(row)
+        return row
+
+    def _query(self, *, kinds, since, limit, before=None):
+        rows = [row for row in self.entries if attention.audit.KINDS[row['kind']] in kinds
+                and row['at'] >= since and (before is None or row['id'] < before)]
+        rows.sort(key=lambda row: (row['at'], row['id']), reverse=True)
+        return {'entries': rows[:limit], 'next': rows[limit - 1]['id'] if len(rows) > limit else None}
+
+
 class World:
     """Fake panes with transcripts and a separate live marker for each turn end."""
 
@@ -461,7 +482,8 @@ class AttentionTest(unittest.TestCase):
         for pane in ('%1', '%2'):
             self.world.turn(pane, reply, 10)
         self.world.observe(*panes)
-        self.assertEqual(self.world.store.waiting(), [original])
+        ask = self.world.store.waiting()[0]
+        self.assertEqual(ask, dict(original, id=ask['id'], asked_at=original['since'], later=None))
         data = json.loads(self.path.read_text())
         self.assertEqual(data['turns'], {'t1': {'turn': '%1:10', 'history': ['%1:10'], 'at': self.clock.now},
                                          't2': {'turn': '%2:10', 'history': ['%2:10'], 'at': self.clock.now}})
@@ -488,7 +510,8 @@ class AttentionTest(unittest.TestCase):
                 self.world.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent)
                 self.world.turn('%8', reply, 10, turn_id='deploy')
                 self.world.observe(entry('%8'))
-                expected = [dict(original, pane='%8')] if source == 'open' else []
+                expected = [dict(original, pane='%8', id=saved['parked']['t1']['id'],
+                                 asked_at=original['since'], later=None)] if source == 'open' else []
                 self.assertEqual(self.world.store.waiting(), expected)
                 self.assertIn('t1', saved.get('legacy', {}))
                 self.assertNotIn('t1', json.loads(self.path.read_text())['legacy'])
@@ -725,6 +748,224 @@ class Handler:
         self.sent = (status, payload)
 
 
+class StaleAskTest(unittest.TestCase):
+    def setUp(self):
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        self.path = Path(folder) / 'attention.json'
+        self.clock = Clock(datetime(2026, 11, 5, 10).timestamp())
+        self.log = FakeLog(self.clock)
+        self.on_urgent = mock.Mock()
+        self.store = attention.Attention(self.path, self.clock, on_urgent=self.on_urgent, log=self.log)
+        self.world = World(self.store)
+        self.pane = entry(pane_name='A named tab', label='Fallback label')
+
+    def start_reply(self, text='Next: Choose?', at=10):
+        self.world.turn('%1', f'{text}\nNeeds you: yes', at)
+        self.world.observe(self.pane)
+        return self.store.ask('%1', 't1')
+
+    def test_current_idle_reply_moves_once_with_audit_and_stays_in_later(self):
+        ask = self.start_reply()
+        self.clock.now += 25 * 3600
+        self.assertTrue(self.world.observe(self.pane))
+        self.world.observe(self.pane)
+        self.log.record.assert_called_once_with(
+            'auto.stale_ask', 'Moved an ask from 5 Nov to Later', actor={'source': 'server'},
+            pane='%1', thread='t1', ask=ask['id'], tab='A named tab', rule='Stale ask')
+        self.assertEqual(self.store.waiting(), [])
+        moved = self.store.ask('%1', 't1')
+        self.assertEqual(moved['later'], {'at': self.clock.now, 'by': 'rule'})
+        self.assertEqual(self.store.later_asks(), [moved])
+        self.world.observe()
+        self.clock.now += attention.RETENTION + 1
+        self.store = self.world.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.world.turn('%8', 'Next: Choose?\nNeeds you: yes', 10, turn_id='%1:10')
+        self.world.observe(entry('%8'))
+        self.assertEqual(self.store.later_asks(), [dict(moved, pane='%8')])
+        self.assertEqual(self.store.automation_log(), {'entries': [], 'handled_today': 0})
+
+    def test_stale_rule_requires_every_eligibility_condition(self):
+        for case in ('too young', 'working', 'prompt', 'urgent', 'snoozed', 'stay', 'rule off', 'newer turn'):
+            with self.subTest(case=case):
+                self.store = attention.Attention(self.path.parent / f'{case}.json', self.clock,
+                                                 on_urgent=self.on_urgent, log=self.log)
+                self.world = World(self.store)
+                if case == 'prompt':
+                    self.world.status['%1'] = APPROVAL
+                    self.world.observe(self.pane)
+                else:
+                    self.start_reply('Urgent: Choose?' if case == 'urgent' else 'Next: Choose?')
+                self.clock.now += (23 if case == 'too young' else 25) * 3600
+                if case == 'working':
+                    self.world.status['%1'] = {'state': 'Working'}
+                elif case == 'snoozed':
+                    self.store.act('%1', 't1', 'snooze')
+                elif case == 'stay':
+                    self.store.act('%1', 't1', 'later')
+                    self.store.act('%1', 't1', 'back')
+                elif case == 'rule off':
+                    self.store.set_rules(False)
+                elif case == 'newer turn':
+                    self.store.turns['t1']['turn'] = 'newer'
+                self.world.observe(self.pane)
+                self.assertIsNone(self.store.ask('%1', 't1')['later'])
+                self.assertFalse(any(row['kind'] == 'auto.stale_ask' for row in self.log.entries))
+
+    def test_empty_reads_at_restart_and_after_version_change_cannot_move_ask(self):
+        ask = self.start_reply()
+        self.clock.now += 25 * 3600
+        for restart in (False, True):
+            with self.subTest(restart=restart):
+                if restart:
+                    self.store = self.world.store = attention.Attention(self.path, self.clock, log=self.log)
+                finished, version = mock.Mock(return_value=10), mock.Mock(return_value='changed')
+                self.store.observe([self.pane], lambda e: {'state': 'Stopped'}, lambda e: ('', None), finished, version)
+                self.assertEqual(self.store.ask('%1', 't1'), ask)
+                finished.assert_called_once_with(self.pane)
+                version.assert_called_once_with(self.pane)
+        self.log.record.assert_not_called()
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.later_asks()[0]['id'], ask['id'])
+
+    def test_snooze_return_restarts_the_stale_clock(self):
+        self.start_reply()
+        self.clock.now += 6 * 3600
+        snoozed = self.store.act('%1', 't1', 'snooze')
+        self.clock.now = snoozed['snoozed_until']
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.asks['%1']['back_at'], self.clock.now)
+        self.assertEqual(len(self.store.waiting()), 1)
+        self.clock.now += 24 * 3600 - 1
+        self.world.observe(self.pane)
+        self.log.record.assert_not_called()
+        self.clock.now += 1
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.later_asks()[0]['id'], snoozed['id'])
+
+    def test_back_audits_the_rule_move_and_protects_this_occurrence(self):
+        ask_id = self.start_reply()['id']
+        self.clock.now += 25 * 3600
+        self.world.observe(self.pane)
+        move = self.log.entries[0]
+        self.assertIs(self.store.act('%1', 't1', 'back', 'old'), False)
+        self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id)['later'])
+        self.log.record.assert_called_with(
+            'auto.undo', 'Put an ask back in the queue', actor=None, pane='%1', thread='t1', ask=ask_id,
+            entry=move['id'], rule='Stale ask')
+        self.assertTrue(self.store.asks['%1']['stay'])
+        self.clock.now += 2 * 86400
+        self.world.observe(self.pane)
+        self.store.act('%1', 't1', 'back', ask_id)
+        self.assertEqual(self.store.waiting()[0]['id'], ask_id)
+        self.assertEqual(self.log.record.call_count, 2)
+
+    def test_back_leaves_the_rule_move_in_place_if_audit_fails(self):
+        ask_id = self.start_reply()['id']
+        self.clock.now += 25 * 3600
+        self.world.observe(self.pane)
+        before = self.path.read_text()
+        self.log.fail.add('auto.undo')
+        with self.assertRaisesRegex(attention.AttentionError, 'Could not write the automation log'):
+            self.store.act('%1', 't1', 'back', ask_id)
+        self.assertEqual(self.path.read_text(), before)
+        self.assertEqual(self.store.later_asks()[0]['id'], ask_id)
+        self.assertFalse(self.store.asks['%1']['stay'])
+
+    def test_new_yes_replaces_the_later_occurrence_and_same_turn_keeps_it(self):
+        original = self.start_reply()
+        self.clock.now += 25 * 3600
+        self.world.observe(self.pane)
+        moved = self.store.ask('%1', 't1')
+        self.world.turn('%1', 'Next: Choose?\nNeeds you: yes', 20, turn_id='%1:10')
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.ask('%1', 't1'), moved)
+        current = self.start_reply('Next: Choose again?', 30)
+        self.assertNotEqual(current['id'], original['id'])
+        self.assertEqual((current['since'], current['asked_at'], current['later']),
+                         (original['since'], self.clock.now, None))
+        self.assertFalse(self.store.asks['%1']['stay'])
+        self.assertIsNone(self.store.asks['%1']['back_at'])
+        self.assertEqual(self.store.waiting(), [current])
+        self.store.act('%1', 't1', 'later', current['id'])
+        self.world.turn('%1', 'Done.\nNeeds you: no', 40)
+        self.world.observe(self.pane)
+        self.assertIsNone(self.store.ask('%1', 't1'))
+
+    def test_prompt_changes_keep_the_same_occurrence(self):
+        self.world.status['%1'] = APPROVAL
+        self.world.observe(self.pane)
+        first = self.store.ask('%1', 't1')
+        self.world.status['%1'] = {'state': 'Approval', 'approval': {'text': 'Run the tests?'}}
+        self.clock.now += 60
+        self.world.observe(self.pane)
+        current = self.store.ask('%1', 't1')
+        self.assertNotEqual(first['next'], current['next'])
+        self.assertEqual((current['id'], current['asked_at']), (first['id'], first['asked_at']))
+
+    def test_move_failure_warns_once_per_ask_and_retries_on_the_next_tick(self):
+        ask_id = self.start_reply()['id']
+        self.clock.now += 25 * 3600
+        self.log.fail.add('auto.stale_ask')
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.world.observe(self.pane)
+            self.world.observe(self.pane)
+        self.assertEqual(self.log.record.call_count, 2)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn(ask_id, lines[0])
+        self.assertEqual(self.store.waiting()[0]['id'], ask_id)
+        self.log.fail.clear()
+        self.world.observe(self.pane)
+        self.assertEqual(self.store.later_asks()[0]['id'], ask_id)
+
+    def test_move_rechecks_the_occurrence_after_audit_releases_control(self):
+        original = self.start_reply()
+        self.clock.now += 25 * 3600
+        def record(*args, **kwargs):
+            self.assertFalse(self.store.lock.locked())
+            self.store.note_reply('%1', 't1', 'Next: New ask.\nNeeds you: yes', 'new')
+            return self.log._record(*args, **kwargs)
+        self.log.record.side_effect = record
+        self.world.observe(self.pane)
+        self.assertNotEqual(self.store.waiting()[0]['id'], original['id'])
+        self.assertIsNone(self.store.automation_log()['entries'][0]['undo'])
+
+    def test_legacy_live_and_parked_ids_are_repaired_and_saved(self):
+        live = self.start_reply()
+        self.world.turn('%2', 'Next: Choose?\nNeeds you: yes', 10)
+        self.world.observe(self.pane, entry('%2', 't2'))
+        self.world.observe(self.pane)
+        data = json.loads(self.path.read_text())
+        data['asks']['%1'].pop('id')
+        data['parked']['t2']['id'] = 'invalid'
+        self.path.write_text(json.dumps(data))
+        self.store = self.world.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.assertTrue(self.world.observe(self.pane))
+        self.assertNotEqual(self.store.asks['%1']['id'], live['id'])
+        for ask in (self.store.asks['%1'], self.store.parked['t2']):
+            self.assertRegex(ask['id'], r'^[0-9a-f]{12}$')
+            self.assertEqual(ask['asked_at'], ask['since'])
+        again = attention.Attention(self.path, self.clock, log=self.log)
+        self.assertEqual((again.asks, again.parked), (self.store.asks, self.store.parked))
+
+    def test_user_later_and_back_have_no_audit_and_later_suppresses_the_ping(self):
+        ask_id = self.start_reply('Urgent: Choose?')['id']
+        self.store.act('%1', 't1', 'snooze', ask_id)
+        moved = self.store.act('%1', 't1', 'later', ask_id)
+        self.assertEqual(moved['later'], {'by': 'you', 'at': self.clock.now})
+        self.assertIsNone(moved['snoozed_until'])
+        self.assertIsNone(self.store.asks['%1']['later']['entry'])
+        self.clock.now += attention.URGENT_GRACE
+        self.world.observe(self.pane)
+        self.assertTrue(self.store.asks['%1']['pinged'])
+        self.on_urgent.assert_not_called()
+        self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id)['later'])
+        self.assertTrue(self.store.asks['%1']['stay'])
+        self.store.act('%1', 't1', 'later', ask_id)
+        self.assertIsNone(self.store.act('%1', 't1', 'snooze', ask_id)['later'])
+        self.log.record.assert_not_called()
+
+
 class TranscriptTurnTest(unittest.TestCase):
     fixtures = Path(__file__).parent / 'fixtures' / 'attention'
 
@@ -783,7 +1024,10 @@ class TranscriptTurnTest(unittest.TestCase):
 class RouteTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
-        self.store = attention.Attention(Path(self.dir.name) / 'a.json', Clock())
+        self.path = Path(self.dir.name) / 'a.json'
+        self.clock = Clock(datetime(2026, 11, 21, 11).timestamp())
+        self.log = FakeLog(self.clock)
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
         self.store.note_reply('%1', 't1', 'Next: a.\nNeeds you: yes', 'first')
         self.panes = {'%1': entry()}
 
@@ -799,6 +1043,17 @@ class RouteTest(unittest.TestCase):
         handler = Handler(f'{attention.PREFIX}/{action}')
         attention.serve(handler, body, self.choose, self.store)
         return handler.sent
+
+    def get(self, suffix=''):
+        import server
+        handler = object.__new__(server.Handler)
+        handler.path = attention.PREFIX + suffix
+        handler.command = 'GET'
+        handler.deny = lambda: False
+        handler.respond = mock.Mock()
+        with mock.patch.object(attention, 'STORE', self.store):
+            handler.do_GET()
+        return handler.respond.call_args.args
 
     def test_routes(self):
         self.assertTrue(attention.handles('/mobile/api/attention'))
@@ -841,6 +1096,81 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(self.post('handled', {'session': 'x', 'thread': 't1'})[0], 400)
         self.assertEqual(self.post('digest', {'enabled': 'yes', 'hour': 9})[0], 400)
         self.assertEqual(self.post('digest', {'enabled': True, 'hour': 7}), (200, {'digest': {'enabled': True, 'hour': 7}}))
+
+    def test_rules_route_validates_persists_and_audits_the_change(self):
+        self.assertTrue(attention.handles(attention.PREFIX + '/rules'))
+        self.assertEqual(self.get()[1]['rules'], {'stale': True})
+        for bad in (None, 'false', 0, 1, {}):
+            self.assertEqual(self.post('rules', {'stale': bad})[0], 400)
+        self.assertEqual(self.post('rules', {'stale': False}), (200, {'rules': {'stale': False}}))
+        self.assertEqual(self.post('rules', {'stale': False}), (200, {'rules': {'stale': False}}))
+        self.log.record.assert_called_once_with('setting.automation', 'Changed the stale ask rule', old=True, new=False)
+        self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).rules, {'stale': False})
+        self.path.write_text(json.dumps({'rules': {'stale': 0}}))
+        self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).rules, {'stale': True})
+
+    def test_ask_route_rejects_stale_ids_and_reports_failed_undo(self):
+        body = {'session': '%1', 'thread': 't1', 'ask': self.store.ask('%1', 't1')['id']}
+        self.clock.now += 25 * 3600
+        self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: ('Next: a.\nNeeds you: yes', 'first'))
+        self.log.fail.add('auto.undo')
+        self.assertEqual(self.post('back', dict(body, ask=123))[0], 400)
+        self.assertEqual(self.post('back', dict(body, ask='stale')),
+                         (409, {'error': 'This ask changed. Reload and try again.'}))
+        self.assertEqual(self.post('back', body),
+                         (503, {'error': 'Could not write the automation log. Try again.'}))
+        self.assertEqual(self.store.later_asks()[0]['id'], body['ask'])
+        self.log.fail.clear()
+        self.assertEqual(self.post('back', body)[0], 200)
+        self.store.clear('%1', 't1')
+        self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
+
+    def test_get_log_adds_undo_targets_and_counts_moves_since_local_midnight(self):
+        today = self.clock.now
+        midnight = datetime(2026, 11, 21).timestamp()
+        ask = self.store.ask('%1', 't1')
+        self.clock.now = today - 8 * 86400
+        self.log.record('auto.stale_ask', 'Outside the window')
+        self.clock.now = midnight - 1
+        yesterday = self.log.record('auto.stale_ask', 'Yesterday')
+        self.clock.now = midnight
+        formerly_current = self.log.record('auto.stale_ask', 'Move from prior view', ask=ask['id'])
+        self.clock.now = today
+        undone = self.log.record('auto.stale_ask', 'Undone move')
+        self.log.record('auto.undo', 'Undo', entry=undone['id'])
+        self.clock.now += 2
+        current = self.log.record('auto.stale_ask', 'Current move', ask=ask['id'], pane='%9')
+        self.store.asks['%1']['later'] = {'by': 'rule', 'at': self.clock.now, 'entry': current['id']}
+
+        status, log = self.get('/log?view=automation')
+        self.assertEqual(status, 200)
+        self.log.query.assert_called_once_with(kinds=['automation'], since=self.clock.now - 7 * 86400, limit=100)
+        self.assertEqual(log['handled_today'], 2)
+        self.assertEqual(log['entries'][0]['undo'], {'session': '%1', 'thread': 't1', 'ask': ask['id']})
+        self.assertFalse(log['entries'][0]['undone'])
+        self.assertNotIn('undo', current)
+        rows = {row['id']: row for row in log['entries']}
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(rows[undone['id']]['undone'])
+        for row in (undone, formerly_current, yesterday):
+            self.assertIsNone(rows[row['id']]['undo'])
+        status, queue = self.get()
+        self.assertEqual(status, 200)
+        self.assertEqual((queue['asks'], queue['later'], queue['handled_today']), ([], self.store.later_asks(), 2))
+
+    def test_get_log_limits_rows_but_counts_all_moves_today(self):
+        first = self.log.record('auto.stale_ask', 'First move')
+        for _ in range(100):
+            self.log.record('auto.stale_ask', 'Another move')
+        self.log.record('auto.undo', 'Undo first move', entry=first['id'])
+        status, log = self.get('/log')
+        self.assertEqual(status, 200)
+        self.assertEqual((len(log['entries']), log['handled_today']), (100, 100))
+        self.assertEqual(self.get()[1]['handled_today'], 100)
+
+    def test_get_log_returns_500_when_audit_query_fails(self):
+        self.log.query.side_effect = OSError('unreadable')
+        self.assertEqual(self.get('/log'), (500, {'error': 'Tether could not read the audit log.'}))
 
 
 class AnswerEndpointTest(unittest.TestCase):

@@ -29,13 +29,15 @@ KINDS = {
     'setting.codex_level': 'settings', 'setting.codex_run': 'settings',
     'setting.autonomy_level': 'settings', 'setting.reviewers': 'settings',
     'setting.advisor': 'settings', 'setting.claude_advisor': 'settings',
-    'setting.learning': 'settings', 'passkey.add': 'settings', 'passkey.remove': 'settings',
+    'setting.learning': 'settings', 'setting.automation': 'settings',
+    'passkey.add': 'settings', 'passkey.remove': 'settings',
     'tab.start': 'tabs', 'tab.close': 'tabs', 'tab.restart': 'tabs',
     'review.link': 'reviews', 'review.stop': 'reviews', 'review.verdict': 'reviews',
     'backlog.add': 'backlog', 'backlog.start': 'backlog', 'backlog.done': 'backlog',
     'backlog.move': 'backlog', 'backlog.remove': 'backlog',
     'lesson.add': 'lessons', 'lesson.remove': 'lessons', 'lesson.dispute': 'lessons',
     'advisor.ask': 'advisor', 'approval.approve': 'approvals', 'approval.deny': 'approvals',
+    'auto.stale_ask': 'automation', 'auto.undo': 'automation',
 }
 MISSING = object()
 _SECRET_KEYS = ('token', 'secret', 'password', 'credential', 'assertion', 'approval',

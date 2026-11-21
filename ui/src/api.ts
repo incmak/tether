@@ -133,7 +133,11 @@ export interface TabBrief { name?: string; description?: string; description_by?
 export interface TabBriefLink { id: string; title: string; state: 'doing' | 'added' | 'done'; open: boolean }
 export interface Needs { kind: 'approval' | 'plan' | 'question'; text: string }
 // since and snoozed_until are Unix seconds. next is the reply's "Next:" line or the prompt's question.
-export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean }
+export interface Ask { pane: string; thread: string | null; since: number; next: string; kind: 'reply' | 'approval' | 'plan' | 'question'; opened: boolean; snoozed_until: number | null; urgent?: boolean
+  /** The occurrence: a new turn that asks again gets a new id. Writes name it, so a stale page gets 409. */
+  id?: string; asked_at?: number
+  /** In Later: out of the queue until you put it back. by 'rule': the stale ask rule moved it (B335). */
+  later?: { at: number; by: 'rule' | 'you' } | null }
 // images: how many images the tool result holds (Claude's Read of a screenshot). GET tool-image serves them.
 // artifact: a page Claude published with its Artifact tool. url: the claude.ai link; path: the local HTML file it came from.
 export interface ToolArtifact { url: string; path: string; title: string }

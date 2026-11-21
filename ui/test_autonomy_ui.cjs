@@ -151,6 +151,8 @@ async function main() {
         if (endpoint.startsWith('autonomy')) return route.fulfill({ json: autonomy })
         if (endpoint.startsWith('codex-level')) return route.fulfill({ json: { level: 0, global: 0, levels: [], project: null, models: [] } })
         if (endpoint.startsWith('chat')) return route.fulfill({ json: fixture.chat })
+        // Home reads the Handled for you count (B335).
+        if (endpoint === 'attention') return route.fulfill({ json: { asks: [], snoozed: 0, later: [], handled_today: 0, rules: { stale: true }, digest: { enabled: false, hour: 9 } } })
         if (endpoint === 'audit') {
           const json = { entries: [], next: null, retention_days: 90 }
           if (url.searchParams.get('facets') === '1') json.facets = { kinds: [], projects: [], actors: [] }

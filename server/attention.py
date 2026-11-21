@@ -12,19 +12,23 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 
+import audit
 import needs
 import paths
 import urgent_ping
 from notification_priority import status_line
 
 PREFIX = '/mobile/api/attention'
-ACTIONS = ('handled', 'snooze', 'opened')
+ACTIONS = ('handled', 'snooze', 'opened', 'later', 'back')
 SNOOZE = 24 * 3600
+STALE = 24 * 3600
 RETENTION = 30 * 86400
 TURN_REFRESH_INTERVAL = 86400
 TURN_HISTORY_LIMIT = 50
@@ -34,8 +38,13 @@ QUIET = 8  # seconds after you answer a prompt in which the same prompt, still o
 AGENTS = ('claude', 'codex', 'antigravity')
 ENDED = ('Idle', 'Stopped')  # the turn is over, so the transcript's last reply is final
 PANE = re.compile(r'^%\d{1,6}$')
+ASK_ID = re.compile(r'[0-9a-f]{12}')
 NEXT = re.compile(r'^(?:[-•>]\s*)?Next:\s*(.+)$', re.I)
 URGENT = re.compile(r'^(?:[-•>]\s*)?\**Urgent:\**\s*(.+)$', re.I)
+
+
+class AttentionError(Exception):
+    pass
 
 
 def _clip(text):
@@ -80,16 +89,18 @@ class Attention:
     checked remembers the conversation and live turn-end marker for each pane with a successful reply read.
     """
 
-    def __init__(self, path=None, clock=time.time, on_urgent=urgent_ping.send):
+    def __init__(self, path=None, clock=time.time, on_urgent=urgent_ping.send, log=audit):
         self.path, self.clock = Path(path or paths.ATTENTION), clock
-        self.on_urgent = on_urgent
+        self.on_urgent, self.log = on_urgent, log
         self.lock = threading.Lock()
+        self._undo_lock = threading.Lock()
+        self._failed_moves = set()
         self.checked, self.quiet = {}, {}
         self._legacy_needs_save = False
         data = self._load()
         self.asks, self.seen, self.digest = data['asks'], data['seen'], data['digest']
         self.turns, self.parked = data['turns'], data['parked']
-        self.legacy = data['legacy']
+        self.legacy, self.rules = data['legacy'], data['rules']
 
     def _load(self):
         try:
@@ -124,9 +135,20 @@ class Attention:
         parked = {thread: ask for thread, ask in (data.get('parked') or {}).items()
                   if isinstance(ask, dict) and ask.get('kind') == 'reply' and ask.get('thread') == thread
                   and isinstance(ask.get('since'), (int, float)) and isinstance(ask.get('parked_at'), (int, float))}
+        for ask in (*asks.values(), *parked.values()):
+            ask_id = ask.get('id')
+            if not isinstance(ask_id, str) or not ASK_ID.fullmatch(ask_id):
+                ask.update(id=secrets.token_hex(6), asked_at=ask['since'])
+                self._legacy_needs_save = True
+            elif type(ask.get('asked_at')) not in (int, float):
+                ask['asked_at'] = ask['since']
+                self._legacy_needs_save = True
+        rules = data.get('rules')
+        stale = rules.get('stale') if isinstance(rules, dict) else None
         digest = data.get('digest') if isinstance(data.get('digest'), dict) else {}
         hour = digest.get('hour')
         return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked, 'legacy': legacy,
+                'rules': {'stale': stale if isinstance(stale, bool) else True},
                 'digest': {'enabled': digest.get('enabled') is True,
                            'hour': hour if isinstance(hour, int) and 0 <= hour <= 23 else 9,
                            'sent': digest.get('sent') if isinstance(digest.get('sent'), str) else None}}
@@ -134,7 +156,8 @@ class Attention:
     def _prune(self, now):
         changed = False
         for store, field in ((self.turns, 'at'), (self.parked, 'parked_at'), (self.legacy, 'at')):
-            expired = [thread for thread, value in store.items() if value[field] < now - RETENTION]
+            expired = [thread for thread, value in store.items()
+                       if value[field] < now - RETENTION and not value.get('later')]
             for thread in expired:
                 del store[thread]
             changed = bool(expired) or changed
@@ -148,7 +171,7 @@ class Attention:
         try:
             with os.fdopen(fd, 'w') as stream:
                 json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest,
-                           'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy}, stream)
+                           'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy, 'rules': self.rules}, stream)
             os.replace(temp, self.path)
             self._legacy_needs_save = False
         except OSError:
@@ -159,8 +182,10 @@ class Attention:
 
     @staticmethod
     def public(ask):
-        return dict({key: ask.get(key) for key in ('pane', 'thread', 'since', 'next', 'kind', 'opened', 'snoozed_until')},
-                    urgent=ask.get('urgent', False))
+        later = ask.get('later')
+        return dict({key: ask.get(key) for key in ('id', 'asked_at', 'pane', 'thread', 'since', 'next', 'kind',
+                                                  'opened', 'snoozed_until')},
+                    urgent=ask.get('urgent', False), later={'at': later['at'], 'by': later['by']} if later else None)
 
     def ask(self, pane, thread=None):
         """The pane's ask for the session list, or None. Snoozed asks are included; snoozed_until says until when."""
@@ -177,11 +202,17 @@ class Attention:
         return None, None
 
     def waiting(self):
-        """Asks that show now (not snoozed), oldest first."""
+        """Asks in the queue, oldest first."""
         now = self.clock()
         with self.lock:
-            asks = [self.public(ask) for ask in self.asks.values() if not ask.get('snoozed_until') or ask['snoozed_until'] <= now]
+            asks = [self.public(ask) for ask in self.asks.values()
+                    if not ask.get('later') and (not ask.get('snoozed_until') or ask['snoozed_until'] <= now)]
         return sorted(asks, key=lambda ask: ask['since'])
+
+    def later_asks(self):
+        with self.lock:
+            asks = [self.public(ask) for ask in self.asks.values() if ask.get('later')]
+        return sorted(asks, key=lambda ask: ask['later']['at'], reverse=True)
 
     def snoozed(self):
         now = self.clock()
@@ -189,8 +220,16 @@ class Attention:
             return sum(1 for ask in self.asks.values() if ask.get('snoozed_until') and ask['snoozed_until'] > now)
 
     def _start(self, pane, thread, kind, text, now):
-        self.asks[pane] = {'pane': pane, 'thread': thread, 'since': now, 'next': _clip(text), 'kind': kind,
-                           'opened': False, 'snoozed_until': None}
+        self.asks[pane] = {'id': secrets.token_hex(6), 'asked_at': now, 'pane': pane, 'thread': thread,
+                           'since': now, 'next': _clip(text), 'kind': kind, 'opened': False, 'snoozed_until': None,
+                           'later': None, 'stay': False, 'back_at': None}
+
+    @staticmethod
+    def _end_snooze(ask, now):
+        if ask.get('snoozed_until') and ask['snoozed_until'] <= now:
+            ask.update(snoozed_until=None, back_at=now)
+            return True
+        return False
 
     def observe(self, entries, status_of, reply_of, finished_of=lambda entry: None, version_of=lambda entry: None):
         """Start and clear asks from the live session list. Read (reply, turn id) from reply_of(entry) once the
@@ -229,9 +268,7 @@ class Attention:
                 if pane not in live:
                     del self.checked[pane]
             for ask in self.asks.values():
-                if ask.get('snoozed_until') and ask['snoozed_until'] <= now:
-                    ask['snoozed_until'] = None  # back, with its first `since`
-                    changed = True
+                changed = self._end_snooze(ask, now) or changed
         for entry in entries:
             pane = entry['id']
             if pane not in live or live[pane] is None and entry.get('pending_conversation'):
@@ -249,6 +286,7 @@ class Attention:
                     ask = self.parked.pop(thread)
                     ask.pop('parked_at')
                     ask['pane'] = pane
+                    self._end_snooze(ask, now)
                     self.asks[pane] = ask
                     changed = True
                 if summary:
@@ -264,22 +302,60 @@ class Attention:
             if status.get('state') not in ENDED:
                 continue
             finished, version = finished_of(entry), version_of(entry)
+            marker = (thread, finished, version)
             checked = self.checked.get(pane)
-            if checked == (thread, finished, version):
-                continue
-            reply, turn_id = reply_of(entry)
-            if not reply:
-                continue
-            first_read = checked is None or checked[0] != thread
-            self.checked[pane] = (thread, finished, version)
-            if turn_id is None and (first_read or finished is None or finished == checked[1]):
-                continue
-            changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
+            if checked != marker:
+                reply, turn_id = reply_of(entry)
+                if reply:
+                    live_turn_ended = checked and checked[0] == thread and finished is not None and finished != checked[1]
+                    if turn_id is not None or live_turn_ended:
+                        changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
+                    with self.lock:
+                        self.checked[pane] = marker
+            changed = self._stale(pane, entry, marker, now) or changed
         if changed:
             with self.lock:
                 self._save(now)
         self.due_pings(now)
         return changed
+
+    def _stale_candidate(self, pane, marker, now):
+        """Return the eligible ask with the state lock held."""
+        thread = marker[0]
+        ask = self.asks.get(pane)
+        if (not self.rules['stale'] or not ask or ask['kind'] != 'reply' or (ask.get('thread') or None) != thread
+                or ask.get('later') or ask.get('stay') or ask.get('urgent') or (ask.get('snoozed_until') or 0) > now
+                or self.checked.get(pane) != marker):
+            return None
+        turn = ask.get('turn')
+        if turn is not None and self.turns.get(thread, {}).get('turn') != turn:
+            return None
+        if now - max(ask['asked_at'], ask.get('back_at') or 0) >= STALE:
+            return ask
+        return None
+
+    def _stale(self, pane, entry, marker, now):
+        with self.lock:
+            ask = self._stale_candidate(pane, marker, now)
+            if not ask:
+                return False
+            ask_id, asked_at = ask['id'], ask['asked_at']
+        day = datetime.fromtimestamp(asked_at)
+        name = entry.get('pane_name') or entry.get('label') or entry.get('tmux_session') or pane
+        move = self.log.record('auto.stale_ask', f'Moved an ask from {day.day} {day:%b} to Later',
+                               actor={'source': 'server'}, pane=pane, thread=marker[0] or '', ask=ask_id,
+                               tab=name, rule='Stale ask')
+        with self.lock:
+            if move is None:
+                if ask_id not in self._failed_moves:
+                    self._failed_moves.add(ask_id)
+                    print(f'Attention: could not log the move to Later for ask {ask_id}.', file=sys.stderr)
+                return False
+            ask = self._stale_candidate(pane, marker, now)
+            if not ask or ask['id'] != ask_id:
+                return False
+            ask['later'] = {'at': now, 'by': 'rule', 'entry': move['id']}
+            return True
 
     def note_reply(self, pane, thread, reply, turn_id, now=None):
         """Apply a finished turn once per conversation, even if its pane changes."""
@@ -308,6 +384,8 @@ class Attention:
                 if not ask:
                     self._start(pane, thread, 'reply', urgent or text, now)
                     ask = self.asks[pane]
+                elif ask.get('turn') != turn_id:
+                    ask.update(id=secrets.token_hex(6), asked_at=now, later=None, stay=False, back_at=None)
                 ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id)
                 if is_new_urgent:
                     ask.update(ping_due=now + URGENT_GRACE, pinged=False)
@@ -327,9 +405,9 @@ class Attention:
                 due = ask.get('ping_due')
                 if due is None or due > now or ask.get('pinged'):
                     continue
-                # Opened (seen in Tether) or snoozed during the grace: you already know, so no ping.
+                # Opened, snoozed or moved to Later during the grace: you already know, so no ping.
                 snoozed = (ask.get('snoozed_until') or 0) > now
-                sendable = ask.get('urgent') is True and ask.get('opened') is False and not snoozed
+                sendable = ask.get('urgent') is True and ask.get('opened') is False and not snoozed and not ask.get('later')
                 ask['pinged'] = True
                 changed = True
                 if sendable:
@@ -361,28 +439,104 @@ class Attention:
             self.seen.setdefault(pane, {'thread': ask.get('thread')})['dismissed'] = ask['next']
         del self.asks[pane]
 
-    def act(self, pane, thread, action):
-        """handled, snooze or opened, for the pane's ask in this conversation. Returns the ask after the change, None
-        when the pane has no ask, or False when the ask belongs to another conversation (a stale page)."""
+    def act(self, pane, thread, action, ask_id=None):
+        """Return the updated ask, False for a stale target, or None if there is no ask and no id was given."""
+        if action == 'back':
+            # Serialize Undo requests for the same move without holding the state lock during logging.
+            with self._undo_lock:
+                return self._act(pane, thread, action, ask_id)
+        return self._act(pane, thread, action, ask_id)
+
+    def _act(self, pane, thread, action, ask_id):
         now = self.clock()
         with self.lock:
             ask = self.asks.get(pane)
             if not ask:
-                return None
-            if (ask.get('thread') or None) != (thread or None):
+                return False if ask_id is not None else None
+            if (ask.get('thread') or None) != (thread or None) or ask_id is not None and ask_id != ask['id']:
                 return False
+            later = ask.get('later')
             if action == 'handled':
                 self._forget(pane, ask)
             elif action == 'snooze':
-                ask['snoozed_until'] = now + SNOOZE
+                ask.update(snoozed_until=now + SNOOZE, later=None)
             elif action == 'opened':
                 if ask.get('opened'):
                     return self.public(ask)
                 ask['opened'] = True
+            elif action == 'later':
+                ask.update(later={'at': now, 'by': 'you', 'entry': None}, snoozed_until=None)
+            elif action == 'back':
+                if not later:
+                    return self.public(ask)
+                if later['by'] == 'you':
+                    ask.update(stay=True, later=None)
             else:
                 raise ValueError('Unknown action.')
-            self._save(now)
+            if action != 'back' or later['by'] == 'you':
+                self._save(now)
+                return self.public(ask)
+            undo_ask_id = ask['id']
+
+        undo = self.log.record('auto.undo', 'Put an ask back in the queue', actor=None, pane=pane, thread=thread or '',
+                               ask=undo_ask_id, entry=later['entry'], rule='Stale ask')
+        if undo is None:
+            raise AttentionError('Could not write the automation log. Try again.')
+        with self.lock:
+            ask = self.asks.get(pane)
+            if not ask or ask['id'] != undo_ask_id:
+                return False
+            if ask.get('later') is later:
+                ask.update(stay=True, later=None)
+                self._save(now)
             return self.public(ask)
+
+    def set_rules(self, stale):
+        if not isinstance(stale, bool):
+            raise ValueError('Choose on or off for the stale ask rule.')
+        with self.lock:
+            old = self.rules['stale']
+            if old != stale:
+                self.rules['stale'] = stale
+                self._save(self.clock())
+        if old != stale:
+            self.log.record('setting.automation', 'Changed the stale ask rule', old=old, new=stale)
+        return {'stale': stale}
+
+    def _automation_today(self, now, page=None):
+        midnight = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0, fold=0).timestamp()
+        if page is None:
+            page = self.log.query(kinds=['automation'], since=midnight, limit=100)
+        moves, undone = set(), set()
+        while True:
+            entries = page['entries']
+            for row in entries:
+                if row['kind'] == 'auto.undo':
+                    undone.add(row.get('detail', {}).get('entry'))
+                elif row['kind'] == 'auto.stale_ask' and row['at'] >= midnight:
+                    moves.add(row['id'])
+            before = page['next']
+            if not before or entries[-1]['at'] < midnight:
+                return len(moves - undone), undone
+            page = self.log.query(kinds=['automation'], since=midnight, limit=100, before=before)
+
+    def handled_today(self):
+        return self._automation_today(self.clock())[0]
+
+    def automation_log(self):
+        now = self.clock()
+        page = self.log.query(kinds=['automation'], since=now - 7 * 86400, limit=100)
+        handled_today, undone = self._automation_today(now, page)
+        with self.lock:
+            targets = {ask['id']: (ask['later']['entry'], {'session': pane, 'thread': ask.get('thread'), 'ask': ask['id']})
+                       for pane, ask in self.asks.items() if (ask.get('later') or {}).get('by') == 'rule'}
+        entries = []
+        for row in page['entries']:
+            if row['kind'] == 'auto.stale_ask':
+                target = targets.get(row.get('detail', {}).get('ask'))
+                row = dict(row, undone=row['id'] in undone, undo=target[1] if target and target[0] == row['id'] else None)
+            entries.append(row)
+        return {'entries': entries, 'handled_today': handled_today}
 
     def set_digest(self, enabled, hour):
         if not isinstance(enabled, bool) or not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
@@ -434,16 +588,28 @@ STORE = Attention()
 
 def handles(path):
     path = path.split('?', 1)[0]
-    return path == PREFIX or path in [f'{PREFIX}/{action}' for action in (*ACTIONS, 'digest')]
+    return path == PREFIX or path in [f'{PREFIX}/{action}' for action in (*ACTIONS, 'digest', 'rules', 'log')]
 
 
 def get(handler):
-    handler.respond(200, {'asks': STORE.waiting(), 'snoozed': STORE.snoozed(), 'digest': STORE.digest_settings()})
+    path = handler.path.split('?', 1)[0]
+    try:
+        if path == PREFIX:
+            payload = {'asks': STORE.waiting(), 'snoozed': STORE.snoozed(), 'digest': STORE.digest_settings(),
+                       'later': STORE.later_asks(), 'handled_today': STORE.handled_today(), 'rules': dict(STORE.rules)}
+        elif path == f'{PREFIX}/log':
+            payload = STORE.automation_log()
+        else:
+            handler.respond(404, {'error': 'Not found'})
+            return
+    except OSError:
+        handler.respond(500, {'error': 'Tether could not read the audit log.'})
+    else:
+        handler.respond(200, payload)
 
 
 def serve(handler, body, choose, store=None):
-    """POST /mobile/api/attention/{handled,snooze,opened}: {session: pane id, thread}. A pane that ended or now runs
-    another conversation gets 409. POST /mobile/api/attention/digest: {enabled, hour}."""
+    """Dispatch attention actions and settings. Ask actions bind to the pane, thread and optional occurrence id."""
     store = store or STORE
     action = handler.path.split('?', 1)[0][len(PREFIX) + 1:]
     if action == 'digest':
@@ -452,12 +618,21 @@ def serve(handler, body, choose, store=None):
         except ValueError as exc:
             handler.respond(400, {'error': str(exc)})
         return
+    if action == 'rules':
+        try:
+            handler.respond(200, {'rules': store.set_rules(body.get('stale'))})
+        except ValueError as exc:
+            handler.respond(400, {'error': str(exc)})
+        return
     if action not in ACTIONS:
         handler.respond(404, {'error': 'Not found'})
         return
-    pane, thread = body.get('session'), body.get('thread')
+    pane, thread, ask_id = body.get('session'), body.get('thread'), body.get('ask')
     if not isinstance(pane, str) or not PANE.match(pane) or not (thread is None or isinstance(thread, str)):
         handler.respond(400, {'error': 'Select a tab first.'})
+        return
+    if ask_id is not None and not isinstance(ask_id, str):
+        handler.respond(400, {'error': 'Use an ask id.'})
         return
     try:
         entry = choose(pane)
@@ -467,8 +642,14 @@ def serve(handler, body, choose, store=None):
     if (thread or None) != (entry.get('thread') or None):
         handler.respond(409, {'error': 'This tab changed conversations. Reload it and try again.'})
         return
-    result = store.act(pane, thread, action)
+    try:
+        result = store.act(pane, thread, action, ask_id=ask_id)
+    except AttentionError as exc:
+        handler.respond(503, {'error': str(exc)})
+        return
     if result is False:
-        handler.respond(409, {'error': 'This tab changed conversations. Reload it and try again.'})
+        message = ('This ask changed. Reload and try again.' if ask_id is not None
+                   else 'This tab changed conversations. Reload it and try again.')
+        handler.respond(409, {'error': message})
         return
     handler.respond(200, {'ask': result if action != 'handled' and result else None, 'waiting': len(store.waiting())})
