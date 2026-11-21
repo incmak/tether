@@ -67,14 +67,27 @@ export function ordinal(value: number) {
   return value + (tens >= 11 && tens <= 13 ? 'th' : ones === 1 ? 'st' : ones === 2 ? 'nd' : ones === 3 ? 'rd' : 'th')
 }
 
-/** The calendar facts a rule repeats on: from the rule's own day and month when it has them, else from a date. */
+/** The calendar parts of an instant in a rule's zone. The server keeps a series' zone on a rule-only edit, so a series
+ *  made under another server zone repeats on that zone's dates. An unknown zone falls back to IST, as on the server. */
+const ZONE_DAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }
+function zoneParts(at: number, zone?: string) {
+  if (!zone || zone === ZONE) return parts(at)
+  try {
+    const fields = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'short' })
+      .formatToParts(new Date(at * 1000)).map(part => [part.type, part.value]))
+    return { year: Number(fields.year), month: Number(fields.month) - 1, date: Number(fields.day), weekday: ZONE_DAYS[fields.weekday] }
+  } catch { return parts(at) }
+}
+
+/** The calendar facts a rule repeats on: from the rule's own day and month when it has them, else from a date in
+ *  `zone` (the kept rule's zone; IST for a new rule). */
 interface Target { weekday: number; day: number; month: number }
-function target(at: number, rule?: RepeatRule | null): Target {
-  const p = parts(at)
+function target(at: number, rule?: RepeatRule | null, zone = rule?.zone): Target {
+  const p = zoneParts(at, zone)
   const keeps = rule && (rule.every === 'month' || rule.every === 'year') && typeof rule.day === 'number'
   return { weekday: p.weekday, day: keeps ? rule.day! : p.date, month: keeps && rule.every === 'year' && typeof rule.month === 'number' ? rule.month - 1 : p.month }
 }
-const lastDay = (at: number) => { const p = parts(at); return new Date(Date.UTC(p.year, p.month + 1, 0)).getUTCDate() }
+const lastDay = (at: number, zone?: string) => { const p = zoneParts(at, zone); return new Date(Date.UTC(p.year, p.month + 1, 0)).getUTCDate() }
 
 function describe(every: Repeat, interval: number, on: Target) {
   const each = interval > 1 ? `Every ${interval} ${unitName(every === 'weekday' ? 'day' : every, interval)}` : ''
@@ -128,7 +141,7 @@ export function choiceLabel(choice: RepeatChoice, at: number, rule?: RepeatRule 
   if (body === null) return ''
   const every = typeof body === 'string' ? body : body.every
   const last = onLastDay(choice)
-  const on = target(at, keptFor(every, last, rule))
+  const on = target(at, keptFor(every, last, rule), rule?.zone)
   if (last) on.day = -1
   return describe(every, typeof body === 'object' ? body.interval ?? 1 : 1, on)
 }
@@ -140,8 +153,9 @@ const keptFor = (every: Repeat, last: boolean, rule?: RepeatRule | null) =>
 
 /** The picker's choices. at: the date the rule starts from; rule: the kept rule, whose own day wins over a clamped date. */
 export function repeatOptions(at: number | null, rule?: RepeatRule | null, current?: RepeatPick): MenuOption[] {
-  const on = at === null ? null : target(at, keptFor('month', false, rule))
-  const yearly = at === null ? null : target(at, keptFor('year', false, rule))
+  const zone = rule?.zone
+  const on = at === null ? null : target(at, keptFor('month', false, rule), zone)
+  const yearly = at === null ? null : target(at, keptFor('year', false, rule), zone)
   const shorter = on && on.day >= 29 ? `, or the last day` : ''
   const options: MenuOption[] = [
     { value: 'never', label: 'Never' },
@@ -151,7 +165,7 @@ export function repeatOptions(at: number | null, rule?: RepeatRule | null, curre
     { value: 'month', label: 'Every month', detail: on ? `On the ${ordinal(on.day)}${shorter}` : 'Same date each month' },
   ]
   // The last day differs from "the same date" only for a date that ends a month shorter than 31 days (30 Nov, 28 Feb).
-  if (current === 'last' || (at !== null && on && on.day === parts(at).date && on.day === lastDay(at) && on.day < 31)) {
+  if (current === 'last' || (at !== null && on && on.day === zoneParts(at, zone).date && on.day === lastDay(at, zone) && on.day < 31)) {
     options.push({ value: 'last', label: 'Last day of every month', detail: 'The 28th to the 31st, as the month ends' })
   }
   options.push(

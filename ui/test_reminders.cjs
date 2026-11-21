@@ -109,6 +109,14 @@ test('repeat options name the date; the last-day option shows only for a short m
   assert.equal(detail(leap.anchor, 'month', leap), 'On the 28th')
   const last = { every: 'month', day: -1, anchor: rule.anchor, zone: 'Asia/Kolkata' }
   assert.equal(detail(last.anchor, 'month', last), 'On the 28th', 'a last-day rule switched to a fixed day takes the date')
+  // A New York series (Sun 14 Feb 2027, 15:00; already Mon 15 Feb in IST) uses New York dates, as the server does.
+  const york = { every: 'month', day: 14, anchor: seconds('2027-02-14T20:00:00Z'), zone: 'America/New_York' }
+  assert.equal(detail(york.anchor, 'year', york), 'On 14 Feb')
+  assert.equal(detail(york.anchor, 'week', york), 'On Sundays')
+  const { choiceLabel, repeatLabel } = loadReminders()
+  assert.equal(choiceLabel({ pick: 'custom', unit: 'week', interval: 2, lastDay: false }, york.anchor, york), 'Every 2 weeks on Sunday')
+  assert.equal(repeatLabel({ ...york, every: 'week' }), 'Every Sunday')
+  assert.equal(detail(york.anchor, 'week', { ...york, zone: 'Not/AZone' }), 'On Mondays', 'an unknown zone falls back to IST')
 })
 
 test('repeat choices round-trip to the request body and validate N per unit', () => {
