@@ -2224,6 +2224,12 @@ button.live-chip:active { background: var(--line); }
 .undo-toast-more { display: inline-grid; place-items: center; border: 0; border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer; }
 .undo-toast-more:hover { color: inherit; }
 .undo-toast :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* A restart offer (B326): the text and Dismiss on the first row, the actions on the second, so a 320 px screen fits them. */
+.undo-toast-restart { flex-wrap: wrap; width: min(440px, calc(100vw - 32px)); padding-top: 4px; }
+.undo-toast-restart .undo-toast-text { flex: 1 1 calc(100% - 56px); padding: 8px 0; }
+.undo-toast-restart .undo-toast-close { order: 1; align-self: flex-start; }
+.undo-toast-restart .undo-toast-action { order: 2; }
+.undo-toast-restart .undo-toast-more { order: 3; margin-left: auto; }
 .undo-effects { margin: 0 0 18px; padding-left: 20px; line-height: 1.5; overflow-wrap: anywhere; }
 .undo-effects li + li { margin-top: 6px; }
 .undo-confirm h2 { overflow-wrap: anywhere; }
