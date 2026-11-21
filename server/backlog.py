@@ -36,6 +36,7 @@ LIMIT = 200000
 # Past ARCHIVE_AT characters, finished items move to DONE.md, in file order, until the list is at ARCHIVE_TO or less.
 # Agents read the whole list, so it stays short; LIMIT is room for a list with many open items.
 ARCHIVE_AT, ARCHIVE_TO = 48000, 36000
+ARCHIVE_READ = 32 * 1024 * 1024  # the server compares DONE.md up to this size (B303); it is about 220 KB in 2026
 VERSIONS = 50
 # The patterns below run on every line of a text the browser sends. Each runs in linear time: no match can start
 # inside a run of spaces, and nothing lazy meets a trailing \s*. Long runs of spaces took seconds before (15 Nov 2026).
@@ -50,6 +51,7 @@ ARCHIVE_STAMP = re.compile(r' \(moved [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{
 WORKTREE = re.compile(r'gitdir:\s*(.+?)/\.git/worktrees/')
 _SEEN = 'backlog-seen.json'
 _observed_files = None
+_READ = object()  # _catch_up reads DONE.md itself
 
 
 def folder():
@@ -212,9 +214,19 @@ def _archive(text, everything=False):
 
 
 def _replace(current, text, everything=False, audit_before=None, before_write=None):
+    with contextlib.ExitStack() as stack:
+        audited = _audit_writable()
+        if audited:
+            try:
+                stack.enter_context(_audit_lock())
+            except OSError:
+                audited = False
+        return _replace_audited(current, text, everything, audit_before, before_write, audited)
+
+
+def _replace_audited(current, text, everything, audit_before, before_write, audited):
     # Catch up before _archive adds this write's items to DONE.md.
-    audited = _audit_writable()
-    caught_up = audited and _catch_up(current)
+    seen = _catch_up(current) if audited else None
     highest = max(_ids(current) + _ids(text) + [0])
     if highest > _last_id():
         _write(folder() / 'last-id', f'{highest}\n')
@@ -229,8 +241,10 @@ def _replace(current, text, everything=False, audit_before=None, before_write=No
     _keep(text)
     if audited:
         recorded = audit_before is None or _audit_changes(audit_before, edited)
-        if caught_up and recorded:
-            _save_seen(text)
+        if seen is not None and recorded:
+            # Only this write's own archived items join the seen set. Anything else new in DONE.md stays for observe().
+            moved = _audit_items(edited)[0].keys() - _audit_items(text)[0].keys()
+            _save_seen(text, seen | moved)
     return _state(text)
 
 
@@ -244,10 +258,25 @@ def _audit_writable():
         return False
 
 
-def _save_seen(text, archived=None):
+@contextlib.contextmanager
+def _audit_lock(block=True):
+    """Serialise catch-ups. The lock lives in the audit folder: a sandboxed worker cannot replace it there."""
+    place = audit.folder()
+    place.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle = os.open(place / '.backlog-seen.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        if archived is None:
-            archived = _checked_archive(_read_archive())
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
+    finally:
+        os.close(handle)
+
+
+def _save_seen(text, archived):
+    try:
         _write(audit.folder() / _SEEN, json.dumps({'text': text, 'archived': sorted(archived)}))
     except Exception as exc:
         audit._warn(f'could not write the backlog snapshot ({type(exc).__name__}).')
@@ -255,23 +284,29 @@ def _save_seen(text, archived=None):
     return True
 
 
-def _catch_up(text, *, archive=None):
-    """Record changes since the last audited list. The caller holds the backlog lock."""
+def _catch_up(text, *, archive=_READ):
+    """Record changes since the last audited list, and return the checked DONE.md IDs that the snapshot now holds, or
+    None when it did not advance. The caller holds the backlog lock and the audit lock."""
     try:
-        archived = _checked_archive(_read_archive() if archive is None else archive)
+        archived = _checked_archive(_read_archive() if archive is _READ else archive)
+        if archived is None:
+            audit._warn('could not read the backlog archive; items that left the list count as removed.')
         path = audit.folder() / _SEEN
+        old_archived = None
         if path.exists():
             seen = json.loads(_read(path))
             before, old_archived = seen['text'], set(seen['archived'])
-            if before == text and old_archived == archived.keys():
-                return True
-            if not _audit_changes(before, text, observed=True, archived=archived, old_archived=old_archived):
+            if before == text and (archived is None or old_archived == archived.keys()):
+                return old_archived
+            if not _audit_changes(before, text, observed=True, archived=archived or {}, old_archived=old_archived):
                 # Keep the old snapshot. A later pass can repeat successful records, which is better than losing one.
-                return False
+                return None
     except Exception as exc:
         audit._warn(f'could not compare the backlog snapshot ({type(exc).__name__}).')
-        return False
-    return _save_seen(text, archived)
+        return None
+    # An unreadable archive keeps the old set, so its new entries still count once it can be read again.
+    refs = set(archived) if archived is not None else old_archived or set()
+    return refs if _save_seen(text, refs) else None
 
 
 def _read_file(path, limit=-1):
@@ -291,7 +326,12 @@ def _file_text(contents):
 
 
 def _read_archive():
-    return _read_file(folder() / 'DONE.md')
+    """DONE.md, or None when it cannot be read (not a regular file, or too large). Unrelated changes still record."""
+    try:
+        contents = _read_file(folder() / 'DONE.md', ARCHIVE_READ + 1)
+    except OSError:
+        return None
+    return None if len(contents) > ARCHIVE_READ else contents
 
 
 def _backlog_files():
@@ -311,13 +351,13 @@ def _seen_revision():
 
 
 def observe():
-    """Catch up after a file change. A failed observation never fails an audit request."""
+    """Catch up after a file change. A failed observation never fails an audit request, and a busy lock skips it."""
     global _observed_files
     try:
         if (_seen_revision(), _backlog_files()) == _observed_files:
             return
-        with _try_locked() as locked:
-            if not locked:
+        with _audit_lock(block=False) as audit_locked, _try_locked() as locked:
+            if not (audit_locked and locked):
                 return
             revision, files = _seen_revision(), _backlog_files()
             if (revision, files) == _observed_files:
@@ -326,7 +366,7 @@ def observe():
             text = _file_text(contents)
             if len(text) > LIMIT:
                 raise OSError('The backlog is too long to observe.')
-            if _catch_up(text, archive=archive):
+            if _catch_up(text, archive=archive) is not None:
                 _observed_files = _seen_revision(), files
     except Exception as exc:
         audit._warn(f'could not observe the backlog ({type(exc).__name__}).')
@@ -534,6 +574,8 @@ def _pane_hint(kind, block):
 
 
 def _checked_archive(contents):
+    if contents is None:
+        return None
     blocks = {}
     items, _ = _audit_items(_file_text(contents), blocks=blocks)
     return {ref: (row, blocks[ref]) for ref, row in items.items() if row[2] == 'done'}
@@ -611,7 +653,7 @@ def _audit_changes(before, after, *, observed=False, archived=None, old_archived
     for ref, (project, title, stage, _) in previous.items():
         if ref in current:
             continue
-        if ref not in archived:
+        if ref not in new_archived:  # an entry the snapshot already held does not vouch for this removal
             record('backlog.remove', f'{ref} removed: {title[:80]}', project=project)
         elif stage != 'done':
             record('backlog.done', f'{ref} done: {title[:80]}', project=project, block=archived[ref][1])
@@ -755,6 +797,8 @@ def mark_done(query, project='', result='', who=''):
 
 def _done_line(result, who):
     """The Done line, dated, so the work board can show the item for a week (board_items)."""
+    if not who and SOURCE.search(result or ''):
+        who = 'unknown'  # else the result's own (codex · pane %N) would read as the who part (B303)
     return f'  - Done: {time.strftime("%Y-%m-%d %H:%M")} · {result or "finished"}{f" ({who})" if who else ""}'
 
 

@@ -365,7 +365,7 @@ class BacklogObservedTests(unittest.TestCase):
 
             with mock.patch.object(fcntl, 'flock', side_effect=require_nonblocking) as lock:
                 backlog.observe()
-            lock.assert_called_once()
+            self.assertEqual(lock.call_count, 2)  # the audit lock, then the busy backlog lock
             self.assertEqual(self.entries(), [])
             self.assertEqual(self.seen()['text'], INITIAL)
 
@@ -439,3 +439,84 @@ class BacklogObservedTests(unittest.TestCase):
         with mock.patch.object(backlog, 'observe') as observe:
             backlog.watch(stop)
         observe.assert_called_once_with()
+
+    # B303 round 3 review
+
+    def test_archive_entry_added_during_in_process_write_is_still_recorded(self):
+        backlog.observe()
+        real = backlog._catch_up
+
+        def catch_up_then_archive(text, **kwargs):
+            refs = real(text, **kwargs)
+            self.archive.write_text('## Build (moved 2026-11-21 10:00)\n- [x] Sneaked in #B40\n')
+            return refs
+        with mock.patch.object(backlog, '_catch_up', side_effect=catch_up_then_archive):
+            self.cli_add('In-process write')
+        self.assertNotIn('B40', self.seen()['archived'])
+        backlog.observe()
+        kinds = sorted((e['kind'], e['summary']) for e in self.entries() if (e.get('detail') or {}).get('observed'))
+        self.assertEqual(kinds, [('backlog.add', 'B40 added: Sneaked in (seen in the file)'),
+                                 ('backlog.done', 'B40 done: Sneaked in (seen in the file)')])
+
+    def test_replaced_backlog_lock_does_not_let_two_catch_ups_run(self):
+        backlog.observe()
+        self.file.write_text(INITIAL + '- [ ] Direct edit #B14\n')
+        with backlog._audit_lock():
+            lock = backlog.folder() / '.lock'
+            lock.unlink()
+            lock.write_text('')  # a worker replaces the backlog lock
+            backlog.observe()
+            self.assertEqual(self.entries(), [])
+        backlog.observe()
+        backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.add', 'B14 added: Direct edit', UNKNOWN)
+
+    def test_unreadable_archive_does_not_hold_back_other_changes(self):
+        backlog.observe()
+        self.archive.mkdir()
+        self.file.write_text(INITIAL + '- [ ] Direct edit #B14\n')
+        with contextlib.redirect_stderr(io.StringIO()):
+            backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.add', 'B14 added: Direct edit', UNKNOWN)
+
+    def test_unreadable_archive_counts_a_missing_item_as_removed(self):
+        backlog.observe()
+        self.archive.mkdir()
+        self.file.write_text(INITIAL.replace('- [ ] Fix warnings #B12\n', ''))
+        with contextlib.redirect_stderr(io.StringIO()):
+            backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.remove', 'B12 removed: Fix warnings', UNKNOWN)
+
+    def test_oversized_archive_is_treated_as_unreadable(self):
+        backlog.observe()
+        self.archive.write_text('## Build\n- [x] Fix warnings #B12\n')
+        self.file.write_text(INITIAL.replace('- [ ] Fix warnings #B12\n', ''))
+        with mock.patch.object(backlog, 'ARCHIVE_READ', 10), contextlib.redirect_stderr(io.StringIO()):
+            backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.remove', 'B12 removed: Fix warnings', UNKNOWN)
+
+    def test_old_archive_copy_does_not_turn_a_removal_into_done(self):
+        self.archive.write_text('## Build (moved 2026-11-20 10:00)\n- [x] Fix warnings #B12\n')
+        backlog.observe()
+        self.assertEqual(self.seen()['archived'], ['B12'])
+        self.file.write_text(INITIAL.replace('- [ ] Fix warnings #B12\n', ''))
+        backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.remove', 'B12 removed: Fix warnings', UNKNOWN)
+
+    def test_done_result_with_source_shape_and_no_who_gives_no_hint(self):
+        backlog.observe()
+        with self.sandbox():
+            backlog.mark_done('B12', 'Build', 'merged (codex · pane %99)', '')
+        self.assertIn('(codex · pane %99) (unknown)', self.file.read_text())
+        backlog.observe()
+        entry, = self.entries()
+        self.assert_observed(entry, 'backlog.done', 'B12 done: Fix warnings', UNKNOWN)
+
+
+if __name__ == '__main__':
+    unittest.main()
