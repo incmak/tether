@@ -1175,6 +1175,72 @@ time.sleep(20)
                 self.assertEqual((check['via'], check['verdict'], check['head']), ('commit-msg', 'pass', old))
                 self.assertEqual(landed['event'], 'landed')
 
+    def test_claude_covers_an_amend_when_post_commit_switches_branch(self):
+        self.commit('-m', 'base', '-m', STAMP)
+        self.install()
+        post = self.repo / '.git' / 'hooks' / 'post-commit'
+        post.write_text('#!/bin/sh\ngit checkout -q -B moved\n')
+        post.chmod(0o755)
+        old = self.git('rev-parse', 'HEAD').stdout.strip()
+        command = f'git commit --amend --allow-empty -m amended -m {shlex.quote(STAMP)}'
+        self.pre(command)
+        self.git('commit', '--amend', '--allow-empty', '-m', 'amended', '-m', STAMP)
+        self.assertNotEqual(self.git('rev-parse', 'HEAD').stdout.strip(), old)
+        self.assertEqual(self.git('rev-parse', '--abbrev-ref', 'HEAD').stdout.strip(), 'moved')
+        self.pre(command, 'PostToolUse')
+        check, landed = self.rows()
+        self.assertEqual((check['via'], check['verdict'], landed['event']), ('commit-msg', 'pass', 'landed'))
+
+    def test_claude_keeps_the_amend_verdict_after_checkout_and_return(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '-m', 'merge side', 'side')
+        command = 'git commit --amend --no-edit'
+        self.pre(command)
+        self.env['GIT_COMMITTER_DATE'] = '2001-01-01T00:00:00+00:00'
+        self.git('commit', '--amend', '--no-edit', '--no-verify')
+        amended = self.git('rev-parse', 'HEAD').stdout.strip()
+        branch = self.git('rev-parse', '--abbrev-ref', 'HEAD').stdout.strip()
+        self.git('checkout', '-q', 'HEAD^')
+        self.git('checkout', '-q', branch)
+        self.assertEqual(self.git('rev-parse', 'HEAD').stdout.strip(), amended)
+        self.assert_hook_silent(command, 'would_block')
+
+    def test_claude_does_not_claim_a_fresh_commit_row_for_a_revisited_remerge(self):
+        self.prepare_merge()
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'original merge', 'side')
+        original = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+00:00',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.commit('-m', 'same')
+        check, = self.rows()
+        fresh = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('reset', '-q', '--keep', f'{original}^')
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'same', 'side')
+        remerge = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.git('reset', '-q', '--keep', fresh)
+        self.git('reset', '-q', '--keep', original)  # The last move to the re-merge now starts at the row's head.
+        self.git('reset', '-q', '--keep', remerge)
+        self.assertEqual(check['head'], original)
+        self.assert_hook_silent(command, 'skip')
+
+    def test_claude_does_not_claim_a_fresh_commit_row_for_a_remerge_without_a_reflog(self):
+        self.prepare_merge()
+        self.git('config', 'core.logAllRefUpdates', 'false')
+        (self.repo / '.git' / 'logs' / 'HEAD').unlink()
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'original merge', 'side')
+        original = self.git('rev-parse', 'HEAD').stdout.strip()
+        self.env.update(GIT_AUTHOR_DATE='2001-01-01T00:00:00+00:00',
+                        GIT_COMMITTER_DATE='2001-01-01T00:00:00+00:00')
+        command = 'git commit --allow-empty -m same'
+        self.pre(command)
+        self.commit('-m', 'same')
+        self.git('reset', '-q', '--keep', f'{original}^')
+        self.git('merge', '--no-ff', '--no-verify', '-m', 'same', 'side')
+        self.assertFalse((self.repo / '.git' / 'logs' / 'HEAD').exists())
+        self.assert_hook_silent(command, 'skip')
+
     def test_claude_applies_the_normal_verdict_to_a_silent_merge_amendment(self):
         self.assert_silent_merge_amendment('would_block')
 

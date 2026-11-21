@@ -1013,7 +1013,9 @@ def _git_path(folder, *args):
 
 
 def _head_reflog(folder):
-    """Return the latest previous HEAD for each commit in the reflog tail, or None if unavailable."""
+    """Return the HEAD before each commit's first reflog entry, or None if unavailable.
+
+    The first entry is the one that made the commit. Later checkouts and resets cannot replace it."""
     path = _git_path(folder, '--git-path', 'logs/HEAD')
     if path is None:
         return None
@@ -1037,7 +1039,7 @@ def _head_reflog(folder):
                 return None
             if not re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t[^\0]*)?', ident):
                 return None
-            heads[new] = old
+            heads.setdefault(new, old)
         return heads
     except (OSError, ValueError):
         return None
@@ -1431,8 +1433,8 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
             else:
                 if merge_heads or amend_parents(head) != commit.parent_list:
                     continue
-                heads = reflog()
-                if heads is not None and heads.get(commit.oid) != head:
+                heads = reflog()  # Only the reflog proves an amend. Matching parents can also be a re-merge.
+                if heads is None or heads.get(commit.oid) != head:
                     continue
             if claimed == commit.oid:
                 match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
