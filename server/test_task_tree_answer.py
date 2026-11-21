@@ -368,15 +368,31 @@ class HelperAnswerTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(writes, keys)
 
-    def test_live_done_with_nothing_ticked_goes_back_from_the_unanswered_review(self):
-        """Claude 2.1.330, live: no ticks on the last question gives a review with a warning and no block for it."""
+    def test_done_with_nothing_ticked_sends_no_keys(self):
+        """Claude 2.1.330, live: with no ticks, Next goes on and Submit shows a review that lacks this question."""
         self.two_question_ask()
-        (status, response), writes = self.live_done(
-            '44-q2-none', 0, 4, [('Enter', self.live2('44-q2-none-05')), ('Left', self.live2('44-q2-none-00'))],
-            'Which formats do you want?')
+        for name, heading in (('44-q2-none-00', 'Which formats do you want?'), ('44-q1-00', 'Which features do you want?')):
+            with self.subTest(name=name):
+                frame = self.live2(name)
+                revision = menu_row(frame, self.entry)['attention']['menu_verified']
+                run = ScriptedTerminal(frame)
+                with patch.object(terminal_input, 'verify'):
+                    status, response = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading)
+                self.assertEqual((status, response), (409, {'error': terminal_input.NO_TICKS}))
+                self.assertEqual(run.writes, [])
+
+    def test_live_unanswered_review_goes_back(self):
+        """Ticks on this question but a review that warns "Some questions are unanswered": no Submit, one Left."""
+        self.two_question_ask()
+        question = self.live2('44-q2-05')
+        revision = menu_row(question, self.entry)['attention']['menu_verified']
+        run = ScriptedTerminal(question, [('Enter', self.live2('44-q2-none-05')), ('Left', self.live2('44-q2-02'))])
+        with patch.object(terminal_input, 'verify'):
+            status, response = self.request_choice('pick', run, then='Enter', revision=revision,
+                                                   heading='Which formats do you want?')
         self.assertEqual(status, 409)
         self.assertIn('Open the terminal to check', response['error'])
-        self.assertEqual(writes, ['Down'] * 4 + ['Enter', 'Left'])
+        self.assertEqual(run.writes, ['Enter', 'Left'])
 
     def test_live_truncated_question_tabs_give_no_revision(self):
         """At 22 columns Claude 2.1.330 shortens the tabs to '☐ … ☐ F…': the question is not verified."""
@@ -388,8 +404,12 @@ class HelperAnswerTests(unittest.TestCase):
         """A narrow pane wraps the key hint to a row that starts with '· '. It is not a chat line."""
         wrapped = SCREEN.replace('to navigate · Esc to cancel', 'to navigate\n· Esc to cancel')
         self.assertNotEqual(wrapped, SCREEN)
-        self.assertEqual(menu_row(wrapped, self.entry)['attention']['menu_verified'],
-                         menu_row(SCREEN, self.entry)['attention']['menu_verified'])
+        revision = menu_row(wrapped, self.entry)['attention']['menu_verified']
+        self.assertEqual(revision, menu_row(SCREEN, self.entry)['attention']['menu_verified'])
+        with patch.object(terminal_input, 'verify'):
+            run = FakeTerminal(wrapped)
+            self.assertEqual(self.request_choice('menu', run, choice=2, revision=revision), (200, {'accepted': True}))
+        self.assertEqual([command[-1] for command in run.writes], ['Down', 'Enter'])
 
     def test_multi_pick_refuses_missing_stale_answered_or_mismatched_menu(self):
         screen = self.multi_frame()

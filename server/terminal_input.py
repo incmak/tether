@@ -657,7 +657,8 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
 
 def menu_open(agent, lines):
     """A numbered menu waits at the bottom of the screen: two numbered rows, the cursor in the menu, and for Claude
-    not a ruled draft that only looks like one. attention() and picker_choose() use the same test."""
+    not a ruled draft that only looks like one. read_picker() uses the same test. attention() also accepts a Claude question that choice_state.ask_current
+    reads whole."""
     tail = lines[-30:]
     marker = {'claude': '❯', 'codex': '›', 'antigravity': '>'}.get(agent)
     cursor_row = next((i for i in reversed(range(len(lines))) if CURSOR_ITEM.match(lines[i])), -1)
@@ -735,6 +736,9 @@ def _wait_for_picker_redraw(look, sleep):
         if result is not None:
             return result
     return None
+
+
+NO_TICKS = 'Tick at least one option, then choose Done.'
 
 
 def _finish_claude_multi(entry, menu, press, run, sleep):
@@ -817,6 +821,9 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
             if submit:
                 if not control:
                     raise MenuChanged(menu_refusal(entry))
+                if not any(item['kind'] == 'option' and item.get('checked') for item in items):
+                    # Claude would go on, or show a review with "Some questions are unanswered".
+                    raise MenuChanged(NO_TICKS)
                 target = len(items) - 1  # the unnumbered control sits between the free and chat rows
             elif (menu['question'] != heading or [picker_row_key(item) for item in items] != labels
                   or items[row]['kind'] != 'option'):
