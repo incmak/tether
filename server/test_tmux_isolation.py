@@ -5,6 +5,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import signal
@@ -473,6 +474,30 @@ os.killpg(0, signal.SIGKILL)
             control.shutdown(socket.SHUT_WR)
             control.settimeout(5)
             self.assertEqual(control.recv(1), b'')
+
+    def test_private_tmux_clients_cannot_start_a_server(self):
+        # Only the watcher starts a test server (-D). Every other private-socket client passes -N.
+        def client(words):
+            return '-S' in words and '/dev/null' in words and '-N' not in words and '-D' not in words
+        found = []
+        for file in sorted(Path(__file__).parent.glob('test_*.py')):
+            tree = ast.parse(file.read_text(encoding='utf-8'), filename=str(file))
+            parts = {id(part) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for part in node.values}
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.List, ast.Tuple)):
+                    words = [item.value for item in node.elts if isinstance(item, ast.Constant)]
+                elif isinstance(node, ast.JoinedStr):
+                    words = ast.unparse(node).split()
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in parts:
+                    # Python source in a string (quoted words), or a shell command that runs tmux.
+                    words = re.findall(r"'([^']*)'", node.value)
+                    if 'tmux' in node.value.split():
+                        words += node.value.split()
+                else:
+                    continue
+                if client(words):
+                    found.append(f'{file.name}:{node.lineno}')
+        self.assertEqual(found, [], 'Add -N so a test client cannot start an unwatched tmux server.')
 
     def test_real_tmux_tests_use_cleanup_instead_of_teardown_or_finally(self):
         for file in sorted(Path(__file__).parent.glob('test_*.py')):

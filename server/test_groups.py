@@ -269,7 +269,7 @@ class TmuxTests(Bundles):
     worker_tmux = """\
 import subprocess, sys
 def run(argv, **kwargs):
-    return subprocess.run([argv[0], '-S', sys.argv[1], '-f', '/dev/null', *argv[1:]], **kwargs)
+    return subprocess.run([argv[0], '-N', '-S', sys.argv[1], '-f', '/dev/null', *argv[1:]], **kwargs)
 """
 
     def setUp(self):
