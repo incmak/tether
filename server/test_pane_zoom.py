@@ -146,7 +146,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache = sys.argv[1:]
 pane_view.tmux = lambda *args: subprocess.run(
-    [binary, '-S', socket, '-f', '/dev/null', *args], capture_output=True, text=True, timeout=5)
+    [binary, '-N', '-S', socket, '-f', '/dev/null', *args], capture_output=True, text=True, timeout=5)
 pane_view.paths.CACHE = Path(cache)
 pane_view.zoom_repair_all()
 '''
@@ -258,7 +258,7 @@ from pathlib import Path
 import pane_view
 binary, socket, cache, pane = sys.argv[1:]
 def tmux(*args):
-    return subprocess.run([binary, '-f', '/dev/null', '-S', socket, *args],
+    return subprocess.run([binary, '-N', '-f', '/dev/null', '-S', socket, *args],
                           capture_output=True, text=True, timeout=5)
 pane_view.tmux = tmux
 pane_view.paths.CACHE = Path(cache)
@@ -442,7 +442,7 @@ pane_view.zoom_leave(view)
         self.assertEqual(self.home_layout(), before)
 
     def test_control_client_ignores_size_for_whole_zoom(self):
-        client = subprocess.Popen([self.binary, '-S', self.socket, '-f', '/dev/null',
+        client = subprocess.Popen([self.binary, '-N', '-S', self.socket, '-f', '/dev/null',
                                    '-C', 'attach-session', '-f', 'ignore-size', '-t', 'zoom-test'],
                                   env=self.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

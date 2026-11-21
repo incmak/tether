@@ -840,7 +840,8 @@ class WrapperTests(unittest.TestCase):
             fake.chmod(0o755)
         env = dict(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'),
                    CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh', MOBILE_TMUX_CONFIG=str(self.temp / 'config'),
-                   TETHER_LAUNCH=None, INVOCATION_ID=None, TETHER_CDP_URL=None)  # the panes inherit the server env
+                   TETHER_LAUNCH=None, INVOCATION_ID=None, TETHER_CDP_URL=None,  # the panes inherit the server env
+                   MOBILE_TMUX_TMUX=str(bin_dir / 'private-tmux'))  # written below, once the socket is known
         self.private = private_tmux(self, 'tlaunch-', env)
         self.env = self.private.env
         self.socket = self.private.socket
@@ -848,9 +849,10 @@ class WrapperTests(unittest.TestCase):
         # The launcher reads its pane context. The tmux client needs only the socket.
         client = bin_dir / 'private-tmux'
         binary = shlex.quote(shutil.which('tmux'))
-        client.write_text(f'#!/bin/sh\nunset TMUX TMUX_PANE\nexec {binary} -S {self.socket} -f /dev/null "$@"\n')
+        client.write_text(f'#!/bin/sh\nunset TMUX TMUX_PANE\nexec {binary} -N -S {self.socket} -f /dev/null "$@"\n')
         client.chmod(0o755)
-        self.env['MOBILE_TMUX_TMUX'] = str(client)
+        # The pane launcher must reach this server only through the wrapper.
+        self.assertEqual(self.tmux('show-environment', '-g', 'MOBILE_TMUX_TMUX').stdout.strip(), f'MOBILE_TMUX_TMUX={client}')
         (self.temp / 'codex').mkdir()
         (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
         self.tmux('new-session', '-d', '-s', 'proj', '-c', str(self.temp),  # no real .codex folder above it
@@ -860,7 +862,7 @@ class WrapperTests(unittest.TestCase):
         target = self.temp / 'argv'
         target.unlink(missing_ok=True)
         self.tmux('send-keys', '-t', 'proj',
-                  f'{command}; env -u TMUX -u TMUX_PANE tmux -S {self.socket} -f /dev/null wait-for -S done', 'Enter')
+                  f'{command}; env -u TMUX -u TMUX_PANE tmux -N -S {self.socket} -f /dev/null wait-for -S done', 'Enter')
         self.tmux('wait-for', 'done')
         for _ in range(50):
             if target.exists():
