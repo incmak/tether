@@ -1441,17 +1441,26 @@ def small_pane_reason(entry, run=subprocess.run):
     return SIZE_HELP
 
 
-# Codex's footer under its input: "? for shortcuts", or the status line with its context figure (footer.CODEX_CONTEXT;
-# footer.py imports this module, so the pattern lives here too).
-CODEX_INPUT_FOOTER = re.compile(r'\?\s+for\s+shortcuts\b|\bContext\s+\d+(?:\.\d+)?%\s+(?:left|used)\b', re.I)
+# Codex 0.170's footer under its input (fixtures codex_0.170.0_restart/): an optional status block that starts with the
+# model ("GPT-6.2-Sol max · ~/project ·") and wraps anywhere (a long folder path fills whole rows), then one hint row
+# ("← for agents · ? for shortcuts", with an optional "⚠ 4 warnings · f2 to view"). Every row must fit: a phrase
+# somewhere in the rows is not enough (R8).
+CODEX_STATUS_START = re.compile(r'^[A-Za-z][\w.-]*\d[\w.-]*(?:\s+(?:minimal|low|medium|high|xhigh|extra high|max))?'
+                                r'(?:\s+(?:fast|ultrafast))?\s+·(?:\s|$)', re.I)
+CODEX_HINT = r'(?:\?\s+for\s+shortcuts|←\s+for\s+agents)'
+CODEX_HINT_ROW = re.compile(rf'^{CODEX_HINT}(?:\s+·\s+{CODEX_HINT})*(?:\s{{2,}}⚠\s+\d+\s+warnings?\s+·\s+f2\s+to\s+view)?$')
 
 
 def codex_input_box(lines, end):
-    """True when the Codex input ends at a blank line and only its footer follows (wrapped lines are joined)."""
+    """True when the Codex input ends at a blank line and only Codex's own footer follows: an optional status block
+    that starts with the model row, and the hint row last."""
     if end >= len(lines) or lines[end].strip():
         return False
     rest = [line.strip() for line in lines[end + 1:] if line.strip()]
-    return 0 < len(rest) <= 6 and CODEX_INPUT_FOOTER.search(' '.join(rest)) is not None
+    if not 0 < len(rest) <= 6 or not CODEX_HINT_ROW.match(rest[-1]):
+        return False
+    status = rest[:-1]
+    return not status or CODEX_STATUS_START.match(status[0]) is not None
 
 
 def _unverified_restart_prompt(entry):

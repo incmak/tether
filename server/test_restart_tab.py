@@ -162,9 +162,11 @@ class RestartTests(unittest.TestCase):
                 self.assert_refused('There is an unsent draft in the agent input. Clear it, then send again.')
 
     def test_styled_idle_captures_prove_the_input_is_empty(self):
-        # Claude's narrow capture is a real 50-column screen from the agent-bar fixtures (Tether keeps live windows wide).
+        # Claude's narrow capture is a real 50-column screen from the agent-bar fixtures. idle_50col is a real Codex screen
+        # on an isolated tmux server (the running Tether keeps live windows wide).
         for agent, capture in [('claude', 'claude_2.1.330_restart/idle.ansi'), ('claude', 'claude_2.1.330_agent_bar/narrow_after_escape.txt'),
-                               ('codex', 'codex_0.170.0_restart/idle.ansi'), ('codex', 'codex_0.170.0_restart/idle_narrow.ansi')]:
+                               ('codex', 'codex_0.170.0_restart/idle.ansi'), ('codex', 'codex_0.170.0_restart/idle_narrow.ansi'),
+                               ('codex', 'codex_0.170.0_restart/idle_50col.ansi')]:
             with self.subTest(capture=capture), patch.dict(self.entry, agent=agent):
                 self.screen = (FIXTURES / capture).read_text()
                 terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
@@ -202,13 +204,23 @@ class RestartTests(unittest.TestCase):
         self.entry['agent'] = 'codex'
         dim = '\x1b[1m›\x1b[0m \x1b[2mSome dim content\x1b[0m\n'
         for screen in [dim, dim + '\n  other text\n',
-                       dim + '\n' + '  line\n' * 7 + '  ? for shortcuts\n']:
+                       dim + '\n' + '  line\n' * 7 + '  ? for shortcuts\n',
+                       # The review case: a context phrase in an unknown status row, then an unrelated last row.
+                       dim + '\n  Status message: Context 42% left\n  build 1234 finished\n',
+                       dim + '\n  Status message: Context 42% left\n  ? for shortcuts\n',
+                       dim + '\n  ? for shortcuts\n  build 1234 finished\n',
+                       dim + '\n  unrelated row\n  GPT-6.2-Sol max · ~/project ·\n  ? for shortcuts\n']:
             with self.subTest(screen=screen):
                 self.screen = screen
                 self.assert_refused('Tether cannot verify the Codex input box, so it did not restart the tab. '
                                     'Open the tab to check. A Codex update may have changed its screen.')
-        self.screen = dim + '\n  \x1b[2m? for shortcuts\x1b[0m\n'
-        terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+        # Real Codex 0.170 footers: the hint row alone, and the wide live status block with its hint row.
+        for footer in ['  \x1b[2m? for shortcuts\x1b[0m\n',
+                       '  GPT-6.2-Sol max · ~/project ·\n  granular · Context 4% used · weekly 87% left\n'
+                       '  ← for agents · ? for shortcuts      ⚠ 4 warnings · f2 to view\n']:
+            with self.subTest(footer=footer):
+                self.screen = dim + '\n' + footer
+                terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
         self.assertEqual(self.writes(), [])
 
     def test_antigravity_requires_a_styled_placeholder_for_empty_input(self):
