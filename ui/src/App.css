@@ -1198,6 +1198,37 @@ button.live-chip:active { background: var(--line); }
 .review-meta code { overflow-wrap: anywhere; font-size: 12px; }
 .review-terms { white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-path { margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+/* Tether's coordinator update (StatusCard.tsx): one row per tab. A row that waits on you gets the needs-you wash (attention.css). */
+.status-card { margin: 16px 0; padding: 4px 0; border-left: 2px solid var(--line); }
+.status-title { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; padding-left: 12px; font-size: 13px; color: var(--muted); }
+.status-title time { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Wide: the rows share columns (subgrid), so names, states and summaries line up. A long name gets at most 40%. */
+.status-card ul { display: grid; grid-template-columns: auto fit-content(40%) minmax(0, 1fr) auto; margin: 0; padding: 0; list-style: none; }
+.status-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; gap: 2px 8px; min-height: 36px; margin-left: 4px; padding: 4px 8px; border: 1px solid transparent; border-radius: var(--radius); font-size: 14px; line-height: 1.4; }
+.status-icon { color: var(--muted); }
+.status-row.done .status-icon { color: var(--done); }
+.status-row.failed .status-icon { color: var(--error); }
+.status-row.asks .status-icon, .status-row.needs .status-icon { color: var(--attention); }
+.status-row.needs { border-color: color-mix(in srgb, var(--attention) 28%, transparent); background: color-mix(in srgb, var(--attention) 13%, transparent); }
+.status-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; white-space: nowrap; }
+.status-name { overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.status-head .file-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.status-state { flex: none; color: var(--text); font-size: 13px; }
+.status-row.needs .status-state, .status-row.failed .status-state { font-weight: 600; }
+.status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.status-text.expanded { grid-column: 2 / 4; grid-row: 2; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* --muted on the waiting wash is under 4.5:1; the question it asks is what the person reads first anyway. */
+.status-row.needs .status-text { color: var(--text); }
+.status-more { display: inline-flex; grid-column: 4; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border-radius: var(--radius); color: var(--muted); }
+.status-more[aria-expanded='true'] svg { transform: rotate(180deg); }
+@media (max-width: 560px) {
+  /* Narrow: the summary goes under the name, so the name and the state stay readable. */
+  .status-card ul { display: block; }
+  .status-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .status-text, .status-text.expanded { grid-column: 2; grid-row: 2; }
+  .status-more { grid-column: 3; grid-row: 1 / span 2; }
+}
+@media (pointer: coarse) { .status-more { width: 44px; height: 44px; margin: -6px -6px -6px 0; } .status-head .file-link { display: inline-block; min-height: 24px; } }
 .review-quote { max-height: 50vh; overflow: auto; padding: 10px 12px; border-radius: var(--radius); background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 1.5; }
 .chip-view { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 0 !important; color: inherit; }
 .chip .chip-view { display: flex; flex: 0 1 auto; width: auto; height: auto; min-width: 0; }

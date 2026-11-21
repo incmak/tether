@@ -1,9 +1,12 @@
 import { terminalText } from './terminalText'
 import { parseReview, type Review } from './reviewText'
+import { parseStatus } from './statusText'
+import { StatusCard } from './StatusCard'
+import { COORDINATOR_RULES, INTERRUPTED } from './injectedPrompt'
 import { shellCommand } from './shellCommand'
 import { copyText } from './clipboard'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus } from 'lucide-react'
+import { Blocks, CalendarClock, RefreshCw, Clock3, Layers, Check, Copy, Share, ChevronRight, X, MessageSquare, MessageSquareReply, MessageCircleQuestion, Info, ShieldAlert, Square, Play, Eye, ClipboardPlus, Radio } from 'lucide-react'
 import { MessagePrimitive } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
@@ -156,6 +159,16 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   // Tether's review loop types these into a tab: a review request to the reviewer, or its feedback to the worker.
   const review = role === 'user' && !kind ? parseReview(text) : null
   if (review) return <ReviewCard id={id} review={review} />
+  // Tether's coordinator updates: which tabs finished, failed, or wait on you (server/coordinator.py message()).
+  const status = role === 'user' && !kind ? parseStatus(text) : null
+  if (status) return <StatusCard id={id} status={status} time={time} />
+  // The rules Tether gives a tab when it becomes the coordinator (server/coordinator.py). They are not the person's words.
+  if (role === 'user' && !kind && text.startsWith(COORDINATOR_RULES)) {
+    return <details className="tool-row compact-row" data-msg-id={id}><summary><Radio size={15} />Coordinator rules<ChevronRight size={15} /></summary><pre>{text.slice(COORDINATOR_RULES.length)}</pre></details>
+  }
+  // Claude Code writes these when you stop a turn: a quiet line, not a bubble with your name.
+  const stopped = role === 'user' && !kind ? INTERRUPTED.get(text.trim()) : undefined
+  if (stopped) return <p className="notice-line" data-msg-id={id}><Square size={13} aria-hidden="true" /><span>{stopped}</span></p>
   // Claude puts the whole summary in a user message after /compact or an auto-compact. Fold it like a tool row.
   if (role === 'user' && text.startsWith('This session is being continued from a previous conversation')) {
     return <details className="tool-row compact-row" data-msg-id={id}><summary><Layers size={15} />Conversation compacted<ChevronRight size={15} /></summary><pre>{text}</pre></details>
@@ -170,15 +183,31 @@ export function Message({ id, role, kind, title, text, count, time, tools, api, 
   </MessagePrimitive.Root>
 }
 // A request starts folded: its body is the other tab's reply, which that tab already shows. Feedback starts open: it is what this tab acts on.
+// An approval starts folded: its one line says what it approves. The other relays from the review loop start open.
+function reviewHead(review: Review): { title: string; meta: React.ReactNode; open: boolean } {
+  const short = review.commit?.slice(0, 12)
+  const rounds = `${review.rounds} review round${review.rounds === 1 ? '' : 's'}`
+  switch (review.kind) {
+    case 'approved': return { title: short ? `Review approved · ${short}` : 'Review approved', open: false,
+      meta: review.uncommitted ? 'The reviewer tab approved the uncommitted changes. Commit them; Tether asks the reviewer to confirm that commit.'
+        : short ? <>The reviewer tab approved commit <code>{short}</code> only.</> : 'The reviewer tab approved this work.' }
+    case 'stopped': return { title: `Review stopped after ${rounds}`, open: true, meta: 'The reviewer tab still finds blocking problems. Mak decides the next step.' }
+    case 'summary': return { title: `Review blocked after ${rounds}`, open: true, meta: 'The reviewer still finds blocking problems. The parent tab decides the next step.' }
+    case 'notice': return { title: `Review blocked · ${review.name}`, open: true, meta: `This helper tab still has blocking findings after ${rounds}. Send it the next step, or hand it to Mak.` }
+    case 'correction': return { title: 'Review correction', open: true, meta: 'Do not act on the approval above.' }
+    case 'feedback': return { title: `Review from ${review.tab}`, open: true, meta: 'Tether sent the reviewer tab’s reply here. This tab fixes what it raises.' }
+    default: return { title: `Review request · ${review.name || review.tab}`, open: false, meta: review.commit
+      ? <>The {review.agent} tab {review.tab} finished a turn. Reply <code>APPROVED {review.commit}</code> (the full hash), or list what is wrong. Tether sends your reply to that tab.</>
+      : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.` }
+  }
+}
 function ReviewCard({ id, review }: { id: string; review: Review }) {
   const preview = review.reply.split('\n').find(line => line.trim())?.replace(/^#+\s*/, '')
-  return <details className="peer-message review-message" data-msg-id={id} open={review.feedback}>
-    <summary><Eye size={15} /><strong>{review.feedback ? `Review from ${review.tab}` : `Review request · ${review.name || review.tab}`}</strong>{review.last && <span className="badge">Last round</span>}<span className="peer-preview">{preview}</span><ChevronRight size={15} /></summary>
-    <p className="review-meta">{review.feedback
-      ? 'Tether sent the reviewer tab’s reply here. This tab fixes what it raises.'
-      : review.commit
-        ? <>The {review.agent} tab {review.tab} finished a turn. Reply <code>APPROVED {review.commit}</code> (the full hash), or list what is wrong. Tether sends your reply to that tab.</>
-        : `The ${review.agent} tab ${review.tab} finished a turn. Reply APPROVED, or list what is wrong. Tether sends your reply to that tab.`}</p>
+  const { title, meta, open } = reviewHead(review)
+  const Icon = review.kind === 'approved' ? Check : Eye
+  return <details className={`peer-message review-message review-${review.kind}`} data-msg-id={id} open={open}>
+    <summary><Icon size={15} /><strong>{title}</strong>{review.last && <span className="badge">Last round</span>}<span className="peer-preview">{preview}</span><ChevronRight size={15} /></summary>
+    <p className="review-meta">{meta}</p>
     {review.terms && <p className="review-meta review-terms">{review.terms.map((part, index) => part.code ? <code key={index}>{part.text}</code> : part.text)}</p>}
     <div className="review-quote"><Linked text={review.reply} /></div>
     {review.transcript && <p className="review-meta review-path" title={review.transcript}>{review.transcript}</p>}

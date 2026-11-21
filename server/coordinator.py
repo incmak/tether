@@ -327,8 +327,10 @@ def message(events, mode):
              f'coordinator rules, run `{cli()} claim`.']
     words = {'done': 'finished', 'asks': 'finished and asks the user', 'needs': 'waits on the user', 'failed': 'failed'}
     for event in events:
-        text = f': {event["text"]}' if event['text'] else ''
-        lines.append(f'- `{event["name"]}` ({event["pane"]}) {words[event["kind"]]}{text}')
+        name = re.sub(r'\r\n|[\r\n\u2028\u2029]', ' ', event['name'].replace('`', "'"))
+        text = ' '.join(event['text'].split())
+        detail = f': {text}' if text else ''
+        lines.append(f'- `{name}` ({event["pane"]}) {words[event["kind"]]}{detail}')
     return '\n'.join(lines)
 
 

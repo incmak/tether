@@ -1,7 +1,8 @@
 // The review messages that Tether types into a tab (server/review_links.py), parsed for the review card in chat.
 export type Review = {
-  feedback: boolean; tab: string; agent?: string; name?: string; terms?: TermPart[]; commit?: string
-  reply: string; transcript?: string; last?: boolean
+  kind: 'request' | 'feedback' | 'approved' | 'stopped' | 'summary' | 'notice' | 'correction'
+  feedback: boolean; tab?: string; agent?: string; name?: string; terms?: TermPart[]; commit?: string
+  reply: string; transcript?: string; last?: boolean; uncommitted?: boolean; rounds?: number
 }
 /** Plain text, or the server's own REVIEW.md command (shown as code). Other text keeps its backticks: it holds paths and checklist rows. */
 export type TermPart = { text: string; code?: boolean }
@@ -30,6 +31,42 @@ const HEADER = new RegExp(`^(Commit under review: ([0-9a-f]{40}|[0-9a-f]{64}) in
   + '(?:Read the review rules first: `(git -C \\3 show origin/main:REVIEW\\.md)`\\. )?'
   + 'An approval counts only for this commit: start it with `APPROVED \\2` \\(the full hash\\)\\.(?: |$)')
 
+const HASH = '[0-9a-f]{12}|[0-9a-f]{40}|[0-9a-f]{64}'
+const APPROVED = new RegExp(String.raw`^\[Tether review\] Approved by the reviewer tab \((%[0-9]+)\)`
+  + String.raw`(?: for commit (${HASH})( and its uncommitted changes)?)?:\n\n`)
+const APPROVED_MARK = '\n\nThe review is complete. '
+const APPROVED_END = 'the next step your instructions give for an approved review, then stop.'
+const APPROVED_DIRTY = 'It covered uncommitted changes, so no commit is approved yet: commit the work '
+  + 'in this turn, and Tether asks the reviewer to confirm that commit. '
+const APPROVED_CLEAN = new RegExp(`^The approval is for commit (${HASH}) only\\. Before you push, deploy or merge, `
+  + `check that HEAD (?:${literal("in this tab's worktree (`git rev-parse HEAD`)")}`
+  + `|in (${FOLDER}) \\(\`git -C \\2 rev-parse HEAD\`\\)) is \\1\\. `
+  + literal('If HEAD is different or you cannot read it, do not act on this approval. '
+    + `Stop and wait for the next review. If HEAD is that hash, do ${APPROVED_END}`) + '$')
+
+const FINDINGS = '\n\nOpen findings:\n\n'
+const STOPPED = new RegExp(String.raw`^\[Tether review\] Stopped after ([1-9][0-9]*) review rounds: the reviewer tab \((%[0-9]+)\)`
+  + literal(` still finds blocking problems. Do not fix them in this turn. Mak decides the next step.${FINDINGS}`)
+  + String.raw`([\s\S]*)\n\n`
+  + literal('Reply with a short list of the open findings and what you tried, then end with "Needs you: yes".') + '$')
+const SUMMARY = new RegExp(String.raw`^\[Tether review\] ([1-9][0-9]*) review rounds still found blocking problems\. `
+  + literal(`Your parent tab decides the next step. Do not fix them in this turn.${FINDINGS}`)
+  + String.raw`([\s\S]*)\n\n`
+  + literal('Reply with the open findings and what you tried. End with "Needs you: no" unless '
+    + 'a finding needs Mak (taste, new authority, or you disagree with the reviewer).') + '$')
+const noticePattern = (name: string) => new RegExp(String.raw`^\[Tether review\] “(${name})” \((%[0-9]+)\) `
+  + String.raw`still has blocking review findings after ([1-9][0-9]*) rounds\. Open findings: “([^\r\n]*)”\n\n`
+  + String.raw`To allow 2 more rounds, send it the next step: python3 ([^\r\n]+?) send --pane \2 "<what to fix>"\. `
+  + String.raw`To hand it to Mak: python3 \5 escalate --pane \2\.$`)
+const NOTICE = noticePattern(String.raw`[^\r\n]*?`)
+const NOTICE_LONG_NAME = noticePattern(String.raw`[^\r\n]*`)
+const CORRECTION = new RegExp(`^\\[Tether review\\] Correction: the approval above is for commit (${HASH}) only\\. `
+  + `(?:This tab is now at (?:${HASH})\\. `
+  + `|${literal("Tether could not read this tab's commit after the approval, so the approval cannot be checked. ")})`
+  + literal('Do not push, deploy or merge on that approval. ')
+  + `(?:${['The review is paused: Mak decides.', 'Tether asked the reviewer to review the current commit.',
+    'Wait for the next review.'].map(literal).join('|')})$`)
+
 export function parseReview(text: string): Review | null {
   for (const [shortest, longest] of REQUESTS) {
     const request = shortest.exec(text)
@@ -37,12 +74,46 @@ export function parseReview(text: string): Review | null {
     if (longest.exec(text)?.[2] !== request[2]) return null
     const { commit, parts } = termParts(request[4].trim())
     return {
-      feedback: false, agent: request[1], name: request[2], tab: request[3], terms: parts, commit,
+      kind: 'request', feedback: false, agent: request[1], name: request[2], tab: request[3], terms: parts, commit,
       reply: request[5].trim(), transcript: request[6], last: !!request[7],
     }
   }
   const feedback = REVIEW_FEEDBACK.exec(text)
-  return feedback ? { feedback: true, tab: feedback[1], reply: feedback[2] } : null
+  if (feedback) return { kind: 'feedback', feedback: true, tab: feedback[1], reply: feedback[2] }
+
+  const message = text.trimEnd()
+  const approved = APPROVED.exec(message)
+  if (approved) {
+    const [, tab, commit, dirty] = approved
+    const end = message.lastIndexOf(APPROVED_MARK)
+    if (end < approved[0].length) return null
+    const footer = message.slice(end + APPROVED_MARK.length)
+    const simple = `${dirty ? APPROVED_DIRTY : ''}Do ${APPROVED_END}`
+    if (footer !== simple && (dirty || !commit || APPROVED_CLEAN.exec(footer)?.[1] !== commit)) return null
+    return {
+      kind: 'approved', feedback: true, tab, commit, ...(dirty ? { uncommitted: true } : {}),
+      reply: message.slice(approved[0].length, end).trim(),
+    }
+  }
+  const stopped = STOPPED.exec(message)
+  if (stopped && Number.isSafeInteger(Number(stopped[1]))) {
+    return { kind: 'stopped', feedback: true, rounds: Number(stopped[1]), tab: stopped[2], reply: stopped[3] }
+  }
+  const summary = SUMMARY.exec(message)
+  if (summary && Number.isSafeInteger(Number(summary[1]))) {
+    return { kind: 'summary', feedback: true, rounds: Number(summary[1]), reply: summary[2] }
+  }
+  const notice = NOTICE.exec(message)
+  if (notice && Number.isSafeInteger(Number(notice[3]))) {
+    // Both the name and the findings preview can contain the quoted separator.
+    if (NOTICE_LONG_NAME.exec(message)?.[1] !== notice[1]) return null
+    return { kind: 'notice', feedback: true, name: notice[1], tab: notice[2], rounds: Number(notice[3]), reply: notice[4] }
+  }
+  const correction = CORRECTION.exec(message)
+  if (correction) {
+    return { kind: 'correction', feedback: true, commit: correction[1], reply: message.slice('[Tether review] '.length) }
+  }
+  return null
 }
 
 /** The commit and the terms to show. The card shows the reply format on its own line, so the terms leave out that

@@ -47,6 +47,7 @@ import { Elapsed, NoticeStack, formatElapsed } from './Notices'
 import type { NoticeItem, NoticeVariant } from './Notices'
 import { State } from './NewSession'
 import { Linked, Message, convertMessage, SelectionCopy } from './Messages'
+import { injectedPrompt } from './injectedPrompt'
 import type { WatchRun } from './Messages'
 import { foldWatchCycles } from './watchCycles'
 import { Composer } from './Composer'
@@ -694,7 +695,8 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // The name the tab shows: the pane's own name, else the session's (a bare number is not a name).
   const claudeName = pane.pane_name || (session && !/^\d+$/.test(session.name) ? session.name : '')
   const messages = useMemo(() => chatMessages(data), [data])
-  const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind).map(message => message.text), [messages])
+  // Up-arrow recall offers only what the person typed: not the status, review and rules prompts Tether typed in.
+  const sentPrompts = useMemo(() => messages.filter(message => message.role === 'user' && !message.kind && !injectedPrompt(message.text)).map(message => message.text), [messages])
   // Read a new reply aloud when its turn ends. Replies already there when the chat opens are not read.
   useEffect(() => readAloud ? keepAudioUnlocked() : undefined, [readAloud])
   // Hands-free: when the reading ends, ask the composer to start the mic.

@@ -7,6 +7,12 @@ const React = require('react')
 const { renderToStaticMarkup } = require('react-dom/server')
 const output = {}
 const compile = text => ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
+const PARSERS = ['./reviewText', './statusText', './injectedPrompt']
+const parser = name => {
+  const module = {}
+  runInNewContext(compile(readFileSync(`src/${name.slice(2)}.ts`, 'utf8')), { exports: module, require: next => parser(next) })
+  return module
+}
 const Root = ({ className, children, ...rest }) => React.createElement('div', { className, 'data-msg-id': rest['data-msg-id'] }, children)
 runInNewContext(compile(readFileSync('src/Messages.tsx', 'utf8')), {
   exports: output,
@@ -15,7 +21,8 @@ runInNewContext(compile(readFileSync('src/Messages.tsx', 'utf8')), {
     if (name === '@assistant-ui/react') return { MessagePrimitive: { Root, Parts: () => 'PARTS' } }
     if (name === './shellCommand') return { shellCommand: () => null }
     if (name === './SentImages') return { sentContent: () => null }
-    if (name === './reviewText') { const review = {}; runInNewContext(compile(readFileSync('src/reviewText.ts', 'utf8')), { exports: review }); return review }
+    // The pure parsers load for real: Message() asks each one whether the text is an injected prompt.
+    if (PARSERS.includes(name)) return parser(name)
     return {}
   },
 })
@@ -42,6 +49,11 @@ assert(card.includes(`Reply <code>APPROVED ${HASH}</code> (the full hash)`), car
 assert(card.includes('<code>git -C /w show origin/main:REVIEW.md</code>'), card)
 assert(!card.includes('Reply APPROVED,'), card)
 assert.equal(card.split(`APPROVED ${HASH}`).length, 2, 'the reply format shows once')
+
+// Words that are also Object.prototype keys stay the person's bubble; only the exact interrupt lines become notice lines.
+for (const word of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) assert(render(word).includes('class="user-message"'), word)
+assert(render('[Request interrupted by user]').includes('<p class="notice-line" data-msg-id="7">'))
+assert(render('[Request interrupted by user] and more').includes('class="user-message"'))
 
 const css = readFileSync('src/App.css', 'utf8')
 assert(/\.via-label \{[^}]*color-mix\(in srgb, var\(--text\) 78%, transparent\)/.test(css), 'the label keeps a 4.5:1 colour on the bubble')
