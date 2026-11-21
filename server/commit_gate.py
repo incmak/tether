@@ -28,7 +28,10 @@ let the commit through.
 After the command, the gate reads the commits that landed. A false block is a "would block" or "let through" verdict
 whose commit has a valid line. The rate in Settings is false blocks / landed commits with a valid line, over the
 calls where git can say which commit the call made (see stats()). Two sessions that commit in one working tree at
-the same moment can still mix their results; sessions use their own worktrees."""
+the same moment can still mix their results; sessions use their own worktrees.
+Known limit: the row of an attempt that failed after the hook can cover a later silent commit in the same worktree.
+That commit must copy the tree, parents, message and author date, and carry a hand-set committer date inside the
+attempt's process lifetime (Linux dates a process from its creation, which can precede an exec of git)."""
 import fcntl
 import hashlib
 import hmac
@@ -78,6 +81,7 @@ HOOK_LOCK_SECONDS = 5
 PENDING_SECONDS = 3600  # a commit command that has not ended after this long gets no result
 PENDING_MAX = 50
 LOG_TIME_TOLERANCE = 0.001  # allow for log timestamps rounded to milliseconds
+REFLOG_BYTES = 256 * 1024
 CLAIM_SECONDS = 86400  # keep hook row claims for one day
 STATE_DAYS = 45  # cleanup age for sessions with no blocks
 PROJECT_ID = re.compile(r'[0-9a-f]{12}')
@@ -1008,6 +1012,37 @@ def _git_path(folder, *args):
     return path if path.is_absolute() else None
 
 
+def _head_reflog(folder):
+    """Return the latest previous HEAD for each commit in the reflog tail, or None if unavailable."""
+    path = _git_path(folder, '--git-path', 'logs/HEAD')
+    if path is None:
+        return None
+    try:
+        with open(path, 'rb', opener=lambda path, flags: os.open(path, flags | os.O_NONBLOCK)) as source:
+            found = os.fstat(source.fileno())
+            if not stat_module.S_ISREG(found.st_mode):
+                return None
+            offset = max(0, found.st_size - REFLOG_BYTES)
+            source.seek(offset)
+            tail = source.read(REFLOG_BYTES)
+        if tail and not tail.endswith(b'\n'):
+            return None
+        if offset:
+            tail = tail.partition(b'\n')[2]  # The first entry can start before the read window.
+        heads = {}
+        for line in tail.split(b'\n')[:-1]:
+            old, new, ident = line.split(b' ', 2)
+            old, new = old.decode('ascii'), new.decode('ascii')
+            if not GIT_OID.fullmatch(old) or not GIT_OID.fullmatch(new):
+                return None
+            if not re.fullmatch(rb'[^<>\0]* <[^<>\0]*> \d+ [+-]\d{4}(?:\t[^\0]*)?', ident):
+                return None
+            heads[new] = old
+        return heads
+    except (OSError, ValueError):
+        return None
+
+
 def _message_hook(folder):
     """True when the repository has a hook that can change the message, False when it has none, None when git
     cannot tell."""
@@ -1307,7 +1342,7 @@ def _amend_parents(folder, head):
     return tuple(shown.stdout.split())
 
 
-def _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents):
+def _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents, reflog):
     """Claim covering hook rows and return uncovered commits. Call with the lock held."""
     commits = list(reversed(commits))
     if not waiting.get('tree'):
@@ -1322,7 +1357,7 @@ def _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents):
 
     key = _message_key()
     uncovered = (commits if key is None
-                 else _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents))
+                 else _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents, reflog))
     if claims != previous:
         try:
             _write(ledger, json.dumps(claims))
@@ -1331,7 +1366,7 @@ def _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents):
     return uncovered
 
 
-def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents):
+def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents, reflog):
     since = waiting['at'] - LOG_TIME_TOLERANCE
     trees = {commit.tree for commit in commits}
     rows_by_tree = {}
@@ -1357,11 +1392,10 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
         if not isinstance(author_date, str) and ('author_date' in row or not merge):
             continue
         committer_date, started = row.get('committer_date'), row.get('started')
-        if 'committer_date' in row:
-            if not isinstance(committer_date, str):
-                continue
-        elif 'committer_override' in row or type(started) is not int:
+        if 'committer_date' in row and not isinstance(committer_date, str):
             continue
+        if 'committer_override' in row or type(started) is not int:
+            started = None
         head = row['head']
         if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
             rows_by_tree.setdefault(tree, []).append(
@@ -1383,7 +1417,8 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
             if committer_date is not None:
                 if committer_date != commit.committer_date:
                     continue
-            elif not started <= commit.committed <= at + LOG_TIME_TOLERANCE:
+            elif (commit.committed > at + LOG_TIME_TOLERANCE
+                  or (started is not None and commit.committed < started)):
                 continue
             claimed = claims.get(row_key)
             if claimed not in (None, commit.oid) or digest not in messages:
@@ -1393,8 +1428,12 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_pa
             if head == commit.parent:
                 if commit.parent_list[1:] != merge_heads:
                     continue
-            elif merge_heads or amend_parents(head) != commit.parent_list:
-                continue
+            else:
+                if merge_heads or amend_parents(head) != commit.parent_list:
+                    continue
+                heads = reflog()
+                if heads is not None and heads.get(commit.oid) != head:
+                    continue
             if claimed == commit.oid:
                 match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
                 break
@@ -1413,9 +1452,13 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
     def amend_parents(head):
         return _amend_parents(waiting['folder'], head)
 
+    @cache
+    def reflog():
+        return _head_reflog(waiting['folder'])
+
     worktree = os.path.realpath(waiting.get('tree') or waiting['folder'])
     rows = list(_rows(locked=True))
-    uncovered = _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents)
+    uncovered = _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents, reflog)
     if not uncovered:
         return
     logged = {row['commit'] for row in rows if row.get('reason') == 'hook-silent'
@@ -1425,7 +1468,10 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
     for commit in uncovered:
         if commit.oid in logged:
             continue
-        new_merge = len(commit.parent_list) >= 2 and amend_parents(waiting['head']) != commit.parent_list
+        new_merge = len(commit.parent_list) >= 2
+        if new_merge and (heads := reflog()) is not None:
+            old = heads.get(commit.oid)
+            new_merge = old == commit.parent or amend_parents(old) != commit.parent_list
         verdict = ('skip' if new_merge
                    else {'missing': 'would_block', 'unknown': 'unknown'}.get(commit.status, 'pass'))
         _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
@@ -1702,7 +1748,7 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         git_process = next((ancestor for ancestor in ancestors if os.path.basename(ancestor.comm) == 'git'), None)
         if git_process is not None and git_process.started is not None:
             record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
-        if 'GIT_COMMITTER_DATE' in env:
+        if env.get('GIT_COMMITTER_DATE'):
             ident = _git(cwd, 'var', 'GIT_COMMITTER_IDENT', env=env)
             date = (re.search(r' (\d+ [+-]\d{4})\Z', ident.stdout.rstrip('\n'))
                     if ident is not None and ident.returncode == 0 else None)
