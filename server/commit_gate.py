@@ -15,8 +15,8 @@ The person sets the mode in Settings. Nothing else changes it.
 The installed Git commit-msg hook checks the final message file for Claude, Codex and terminal commits.
 It logs one verdict and skips merges, replays that invoke the hook, and fixup, squash and amend! commits.
 The hook checks ordinary amendments. Claude's PreToolUse check can defer to the hook.
-PostToolUse matches each hook row to one landed commit by worktree, tree, parent, message HMAC and dates.
-A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips merges.
+PostToolUse matches each hook row to one landed commit by worktree, tree, all parents, message HMAC and dates.
+A merge skip row can lack the author date. PostToolUse checks uncovered commits and skips new merges.
 
 Otherwise claude_hooks.py calls hook() for Bash commit commands and their PostToolUse results.
 The gate reads the command, never the screen. It denies only when it read the whole message from the command, that
@@ -45,6 +45,7 @@ import tempfile
 import threading
 import time
 from contextlib import nullcontext
+from functools import cache
 from pathlib import Path
 from typing import NamedTuple
 
@@ -971,10 +972,10 @@ def _write_session(session, state, now):
     _write(path, json.dumps(state))
 
 
-def _git(folder, *args, text=True):
+def _git(folder, *args, text=True, env=None):
     try:
         return subprocess.run(['git', '-C', folder, *args], capture_output=True, text=text, timeout=0.5,
-                              errors='replace' if text else None)
+                              errors='replace' if text else None, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -1023,9 +1024,10 @@ class _LandedCommit(NamedTuple):
     oid: str
     tree: str
     parent: str | None
-    parents: int
+    parent_list: tuple[str, ...]
     author_date: str
     committed: int
+    committer_date: str
     status: str
     body: str | None
 
@@ -1033,23 +1035,26 @@ class _LandedCommit(NamedTuple):
 def _landed(folder, head):
     """Commits made since `head`, newest first. [] when none landed, None when Git cannot tell."""
     shown = _git(folder, 'log', '--first-parent', '-n', '20', '-z', '--date=raw',
-                 '--format=%H%x00%T%x00%P%x00%ad%x00%ct%x00%B',
+                 '--format=%H%x00%T%x00%P%x00%ad%x00%cd%x00%B',
                  f'{head}..HEAD' if head else 'HEAD', text=False)
     if shown is None or shown.returncode != 0:
         return [] if head == '' else None
     fields = shown.stdout.split(b'\0')[:-1]
     commits = []
     for index in range(0, len(fields), 6):
-        oid, tree, parents, author_date, committed, raw = fields[index:index + 6]
+        oid, tree, parents, author_date, raw_committer_date, raw = fields[index:index + 6]
         try:
             body = raw.decode('utf-8')
         except UnicodeDecodeError:
             body, status = None, 'unknown'
         else:
             status = stamp.message_status(body.replace('\r\n', '\n').replace('\r', '\n'))
-        parent = parents.partition(b' ')[0].decode('ascii') or None
-        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, len(parents.split()),
-                                     author_date.decode('ascii'), int(committed), status, body))
+        parent_list = tuple(parents.decode('ascii').split())
+        parent = parent_list[0] if parent_list else None
+        committer_date = raw_committer_date.decode('ascii')
+        committed = int(committer_date.partition(' ')[0])
+        commits.append(_LandedCommit(oid.decode('ascii'), tree.decode('ascii'), parent, parent_list,
+                                     author_date.decode('ascii'), committed, committer_date, status, body))
     return commits
 
 
@@ -1289,18 +1294,20 @@ def _read_claims(path):
     return claims
 
 
-def _amend_parent(folder, head):
-    """An amend replaced head. Return its first parent, or '' when it cannot prove coverage."""
+def _amend_parents(folder, head):
+    """Return the replaced head's parents, or None when Git cannot prove it was replaced."""
+    if not isinstance(head, str) or not GIT_OID.fullmatch(head):
+        return None
     ancestor = _git(folder, 'merge-base', '--is-ancestor', head, 'HEAD')
     if ancestor is None or ancestor.returncode != 1:
-        return ''
+        return None
     shown = _git(folder, 'show', '-s', '--format=%P', head)
     if shown is None or shown.returncode != 0:
-        return ''
-    return shown.stdout.strip().partition(' ')[0] or None
+        return None
+    return tuple(shown.stdout.split())
 
 
-def _uncovered_commits(waiting, commits, worktree, rows, now):
+def _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents):
     """Claim covering hook rows and return uncovered commits. Call with the lock held."""
     commits = list(reversed(commits))
     if not waiting.get('tree'):
@@ -1314,7 +1321,8 @@ def _uncovered_commits(waiting, commits, worktree, rows, now):
         return commits
 
     key = _message_key()
-    uncovered = commits if key is None else _claim_covering_rows(waiting, commits, worktree, rows, key, claims)
+    uncovered = (commits if key is None
+                 else _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents))
     if claims != previous:
         try:
             _write(ledger, json.dumps(claims))
@@ -1323,7 +1331,7 @@ def _uncovered_commits(waiting, commits, worktree, rows, now):
     return uncovered
 
 
-def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
+def _claim_covering_rows(waiting, commits, worktree, rows, key, claims, amend_parents):
     since = waiting['at'] - LOG_TIME_TOLERANCE
     trees = {commit.tree for commit in commits}
     rows_by_tree = {}
@@ -1338,16 +1346,30 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
         if not isinstance(messages, list) or not messages or 'head' not in row or os.path.realpath(folder) != worktree:
             continue
         merge = row.get('verdict') == 'skip' and row.get('reason') == 'merge'
+        merge_heads = ()
+        if merge:
+            heads = row.get('merge_heads')
+            if not isinstance(heads, list) or not heads or not all(
+                    isinstance(oid, str) and GIT_OID.fullmatch(oid) for oid in heads):
+                continue
+            merge_heads = tuple(heads)
         author_date = row.get('author_date')
         if not isinstance(author_date, str) and ('author_date' in row or not merge):
             continue
+        committer_date, started = row.get('committer_date'), row.get('started')
+        if 'committer_date' in row:
+            if not isinstance(committer_date, str):
+                continue
+        elif 'committer_override' in row or type(started) is not int:
+            continue
         head = row['head']
         if head is None or (isinstance(head, str) and GIT_OID.fullmatch(head)):
-            rows_by_tree.setdefault(tree, []).append((at, f'{at}:{folder}', head, messages, author_date, merge))
+            rows_by_tree.setdefault(tree, []).append(
+                (at, f'{at}:{folder}', head, messages, author_date, committer_date, started, merge_heads))
     for candidates in rows_by_tree.values():
         candidates.sort(key=lambda row: row[0])
 
-    uncovered, amend_parents = [], {}
+    uncovered = []
     for commit in commits:
         candidates = rows_by_tree.get(commit.tree)
         if not candidates or commit.body is None:
@@ -1355,22 +1377,24 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
             continue
         digest = _message_digest(key, _normalize_message(commit.body.split('\n')))
         match = None
-        for at, row_key, head, messages, author_date, merge in candidates:
-            if (merge != (commit.parents >= 2) or commit.committed > at + LOG_TIME_TOLERANCE
-                    or (author_date is not None and author_date != commit.author_date)):
+        for at, row_key, head, messages, author_date, committer_date, started, merge_heads in candidates:
+            if author_date is not None and author_date != commit.author_date:
+                continue
+            if committer_date is not None:
+                if committer_date != commit.committer_date:
+                    continue
+            elif not started <= commit.committed <= at + LOG_TIME_TOLERANCE:
                 continue
             claimed = claims.get(row_key)
             if claimed not in (None, commit.oid) or digest not in messages:
                 continue
             if match is not None and claimed is None:
                 continue  # Keep the oldest eligible row unless a covering claim already exists.
-            if head != commit.parent:
-                if head is None:
+            if head == commit.parent:
+                if commit.parent_list[1:] != merge_heads:
                     continue
-                if head not in amend_parents:
-                    amend_parents[head] = _amend_parent(waiting['folder'], head)
-                if amend_parents[head] != commit.parent:
-                    continue
+            elif merge_heads or amend_parents(head) != commit.parent_list:
+                continue
             if claimed == commit.oid:
                 match = row_key  # Reuse the existing claim on overlapping PostToolUse calls.
                 break
@@ -1385,9 +1409,13 @@ def _claim_covering_rows(waiting, commits, worktree, rows, key, claims):
 
 def _log_deferred_checks(commits, waiting, session, tool, now):
     """Claim hook rows and dedupe hook-silent rows under the same lock."""
+    @cache
+    def amend_parents(head):
+        return _amend_parents(waiting['folder'], head)
+
     worktree = os.path.realpath(waiting.get('tree') or waiting['folder'])
     rows = list(_rows(locked=True))
-    uncovered = _uncovered_commits(waiting, commits, worktree, rows, now)
+    uncovered = _uncovered_commits(waiting, commits, worktree, rows, now, amend_parents)
     if not uncovered:
         return
     logged = {row['commit'] for row in rows if row.get('reason') == 'hook-silent'
@@ -1397,7 +1425,8 @@ def _log_deferred_checks(commits, waiting, session, tool, now):
     for commit in uncovered:
         if commit.oid in logged:
             continue
-        verdict = ('skip' if commit.parents >= 2
+        new_merge = len(commit.parent_list) >= 2 and amend_parents(waiting['head']) != commit.parent_list
+        verdict = ('skip' if new_merge
                    else {'missing': 'would_block', 'unknown': 'unknown'}.get(commit.status, 'pass'))
         _log({'at': round(now, 3), 'event': 'check', 'via': 'landed', 'id': tool, 'session': session,
               'project': waiting.get('project'), 'mode': waiting['mode'], 'folder': worktree,
@@ -1455,30 +1484,65 @@ def hook(data, env=os.environ):
 class _Ancestor(NamedTuple):
     pid: int
     comm: str
+    started: float | None
+
+
+def _boot_clock():
+    try:
+        ticks = os.sysconf('SC_CLK_TCK')
+        with open('/proc/stat', 'rb') as proc:
+            for line in proc:
+                if line.startswith(b'btime ') and ticks > 0:
+                    return int(line.split()[1]), ticks
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _ps_started(elapsed, now):
+    found = re.fullmatch(r'(?:(?:(\d+)-)?(\d{1,2}):)?([0-5]\d):([0-5]\d)', elapsed)
+    if found is None:
+        return None
+    days, hours, minutes, seconds = (int(part or 0) for part in found.groups())
+    if hours >= 24:
+        return None
+    return now - (days * 86400 + hours * 3600 + minutes * 60 + seconds)
 
 
 def _ancestors():
     """Nearest parents first. A vanished process or a slow ps ends the walk."""
     pid = os.getppid()
     deadline = time.monotonic() + 0.05
+    linux = sys.platform.startswith('linux')
+    clock = _boot_clock() if linux else None
     for _ in range(40):
         remaining = deadline - time.monotonic()
         if pid < 1 or remaining <= 0:
             break
+        started = None
         try:
-            if sys.platform.startswith('linux'):
+            if linux:
                 entry = Path(f'/proc/{pid}/stat').read_bytes()
                 start, end = entry.index(b'('), entry.rindex(b')')
                 comm = os.fsdecode(entry[start + 1:end])
-                ppid = int(entry[end + 1:].split()[1])
+                fields = entry[end + 1:].split()
+                ppid = int(fields[1])
+                if clock is not None:
+                    boot, ticks = clock
+                    try:
+                        started = boot + int(fields[19]) / ticks  # starttime is field 22.
+                    except (ValueError, IndexError):
+                        pass
             else:
-                shown = subprocess.run(['ps', '-o', 'ppid=,comm=', '-p', str(pid)], capture_output=True,
+                shown = subprocess.run(['ps', '-o', 'ppid=,etime=,comm=', '-p', str(pid)], capture_output=True,
                                        text=True, check=True, timeout=remaining)
-                parent, comm = shown.stdout.strip().split(maxsplit=1)
+                parent, elapsed, comm = shown.stdout.split(maxsplit=2)
+                comm = comm.strip()
                 ppid, comm = int(parent), os.path.basename(comm)
+                started = _ps_started(elapsed, time.time())
         except (OSError, ValueError, IndexError, subprocess.SubprocessError):
             break
-        yield _Ancestor(pid, comm)
+        yield _Ancestor(pid, comm, started)
         if ppid == pid:
             break
         pid = ppid
@@ -1505,7 +1569,7 @@ def _project_for_hook(cwd, env, ancestors=None):
 
 
 def _source_session(ancestors, env):
-    for pid, comm in ancestors:
+    for pid, comm, _ in ancestors:
         if comm == 'claude':
             source = 'claude'
             break
@@ -1540,10 +1604,7 @@ def _message_verdict(lines):
     return ('would_block', 'no-line') if stamp.message_status('\n'.join(lines)) == 'missing' else ('pass', '')
 
 
-def _final_verdict(path, cwd):
-    git_dir = _git_path(cwd, '--git-dir')
-    if git_dir is None:
-        raise GateError(400, 'Git could not find the repository for the commit message.')
+def _final_verdict(path, cwd, git_dir):
     skip = None
     if (git_dir / 'MERGE_HEAD').exists():
         skip = ('skip', 'merge')
@@ -1638,7 +1699,27 @@ def commit_msg(path, env=os.environ, cwd=None, now=None):
         record.update(_hook_identity(cwd))
         if author_date := re.fullmatch(r'@(\d+ [+-]\d{4})', env.get('GIT_AUTHOR_DATE', '')):
             record['author_date'] = author_date[1]
-        verdict, reason, readings = _final_verdict(path, cwd)
+        git_process = next((ancestor for ancestor in ancestors if os.path.basename(ancestor.comm) == 'git'), None)
+        if git_process is not None and git_process.started is not None:
+            record['started'] = math.floor(git_process.started) - 1  # Allow for clock tick rounding.
+        if 'GIT_COMMITTER_DATE' in env:
+            ident = _git(cwd, 'var', 'GIT_COMMITTER_IDENT', env=env)
+            date = (re.search(r' (\d+ [+-]\d{4})\Z', ident.stdout.rstrip('\n'))
+                    if ident is not None and ident.returncode == 0 else None)
+            if date is None:
+                record['committer_override'] = True
+            else:
+                record['committer_date'] = date[1]
+        git_dir = _git_path(cwd, '--git-dir')
+        if git_dir is None:
+            raise GateError(400, 'Git could not find the repository for the commit message.')
+        verdict, reason, readings = _final_verdict(path, cwd, git_dir)
+        if (verdict, reason) == ('skip', 'merge'):
+            merge_head = _read_message_file(git_dir, 'MERGE_HEAD')
+            if merge_head is not None:
+                heads = merge_head.removesuffix('\n').split('\n')
+                if all(GIT_OID.fullmatch(oid) for oid in heads):
+                    record['merge_heads'] = heads
         if 'tree' in record and readings and (key := _message_key(create=True)) is not None:
             normalized = {_normalize_message(reading) for reading in readings}
             record['messages'] = sorted(_message_digest(key, message) for message in normalized)
