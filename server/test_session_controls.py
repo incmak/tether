@@ -15,6 +15,7 @@ import server
 import terminal_input as terminal
 import terminal_input
 from own_time import own_time
+from test_tmux_isolation import private_tmux
 
 
 class ReviewDraftTests(unittest.TestCase):
@@ -417,64 +418,53 @@ class SessionControlTests(unittest.TestCase):
             time.sleep(.05)
 
     def test_real_tmux_session_creation_and_no_agent_commands(self):
-        with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            socket = str(folder / 'tmux.sock')
-            (folder / 'child').mkdir()
-            subprocess.run(['tmux', '-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'seed',
-                            'bash', '--noprofile', '--norc'], check=True)
-            def run(argv, **kwargs):
-                return subprocess.run(['tmux', '-S', socket, *argv[1:]], **kwargs)
-            try:
-                # create_session uses the server's default command; keep this fixture independent of the user's shell.
-                run([paths.TMUX, 'set-option', '-g', 'default-command',
-                     'env "PS1=test$ " bash --noprofile --norc'], check=True)
-                pane = terminal.create_session('work', str(folder), run=run)
-                pid = int(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_pid}'], capture_output=True, text=True).stdout)
-                entry = {'id': pane, 'agent': 'shell', 'pane_pid': pid, 'pane_start': terminal.process_start(pid)}
-                with self.assertRaises(RuntimeError):
-                    terminal.create_session('work', str(folder), run=run)
-                self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
-                terminal.shell_submit(entry, 'cd child', run=run)
-                current = lambda: run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_current_path}'], capture_output=True, text=True).stdout.strip()
-                self.wait_until(lambda: current() == str(folder / 'child'))
-                self.assertEqual(current(), str(folder / 'child'))
-                self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
-                terminal.shell_submit(entry, 'printf shell-command-ok > result.txt', run=run)
-                self.wait_until(lambda: (folder / 'child/result.txt').exists())
-                self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
-                self.assertEqual((folder / 'child/result.txt').read_text(), 'shell-command-ok')
-                run([paths.TMUX, 'send-keys', '-t', pane, '-l', 'keep this draft'], check=True)
-                time.sleep(.1)
-                with self.assertRaises(RuntimeError):
-                    terminal.shell_submit(entry, 'replacement', run=run)
-            finally:
-                subprocess.run(['tmux', '-S', socket, 'kill-server'], check=False)
-
+        private = private_tmux(self, 'tsession-')
+        folder = Path(private.folder)
+        run = private.run
+        (folder / 'child').mkdir()
+        private.tmux('new-session', '-d', '-s', 'seed', 'bash', '--noprofile', '--norc').check_returncode()
+        # create_session uses the server's default command; keep this fixture independent of the user's shell.
+        run([paths.TMUX, 'set-option', '-g', 'default-command',
+             'env "PS1=test$ " bash --noprofile --norc'], check=True)
+        pane = terminal.create_session('work', str(folder), run=run)
+        pid = int(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_pid}'], capture_output=True, text=True).stdout)
+        entry = {'id': pane, 'agent': 'shell', 'pane_pid': pid, 'pane_start': terminal.process_start(pid)}
+        with self.assertRaises(RuntimeError):
+            terminal.create_session('work', str(folder), run=run)
+        self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
+        terminal.shell_submit(entry, 'cd child', run=run)
+        current = lambda: run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_current_path}'], capture_output=True, text=True).stdout.strip()
+        self.wait_until(lambda: current() == str(folder / 'child'))
+        self.assertEqual(current(), str(folder / 'child'))
+        self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
+        terminal.shell_submit(entry, 'printf shell-command-ok > result.txt', run=run)
+        self.wait_until(lambda: (folder / 'child/result.txt').exists())
+        self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
+        self.assertEqual((folder / 'child/result.txt').read_text(), 'shell-command-ok')
+        run([paths.TMUX, 'send-keys', '-t', pane, '-l', 'keep this draft'], check=True)
+        time.sleep(.1)
+        with self.assertRaises(RuntimeError):
+            terminal.shell_submit(entry, 'replacement', run=run)
 
     def test_prompt_that_fills_the_row_still_takes_a_command(self):
         # A 20-column pane and a 20-character prompt: the cursor wraps to an empty row below the prompt.
-        with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            socket = str(folder / 'tmux.sock')
-            subprocess.run(['tmux', '-S', socket, 'new-session', '-d', '-x', '20', '-y', '6', '-s', 'wrap', '-c', str(folder),
-                            'env', 'PS1=abcdefghijklmnopqr$ ', 'bash', '--noprofile', '--norc'], check=True)
-            def run(argv, **kwargs):
-                return subprocess.run(['tmux', '-S', socket, *argv[1:]], **kwargs)
-            try:
-                pane = run([paths.TMUX, 'display-message', '-p', '-t', 'wrap', '#{pane_id}'], capture_output=True, text=True).stdout.strip()
-                pid = int(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_pid}'], capture_output=True, text=True).stdout)
-                entry = {'id': pane, 'agent': 'shell', 'pane_pid': pid, 'pane_start': terminal.process_start(pid)}
-                self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
-                self.assertEqual(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{cursor_x}'], capture_output=True, text=True).stdout.strip(), '0')
-                terminal.shell_submit(entry, 'printf ok > r.txt', run=run)
-                self.wait_until(lambda: (folder / 'r.txt').exists())
-                run([paths.TMUX, 'send-keys', '-t', pane, '-l', 'draft'], check=True)
-                time.sleep(.2)
-                with self.assertRaises(RuntimeError):
-                    terminal.shell_submit(entry, 'replacement', run=run)
-            finally:
-                subprocess.run(['tmux', '-S', socket, 'kill-server'], check=False)
+        private = private_tmux(self, 'twrap-')
+        folder = Path(private.folder)
+        run = private.run
+        private.tmux('new-session', '-d', '-x', '20', '-y', '6', '-s', 'wrap', '-c', str(folder),
+                     'env', 'PS1=abcdefghijklmnopqr$ ', 'bash', '--noprofile', '--norc').check_returncode()
+        pane = run([paths.TMUX, 'display-message', '-p', '-t', 'wrap', '#{pane_id}'], capture_output=True, text=True).stdout.strip()
+        pid = int(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_pid}'], capture_output=True, text=True).stdout)
+        entry = {'id': pane, 'agent': 'shell', 'pane_pid': pid, 'pane_start': terminal.process_start(pid)}
+        self.wait_until(lambda: terminal.shell_prompt(entry, run).endswith('$'))
+        self.assertEqual(run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{cursor_x}'], capture_output=True, text=True).stdout.strip(), '0')
+        terminal.shell_submit(entry, 'printf ok > r.txt', run=run)
+        self.wait_until(lambda: (folder / 'r.txt').exists())
+        run([paths.TMUX, 'send-keys', '-t', pane, '-l', 'draft'], check=True)
+        time.sleep(.2)
+        with self.assertRaises(RuntimeError):
+            terminal.shell_submit(entry, 'replacement', run=run)
+
 
 class ShellPromptTests(unittest.TestCase):
     def setUp(self):
@@ -1979,19 +1969,13 @@ class SmallPanePromptTests(unittest.TestCase):
         self.assertEqual(commands[-1], 'delete-buffer')
 
     def test_real_tmux_short_pane_on_private_socket(self):
-        with tempfile.TemporaryDirectory(prefix='tsp-') as folder:
-            socket = str(Path(folder) / 'tmux.sock')
-            def run(argv, **kwargs):
-                return subprocess.run([paths.TMUX, '-S', socket, '-f', '/dev/null', *argv[1:]], **kwargs)
-            try:
-                result = run([paths.TMUX, 'new-session', '-d', '-x', '100', '-y', '5', '-s', 'small',
+        private = private_tmux(self, 'tsp-')
+        result = private.tmux('new-session', '-d', '-x', '100', '-y', '5', '-s', 'small',
                               '-n', 'Bugs', '-P', '-F', '#{pane_id}',
-                              "printf 'output without a prompt\\n'; exec sleep 60"],
-                             check=True, capture_output=True, text=True, timeout=5)
-                reason = terminal.small_pane_reason({'id': result.stdout.strip(), 'agent': 'claude'}, run)
-                self.assertEqual(reason, terminal.SIZE_HELP)
-            finally:
-                run([paths.TMUX, 'kill-server'], capture_output=True, timeout=5)
+                              "printf 'output without a prompt\n'; exec sleep 60")
+        result.check_returncode()
+        reason = terminal.small_pane_reason({'id': result.stdout.strip(), 'agent': 'claude'}, private.run)
+        self.assertEqual(reason, terminal.SIZE_HELP)
 
 
 class AntigravityPromptTests(unittest.TestCase):

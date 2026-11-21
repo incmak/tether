@@ -91,3 +91,9 @@ diff is ignored.
 - Text: `\breview_(folder|gate_records)\b|\b_review_entry\b`
 - Check: Run `test_review_scope`. A worker that commits in another worktree gets a review of that worktree. The approval checks its HEAD and status even if a later gate record names a different folder.
 - Incident: B363, 2026-11-19, reviews named the worker tab's start folder after the worker committed in another worktree.
+
+## R14: Tests stop their private tmux servers
+- Paths: `^server/test_.*\.py$`
+- Text: `new-session`
+- Check: Use `private_tmux` from `server/test_tmux_isolation.py`. Register cleanup before the first tmux call. Start tmux with `-f /dev/null` and a private socket.
+- Incident: B465; note test-tmux-leak.md

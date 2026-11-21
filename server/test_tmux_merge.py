@@ -1,18 +1,18 @@
 """tmux_merge against a fake runner or a real server on a private socket."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from pathlib import Path
-
 import paths
 import projects
 import side_shells
 import tmux_merge
+from test_tmux_isolation import private_tmux
 
 
 class FakeTmux:
@@ -585,11 +585,9 @@ class TmuxMergeRecoveryTests(unittest.TestCase):
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class TmuxMergeTests(unittest.TestCase):
     def setUp(self):
-        self.socket_dir = tempfile.mkdtemp(prefix='tmg', dir='/tmp')  # short: long socket paths fail
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        self.socket = str(Path(self.socket_dir) / 'tmux.sock')
-        self.addCleanup(shutil.rmtree, self.socket_dir, ignore_errors=True)
-        self.addCleanup(self.tmux, 'kill-server')
+        self.private = private_tmux(self, 'tmg')
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         scope = mock.patch.object(paths, 'SCOPE_TMUX', False)
         scope.start()
         self.addCleanup(scope.stop)
@@ -597,13 +595,6 @@ class TmuxMergeTests(unittest.TestCase):
         self.tmux('split-window', '-t', '=alpha:')
         self.tmux('new-window', '-t', '=alpha:')
         self.b = self.new('beta')
-
-    def run_tmux(self, argv, **kwargs):
-        # Use the private socket and skip user hooks and commands from the user's tmux config.
-        return subprocess.run([argv[0], '-S', self.socket, '-f', '/dev/null', *argv[1:]], env=self.env, **kwargs)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def new(self, name):
         result = self.tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40')

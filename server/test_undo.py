@@ -2,11 +2,9 @@
 (TMUX_TMPDIR), never the user's tmux. Reopened agent tabs get a harmless command instead of claude or codex."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
-import functools
 import io
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 import threading
@@ -27,6 +25,7 @@ import undo
 import undo_api
 import tmux_merge
 import undo_store
+from test_tmux_isolation import private_tmux
 
 
 class Private(unittest.TestCase):
@@ -256,11 +255,9 @@ class ApiTests(Private):
 class TmuxBase(Private):
     def setUp(self):
         super().setUp()
-        self.socket_dir = tempfile.mkdtemp(prefix='tun', dir='/tmp')  # short: long socket paths fail
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env['TMUX_TMPDIR'] = self.socket_dir
-        env['SHELL'] = '/bin/sh'
-        self.run_tmux = functools.partial(subprocess.run, env=env)
+        self.private = private_tmux(self, 'tun', {'SHELL': '/bin/sh'})
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         for target, name, value in ((paths, 'SCOPE_TMUX', False),
                                     (undo_store, '_server', lambda: auto_resume.server_id(run=self.run_tmux)[1])):
             patch = mock.patch.object(target, name, value)
@@ -273,13 +270,6 @@ class TmuxBase(Private):
         self.a1, self.a2 = self.panes(self.a)
         self.b1, = self.panes(self.b)
         self.env = undo.Env(run=self.run_tmux)
-
-    def tearDown(self):
-        self.tmux('kill-server')
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def new(self, name):
         self.tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40', '-c', self.folder, '/bin/sh')

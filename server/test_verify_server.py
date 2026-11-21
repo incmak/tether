@@ -23,6 +23,8 @@ from urllib.parse import parse_qs
 import urllib.request
 from unittest.mock import Mock, patch
 
+from test_tmux_isolation import stop_server
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / 'dev'))
 import verify_server
@@ -990,11 +992,11 @@ class Boot(unittest.TestCase):
         (self.dist / 'index.html').write_text('<!doctype html><title>Fixture build</title>')
         self.decoy = self.dist / 'other.sock'
         self.env = verify_server.clean_env(self.dist, self.dist)
+        self.addCleanup(stop_server, self.decoy)
         started = self.tmux(self.decoy, 'new-session', '-d', '-s', 'Decoy', 'exec sleep 60')
         if 'Operation not permitted' in started.stderr or 'Permission denied' in started.stderr:
             self.skipTest('not run (sandbox): private tmux socket: ' + started.stderr.strip())
         started.check_returncode()
-        self.addCleanup(lambda: self.tmux(self.decoy, 'kill-server').check_returncode())
 
     def tmux(self, sock, *args):
         return subprocess.run([TMUX, '-S', str(sock), '-f', '/dev/null', *args], env=self.env,

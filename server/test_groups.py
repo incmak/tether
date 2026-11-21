@@ -1,7 +1,6 @@
 """Groups (groups.py, groups_api.py) and the places that carry @group. The store runs against a real tmux server in
 its own socket folder (TMUX_TMPDIR), never the user's tmux. No test sends input to a terminal."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
-import functools
 import io
 import json
 import os
@@ -27,6 +26,7 @@ import server
 import terminal_input
 import tmux_merge
 from own_time import own_time
+from test_tmux_isolation import private_tmux
 
 PID = 'a1b2c3d4e5f6'
 
@@ -266,12 +266,17 @@ class LaunchTests(Bundles):
 
 @unittest.skipUnless(shutil.which(paths.TMUX) or os.path.exists(paths.TMUX), 'tmux is not installed')
 class TmuxTests(Bundles):
+    worker_tmux = """\
+import subprocess, sys
+def run(argv, **kwargs):
+    return subprocess.run([argv[0], '-S', sys.argv[1], '-f', '/dev/null', *argv[1:]], **kwargs)
+"""
+
     def setUp(self):
         super().setUp()
-        self.socket_dir = tempfile.mkdtemp(prefix='tgr', dir='/tmp')  # short: long socket paths fail
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env['TMUX_TMPDIR'] = self.socket_dir
-        self.run_tmux = functools.partial(subprocess.run, env=env)
+        self.private = private_tmux(self, 'tgr')
+        self.run_tmux = self.private.run
+        self.tmux = self.private.tmux
         scope = mock.patch.object(paths, 'SCOPE_TMUX', False)
         scope.start()
         self.addCleanup(scope.stop)
@@ -280,13 +285,6 @@ class TmuxTests(Bundles):
         self.b = self.new('beta')
         self.a1, self.a2 = self.panes(self.a)
         self.b1, = self.panes(self.b)
-
-    def tearDown(self):
-        self.tmux('kill-server')
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-
-    def tmux(self, *args):
-        return self.run_tmux([paths.TMUX, *args], capture_output=True, text=True, timeout=5)
 
     def new(self, name):
         self.tmux('new-session', '-d', '-s', name, '-x', '120', '-y', '40')
@@ -476,13 +474,14 @@ class TmuxTests(Bundles):
 
     def test_writers_in_other_processes_lose_no_group(self):
         # The server and agent launchers are separate processes. Each read-modify-write holds a file lock.
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
-        code = ('import sys, groups\n'
-                'for i in range(15):\n'
-                '    groups.create(sys.argv[1], sys.argv[2] + str(i))\n')
-        workers = [subprocess.Popen([os.sys.executable, '-c', code, self.a, prefix], cwd=Path(__file__).parent, env=env,
-                                    stderr=subprocess.PIPE, text=True) for prefix in ('A', 'B', 'C')]
+        env = dict(self.private.env, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
+        code = self.worker_tmux + (
+            'import groups\n'
+            'for i in range(15):\n'
+            '    groups.create(sys.argv[2], sys.argv[3] + str(i), run=run)\n')
+        workers = [subprocess.Popen([os.sys.executable, '-c', code, self.private.socket, self.a, prefix],
+                                    cwd=Path(__file__).parent, env=env, stderr=subprocess.PIPE, text=True)
+                   for prefix in ('A', 'B', 'C')]
         for worker in workers:
             self.assertEqual(worker.wait(timeout=60), 0, worker.stderr.read())
             worker.stderr.close()
@@ -707,12 +706,11 @@ class TmuxTests(Bundles):
 
     def test_another_process_sees_a_start_in_flight(self):  # rule 4 across processes, and the expiry
         run = self.run_tmux
-        env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')}
-        env.update(TMUX_TMPDIR=self.socket_dir, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
-        sweep = ['import groups', 'print(groups.drop_lone_auto())']
+        env = dict(self.private.env, MOBILE_TMUX_CACHE=str(paths.CACHE), TETHER_HOME=str(paths.TETHER))
+        sweep = self.worker_tmux + 'import groups\nprint(groups.drop_lone_auto(run=run))'
         self.auto_stack(self.a, 'Billing', self.a1)
         with agent_tabs._start_group({}, {'id': self.a1, 'pane_name': 'Billing'}, run) as (group, name, owner):
-            out = subprocess.run([os.sys.executable, '-c', '\n'.join(sweep)], cwd=Path(__file__).parent, env=env,
+            out = subprocess.run([os.sys.executable, '-c', sweep, self.private.socket], cwd=Path(__file__).parent, env=env,
                                  capture_output=True, text=True, timeout=60)
             self.assertEqual((out.returncode, out.stdout.strip()), (0, '[]'), out.stderr)
             with own_time(groups, time=mock.Mock(return_value=10 ** 12)):  # a marker its process never ended

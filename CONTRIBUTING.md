@@ -31,6 +31,8 @@ Run each command from the repository root:
 (cd ui && npm ci && npx tsc -b && npx eslint . && npm run build)
 ```
 
+If you run a suite with `timeout`, add `-k 10s` so a leaked child cannot keep it alive after SIGTERM.
+
 Fork pull requests need no secrets for CI. First-time contributors may need the maintainer to approve the workflow run.
 
 ## Change rules

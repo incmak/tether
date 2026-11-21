@@ -1,6 +1,7 @@
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import codex_level
 import project_launch
 import projects
 from agent_browser_cli import note
+from test_tmux_isolation import private_tmux
 
 HERE = Path(__file__).resolve().parent
 PID = 'a1b2c3d4e5f6'
@@ -836,24 +838,30 @@ class WrapperTests(unittest.TestCase):
             fake.write_text(f'#!{sys.executable}\nimport json, os, sys\n'
                             f'open({str(self.temp / "argv")!r}, "a").write(json.dumps([sys.argv[0]] + sys.argv[1:] + [os.environ.get("TETHER_LAUNCH", "")]) + "\\n")\n')
             fake.chmod(0o755)
-        self.socket = str(self.temp / 'tmux.sock')
-        self.env = {key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE', 'TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL')}
-        self.env.update(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'), CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh',
-                        MOBILE_TMUX_CONFIG=str(self.temp / 'config'))  # not the developer's own advisor choice
+        env = dict(PATH=f'{bin_dir}:{os.environ["PATH"]}', TETHER_HOME=str(self.temp / 'tether'),
+                   CODEX_HOME=str(self.temp / 'codex'), SHELL='/bin/sh', MOBILE_TMUX_CONFIG=str(self.temp / 'config'))
+        self.private = private_tmux(self, 'tlaunch-', env)
+        self.env = self.private.env
+        for key in ('TETHER_LAUNCH', 'INVOCATION_ID', 'TETHER_CDP_URL'):
+            self.env.pop(key, None)
+        self.socket = self.private.socket
+        self.tmux = self.private.tmux
+        # The launcher reads its pane context. The tmux client needs only the socket.
+        client = bin_dir / 'private-tmux'
+        binary = shlex.quote(shutil.which('tmux'))
+        client.write_text(f'#!/bin/sh\nunset TMUX TMUX_PANE\nexec {binary} -S {self.socket} -f /dev/null "$@"\n')
+        client.chmod(0o755)
+        self.env['MOBILE_TMUX_TMUX'] = str(client)
         (self.temp / 'codex').mkdir()
         (self.temp / 'codex' / 'config.toml').write_text('sandbox_mode = "workspace-write"\n')  # --add-dir needs a writable sandbox
         self.tmux('new-session', '-d', '-s', 'proj', '-c', str(self.temp),  # no real .codex folder above it
-                   '-x', '120', '-y', '30', '/bin/sh')  # not a login shell: /etc/profile would reset PATH
-        self.addCleanup(self.tmux, 'kill-server')
-
-    def tmux(self, *args):
-        assert self.socket
-        return subprocess.run(['tmux', '-f', '/dev/null', '-S', self.socket, *args], capture_output=True, text=True, env=self.env, timeout=5)
+                  '-x', '120', '-y', '30', '/bin/sh').check_returncode()  # A login shell would reset PATH.
 
     def run_in_pane(self, command):
         target = self.temp / 'argv'
         target.unlink(missing_ok=True)
-        self.tmux('send-keys', '-t', 'proj', f'{command}; tmux -S {self.socket} wait-for -S done', 'Enter')
+        self.tmux('send-keys', '-t', 'proj',
+                  f'{command}; env -u TMUX -u TMUX_PANE tmux -S {self.socket} -f /dev/null wait-for -S done', 'Enter')
         self.tmux('wait-for', 'done')
         for _ in range(50):
             if target.exists():

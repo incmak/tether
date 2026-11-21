@@ -1,7 +1,6 @@
 """Narrow screen guards: styled input, clipped controls, and private tmux only."""
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import json
-import os
 from pathlib import Path
 import shlex
 import shutil
@@ -11,14 +10,13 @@ import tempfile
 import time
 import unittest
 from unittest.mock import Mock, patch
-import uuid
 
 import agents
 import footer
 import model_picker
-import paths
 import terminal_input as terminal
 from own_time import own_time
+from test_tmux_isolation import private_tmux
 
 
 class Screen:
@@ -346,41 +344,30 @@ class CapturedScreenTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('tmux'), 'tmux is not installed')
     def test_real_tmux_22_column_styled_input_on_private_socket(self):
         fixture = next(item for item in self.fixtures if item['source'].startswith('native Codex'))
-        socket = 'tether-narrow-test-' + uuid.uuid4().hex
-        env = dict(os.environ)
-        env.pop('TMUX', None)
-        env.pop('TMUX_PANE', None)
-        with tempfile.TemporaryDirectory(prefix='narrow-pane-') as folder:
-            env.update(HOME=folder, CLAUDE_CONFIG_DIR=folder + '/.claude', CODEX_HOME=folder + '/.codex')
+        folder = self.enterContext(tempfile.TemporaryDirectory(prefix='narrow-pane-'))
+        env = dict(HOME=folder, CLAUDE_CONFIG_DIR=folder + '/.claude', CODEX_HOME=folder + '/.codex')
+        tmux = private_tmux(self, 'tnarrow-', env).tmux
+        screen = fixture['screen'].rstrip('\n') + '\n\nmodel · /srv/example/project · low'
+        code = 'import time; print(' + repr(screen) + ',flush=True); time.sleep(10)'
+        command = 'timeout 12 ' + shlex.quote(sys.executable) + ' -c ' + shlex.quote(code) + ' </dev/null'
+        created = tmux('new-session', '-d', '-s', 'input', '-x', '22', '-y', '39', '-P', '-F', '#{pane_id}', command)
+        created.check_returncode()
+        pane = created.stdout.strip()
+        deadline = time.monotonic() + 3
+        while '›' not in tmux('capture-pane', '-e', '-p', '-t', pane).stdout:
+            if time.monotonic() >= deadline:
+                self.fail('The private pane did not draw its input.')
+            time.sleep(.02)
+        calls = []
 
-            def tmux(*args):
-                return subprocess.run([paths.TMUX, '-L', socket, '-f', '/dev/null', *args], env=env,
-                                      stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return tmux(*argv[1:])
 
-            try:
-                screen = fixture['screen'].rstrip('\n') + '\n\nmodel · /srv/example/project · low'
-                code = 'import time; print(' + repr(screen) + ',flush=True); time.sleep(10)'
-                command = 'timeout 12 ' + shlex.quote(sys.executable) + ' -c ' + shlex.quote(code) + ' </dev/null'
-                created = tmux('new-session', '-d', '-s', 'input', '-x', '22', '-y', '39', '-P', '-F', '#{pane_id}', command)
-                created.check_returncode()
-                pane = created.stdout.strip()
-                deadline = time.monotonic() + 3
-                while '›' not in tmux('capture-pane', '-e', '-p', '-t', pane).stdout:
-                    if time.monotonic() >= deadline:
-                        self.fail('The private pane did not draw its input.')
-                    time.sleep(.02)
-                calls = []
-
-                def run(argv, **kwargs):
-                    calls.append(argv)
-                    return tmux(*argv[1:])
-
-                terminal.empty_prompt({'id': pane, 'agent': 'codex'}, run)
-                self.assertEqual(tmux('display-message', '-p', '-t', pane, '#{pane_width}x#{pane_height}').stdout.strip(), '22x39')
-                self.assertTrue(all(argv[1] == 'capture-pane' and '-e' in argv for argv in calls))
-                self.assertEqual(agents.footer_cwd(run, pane), '/srv/example/project')
-            finally:
-                tmux('kill-server')
+        terminal.empty_prompt({'id': pane, 'agent': 'codex'}, run)
+        self.assertEqual(tmux('display-message', '-p', '-t', pane, '#{pane_width}x#{pane_height}').stdout.strip(), '22x39')
+        self.assertTrue(all(argv[1] == 'capture-pane' and '-e' in argv for argv in calls))
+        self.assertEqual(agents.footer_cwd(run, pane), '/srv/example/project')
 
 
 if __name__ == '__main__':
