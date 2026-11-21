@@ -606,6 +606,10 @@ def false_success(text):
 
 def spoken_failure(reason):
     reason = ' '.join(reason.split()) if isinstance(reason, str) else None
+    if reason:
+        # Browser errors end with an instruction to the model ("Ask which one."). The user must not hear it.
+        reason = ' '.join(sentence for sentence in re.split(r'(?<=[.!?])\s+', reason)
+                          if not re.match(r'ask\b', sentence, re.I))
     if not reason or len(reason) > 300:
         return 'That did not go through.'
     if not reason.endswith(('.', '!', '?')):

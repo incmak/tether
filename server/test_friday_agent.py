@@ -1579,6 +1579,14 @@ class FridayRulesTests(unittest.TestCase):
                 ('Which chat?', ' Which chat?'),
                 ('x' * 300, ' ' + 'x' * 300 + '.'),
                 ('x' * 301, ''),
+                # Instructions to the model are not spoken (ui/src/Live.tsx, fridayNames.ts, fridaySessions.ts).
+                ('Multiple chats are waiting for approval: Docs, API. Ask which one.',
+                 ' Multiple chats are waiting for approval: Docs, API.'),
+                ('Several items match: B1, B2. Ask which one.', ' Several items match: B1, B2.'),
+                ('Backend is a tmux session with 2 chats: Docs, API. ask the user which one?',
+                 ' Backend is a tmux session with 2 chats: Docs, API.'),
+                ('Ask which one.', ''),
+                ('Tasks are open.', ' Tasks are open.'),
                 (' \n\t ', ''),
                 (None, ''),
                 (404, '')):
@@ -3257,6 +3265,19 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                     ('', 1, [*prior_actions, switch]), ('Switched to Docs.', 1, [])])
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
                                  ['That did not go through. No chat called Docs.'])
+                self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
+
+    async def test_false_success_drops_the_instruction_to_the_model(self):
+        cases = (('show_session', {'session': 'Back'}, 'Several sessions match: Backend, Backup. Ask which one.',
+                  'Several sessions match: Backend, Backup.'),
+                 ('switch_chat', {'chat': 'Doc'}, 'No chat called Doc. Closest chats: Docs, Docker. Ask which one.',
+                  'No chat called Doc. Closest chats: Docs, Docker.'))
+        for name, args, error, spoken in cases:
+            with self.subTest(name=name), patch('sys.stderr'):
+                _, frames = await self.tool_flow('Show it', [
+                    ('', 1, [(name, args, {'error': error})]), ('Showing it.', 1, [])])
+                self.assertEqual([f.text for f in frames if isinstance(f, self.rt.TTSSpeakFrame)],
+                                 ['That did not go through. ' + spoken])
                 self.assertFalse(any(isinstance(f, self.rt.LLMTextFrame) for f in frames))
 
     async def test_unspeakable_last_failure_clears_the_previous_reason(self):
