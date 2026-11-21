@@ -1,4 +1,5 @@
 """The coordinator tab: commands and the status feed, with fake tmux options, statuses and sends."""
+import subprocess
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import contextlib
 from functools import partial
@@ -33,6 +34,10 @@ class Tmux:
         assert args[0] == paths.TMUX and kwargs == dict(capture_output=True, text=True, timeout=5)
         if args[1:4] == ['display-message', '-p', '-t'] and args[5] == '#{pane_id}\t#{@tether_helper}':
             entry = next((entry for entry in self.world.entries if entry['id'] == args[4]), None)
+            if entry and entry.get('record') is OSError:
+                raise subprocess.TimeoutExpired(args, 5)
+            if entry and entry.get('record') is LookupError:
+                entry = None  # tmux answers, but not for this pane
             out = f"{args[4]}\t{entry.get('record', '')}\n" if entry else ''
             return type('Result', (), {'returncode': 0 if entry else 1, 'stdout': out})()
         unset = args[1:4] == ['set-option', '-p', '-u']
@@ -383,6 +388,19 @@ class BrowserRole(unittest.TestCase):
         self.assertEqual(self.world.sent, [])
         own = json.dumps({'owner_pane': '%1', 'sent_at': 1, 'kind': 'own', 'moved_by': 'user'})
         with patch.dict(self.world.entries[1], record=own):
+            self.assertEqual(self.world.change_role()['coordinator'], '%2')
+
+    def test_claim_refuses_when_the_placement_cannot_be_confirmed(self):
+        # A timed-out read, a missing pane and a record that does not parse all leave the placement unknown.
+        for record in (OSError, LookupError, '{"kind": "helper", "owner_pane": "%1"', '{"kind": "helper"}'):
+            with self.subTest(record=record), patch.dict(self.world.entries[1], record=record):
+                with self.assertRaisesRegex(ValueError, 'could not confirm'):
+                    self.world.change_role(take=True)
+                with self.assertRaisesRegex(ValueError, 'could not confirm'):
+                    self.world.act('%2', action='claim', take=True)
+        self.assertEqual(self.world.marked(), {})
+        self.assertEqual(self.world.sent, [])
+        with patch.dict(self.world.entries[1], record=''):
             self.assertEqual(self.world.change_role()['coordinator'], '%2')
 
     def test_every_mark_value_is_known_to_the_record_guard(self):
