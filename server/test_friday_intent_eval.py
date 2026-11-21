@@ -262,6 +262,20 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertEqual(result['fails'], fails)
                 self.assertIsNotNone(result['samples'][0]['proposal'])
 
+    def test_call_transcript_case_passes_only_a_readback_that_attaches_the_call(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        example = next(item for item in data['cases'] if item['id'] == 'log-send-friday-call-transcript')
+        for attach, fails in ((True, {}), (False, {'wrong_args': 1})):
+            with self.subTest(attach=attach):
+                args = {'chat': 'friday test', 'prompt': 'Review this call.'}
+                if attach:
+                    args['attach_call'] = True
+                result, _ = self.run_script(example, assistant(tool_calls=[call('send_to_chat', **args)]), data=data)
+                self.assertEqual(result['fails'], fails)
+                if attach:  # Without the attachment, the plain send goes direct and misses attach_call.
+                    self.assertTrue(result['samples'][0]['proposal']['attach'])
+                    self.assertIn("with this call's transcript", result['samples'][0]['reply'])
+
     def test_pending_proposal_binds_yes_to_the_last_readback_and_chat(self):
         pending = {'name': 'send_to_chat', 'chat': 'friday test', 'payload': 'Fix the login bug'}
         readback = friday.send_readback(friday.SendProposal(**pending, turn=0))

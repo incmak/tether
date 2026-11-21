@@ -95,6 +95,8 @@ class EmptyZoomCache(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('tmux'), 'tmux is not installed')
 class IsolatedZoom(unittest.TestCase):
+    pane_program = 'timeout 120 tail -f /dev/null </dev/null'
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
@@ -105,12 +107,13 @@ class IsolatedZoom(unittest.TestCase):
         self.env = self.private.env
         self.tmux = self.private.tmux
         self.binary = shutil.which('tmux')
-        self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40').check_returncode()
+        self.tmux('new-session', '-d', '-s', 'zoom-test', '-x', '120', '-y', '40',
+                  self.pane_program).check_returncode()
         self.addCleanup(self.stop_server)
         self.pane = self.tmux('display-message', '-p', '-t', 'zoom-test', '#{pane_id}').stdout.strip()
         self.home = self.tmux('display-message', '-p', '-t', self.pane, '#{window_id}').stdout.strip()
-        self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
-        self.tmux('split-window', '-h', '-t', self.pane).check_returncode()
+        self.tmux('split-window', '-h', '-t', self.pane, self.pane_program).check_returncode()
+        self.tmux('split-window', '-h', '-t', self.pane, self.pane_program).check_returncode()
         self.other = self.tmux('display-message', '-p', '-t', self.home, '#{pane_id}').stdout.strip()
         for replacement in (patch.object(pane_view, 'tmux', side_effect=self.tmux),
                             patch.object(pane_view.paths, 'CACHE', Path(self.folder.name) / 'cache')):
@@ -118,8 +121,8 @@ class IsolatedZoom(unittest.TestCase):
             self.addCleanup(replacement.stop)
 
     def stop_server(self):
-        # kill-server returns before the pane shells exit, and a shell can still write into HOME (the
-        # temporary folder) while the folder cleanup runs. Wait until every pane process has gone.
+        # The panes run a fixed program without a login shell. Wait so no pane process outlives
+        # the temporary folder.
         listed = self.tmux('list-panes', '-a', '-F', '#{pane_pid}').stdout.split()
         self.tmux('kill-server')
         deadline = time.monotonic() + 5
@@ -173,7 +176,7 @@ pane_view.zoom_repair_all()
                        capture_output=True, timeout=10, check=True)
 
     def test_five_narrow_panes_restore_exactly_after_exit_or_restart(self):
-        program = 'timeout 120 tail -f /dev/null </dev/null'
+        program = self.pane_program
         self.home, self.pane = self.tmux('new-window', '-d', '-t', 'zoom-test:', '-n', 'arranged',
                                         '-P', '-F', '#{window_id} #{pane_id}', program).stdout.split()
         right = self.pane

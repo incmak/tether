@@ -6,7 +6,7 @@ import type { Anchor } from './hooks'
 import { anchorOf } from './hooks'
 import { paneTitle } from './Sidebar'
 import { revealLeft } from './groups'
-import { needsMak } from './helperTabs'
+import { fromLabel, needsMak } from './helperTabs'
 import { isTaskAdvisor, taskIdentity, taskRole, taskState, taskStateLabel } from './taskTree'
 import './HelperTabs.css'
 
@@ -16,7 +16,7 @@ export function TaskDot({ state, label }: { state: ReturnType<typeof taskState>;
 }
 
 export function TaskFrom({ pane }: { pane: Pane }) {
-  return pane.from && <span className="task-from" title={`Started by ${pane.from.name}`}>from {pane.from.name}</span>
+  return pane.from && <span className="task-from" title={`Started by ${pane.from.name}`}>from {fromLabel(pane.from.name)}</span>
 }
 
 export function helperLabel(pane: Pane) {
@@ -67,7 +67,8 @@ export function TaskChips({ task, children, pane, panelId, onOpen, onActions }: 
         onContextMenu={event => { event.preventDefault(); onActions(item.id, anchorOf(event)) }}
         onKeyDown={event => { moveTabFocus(event); if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); onActions(item.id, anchorOf(event)) } }}>
         <Icon size={14} className={advisor ? 'tab-advisor' : undefined} aria-hidden="true" /><span>{main ? 'Main' : paneTitle(item)}</span>
-        {dotLabel && <TaskDot state={state} label={dotLabel} />}
+        {/* Concept D: the task tab already shows Main's working state; Main keeps only the needs-you dot. */}
+        {dotLabel && !(main && state === 'working') && <TaskDot state={state} label={dotLabel} />}
       </button>
     })}
   </div>
