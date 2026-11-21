@@ -114,6 +114,7 @@ class StackCloseTests(unittest.TestCase):
                 return
             step, = undo_store.entries()
             self.assertEqual(handler.body['undo'], step['id'])
+            self.assertEqual(step['actions'][0]['kind'], 'tab.close')
             self.assertEqual(step['actions'][0].get('pending', False), outcome == 'unknown')
             if outcome == 'unknown':
                 self.assertEqual(handler.body['unknown'], [self.review['pane_name']])
@@ -134,6 +135,28 @@ class StackCloseTests(unittest.TestCase):
 
     def test_close_timeout_with_unreadable_tmux_keeps_pending_undo(self):
         self.check_first_kill_error('unknown')
+
+    def test_stale_stack_close_after_checkpoint_preserves_redo(self):
+        checkpoint = undo_store.checkpoint
+        saved = {'pane': self.root['id'], 'name': self.root['pane_name'], 'session': 'Tether'}
+
+        def stage(identifier, label, actions, **kwargs):
+            step = checkpoint(identifier, label, actions, **kwargs)
+            if actions:
+                self.root['state'] = 'Working'
+            return step
+
+        with (tempfile.TemporaryDirectory() as folder, patch.object(undo_store, '_ENABLED', True),
+              patch.object(undo_store, '_path', return_value=Path(folder) / 'history.json'),
+              patch.object(undo_store, 'checkpoint', side_effect=stage),
+              patch('undo.capture_safe', return_value=saved), undo_store.acting('user')):
+            earlier = undo_store.record('prefs.order', 'Earlier step', sub=None, old=['a'], new=['b'])
+            undo_store.edit(lambda found: found[0].update(state='undone', redo=True))
+            before = undo_store.entries()
+            self.assertEqual(self.post('close', BUGS, self.root)[0], 409)
+            self.assertEqual(undo_store.entries(), before)
+            self.assertEqual(undo.next_target('redo'), earlier['id'])
+            self.assertEqual(self.run.writes, [])
 
     def test_b446_close_preserves_helpers_listed_in_another_stack(self):
         self.assertEqual(self.post('close', BUGS, self.root)[0], 200)

@@ -3,6 +3,7 @@ import unittest_isolated  # noqa: F401
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -54,6 +55,40 @@ class FakeTerminal:
         return subprocess.CompletedProcess(argv, 0, '')
 
 
+def focus_multi(frame, target):
+    """Move the cursor marker among the rows in a captured question."""
+    plain = terminal_input.prompt_actions.plain
+    rows = frame.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(rows) if '✔ Submit' in plain(line))
+    for i in range(start + 1, len(rows)):
+        line = rows[i]
+        match = re.match(r'^(?:❯ |  )(?:(\d+)\. |   (Submit|Next)$)', plain(line).rstrip())
+        if not match:
+            continue
+        line = line.replace('❯', ' ', 1)
+        if target in match.groups():
+            marker = re.match(r'^(?:\x1b\[[0-9;]*m)*', line).end()
+            line = line[:marker] + '❯' + line[marker + 1:]
+        rows[i] = line
+    return ''.join(rows)
+
+
+class ScriptedTerminal(FakeTerminal):
+    def __init__(self, screen, steps=()):
+        super().__init__(screen)
+        self.steps = iter(steps)
+
+    def __call__(self, argv, **kwargs):
+        if argv[1] == 'capture-pane':
+            return super().__call__(argv, **kwargs)
+        assert server.SEND_LOCK.locked()
+        key, frame = next(self.steps, (None, None))
+        assert argv[1] == 'send-keys' and argv[-1] == key, argv
+        self.writes.append(key)
+        self.screen = frame
+        return subprocess.CompletedProcess(argv, 0, '')
+
+
 class HelperAnswerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -94,19 +129,257 @@ class HelperAnswerTests(unittest.TestCase):
                                                          'content': 'The user chose Text.'}]}}
 
     def request_menu(self, run, **body):
-        payload = json.dumps(dict(session=HELPER['id'], thread=THREAD, choice=1, **body)).encode()
+        return self.request_choice('menu', run, choice=1, **body)[0]
+
+    def request_choice(self, endpoint, run, **body):
+        payload = json.dumps(dict(session=HELPER['id'], thread=THREAD, **body)).encode()
         handler = object.__new__(server.Handler)
-        handler.path = '/mobile/api/menu'
+        handler.path = '/mobile/api/' + endpoint
         handler.rfile = io.BytesIO(payload)
         handler.headers = {'Host': 'phone.test', 'Origin': 'http://phone.test', 'X-Codex-Mobile': '1',
                            'Content-Length': str(len(payload))}
         handler.respond = Mock()
         handler.deny = Mock(return_value=False)
-        choose = terminal_input.menu_choose
+        name = 'menu_choose' if endpoint == 'menu' else 'picker_choose'
+        choose = getattr(terminal_input, name)
         with patch.object(server, 'sessions', return_value=[self.entry]), patch.object(
-                server, 'menu_choose', side_effect=lambda *args, **kwargs: choose(*args, **kwargs, run=run)):
+                server, name, side_effect=lambda *args, **kwargs: choose(*args, **kwargs, run=run, sleep=lambda _: None)):
             handler.do_POST()
-        return handler.respond.call_args.args[0]
+        return handler.respond.call_args.args
+
+    def multi_ask(self, identifier):
+        ask = self.tool_ask(identifier)
+        ask['message']['content'][0]['input']['questions'] = [
+            dict(header=header, question=question, multiSelect=multi,
+                 options=[dict(label=label, description=detail) for label, detail in rows])
+            for header, question, multi, rows in (
+                ('Library', 'Which library?', False, [('React', ''), ('Vue', '')]),
+                ('Features', 'Which features?', True, [('Search', 'Find'), ('Export', 'Save'), ('Sync', 'Share')]),
+                ('Name', 'Which name?', False, [('A', 'First'), ('B', 'Second')]),
+            )
+        ]
+        return ask
+
+    def multi_pick(self, run, **body):
+        return self.request_choice('pick', run, heading='Which features?',
+                                   labels=['Search\nFind', 'Export\nSave', 'Sync\nShare',
+                                           'Type something', 'Chat about this'], **body)
+
+    def multi_frame(self):
+        self.transcript_records(self.multi_ask('features'))
+        return (Path(__file__).parent / 'test_fixtures/native_ask/multi.txt').read_text()
+
+    def test_verified_multi_tick_keeps_the_same_revision(self):
+        screen = self.multi_frame()
+        run = FakeTerminal(screen)
+        original = run.__call__
+
+        def tick(argv, **kwargs):
+            result = original(argv, **kwargs)
+            if argv[1] == 'send-keys' and argv[-1] == 'Space':
+                run.screen = run.screen.replace('[✔]', '[ ]')
+            return result
+
+        status = menu_row(screen, self.entry)['attention']
+        revision = status['menu_verified']
+        self.assertTrue(revision)
+        self.assertTrue(status['ask_current']['options'][1]['checked'])
+        with patch.object(terminal_input, 'verify'):
+            self.assertEqual(self.multi_pick(tick, row=1, then='Space', revision=revision)[0], 200)
+            after = menu_row(run.screen, self.entry)['attention']
+            self.assertFalse(after['ask_current']['options'][1]['checked'])
+            self.assertEqual(after['menu_verified'], revision)
+            self.assertEqual(self.multi_pick(run, row=1, then='Enter', revision=revision)[0], 409)
+            self.assertEqual(self.request_menu(run, revision=revision), 409)
+        self.assertEqual([command[-1] for command in run.writes], ['Space'])
+
+    def test_multi_pick_sends_no_keys_on_free_or_chat_rows(self):
+        screen = self.multi_frame()
+        revision = menu_row(screen, self.entry)['attention']['menu_verified']
+        for row, marker in ((3, '  \x1b[38;5;246m4.'), (4, '  5. Chat about this')):
+            focused = screen.replace('❯', ' ').replace(marker, '❯' + marker[1:])
+            with self.subTest(row=row), patch.object(terminal_input, 'verify'):
+                run = FakeTerminal(focused)
+                self.assertTrue(terminal_input.verified_numbered_menu(self.entry, focused)['options'][row]['selected'])
+                for key in ('Space', 'Enter'):
+                    self.assertEqual(self.multi_pick(run, row=row, then=key, revision=revision),
+                                     (409, {'error': terminal_input.menu_refusal(self.entry)}))
+                self.assertEqual(run.writes, [])
+
+    def submit_fixture(self, name):
+        return (Path(__file__).parent / 'fixtures/claude_2.1.330_ask_multi' / f'multi-{name}.ansi').read_text()
+
+    def submit_ask(self):
+        ask = self.multi_ask('features')
+        question = ask['message']['content'][0]['input']['questions'][1]
+        question['question'] = 'Which features do you want?'
+        for option in question['options']:
+            option['description'] += ' things'
+        ask['message']['content'][0]['input']['questions'] = [question]
+        self.transcript_records(ask)
+
+    def done(self, run, revision):
+        with patch.object(terminal_input, 'verify'):
+            return self.request_choice('pick', run, then='Enter', revision=revision, heading='Which features do you want?')
+
+    def test_done_reaches_submit_and_confirms_at_each_width(self):
+        self.submit_ask()
+        question = self.submit_fixture('q1-120')
+        revision = menu_row(question, self.entry)['attention']['menu_verified']
+        self.assertTrue(revision)
+        for ticked, submit, review in (
+            ('ticked', 'on-submit', 'after-submit'),
+            (None, 'on-submit-44', 'review-44'),
+            ('back-22', 'on-submit-22', 'review-22'),
+        ):
+            with self.subTest(submit=submit):
+                focused = self.submit_fixture(submit)
+                start = self.submit_fixture(ticked) if ticked else focus_multi(focused, '1')
+                steps = [('Down', focus_multi(focused, row)) for row in ('2', '3', '4')]
+                steps += [('Down', focused), ('Enter', self.submit_fixture(review)), ('Enter', '')]
+                run = ScriptedTerminal(start, steps)
+                self.assertEqual(self.done(run, revision), (200, {'accepted': True}))
+                self.assertEqual(run.writes, ['Down'] * 4 + ['Enter', 'Enter'])
+                for frame in (start, focused):
+                    self.assertEqual(menu_row(frame, self.entry)['attention']['menu_verified'], revision)
+
+    def test_done_moves_from_free_and_chat_or_starts_on_submit(self):
+        self.submit_ask()
+        submit = self.submit_fixture('on-submit')
+        review = self.submit_fixture('after-submit')
+        revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
+        for row, move in (('4', ['Down']), ('5', ['Up']), ('Submit', [])):
+            with self.subTest(row=row):
+                start = focus_multi(submit, row) if move else submit
+                run = ScriptedTerminal(start, [(key, submit) for key in move] + [('Enter', review), ('Enter', '')])
+                self.assertEqual(self.done(run, revision)[0], 200)
+                self.assertEqual(run.writes, move + ['Enter', 'Enter'])
+
+    def test_done_refuses_a_different_review_answer_and_goes_back(self):
+        self.submit_ask()
+        submit = self.submit_fixture('on-submit-22')
+        revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
+        review = self.submit_fixture('review-22').replace('→ Search', '→ Export')
+        run = ScriptedTerminal(submit, [('Enter', review), ('Left', self.submit_fixture('back-22'))])
+        status, response = self.done(run, revision)
+        self.assertEqual(status, 409)
+        self.assertIn('Open the terminal to check', response['error'])
+        self.assertEqual(run.writes, ['Enter', 'Left'])
+
+    def test_done_refuses_a_missing_or_unfamiliar_review(self):
+        self.submit_ask()
+        self.entry['agent_version'] = '2.1.331'
+        submit = self.submit_fixture('on-submit')
+        revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
+        for name, frame in (('missing', ''), ('renumbered', self.submit_fixture('after-submit').replace('1. ', '3. '))):
+            with self.subTest(name=name):
+                run = ScriptedTerminal(submit, [('Enter', frame)])
+                status, response = self.done(run, revision)
+                self.assertEqual(status, 409)
+                self.assertIn('Claude Code 2.1.331', response['error'])
+                self.assertEqual(run.writes, ['Enter'])
+
+    def test_done_matches_multiple_ticked_labels_in_the_review(self):
+        self.submit_ask()
+        submit = self.submit_fixture('on-submit').replace('[ ] Sync', '[✔] Sync')
+        review = self.submit_fixture('after-submit')
+        revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
+        for answer, status, key in (('Sync, Search', 200, 'Enter'), ('Sync, Search, Search', 409, 'Left')):
+            with self.subTest(answer=answer):
+                run = ScriptedTerminal(submit, [('Enter', review.replace('→ Search', '→ ' + answer)), (key, '')])
+                self.assertEqual(self.done(run, revision)[0], status)
+                self.assertEqual(run.writes, ['Enter', key])
+
+    def test_done_refuses_missing_control_and_space_refuses_control(self):
+        self.submit_ask()
+        submit = self.submit_fixture('on-submit')
+        question = self.submit_fixture('ticked')
+        revision = menu_row(question, self.entry)['attention']['menu_verified']
+        frame = ''.join(line for line in question.splitlines(keepends=True)
+                        if terminal_input.prompt_actions.plain(line).strip() != 'Submit')
+        self.assertEqual(menu_row(frame, self.entry)['attention']['menu_verified'], revision)
+        run = ScriptedTerminal(frame)
+        self.assertEqual(self.done(run, revision)[0], 409)
+        self.assertEqual(run.writes, [])
+        run = ScriptedTerminal(submit)
+        with patch.object(terminal_input, 'verify'):
+            for row in (4, 5):
+                self.assertEqual(self.request_choice('pick', run, row=row, then='Space', revision=revision,
+                                                     labels=['Search\nFind things', 'Export\nSave things', 'Sync\nShare things',
+                                                             'Type something', 'Submit', 'Chat about this'],
+                                                     heading='Which features do you want?')[0], 409)
+        self.assertEqual(run.writes, [])
+
+    def test_done_at_next_only_accepts_the_next_question_of_the_same_ask(self):
+        screen = self.multi_frame()
+        revision = menu_row(screen, self.entry)['attention']['menu_verified']
+        self.assertTrue(revision)
+        following = (Path(__file__).parent / 'test_fixtures/native_ask/last.txt').read_text()
+        for start, directions in (('2', [('Down', '3'), ('Down', '4'), ('Down', 'Next')]), ('5', [('Up', 'Next')])):
+            for frame, status in ((following, 200), (focus_multi(screen, 'Next'), 409)):
+                with self.subTest(start=start, status=status), patch.object(terminal_input, 'verify'):
+                    steps = [(key, focus_multi(screen, row)) for key, row in directions] + [('Enter', frame)]
+                    run = ScriptedTerminal(focus_multi(screen, start), steps)
+                    code, response = self.request_choice('pick', run, then='Enter', revision=revision, heading='Which features?')
+                    self.assertEqual(code, status)
+                    if code == 409:
+                        self.assertIn('Open the terminal to check', response['error'])
+                    self.assertEqual(run.writes, [key for key, _ in steps])
+
+    def test_multi_pick_refuses_missing_stale_answered_or_mismatched_menu(self):
+        screen = self.multi_frame()
+        revision = menu_row(screen, self.entry)['attention']['menu_verified']
+        old = self.multi_ask('features')
+        mismatched_type = self.multi_ask('features')
+        mismatched_type['message']['content'][0]['input']['questions'][1]['multiSelect'] = False
+        for records, frame, body in (
+            ((old,), screen, {}),
+            ((old, self.tool_result('features'), self.multi_ask('new')), screen, {'revision': revision}),
+            ((old, self.tool_result('features')), screen, {'revision': revision}),
+            ((mismatched_type,), screen, {'revision': revision}),
+            ((old,), screen.replace('Library', 'Libraries'), {'revision': revision}),
+            ((old,), screen.replace('Which features?', 'Which features now?'), {'revision': revision}),
+            ((old,), screen.replace('Export', 'Download'), {'revision': revision}),
+            ((old,), screen.replace('Save', 'Archive'), {'revision': revision}),
+        ):
+            with self.subTest(records=records, frame=frame, body=body), patch.object(terminal_input, 'verify'):
+                self.transcript_records(*records)
+                run = FakeTerminal(frame)
+                for key in ('Space', 'Enter'):
+                    self.assertEqual(self.multi_pick(run, row=1, then=key, **body),
+                                     (409, {'error': terminal_input.menu_refusal(self.entry)}))
+                self.assertEqual(run.writes, [])
+
+    def test_multi_pick_rechecks_the_transcript_after_cursor_moves(self):
+        screen = self.multi_frame()
+        revision = menu_row(screen, self.entry)['attention']['menu_verified']
+        self.assertTrue(revision)
+        run = FakeTerminal(screen)
+
+        def move(argv, **kwargs):
+            if argv[1] != 'send-keys' or argv[-1] != 'Down':
+                return run(argv, **kwargs)
+            run.writes.append(argv)
+            run.screen = screen.replace('❯', ' ').replace('  \x1b[38;5;246m3.', '❯ \x1b[38;5;246m3.')
+            self.transcript_records(self.multi_ask('new'))
+            return subprocess.CompletedProcess(argv, 0, '')
+
+        with patch.object(terminal_input, 'verify'):
+            self.assertEqual(self.multi_pick(move, row=2, then='Space', revision=revision)[0], 409)
+        self.assertEqual([command[-1] for command in run.writes], ['Down'])
+
+    def test_codex_numbered_checkboxes_are_refused_with_or_without_revision(self):
+        screen = ('Select Model and Effort\n\n  1. [x] First\n› 2. [ ] Second\n\n'
+                  'enter select · esc back\n')
+        self.entry['agent'] = 'codex'
+        self.assertFalse(menu_row(screen, self.entry)['attention']['menu_verified'])
+        run = FakeTerminal(screen)
+        with patch.object(terminal_input, 'verify'):
+            for body in ({}, {'revision': 'a' * 64}):
+                self.assertEqual(self.request_choice('pick', run, row=1, then='Space',
+                                                     heading='Select Model and Effort',
+                                                     labels=['[x] First', '[ ] Second'], **body)[0], 409)
+        self.assertEqual(run.writes, [])
 
     def test_menu_route_refuses_answered_and_superseded_questions(self):
         first = self.tool_ask('old')

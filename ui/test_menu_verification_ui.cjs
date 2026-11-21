@@ -12,6 +12,17 @@ const question = 'Which screenshot format should the report use?'
 const revision = 'a'.repeat(64)
 const listedRevision = 'b'.repeat(64)
 const options = [{ id: 1, text: 'PNG', selected: true }, { id: 2, text: 'WebP' }]
+const multiQuestion = 'Which features?'
+const submitRefusal = 'The question changed or is no longer open. Open the terminal to review it.'
+const multiOptions = [
+  { id: 1, text: 'Search', detail: 'Find' },
+  { id: 2, text: 'Export', detail: 'Save' },
+  { id: 3, text: 'Sync', detail: 'Share' },
+  { id: 4, text: 'Type something', free: true },
+  { id: 5, text: 'Chat about this', selected: true },
+]
+const multiCurrent = { index: 1, total: 3, header: 'Features', multi: true, question: multiQuestion,
+  options: multiOptions.map(option => ({ ...option, checked: option.id === 2 })), tabs: [], keys: [] }
 const approvalPane = { ...pane, id: '%13', thread: 'approval-thread', state: 'Approval', attention: null,
   approval: { id: 'approval-1', actionable: true, text: 'Run the report?', options: [{ id: 1, text: 'Yes' }] } }
 const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.woff2': 'font/woff2' }
@@ -37,6 +48,8 @@ async function main() {
     page.setDefaultTimeout(4000)
     const errors = [], writes = []
     let verified = false
+    let multi = false
+    let submitResponse
     page.on('pageerror', error => errors.push(error.message))
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await page.routeWebSocket('**/*', socket => socket.close())
@@ -46,7 +59,12 @@ async function main() {
       if (url.pathname.startsWith('/mobile/api/')) {
         const endpoint = url.pathname.slice('/mobile/api/'.length)
         if (request.method() !== 'GET') {
-          writes.push({ endpoint, body: request.postDataJSON() })
+          const body = request.postDataJSON()
+          writes.push({ endpoint, body })
+          if (endpoint === 'pick' && body.then === 'Enter') {
+            await submitResponse
+            return route.fulfill({ status: 409, json: { error: submitRefusal } })
+          }
           return route.fulfill({ json: { accepted: true } })
         }
         if (endpoint === 'stream') return route.fulfill({ status: 204, body: '' })
@@ -54,8 +72,11 @@ async function main() {
           id: 'listed-menu', reason: 'menu', question, options, menu_verified: listedRevision,
         } }, approvalPane], default_thread: pane.thread } })
         if (endpoint === 'chat') return route.fulfill({ json: { ...pane, session: pane.id, messages: [], busy: false, earlier: 0,
-          attention: { id: 'menu-1', reason: 'menu', text: question, question, menu_verified: verified ? revision : false,
-            ...(verified ? { options } : {}) } } })
+          attention: multi
+            ? { id: 'multi-1', reason: 'menu', text: multiQuestion, question: multiQuestion,
+              menu_verified: verified ? revision : undefined, options: multiOptions, ask_current: multiCurrent }
+            : { id: 'menu-1', reason: 'menu', text: question, question, menu_verified: verified ? revision : false,
+              ...(verified ? { options } : {}) } } })
         if (endpoint === 'prefs') return route.fulfill({ json: { prefs: { uiUsage: false }, version: 1 } })
         return route.fulfill({ json: replies[endpoint] ?? {} })
       }
@@ -106,6 +127,39 @@ async function main() {
           assert.deepEqual(writes.filter(({ endpoint }) => ['menu', 'key', 'pick', 'message'].includes(endpoint)), [])
         }
       }
+      multi = true
+      await page.goto(`${origin}/chat/?session=%2512`)
+      await dock.getByText(multiQuestion, { exact: true }).waitFor()
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), width)
+      assert(await page.locator('.composer textarea').isDisabled())
+      assert.equal(await dock.getByRole('button', { name: /Type your own answer|Chat about this/ }).count(), 0)
+      for (const [button, pick] of [
+        [/Search/, { row: 0, labels: ['Search\nFind', 'Export\nSave', 'Sync\nShare', 'Type something', 'Chat about this'], then: 'Space' }],
+        [/Done \(Enter\)/, { then: 'Enter' }],
+      ]) {
+        const submitting = pick.then === 'Enter'
+        const gate = submitting ? Promise.withResolvers() : null
+        if (gate) submitResponse = gate.promise
+        const picked = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/mobile/api/pick')
+        const control = dock.getByRole('button', { name: button })
+        try {
+          if (submitting) await control.and(page.locator('button:enabled')).press('Enter')
+          else await control.click()
+          assert.deepEqual((await picked).postDataJSON(), {
+            session: pane.id, thread: pane.thread, ...pick, heading: multiQuestion, revision,
+          })
+          if (submitting) await control.and(page.locator('button:disabled')).waitFor()
+        } finally {
+          gate?.resolve()
+        }
+      }
+      await page.getByText(submitRefusal, { exact: true }).waitFor()
+      verified = false
+      await page.goto(`${origin}/chat/?session=%2512`)
+      await dock.getByText('Answer this in the terminal.', { exact: true }).waitFor()
+      assert.equal(await dock.getByRole('button').count(), 1)
+      assert(await dock.getByRole('button', { name: 'Open terminal', exact: true }).isVisible())
+      multi = false
     }
     const toggle = page.getByRole('button', { name: /^Needs you,/ })
     if (await toggle.getAttribute('aria-pressed') === 'false') await toggle.click()
@@ -125,7 +179,7 @@ async function main() {
       session: approvalPane.id, thread: approvalPane.thread, approval: approvalPane.approval.id, choice: 1,
     })
     assert.deepEqual(errors, [])
-    console.log('Dock menus pass at 320 px and 1280 px. Inbox digits and Y send the listed identities.')
+    console.log('Dock menus, multi-select tick and Done, and the terminal fallback pass at 320 px and 1280 px. Inbox digits and Y send the listed identities.')
   } finally { await browser.close() }
 }
 

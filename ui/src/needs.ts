@@ -38,7 +38,7 @@ export function inboxItems(panes: Pane[], seen: Record<string, number>, selected
         item.yes = approval.options.find(option => YES.test(option.text) && !ALWAYS.test(option.text))
         item.no = approval.options.find(option => NO.test(option.text))
       }
-      if (needs.kind === 'question' && !approval && pane.attention?.reason === 'menu' && pane.attention.menu_verified) {
+      if (needs.kind === 'question' && !approval && pane.attention?.reason === 'menu' && pane.attention.menu_verified && !pane.attention.ask_current?.multi) {
         const menu = (pane.attention.options ?? []).filter(option => option.id >= 1 && option.id <= 3 && !option.free)
         if (menu.length) item.menu = menu
       }

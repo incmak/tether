@@ -151,8 +151,10 @@ function updateAttention(value) {
   document.querySelector('#attention-type').style.display = info ? 'none' : '';
   document.querySelector('#attention-keys').style.display = info ? 'none' : '';
   if (wasHidden || atBottom) text.scrollTop = text.scrollHeight;
-  // A recognised multiple-choice question reads as a chat card with tappable options; the raw screen stays one tap away.
-  const card = document.querySelector('#attention-card'), choices = !info && value.options?.length > 1;
+  // A one-choice question the server verified (menu_verified holds its revision) reads as a chat card with tappable options.
+  // Anything else shows the raw keys: a card answer must name the question it answers, so the server can refuse a stale one.
+  const card = document.querySelector('#attention-card'), answers = (value.options || []).filter(option => !option.free);
+  const choices = !info && !value.ask_current?.multi && typeof value.menu_verified === 'string' && answers.length > 1;
   panel.classList.toggle('as-card', choices);
   card.hidden = !choices;
   // Show only the keys that mean something for this screen: a card's options replace the arrows and numbers.
@@ -166,16 +168,18 @@ function updateAttention(value) {
   if (!choices) return;
   card.querySelector('.q').textContent = value.question || 'Choose an option';
   const list = card.querySelector('.opts');
-  const signature = JSON.stringify(value.options.map(option => [option.id, option.text, option.detail]));
+  list.dataset.revision = value.menu_verified;
+  const signature = JSON.stringify(answers.map(option => [option.id, option.text, option.detail]));
   if (list.dataset.signature !== signature) {
     list.dataset.signature = signature;
-    list.replaceChildren(...value.options.map(option => {
+    list.replaceChildren(...answers.map(option => {
       const button = document.createElement('button'); button.type = 'button';
       const number = document.createElement('b'); number.textContent = option.id;
       const label = document.createElement('span'); label.textContent = option.text;
       if (option.detail) { const detail = document.createElement('small'); detail.textContent = option.detail; label.append(detail); }
       button.append(number, label);
-      button.addEventListener('click', () => sendTerminalInput('/mobile/api/key', {key: String(option.id)}));
+      button.addEventListener('click', () => sendTerminalInput('/mobile/api/menu',
+        {choice: option.id, label: option.text, revision: list.dataset.revision}));
       return button;
     }));
   }

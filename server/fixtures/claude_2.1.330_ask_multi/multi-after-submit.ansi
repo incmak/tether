@@ -1,0 +1,40 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.330[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus 5.5 with medium effort · Claude Ultra[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/fixture
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mThis is a throwaway test tab. Do no other work. Call the AskUserQuestion tool once with exactly one question: header [39m
+  [38;5;231m'Features', question 'Which features do you want?', multiSelect true, options 'Search' (description 'Find things'), [39m
+  [38;5;231m'Export' (description 'Save things') and 'Sync' (description 'Share things'). After I answer, call AskUserQuestion [39m
+  [38;5;231magain with the exact same question. After the second answer, reply 'done' and stop.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m←  ☒ Features [38;5;16m[48;5;153m ✔ Submit [38;5;246m[49m →[39m
+
+[1m[38;5;231mReview your answers[0m
+
+ ● Which features do you want?
+   [38;5;114m→ Search[39m
+
+[38;5;153m❯[39m [38;5;246m1. [38;5;153mSubmit answers[39m
+  [38;5;246m2. [39mCancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

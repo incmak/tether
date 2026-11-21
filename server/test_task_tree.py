@@ -20,6 +20,7 @@ import task_tree
 import task_tree_api
 import task_tree_close
 import undo_store
+from undo import next_target
 
 
 def chat(number, **changes):
@@ -309,8 +310,16 @@ class Routes(unittest.TestCase):
         with patch.object(undo_store, '_ENABLED', True), \
                 patch.object(undo_store, '_path', return_value=self.folder / 'undo.json'), \
                 patch.object(undo_store, 'checkpoint', side_effect=change_after_checkpoint):
+            earlier = undo_store.record('prefs.order', 'Earlier step', sub=None, old=['a'], new=['b'])
+            undo_store.edit(lambda found: found[0].update(state='undone', redo=True))
+            before = undo_store.entries()
             status, body = self.request('close', self.close_request())
-            steps = undo_store.entries()
+            old, *steps = undo_store.entries()
+            if closed:
+                self.assertIsNone(next_target('redo'))
+            else:
+                self.assertEqual([old], before)
+                self.assertEqual(next_target('redo'), earlier['id'])
         self.assertEqual(status, 409)
         self.assertEqual(body['error'], task_tree_api.CLOSE_CHANGED)
         self.assertEqual(body['closed'], closed)

@@ -851,7 +851,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     try { await api(path, body); await refresh(); onUpdate(); return true }
     catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        await refresh(); setToast('The thread changed. Review the chat, then try again.')
+        await refresh(); setToast(path === 'pick' ? errorText(error) : 'The thread changed. Review the chat, then try again.')
       } else { lastFailure.current = error; setSendError(errorText(error)); setDraftBlocked(error instanceof ApiError && error.draft) }
       return false
     }
@@ -891,9 +891,9 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
     } finally { setActing(false) }
   }
   // While Claude asks a question, the message box answers it through its own-answer row (checked on the server).
-  const terminalOnlyMenu = !data?.approval && data?.attention?.menu_verified === false
+  const menuBlocksComposer = !data?.approval && (data?.attention?.menu_verified === false || data?.attention?.ask_current?.multi === true)
   const menuRevision = data?.attention?.menu_verified || undefined
-  const ownAnswer = !terminalOnlyMenu && !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
+  const ownAnswer = !menuBlocksComposer && !data?.approval && data?.attention?.reason === 'menu' ? data.attention.options?.find(option => option.free) : undefined
   async function send(text: string, retryOf?: Pending) {
     text = terminalText(text)
     setPending(list => list.some(item => item.terminal) ? list.filter(item => !item.terminal) : list)
@@ -1078,11 +1078,11 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
   // A card key that Claude did not take leaves its error under the message box. Clear it when the card changes or closes.
   const card = footer.heads_up ? `${footer.heads_up.state}|${footer.heads_up.text}` : ''
   useEffect(() => { if (cardError.current) { cardError.current = false; setSendError(''); setDraftBlocked(false) } }, [card, pane.id])
-  // A tap on a row of the agent's list: the server moves the cursor there, checks the row, then presses one key.
-  async function pickRow(row: number, labels: string[], then: PickKey) {
+  // A list action names a row or submits the numbered question identified by its revision.
+  async function pickRow(row: number | undefined, labels: string[] | undefined, then: PickKey, revision?: string) {
     if (acting) return false
     setActing(true)
-    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '' }) } finally { setActing(false) }
+    try { return await write('pick', { session: pane.id, thread: data?.thread ?? null, row, labels, then, heading: data?.attention ? pickHeading(data.attention) : '', revision }) } finally { setActing(false) }
   }
   async function sendKey(key: string, card = false) {
     if (acting) return false
@@ -1335,7 +1335,7 @@ export function Chat({ liveReplyPreview, headerSwipe = false, pane, session, api
       {activePane.agent === 'codex' && (footer.context || !!footer.windows?.length || creditsLabel(footer.credits)) && <button type="button" className="pill" aria-label="Usage and credits" aria-haspopup="dialog" onClick={() => setUsageSheet(true)}><Gauge size={13} />Usage</button>}
       {activePane.agent === 'claude' && (footer.observed || footer.status || footer.mode) && <span className="mode-container" onKeyDown={event => { if (modeMenu && event.key === 'Escape') { event.stopPropagation(); setModeMenu(false); modeButton.current?.focus() } }}><button ref={modeButton} type="button" className="pill" aria-label={`Mode: ${MODES[currentMode]}. Change mode`} aria-expanded={modeMenu} disabled={!writable || !!modeBusy} onClick={() => setModeMenu(!modeMenu)}><Gauge size={13} /><span className="pill-text">{modeBusy ? `${MODES[modeBusy]}…` : MODES[currentMode]}</span></button>
         {modeMenu && <div className="attach-menu mode-menu" role="menu">{Object.entries(MODES).map(([key, label]) => <button key={key} role="menuitemradio" aria-checked={key === currentMode} type="button" onClick={() => void chooseMode(key)}>{label}{key === currentMode && <Check size={16} />}</button>)}</div>}</span>}
-    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable || terminalOnlyMenu} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
+    </span>} api={api} pane={activePane} thread={data?.thread ?? null} disabled={!data || !writable || menuBlocksComposer} onSend={send} error={sendError} errorAction={draftBlocked ? <button type="button" disabled={acting} onClick={() => void clearAgentInput()}>Clear {agentNames[activePane.agent]}’s input</button> : null} draft={draft} setDraft={setDraft} working={state === 'Working'} onStop={() => void stop()} micOk={micOk} chime={chime} handsFree={handsFree && readAloud} listenRequest={listenRequest} sent={sentPrompts} onTools={() => setTools(true)} hint={ownAnswer ? `Answer ${agentNames[activePane.agent]}’s question` : undefined} />
     </div>{nextPane && <ChatPeek id={nextPane.id} data={chatCache.get(nextPane.id)} api={api} side={1} peekRef={peekNext} />}{previousPane && <ChatPeek id={previousPane.id} data={chatCache.get(previousPane.id)} api={api} side={-1} peekRef={peekPrevious} />}</div>
     </>}
     <ImageViewer image={opened} close={() => setOpened(null)} onShow={showInFiles(opened && !opened.error ? opened.name : null, () => setOpened(null))} />

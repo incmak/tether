@@ -5,7 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import Mock, patch
 
 import auto_resume
@@ -70,6 +70,8 @@ class TaskTreeUndoTests(unittest.TestCase):
         if command[1:3] == ['list-panes', '-a']:
             if self.server_id is None:
                 return CompletedProcess(command, 1)
+            if command[-1] == '#{pane_id}':
+                return CompletedProcess(command, 0, stdout='\n'.join(self.entries))
             lines = ['\t'.join((pane, '', '', json.dumps(self.records[pane]) if self.records[pane] else '',
                                 entry['tmux_session'], '', '', ''))
                      for pane, entry in self.entries.items()]
@@ -398,6 +400,89 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.assertEqual(self.act('redo')['state'], 'done')
         self.assertEqual(self.killed, ['%11', '%10'])
         self.assertEqual(self.act('undo')['state'], 'undone')
+
+    def assert_partial_redo_can_undo(self, *, unknown):
+        self.closed_tree()
+        self.act('undo')
+        checkpoint = []
+
+        def interrupted(pane, env):
+            checkpoint.append(undo_store.entries()[-1])
+            self.close(pane, env)
+            if unknown:
+                self.server_id = 'unreachable'
+            raise TimeoutExpired('tmux', 5)
+
+        with patch.object(undo, '_close', side_effect=interrupted):
+            with self.assertRaisesRegex(undo.Refused, 'Only part'):
+                self.act('redo')
+        self.assertEqual(checkpoint[0]['redo_close']['pending']['target'], '%11')
+        self.assertEqual(self.killed, ['%11'])
+        self.assertIn('%10', self.entries)
+        if unknown:
+            with self.assertRaisesRegex(undo.Refused, 'could not confirm'):
+                undo.run('undo', checkpoint[0]['id'], self.env)
+            self.server_id = '1:2'
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%12'], helper('%10', thread(1)))
+        self.assertEqual(self.records['%3'], helper('%12', thread(2), root='%10', root_thread=thread(1)))
+        self.assertEqual(self.killed, ['%11'])
+
+    def test_partial_redo_can_undo_a_kill_that_took_effect_before_timeout(self):
+        self.assert_partial_redo_can_undo(unknown=False)
+
+    def test_redo_error_with_a_live_first_target_preserves_the_step(self):
+        self.closed_tree(kept=False)
+        self.act('undo')
+        original = undo_store.entries()
+        with (patch.object(undo, '_close', side_effect=OSError('The first close failed.')),
+              self.assertRaisesRegex(undo.Refused, 'first close failed')):
+            self.act('redo')
+        self.assertEqual(undo_store.entries(), original)
+        self.assertEqual(undo.next_target('redo'), original[0]['id'])
+        self.assertEqual(self.killed, [])
+        self.assertEqual(self.act('redo')['state'], 'done')
+
+    def test_partial_redo_keeps_undo_while_the_kill_outcome_is_unknown(self):
+        self.assert_partial_redo_can_undo(unknown=True)
+
+    def test_unknown_redo_with_a_live_target_can_resume_without_phantom_undo(self):
+        self.closed_tree(kept=False)
+        self.act('undo')
+        original = undo_store.entries()[0]
+
+        def interrupted(pane, env):
+            self.server_id = 'unreachable'
+            raise TimeoutExpired('tmux', 5)
+
+        with patch.object(undo, '_close', side_effect=interrupted):
+            with self.assertRaises(undo.Refused):
+                self.act('redo')
+        self.assertEqual(self.killed, [])
+        self.assertEqual(undo.history(self.env, check=False)['next_undo'], original['id'])
+        self.server_id = '1:2'
+        history = undo.history(self.env)
+        self.assertIsNone(history['next_undo'])
+        self.assertEqual(history['next_redo'], original['id'])
+        self.assertEqual(undo_store.entries(), [original])
+        self.assertEqual(self.act('redo')['state'], 'done')
+        self.assertEqual(self.killed, ['%11', '%10'])
+
+    def test_pending_task_close_keeps_only_the_tabs_that_closed(self):
+        self.closed_tree(kept=False)
+        self.put(self.root)
+
+        def stage(found):
+            found[0]['actions'][0]['closed'][-1]['pending'] = True
+
+        undo_store.edit(stage)
+        with self.assertRaisesRegex(undo.Refused, 'The tab did not close. Nothing to undo.'):
+            undo.run('undo', None, self.env)
+        kept, = undo_store.entries()[0]['actions'][0]['closed']
+        self.assertEqual(kept['tab']['pane'], '%2')
+        self.assertEqual(self.act('undo')['state'], 'undone')
+        self.assertEqual(self.records['%10'], self.worker_record)
+        self.assertIn('%1', self.entries)
 
     def test_failed_reopen_rolls_back_the_other_reopened_tab(self):
         self.closed_tree()

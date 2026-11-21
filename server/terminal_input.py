@@ -494,7 +494,7 @@ class MenuChanged(RuntimeError):
     pass
 
 
-def menu_refusal(entry, *, helper=False):
+def menu_refusal(entry, *, helper=False, check=False):
     agent = entry['agent']
     version = entry.get('agent_version')
     if agent == 'codex' and not version:
@@ -505,7 +505,7 @@ def menu_refusal(entry, *, helper=False):
                 version = first['payload'].get('cli_version')
         except (KeyError, AttributeError, OSError, TypeError, ValueError):
             pass
-    name, captured = {'claude': ('Claude Code', '2.1.316, 2.1.318 and 2.1.329'),
+    name, captured = {'claude': ('Claude Code', '2.1.316, 2.1.318, 2.1.329 and 2.1.330'),
                       'codex': ('Codex', '0.169.0 and 0.170.0')}.get(agent, (agent, ''))
     if isinstance(version, str) and re.fullmatch(r'v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?', version):
         detail = f' {name} {version} may have changed the screen.'
@@ -516,41 +516,52 @@ def menu_refusal(entry, *, helper=False):
     else:
         detail = ''
     where = 'the helper' if helper else 'the terminal'
-    return f'The question changed or is no longer open. Open {where} to review it.{detail}'
+    action = 'check' if check else 'review'
+    return f'The question changed or is no longer open. Open {where} to {action} it.{detail}'
+
+
+def _open_claude_ask(entry):
+    import agents
+    try:
+        return agents.open_claude_ask(entry)
+    except OSError:
+        return None
 
 
 def verified_numbered_menu(entry, frame):
     """Keep numbered display parsing separate from the evidence required to write."""
     if entry['agent'] == 'codex':
         return choice_state.codex_numbered_menu(frame)
-    if entry['agent'] != 'claude' or not (current := choice_state.ask_current(frame)) or current['multi']:
+    if entry['agent'] != 'claude' or not (current := choice_state.ask_current(frame)):
         return None
-    import agents
-    try:
-        ask = agents.open_claude_ask(entry)
-    except OSError:
-        return None
+    ask = _open_claude_ask(entry)
     if ask is None or len(ask['questions']) != current['total']:
         return None
     expected = ask['questions'][current['index']]
-    options = [{'id': item['id'], 'text': item['text'], 'detail': item['description'],
-                'selected': item['selected'], **({'free': True} if item['kind'] == 'free' else {})}
+    options = [{'id': item['id'], 'text': item['label'], 'detail': item['description'],
+                'selected': item['selected'], 'kind': item['kind'],
+                **({'checked': item['checked']} if 'checked' in item else {}),
+                **({'free': True} if item['kind'] == 'free' else {})}
                for item in current['options']]
     normalize = lambda text: ' '.join(text.split())
-    if (expected['multi']
-            or [normalize(item['header']) for item in ask['questions']] != [tab['label'] for tab in current['tabs']]
+    headers = [normalize(item['header']) for item in ask['questions']]
+    visible_headers = [tab['label'] for tab in current['tabs']]
+    # At 22 columns a single chip can be clipped to …, while the question and all options are still visible.
+    if (expected['multi'] != current['multi']
+            or (headers != visible_headers and visible_headers != ['…'])
             or normalize(expected['question']) != current['question']
             or [(normalize(item['label']), normalize(item['description'])) for item in expected['options']]
             != [(item['text'], item['detail']) for item in options[:-2]]):
         return None
     for item, source in zip(options, expected['options']):
         item.update(text=source['label'], detail=source['description'])
-    return {'question': expected['question'], 'options': options,
-            'menu_identity': [current['index'], current['total'], current['header'], ask['id']]}
+    return {'question': expected['question'], 'options': options, 'multi': current['multi'],
+            'menu_identity': [current['index'], current['total'], headers[current['index']], ask['id']],
+            'control': current['control'], 'ask': ask}
 
 
 def menu_digest(menu):
-    """Bind the question and all options, independent of cursor position and free-answer draft."""
+    """Bind the question and options, independent of the cursor, checks and free-answer draft."""
     question = menu.get('question')
     options = menu.get('options')
     if not question or not options or [option['id'] for option in options] != list(range(1, len(options) + 1)):
@@ -573,7 +584,7 @@ def menu_choose(entry, choice, label=None, answer=None, run=subprocess.run, slee
         if writing:
             verify(entry, run)
         menu = verified_numbered_menu(entry, capture(entry, run, styled=True))
-        if not menu or current_prompt is not None and not current_prompt():
+        if not menu or menu.get('multi') or current_prompt is not None and not current_prompt():
             raise MenuChanged(menu_refusal(entry, helper=digest is not None))
         content = menu_digest(menu)
         if expected is not None and expected != content:
@@ -682,10 +693,11 @@ def claude_picker(screen, styled=None):
     return {**picker, 'items': items}
 
 
-def read_picker(entry, run=subprocess.run):
+def read_picker(entry, run=subprocess.run, *, styled=None):
     """The cursor list on screen now, in the order attention() checks: a numbered menu, then an unnumbered picker
     (Claude's Rewind, Codex lists). None when neither is open."""
-    styled = capture(entry, run, styled=True)
+    if styled is None:
+        styled = capture(entry, run, styled=True)
     screen = prompt_actions.plain(styled)
     if menu_open(entry['agent'], screen.rstrip().splitlines()):
         menu = menu_question(menu_lines(screen.rstrip().splitlines()), entry['agent'])
@@ -716,54 +728,150 @@ def picker_heading(picker):
     return picker.get('title') or (picker.get('text') or '').split('\n')[0].strip()
 
 
-def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=time.sleep, heading=None):
+def _wait_for_picker_redraw(look, sleep):
+    for _ in range(20):  # up to 2 s for a screen to show the result of a key
+        sleep(.1)
+        result = look()
+        if result is not None:
+            return result
+    return None
+
+
+def _finish_claude_multi(entry, menu, press, run, sleep):
+    index, _, _, ask_id = menu['menu_identity']
+    advance = menu['control']['kind'] == 'next'
+    ticks = [item['text'] for item in menu['options'] if item['kind'] == 'option' and item.get('checked')]
+    press('Enter')
+
+    def look():
+        verify(entry, run)
+        frame = capture(entry, run, styled=True)
+        if advance:
+            following = verified_numbered_menu(entry, frame)
+            if following and following['menu_identity'][0] == index + 1 and following['menu_identity'][3] == ask_id:
+                return True
+        elif _open_claude_ask(entry) == menu['ask']:
+            return choice_state.ask_review(frame)
+        return None
+
+    result = _wait_for_picker_redraw(look, sleep)
+    if advance and result:
+        return
+    if result:
+        blocks = result['blocks']
+        questions = [' '.join(item['question'].split()) for item in menu['ask']['questions']]
+        if (result['selected'] and [question for question, _ in blocks] == questions
+                and all(answer for _, answer in blocks) and _review_ticks_match(blocks[index][1], ticks)):
+            press('Enter')
+            return
+        press('Left')
+    raise MenuChanged(menu_refusal(entry, check=True))
+
+
+def _review_ticks_match(answer, ticks):
+    # Claude 2.1.330 joins selected labels with commas and quotes labels that contain a delimiter or a quote.
+    # Compare the labels in any order because their order can follow the order of selection.
+    parts = re.findall(r'("(?:\\.|[^"\\])*"|(?:(?!, )[^"\n])+)(?:, |$)', answer)
+    labels = [json.dumps(label, ensure_ascii=False) if ', ' in label or '"' in label else label for label in ticks]
+    return ', '.join(parts) == answer and sorted(parts) == sorted(labels)
+
+
+def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=time.sleep, heading=None, *, revision=None):
     """Move the cursor of a picker to one row, then press `then`: Enter chooses the row, Space ticks it in a
     multi-select list, and Up on the first row or Down on the last row shows the rows past the screen.
 
     `labels` is the whole list the user saw (picker_row_key of each row) and `heading` the name of that list. The list
     on screen must match both before the first key and after each move, so the row index names one entry, never a
-    look-alike, and never a row of another list. Each move must show on screen before the next key:
+    look-alike, and never a row of another list. Numbered multi-select writes also bind the outstanding ask by
+    revision at each check. Each move must show on screen before the next key:
     a slow redraw must not queue a second press that lands past the row."""
     if then not in ('Enter', 'Up', 'Down', 'Space'):
         raise ValueError('Invalid key.')
-    if (not isinstance(labels, list) or not labels or not all(isinstance(label, str) for label in labels)
-            or not isinstance(row, int) or isinstance(row, bool) or not 0 <= row < len(labels)
-            or not isinstance(heading, str)):
+    submit = then == 'Enter' and row is None
+    if then == 'Enter' and submit != (revision is not None):
+        raise MenuChanged(menu_refusal(entry))
+    if not submit and (not isinstance(labels, list) or not labels or not all(isinstance(label, str) for label in labels)
+                       or not isinstance(row, int) or isinstance(row, bool) or not 0 <= row < len(labels)
+                       or not isinstance(heading, str)):
         raise ValueError('Choose a row first.')
-    verify(entry, run)
+    answering = then in ('Space', 'Enter')
+    bound = answering and revision is not None
+    if not bound:
+        verify(entry, run)
+
+    def press(key):
+        run([paths.TMUX, 'send-keys', '-t', entry['id'], key], check=True, capture_output=True, timeout=5)
 
     def look():
-        picker = read_picker(entry, run)
-        if picker is None:
-            raise RuntimeError('The list is no longer open.')
-        if picker.get('numbered') and then in ('Space', 'Enter'):
-            if picker.get('multi'):
+        menu = None
+        target = row
+        if bound:
+            verify(entry, run)
+        frame = capture(entry, run, styled=True)
+        if bound:
+            menu = verified_numbered_menu(entry, frame)
+            if not menu or not menu.get('multi') or menu_digest(menu) != revision:
                 raise MenuChanged(menu_refusal(entry))
-            raise ValueError('Choose a numbered option with its own button.')
-        if [picker_row_key(item) for item in picker['items']] != labels or picker_heading(picker) != heading:
-            raise RuntimeError('The list changed. Review it again.')
-        at = [index for index, item in enumerate(picker['items']) if item['selected']]
-        if len(at) != 1:
-            raise RuntimeError(f'Could not find the cursor in the list. Open the terminal to choose ({entry["agent"]} may have a new screen layout).')
-        return at[0]
-    at = look()
-    for _ in range(len(labels) + 1):
-        if at == row:
-            run([paths.TMUX, 'send-keys', '-t', entry['id'], then], check=True, capture_output=True, timeout=5)
-            return
-        key = 'Down' if at < row else 'Up'
-        run([paths.TMUX, 'send-keys', '-t', entry['id'], key], check=True, capture_output=True, timeout=5)
-        for _ in range(20):  # up to 2 s for the redraw
-            sleep(.1)
-            moved = look()
-            if moved != at:
-                break
+            items = menu['options']
+            control = menu.get('control')
+            if submit:
+                if not control:
+                    raise MenuChanged(menu_refusal(entry))
+                target = len(items) - 1  # the unnumbered control sits between the free and chat rows
+            elif (menu['question'] != heading or [picker_row_key(item) for item in items] != labels
+                  or items[row]['kind'] != 'option'):
+                raise MenuChanged(menu_refusal(entry))
+            if control:
+                items = [*items[:-1], control, items[-1]]
         else:
+            if answering and entry['agent'] == 'claude' and (choice_state.ask_current(frame) or {}).get('multi'):
+                raise MenuChanged(menu_refusal(entry))
+            picker = read_picker(entry, run, styled=frame)
+            if picker is None:
+                raise RuntimeError('The list is no longer open.')
+            if picker.get('numbered') and answering:
+                if picker.get('multi'):
+                    raise MenuChanged(menu_refusal(entry))
+                raise ValueError('Choose a numbered option with its own button.')
+            items = picker['items']
+            if [picker_row_key(item) for item in items] != labels or picker_heading(picker) != heading:
+                raise RuntimeError('The list changed. Review it again.')
+        at = [index for index, item in enumerate(items) if item['selected']]
+        if len(at) != 1:
+            if submit:
+                raise MenuChanged(menu_refusal(entry))
+            raise RuntimeError(f'Could not find the cursor in the list. Open the terminal to choose ({entry["agent"]} may have a new screen layout).')
+        return at[0], target, len(items), menu
+
+    def moved_cursor():
+        result = look()
+        if result[0] != at:
+            return result
+
+    at, target, count, menu = look()
+    for _ in range(count + 1):
+        if at == target:
+            if submit:
+                _finish_claude_multi(entry, menu, press, run, sleep)
+            else:
+                press(then)
+            return
+        key = 'Down' if at < target else 'Up'
+        press(key)
+
+        moved = _wait_for_picker_redraw(moved_cursor, sleep)
+        if moved is None:
+            if submit:
+                raise MenuChanged(menu_refusal(entry))
             raise RuntimeError(f'The cursor did not move. Open the terminal to choose ({entry["agent"]} may have a new screen layout).')
-        if (moved > row) if key == 'Down' else (moved < row):
+        at, target, _, menu = moved
+        if (at > target) if key == 'Down' else (at < target):
+            if submit:
+                raise MenuChanged(menu_refusal(entry))
             # The cursor jumped over the row: it is a line of the entry above, not a place the cursor stops.
             raise RuntimeError('That line is part of the entry above it. Choose the entry itself.')
-        at = moved
+    if submit:
+        raise MenuChanged(menu_refusal(entry))
     raise RuntimeError(f'Could not move to that row. Open the terminal to choose it ({entry["agent"]} may have a new screen layout).')
 
 
@@ -858,6 +966,7 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     marker = {'claude': '❯', 'codex': '›', 'antigravity': '>'}.get(entry['agent'])
     reason = None
     picker = None
+    current = None
     link = login_link(login_screen.splitlines() if login_screen is not None else lines, entry['agent'])
     tabs = next((index for index, line in enumerate(lines) if SETTINGS_TABS.match(line)), None) if entry['agent'] == 'claude' else None
     permissions = permissions_dialog.parse(screen, styled_screen) if entry['agent'] == 'claude' else None
@@ -871,7 +980,9 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
     elif tabs is not None:
         # Claude's Settings dialog (/usage, /status ...) that claude_dialog could not read: show its text from the tab row.
         reason, tail = 'panel', lines[tabs:]
-    elif menu_open(entry['agent'], lines):
+    elif (menu_open(entry['agent'], lines)
+          or entry['agent'] == 'claude' and any(re.fullmatch(r'❯    (?:Submit|Next)', line) for line in tail)
+          and (current := choice_state.ask_current(styled_screen or screen)) and current['control']):
         reason = 'menu'
     elif ((entry['agent'] == 'claude' and (picker := claude_picker(screen, styled_screen)))
           or (entry['agent'] == 'codex' and (picker := choice_state.cursor_picker(styled_screen or screen, 'codex')))):
@@ -930,10 +1041,8 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
         choice = choice_state.parse(styled_screen or screen, entry['agent'])
         if choice is not None:
             found['choice'] = choice
-    if entry['agent'] == 'claude':
-        current = choice_state.ask_current(styled_screen or screen)
-        if current is not None:
-            found['ask_current'] = current
+    if entry['agent'] == 'claude' and (current := current or choice_state.ask_current(styled_screen or screen)):
+        found['ask_current'] = current
     return found
 
 

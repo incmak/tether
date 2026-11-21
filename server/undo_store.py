@@ -96,7 +96,9 @@ def _write(entries):
 
 def _prune(entries, now):
     fresh = [entry for entry in entries if now - entry['at'] <= MAX_AGE]
-    return fresh[-LIMIT:]
+    # A provisional close must not evict an earlier step if the close is rejected.
+    kept = {entry['id'] for entry in [e for e in fresh if not e.get('close_checkpoint')][-LIMIT:]}
+    return [entry for entry in fresh if entry['id'] in kept or entry.get('close_checkpoint')]
 
 
 def entries(now=None):
@@ -249,14 +251,34 @@ def record(kind, label, **data):
 
 
 
-def checkpoint(identifier, label, actions, *, server):
+def redo_available(entry, found):
+    """An unknown user close suspends older redo until its result is known."""
+    return entry['state'] == 'undone' and entry.get('redo', True) and not any(
+        other.get('close_checkpoint') == 'unknown' and other['who']['by'] == 'user'
+        and (entry.get('undone_at') or 0) <= other['at'] for other in found)
+
+
+def _end_redo(found, entry):
+    if entry['who']['by'] == 'user':
+        # A step saved late does not end the redo of an undo that came after it.
+        for old in found:
+            if (old.get('undone_at') or 0) <= entry['at']:
+                old['redo'] = False
+
+
+def confirm_checkpoint(found, entry):
+    if entry.pop('close_checkpoint', None):
+        _end_redo(found, entry)
+
+
+def checkpoint(identifier, label, actions, *, server, status=None):
     """Persist the current Undo of a write before its next irreversible operation."""
     if not recording():
         return None
     if identifier is None:
         if not actions:
             return None
-        entry = _save(label, actions, server=server)
+        entry = _save(label, actions, server=server, close_checkpoint=status)
         if entry is None:
             raise LockError('Tether could not save Undo. Review the task before trying again.')
         return entry['id']
@@ -267,6 +289,10 @@ def checkpoint(identifier, label, actions, *, server):
             raise LockError('Tether could not update Undo. Review the task before trying again.')
         if actions:
             entry['actions'] = actions
+            if status is None:
+                confirm_checkpoint(found, entry)
+            elif entry.get('close_checkpoint'):
+                entry['close_checkpoint'] = status
         else:
             found.remove(entry)
 
@@ -283,20 +309,18 @@ def _server():
     return identifier if kind == 'up' else None
 
 
-def _save(label, actions, who=None, at=None, server=False):
+def _save(label, actions, who=None, at=None, server=False, *, close_checkpoint=None):
     """at: when the first action happened. A step is saved when its request ends, after its locks are free, so two
     requests can save out of order: the entry goes in its place by that time, and Cmd+Z undoes the newest change."""
     entry = {'id': 'u' + secrets.token_hex(6), 'at': at or time.time(), 'who': who or _ACTOR.get() or {'by': 'tether'},
              'label': ' '.join(str(label).split())[:LABEL_LIMIT], 'actions': actions, 'state': 'done', 'redo': False,
              'server': _server() if server is False else server}
+    if close_checkpoint:
+        entry['close_checkpoint'] = close_checkpoint
 
     def change(found):
-        if entry['who']['by'] == 'user':
-            # A new step of the person ends redo, as in every editor; Tether's own steps do not. Only for the undos
-            # before its change: a step saved late does not end the redo of an undo that came after it.
-            for old in found:
-                if not (old.get('undone_at') or 0) > entry['at']:
-                    old['redo'] = False
+        if not close_checkpoint:
+            _end_redo(found, entry)
         place = len(found)
         while place and found[place - 1]['at'] > entry['at']:
             place -= 1

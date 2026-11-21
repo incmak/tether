@@ -2424,7 +2424,7 @@ class Handler(BaseHTTPRequestHandler):
                 pane = parse_qs(urlsplit(self.path).query).get('pane', [None])[0]
                 task_tree_api.get(self, pane, live_task_tree)
             elif path == undo_api.PATH:
-                undo_api.get(self, undo_env())
+                undo_api.get(self, undo_env(), SEND_LOCK)
             elif path == '/mobile/api/auto-resume':
                 self.respond(200, auto_resume.notice())
             elif path == '/mobile/api/codex-provider':
@@ -3625,7 +3625,8 @@ class Handler(BaseHTTPRequestHandler):
                 from terminal_input import MenuChanged
                 try:
                     with SEND_LOCK:
-                        picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'), heading=body.get('heading'))
+                        picker_choose(config, body.get('row'), body.get('labels'), then=body.get('then', 'Enter'),
+                                      heading=body.get('heading'), revision=body.get('revision'))
                 except MenuChanged as exc:
                     self.respond(409, {'error': str(exc)})
                     return

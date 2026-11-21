@@ -30,7 +30,7 @@ export function QuickReply({ api, pane, id, focus, onOpen, onSuccess }: Props) {
   const approval = (data?.approval as Approval | null) ?? null
   const attention = data?.attention ?? null
   const menuRevision = attention?.menu_verified || undefined
-  const ownAnswer = !approval && attention?.reason === 'menu' && attention.menu_verified !== false ? attention.options?.find(option => option.free) : undefined
+  const ownAnswer = !approval && attention?.reason === 'menu' && attention.menu_verified !== false && !attention.ask_current?.multi ? attention.options?.find(option => option.free) : undefined
   const reply = !!data && !data.plan && ((!approval && !attention) || !!ownAnswer)
   const disabled = busy || pane.writable === false || data?.writable === false
 
