@@ -33,7 +33,7 @@ STAGE_OF = {'fixing': 'building', 'fixed': 'review', 'closed': 'done', 'duplicat
 LABEL = {'handed': 'new', 'triaging': 'triaging', 'needs-mak': 'needs decision', 'ticket': 'ticket',
          'fixing': 'fixing', 'fixed': 'fixed, review', 'closed': 'done', 'duplicate': 'done', 'wontfix': 'done'}
 OPTIONS = ['Go ahead', 'Hold']
-LINE = re.compile(r'^- (\d{4}-\d\d-\d\d \d\d:\d\d) \| ([A-Z]{1,3}-\d+|seen) \| (\S+) \| (.*)$')
+LINE = re.compile(rf'^- ({tether_zone.STAMP_PATTERN}) \| ([A-Z]{{1,3}}-\d+|seen) \| (\S+) \| (.*)$')
 NAME = re.compile(r'[a-z0-9][a-z0-9-]{1,29}')
 SEEN_KEEP = 500
 ARCHIVE = 'TRIAGE-before-board.md'
@@ -57,7 +57,7 @@ def _sha(text):
 
 
 def stamp(at):
-    return tether_zone.stamp(at)
+    return tether_zone.stamp_exact(at)
 
 
 def parse_time(text):
@@ -404,8 +404,12 @@ class Ledger:
         mark = self._mark()
         if mark is None or not self._foreign(mark):
             return []
-        known = {row_line(r) for r in self.rows()} | {row_line(r) for r in archived}
-        return [r for r in parse(_read(self.view)) if row_line(r) not in known]
+        written = self.rows() + archived
+        known = {(parse_time(r[0]), *r[1:5]) for r in written}
+        # An older view named only a wall minute, even when the event was the first occurrence of a fold.
+        bare = {(r[0][:16], *r[1:5]) for r in written}
+        return [r for r in parse(_read(self.view))
+                if (parse_time(r[0]), *r[1:5]) not in known and (len(r[0]) != 16 or r[:5] not in bare)]
 
     def _seen_late(self, rows):
         data = [{'at': r[0], 'text': r[3], 'ts': r[5]} for r in self.seen_rows()]

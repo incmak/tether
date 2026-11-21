@@ -113,11 +113,18 @@ export function phaseOfTools(tools: FactoryTool[]): { phase: Phase; why: string 
 }
 const short = (tool: FactoryTool) => { const text = tool.title ? `${tool.name} ${tool.title}` : tool.name; return text.length > 70 ? `${text.slice(0, 69)}…` : text }
 
-/** When a backlog item was checked off: its "Done:" line read in the Tether zone, in ms, or 0. */
+/** When an item was checked off, in ms, or 0. A bare stamp uses the later instant in the Tether zone. */
 export function doneAt(item: Item, zone?: string) {
-  const found = item.status?.kind === 'done' ? item.status.text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/) : null
-  if (!found) return 0
-  return zonedTimeLatest(+found[1], +found[2] - 1, +found[3], +(found[4] ?? 0), +(found[5] ?? 0), zone)
+  const stamp = item.status?.stamp
+  if (!stamp) return 0
+  const time = stamp.time ?? '00:00'
+  if (stamp.offset) {
+    const offset = stamp.offset.replace(/^([+-]\d{2})(\d{2})$/, '$1:$2')
+    return Date.parse(`${stamp.day}T${time.padStart(5, '0')}${offset}`) || 0
+  }
+  const [year, month, day] = stamp.day.split('-').map(Number)
+  const [hour, minute] = time.split(':').map(Number)
+  return zonedTimeLatest(year, month - 1, day, hour, minute, zone)
 }
 
 function deployAt(line: Deploy, zone?: string) {

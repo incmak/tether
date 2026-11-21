@@ -863,7 +863,7 @@ def _done_line(result, who):
     """The Done line, dated, so the work board can show the item for a week (board_items)."""
     if not who and SOURCE.search(result or ''):
         who = 'unknown'  # else the result's own (codex · pane %N) would read as the who part (B303)
-    return f'  - Done: {tether_zone.stamp()} · {result or "finished"}{f" ({who})" if who else ""}'
+    return f'  - Done: {tether_zone.stamp_exact()} · {result or "finished"}{f" ({who})" if who else ""}'
 
 
 def _open_block(lines, start, end):
@@ -1042,7 +1042,7 @@ def linked(pane, chat, limit=6):
 # The work board shows backlog items as cards (work_backlog.py). Only Ready, Building and Done fit an item:
 # open, open with a Doing line, and ticked.
 BOARD_STAGES = ('ready', 'building', 'done')
-DONE_AT = re.compile(r'\s+- Done: ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})(?: · (.*))?$')
+DONE_AT = re.compile(rf'\s+- Done: ({tether_zone.STAMP_PATTERN})(?: · (.*))?$')
 DETAILS = 20  # detail lines a card carries, at most
 WEEK = 7 * 86400
 

@@ -70,12 +70,36 @@ class Case(unittest.TestCase):
 
 
 class FactTests(Case):
+    def test_report_date_only_deploys_follow_the_written_day_without_a_clock(self):
+        day, previous = '2026-11-21', '2026-11-20'
+        line = f'- {day} · Date-only test'
+        (self.repo / 'DEPLOYED.md').write_text(line + '\n')
+        self.addCleanup(time.tzset)
+        self.enterContext(mock.patch.dict(os.environ, TZ='Asia/Kolkata'))
+        time.tzset()
+        self.assertEqual(factory.parse_deployed_line(line)['at'],
+                         datetime.fromisoformat('2026-11-20T18:30:00Z').timestamp())
+        for zone in ('America/New_York', 'Pacific/Auckland'):
+            with self.subTest(zone=zone), mock.patch.dict(os.environ, TETHER_REMINDER_ZONE=zone):
+                facts = ops_agent.gather(day, [str(self.repo)], [])
+                self.assertEqual([row['text'] for row in facts['deploys']], ['Date-only test'])
+                self.assertEqual(ops_agent.gather(previous, [str(self.repo)], [])['deploys'], [])
+                self.assertIn(f'- {day} Date-only test (no Verified stamp; repo)', ops_agent.note_text(facts, 'test'))
+
+    def test_day_bounds_cover_havana_midnight_fold_and_gap(self):
+        with mock.patch.dict(os.environ, TETHER_REMINDER_ZONE='America/Havana'):
+            for day, start, end in (('2026-11-01', '2026-11-01T04:00:00Z', '2026-11-02T05:00:00Z'),
+                                    ('2026-03-08', '2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z')):
+                with self.subTest(day=day):
+                    expected = tuple(datetime.fromisoformat(value).timestamp() for value in (start, end))
+                    self.assertEqual(ops_agent.day_bounds(day), expected)
+
     def test_deploy_lines_with_numeric_offsets_cross_utc_midnight(self):
         (self.repo / 'DEPLOYED.md').write_text(
             '- 2026-11-16 23:00 -0200 · aaaaaaa Hotfix · Verified: tests(ok)\n'
             '- 2026-11-17 01:00 +05:30 · bbbbbbb Earlier · Verified: none\n')
         start = datetime.fromisoformat('2026-11-17T00:00:00+00:00').timestamp()
-        found = ops_agent.deploys(str(self.repo), start, start + 86400)
+        found = ops_agent.deploys(str(self.repo), DAY, start, start + 86400)
         self.assertEqual([(row['at'], row['text'], row['stamp']) for row in found],
                          [(start + 3600, 'aaaaaaa Hotfix', 'verified')])
 
@@ -111,11 +135,11 @@ class FactTests(Case):
         start, end = at(0), at(0) + 86400
         self.enterContext(mock.patch.object(prefs_sync, 'FILE', self.root / 'cache' / 'prefs.json'))
         prefs_sync.save({'timeZone': 'UTC'})
-        found = ops_agent.deploys(str(self.repo), *ops_agent.day_bounds(DAY))
+        found = ops_agent.deploys(str(self.repo), DAY, *ops_agent.day_bounds(DAY))
         self.assertEqual([(row['commit'], row['stamp']) for row in found],
                          [('bbbbbbb', 'verified'), ('ccccccc', 'none'), ('ddddddd', 'missing')])
         self.assertEqual(found[1]['text'], 'ccccccc Hotfix')
-        self.assertEqual(ops_agent.deploys(str(self.root), start, end), [])
+        self.assertEqual(ops_agent.deploys(str(self.root), DAY, start, end), [])
 
     def test_review_log_keeps_only_pauses(self):
         entries = self.entries()

@@ -25,7 +25,7 @@ import re
 import subprocess
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import delegate
@@ -234,8 +234,8 @@ def stamp(text):
 
 def day_bounds(day):
     """(start, end) in epoch seconds of a calendar day in the Tether zone 'YYYY-MM-DD'."""
-    start = datetime.strptime(day, '%Y-%m-%d').replace(tzinfo=tether_zone.zone())
-    return start.timestamp(), (start + timedelta(days=1)).timestamp()
+    start = date.fromisoformat(day)
+    return tether_zone.day_start(start), tether_zone.day_start(start + timedelta(days=1))
 
 
 def commits(root, start, end, run=subprocess.run):
@@ -263,8 +263,8 @@ def commits(root, start, end, run=subprocess.run):
     return sorted(found, key=lambda item: item['at'])
 
 
-def deploys(root, start, end):
-    """The DEPLOYED.md lines of a repository's main checkout with start <= time < end."""
+def deploys(root, day, start, end):
+    """The main checkout's deploys within the report day, using the written day for untimed lines."""
     try:
         lines = (Path(root) / 'DEPLOYED.md').read_text(encoding='utf-8', errors='replace').splitlines()
     except OSError:
@@ -272,9 +272,13 @@ def deploys(root, start, end):
     found = []
     for line in lines:
         parsed = factory.parse_deployed_line(line)
-        if parsed and start <= parsed['at'] < end:
+        if not parsed:
+            continue
+        in_day = start <= parsed['at'] < end if parsed['timed'] else parsed['day'] == day
+        if in_day:
             kind, text = stamp(line)
-            found.append({'at': parsed['at'], 'commit': parsed['commit'] or '', 'stamp': kind, 'stamp_text': text[:200],
+            found.append({'at': parsed['at'], 'day': parsed['day'], 'timed': parsed['timed'],
+                          'commit': parsed['commit'] or '', 'stamp': kind, 'stamp_text': text[:200],
                           'text': FOUND.split(parsed['text'])[0].rstrip(' ·')[:200], 'repo': Path(root).name})
     return found
 
@@ -283,7 +287,7 @@ def gather(day, roots, paused, run=subprocess.run):
     """The facts of one day for one project: {'day', 'commits', 'deploys', 'paused', 'reverts', 'problems'}."""
     start, end = day_bounds(day)
     found_commits = [item for root in roots for item in commits(root, start, end, run)]
-    found_deploys = [item for root in roots for item in deploys(root, start, end)]
+    found_deploys = [item for root in roots for item in deploys(root, day, start, end)]
     facts = {'day': day, 'commits': found_commits, 'deploys': found_deploys, 'paused': paused,
              'reverts': [item for item in found_commits if item['revert']]}
     facts['problems'] = (sum(item['stamp'] != 'verified' for item in found_commits + found_deploys)
@@ -327,7 +331,8 @@ def note_text(facts, name, learn=PLACEHOLDER):
              '## Commits without verification',
              *_rows(unverified_commits, lambda row: f'- `{row["hash"]}` {_clock(row["at"])} {row["subject"]} ({_why(row)}; {row["repo"]})'), '',
              '## Deploys without verification',
-             *_rows(unverified_deploys, lambda row: f'- {_clock(row["at"])} {row["text"]} ({_why(row)}; {row["repo"]})'), '',
+             *_rows(unverified_deploys, lambda row: f'- {_clock(row["at"]) if row["timed"] else row["day"]} '
+                   f'{row["text"]} ({_why(row)}; {row["repo"]})'), '',
              '## Paused reviews',
              *_rows(facts['paused'], lambda row: f'- {_clock(row["at"])} {row["text"]}'), '',
              '## Reverts',

@@ -4,7 +4,7 @@
 export interface Source { agent: 'claude' | 'codex'; tmux?: string; pane?: string; chat?: string }
 export interface Detail { line: number; text: string; done?: boolean; raw: string }
 /** Who works on an item now ("Doing"), or what came of it ("Done"). Agents write these lines (server: backlog.py). */
-export interface Status { kind: 'doing' | 'done'; text: string; source?: Source; line: number; raw: string }
+export interface Status { kind: 'doing' | 'done'; text: string; source?: Source; line: number; raw: string; stamp?: { day: string; time?: string; offset?: string } }
 /** ref: the item's ID, like B12, that agents and people use to name it. */
 export interface Item { kind: 'item'; id: string; line: number; raw: string; done: boolean; text: string; ref?: string; source?: Source; status?: Status; details: Detail[] }
 export interface Note { kind: 'note'; id: string; line: number; raw: string; text: string; heading: boolean }
@@ -18,6 +18,7 @@ const HEADING = /^#{1,6}\s+/
 const ID = /\s+#B([0-9]+)\s*$/
 const TOP = /^[-*] \[[ xX]\] /
 const STATUS = /^\s+- (Doing|Done): (.*)$/
+const DONE_STAMP = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2})(?: ([+-]\d{2}:?\d{2})(?=$|\s))?)?/
 const indented = (line: string | undefined) => !!line && line.trim() !== '' && /^\s/.test(line)
 
 /** "codex · tmux $3 · pane %12 · chat 019a" without its brackets. */
@@ -50,7 +51,12 @@ function parseStatus(raw: string, line: number): Status | null {
   const plain = /^(claude|codex)((?: · [^()·]+)*)$/.exec(found[2].trim())
   if (kind === 'doing' && plain) return { kind, text: '', source: sourceOf(plain[1], plain[2]), line, raw }
   const { text, source } = parseSource(found[2])
-  return { kind, text: text.trim(), source, line, raw }
+  const body = text.trim()
+  const stamp = kind === 'done' ? DONE_STAMP.exec(body) : null
+  if (!stamp) return { kind, text: body, source, line, raw }
+  const rest = body.slice(stamp[0].length)
+  const result = stamp[2] && rest.startsWith(' · ') ? rest.slice(3) : body
+  return { kind, text: result, source, line, raw, stamp: { day: stamp[1], time: stamp[2], offset: stamp[3] } }
 }
 
 /** Give each item line without an ID the next free one, in file order. The server does the same (backlog.py with_ids),

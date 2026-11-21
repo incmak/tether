@@ -4,12 +4,15 @@ import io
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import agent_triage_cli
 import agents
 import paths
+import tether_zone
 import work_api
 import work_items
 import work_triage
@@ -56,8 +59,10 @@ class Base(unittest.TestCase):
     def lines(self, rows):
         return [work_triage.row_line(r) for r in rows]
 
-    def old_lines(self):
-        return [line for line in LEDGER.splitlines() if line.startswith('- ')]
+    def expected_lines(self):
+        rows = work_triage.parse(LEDGER)
+        active = {'T-001', 'T-003', 'T-004'}
+        return self.lines([(tether_zone.stamp_exact(row[5]), *row[1:]) if row[1] in active else row for row in rows])
 
 
 class Import(Base):
@@ -80,8 +85,8 @@ class Import(Base):
         self.imported()
         self.assertEqual(self.ledger.write_view(), '')
         view = [line for line in self.view.read_text(encoding='utf-8').splitlines() if line.startswith('- ')]
-        self.assertEqual(view, self.old_lines())
-        self.assertEqual(self.lines(self.ledger.rows()), self.old_lines())
+        self.assertEqual(view, self.expected_lines())
+        self.assertEqual(self.lines(self.ledger.rows()), self.expected_lines())
 
     def test_import_makes_no_push(self):
         sent = []
@@ -155,7 +160,7 @@ class Import(Base):
         report = self.imported()
         self.assertEqual((report['made'], report['added']), ([], 0))
         self.assertEqual(self.ledger.state(), 'ready')
-        self.assertEqual(self.lines(self.ledger.rows()), self.old_lines())
+        self.assertEqual(self.lines(self.ledger.rows()), self.expected_lines())
 
     def test_tab_links_make_no_line_and_open_shows_the_last_step(self):
         self.imported()
@@ -163,7 +168,7 @@ class Import(Base):
         work_items.link('T-001', '%9', 'triage', by='import')
         work_items.link('T-003', '%10', 'triage', by='agent')
         self.assertEqual(self.lines(self.ledger.open_rows()), before)
-        self.assertEqual(self.lines(self.ledger.rows()), self.old_lines())
+        self.assertEqual(self.lines(self.ledger.rows()), self.expected_lines())
 
     def test_tab_links_do_not_count_as_imported_lines(self):
         self.imported()
@@ -193,6 +198,20 @@ class Import(Base):
         self.assertNotIn('seen', (self.view.parent / work_triage.ARCHIVE).read_text(encoding='utf-8').split(
             '2026-11-05 09:00 | seen')[1])
         self.assertEqual(self.imported()['late'], 0)
+
+    def test_import_does_not_duplicate_generated_rows_from_the_bare_stamp_view(self):
+        self.imported()
+        with mock.patch.object(tether_zone, 'zone', return_value=ZoneInfo('America/New_York')):
+            for instant, text in (('2026-11-01T05:30:00Z', 'same step'), ('2026-11-01T08:30:00Z', 'ordinary step')):
+                with mock.patch.object(work_triage.time, 'time', return_value=datetime.fromisoformat(instant).timestamp()):
+                    self.ledger.add('T-001', 'ticket', text)
+            with mock.patch.object(work_triage, 'stamp', tether_zone.stamp):
+                self.assertEqual(self.ledger.write_view(), '')
+            with self.view.open('a', encoding='utf-8') as out:
+                out.write('- 2026-11-01 01:30 -05:00 | T-001 | ticket | same step\n')
+            self.assertEqual(self.imported()['late'], 1)
+            rows = [row for row in self.ledger.item_rows('T-001') if row[3] == 'same step']
+            self.assertEqual([row[0] for row in rows], ['2026-11-01 01:30 -0400', '2026-11-01 01:30 -0500'])
 
     def test_a_view_write_whose_marker_failed_recovers_through_import(self):
         self.imported()
@@ -467,7 +486,7 @@ class Cli(Base):
         self.assertEqual(out.strip(), 'T-006')
         code, out, _ = self.cli('add', 'T-006', 'fixing', 'patch', 'ready', '--ref', 'pl#9')
         self.assertEqual(code, 0)
-        self.assertRegex(out.strip(), r'^- \d{4}-\d\d-\d\d \d\d:\d\d \| T-006 \| fixing \| patch ready \| ref: pl#9$')
+        self.assertRegex(out.strip(), r'^- \d{4}-\d\d-\d\d \d\d:\d\d [+-]\d{4} \| T-006 \| fixing \| patch ready \| ref: pl#9$')
         self.assertIn('| T-006 | fixing | patch ready | ref: pl#9', self.view.read_text(encoding='utf-8'))
         self.assertEqual(self.cli('show', 'T-099')[1].strip(), 'no such item')
         self.assertEqual(len(self.cli('last', '2')[1].splitlines()), 2)

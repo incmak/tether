@@ -58,6 +58,30 @@ function floor(panes, tools = {}, extra = {}) {
   return m.buildFloor({ panes, rows: items.parseBacklog(backlog), data: { now: NOW / 1000, tools, deployed: [], commits: [], ...extra }, now: NOW })
 }
 const byId = (result, id) => result.tasks.find(task => task.id === id)
+const exactStamps = JSON.parse(readFileSync('../server/fixtures/zone_exact_stamps.json', 'utf8'))
+
+for (const { zone, instant, stamp } of exactStamps) {
+  test(`Factory Done time round-trips ${zone} ${stamp}`, () => {
+    const [row] = items.parseBacklog(`- [x] Shipped #B15\n  - Done: ${stamp} · shipped`)
+    assert.equal(m.doneAt(row, zone), Date.parse(instant))
+    assert.equal(m.doneAt(row, 'Pacific/Auckland'), Date.parse(instant))
+  })
+}
+
+for (const { zone, instant, stamp } of [exactStamps[0], exactStamps[3]]) {
+  test(`Factory expires the first occurrence of an exact Done stamp after 24 hours in ${zone}`, () => {
+    const rows = items.parseBacklog(`- [x] Shipped #B15\n  - Done: ${stamp} · shipped`)
+    const expiry = Date.parse(instant) + 24 * 60 * 60 * 1000
+    const taskAt = now => byId(m.buildFloor({ panes: [], rows, data: null, now, zone }), 'B15')
+    assert.equal(taskAt(expiry)?.phase, 'done', stamp)
+    assert.equal(taskAt(expiry + 1000), undefined, stamp)
+  })
+}
+
+test('Factory accepts a colon in the offset of a Done stamp', () => {
+  const [row] = items.parseBacklog('- [x] Shipped #B15\n  - Done: 2026-04-05 01:45 +10:30 · shipped')
+  assert.equal(m.doneAt(row, 'Australia/Lord_Howe'), Date.parse('2026-04-04T15:15:00Z'))
+})
 
 test('Factory retains a repeated-hour Done stamp for 24 hours from its later instant', () => {
   const rows = items.parseBacklog('## tether\n- [x] Shipped #B15\n  - Done: 2026-11-01 01:30 · shipped')

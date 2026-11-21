@@ -30,8 +30,7 @@ TEXT_FIELDS = ('confidence', 'evidence', 'error')  # optional: a wrong type read
 ADVISOR_FIELDS = ('role', 'agent', 'model', 'answer', 'confidence')
 ID = re.compile(r'[0-9a-f]{12}')
 LAST_TIME = 253402300799  # 9999-12-31 23:59:59 UTC
-STAMP = r'\d{4}-\d\d-\d\d \d\d:\d\d'
-LINE = re.compile(rf'- ({STAMP}) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
+LINE = re.compile(rf'- ({tether_zone.STAMP_PATTERN}) \[([a-z_]+)\] Q: (.*?) -> A: (.*) \((\S+) (\S+)\)')
 
 
 def _flat(text, limit):
@@ -97,7 +96,7 @@ def _normal(entry):
     if not _valid(entry):
         return None
     stamp = entry.get('stamp')
-    if 'stamp' in entry and (not isinstance(stamp, str) or not re.fullmatch(STAMP, stamp)):
+    if 'stamp' in entry and (not isinstance(stamp, str) or not re.fullmatch(tether_zone.STAMP_PATTERN, stamp)):
         entry = dict(entry)
         entry.pop('stamp')
     advisors = entry.get('advisors')

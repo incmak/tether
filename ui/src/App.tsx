@@ -130,7 +130,7 @@ function App() {
     }
   }, [])
   const { data, error, loading, refresh } = usePolling(fetchSessions, 4000)
-  const [prefs, update] = usePrefs()
+  const [prefs, update, rejectedZone] = usePrefs()
   useEffect(() => {
     const pending = resumeBackground(api)
     if (pending) void pending.promise.then(item => applyPhoto(item, update)).catch(() => { /* A resumed job can expire or disappear after a server restart. */ })
@@ -1106,7 +1106,7 @@ function App() {
     {remindersOpen && <RemindersSheet api={api} polled={reminderList} panes={panes} current={panes.find(item => item.id === openId)} onOpenPane={openPane}
       onOpenItem={query => setBacklog({ mode: 'page', query })} onClose={() => setRemindersOpen(false)} />}
     {backlogAdd && <BacklogAddSheet key={backlogAdd.text} api={api} text={backlogAdd.text} pane={backlogAdd.pane} onClose={() => setBacklogAdd(null)} onAdded={setNotice} />}
-    {settings && <Settings api={api} prefs={prefs} update={update} onReload={reload} onClose={() => setSettings(false)} start={settings === true ? undefined : settings || undefined} />}
+    {settings && <Settings api={api} prefs={prefs} update={update} rejectedZone={rejectedZone} onReload={reload} onClose={() => setSettings(false)} start={settings === true ? undefined : settings || undefined} />}
     {!settings && <TrialBar onRevert={revertLook} />}
     {tabTask && <NewTask api={api} pane={tabTask.pane} at={tabTask.at} micOk={!prefs.voiceOff} chime={prefs.voiceSound} mainModel={prefs.mainModel} onClose={() => setTabTask(null)}
       onEmpty={() => { const target = tabTask.pane; setTabTask(null); void split('right', target) }}

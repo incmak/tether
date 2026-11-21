@@ -107,10 +107,10 @@ def deployed(now=None, file=None):
         lines = (file or deployed_file()).read_text(encoding='utf-8', errors='replace').splitlines()
     except OSError:
         return []
-    today = tether_zone.now(now)
-    since = (today - timedelta(days=DEPLOYED_DAYS)).replace(hour=0, minute=0, second=0, microsecond=0)
-    first_day, last_day = since.date().isoformat(), today.date().isoformat()
-    first_at = since.timestamp()
+    today = tether_zone.now(now).date()
+    since = today - timedelta(days=DEPLOYED_DAYS)
+    first_day, last_day = since.isoformat(), today.isoformat()
+    first_at = tether_zone.day_start(since)
     found = []
     for item in map(parse_deployed_line, lines):
         if not item:

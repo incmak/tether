@@ -173,6 +173,7 @@ export function rejectedKeep(changes: Record<string, unknown>, error: unknown): 
 export function usePrefs({ syncZone = true } = {}) {
   const [prefs, setPrefs] = useState<Prefs>(load)
   const [serverZone, setServerZone] = useState<{ name?: string; preference?: string }>()
+  const [zoneRejection, setZoneRejection] = useState<{ attempted: string; restored?: string }>()
   // The server decides the zone once it answered for this choice. A name this browser cannot format falls back below.
   const confirmedZone = prefs.timeZone === serverZone?.preference && serverZone?.name && canFormat(serverZone.name) ? serverZone.name : undefined
   const effectiveZone = confirmedZone ?? pickZone(prefs.timeZone, serverZone?.name)
@@ -183,7 +184,7 @@ export function usePrefs({ syncZone = true } = {}) {
       ? current : { name: stored.zone, preference: stored.prefs.timeZone })
   }, [syncZone])
   const latest = useRef(prefs)
-  const version = useRef(-1)  // the server copy this device has; -1 = not read yet
+  const lastStored = useRef<Stored>(undefined)
   const pending = useRef<Shared>(loadPending())  // changed here, not saved yet
   const busy = useRef(false)
   const sending = useRef<Shared>({})  // sent, no answer yet; kept on disk until the server takes it
@@ -193,7 +194,7 @@ export function usePrefs({ syncZone = true } = {}) {
 
   // Take the server copy, but keep keys this device changed and has not saved yet.
   const apply = useCallback((stored: Stored) => {
-    version.current = stored.version
+    lastStored.current = stored
     const incoming = Object.fromEntries(Object.entries(stored.prefs).filter(([key]) => !(key in pending.current))) as Shared
     // The shared copy may have no override. Drop a cached override when the server uses its default.
     if (!('timeZone' in pending.current)) incoming.timeZone = stored.prefs.timeZone
@@ -217,12 +218,29 @@ export function usePrefs({ syncZone = true } = {}) {
     })
   }, [persist])
 
+  const restoreRejected = useCallback((changes: Shared, kept: Shared) => {
+    const keys = SYNCED.filter(key => key in changes && !(key in kept) && !(key in pending.current))
+    if (!keys.length) return
+    const serverPrefs = lastStored.current?.prefs
+    const restored = Object.fromEntries(keys.map(key => [key, serverPrefs?.[key] ?? DEFAULTS[key]]))
+    if (keys.includes('timeZone') && changes.timeZone) {
+      setZoneRejection({ attempted: changes.timeZone, restored: serverPrefs?.timeZone })
+    }
+    setPrefs(current => {
+      const next = { ...current, ...restored }
+      latest.current = next
+      store(next)
+      return next
+    })
+  }, [])
+
   const flush = useCallback(async function flush() {
     if (busy.current || !Object.keys(pending.current).length) return
     busy.current = true
     const changes = pending.current
     pending.current = {}
     sending.current = changes
+    if ('timeZone' in changes) setZoneRejection(undefined)
     if (changes.drafts) changes.drafts = keptDrafts(changes.drafts)
     try {
       const stored = await request<Stored>('prefs', { changes })
@@ -234,34 +252,36 @@ export function usePrefs({ syncZone = true } = {}) {
       sending.current = {}
       const rejected = rejectedKeep(changes, error)
       const kept = rejected ?? changes
+      if (rejected !== null) restoreRejected(changes, kept)
       pending.current = { ...kept, ...pending.current }
       persist()
       if (rejected !== null && error instanceof ApiError) console.warn('Preference save rejected:', error.status, error.message)
     }
     busy.current = false
     if (Object.keys(pending.current).length) timer.current = window.setTimeout(flush, 2000)
-  }, [apply, persist, rememberZone])
+  }, [apply, persist, rememberZone, restoreRejected])
   useLayoutEffect(() => { flushRef.current = flush }, [flush])
 
   const pull = useCallback(async () => {
     if (busy.current) return
     if (Object.keys(pending.current).length) { void flush(); return }
-    const requestedAtVersion = version.current
+    const requestedAtVersion = lastStored.current?.version
     try {
       const stored = await request<Stored>('prefs')
-      if (version.current !== requestedAtVersion) return
+      if (lastStored.current?.version !== requestedAtVersion) return
       // A queued local write can defer the shared prefs, but the server's fallback zone is still usable.
       rememberZone(stored)
       if (busy.current || Object.keys(pending.current).length) return
       // A device's first sync adds its own choices to the shared copy, so nothing set before sync is lost.
       if (!firstSyncDone()) {
+        lastStored.current = stored
         pending.current = stored.version === 0 ? pick(latest.current) : joined(stored.prefs, latest.current)
         persist()
         try { localStorage.setItem(SYNCED_KEY, '1') } catch { /* private mode: merge again next visit, which is harmless */ }
         void flush()
         return
       }
-      if (stored.version !== version.current) apply(stored)
+      if (stored.version !== lastStored.current?.version) apply(stored)
     } catch { /* offline: keep this device's copy */ }
   }, [apply, flush, persist, rememberZone])
 
@@ -289,5 +309,6 @@ export function usePrefs({ syncZone = true } = {}) {
       return next
     })
   }, [flush, persist])
-  return [prefs, update] as const
+  const rejectedZone = prefs.timeZone === zoneRejection?.restored ? zoneRejection?.attempted : undefined
+  return [prefs, update, rejectedZone] as const
 }

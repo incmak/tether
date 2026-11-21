@@ -129,22 +129,84 @@ class TetherZoneTests(unittest.TestCase):
                 prefs_sync.save({'timeZone': zone})
                 self.assertEqual(tether_zone.parse(stamp), datetime.fromisoformat(expected).timestamp())
 
-    def test_offset_less_backlog_advisor_and_triage_stamps_round_trip(self):
+    def test_exact_stamp_round_trips(self):
+        rows = json.loads((Path(__file__).parent / 'fixtures' / 'zone_exact_stamps.json').read_text())
+        for row in rows:
+            with self.subTest(instant=row['instant']):
+                prefs_sync.save({'timeZone': row['zone']})
+                at = datetime.fromisoformat(row['instant']).timestamp()
+                self.assertEqual(tether_zone.stamp_exact(at), row['stamp'])
+                self.assertEqual(tether_zone.parse(tether_zone.stamp_exact(at)), at)
+
+    def test_explicit_offset_ignores_the_current_zone(self):
+        prefs_sync.save({'timeZone': 'Pacific/Auckland'})
+        for stamp, instant in (('2026-11-01 01:30 -0400', '2026-11-01T05:30:00Z'),
+                               ('2026-04-05 01:45 +10:30', '2026-04-04T15:15:00Z')):
+            with self.subTest(stamp=stamp):
+                self.assertEqual(tether_zone.parse(stamp), datetime.fromisoformat(instant).timestamp())
+
+    def test_backlog_exact_done_stamp_readers(self):
+        for stamp, instant in (('2026-11-01 01:30 -0400', '2026-11-01T05:30:00Z'),
+                               ('2026-04-05 01:45 +10:30', '2026-04-04T15:15:00Z')):
+            at = datetime.fromisoformat(instant).timestamp()
+            block = ['- [x] Task #B1', f'  - Done: {stamp} · finished (codex · pane %12)']
+            with self.subTest(stamp=stamp, reader='_done_time'):
+                self.assertEqual(backlog._done_time(block), at)
+            with self.subTest(stamp=stamp, reader='_card'):
+                card = backlog._card(block, 0, 'Inbox', 0, at)
+                self.assertIsNotNone(card)
+                self.assertEqual((card['doneAt'], card['done']), (at, 'finished (codex · pane %12)'))
+            with self.subTest(stamp=stamp, reader='_finished'):
+                text = '\n'.join(block)
+                self.assertEqual(backlog._finished(text, True, keep_since=at)[0], [])
+                self.assertEqual(backlog._finished(text, True, keep_since=at + 1)[0], [('Inbox', block)])
+            with self.subTest(stamp=stamp, reader='_pane_hint'):
+                self.assertEqual(backlog._pane_hint('backlog.done', block), '%12')
+
+    def test_exact_offsets_in_triage_ledger_and_advisor_markdown(self):
+        for stamp, instant in (('2026-11-01 01:30 -0400', '2026-11-01T05:30:00Z'),
+                               ('2026-04-05 01:45 +10:30', '2026-04-04T15:15:00Z')):
+            at = datetime.fromisoformat(instant).timestamp()
+            with self.subTest(stamp=stamp, reader='triage'):
+                rows = work_triage.parse(f'- {stamp} | T-1 | fixing | result | ref: pl#9')
+                self.assertEqual(rows, [(stamp, 'T-1', 'fixing', 'result', 'pl#9', at)])
+            with self.subTest(stamp=stamp, reader='advisor'):
+                entry = advisor_log._legacy(f'- {stamp} [decided] Q: Question -> A: Answer (claude opus)')
+                self.assertIsNotNone(entry)
+                self.assertEqual(entry['time'], at)
+
+    def test_backlog_and_triage_write_offsets_and_advisor_keeps_its_display_stamp(self):
         at = datetime(2026, 11, 19, 1, 42, 38, tzinfo=timezone.utc).timestamp()
         minute = at - 38
-        for zone, shown in (('America/New_York', '2026-11-18 20:42'), ('Pacific/Auckland', '2026-11-19 14:42')):
+        for zone, shown, offset in (('America/New_York', '2026-11-18 20:42', '-0500'),
+                                    ('Pacific/Auckland', '2026-11-19 14:42', '+1300')):
+            exact = f'{shown} {offset}'
             with self.subTest(zone=zone):
                 prefs_sync.save({'timeZone': zone})
                 with mock.patch.object(tether_zone.time, 'time', return_value=at):
                     done = backlog._done_line('finished', '')
-                self.assertIn(f'Done: {shown} ·', done)
-                self.assertEqual(backlog._done_time(['- [x] Task #B1', done]), minute)
                 entry = advisor_log.make('Question', {'status': 'decided', 'answer': 'Answer'}, 'claude', 'opus', now=at)
                 line = advisor_log.line(entry)
                 self.assertTrue(line.startswith(f'- {shown} [decided]'))
+                self.assertEqual(entry['time'], at)
                 self.assertEqual(advisor_log._legacy(line)['time'], minute)
-                self.assertEqual(work_triage.stamp(at), shown)
                 self.assertEqual(work_triage.parse_time(shown), minute)
+            with self.subTest(zone=zone, writer='backlog'):
+                self.assertIn(f'Done: {exact} ·', done)
+                self.assertEqual(backlog._done_time(['- [x] Task #B1', done]), minute)
+            with self.subTest(zone=zone, writer='triage'):
+                self.assertEqual(work_triage.stamp(at), exact)
+                self.assertEqual(work_triage.parse_time(exact), minute)
+
+    def test_day_start_uses_the_first_instant_at_a_fold_or_gap(self):
+        for zone, day, instant in (('America/Havana', '2026-11-01', '2026-11-01T04:00:00Z'),
+                                    ('America/Havana', '2026-03-08', '2026-03-08T05:00:00Z'),
+                                    ('Asia/Kathmandu', '1986-01-01', '1985-12-31T18:30:00Z')):
+            with self.subTest(zone=zone, day=day):
+                prefs_sync.save({'timeZone': zone})
+                at = datetime.fromisoformat(instant).timestamp()
+                self.assertEqual(tether_zone.day_start(day), at)
+                self.assertEqual(tether_zone.day_start(datetime.fromisoformat(day).date()), at)
 
     def test_advisor_full_log_matches_its_markdown_after_a_zone_change(self):
         prefs_sync.save({'timeZone': 'America/New_York'})

@@ -13,6 +13,14 @@ const {
   sameDay, setTetherZone, startOfDay, tetherZone, zonedTime, zoneLabel, zoneList, zoneParts,
 } = mod.exports
 
+test('Havana day starts at the first midnight in a fold and the first valid time in a gap', () => {
+  for (const [instant, expected] of [
+    ['2026-11-01T04:30:00Z', '2026-11-01T04:00:00Z'],
+    ['2026-11-01T05:30:00Z', '2026-11-01T04:00:00Z'],
+    ['2026-03-08T15:00:00Z', '2026-03-08T05:00:00Z'],
+  ]) assert.equal(startOfDay(Date.parse(instant), 'America/Havana'), Date.parse(expected))
+})
+
 test('New York wall times round trip across both DST transitions', () => {
   setTetherZone('America/New_York')
   for (const [month, date, hour, minute, iso, actualHour] of [

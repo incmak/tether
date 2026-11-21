@@ -1,10 +1,11 @@
-"""Use the synced time zone, then the legacy TETHER_REMINDER_ZONE, then Asia/Kolkata. Offset-less stamps are
-read in the current zone; after a zone change an old stamp shifts by the zone difference.
+"""Use the synced time zone, then the legacy TETHER_REMINDER_ZONE, then Asia/Kolkata. Exact stamps keep their
+written offset. Offset-less stamps are read in the current zone, so a zone change shifts old stamps.
 A stamp in a repeated hour reads back as the later occurrence. A stamp in a gap shifts forward by the gap.
 """
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 import os
+import re
 import time
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -15,6 +16,9 @@ else:
 
 DEFAULT = 'Asia/Kolkata'
 FORMAT = '%Y-%m-%d %H:%M'
+STAMP_FORMAT = '%Y-%m-%d %H:%M %z'
+_OFFSET_SUFFIX = r' [+-][0-9]{2}:?[0-9]{2}'
+STAMP_PATTERN = rf'[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}} [0-9]{{2}}:[0-9]{{2}}(?:{_OFFSET_SUFFIX})?'
 
 
 @lru_cache(maxsize=1)
@@ -57,6 +61,10 @@ def stamp(at=None, fmt=FORMAT):
     return now(at).strftime(fmt)
 
 
+def stamp_exact(at=None):
+    return stamp(at, STAMP_FORMAT)
+
+
 def wall_times(wall, tz):
     """Unix seconds for a naive wall time, earliest first. In a gap, shift the time forward."""
     candidates = {wall.replace(tzinfo=tz, fold=fold).timestamp() for fold in (0, 1)}
@@ -64,6 +72,28 @@ def wall_times(wall, tz):
     return matches or [max(candidates)]
 
 
-def parse(text, fmt=FORMAT):
-    wall = datetime.strptime(text, fmt).replace(tzinfo=None)
+def parse(text):
+    if re.search(rf'{_OFFSET_SUFFIX}$', text):
+        return datetime.strptime(text, STAMP_FORMAT).timestamp()
+    wall = datetime.strptime(text, FORMAT)
     return wall_times(wall, zone())[-1]
+
+
+def day_start(text_or_date):
+    """Unix seconds at the first instant of a local day, or the next instant if the day was skipped."""
+    day = date.fromisoformat(text_or_date) if isinstance(text_or_date, str) else text_or_date
+    tz = zone()
+    midnight = datetime(day.year, day.month, day.day)
+    at = int(midnight.replace(tzinfo=tz).timestamp())
+    if datetime.fromtimestamp(at, tz).replace(tzinfo=None) == midnight:
+        return at
+
+    # A gap can start on the previous day. Find the transition between the two offset interpretations.
+    before = int(midnight.replace(tzinfo=tz, fold=1).timestamp())
+    while at - before > 1:
+        mid = (before + at) // 2
+        if datetime.fromtimestamp(mid, tz).date() < day:
+            before = mid
+        else:
+            at = mid
+    return at

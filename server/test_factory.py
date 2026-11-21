@@ -34,6 +34,22 @@ def agy_step(position, **fields):
 
 
 class DeployedTests(unittest.TestCase):
+    def test_timed_deploy_window_includes_the_first_instant_at_a_havana_midnight_transition(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
+        prefs_sync.save({'timeZone': 'America/Havana'})
+        log = root / 'DEPLOYED.md'
+        for day, now, stamps in (
+            ('2026-11-01', '2026-11-03T17:00:00Z',
+             ('2026-10-31 23:59 -0400', '2026-11-01 00:00 -0400', '2026-11-01 00:00 -0500')),
+            ('2026-03-08', '2026-03-10T16:00:00Z',
+             ('2026-03-07 23:59 -0500', '2026-03-08 01:00 -0400', '2026-03-08 01:01 -0400')),
+        ):
+            with self.subTest(day=day):
+                log.write_text('\n'.join(f'- {stamp} · {index}' for index, stamp in enumerate(stamps)))
+                rows = factory.deployed(datetime.fromisoformat(now).timestamp(), log)
+                self.assertEqual([row['text'] for row in rows], ['2', '1'])
+
     def test_date_only_deploys_use_the_written_day_at_the_window_boundary(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(prefs_sync, 'FILE', root / 'prefs.json'))
