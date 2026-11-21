@@ -1,6 +1,6 @@
 """The coordinator tab: commands and the status feed, with fake tmux options, statuses and sends."""
-import subprocess
 import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
+import subprocess
 import contextlib
 from functools import partial
 import http.client
