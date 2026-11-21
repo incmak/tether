@@ -557,10 +557,13 @@ class FridayRulesTests(unittest.TestCase):
             ('docs', 'No, what did docs say', 'deny', False),
             ('docs', 'Okay?', 'approve', False),
             ('docs', 'Okay.', 'approve', True),
-            ('docs', 'Yes, approve docs.', 'approve', True),
+            ('docs', 'Yes, approve docs.', 'approve', False),  # a chat name is never removed: Friday asks again
+            ('docs', 'Yes, approve.', 'approve', True),
+            ('docs', 'Yes, approve it.', 'approve', True),
             ('docs', 'Sure, go ahead.', 'approve', True),
             ('docs', 'Yup, alright.', 'approve', True),
-            ('API Docs', 'Deny API Docs, please.', 'deny', True),
+            ('API Docs', 'Deny API Docs, please.', 'deny', False),
+            ('API Docs', 'Deny it, please.', 'deny', True),
             ('API Docs', 'Deny Docs, please.', 'deny', False),
             ('docs', 'Yes and no', 'approve', False),
             ('docs', 'Go', 'approve', False),
@@ -570,12 +573,17 @@ class FridayRulesTests(unittest.TestCase):
             ('Hold off', 'Okay, hold off', 'approve', False),
             ('No thanks', 'Okay, no thanks', 'approve', False),
             ('Hold off', 'Okay, hold off.', 'deny', False),
-            ('Hold off', 'Approve Hold off.', 'approve', True),
+            ('Hold off', 'Approve Hold off.', 'approve', False),
             ('No thanks', 'Yes, approve it in No thanks.', 'approve', False),  # fail-safe: Friday asks again
             # A title that is a decision word never absorbs a separate decision.
             ('No', 'Approve. No.', 'approve', False),
             ('Yes', 'Deny. Yes.', 'deny', False),
             ('Go ahead', 'Deny. Go ahead.', 'deny', False),
+            # A chat title never hides a withdrawal or a delay.
+            ('It Hold off', 'Approve it. Hold off.', 'approve', False),
+            ('A minute', 'Okay, in a minute.', 'approve', False),
+            ('Wait', 'Approve. Wait.', 'approve', False),
+            ('Later today', 'Yes, approve it later today.', 'approve', False),
             # "Don't" alone denies; a negated command decides nothing.
             ('docs', "Don't deny.", 'deny', False),
             ('docs', "Don't stop.", 'deny', False),

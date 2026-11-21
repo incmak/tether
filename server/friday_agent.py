@@ -567,38 +567,22 @@ def plain_yes(text, chat=''):
 
 APPROVAL_ANSWERS = frozenset('approve approved yes yeah yep yup ok okay sure allow alright'.split())
 DENIAL_ANSWERS = frozenset('deny denied no nope reject stop'.split())
-APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and in for'.split())
+APPROVAL_FILLER = frozenset('it that this please the request one right now thanks thank you just uh um and'.split())
 
 
-def approval_answer(text, chat=''):
-    """Return the decision in a whole utterance that answers an approval."""
+def approval_answer(text):
+    """Return the decision in a whole utterance that answers an approval.
+
+    The whole answer must be decision words plus filler. A chat name is never removed from it: a title
+    such as "Hold off" or "A minute" could hide words that withdraw or delay the decision. "Yes, approve
+    docs." is refused, and Friday asks again (fail-safe).
+    """
     if '?' in text:
         return None
     words = re.sub(r'\bdon t\b', "don't", norm(text.replace('\u2019', "'")))
     if "don't" in words.split():
         # "Don't!" alone denies; "Don't deny" or "Don't stop" negates a command and decides nothing.
         return 'deny' if set(words.split()) - {"don't"} <= APPROVAL_FILLER else None
-    name = norm(chat)
-    # The chat name counts only as one whole phrase right after a decision word or "in"/"for"
-    # ("approve docs", "deny it in docs"): a title such as "Hold off" never turns other words into consent.
-    # A title that holds a decision word ("No", "Yes", "Go ahead") never counts: norm drops the sentence
-    # boundary, so "Approve. No." would read as "approve No".
-    if name and not set(name.split()) & (APPROVAL_ANSWERS | DENIAL_ANSWERS | {'go', 'ahead', 'don'}):
-        words = re.sub(rf'\b(approve|approved|deny|denied|in|for) {re.escape(name)}(?= |$)', r'\1 it', words)
-    words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
-    if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
-        return None
-    approve = bool(words & APPROVAL_ANSWERS)
-    deny = bool(words & DENIAL_ANSWERS)
-    if approve != deny:
-        return 'approve' if approve else 'deny'
-    return None
-    words = norm(re.sub(r"\bdon't\b", 'deny', text, flags=re.I))
-    name = norm(chat)
-    if name:
-        # The chat name counts only as one whole phrase right after a decision word or "in"/"for"
-        # ("approve docs", "deny it in docs"): a title such as "Hold off" never turns other words into consent.
-        words = re.sub(rf'\b(approve|approved|deny|denied|in|for) {re.escape(name)}(?= |$)', r'\1 it', words)
     words = set(re.sub(r'\bgo ahead\b', 'approve', words).split())
     if words - (APPROVAL_ANSWERS | DENIAL_ANSWERS | APPROVAL_FILLER):
         return None
@@ -735,7 +719,7 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
             return 'The user answered a send question, not an approval.'
         if APPROVAL_NEGATION.search(last_user_text):
             return 'The user did not give unambiguous consent for this decision.'
-        decision = approval_answer(last_user_text, str(args.get('chat') or ''))
+        decision = approval_answer(last_user_text)
         if decision is None or decision != args.get('decision'):
             return 'The user did not give unambiguous consent for this decision.'
     if name == 'send_to_chat' and re.search(
