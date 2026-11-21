@@ -35,6 +35,17 @@ function reminder(id, text, extra = {}) {
 }
 
 const repeatRule = (every, anchor) => ({ every, anchor, zone: 'Asia/Kolkata' })
+/** The rule the server stores for a request's `repeat`: a rule name or { every, interval?, last_day? }. */
+function ruleFrom(repeat, anchor) {
+  if (!repeat) return null
+  const spec = typeof repeat === 'string' ? { every: repeat } : repeat
+  const date = new Date((anchor + 19800) * 1000)
+  const rule = repeatRule(spec.every, anchor)
+  if (spec.interval > 1) rule.interval = spec.interval
+  if (spec.every === 'month' || spec.every === 'year') rule.day = spec.last_day ? -1 : date.getUTCDate()
+  if (spec.every === 'year') rule.month = date.getUTCMonth() + 1
+  return rule
+}
 
 async function fixtureServer(t) {
   await readFile(path.join(DIST, 'index.html'))
@@ -97,7 +108,7 @@ async function open(t, browser, origin, viewport, {
         switch (action) {
           case 'add': {
             item = reminder(`R${nextId++}`, body.text, {
-              due: body.due, link: body.link ?? null, repeat: body.repeat ? repeatRule(body.repeat, body.due) : null,
+              due: body.due, link: body.link ?? null, repeat: ruleFrom(body.repeat, body.due),
             })
             break
           }
@@ -122,7 +133,7 @@ async function open(t, browser, origin, viewport, {
           case 'edit': {
             const changedDue = 'due' in body && body.due !== old.due
             item = { ...old, ...('text' in body && { text: body.text }), ...(changedDue && { due: body.due, occ: old.occ + 1 }) }
-            if ('repeat' in body) item.repeat = body.repeat ? repeatRule(body.repeat, old.repeat?.anchor ?? old.due) : null
+            if ('repeat' in body) item.repeat = ruleFrom(body.repeat, old.repeat?.anchor ?? old.due)
             if (changedDue && item.repeat) item.repeat = { ...item.repeat, anchor: item.due }
             break
           }
@@ -390,6 +401,70 @@ test('Reminders in Chromium', async t => {
     await button(sheet, 'Repeat: Never').waitFor()
   })
 
+  await t.test('Custom repeat: every N units with the rule in words, and a bad N blocks Add', async t => {
+    const { page, sheet } = await open(t, browser, origin, { width: 320, height: 700 })
+    await sheet.getByRole('textbox', { name: 'Remind me to' }).fill('Pay the quarterly tax')
+    await button(sheet, 'Tomorrow 10:00').click()
+    await button(sheet, 'Repeat: Never').click()
+    await sheet.getByRole('listbox', { name: 'Repeat' }).getByRole('option', { name: /^Custom/ }).click()
+    const every = sheet.getByRole('spinbutton', { name: 'Repeat every' })
+    assert.equal(await every.inputValue(), '2')
+    const hint = sheet.locator('.reminder-every-hint')
+    assert.equal(await hint.textContent(), 'Every 2 weeks on Thursday')
+    await every.fill('0')
+    assert.equal(await hint.textContent(), 'Type a number from 1 to 52.')
+    assert.equal(await every.getAttribute('aria-invalid'), 'true')
+    assert.equal(await button(sheet, 'Add reminder').isDisabled(), true)
+    await every.fill('3')
+    await button(sheet, 'Repeat unit: weeks').click()
+    await sheet.getByRole('listbox', { name: 'Repeat unit' }).getByRole('option', { name: 'months' }).click()
+    assert.equal(await hint.textContent(), 'Every 3 months on the 19th')
+    assert.deepEqual(await post(page, 'add', () => button(sheet, 'Add reminder').click()), {
+      text: 'Pay the quarterly tax', due: TOMORROW, repeat: { every: 'month', interval: 3 },
+    })
+    const label = sheet.getByRole('listitem').filter({ hasText: 'Pay the quarterly tax' }).locator('.reminder-repeat')
+    await label.waitFor()
+    assert.match(await label.ariaSnapshot(), /Repeats:\s+Every 3 months on the 19th/)
+    await button(sheet, 'Repeat: Never').waitFor()
+    assert.equal(await every.count(), 0, 'the form resets to Never')
+  })
+
+  await t.test('a 30 Nov reminder offers the last day of every month', async t => {
+    const { page, sheet } = await open(t, browser, origin, phone)
+    await sheet.getByRole('textbox', { name: 'Remind me to' }).fill('Send the rent')
+    await sheet.getByRole('textbox', { name: /^When/ }).fill('2026-11-30 10:00')
+    await button(sheet, 'Repeat: Never').click()
+    const list = sheet.getByRole('listbox', { name: 'Repeat' })
+    assert.match(await list.getByRole('option', { name: /^Every month/ }).textContent(), /On the 30th, or the last day/)
+    await list.getByRole('option', { name: /^Last day of every month/ }).click()
+    const due = Date.UTC(2026, 10, 30, 4, 30) / 1000
+    assert.deepEqual(await post(page, 'add', () => button(sheet, 'Add reminder').click()), {
+      text: 'Send the rent', due, repeat: { every: 'month', last_day: true },
+    })
+    const label = sheet.getByRole('listitem').filter({ hasText: 'Send the rent' }).locator('.reminder-repeat')
+    await label.waitFor()
+    assert.match(await label.ariaSnapshot(), /Every month on the last day/)
+  })
+
+  await t.test('Edit of a 28 Feb copy of a 31st series keeps the 31st and saves a custom interval', async t => {
+    const feb28 = Date.UTC(2027, 1, 28, 4, 30) / 1000
+    const monthly = reminder('R1', 'File the invoices', { due: feb28, repeat: { ...repeatRule('month', feb28), day: 31 } })
+    const { page, sheet } = await open(t, browser, origin, phone, { records: [monthly] })
+    const row = sheet.getByRole('listitem').filter({ hasText: monthly.text })
+    assert.match(await row.locator('.reminder-repeat').ariaSnapshot(), /Every month on the 31st/)
+    await button(sheet, `Edit: ${monthly.text}`).click()
+    const edit = sheet.getByRole('form', { name: `Edit reminder: ${monthly.text}` })
+    await button(edit, 'Repeat: Every month').click()
+    const list = sheet.getByRole('listbox', { name: 'Repeat' })
+    assert.match(await list.getByRole('option', { name: /^Every month/ }).textContent(), /On the 31st/)
+    assert.equal(await list.getByRole('option', { name: /^Last day/ }).count(), 0)
+    await list.getByRole('option', { name: /^Custom/ }).click()
+    await button(edit, 'Repeat unit: weeks').click()
+    await sheet.getByRole('listbox', { name: 'Repeat unit' }).getByRole('option', { name: 'months' }).click()
+    assert.equal(await edit.locator('.reminder-every-hint').textContent(), 'Every 2 months on the 31st')
+    assert.deepEqual(await post(page, 'edit', () => button(edit, 'Save').click()), { id: monthly.id, repeat: { every: 'month', interval: 2 } })
+  })
+
   await t.test('weekly label uses the anchor even when the copy was snoozed', async t => {
     const weekly = reminder('R1', 'Review weekly reports', { due: TOMORROW + 86400, repeat: repeatRule('week', TOMORROW) })
     const { sheet } = await open(t, browser, origin, phone, { records: [weekly] })
@@ -475,7 +550,10 @@ test('Reminders in Chromium', async t => {
     await repeat.press('ArrowDown')
     const list = sheet.getByRole('listbox', { name: 'Repeat' })
     await list.waitFor()
-    assert.equal(await list.getByRole('option').count(), 4)
+    assert.deepEqual(await list.getByRole('option').evaluateAll(options => options.map(option => option.querySelector('.sm-label').textContent)),
+      ['Never', 'Every day', 'Every weekday', 'Every week', 'Every month', 'Every year', 'Custom'])
+    const box = await list.boundingBox()
+    assert.ok(box.x >= 0 && box.x + box.width <= 320, `the Repeat menu fits 320 px: ${JSON.stringify(box)}`)
     await list.press('Escape')
     const layout = await form.evaluate(form => ({
       viewport: innerWidth, page: document.documentElement.scrollWidth, form: form.clientWidth, content: form.scrollWidth,

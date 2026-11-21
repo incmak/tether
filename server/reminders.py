@@ -19,6 +19,7 @@ delivery state for restore by ID for 30 days.
 
 A repeat rule moves to the next copy on Done. Its anchor keeps the scheduled wall time even after a snooze.
 Catch-up makes a single future copy. Deleting the open copy stops the series until restore.
+Monthly and yearly rules keep their day. A day the month lacks moves to the last day of that month.
 
 Times are UTC epoch seconds.
 """
@@ -32,8 +33,9 @@ import sys
 import tempfile
 import threading
 import time
+from calendar import monthrange
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from math import inf
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -45,7 +47,8 @@ except ImportError:
 PREFIX = '/mobile/api/reminders'
 ACTIONS = ('add', 'edit', 'done', 'reopen', 'snooze', 'delete', 'restore')
 ZONE = ZoneInfo(os.environ.get('TETHER_REMINDER_ZONE') or 'Asia/Kolkata')
-RULES = ('day', 'weekday', 'week')
+RULES = ('day', 'weekday', 'week', 'month', 'year')
+INTERVAL_LIMITS = {'day': 365, 'weekday': 1, 'week': 52, 'month': 60, 'year': 5}
 TEXT_LIMIT = 500
 LATE = 120  # fired this many seconds after its time (server down or busy): the notice says late
 DONE_KEPT = 50  # finished reminders kept; older ones are dropped
@@ -129,6 +132,28 @@ def _recently_deleted(records, now):
                   key=lambda r: r['deleted_at'], reverse=True)
 
 
+def _int_between(value, low, high):
+    return type(value) is int and low <= value <= high
+
+
+def _valid_repeat(rule):
+    if not isinstance(rule, dict):
+        return False
+    every = rule.get('every')
+    if every not in RULES or not _int_between(rule.get('interval', 1), 1, INTERVAL_LIMITS[every]):
+        return False
+    if not isinstance(rule.get('zone'), str):
+        return False
+    anchor = rule.get('anchor')
+    if type(anchor) not in (int, float) or not -inf < anchor < inf:
+        return False
+    if every in ('month', 'year'):
+        day = rule.get('day')
+        if type(day) is not int or (day != -1 and not 1 <= day <= 31):
+            return False
+    return every != 'year' or _int_between(rule.get('month'), 1, 12)
+
+
 def _load(now, *, prune_deleted=True):
     try:
         data = json.loads(_path().read_text(encoding='utf-8'))
@@ -151,16 +176,14 @@ def _load(now, *, prune_deleted=True):
         record.setdefault('retry_at', {})
         record.setdefault('sending', {})
         record.setdefault('failed', [])
-        repeat = record.setdefault('repeat', None)
-        if isinstance(repeat, dict):
-            anchor = repeat.get('anchor')
-            if (repeat.get('every') in RULES and type(anchor) in (int, float) and -inf < anchor < inf
-                    and isinstance(repeat.get('zone'), str)):
-                origin = repeat.get('origin')
-                if not (type(origin) in (int, float) and -inf < origin < inf):
-                    repeat.pop('origin', None)
-                continue
-        record['repeat'] = None
+        repeat = record.get('repeat')
+        if isinstance(repeat, dict) and 'origin' in repeat and not (
+                type(repeat['origin']) in (int, float) and -inf < repeat['origin'] < inf):
+            repeat.pop('origin')  # a bad origin falls back to the anchor's wall time; the rule stays
+        if not _valid_repeat(repeat):
+            record['repeat'] = None
+        elif repeat.get('interval') == 1:
+            repeat.pop('interval')
     nxt = data.get('next') if isinstance(data.get('next'), int) and data.get('next') > top else top + 1
     return {'version': 2, 'next': nxt, 'reminders': items, 'deleted': deleted}
 
@@ -236,35 +259,96 @@ def public(record):
     return result
 
 
+def repeat_zone(rule):
+    try:
+        return ZoneInfo(rule['zone'])
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZONE
+
+
+def _repeat_date(rule, last_day):
+    every = rule['every']
+    if every in ('month', 'year'):
+        anchor = datetime.fromtimestamp(rule['anchor'], repeat_zone(rule))
+        rule['day'] = -1 if last_day else anchor.day
+        if every == 'year':
+            rule['month'] = anchor.month
+
+
+def _clean_repeat(repeat, due, previous=None):
+    if repeat is None:
+        return None
+    options = repeat if isinstance(repeat, dict) else {'every': repeat}
+    every, interval, last_day = options.get('every'), options.get('interval', 1), options.get('last_day', False)
+    if every not in RULES:
+        raise ReminderError('Pick a repeat: never, day, weekday, week, month or year.')
+    if options.keys() - {'every', 'interval', 'last_day'}:
+        raise ReminderError('Use only every, interval and last_day for a repeat.')
+    limit = INTERVAL_LIMITS[every]
+    if not _int_between(interval, 1, limit):
+        if every == 'weekday':
+            raise ReminderError('Weekday reminders repeat every weekday.')
+        raise ReminderError(f'Repeat every 1 to {limit} {every}s.')
+    if type(last_day) is not bool:
+        raise ReminderError('Use true or false for last_day.')
+    if last_day and every != 'month':
+        raise ReminderError('Use last_day only with a monthly repeat.')
+    rule = {'every': every, 'anchor': previous['anchor'] if previous else due, 'zone': ZONE.key}
+    if interval > 1:
+        rule['interval'] = interval
+    if previous and 'origin' in previous:
+        rule['origin'] = previous['origin']
+    if (every in ('month', 'year') and previous and every == previous['every']
+            and last_day == (previous['day'] == -1)):
+        rule['day'] = previous['day']
+        if every == 'year':
+            rule['month'] = previous['month']
+    else:
+        _repeat_date(rule, last_day)
+    return rule
+
+
+def _next_month(anchor, today, wall_time, step, wanted, after):
+    months = (today.year - anchor.year) * 12 + today.month - anchor.month
+    index = anchor.month - 1 + max(1, months // step) * step
+    while True:
+        years, offset = divmod(index, 12)
+        year, month = anchor.year + years, offset + 1
+        last = monthrange(year, month)[1]
+        day = last if wanted == -1 else min(wanted, last)
+        due = datetime.combine(date(year, month, day), wall_time, tzinfo=anchor.tzinfo).timestamp()
+        if due > after:
+            return due
+        index += step
+
+
 def next_due(rule, now):
     """The first future occurrence after the anchor, at the series wall time.
 
-    The anchor is this copy's occurrence. The optional origin is the first occurrence of the series: its
-    wall time survives a copy whose time a skipped daylight-saving hour moved (02:30 shown as 03:30).
+    The origin keeps its wall time when a later copy lands in a skipped daylight-saving hour.
     """
-    try:
-        zone = ZoneInfo(rule['zone'])
-    except (ZoneInfoNotFoundError, ValueError):
-        zone = ZONE
+    zone = repeat_zone(rule)
     anchor = datetime.fromtimestamp(rule['anchor'], zone)
     today = datetime.fromtimestamp(now, zone).date()
     wall_time = datetime.fromtimestamp(rule.get('origin', rule['anchor']), zone).time()
-    every = rule['every']
-    step = 7 if every == 'week' else 1
-    # Jump near today in whole steps from the anchor to keep weekly rules on the same weekday.
+    every, interval = rule['every'], rule.get('interval', 1)
+    after = max(rule['anchor'], now)
+    if every in ('month', 'year'):
+        step = interval * (12 if every == 'year' else 1)
+        return _next_month(anchor, today, wall_time, step, rule['day'], after)
+    step = interval * (7 if every == 'week' else 1)
+    # Jump near today in whole steps to keep the phase.
     count = max(1, (today - anchor.date()).days // step)
     day = anchor.date() + timedelta(days=count * step)
     while True:
         if every != 'weekday' or day.weekday() < 5:
             due = datetime.combine(day, wall_time, tzinfo=zone).timestamp()
-            if due > max(rule['anchor'], now):
+            if due > after:
                 return due
         day += timedelta(days=step)
 
 
 def _new(text, due, by, link, now, repeat, source):
-    if repeat is not None and repeat not in RULES:
-        raise ReminderError('Pick a repeat: never, day, weekday or week.')
     text = _text(text)
     source = _clean_source(source)
     due = _due(due, now, sourced=bool(source))
@@ -273,7 +357,7 @@ def _new(text, due, by, link, now, repeat, source):
     record = {'text': text, 'due': due, 'created': now, 'by': str(by or 'you')[:200],
               'state': 'scheduled', 'fired_at': None, 'late': False, 'snoozes': 0, 'done_at': None,
               'link': _clean_link(link), 'occ': 1, 'sent': [], 'tries': {}, 'retry_at': {}, 'sending': {}, 'failed': [],
-              'repeat': {'every': repeat, 'anchor': due, 'zone': ZONE.key} if repeat is not None else None}
+              'repeat': _clean_repeat(repeat, due)}
     if source:
         record.update(source=source, source_at=due)
     return record
@@ -394,18 +478,14 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                 _schedule(record, _due(body['due'], now))
             rule = record['repeat']
             if 'repeat' in body:
-                repeat = body['repeat']
-                if repeat is not None and repeat not in RULES:
-                    raise ReminderError('Pick a repeat: never, day, weekday or week.')
+                repeat = _clean_repeat(body['repeat'], record['due'], None if due_changed else rule)
                 if repeat is not None and record.get('source'):
                     raise ReminderError('A linked reminder cannot repeat.')
-                keep = rule if rule and not due_changed else {'anchor': record['due']}
-                record['repeat'] = None if repeat is None else {
-                    'every': repeat, 'zone': ZONE.key,
-                    **{key: keep[key] for key in ('anchor', 'origin') if key in keep}}
+                record['repeat'] = repeat
             elif due_changed and rule:
                 rule['anchor'] = record['due']
                 rule.pop('origin', None)
+                _repeat_date(rule, rule.get('day') == -1)
         elif action == 'done':
             if record['state'] == 'done':
                 return public(record)

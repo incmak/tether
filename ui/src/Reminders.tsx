@@ -8,8 +8,8 @@ import { useModal } from './hooks'
 import { Bone } from './Skeleton'
 import { SelectMenu } from './SelectMenu'
 import { chatTitle } from './Sidebar'
-import { act, fullLabel, groupReminders, parseWhen, quickPicks, repeatLabel, repeatOptions, snoozePicks, TEXT_LIMIT, whenLabel, ZONE_LABEL } from './reminders'
-import type { Listing, Reminder, Repeat, useReminders } from './reminders'
+import { act, choiceLabel, choiceOf, choiceValid, fullLabel, groupReminders, INTERVAL_MAX, NO_REPEAT, parseWhen, quickPicks, repeatBody, repeatLabel, repeatOptions, sameChoice, snoozePicks, TEXT_LIMIT, unitName, whenLabel, ZONE_LABEL } from './reminders'
+import type { Listing, Reminder, RepeatChoice, RepeatPick, RepeatRule, RepeatUnit, useReminders } from './reminders'
 import { TodosPanel } from './Todos'
 import { useTasks } from './tasks'
 import './Reminders.css'
@@ -44,11 +44,30 @@ function WhenField({ id, when, onChange, now, picks = true }: { id: string; when
   </div>
 }
 
-function RepeatField({ id, value, at, onChange }: { id: string; value: 'never' | Repeat; at: number | null; onChange: (value: 'never' | Repeat) => void }) {
+const UNITS: RepeatUnit[] = ['day', 'week', 'month', 'year']
+
+/** Repeat: a menu of common rules; Custom adds "Every [N] [unit]" below it, with the rule in words.
+ *  rule: the kept rule of an edit whose time stays, so a clamped copy (28 Feb of a 31st series) still names the 31st. */
+function RepeatField({ id, value, at, rule, onChange }: { id: string; value: RepeatChoice; at: number | null; rule?: RepeatRule | null; onChange: (value: RepeatChoice) => void }) {
+  const custom = value.pick === 'custom'
+  const valid = choiceValid(value)
+  const hint = `${id}-every-hint`
   return <div className="reminder-repeat-field">
     <span className="reminder-field-label" id={`${id}-label`}>Repeat</span>
-    <SelectMenu id={id} value={value} label="Repeat" minWidth={200} className="sm-field reminder-repeat-select"
-      icon={<RepeatIcon size={14} aria-hidden="true" />} options={repeatOptions(at)} onChange={next => onChange(next as 'never' | Repeat)} />
+    <SelectMenu id={id} value={value.pick} label="Repeat" minWidth={240} className="sm-field reminder-repeat-select"
+      icon={<RepeatIcon size={14} aria-hidden="true" />} options={repeatOptions(at, rule, value.pick)} onChange={next => onChange({ ...value, pick: next as RepeatPick })} />
+    {custom && <div className="reminder-every" role="group" aria-labelledby={`${id}-every-label`}>
+      <span id={`${id}-every-label`}>Every</span>
+      <input id={`${id}-every`} type="number" inputMode="numeric" min={1} max={INTERVAL_MAX[value.unit]} step={1} aria-label="Repeat every"
+        aria-describedby={hint} aria-invalid={!valid} value={Number.isNaN(value.interval) ? '' : value.interval}
+        onChange={event => onChange({ ...value, interval: event.target.value === '' ? NaN : Number(event.target.value) })} />
+      <SelectMenu id={`${id}-unit`} value={value.unit} label="Repeat unit" minWidth={140} className="sm-field reminder-unit-select"
+        options={UNITS.map(unit => ({ value: unit, label: unitName(unit, Number.isNaN(value.interval) ? 2 : value.interval) }))}
+        onChange={next => onChange({ ...value, unit: next as RepeatUnit })} />
+    </div>}
+    {custom && <p id={hint} className={valid ? 'reminder-parsed reminder-every-hint' : 'reminder-parsed reminder-every-hint bad'} aria-live="polite">
+      {!valid ? `Type a number from 1 to ${INTERVAL_MAX[value.unit]}.` : at === null ? 'Pick a time to start from.' : choiceLabel(value, at, rule)}
+    </p>}
   </div>
 }
 
@@ -61,8 +80,8 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
   const [text, setText] = useState(item.text)
   const [when, setWhen] = useState<When>(EMPTY)
   // null until the user picks: the picker then follows the latest polled rule, and Save leaves the rule alone.
-  const [repeatDraft, setRepeatDraft] = useState<'never' | Repeat | null>(null)
-  const repeat = repeatDraft ?? item.repeat?.every ?? 'never'
+  const [repeatDraft, setRepeatDraft] = useState<RepeatChoice | null>(null)
+  const repeat = repeatDraft ?? choiceOf(item.repeat)
   const [busy, setBusy] = useState(false)
   const formId = useId()
   const run = async (work: () => Promise<unknown>) => {
@@ -82,7 +101,7 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
       const body: Record<string, unknown> = { id: item.id }
       if (text.trim() !== item.text) body.text = text.trim()
       if (at !== null) body.due = at
-      if (repeatDraft !== null && repeatDraft !== (item.repeat?.every ?? 'never')) body.repeat = repeatDraft === 'never' ? null : repeatDraft
+      if (repeatDraft !== null && !sameChoice(repeatDraft, choiceOf(item.repeat))) body.repeat = repeatBody(repeatDraft)
       if (Object.keys(body).length === 1 || await run(() => act(api, 'edit', body))) setEditing(false)
     }
     return <li className="reminder-row editing">
@@ -92,13 +111,15 @@ function Row({ item, now, panes, api, onOpenPane, onOpenItem, onDelete, onError 
         <WhenField id={`${formId}-when`} when={when} onChange={setWhen} now={now} picks={false} />
         <p className="reminder-keep">{typed ? '' : `Leave When empty to keep ${whenLabel(item.due, now)}.`}</p>
         {/* A kept due (blank or re-typed) can be a snoozed time; the server keeps the rule's own occurrence then. */}
-        <RepeatField id={`${formId}-repeat`} value={repeat} at={at !== null && at !== item.due ? at : item.repeat?.anchor ?? item.due} onChange={setRepeatDraft} />
-        {item.repeat && (repeat !== 'never'
-          ? <button type="button" className="link-button reminder-stop-repeat" onClick={() => setRepeatDraft('never')}>Stop repeating</button>
+        {/* A new time gives the rule a new day; a kept time keeps the rule's own day and month. */}
+        <RepeatField id={`${formId}-repeat`} value={repeat} at={at !== null && at !== item.due ? at : item.repeat?.anchor ?? item.due}
+          rule={at !== null && at !== item.due ? null : item.repeat} onChange={setRepeatDraft} />
+        {item.repeat && (repeat.pick !== 'never'
+          ? <button type="button" className="link-button reminder-stop-repeat" onClick={() => setRepeatDraft(NO_REPEAT)}>Stop repeating</button>
           : <p className="reminder-keep">Repeating stops when you save.</p>)}
         <div className="sheet-buttons">
           <button type="button" className="secondary" onClick={() => { setEditing(false); setText(item.text); setWhen(EMPTY) }}>Cancel</button>
-          <button type="submit" className="primary" disabled={busy || !text.trim() || (typed && (at === null || at <= now))}>Save</button>
+          <button type="submit" className="primary" disabled={busy || !text.trim() || (typed && (at === null || at <= now)) || !choiceValid(repeat)}>Save</button>
         </div>
       </form>
     </li>
@@ -175,7 +196,7 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
   useEffect(() => { const timer = setInterval(() => setNow(nowSeconds()), 15000); return () => clearInterval(timer) }, [])
   const [text, setText] = useState('')
   const [when, setWhen] = useState<When>(EMPTY)
-  const [repeat, setRepeat] = useState<'never' | Repeat>('never')
+  const [repeat, setRepeat] = useState<RepeatChoice>(NO_REPEAT)
   const [linkTab, setLinkTab] = useState(false)
   const [saving, setSaving] = useState(false)
   const [problem, setProblem] = useState('')
@@ -189,15 +210,15 @@ export function RemindersSheet({ api, polled, panes, current, onOpenPane, onOpen
   }, [undo])
   const groups = useMemo(() => groupReminders(data?.reminders ?? []), [data])
   const at = whenAt(when, now)
-  const ready = !!text.trim() && at !== null && at > now
+  const ready = !!text.trim() && at !== null && at > now && choiceValid(repeat)
   const add = async (event: FormEvent) => {
     event.preventDefault()
     if (!ready || saving) return
     setSaving(true); setProblem('')
     try {
       const link = linkTab && current ? { pane: current.id, thread: current.thread || undefined } : undefined
-      await act(api, 'add', { text: text.trim(), due: at, link, repeat: repeat === 'never' ? null : repeat })
-      setText(''); setWhen(EMPTY); setRepeat('never'); setLinkTab(false)
+      await act(api, 'add', { text: text.trim(), due: at, link, repeat: repeatBody(repeat) })
+      setText(''); setWhen(EMPTY); setRepeat(NO_REPEAT); setLinkTab(false)
       textRef.current?.focus()
     } catch (error) { setProblem(errorText(error)) } finally { setSaving(false) }
   }

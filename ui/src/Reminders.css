@@ -17,6 +17,16 @@
 .reminder-picks { display: flex; flex-wrap: wrap; gap: 6px; }
 .reminder-repeat-field { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; }
 .reminder-field-label { font-size: 13px; font-weight: 600; }
+/* Custom repeat: "Every [N] [unit]" on its own line, the rule in words under it. */
+.reminder-every { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; flex-basis: 100%; font-size: 14px; }
+.reminder-every input {
+  width: 4.5em; min-height: 44px; box-sizing: border-box; padding: 4px 8px; border: 1px solid var(--reminder-field-line);
+  border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font: inherit; font-size: 16px; font-variant-numeric: tabular-nums;
+}
+.reminder-every input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -1px; border-color: var(--accent); }
+.reminder-every input[aria-invalid="true"] { border-color: var(--error); }
+.sm-trigger.reminder-unit-select { width: auto; flex: 1 1 8em; max-width: 12em; }
+.reminder-every-hint { flex-basis: 100%; }
 .reminder-repeat-select { min-width: 0; }
 .reminder-stop-repeat { justify-self: start; min-height: 24px; font-size: 13px; }
 .reminder-repeat { display: inline-flex; align-items: center; gap: 4px; }
