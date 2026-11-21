@@ -358,7 +358,7 @@ export function StaleRuleSetting({ api }: { api: Api }) {
     api<AttentionState>('attention', undefined, controller.signal).then(data => {
       const value = data.rules?.stale ?? true
       if (!controller.signal.aborted && accept(value)) setStale(state => confirmStaleRule(state, value, true))
-    }).catch(reason => { if (!controller.signal.aborted && !staleRuleQueue.busy) setError(errorText(reason)) })
+    }).catch(reason => { if (!controller.signal.aborted && accept(null)) setError(errorText(reason)) })
     return () => {
       controller.abort()
       if (staleRuleQueue.listener === listener) staleRuleQueue.listener = null

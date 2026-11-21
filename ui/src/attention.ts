@@ -73,12 +73,13 @@ export class StaleRuleQueue {
 
   get busy() { return this.running || this.next !== null }
 
-  // A read counts only when no write ran from its start to its end: a write that ran has the newer value.
+  // A read counts only when no write ran from its start to its end: a write that ran has the newer value and the
+  // newer error. Pass the value the read got, or null when it failed; the result says whether to show it.
   startRead() {
     const generation = this.generation, idle = !this.busy
-    return (value: boolean) => {
+    return (value: boolean | null) => {
       if (!idle || this.busy || generation !== this.generation) return false
-      this.confirmed = value
+      if (value !== null) this.confirmed = value
       return true
     }
   }

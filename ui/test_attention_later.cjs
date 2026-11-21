@@ -119,6 +119,11 @@ async function testStaleRuleQueue() {
   assert.equal(q3.confirmed, false)
   assert.equal(duringWrite(true), false)
   assert.equal(q3.confirmed, false)
+  // Review 6: a failed read reports whether it is current and never changes the confirmed value.
+  assert.equal(duringWrite(null), false)
+  const failedIdle = q3.startRead()
+  assert.equal(failedIdle(null), true)
+  assert.equal(q3.confirmed, false)
   const idleRead = q3.startRead()
   assert.equal(idleRead(true), true)
   assert.equal(q3.confirmed, true)
