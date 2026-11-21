@@ -43,6 +43,7 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.enterContext(patch.object(undo_store, '_ENABLED', True))
         self.entries = {}
         self.records = {}
+        self.roles = {}   # @tether_role, as coordinator._set writes it
         self.server_id = '1:2'
         self.runner = Mock(side_effect=self.tmux)
         self.fresh = Mock(side_effect=lambda: list(self.entries.values()))
@@ -63,6 +64,10 @@ class TaskTreeUndoTests(unittest.TestCase):
             value = self.records.get(pane)
             raw = json.dumps(value) if value else ''
             return CompletedProcess(command, 0 if pane in self.entries else 1, stdout=f'{pane}\t{raw}\n')
+        if command[-1] == '#{pane_id}\t#{@tether_role}':
+            pane = command[4]
+            return CompletedProcess(command, 0 if pane in self.entries else 1,
+                                    stdout=f'{pane}\t{self.roles.get(pane, "")}\n')
         if command[1:4] == ['display-message', '-p', '#{pid}:#{start_time}']:
             if self.server_id is None:
                 return CompletedProcess(command, 1, stdout='', stderr='no server running')
@@ -100,6 +105,30 @@ class TaskTreeUndoTests(unittest.TestCase):
         self.assertIsNone(self.records['%2'])
         self.assertEqual(undo.run('redo', saved['id'], self.env)['state'], 'done')
         self.assertEqual(self.records['%2'], new)
+
+    def test_move_undo_and_redo_never_place_a_coordinator_in_a_task(self):
+        self.put(self.entry('%1', 1))
+        placed = helper('%1', thread(1), moved=True)
+        own = dict(placed, kind='own')
+        child = self.entry('%2', 2)
+        for direction, before, after in (('undo', placed, own), ('redo', own, placed)):
+            with self.subTest(direction=direction):
+                self.put(child, after)   # the move just wrote `after`
+                with undo_store.acting('user'), undo_store.step():
+                    undo.record_task_tree_move(child, before, after)
+                saved = undo_store.entries()[-1]
+                if direction == 'redo':
+                    self.assertEqual(undo.run('undo', saved['id'], self.env)['state'], 'undone')
+                self.put(dict(child, coordinator='needs'), self.records['%2'])
+                self.roles['%2'] = 'coordinator-needs'
+                kept = self.records['%2']
+                writes = len([c for c in self.runner.call_args_list if c.args[0][1] == 'set-option'])
+                with self.assertRaisesRegex(undo.Refused, 'is now the coordinator'):
+                    undo.run(direction, saved['id'], self.env)
+                self.assertEqual(self.records['%2'], kept)
+                self.assertEqual(len([c for c in self.runner.call_args_list if c.args[0][1] == 'set-option']), writes)
+                self.roles.pop('%2')
+                self.put(child, kept)
 
     def test_move_refuses_a_changed_conversation_or_placement(self):
         self.put(self.entry('%1', 1))

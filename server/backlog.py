@@ -600,9 +600,13 @@ def done_ids():
     archive = folder() / 'DONE.md'
     if archive.is_symlink():
         raise invalid('The backlog archive is a link. Tether does not open it.')
-    # Read the current list first: archive writes the destination before removing source items.
-    current = _audit_items(read()['text'])[0]
-    # The same bounded, non-blocking read as the audit snapshot (B303): a pipe or a huge archive never stalls a listing.
+    # Read the current list first: archive writes the destination before removing source items. Both files use the
+    # bounded, non-blocking read of the audit snapshot (B303): a pipe or a huge file never stalls a listing. The
+    # done check needs no next ID, so last-id is not read.
+    text = _file_text(_read_file(_path(), 4 * LIMIT + 1))
+    if len(text) > LIMIT:
+        raise ProjectError(413, f'The backlog is over {LIMIT:,} characters. Shorten {_path()}.')
+    current = _audit_items(text)[0]
     contents = _read_file(archive, ARCHIVE_READ + 1)
     if len(contents) > ARCHIVE_READ:
         raise invalid(f'The backlog archive is over {ARCHIVE_READ:,} bytes. Tether does not read it.')

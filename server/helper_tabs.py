@@ -63,6 +63,30 @@ class Stale(RuntimeError):
     pass
 
 
+# The coordinator mark lives in @tether_role (coordinator._set). A helper cannot be the coordinator, so a tab never
+# holds both a task placement and this mark: write_record refuses one side and coordinator claims refuse the other,
+# both under record_lock.
+COORDINATOR_MARKS = ('coordinator', 'coordinator-needs', 'coordinator-off')
+COORDINATOR_IN_TASK = 'This tab is the coordinator. Release the coordinator role before you place it in a task.'
+
+
+def placed(record):
+    """True when the record puts its tab inside another tab's task."""
+    return bool(record and record.get('kind') == 'helper')
+
+
+def _coordinator_mark(pane, run):
+    try:
+        result = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_id}\t#{@tether_role}'],
+                     capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError('Could not read the tab role.') from exc
+    found, _, role = result.stdout.rstrip('\n').partition('\t')
+    if result.returncode or found != pane:
+        raise Stale('The helper record changed. Reload its tab.')
+    return role in COORDINATOR_MARKS
+
+
 def _thread(entry):
     thread = entry.get('thread')
     return thread if isinstance(thread, str) and UUID.fullmatch(thread) and not entry.get('pending_conversation') else None
@@ -112,7 +136,8 @@ def write_record(pane, before, after, run, *, read=None):
     old, new = fields(before), fields(after)
     changes = _changed_fields(old or {}, new or {})
     with record_lock():
-        exists, raw = (read or _read_raw)(pane, run)
+        found = (read or _read_raw)(pane, run)   # (exists, raw) or (exists, raw, @tether_role)
+        exists, raw = found[:2]
         if not exists or raw and _record(raw) is None:
             raise Stale('The helper record changed. Reload its tab.')
         current = fields(raw or None)
@@ -120,6 +145,9 @@ def write_record(pane, before, after, run, *, read=None):
             raise Stale('The helper record changed. Reload its tab.')
         if not changes:
             return
+        if placed(new) and not placed(old) and (found[2] in COORDINATOR_MARKS if len(found) > 2
+                                                else _coordinator_mark(pane, run)):
+            raise Stale(COORDINATOR_IN_TASK)
         args = ['-u', OPTION]
         if new is not None:
             current = current or {}

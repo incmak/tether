@@ -53,6 +53,11 @@ class FakeTmux:
             row = self.rows.get(pane)
             return subprocess.CompletedProcess(command, 0 if row else 1,
                                                stdout=f'{pane}\t{row.get(helper_tabs.OPTION, "")}\n' if row else '')
+        if command[1] == 'display-message' and command[-1] == '#{pane_id}\t#{@tether_role}':
+            pane = command[4]
+            row = self.rows.get(pane)
+            return subprocess.CompletedProcess(command, 0 if row else 1,
+                                               stdout=f'{pane}\t{row.get("@tether_role", "")}\n' if row else '')
         if command[1] == 'display-message' and command[-1] == helper_close.CLOSE_FORMAT:
             pane = command[4]
             row = self.rows.get(pane)

@@ -18,8 +18,9 @@ const CHOICES: [CoordinatorMode | null, string, string][] = [
 
 export const coordinatorLabel = (mode?: CoordinatorMode | null) => CHOICES.find(item => item[0] === (mode ?? null))?.[1] ?? ''
 
-/** May this tab be the coordinator? Claude and Codex tabs that are not reviewer, advisor or helper tabs (server: coordinator.browser_role). */
-export const canCoordinate = (pane: Pane) => (pane.agent === 'claude' || pane.agent === 'codex') && !pane.role && !pane.helper && pane.writable
+/** May this tab be the coordinator? Claude and Codex tabs that are not reviewer, advisor or helper tabs, and not inside
+ *  a task (server: coordinator.browser_role and _claim). */
+export const canCoordinate = (pane: Pane) => (pane.agent === 'claude' || pane.agent === 'codex') && !pane.role && !pane.helper && !pane.task && pane.writable
 
 /**
  * One choice writes at once, so this is a menu of radio items (WAI-ARIA menu pattern): the arrow keys move focus,

@@ -66,6 +66,32 @@ class Tmux:
         return [args for args, _ in self.calls if args[1] == 'set-option']
 
 
+class CoordinatorPlacementTests(unittest.TestCase):
+    def test_write_record_never_places_a_coordinator_in_a_task(self):
+        own = {'owner_pane': '%1', 'sent_at': 1, 'kind': 'own', 'moved_by': 'user'}
+        home = dict(own, kind='helper')
+        for mark in helpers.COORDINATOR_MARKS + ('reviewer', ''):
+            options, writes = {'@tether_helper': json.dumps(own), '@tether_role': mark}, []
+
+            def run(args, **_):
+                if args[1] == 'display-message':
+                    return subprocess.CompletedProcess(args, 0, stdout='%2\t' + options[args[5].split('\t')[1][2:-1]] + '\n')
+                writes.append(args)
+                return subprocess.CompletedProcess(args, 0)
+            with self.subTest(mark=mark):
+                if mark in helpers.COORDINATOR_MARKS:
+                    with self.assertRaisesRegex(helpers.Stale, 'is the coordinator'):
+                        helpers.write_record('%2', own, home, run)
+                    self.assertEqual(writes, [])
+                else:
+                    helpers.write_record('%2', own, home, run)
+                    self.assertEqual(len(writes), 1)
+        # A record that already places the tab can still change its other fields (no new placement).
+        options, writes = {'@tether_helper': json.dumps(home), '@tether_role': 'coordinator'}, []
+        helpers.write_record('%2', home, dict(home, sent_at=2), run)
+        self.assertEqual(len(writes), 1)
+
+
 class HelperTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

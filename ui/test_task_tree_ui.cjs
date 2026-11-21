@@ -283,6 +283,9 @@ async function main() {
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
     await dialog.waitFor({ state: 'hidden' })
     await side().getByRole('button', { name: `Actions for ${reviewName}` }).click()
+    await dialog.getByRole('button', { name: 'Move out of task' }).waitFor()
+    // A tab inside a task is a helper there and cannot be the coordinator (server: coordinator._claim).
+    assert.equal(await dialog.getByRole('button', { name: /^Coordinator…/ }).count(), 0)
     await Promise.all([waitWrite('task-tree/move'), dialog.getByRole('button', { name: 'Move out of task' }).click()])
     assert.deepEqual(write('task-tree/move'), { pane: '%86', thread: 'thread-%86', into: null, into_thread: null })
     await dialog.waitFor({ state: 'hidden' })
@@ -291,6 +294,7 @@ async function main() {
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
 
     await side().getByRole('button', { name: `Actions for ${taskName}` }).click()
+    await dialog.getByRole('button', { name: /^Coordinator…/ }).waitFor()   // the task itself may be the coordinator
     await Promise.all([waitWrite('task-tree/done'), dialog.getByRole('button', { name: 'Mark done' }).click()])
     assert.deepEqual(write('task-tree/done'), { pane: '%1', thread: 'root-thread', done: true })
     await dialog.waitFor({ state: 'hidden' })

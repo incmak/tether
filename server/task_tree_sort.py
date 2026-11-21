@@ -235,14 +235,15 @@ def _check(server, rows, expected, snapshot):
 
 def _confirm_record(server, row, expected, run):
     pane = row['pane']
-    fmt = '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}'
+    # The role comes from the same checked read, so write_record's coordinator guard sees this tmux server's pane.
+    fmt = '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_role}\t#{@tether_helper}'
     result = run([paths.TMUX, 'display-message', '-p', '-t', pane, fmt],
                  capture_output=True, text=True, timeout=5)
-    fields = result.stdout.rstrip('\n').split('\t', 3)
-    if (result.returncode or len(fields) != 4 or fields[:3] != [server, pane, row['session']]
-            or _placement(fields[3]) != _placement(expected)):
+    fields = result.stdout.rstrip('\n').split('\t', 4)
+    if (result.returncode or len(fields) != 5 or fields[:3] != [server, pane, row['session']]
+            or _placement(fields[4]) != _placement(expected)):
         raise Refused(f'The sort plan is stale: {pane} changed its session or helper record.')
-    return True, fields[3]
+    return True, fields[4], fields[3]
 
 
 def _write(server, row, before, after, run):

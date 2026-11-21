@@ -25,6 +25,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 
 import auto_resume
+import coordinator
 import groups
 import helper_close
 import helper_tabs
@@ -1458,6 +1459,8 @@ class TaskTreeMove:
         row = rows[pane]
         if not task_tree.is_child(target, row.role, row.group_by):
             return
+        if (entries.get(pane) or {}).get('coordinator') in coordinator.MODES:
+            raise Refused(f'Tab {pane} is now the coordinator. Release the coordinator role before you put it back in a task.')
         if d == 'redo' and any(_tree_parent(child, rows, entries) == pane for child in rows):
             raise Refused('That tab now has helpers of its own. Move them out first.')
         prospective = {**rows, pane: replace(row, record=target)}

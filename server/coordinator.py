@@ -24,6 +24,7 @@ import agents
 import attention
 import auth
 import codex_messages
+import helper_tabs
 import history
 import needs
 import paths
@@ -159,6 +160,9 @@ def _chat_known(entry):
     return entry is not None and entry.get('transcript') is not None and not entry.get('pending_conversation')
 
 
+IN_TASK = 'A tab inside a task cannot be the coordinator. Move it out of its task first.'
+
+
 def _change_mark(body, caller, entries, run, *, on_claim=None):
     """Change the mark using fresh entries while the caller holds the lock."""
     action = body['action']
@@ -175,9 +179,19 @@ def _change_mark(body, caller, entries, run, *, on_claim=None):
         _set(run, pane, mode)
         return {'events': mode}
 
+    # Hold the record lock from the placement check to the mark: a move, sort or Undo cannot place the tab in a task
+    # in between (write_record checks the mark under the same lock).
+    with helper_tabs.record_lock():
+        return _claim(body, caller, entries, run, mine, on_claim)
+
+
+def _claim(body, caller, entries, run, mine, on_claim):
+    pane = caller['id']
     mode = _mode(body, mine[1] if mine else 'all')
     if mine is None and (caller.get('role') or caller.get('helper')):
         raise ValueError('A reviewer or advisor tab cannot be the coordinator.')
+    if mine is None and (caller.get('task') or helper_tabs.placed(helper_tabs.load(pane, run)[1])):
+        raise ValueError(IN_TASK)
     other = next((entry for entry in entries if entry['id'] != pane and entry.get('coordinator') in MODES
                   and entry.get('tmux_session') == caller.get('tmux_session')), None)
     replaced = None

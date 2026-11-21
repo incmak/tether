@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -65,8 +66,9 @@ class FakeTmux:
                 if cmd[5] == '#{pane_id}\t#{@tether_helper}':
                     output = '\t'.join((pane, state['@tether_helper']))
                 else:
-                    self.assert_command(cmd[5], '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_helper}')
-                    output = '\t'.join((self.server, pane, state['session_id'], state['@tether_helper']))
+                    self.assert_command(cmd[5], '#{pid}:#{start_time}\t#{pane_id}\t#{session_id}\t#{@tether_role}\t#{@tether_helper}')
+                    output = '\t'.join((self.server, pane, state['session_id'], state['@tether_role'],
+                                         state['@tether_helper']))
             else:
                 self.assert_command(cmd[2:], ['-p', '#{pid}:#{start_time}'])
                 output = self.server
@@ -179,6 +181,28 @@ class TaskTreeSortTests(unittest.TestCase):
             with self.subTest(pane=pane):
                 self.assertEqual(rows[pane]['new'], rows[pane]['old'])
                 self.assertIsNone(rows[pane]['after'])
+
+    def test_apply_never_places_a_tab_that_became_the_coordinator(self):
+        rows = self.run_plan()
+        target, = [pane for pane, row in rows.items() if row['new'] != row['old'] and (row['new'] or {}).get('kind') == 'helper']
+        raw = {pane: self.tmux.options[pane]['@tether_helper'] for pane in rows}
+        # Before apply: the preflight sees the new role and refuses the whole plan.
+        self.tmux.options[target]['@tether_role'] = 'coordinator-needs'
+        self.assertNotEqual(self.cli('apply', str(self.folder))[0], 0)
+        self.assertEqual(self.tmux.writes, [])
+        # After the preflight: the mark appears before the record read, so the record guard refuses that write and
+        # apply restores any write it already made.
+        self.tmux.options[target]['@tether_role'] = ''
+        run = self.tmux.run
+
+        def claim_before_the_read(cmd, **kwargs):
+            if cmd[1] == 'display-message' and cmd[-1].startswith('#{pid}:#{start_time}\t') and cmd[4] == target:
+                self.tmux.options[target]['@tether_role'] = 'coordinator'
+            return run(cmd, **kwargs)
+        with patch.object(self.tmux, 'run', claim_before_the_read):
+            self.assertNotEqual(self.cli('apply', str(self.folder))[0], 0)
+        self.assertNotIn(target, self.tmux.writes)
+        self.assertEqual({pane: self.tmux.options[pane]['@tether_helper'] for pane in rows}, raw)
 
     def test_apply_and_undo_restore_exact_records(self):
         rows = self.run_plan()
