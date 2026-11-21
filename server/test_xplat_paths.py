@@ -34,6 +34,7 @@ class TestStoreIsolation(unittest.TestCase):
         stores = {name: value for name, value in vars(paths).items()
                   if name.isupper() and isinstance(value, Path)}
         stores.update(work=paths.work(), reminders=paths.reminders(), task_sources=paths.task_sources(), items=paths.items(),
+                      friday_notes=paths.friday_notes(), friday_drafts=paths.friday_drafts(),
                       private_file=paths.private_file('test'), path_home=Path.home(),
                       expanduser_home=Path(os.path.expanduser('~')), tempdir=Path(tempfile.gettempdir()))
         for name, store in stores.items():
@@ -60,10 +61,11 @@ class TestStoreIsolation(unittest.TestCase):
                     assert Path.home() != original_home, 'late import left HOME unchanged'
                     assert paths.HOME == Path.home() == Path(os.path.expanduser('~'))
                     assert not paths.CACHE.is_relative_to(original_home)
+                    assert paths.friday_drafts() == paths.TETHER / 'friday-drafts'
 
                 result = unittest.FunctionTestCase(test).run()
                 assert result.wasSuccessful(), result.failures + result.errors
-            ''', HOME=original_home)
+            ''', HOME=original_home, TETHER_FRIDAY_DRAFTS=str(Path(original_home) / 'drafts'))
 
     def test_tempdir_under_original_home_is_replaced_even_if_cached(self):
         with tempfile.TemporaryDirectory() as original_home:
@@ -151,6 +153,12 @@ class XplatPathsTests(unittest.TestCase):
             with patch.object(procinfo, 'DARWIN', False):
                 self.assertEqual(paths._find_tmux(), '/usr/bin/tmux')
                 access.assert_not_called()
+
+    def test_friday_drafts_uses_tether_home_and_honors_an_override(self):
+        self.assertEqual(paths.friday_drafts(), paths.TETHER / 'friday-drafts')
+        override = self.home / 'my-drafts'
+        with patch.dict(os.environ, TETHER_FRIDAY_DRAFTS=str(override)):
+            self.assertEqual(paths.friday_drafts(), override)
 
     def test_chrome_app_order(self):
         candidates = [str(Path(root) / (app + '.app') / 'Contents/MacOS' / app)

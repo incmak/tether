@@ -54,8 +54,53 @@ def fixture_kind(pid):
     return 'unknown'
 
 
+def fixture_tree():
+    """This test process and every process below it, from the parent pids in /proc."""
+    children = {}
+    for name in os.listdir('/proc'):
+        if name.isdigit():
+            parent = dev_previews._stat(int(name))[0]
+            if parent is not None:
+                children.setdefault(parent, []).append(int(name))
+    tree, todo = set(), [os.getpid()]
+    while todo:
+        pid = todo.pop()
+        if pid not in tree:
+            tree.add(pid)
+            todo += children.get(pid, [])
+    return tree
+
+
+def fixture_holders(inodes, uid, root='/proc'):
+    """socket_holders that sees only this test's processes (B357). A non-dumpable process elsewhere in the session,
+    such as a hidden-holder test of a second suite, would otherwise make every test socket look shared."""
+    return dev_previews.socket_holders(inodes, uid, root, only=fixture_tree().__contains__)
+
+
+def fixture_listeners(hidden=()):
+    """The real listener table, cut to the sockets that this test's processes hold, plus the inodes in `hidden` (B357).
+    IPv4 and IPv6 pick ephemeral ports apart, so another suite on the host can listen on [::1]:P while a test server
+    holds 127.0.0.1:P. target() would then see a second listener whose holder is not a test process and refuse the
+    port. A non-dumpable holder hides its descriptors, so a test that hides its own holder names the inode."""
+    held = set(hidden)
+    for pid in fixture_tree():
+        try:
+            links = os.listdir('/proc/%d/fd' % pid)
+        except OSError:
+            continue  # non-dumpable or gone
+        for link in links:
+            try:
+                target = os.readlink('/proc/%d/fd/%s' % (pid, link))
+            except OSError:
+                continue
+            if target.startswith('socket:['):
+                held.add(int(target[8:-1]))
+    return [entry for entry in dev_previews.read_listeners() if entry['inode'] in held]
+
+
 # Keep real socket ownership checks. KindTests checks classification with its own process tree.
-LOCAL = {'names': functools.partial(dev_previews.process_names, kind=fixture_kind), 'kind': fixture_kind}
+LOCAL = {'listeners': fixture_listeners, 'holders': fixture_holders, 'kind': fixture_kind,
+         'names': functools.partial(dev_previews.process_names, kind=fixture_kind, holders=fixture_holders)}
 
 
 @unittest.skipUnless(sys.byteorder == 'little', 'the samples are from a little-endian machine')
@@ -128,7 +173,7 @@ class PortTests(unittest.TestCase):
             listener.bind(('127.0.0.1', 0))
             listener.listen(1)
             inode = os.fstat(listener.fileno()).st_ino
-            found = dev_previews.process_names([inode], os.getuid())
+            found = dev_previews.process_names([inode], os.getuid(), holders=fixture_holders)
         if sys.platform.startswith('linux'):
             self.assertEqual(found[inode]['folder'], os.path.basename(os.getcwd()))
             self.assertTrue(found[inode]['name'])
@@ -1092,6 +1137,47 @@ class ProxyTests(unittest.TestCase):
                          ('websocket', 'Upgrade', 'http://localhost:%d' % self.dev_port, '13'))
         self.assertNotIn('cookie', headers)
 
+    def test_a_listener_of_another_suite_on_the_same_port_is_ignored(self):
+        # B357: a second suite on the host may listen on the same port number at another loopback address.
+        import subprocess
+        # Each run takes a loopback address from its own pid, so parallel runs of this test never share address and port.
+        pid = os.getpid()
+        address = '127.%d.%d.%d' % (pid >> 16 & 255, pid >> 8 & 255, pid & 255)
+        code = ('import os,socket,sys,time\nif os.fork(): sys.exit(0)\nos.setsid()\n'  # not a child of this test
+                's=socket.socket(); s.bind((%r, %d)); s.listen()\n'
+                'print(os.getpid(), flush=True); sys.stdout.close(); time.sleep(60)' % (address, self.dev_port))
+        starter = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True)
+        line = starter.stdout.readline()
+        starter.wait()
+        starter.stdout.close()
+        self.assertTrue(line.strip().isdigit(), 'the stranger could not listen on %s:%d' % (address, self.dev_port))
+        self.addCleanup(os.kill, int(line), 9)
+        self.assertIn(self.dev_port, [entry['port'] for entry in dev_previews.read_listeners()
+                                      if str(entry['address']) == address])
+        self.sign_in()
+        self.assertEqual(self.request('GET', '/')[0].status, 200)
+
+    def test_a_hidden_process_of_another_suite_in_this_session_is_ignored(self):
+        # B357: a second suite in the same terminal session may run a non-dumpable process (a hidden-holder test).
+        # Unscoped, socket_holders cannot rule out that it shares the test server's socket, so it drops the socket.
+        import subprocess
+        code = ('import ctypes,os,sys,time\nif os.fork(): sys.exit(0)\n'  # not a child of this test, same session
+                'ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n'  # PR_SET_DUMPABLE, 0
+                'print(os.getpid(), flush=True); sys.stdout.close(); time.sleep(60)')
+        starter = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, text=True)
+        stranger = int(starter.stdout.readline())
+        starter.wait()
+        starter.stdout.close()
+        self.addCleanup(os.kill, stranger, 9)
+        with self.assertRaises(PermissionError):
+            os.listdir('/proc/%d/fd' % stranger)
+        self.assertEqual(dev_previews._stat(stranger)[1], dev_previews._stat(os.getpid())[1])
+        inode = os.fstat(self.upstream.socket.fileno()).st_ino
+        trap = dev_previews.socket_holders([inode], os.getuid(), only=(fixture_tree() | {stranger}).__contains__)
+        self.assertEqual(trap, ({}, True))  # the trap this test avoids: the stranger hides the test server's socket
+        self.sign_in()
+        self.assertEqual(self.request('GET', '/')[0].status, 200)
+
     def test_interim_answers_are_dropped(self):
         self.sign_in()
         response, data = self.request('GET', '/early')
@@ -1591,7 +1677,8 @@ class RealStopTests(unittest.TestCase):
         # port. The bytes would go to the protected process: the new listener must not stand in for it.
         me = os.getpid()
         kind = {'me': 'dev'}
-        previews = DevPreviews(ports=[], names=LOCAL['names'], kind=lambda pid: kind['me'] if pid == me else 'dev')
+        previews = DevPreviews(ports=[], listeners=LOCAL['listeners'], holders=LOCAL['holders'], names=LOCAL['names'],
+                               kind=lambda pid: kind['me'] if pid == me else 'dev')
         server = socket.socket()
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(('127.0.0.1', 0))
@@ -1618,13 +1705,15 @@ class RealStopTests(unittest.TestCase):
         # Review of c676232, item 2: a non-dumpable process hides its descriptors from Tether.
         import subprocess
         child = subprocess.Popen([sys.executable, '-c', 'import ctypes,socket,time\n'
+                                  'import os\n'
                                   's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()\n'
                                   'ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n'  # PR_SET_DUMPABLE, 0
-                                  'print(s.getsockname()[1], flush=True); c=s.accept(); time.sleep(60)'],
+                                  'print(s.getsockname()[1], os.fstat(s.fileno()).st_ino, flush=True)\n'
+                                  'c=s.accept(); time.sleep(60)'],
                                  stdout=subprocess.PIPE, text=True)
         self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
-        port = int(child.stdout.readline())
-        previews = DevPreviews(ports=[], **LOCAL)
+        port, inode = map(int, child.stdout.readline().split())
+        previews = DevPreviews(ports=[], **dict(LOCAL, listeners=functools.partial(fixture_listeners, hidden={inode})))
         self.assertNotIn(port, [row['port'] for row in previews.servers()])  # no visible holder
         with socket.create_connection(('127.0.0.1', port)) as client:
             self.assertEqual(previews.verify(client), 'other')
@@ -1654,7 +1743,7 @@ class RealStopTests(unittest.TestCase):
     def test_every_holder_of_the_connection_is_checked(self):
         # Review of 5b16c08, item 1: the dev parent holds the accepted socket, and so does a protected child.
         port, client, child = self.shared_accept(hide=False)
-        previews = DevPreviews(ports=[], names=LOCAL['names'],
+        previews = DevPreviews(ports=[], listeners=LOCAL['listeners'], holders=LOCAL['holders'], names=LOCAL['names'],
                                kind=lambda pid: 'agent' if pid == child else LOCAL['kind'](pid))
         self.assertIn(port, [row['port'] for row in previews.servers()])  # the listener is the parent's only
         self.assertEqual(previews.verify(client), 'other')
@@ -1673,20 +1762,25 @@ class RealStopTests(unittest.TestCase):
         import signal, subprocess
         script = ('import ctypes,os,socket,time\n'
                   's=socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(); port=s.getsockname()[1]\n'
-                  'kids=[]\n'
+                  'inode=os.fstat(s.fileno()).st_ino\n'
+                  'kids=[]; ready, done = os.pipe()\n'
                   'for hide in (False, True):\n'
                   '    pid=os.fork()\n'
                   '    if pid == 0:\n'
-                  '        if hide: ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n'
-                  '        time.sleep(60); os._exit(0)\n'
+                  '        if hide and ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) == 0: os.write(done, b"1")\n'
+                  '        os.close(done); time.sleep(60); os._exit(0)\n'
                   '    kids.append(pid)\n'
-                  's.close(); print(port, *kids, flush=True); time.sleep(60)')
+                  'os.close(done)\n'  # only the hidden worker holds the write end: its exit ends the read
+                  'if os.read(ready, 1) != b"1":\n'  # not non-dumpable: no readiness line, and stdout closes
+                  '    [os.kill(kid, 9) for kid in kids]; raise SystemExit(1)\n'
+                  's.close(); print(port, inode, *kids, flush=True); time.sleep(60)')
         parent = subprocess.Popen([sys.executable, '-c', script], stdout=subprocess.PIPE, text=True,
                                   start_new_session=True)
         self.addCleanup(lambda: (os.killpg(parent.pid, signal.SIGKILL), parent.wait(), parent.stdout.close()))
-        port, visible, hidden = map(int, parent.stdout.readline().split())
-        holders, complete = dev_previews.socket_holders([row['inode'] for row in DevPreviews(ports=[]).listeners(fresh=True)
-                                                         if row['port'] == port], os.getuid())
+        line = parent.stdout.readline()
+        self.assertTrue(line, 'the hidden worker did not turn non-dumpable')
+        port, inode, visible, hidden = map(int, line.split())
+        holders, complete = dev_previews.socket_holders([inode], os.getuid(), only=fixture_tree().__contains__)
         self.assertTrue(complete)
         self.assertEqual(holders, {})  # the visible worker alone is not trusted
         previews = DevPreviews(ports=[], **LOCAL)

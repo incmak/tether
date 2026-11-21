@@ -79,7 +79,7 @@ export const paneName = (pane: Pane) => pane.pane_name || pane.brief?.name || pa
 export function agentState(pane: Pane): AgentState {
   if (needsYou(pane.state)) return 'prompt'
   if (pane.state === 'Working') return 'working'
-  if (pane.ask && !(pane.ask.snoozed_until && pane.ask.snoozed_until * 1000 > Date.now())) return 'waits'
+  if (pane.ask && !pane.ask.later && !(pane.ask.snoozed_until && pane.ask.snoozed_until * 1000 > Date.now())) return 'waits'
   return 'idle'
 }
 export const STATE_NAMES: Record<AgentState, string> = { working: 'Working', prompt: 'Waits for you', waits: 'Waits for you', idle: 'Idle' }

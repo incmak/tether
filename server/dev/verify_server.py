@@ -80,7 +80,7 @@ REFUSED = {
         # These inspect host services, credentials, processes, or live account data.
         'accounts', 'browser/extension/devices', 'browser/extension/download',
         'browser/live', 'browser/snapshot', 'browser/stream', 'browser/tabs',
-        'dev-preview', 'foundry-spend', 'host-stats', 'live/agent', 'live/brief',
+        'dev-preview', 'foundry-spend', 'friday-notes', 'host-stats', 'live/agent', 'live/brief',
         'login/state', 'passkeys', 'upkeep/ops', 'upkeep/ops/note', 'upkeep/prune', 'usage?live=1',
         # These browse or expose files outside the fixture chat transcript.
         'file', 'files', 'files/list', 'files/places', 'files/preview', 'files/raw',
@@ -92,7 +92,7 @@ REFUSED = {
         'share/list', 'share/raw/{}', 'share/thumb/{}', 'share/uploads', 'share/uploads/{}', 'tool-image',
         # Optional panels and detail views have no fixture contract. The verify
         # browser relay answers the chat stream with 204 so the UI polls instead.
-        'activity', 'activity/export', 'attention', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
+        'activity', 'activity/export', 'attention', 'attention/log', 'audit', 'auto-merge', 'autonomy', 'autonomy/setup',
         'claude-advisor', 'codex-level', 'codex-provider', 'commit-gate', 'groups/context',
         'history', 'history/hidden', 'live', 'projects/advisor-entry', 'projects/advisor-log',
         'projects/note', 'search', 'side-shells', 'stream', 'subagent', 'subagent-task', 'subagent-tool', 'tool',
@@ -104,8 +104,8 @@ REFUSED = {
     'PATCH': {'live/offer'},
     'POST': {
         # These can type into, start, stop, or reconfigure a terminal or agent.
-        'approval', 'ask-answer', 'ask-engage', 'attention/digest', 'attention/handled',
-        'attention/opened', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
+        'approval', 'ask-answer', 'ask-engage', 'attention/back', 'attention/digest', 'attention/handled',
+        'attention/later', 'attention/opened', 'attention/rules', 'attention/snooze', 'auto-resume', 'broadcast', 'clear-draft',
         'continue', 'continue-preview', 'coordinator-role', 'delegate', 'dialog', 'fork', 'groups/close', 'key',
         'live/summary',
         'menu', 'merge', 'message', 'mode', 'model', 'model-options', 'pane-icon', 'pane-icon/draw',
@@ -133,7 +133,10 @@ REFUSED = {
         # These change state outside the small set of fixture writes in ALLOWED.
         'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
         'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
-        'codex-trust', 'commit-gate', 'feedback', 'groups/arrange', 'groups/create', 'groups/move',
+        'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
+        'friday-notes/draft', 'friday-notes/draft-edit', 'friday-notes/draft-send',
+        'friday-notes/draft-close', 'friday-notes/draft-asked',
+        'groups/arrange', 'groups/create', 'groups/move',
         'groups/remove', 'groups/rename', 'groups/reorder', 'groups/ungroup', 'history/hide', 'passkeys',
         'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',
         'projects/note-delete', 'projects/pin', 'projects/seen', 'projects/unpin',

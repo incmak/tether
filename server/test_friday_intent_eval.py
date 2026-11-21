@@ -51,6 +51,93 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertEqual(result['passed'], 0)
                 self.assertEqual(result['fails'], {'claimed_action': 1})
 
+    def test_topic_note_cases_allow_reading_from_outgoing_state_or_the_tool(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        for example in (item for item in data['cases'] if item['id'] in ('topic-list', 'h-topic-list')):
+            with self.subTest(id=example['id']):
+                answer = assistant('You have notes for Urgent Call Spec.')
+                lookup = assistant(tool_calls=[call('read_notes')])
+                for responses in ((answer,), (lookup, answer)):
+                    result, payloads = self.run_script(example, *responses, data=data)
+                    self.assertEqual(result['passed'], 1, result['fails'])
+                    state, = [json.loads(message['content'][len(friday.STATE_PREFIX):])
+                              for message in payloads[-1]['messages']
+                              if (message.get('content') or '').startswith(friday.STATE_PREFIX)]
+                    self.assertEqual(state['topic_notes'], example['topic_notes'])
+
+    def test_timed_reminder_cases_reject_topic_note_writes(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        for example in (item for item in data['cases'] if item['id'] in ('topic-timed-reminder', 'h-topic-timed-reminder')):
+            with self.subTest(id=example['id']):
+                hold = assistant(tool_calls=[call('hold_note', topic='Keys', notes=['Rotate keys.'])])
+                reminder = assistant(tool_calls=[call('reminder_add', reminders=[{'text': 'Rotate keys', 'when': 'tomorrow 10:00'}])])
+                result, _ = self.run_script(example, hold, data=data)
+                self.assertEqual(result['fails'], {'wrong_tool': 1, 'wrong_args': 1})
+                result, _ = self.run_script(example, reminder, data=data)
+                self.assertEqual(result['passed'], 1, result['fails'])
+
+    def test_topic_drop_cases_require_a_readback_and_refuse_negated_deletes(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        drop = assistant(tool_calls=[call('drop_notes', topic='auth')])
+        for prefix in ('', 'h-'):
+            example = next(item for item in data['cases'] if item['id'] == prefix + 'topic-drop-never-mind')
+            result, _ = self.run_script(example, drop, data=data)
+            self.assertEqual(result['passed'], 1, result['fails'])
+            sample, = result['samples']
+            self.assertEqual(sample['reply'], 'Not deleted yet. Should I delete Auth and its note? Yes or no?')
+            self.assertEqual(sample['actions'], [])
+            missing = assistant(tool_calls=[call('drop_notes', topic='missing')])
+            result, _ = self.run_script(example, missing, assistant('I could not find that topic.'), data=data)
+            self.assertIsNone(result['samples'][0]['proposal'])
+            blocked, = result['samples'][0]['blocked']
+            self.assertEqual(blocked['blocked'], 'No topic matches missing. Open topics: Auth.')
+            example = next(item for item in data['cases'] if item['id'] == prefix + 'topic-drop-negated')
+            reply = assistant('Okay, I will keep those notes.')
+            result, _ = self.run_script(example, reply, data=data)
+            self.assertEqual(result['passed'], 1, result['fails'])
+            result, _ = self.run_script(example, drop, reply, data=data)
+            self.assertEqual(result['fails'], {'blocked': 1})
+            self.assertIsNone(result['samples'][0]['proposal'])
+
+    def test_draft_intent_cases_use_fixed_readbacks_and_reject_ordinary_sends(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        cases = {item['id']: item for item in data['cases']}
+        scenarios = {
+            'make a prompt for the auth notes': 'make_prompt',
+            'add a step to run the tests': 'edit_prompt',
+            'send it to api-server': 'send_prompt',
+            'read all of it': 'send_prompt',
+            'send the auth prompt to api-server': 'send_prompt',
+            'yes after an edit': 'send_prompt',
+            'yes to the wrong chat': 'send_prompt',
+            'yes after a Friday question': 'send_prompt',
+        }
+        for prefix, split in (('', 'dev'), ('h-', 'holdout')):
+            for ident, tool in scenarios.items():
+                with self.subTest(ident=ident, split=split):
+                    example = cases[prefix + ident]
+                    self.assertEqual(example['split'], split)
+                    args = {'topic': 'Auth'}
+                    if tool == 'edit_prompt':
+                        args['change'] = example['user']
+                    if ident == 'read all of it':
+                        args['read_all'] = True
+                    if ident == 'yes to the wrong chat':
+                        args['chat'] = 'docs-site'
+                    result, _ = self.run_script(example, assistant(tool_calls=[call(tool, **args)]), data=data)
+                    self.assertEqual(result['passed'], 1, result['fails'])
+                    sample, = result['samples']
+                    if tool == 'send_prompt':
+                        self.assertEqual(sample['actions'], [])
+                        self.assertEqual(sample['proposal']['rev'], 2 if ident == 'yes after an edit' else 1)
+                    if ident == 'send the auth prompt to api-server':
+                        text = example['draft_topics'][0]['draft']['revisions'][-1]['text']
+                        wrong = assistant(tool_calls=[call('send_to_chat', chat='api-server', prompt=text)])
+                        result, _ = self.run_script(example, wrong, assistant('I can read it back.'), data=data)
+                        self.assertEqual(result['passed'], 0)
+                        blocked, = result['samples'][0]['blocked']
+                        self.assertEqual(blocked['blocked'], 'Use send_prompt for a drafted prompt.')
+
     def test_lookup_uses_case_result_and_scores_extra_action(self):
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
                        tool_results={'list_chats': {'chats': ['Friday test']}})

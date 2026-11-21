@@ -23,6 +23,9 @@ const fixture = {
   reminders: { reminders: [] },
   undo: { entries: [], next_undo_label: null, next_redo_label: null },
   usage: { claude: null, codex: null },
+  // The Files screen loads these. A catch-all {} has no entries, and the Files list crashes the page when it lands.
+  'files/list': { path: '/srv/example', parent: '/srv', entries: [{ name: 'notes.md', dir: false, size: 12, modified: 1700000000, kind: 'text' }], truncated: false },
+  'files/places': { home: '/srv/example', pinned: [], sessions: [], disk: null },
 }
 const live = 'Friday Live mode: talk hands-free'
 // Each row is [label, key hint]; '' means the row shows no key hint.
@@ -155,6 +158,8 @@ async function main() {
           await menu.waitFor({ state: 'detached' })
           await page.getByRole('button', { name: 'Files', exact: true }).click()
           await page.locator(width < 900 ? '.phone-files' : '.screen-files').waitFor()
+          // Wait for the listing, so it lands before search opens and not at a random later point.
+          await page.getByText('notes.md', { exact: true }).first().waitFor()
           await openSearch()
           assert.deepEqual(await rows(), width < 900 ? phone(filesCommands) : filesCommands)
           await search.fill('Home')

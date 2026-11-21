@@ -52,7 +52,7 @@ import { ActionDeck, useUrgentDeck } from './ActionDeck'
 import { LessonsReview } from './LessonsReview'
 import { CleanUp } from './Upkeep'
 import { reviewReason, useLessonsReview } from './lessonsReview'
-import { deckItems, useNow, visibleAsk, waitingAsks } from './attention'
+import { deckItems, laterAsks, useNow, visibleAsk, waitingAsks } from './attention'
 import { Home, NoTerminal } from './Home'
 import { hasAgents, homeGroups } from './homeGroups'
 import { DRAG_SLOT, WORKSPACE_QUERY, addPanel, addSlot, deskFor, deskKeyFor, hasPanel, newPanelId, panelCols, placePane, removePanel, withDesk, withPanels, resolveSlots, splitSlot, storeSlots, swapSlots } from './workspace'
@@ -417,6 +417,7 @@ function App() {
   // Only the visible tabs count, like Catch up: an archived tab never opens the deck or gets a card.
   const visiblePanes = useMemo(() => sessions.flatMap(item => item.panes), [sessions])
   const waiting = useMemo(() => prefs.attention ? waitingAsks(visiblePanes, now) : [], [prefs.attention, visiblePanes, now])
+  const later = useMemo(() => prefs.attention ? laterAsks(visiblePanes) : null, [prefs.attention, visiblePanes])
   const [deck, setDeck] = useUrgentDeck(waiting, prefs.attention, factory)
   // The deck also shows the tabs that wait by their state only, as cards that open the tab.
   const deckCards = useMemo(() => prefs.attention ? deckItems(visiblePanes, now) : [], [prefs.attention, visiblePanes, now])
@@ -999,7 +1000,8 @@ function App() {
     const owner = sessions.find(item => item.id === target.tmux_session)
     const at = livePins.findIndex(item => item.pane.id === target.id)
     const sidePin = target.agent !== 'shell' ? { pinned: at >= 0, index: at, total: livePins.length, note: at >= 0 ? livePins[at].pin.note ?? '' : '', onToggle: () => at >= 0 ? unpinPane(target.id) : pinPane(target.id), onNote: (text: string) => notePin(target.id, text), onStep: (dir: 1 | -1) => stepPin(dir, target.id) } : undefined
-    const ask = prefs.attention ? visibleAsk(target, now) : null
+    // An ask in Later shows its own chips (Back to the queue), so the tab says why it left the queue.
+    const ask = prefs.attention ? visibleAsk(target, now) ?? (target.ask?.later ? target.ask : null) : null
     const groupHooks = groupHooksFor(owner)
     const onDropGroup = owner ? (id: string, group: string) => { api('groups/move', { session: owner.id, pane: id, group: group || null }).then(() => refresh(), error => setNotice(errorText(error))) } : undefined
     return <Chat onBacklogAdd={(text, from) => setBacklogAdd({ text, pane: from })} headerExtra={view ? undefined : <OldestButton compact sort={waitSort} onDeck={() => setDeck(true)} items={waiting} sessions={sessions} selected={openId} onOpen={openPane} />}
@@ -1065,7 +1067,7 @@ function App() {
     {pane && view && wide && <BrowserFloat api={api} pane={pane} onDock={() => { if (!hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} onClose={() => { if (hasPanel(panelCols(desk), 'browser')) togglePanelKind(setPanels, 'browser') }} />}
     {showPanel('waiting') && <WaitingPanel api={api} cards={groups.needs} asks={(prefs.attention && (waiting.length || review)) || reminderEntry ? <WaitingBox items={waiting} sessions={sessions} selected={openId} limit={0} sort={waitSort} review={prefs.attention ? review : undefined} reminder={reminderEntry} onOpen={openPane} onDeck={() => setDeck(true)} /> : undefined} edge={lookShown.grid.columns.some(column => (column.top === 'waiting' || column.bottom === 'waiting') && (column.main !== 'sessions' || desk.sidebar))} onOpen={openPane} onUpdate={() => void refresh()} />}
     {showPanel('status') && <StatusColumn groups={groups} panes={panes} sessions={sessions} selected={openId} onOpen={openPane} />}
-    {home && <Home api={api} groups={groups} asks={waiting} reminders={reminderEntry} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
+    {home && <Home api={api} groups={groups} asks={waiting} later={later} reminders={reminderEntry} sessions={sessions} sort={waitSort} decisions={decisionsGroup()} decisionCount={decisionCount} hasAgents={hasAgents(panes)} loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onOpen={openPane} onMarkRead={markRead} onUpdate={() => void refresh()} onNew={() => setNewSession({})} onMenu={() => setDrawer(true)} onBacklog={() => setBacklog({ mode: 'sheet' })} />}
     {noTerminal && <NoTerminal loaded={!!data} loading={loading} error={error} onRetry={() => void refresh()} onMenu={() => setDrawer(true)} />}
     {files && <Suspense fallback={<PanelLoading label="Files" />}><Explorer api={api} panes={panes} pane={pane} target={filesTarget} onTarget={() => setFilesTarget(null)} onAddToMessage={addToMessage} onTerminalHere={terminalHere} onPin={pinTarget} /></Suspense>}
     {share && <Suspense fallback={<PanelLoading label="Share" cover={!wide} />}><Share wide={wide} onAddToMessage={wide ? addToMessage : pane ? paths => {

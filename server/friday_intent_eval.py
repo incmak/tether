@@ -22,7 +22,7 @@ else:
 DEFAULT_CASES = Path(__file__).with_name('fixtures') / 'friday_intent' / 'cases.json'
 GROUPS = frozenset('approval backlog_add backlog_list backlog_send cant_do confirm deny event '
                    'list_chats misheard new_chat no_tool outside panel read_reply readback reminder '
-                   'send_direct show split_turn status switch'.split())
+                   'send_direct show split_turn status switch topic_notes'.split())
 LOOKUPS = {'list_chats', 'backlog_list', 'read_last_reply'}
 CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
@@ -48,8 +48,15 @@ def _asks_send_to(reply, chat):
 
 def proposal_args(proposal):
     """The action a read-back proposes, including a call transcript attachment."""
+    if proposal['name'] == 'drop_notes':
+        args = {'topic': proposal['chat']}
+        if proposal['note'] is not None:
+            args['note'] = proposal['note']
+        return args
     if proposal['name'] == 'answer_approval':
         return {'chat': proposal['chat'], 'decision': proposal['payload']}
+    if proposal['name'] == 'send_prompt':
+        return {'topic': proposal['topic'], 'chat': proposal['chat'], 'read_all': proposal['read_all']}
     args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
     if proposal.get('attach'):
         args['attach_call'] = True
@@ -61,7 +68,6 @@ def _score(trace, expect, expected_tools):
     name, args = (action['name'], action['args']) if action else (None, {})
     readback_chat = expect.get('readback_chat')
     if expect.get('readback_ok') and proposal is not None and action is None:
-        # A read-back of the expected send also passes: the guard sends only text the user heard.
         name, args = proposal['name'], proposal_args(proposal)
     readback_instead = (proposal is not None and action is None and None not in expected_tools
                         and not expect.get('readback_ok'))
@@ -92,7 +98,7 @@ def _score(trace, expect, expected_tools):
     if readback_chat is not None:
         readback_tool = expect.get('readback_tool', 'send_to_chat')
         if proposal is None:
-            matches = readback_tool != 'answer_approval' and _asks_send_to(reply, readback_chat)
+            matches = readback_tool not in ('answer_approval', 'drop_notes', 'send_prompt') and _asks_send_to(reply, readback_chat)
         else:
             matches = (proposal['name'] == readback_tool
                        and proposal['chat'].strip().casefold() == readback_chat.casefold())
@@ -136,8 +142,22 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             if friday.is_real_user(m) and isinstance(m.get('content'), str)
             and m['content'].strip() and not m['content'].startswith(friday.EVENT_PREFIX))
     user_turn = 1
+    draft_topics = case.get('draft_topics', [])
+
+    def resolve(chat):
+        for target in fixture.get('draft_targets', []):
+            if ' '.join(target['name'].casefold().split()) == ' '.join(chat.casefold().split()):
+                return target
+        raise friday.friday_notes.NotesError(f'No chat called {chat}.', 404)
+
     # An eval case's stored proposal stands for a read-back that played to the end.
-    pending = friday.SendProposal(**case['pending'], turn=0, heard=True) if 'pending' in case else None
+    saved_pending = case.get('pending')
+    pending = None
+    if saved_pending:
+        fields = dict(saved_pending)
+        if 'target' in fields:
+            fields['target'] = tuple(fields['target'])
+        pending = friday.SendProposal(**fields, turn=0, heard=True)
     if pending and not pending.follows(previous_assistant):
         pending = None
     declined = None
@@ -145,6 +165,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         declined, pending = pending, None  # The guards still check the decline in this run.
     used = set()
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
+    topic_notes = case.get('topic_notes')
 
     if declined and source == 'speech' and friday.bare_decline(declined, last_user_text):
         trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime does not run the model
@@ -152,7 +173,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
     for _ in range(4):
         suggestions = friday.suggested_replies(messages) if source == 'speech' else ()
         trace['steps'] += 1
-        payload = {'model': brain.model, 'messages': signed(messages), 'tools': prefix['tools'],
+        outgoing = friday.with_state_time(messages, {'topic_notes': topic_notes}) if topic_notes else messages
+        payload = {'model': brain.model, 'messages': signed(outgoing), 'tools': prefix['tools'],
                    'max_tokens': brain.max_tokens, **brain.extra}
         message = dict(complete(payload))
         usage = message.pop('_usage', None) or {}
@@ -169,17 +191,44 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
             name, args = call['function']['name'], _tool_args(call)
             args = friday.confirmed_args(name, args, last_user_text, previous_assistant, pending or declined, user_turn)
             reason = friday.check_tool(name, args, source, last_user_text, used, previous_assistant,
-                                       pending=pending or declined, user_turn=user_turn, suggestions=suggestions)
-            if reason in (friday.READBACK_REQUIRED, friday.APPROVAL_CONFIRM_REQUIRED):
-                if trace['proposal'] is None:
-                    proposal = friday.SendProposal.from_args(name, args, user_turn)
+                                       pending=pending or declined, user_turn=user_turn, suggestions=suggestions,
+                                       draft_topics=draft_topics)
+            draft_proposal = None
+            if name == 'send_prompt' and (reason is None or reason == friday.READBACK_REQUIRED):
+                try:
+                    draft_proposal = friday.prompt_readback_proposal(args, user_turn, draft_topics, resolve)
+                except friday.friday_notes.NotesError as exc:
+                    reason = str(exc)
+                else:
+                    if reason is None and draft_proposal.key != pending.key:
+                        reason = friday.READBACK_REQUIRED
+            if reason in (friday.READBACK_REQUIRED, friday.APPROVAL_CONFIRM_REQUIRED) and trace['proposal'] is None:
+                try:
+                    if name == 'drop_notes':
+                        topics = [dict(id=f'T{i}', title=item['topic'], state='open', updated=0,
+                                       notes=[{'text': text} for text in item['notes']])
+                                  for i, item in enumerate(topic_notes or [], 1)]
+                        proposal = friday.drop_readback_proposal(args, user_turn, topics)
+                    elif name == 'send_prompt':
+                        proposal = draft_proposal
+                    else:
+                        proposal = friday.SendProposal.from_args(name, args, user_turn)
+                except friday.friday_notes.NotesError as exc:
+                    reason = str(exc)
+                else:
                     trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                    if name == 'drop_notes':
+                        trace['proposal']['note'] = proposal.target[1]
+                    if name == 'send_prompt':
+                        trace['proposal'].update(topic=proposal.topic, rev=proposal.target[1], read_all=proposal.target[4])
                     if proposal.attach:
                         trace['proposal']['attach'] = True
                     pending = None
                     trace['reply'] = friday.send_readback(proposal)
+            if reason in (friday.READBACK_REQUIRED, friday.APPROVAL_CONFIRM_REQUIRED):
                 status = (friday.APPROVAL_READBACK_START[args['decision']]
-                          if reason == friday.APPROVAL_CONFIRM_REQUIRED else 'Not sent yet.')
+                          if reason == friday.APPROVAL_CONFIRM_REQUIRED
+                          else 'Not deleted yet.' if name == 'drop_notes' else 'Not sent yet.')
                 result = {'error': f'{status} Friday asked the user to confirm.'}
             elif reason == friday.APPROVAL_DECLINED:
                 # The runtime speaks a fixed reply and does not run the model again; later calls still run.
@@ -191,6 +240,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 result = {'error': reason}
             else:
                 used.add(name)
+                if name == 'send_prompt':
+                    pending = None
                 if name == 'read_last_reply':
                     trace['reads'].append(str(args.get('chat') or ''))
                     returned = results.get(name, {})
@@ -267,12 +318,23 @@ def load_fixture(path):
             raise ValueError(f'{label}: event must be a boolean')
         if 'pending' in case:
             pending = case['pending']
-            if (not isinstance(pending, dict) or pending.keys() != {'name', 'chat', 'payload'}
-                    or pending['name'] not in (*friday.SEND_TOOLS, 'answer_approval')
-                    or not all(isinstance(value, str) for value in pending.values())):
+            base = {'name', 'chat', 'payload'}
+            is_draft = isinstance(pending, dict) and pending.get('name') == 'send_prompt'
+            keys = base | {'target', 'topic', 'requested_topic', 'summary', 'skill'} if is_draft else base
+            if (not isinstance(pending, dict) or pending.keys() != keys
+                    or pending['name'] not in (*friday.DELIVERY_TOOLS, 'answer_approval')
+                    or not all(isinstance(pending[key], str) for key in base)):
                 raise ValueError(f'{label}: pending must specify a read-back tool name, chat and payload')
             if pending['name'] == 'answer_approval' and pending['payload'] not in ('approve', 'deny'):
                 raise ValueError(f'{label}: pending approval payload must be approve or deny')
+            if is_draft:
+                target = pending['target']
+                if (not isinstance(target, list) or len(target) != 5 or not isinstance(target[0], str)
+                        or type(target[1]) is not int or not all(isinstance(value, str) for value in target[2:4])
+                        or type(target[4]) is not bool
+                        or not all(isinstance(pending[key], str) for key in ('topic', 'requested_topic', 'summary'))
+                        or (pending['skill'] is not None and not isinstance(pending['skill'], str))):
+                    raise ValueError(f'{label}: invalid pending draft proposal')
         _validate_context(case, label, names)
         _validate_expectation(case.get('expect'), label, names)
     return fixture
@@ -281,6 +343,16 @@ def load_fixture(path):
 def _validate_context(data, label, names):
     if not isinstance(data.get('state', {}), dict) or not isinstance(data.get('tool_results', {}), dict):
         raise ValueError(f'{label}: state and tool_results must be objects')
+    if not isinstance(data.get('topic_notes', []), list):
+        raise ValueError(f'{label}: topic_notes must be a list')
+    if (not isinstance(data.get('draft_topics', []), list)
+            or not all(friday.friday_notes._valid(topic) for topic in data.get('draft_topics', []))):
+        raise ValueError(f'{label}: invalid draft topic store')
+    if (not isinstance(data.get('draft_targets', []), list)
+            or not all(isinstance(target, dict) and
+                       all(isinstance(target.get(key), str) for key in ('pane', 'thread', 'name', 'agent'))
+                       for target in data.get('draft_targets', []))):
+        raise ValueError(f'{label}: invalid draft target list')
     for name in data.get('tool_results', {}):
         if name not in names:
             raise ValueError(f'{label}: unknown tool {name!r}')
@@ -317,12 +389,12 @@ def _validate_expectation(expect, label, names):
             re.compile(pattern)
     except (TypeError, re.error, OverflowError) as exc:
         raise ValueError(f'{label}: invalid regex ({exc})') from None
-    if 'readback_ok' in expect and not (isinstance(expect['readback_ok'], bool) and tool in friday.SEND_TOOLS):
-        raise ValueError(f'{label}: readback_ok must be true or false on a send case')
+    if 'readback_ok' in expect and not (isinstance(expect['readback_ok'], bool) and tool in friday.CONSENT_TOOLS):
+        raise ValueError(f'{label}: readback_ok must be true or false on a read-back tool case')
     if 'readback_chat' in expect and not isinstance(expect['readback_chat'], str):
         raise ValueError(f'{label}: readback_chat must be text')
-    if 'readback_tool' in expect and expect['readback_tool'] not in (*friday.SEND_TOOLS, 'answer_approval'):
-        raise ValueError(f'{label}: readback_tool must be a send or approval tool')
+    if 'readback_tool' in expect and expect['readback_tool'] not in (*friday.CONSENT_TOOLS, 'answer_approval'):
+        raise ValueError(f'{label}: readback_tool must use the read-back path')
 
 
 class LiveError(RuntimeError):

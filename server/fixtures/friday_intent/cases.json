@@ -46,6 +46,20 @@
    "text": "I added the health check endpoint and the tests pass."
   }
  },
+ "draft_targets": [
+  {
+   "name": "api-server",
+   "pane": "%42",
+   "thread": "api-thread",
+   "agent": "codex"
+  },
+  {
+   "name": "docs-site",
+   "pane": "%43",
+   "thread": "docs-thread",
+   "agent": "claude"
+  }
+ ],
  "cases": [
   {
    "id": "log-ask-why-slow",
@@ -2682,6 +2696,1604 @@
      "prompt": "(?i)read|reply|response|cut|trunc"
     }
    }
+  },
+  {
+   "id": "topic-keep-together",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Keep the quiet hours from ten at night to seven in the morning."
+    },
+    {
+     "role": "assistant",
+     "content": "Okay."
+    }
+   ],
+   "user": "keep this for urgent call spec, we'll send them together",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)urgent call spec",
+     "notes": "(?i)quiet hours"
+    }
+   }
+  },
+  {
+   "id": "topic-remember-chat",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "remember this for the api-server chat: use port 8080",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)api.server",
+     "notes": "(?i)use port 8080"
+    }
+   }
+  },
+  {
+   "id": "topic-timed-reminder",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "remind me tomorrow to rotate keys",
+   "expect": {
+    "tool": "reminder_add",
+    "args": {
+     "reminders": "(?i)rotate.*keys"
+    }
+   }
+  },
+  {
+   "id": "topic-drop",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "drop the urgent call spec notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
+    "args": {
+     "topic": "(?i)urgent call spec"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "topic-list",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "what notes do I have?",
+   "expect": {
+    "tool": null,
+    "any_tool": [
+     "read_notes"
+    ],
+    "reply": "(?i)urgent call spec"
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ],
+   "tool_results": {
+    "read_notes": {
+     "count": 1,
+     "topics": [
+      "Urgent Call Spec (1 note)"
+     ]
+    }
+   }
+  },
+  {
+   "id": "h-topic-keep-together",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "My answer is that the owner decides what is urgent."
+    },
+    {
+     "role": "assistant",
+     "content": "I heard your answer."
+    }
+   ],
+   "user": "hold on to that answer for urgent call spec, don't send it yet",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)urgent call spec",
+     "notes": "(?i)owner"
+    }
+   }
+  },
+  {
+   "id": "h-topic-remember-chat",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "for the api server chat, remember this: the port is 8080",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)api.server",
+     "notes": "8080"
+    }
+   }
+  },
+  {
+   "id": "h-topic-timed-reminder",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "remember to remind me to rotate my keys tomorrow morning",
+   "expect": {
+    "tool": "reminder_add",
+    "args": {
+     "reminders": "(?i)rotate.*keys"
+    }
+   }
+  },
+  {
+   "id": "h-topic-drop",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "clear the saved notes for urgent call spec",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
+    "args": {
+     "topic": "(?i)urgent call spec"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-list",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "which topics have I saved notes for?",
+   "expect": {
+    "tool": null,
+    "any_tool": [
+     "read_notes"
+    ],
+    "reply": "(?i)urgent call spec"
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ],
+   "tool_results": {
+    "read_notes": {
+     "count": 1,
+     "topics": [
+      "Urgent Call Spec (1 note)"
+     ]
+    }
+   }
+  },
+  {
+   "id": "topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "topic-drop-negated",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-negated",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "make a prompt for the auth notes",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "make a prompt for the auth notes",
+   "expect": {
+    "tool": "make_prompt",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "add a step to run the tests",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "add a step to run the tests",
+   "expect": {
+    "tool": "edit_prompt",
+    "args": {
+     "topic": "(?i)auth",
+     "change": "(?i)^add a step to run the tests$"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ]
+  },
+  {
+   "id": "send it to api-server",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "send it to api-server",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "read all of it",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "read all of it",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^True$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "send the auth prompt to api-server",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "send the auth prompt to api-server",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "yes after an edit",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "yes",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 2\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 2,
+      "summary": "Keep the token check and run the full suite.",
+      "skill": null,
+      "length": 245
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 2,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 2,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       },
+       {
+        "rev": 2,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests. Also run the full suite.",
+        "skill": null,
+        "summary": "Keep the token check and run the full suite.",
+        "edit": "Run the full suite.",
+        "at": 2
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "yes to the wrong chat",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "yes, send it to docs-site",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "docs-site",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "yes after a Friday question",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    },
+    {
+     "role": "user",
+     "content": "How long is it?"
+    },
+    {
+     "role": "assistant",
+     "content": "It is on screen. Do you want me to send it?"
+    }
+   ],
+   "user": "yes",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-make a prompt for the auth notes",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "draft a full prompt from the auth notes",
+   "expect": {
+    "tool": "make_prompt",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-add a step to run the tests",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "add a step to check expired tokens",
+   "expect": {
+    "tool": "edit_prompt",
+    "args": {
+     "topic": "(?i)auth",
+     "change": "(?i)^add a step to check expired tokens$"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-send it to api-server",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "send that to api-server now",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-read all of it",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "let me hear the whole prompt",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^True$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-send the auth prompt to api-server",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Make a prompt for the auth notes."
+    },
+    {
+     "role": "assistant",
+     "content": "The prompt for Auth is ready, version 1. Keep the token check. Say send it to a chat, read all of it, or a change."
+    }
+   ],
+   "user": "send my drafted auth prompt to api-server",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-yes after an edit",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "yes send it",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 2\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 2,
+      "summary": "Keep the token check and run the full suite.",
+      "skill": null,
+      "length": 245
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 2,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 2,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       },
+       {
+        "rev": 2,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests. Also run the full suite.",
+        "skill": null,
+        "summary": "Keep the token check and run the full suite.",
+        "edit": "Run the full suite.",
+        "at": 2
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-yes to the wrong chat",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    }
+   ],
+   "user": "yes, to docs-site",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "docs-site",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": "h-yes after a Friday question",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Send it to api-server."
+    },
+    {
+     "role": "assistant",
+     "content": "Not sent yet. Should I send the Auth prompt, version 1, to api-server? Keep the token check. The full draft is on screen, 220 characters. Yes or no?"
+    },
+    {
+     "role": "user",
+     "content": "How long is it?"
+    },
+    {
+     "role": "assistant",
+     "content": "It is on screen. Do you want me to send it?"
+    }
+   ],
+   "user": "go ahead",
+   "expect": {
+    "tool": "send_prompt",
+    "readback_ok": true,
+    "readback_tool": "send_prompt",
+    "readback_chat": "api-server",
+    "args": {
+     "topic": "(?i)^auth$",
+     "read_all": "^False$"
+    },
+    "reply": "version 1\\b"
+   },
+   "pending": {
+    "name": "send_prompt",
+    "chat": "api-server",
+    "payload": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+    "target": [
+     "T1",
+     1,
+     "%42",
+     "api-thread",
+     false
+    ],
+    "topic": "Auth",
+    "requested_topic": "Auth",
+    "summary": "Keep the token check.",
+    "skill": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ],
+     "chat": "api-server",
+     "draft": {
+      "state": "ready",
+      "rev": 1,
+      "summary": "Keep the token check.",
+      "skill": null,
+      "length": 220
+     }
+    }
+   ],
+   "draft_topics": [
+    {
+     "id": "T1",
+     "title": "Auth",
+     "chat": "api-server",
+     "notes": [
+      {
+       "text": "Keep the token check.",
+       "at": 1
+      }
+     ],
+     "state": "open",
+     "created": 1,
+     "updated": 1,
+     "sent_at": null,
+     "sent_to": null,
+     "draft": {
+      "state": "ready",
+      "error": null,
+      "started": 1,
+      "updated": 1,
+      "asked_close": false,
+      "revisions": [
+       {
+        "rev": 1,
+        "text": "Preserve the existing token check for signed requests. Inspect the request handlers and list the routes that depend on the current check. Add coverage for an expired token and a valid token. Run the focused server tests.",
+        "skill": null,
+        "summary": "Keep the token check.",
+        "edit": null,
+        "at": 1
+       }
+      ],
+      "chat": {
+       "pane": "%44",
+       "thread": "draft-thread",
+       "name": "Draft Auth"
+      }
+     }
+    }
+   ]
   }
  ]
 }
