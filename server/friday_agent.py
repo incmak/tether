@@ -114,6 +114,7 @@ STATE_PREFIX = 'Current Tether state: '
 EVENT_PREFIX = 'Tether news to tell the user in one sentence; do not act on it: '
 CALL_GAP_SECONDS = 900
 CALL_TRANSCRIPT_LIMIT = 40000
+CALL_PROMPT_LIMIT = 60000
 MAX_REPLY_TOKENS = 120
 BARGE_IN_WORDS = 3
 FRIDAY_HOTWORDS = ('Tether', 'tether')
@@ -129,6 +130,10 @@ SEND_INTENT = re.compile(
 CALL_LOG_INTENT = re.compile(
     r'\b(?:voice logs?|call logs?|transcript|conversation|(?:this|the|our|whole) call|call with (?:you|friday)'
     r'|logs? (?:i had )?with you|(?:what|everything) (?:we|i) (?:said|discussed))\b', re.I)
+CALL_LOG_EXCLUSION = re.compile(
+    r"\b(?:without|not|never|don['’]?t|no|exclud(?:e|es|ed|ing)|except|omit|skip|avoid|private"
+    r"|leave(?:\W+\w+){0,8}\W+out|keep(?:\W+\w+){0,8}\W+private)\b", re.I)
+CALL_NOT_REQUESTED = 'The user did not ask to send the call.'
 APPROVAL_YES = re.compile(r'\b(?:approve|approved|yes|yeah|yep|ok|okay|sure|allow|go ahead)\b', re.I)
 APPROVAL_NO = re.compile(r"\b(?:deny|denied|no|nope|reject|stop|don't)\b", re.I)
 # "Do not approve it" or "Not yet" decides nothing: a negation refuses answer_approval, never denies.
@@ -638,6 +643,17 @@ def send_intent(text):
     return False
 
 
+def excludes_call(text):
+    """Treat an exclusion close to any call mention as a veto."""
+    mentions = list(CALL_LOG_INTENT.finditer(text))
+    for exclusion in CALL_LOG_EXCLUSION.finditer(text):
+        for mention in mentions:
+            between = text[exclusion.end():mention.start()] or text[mention.end():exclusion.start()]
+            if len(re.findall(r"\w+(?:['’]\w+)*", between)) <= 4:
+                return True
+    return False
+
+
 # Broad on purpose: any send word in a message that asks something makes it a possible send question.
 SEND_WORDS = re.compile(r'\b(?:send|sent|tell|ask|instruct|forward|pass|message|prompt|relay|post|share|ping|poke|'
                         r'nudge|notify|contact|remind|update|reach|hand|assign|delegate|give|let)\b', re.I)
@@ -690,6 +706,9 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     live = pending is not None and pending.live(user_turn)
     follows_readback = live and pending.follows(previous_assistant)
     has_proposal = follows_readback and pending.heard
+    attach = name == 'send_to_chat' and bool(args.get('attach_call'))
+    if attach and excludes_call(last_user_text):
+        return CALL_NOT_REQUESTED
     if (source == 'speech' and name in SEND_TOOLS and live
             and (follows_readback or (not pending.heard and not previous_assistant.strip()))
             and APPROVAL_NO.search(last_user_text)):
@@ -729,13 +748,12 @@ def check_tool(name, args, source, last_user_text, used, previous_assistant='', 
     if name in SEND_TOOLS:
         payload = str(args.get('prompt' if name == 'send_to_chat' else 'item', ''))
         chat = str(args.get('chat', '')).strip().casefold()
-        attach = name == 'send_to_chat' and bool(args.get('attach_call'))
         # A yes confirms the one send Friday proposed: the same tool and chat, and the read-back text exactly.
         proposal_matches = (has_proposal and name == pending.name and chat == pending.chat.strip().casefold()
                             and attach == pending.attach and binds(payload, pending.payload))
         yes = plain_yes(last_user_text, chat)
         if attach and not (CALL_LOG_INTENT.search(last_user_text) or (yes and proposal_matches)):
-            return 'The user did not ask to send the call.'
+            return CALL_NOT_REQUESTED
         if suggestions:
             normalized_payload = norm(payload)
             normalized_speech = norm(last_user_text)
@@ -837,13 +855,18 @@ class CallLog:
         self._messages = {}
 
     def start_session(self):
+        self.generation += 1
         if self.turns and self.clock() - self.turns[-1][0] >= CALL_GAP_SECONDS:
             self.turns.clear()
             self._messages.clear()
-            self.generation += 1
+
+    def record_spoken(self, text, *, generation=None):
+        """Record Friday speech that never enters the model context, such as the read-back cue."""
+        if (generation is None or generation == self.generation) and text.strip():
+            self.turns.append((self.clock(), 'friday', text.strip()))
 
     def record_messages(self, messages, *, generation=None):
-        # A peer whose teardown timed out can still deliver frames after a new call starts.
+        # A peer whose teardown timed out can still deliver frames after reconnect.
         if generation is not None and generation != self.generation:
             return
         for message in messages:
@@ -866,7 +889,7 @@ class CallLog:
             self.turns.append((self.clock(), who, text))
 
 
-def format_call_transcript(turns):
+def format_call_transcript(turns, budget=CALL_TRANSCRIPT_LIMIT):
     """Return a JSON-size-bounded transcript and the number of turns it includes."""
     if not turns:
         return '', 0
@@ -885,14 +908,16 @@ def format_call_transcript(turns):
     size = sum(sizes)
     for cut, line_size in enumerate(sizes):
         header = heading(cut)
-        if len(json.dumps(header)) + size <= CALL_TRANSCRIPT_LIMIT:
+        if len(json.dumps(header)) + size <= budget:
             return header + '\n' + '\n'.join(lines[cut:]), len(lines) - cut
         size -= line_size
 
     # If even the final turn is too large, keep as much of it as fits.
     suffix = ' [turn cut]'
-    limit = CALL_TRANSCRIPT_LIMIT - len(json.dumps(header + '\n' + suffix)) + 2
+    limit = budget - len(json.dumps(header + '\n' + suffix)) + 2
     end = bisect_right(range(len(lines[-1]) + 1), limit, key=lambda n: len(json.dumps(lines[-1][:n]))) - 1
+    if end <= len(turns[-1][1].capitalize() + ': '):
+        return '', 0
     return header + '\n' + lines[-1][:end] + suffix, 1
 
 
@@ -1667,6 +1692,8 @@ def runtime_types():
 
         async def speak_readback(self, text, marker_id, *, cue):
             if cue:
+                # The cue tells the user when to confirm, so the call transcript keeps it.
+                self.call_log.record_spoken(READBACK_CUE, generation=self.call_log_generation)
                 await self.push_frame(FridayReadbackSpeechFrame(READBACK_CUE, append_to_context=False))
             await self.push_frame(FridayReadbackSpeechFrame(text, marker_id=marker_id))
 
@@ -1721,6 +1748,7 @@ def runtime_types():
                     if reply is not previous_tail and reply['role'] == 'assistant' and not reply.get('tool_calls'):
                         # The aggregator pushes a context frame immediately after committing speech.
                         # Pipecat commits TTSSpeakFrame text here too, including Friday's ack and read-back.
+                        # Fillers stay out of context and the transcript; speak_readback records the cue.
                         self.call_log.record_messages((reply,), generation=self.call_log_generation)
                         snapshot = response.request_messages if response is not None else speech_snapshot
                         self._last_reply = (reply, snapshot)
@@ -1950,8 +1978,14 @@ def runtime_types():
                         run.failed_action = True
                         await params.result_callback({'error': 'There is no call to send yet.'})
                         return
-                    transcript, call_turn_count = format_call_transcript(run.call_turns)
-                    params.arguments['prompt'] = str(args.get('prompt', '')) + '\n\n' + transcript
+                    prompt = str(args.get('prompt', '')) + '\n\n'
+                    budget = min(CALL_TRANSCRIPT_LIMIT, CALL_PROMPT_LIMIT - len(json.dumps(prompt)))
+                    transcript, call_turn_count = format_call_transcript(run.call_turns, budget)
+                    if not transcript:
+                        run.failed_action = True
+                        await params.result_callback({'error': 'The prompt is too long to add the call.'})
+                        return
+                    params.arguments['prompt'] = prompt + transcript
             if run and response:
                 run.pending[params.tool_call_id] = SimpleNamespace(
                     name=params.function_name, args=args, response=response, call_turn_count=call_turn_count)

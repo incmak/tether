@@ -281,6 +281,16 @@ class CallLogTests(unittest.TestCase):
         log.record_messages(messages + [dict(user), dict(reply)])
         self.assertEqual(log.turns, [(500, 'user', 'Check docs.'), (500, 'friday', 'Okay.')] * 2)
 
+    def test_records_the_spoken_readback_cue_for_the_current_peer_only(self):
+        log = friday.CallLog(clock=lambda: 500)
+        log.start_session()
+        old = log.generation
+        log.record_spoken(friday.READBACK_CUE, generation=old)
+        log.start_session()
+        log.record_spoken('Late cue from the old peer.', generation=old)
+        log.record_spoken('  ', generation=log.generation)
+        self.assertEqual(log.turns, [(500, 'friday', friday.READBACK_CUE)])
+
     def test_transcript_cuts_oldest_turns_to_fit_escaped_json(self):
         turns = [(0, 'user', 'Earlier request'), (60, 'friday', '😀' * 4000),
                  (120, 'user', 'Keep this "quote" and é.')]
@@ -676,6 +686,22 @@ class FridayRulesTests(unittest.TestCase):
                                  'The user did not ask to send the call.')
                 self.assertIsNone(friday.check_tool('send_to_chat', dict(args, attach_call=False),
                                                     'speech', words, set()))
+
+    def test_attachment_refuses_nearby_exclusions(self):
+        args = {'chat': 'docs', 'prompt': 'Review it.', 'attach_call': True}
+        for words in ('Send the build log to docs, without this call transcript',
+                      'Send the notes to docs, but keep our conversation private',
+                      'Send the notes to docs; leave this call out',
+                      'Send the notes about our conversation to docs, but don’t include the transcript'):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', words, set()),
+                                 'The user did not ask to send the call.')
+                self.assertIsNone(friday.check_tool('send_to_chat', dict(args, attach_call=False),
+                                                    'speech', words, set()))
+        proposal = friday.SendProposal('send_to_chat', 'docs', 'Review it.', 1, heard=True, attach=True)
+        self.assertEqual(friday.check_tool('send_to_chat', args, 'speech', 'Yes, but no transcript.', set(),
+                                         friday.send_readback(proposal), proposal, 2),
+                         'The user did not ask to send the call.')
 
     def test_yes_cannot_change_transcript_consent_in_either_direction(self):
         name = 'send_to_chat'
@@ -2049,7 +2075,8 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         rt = Mock(wraps=self.rt)
         rt.SharedVAD.return_value = None
         turns = [{'role': 'user', 'content': 'First question.'}, {'role': 'assistant', 'content': 'First reply.'}]
-        for now in (1000, 1000 + friday.CALL_GAP_SECONDS - 1, 1000 + friday.CALL_GAP_SECONDS):
+        reconnect = 1000 + friday.CALL_GAP_SECONDS - 1
+        for now in (1000, reconnect, reconnect + friday.CALL_GAP_SECONDS):
             with self.subTest(now=now):
                 clock.return_value = now
                 connection = SmallWebRTCConnection(ice_servers=[])
@@ -2057,15 +2084,22 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 try:
                     self.assertIs(session.llm.call_log, log)
                     if now == 1000:
-                        log.record_messages(turns)
                         old_generation = session.llm.call_log_generation
-                    elif now < 1000 + friday.CALL_GAP_SECONDS:
-                        self.assertEqual(session.llm.call_log_generation, old_generation)
+                        log.record_messages(turns, generation=old_generation)
+                    elif now == reconnect:
+                        log.record_messages([{'role': 'user', 'content': 'After reconnect.'}],
+                                            generation=session.llm.call_log_generation)
+                        log.record_messages([{'role': 'assistant', 'content': 'Late reply.'}],
+                                            generation=old_generation)
                         self.assertEqual(log.turns, [(1000, 'user', 'First question.'),
-                                                     (1000, 'friday', 'First reply.')])
+                                                     (1000, 'friday', 'First reply.'),
+                                                     (now, 'user', 'After reconnect.')])
+                        self.assertGreater(session.llm.call_log_generation, old_generation)
+                        old_generation = session.llm.call_log_generation
                     else:
                         self.assertEqual(log.turns, [])
-                        log.record_messages([{'role': 'user', 'content': 'New call.'}])
+                        log.record_messages([{'role': 'user', 'content': 'New call.'}],
+                                            generation=session.llm.call_log_generation)
                         log.record_messages([{'role': 'assistant', 'content': 'Late reply.'}],
                                             generation=old_generation)
                         self.assertEqual(log.turns, [(now, 'user', 'New call.')])
@@ -2246,6 +2280,63 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
             session.rtvi.handle_function_call.assert_awaited_once_with(params)
             self.assertTrue(params.arguments['prompt'].endswith('\nUser: Send this call to docs.'))
             self.assertNotIn('Later speech.', params.arguments['prompt'])
+        finally:
+            llm._active_run.reset(token)
+            await llm._client.close()
+
+    async def test_reconnect_refuses_an_old_peers_transcript_send(self):
+        log = friday.CallLog(clock=lambda: 1000)
+        log.start_session()
+        session = SimpleNamespace(call_log=log, rtvi=SimpleNamespace(handle_function_call=AsyncMock()))
+        llm = self.rt.FridayLLM(session, friday.brain_config({}))
+        request = {'role': 'user', 'content': 'Send this call to docs.'}
+        log.record_messages([request], generation=llm.call_log_generation)
+        run = llm.prepare_run([request])
+        log.start_session()
+        params = SimpleNamespace(function_name='send_to_chat', tool_call_id='call',
+                                 arguments={'chat': 'Docs', 'prompt': 'Review it.', 'attach_call': True},
+                                 result_callback=AsyncMock())
+        token = llm._active_run.set(run)
+        try:
+            await llm.handle_browser_tool(params)
+            params.result_callback.assert_awaited_once_with({'error': 'There is no call to send yet.'})
+            session.rtvi.handle_function_call.assert_not_awaited()
+        finally:
+            llm._active_run.reset(token)
+            await llm._client.close()
+
+    async def test_attachment_fits_the_prompt_and_transcript_in_escaped_json(self):
+        for prompt, spoken_text in (('x' * 26000, 'y' * 40000), ('é😀' * 1500, '😀' * 4000)):
+            with self.subTest(prompt_length=len(prompt), spoken_length=len(spoken_text)):
+                args = {'chat': 'Docs', 'prompt': prompt, 'attach_call': True}
+                session, frames = await self.tool_flow('Send this call to docs. ' + spoken_text, [('', 1, [
+                    ('send_to_chat', args, {'ok': True, 'chat': 'Docs'})])])
+                self.assertIn(('dispatch', 'send_to_chat'), frames)
+                sent = session.last_dispatch['prompt']
+                self.assertTrue(sent.startswith(prompt + '\n\n'))
+                self.assertIn('\nUser: Send this call to docs. ' + spoken_text[0], sent)
+                self.assertTrue(sent.endswith(' [turn cut]'))
+                self.assertLessEqual(len(json.dumps(sent)), 60000)
+
+    async def test_attachment_refuses_when_no_turn_content_fits(self):
+        session = SimpleNamespace(rtvi=SimpleNamespace(handle_function_call=AsyncMock()))
+        llm = self.rt.FridayLLM(session, friday.brain_config({}))
+        request = {'role': 'user', 'content': 'Send this call to docs.'}
+        llm.call_log.record_messages([request])
+        run = llm.prepare_run([request])
+        # Leave room for the header and role label, but no spoken text beyond them.
+        overhead = 'Voice call transcript (1 turn, from 00:00 to 00:00):\nUser:  [turn cut]'
+        prompt = 'x' * (60000 - len(json.dumps(overhead)) - len(json.dumps('\n\n')))
+        params = SimpleNamespace(function_name='send_to_chat', tool_call_id='call',
+                                 arguments={'chat': 'Docs', 'prompt': prompt, 'attach_call': True},
+                                 result_callback=AsyncMock())
+        token = llm._active_run.set(run)
+        try:
+            await llm.handle_browser_tool(params)
+            params.result_callback.assert_awaited_once_with({'error': 'The prompt is too long to add the call.'})
+            session.rtvi.handle_function_call.assert_not_awaited()
+            self.assertTrue(run.failed_action)
+            self.assertFalse(run.pending)
         finally:
             llm._active_run.reset(token)
             await llm._client.close()
