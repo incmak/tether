@@ -100,13 +100,14 @@ class Attention:
         self.path, self.clock = Path(path or paths.ATTENTION), clock
         self.on_urgent, self.log = on_urgent, log
         self.lock = threading.Lock()
-        self._failed_moves = {}
+        self._failed_moves, self._failed_undos = {}, {}
         self.checked, self.latest, self.quiet = {}, {}, {}
         self._legacy_needs_save = False
         data = self._load()
         self.asks, self.seen, self.digest = data['asks'], data['seen'], data['digest']
         self.turns, self.parked = data['turns'], data['parked']
         self.legacy, self.rules = data['legacy'], data['rules']
+        self.undos = data['undos']
 
     def _load(self):
         try:
@@ -158,7 +159,15 @@ class Attention:
         stale = rules.get('stale') if isinstance(rules, dict) else None
         digest = data.get('digest') if isinstance(data.get('digest'), dict) else {}
         hour = digest.get('hour')
-        return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked, 'legacy': legacy,
+        saved_undos = data.get('undos')
+        if not isinstance(saved_undos, dict):
+            saved_undos = {}
+        undos = {entry_id: item for entry_id, item in saved_undos.items()
+                 if isinstance(entry_id, str) and isinstance(item, dict)
+                 and type(item.get('at')) in (int, float) and -float('inf') < item['at'] < float('inf')
+                 and all(isinstance(item.get(key), str) for key in ('pane', 'thread', 'ask'))
+                 and isinstance(item.get('actor'), dict)}
+        return {'asks': asks, 'seen': seen, 'turns': turns, 'parked': parked, 'legacy': legacy, 'undos': undos,
                 'rules': {'stale': stale if isinstance(stale, bool) else True},
                 'digest': {'enabled': digest.get('enabled') is True,
                            'hour': hour if isinstance(hour, int) and 0 <= hour <= 23 else 9,
@@ -172,7 +181,11 @@ class Attention:
             for thread in expired:
                 del store[thread]
             changed = bool(expired) or changed
-        return changed
+        expired_undos = [entry_id for entry_id, item in self.undos.items() if item['at'] < now - AUTOMATION_HISTORY]
+        for entry_id in expired_undos:
+            del self.undos[entry_id]
+            self._failed_undos.pop(entry_id, None)
+        return changed or bool(expired_undos)
 
     def _save(self, now):
         """Write atomically and report whether the state reached disk."""
@@ -183,7 +196,8 @@ class Attention:
             fd, temp = tempfile.mkstemp(prefix='.attention-', dir=self.path.parent)
             with os.fdopen(fd, 'w') as stream:
                 json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest,
-                           'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy, 'rules': self.rules}, stream)
+                           'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy,
+                           'rules': self.rules, 'undos': self.undos}, stream)
             os.replace(temp, self.path)
             self._legacy_needs_save = False
         except OSError:
@@ -198,8 +212,10 @@ class Attention:
     def _save_user(self, now):
         """Save a user write under the state lock and roll back pruning if it fails."""
         before = self.turns.copy(), self.parked.copy(), self.legacy.copy()
+        before_undos = self.undos.copy(), self._failed_undos.copy()
         if not self._save(now):
             self.turns, self.parked, self.legacy = before
+            self.undos, self._failed_undos = before_undos
             raise AttentionError('Could not save. Try again.')
 
     @staticmethod
@@ -276,6 +292,8 @@ class Attention:
                     turn['at'] = now
                     changed = True
             changed = self._prune(now) or changed
+            if self.undos:
+                self._flush_undos(now)
             for store in (self.asks, self.seen):
                 for pane in list(store):
                     thread = live.get(pane, False)
@@ -519,24 +537,23 @@ class Attention:
                 if not rule and entry_id is not None:
                     return False  # A log row cannot put a manual move back in the queue.
                 ask.update(stay=True, later=None)
+                if rule:
+                    previous_undo = self.undos.get(entry_id)
+                    capture_actor = getattr(self.log, 'capture_actor', audit.capture_actor)
+                    self.undos[entry_id] = {'at': now, 'pane': pane, 'thread': thread or '', 'ask': ask['id'],
+                                            'actor': capture_actor()}
                 try:
                     self._save_user(now)
                 except AttentionError:
                     self.asks[pane] = before
+                    if rule:
+                        if previous_undo is None:
+                            del self.undos[entry_id]
+                        else:
+                            self.undos[entry_id] = previous_undo
                     raise
                 if rule:
-                    # The Undo line follows the saved state, so an Undo line always means a saved Undo.
-                    # Audit never takes the Attention lock, so Snooze and Later wait until this returns.
-                    undo = self.log.record('auto.undo', 'Put an ask back in the queue', actor=None, pane=pane,
-                                           thread=thread or '', ask=ask['id'], entry=entry_id, rule='Stale ask')
-                    if undo is None:
-                        self.asks[pane] = before
-                        if self._save(now):
-                            raise AttentionError('Could not write the automation log. Try again.')
-                        # The state file already holds the Undo. Keep memory equal to it; only the log line is missing.
-                        self.asks[pane] = ask
-                        print(f'Attention: ask {ask["id"]} is back in the queue without its automation log line.',
-                              file=sys.stderr)
+                    self._flush_undos(now, only=entry_id)
                 return self.public(ask)
             else:
                 raise ValueError('Unknown action.')
@@ -572,6 +589,51 @@ class Attention:
             raise OSError(page['error'])
         return page
 
+    def _flush_undos(self, now, only=None):
+        """Copy saved Undos to the audit log with the state lock held."""
+        due = {entry_id: item for entry_id, item in self.undos.items()
+               if entry_id == only or (only is None and self._failed_undos.get(entry_id, now) <= now)}
+        if not due:
+            return
+        filters = {'kinds': ['auto.undo'], 'since': min(item['at'] for item in due.values()) - 1, 'limit': 100}
+        logged = set()
+        can_append = False
+        try:
+            while True:
+                page = self._query_log(**filters)
+                for row in page['entries']:
+                    entry_id = row.get('detail', {}).get('entry')
+                    if entry_id in due and row['at'] >= due[entry_id]['at'] - 1:
+                        logged.add(entry_id)
+                if not page['next'] or len(logged) == len(due):
+                    break
+                filters['before'] = page['next']
+            can_append = True
+        except OSError:
+            # Wait until the log can confirm which Undo lines already exist.
+            pass
+
+        dropped = False
+        for entry_id, item in due.items():
+            written = entry_id in logged
+            if not written and can_append:
+                try:
+                    written = self.log.record('auto.undo', 'Put an ask back in the queue', actor=item['actor'],
+                                              pane=item['pane'], thread=item['thread'], ask=item['ask'],
+                                              entry=entry_id, rule='Stale ask') is not None
+                except OSError:
+                    pass
+            if written:
+                del self.undos[entry_id]
+                self._failed_undos.pop(entry_id, None)
+                dropped = True
+            else:
+                if entry_id not in self._failed_undos:
+                    print(f'Attention: could not log Undo for move {entry_id}.', file=sys.stderr)
+                self._failed_undos[entry_id] = now + STALE_RETRY
+        if dropped:
+            self._save(now)
+
     @staticmethod
     def _move_failed(row, asks):
         ask = asks.get(row.get('detail', {}).get('ask'))
@@ -582,7 +644,7 @@ class Attention:
         if page is None:
             page = self._query_log(kinds=['automation'], since=midnight, limit=100)
         asks = {ask['id']: ask for ask in (*self.parked.values(), *self.asks.values())}
-        moves, undone = set(), set()
+        moves, undone = set(), set(self.undos)
         while True:
             entries = page['entries']
             for row in entries:
@@ -594,7 +656,7 @@ class Attention:
             if not before or entries[-1]['at'] < midnight:
                 break
             page = self._query_log(kinds=['automation'], since=midnight, limit=100, before=before)
-        # An Undo audit line can survive a failed save. The active rule moves in state take precedence.
+        # Active rule moves in state take precedence over Undo records.
         undone.difference_update(ask['later']['entry'] for ask in asks.values()
                                  if (ask.get('later') or {}).get('by') == 'rule')
         return len(moves - undone), undone, asks
@@ -604,7 +666,7 @@ class Attention:
             return self._automation_today(_local_midnight(self.clock()))[0]
 
     def automation_log(self):
-        # Undo records its audit line and saves under this lock. Read both before it runs or both after it runs.
+        # Read the audit log and the Undo outbox under the same lock.
         with self.lock:
             now = self.clock()
             today_start = _local_midnight(now)

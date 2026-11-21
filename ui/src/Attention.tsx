@@ -8,8 +8,8 @@ import type { Api, Ask, Pane } from './api'
 import { ApiError, errorText } from './api'
 import type { Reminder } from './reminders'
 import { whenLabel } from './reminders'
-import { askAction, confirmStaleRule, LATE, splitToday, stillWait, useNow } from './attention'
-import type { AskAction, AttentionState, AutoEntry, AutoLog, Digest, Waiting } from './attention'
+import { askAction, confirmStaleRule, LATE, splitToday, staleRuleQueue, stillWait, useNow } from './attention'
+import type { AskAction, AttentionState, StaleRuleResult, AutoEntry, AutoLog, Digest, Waiting } from './attention'
 import { useModal } from './hooks'
 import { age } from './needs'
 import { chatTitle } from './Sidebar'
@@ -344,46 +344,33 @@ function HandledSheet({ api, later, sessions, onOpen, onChanged, onClose }: { ap
 
 /** Settings: the stale ask rule, on by default. It is a server setting. */
 export function StaleRuleSetting({ api }: { api: Api }) {
-  const [{ shown: stale }, setStale] = useState<{ confirmed: boolean | null; shown: boolean | null }>({ confirmed: null, shown: null })
+  const [{ shown: stale }, setStale] = useState<{ confirmed: boolean | null; shown: boolean | null }>(
+    () => ({ confirmed: null, shown: staleRuleQueue.busy ? staleRuleQueue.wanted : null }))
   const [error, setError] = useState('')
-  const latest = useRef(0)
   useEffect(() => {
-    const controller = new AbortController()
-    const id = ++latest.current
-    api<AttentionState>('attention', undefined, controller.signal).then(data => {
-      if (id === latest.current) setStale(current => confirmStaleRule(current, data.rules?.stale ?? true, true))
-    }).catch(reason => { if (id === latest.current) setError(errorText(reason)) })
-    return () => { ++latest.current; controller.abort() }
-  }, [api])
-  // One write at a time: the server applies writes in the order sent, so the last answer is the server's value.
-  // A change made while a write runs waits and goes next, with the newest value only.
-  const queued = useRef<boolean | null>(null)
-  const writing = useRef(false)
-  const save = async (next: boolean) => {
-    ++latest.current  // the first load must not overwrite a change
-    queued.current = next
-    setStale(current => ({ ...current, shown: next })); setError('')
-    if (writing.current) return
-    writing.current = true
-    try {
-      while (queued.current !== null) {
-        const value = queued.current
-        queued.current = null
-        try {
-          const result = await api<{ rules: { stale: boolean } }>('attention/rules', { stale: value })
-          setStale(current => confirmStaleRule(current, result.rules.stale, queued.current === null))
-        } catch (reason) {
-          setError(errorText(reason))
-          let confirmed: boolean | null = null
-          try {
-            confirmed = (await api<AttentionState>('attention')).rules.stale
-          } catch { /* Keep the write error and fall back to the last confirmation. */ }
-          setStale(current => confirmStaleRule(current, confirmed, queued.current === null))
-        }
-      }
-    } finally {
-      writing.current = false
+    const listener = (result: StaleRuleResult) => {
+      setStale(current => confirmStaleRule(current, result.confirmed, result.last))
+      if (result.last) setError(result.error)
     }
+    staleRuleQueue.listener = listener
+    const controller = new AbortController()
+    const generation = staleRuleQueue.generation
+    // A write that runs or ran since this read started has the newer value.
+    const current = () => !controller.signal.aborted && generation === staleRuleQueue.generation && !staleRuleQueue.busy
+    api<AttentionState>('attention', undefined, controller.signal).then(data => {
+      if (current()) setStale(state => confirmStaleRule(state, data.rules?.stale ?? true, true))
+    }).catch(reason => { if (current()) setError(errorText(reason)) })
+    return () => {
+      controller.abort()
+      if (staleRuleQueue.listener === listener) staleRuleQueue.listener = null
+    }
+  }, [api])
+  const save = (next: boolean) => {
+    setStale(current => ({ ...current, shown: next })); setError('')
+    void staleRuleQueue.set(next,
+      async value => (await api<{ rules: { stale: boolean } }>('attention/rules', { stale: value })).rules.stale,
+      async () => (await api<AttentionState>('attention')).rules.stale,
+      errorText)
   }
   return <div className="preferences-field attention-digest">
     <label className="switch-row"><span><strong>Move stale asks to Later</strong><small>An ask that waited over 24 hours on an idle tab leaves the queue. Undo it in Handled for you on Home.</small></span>

@@ -33,6 +33,7 @@ class FakeLog:
         self.clock, self.entries, self.fail = clock, [], set()
         self.record = mock.Mock(side_effect=self._record)
         self.query = mock.Mock(side_effect=self._query)
+        self.capture_actor = mock.Mock(return_value={'source': 'web', 'device': 'Test browser'})
 
     def _record(self, kind, summary, *, actor=None, **detail):
         if kind in self.fail:
@@ -875,8 +876,8 @@ class StaleAskTest(unittest.TestCase):
         self.assertIs(self.store.act('%1', 't1', 'back', 'old'), False)
         self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id, move['id'])['later'])
         self.log.record.assert_called_with(
-            'auto.undo', 'Put an ask back in the queue', actor=None, pane='%1', thread='t1', ask=ask_id,
-            entry=move['id'], rule='Stale ask')
+            'auto.undo', 'Put an ask back in the queue', actor=self.log.capture_actor.return_value,
+            pane='%1', thread='t1', ask=ask_id, entry=move['id'], rule='Stale ask')
         self.assertTrue(self.store.asks['%1']['stay'])
         self.clock.now += 2 * 86400
         self.world.observe(self.pane)
@@ -884,17 +885,20 @@ class StaleAskTest(unittest.TestCase):
         self.assertEqual(self.store.waiting()[0]['id'], ask_id)
         self.assertEqual(self.log.record.call_count, 2)
 
-    def test_back_leaves_the_rule_move_in_place_if_audit_fails(self):
+    def test_back_defers_audit_when_the_log_cannot_be_read(self):
         ask_id = self.start_reply()['id']
         self.clock.now += 25 * 3600
         self.world.observe(self.pane)
-        before = self.path.read_text()
-        self.log.fail.add('auto.undo')
-        with self.assertRaisesRegex(attention.AttentionError, 'Could not write the automation log'):
-            self.store.act('%1', 't1', 'back', ask_id, self.log.entries[0]['id'])
-        self.assertEqual(self.path.read_text(), before)
-        self.assertEqual(self.store.later_asks()[0]['id'], ask_id)
-        self.assertFalse(self.store.asks['%1']['stay'])
+        move, = self.log.entries
+        with mock.patch.object(self.log, 'query', side_effect=OSError('unreadable')), \
+                mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id, move['id'])['later'])
+        self.assertEqual(self.log.entries, [move])
+        self.assertIn(move['id'], self.store.undos)
+        self.clock.now += attention.STALE_RETRY
+        self.world.observe(self.pane)
+        self.assertEqual(self.log.entries[-1]['detail']['entry'], move['id'])
+        self.assertEqual(self.store.undos, {})
 
     def test_new_yes_replaces_the_later_occurrence_and_same_turn_keeps_it(self):
         original = self.start_reply()
@@ -1262,7 +1266,7 @@ class RouteTest(unittest.TestCase):
                     self.assertEqual(self.post(action, body), (503, {'error': 'Could not save. Try again.'}))
                 self.assertEqual(json.dumps([self.store.asks, self.store.seen, self.store.digest, self.store.turns], sort_keys=True), before)
 
-    def test_ask_route_rejects_stale_ids_and_reports_failed_undo(self):
+    def test_ask_route_rejects_stale_ids_and_returns_saved_undo(self):
         body = {'session': '%1', 'thread': 't1', 'ask': self.store.ask('%1', 't1')['id']}
         self.clock.now += 25 * 3600
         self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: ('Next: a.\nNeeds you: yes', 'first'))
@@ -1273,11 +1277,12 @@ class RouteTest(unittest.TestCase):
                          (409, {'error': 'This ask changed. Reload and try again.'}))
         self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
         body['entry'] = self.log.entries[0]['id']
-        self.assertEqual(self.post('back', body),
-                         (503, {'error': 'Could not write the automation log. Try again.'}))
-        self.assertEqual(self.store.later_asks()[0]['id'], body['ask'])
-        self.log.fail.clear()
-        self.assertEqual(self.post('back', body)[0], 200)
+        with mock.patch('sys.stderr', new_callable=io.StringIO):
+            status, payload = self.post('back', body)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['ask'], self.store.ask('%1', 't1'))
+        self.assertEqual(self.store.later_asks(), [])
+        self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
         self.store.clear('%1', 't1')
         self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
 
@@ -1316,26 +1321,31 @@ class RouteTest(unittest.TestCase):
         self.assertFalse(rows[first['id']]['undone'])
         self.assertTrue(rows[second['id']]['undone'])
 
-    def test_back_holds_the_state_lock_through_audit_and_save(self):
+    def test_back_holds_the_state_lock_through_save_and_audit(self):
         self.clock.now += 25 * 3600
         self.move_reply()
         move, = self.log.entries
         def record(*args, **kwargs):
             self.assertTrue(self.store.lock.locked())  # Snooze and Later take this same lock.
-            # The Undo line follows the saved Undo.
             self.assertIsNone(self.store.asks['%1']['later'])
-            self.assertTrue(attention.Attention(self.path, self.clock, log=self.log).asks['%1']['stay'])
+            saved = json.loads(self.path.read_text())
+            self.assertTrue(saved['asks']['%1']['stay'])
+            self.assertIn(move['id'], saved['undos'])
             return self.log._record(*args, **kwargs)
         self.log.record.side_effect = record
         save = self.store._save
+        pending = []
         def save_locked(now):
             self.assertTrue(self.store.lock.locked())
             self.assertTrue(self.store.asks['%1']['stay'])
+            pending.append(set(self.store.undos))
             return save(now)
         with mock.patch.object(self.store, '_save', side_effect=save_locked):
             self.assertEqual(self.post('back', {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'],
                                                 'entry': move['id']})[0], 200)
         self.assertTrue(self.store.asks['%1']['stay'])
+        self.assertEqual(pending, [{move['id']}, set()])
+        self.assertEqual(json.loads(self.path.read_text())['undos'], {})
 
     def test_failed_undo_save_keeps_later_and_the_log_row_undoable(self):
         self.clock.now += 25 * 3600
@@ -1348,7 +1358,10 @@ class RouteTest(unittest.TestCase):
         with self.subTest('route and state'):
             self.assertEqual((status, body), (503, {'error': 'Could not save. Try again.'}))
             self.assertEqual(self.store.asks['%1'], before)
-            self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).asks['%1'], before)
+            self.assertEqual(self.store.undos, {})
+            saved = json.loads(self.path.read_text())
+            self.assertEqual(saved['asks']['%1'], before)
+            self.assertEqual(saved['undos'], {})
         with self.subTest('audit and count'):
             self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask'])  # no Undo line
             _, log = self.get('/log')
@@ -1378,34 +1391,103 @@ class RouteTest(unittest.TestCase):
                 self.assertEqual(log['handled_today'], 1)
                 self.assertEqual(self.get()[1]['handled_today'], 1)
 
-    def test_undo_log_failure_restores_the_saved_state(self):
+    def test_undo_log_failure_retries_at_the_deadline_and_stops_polling(self):
         self.clock.now += 25 * 3600
         self.move_reply()
         move, = self.log.entries
         target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
-        before = self.store.asks['%1'].copy()
-        with mock.patch.object(self.log, 'record', return_value=None):
-            self.assertEqual(self.post('back', target),
-                             (503, {'error': 'Could not write the automation log. Try again.'}))
-        self.assertEqual(self.store.asks['%1'], before)
-        self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).asks['%1'], before)
+        self.log.fail.add('auto.undo')
+        with mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+            status, body = self.post('back', target)
+        self.assertEqual(status, 200)
+        self.assertIsNone(body['ask']['later'])
+        self.assertEqual(self.store.later_asks(), [])
+        self.assertIn(move['id'], err.getvalue())
+        saved = json.loads(self.path.read_text())
+        self.assertIsNone(saved['asks']['%1']['later'])
+        undo = {'at': self.clock.now, 'pane': '%1', 'thread': 't1', 'ask': target['ask'],
+                'actor': self.log.capture_actor.return_value}
+        self.assertEqual(self.store.undos, {move['id']: undo})
+        self.assertEqual(saved['undos'], self.store.undos)
+        self.assertEqual(self.get()[1]['handled_today'], 0)
+        _, log = self.get('/log')
+        self.assertEqual(log['handled_today'], 0)
+        self.assertEqual(log['entries'], [dict(move, undone=True, undo=None)])
+        self.log.fail.clear()
+        self.log.query.reset_mock()
+        self.log.record.reset_mock()
+        self.clock.now += attention.STALE_RETRY - 1
+        self.move_reply()
+        self.log.query.assert_not_called()
+        self.log.record.assert_not_called()
+        self.clock.now += 1
+        self.move_reply()
+        self.log.query.assert_called_once_with(kinds=['auto.undo'], since=undo['at'] - 1, limit=100)
+        self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
+        self.assertEqual(self.store.undos, {})
+        self.assertEqual(json.loads(self.path.read_text())['undos'], {})
+        self.log.query.reset_mock()
+        self.move_reply()
+        self.log.query.assert_not_called()
 
-    def test_undo_keeps_the_saved_undo_when_the_log_and_the_rollback_fail(self):
+    def test_saved_undo_is_visible_on_reload_and_audited_on_the_first_tick(self):
         self.clock.now += 25 * 3600
         self.move_reply()
         move, = self.log.entries
         target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
-        save, calls = self.store._save, []
-        def first_save_only(now):
-            calls.append(now)
-            return save(now) if len(calls) == 1 else False
-        with mock.patch.object(self.log, 'record', return_value=None), \
-                mock.patch.object(self.store, '_save', side_effect=first_save_only), \
-                mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+        actor = {'source': 'web', 'device': 'Original browser'}
+        del self.log.capture_actor
+        with mock.patch.object(self.log, 'record', side_effect=OSError('unwritable')), \
+                mock.patch.object(attention.audit, 'capture_actor', return_value=actor), \
+                mock.patch('sys.stderr', new_callable=io.StringIO):
             self.assertEqual(self.post('back', target)[0], 200)
-        self.assertIn('without its automation log line', err.getvalue())
-        self.assertTrue(self.store.asks['%1']['stay'])
-        self.assertEqual(self.store.asks['%1'], attention.Attention(self.path, self.clock, log=self.log).asks['%1'])
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.assertEqual(self.get()[1]['handled_today'], 0)
+        self.assertEqual(self.get('/log')[1]['entries'], [dict(move, undone=True, undo=None)])
+        self.assertEqual(self.log.entries, [move])
+        self.move_reply()
+        original, undo = self.log.entries
+        self.assertEqual(original, move)
+        self.assertEqual((undo['kind'], undo['actor'], undo['detail']['entry']), ('auto.undo', actor, move['id']))
+        self.assertEqual(self.store.undos, {})
+        self.assertEqual(json.loads(self.path.read_text())['undos'], {})
+
+    def test_reload_deduplicates_an_undo_when_the_outbox_clear_save_fails(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        save = self.store._save
+        with mock.patch.object(self.store, '_save', side_effect=lambda now: save(now) if len(self.log.entries) == 1 else False):
+            self.assertEqual(self.post('back', target)[0], 200)
+        _, undo = self.log.entries
+        self.assertEqual(undo['detail']['entry'], move['id'])
+        self.assertIn(move['id'], json.loads(self.path.read_text())['undos'])
+        for i in range(100):
+            self.log._record('auto.undo', 'Unrelated Undo', entry=f'other-{i}')
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.log.query.reset_mock()
+        self.log.record.reset_mock()
+        self.move_reply()
+        self.log.record.assert_not_called()
+        filters = {'kinds': ['auto.undo'], 'since': undo['at'] - 1, 'limit': 100}
+        self.assertEqual(self.log.query.call_args_list, [mock.call(**filters), mock.call(**filters, before='0002')])
+        self.assertEqual(self.store.undos, {})
+        self.assertEqual(json.loads(self.path.read_text())['undos'], {})
+
+    def test_outbox_load_filters_invalid_items_and_prunes_expired_undos(self):
+        now = self.clock.now
+        pending = {'at': now - attention.AUTOMATION_HISTORY, 'pane': '%1', 'thread': 't1', 'ask': 'ask',
+                   'actor': {'source': 'web'}}
+        undos = {'pending': pending, 'expired': dict(pending, at=pending['at'] - 1), 'invalid': []}
+        undos.update({key: dict(pending, **{key: None}) for key in pending})
+        self.path.write_text(json.dumps({'undos': undos}))
+        self.store = attention.Attention(self.path, self.clock, log=self.log)
+        self.assertEqual(set(self.store.undos), {'pending', 'expired'})
+        self.move_reply()
+        undo, = self.log.entries
+        self.assertEqual((undo['kind'], undo['detail']['entry']), ('auto.undo', 'pending'))
+        self.assertEqual(json.loads(self.path.read_text())['undos'], {})
 
     def test_failed_undo_save_keeps_parked_move_counted_until_tab_returns(self):
         self.clock.now += 25 * 3600
@@ -1448,6 +1530,8 @@ class RouteTest(unittest.TestCase):
 
                 def query(**filters):
                     page = self.log._query(**filters)
+                    if filters['kinds'] == ['auto.undo']:
+                        return page
                     worker.start()
                     self.assertTrue(started.wait(1))
                     worker.join(0.05)

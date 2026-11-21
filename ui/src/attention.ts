@@ -56,8 +56,53 @@ export interface AttentionState { later: Ask[]; handled_today: number | null; lo
 
 export function confirmStaleRule(current: { confirmed: boolean | null; shown: boolean | null }, value: boolean | null, show: boolean) {
   const confirmed = value ?? current.confirmed
-  return { confirmed, shown: show ? confirmed : current.shown }
+  return { confirmed, shown: show ? confirmed ?? current.shown : current.shown }
 }
+
+export interface StaleRuleResult { confirmed: boolean | null; last: boolean; error: string }
+
+// The server applies stale rule writes in the order they arrive, so only one write runs at a time. The queue lives
+// for the page, not the dialog: Settings can close and open again while a write runs.
+export class StaleRuleQueue {
+  private running = false
+  private next: boolean | null = null
+  wanted: boolean | null = null  // the newest choice while writes run
+  generation = 0                 // changes on each choice, so an older read cannot overwrite it
+  listener: ((result: StaleRuleResult) => void) | null = null
+
+  get busy() { return this.running || this.next !== null }
+
+  async set(value: boolean, write: (value: boolean) => Promise<boolean>, read: () => Promise<boolean>,
+    describe: (reason: unknown) => string) {
+    this.generation++
+    this.next = value
+    this.wanted = value
+    if (this.running) return
+    this.running = true
+    try {
+      while (this.next !== null) {
+        const sent = this.next
+        this.next = null
+        let result: Omit<StaleRuleResult, 'last'>
+        try {
+          result = { confirmed: await write(sent), error: '' }
+        } catch (reason) {
+          let confirmed: boolean | null = null
+          try { confirmed = await read() } catch { /* Keep the last confirmation. */ }
+          result = { confirmed, error: describe(reason) }
+        }
+        // Only the newest write decides what the switch shows and whether an error shows.
+        const last = this.next === null
+        if (last) this.wanted = null
+        this.listener?.({ ...result, last })
+      }
+    } finally {
+      this.running = false
+    }
+  }
+}
+
+export const staleRuleQueue = new StaleRuleQueue()
 
 export function splitToday(entries: AutoEntry[], todayStart: number) {
   const today: AutoEntry[] = [], older: AutoEntry[] = []

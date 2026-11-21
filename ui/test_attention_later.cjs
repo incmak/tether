@@ -72,4 +72,44 @@ function testStaleRuleMixedResults() {
   assert.deepEqual({ ...a.confirmStaleRule(newerSuccess, false, false) }, { confirmed: false, shown: true })
 }
 testStaleRuleMixedResults()
-console.log('ok attention later')
+
+// Review 4: one write at a time across dialog mounts; only the newest result sets the error.
+async function testStaleRuleQueue() {
+  const q = new a.StaleRuleQueue()
+  const sent = [], results = [], held = []
+  let server = true
+  const write = value => { sent.push(value); return new Promise((resolve, reject) => held.push({ value, resolve, reject })) }
+  const read = async () => server
+  q.listener = result => results.push(result)
+  const first = q.set(false, write, read, () => 'Could not save. Try again.')
+  q.listener = null                                  // Settings closes while the write runs
+  const generation = q.generation
+  q.set(false, write, read, () => 'x')
+  q.set(true, write, read, () => 'x')                // reopened: two more choices
+  assert.equal(q.busy, true)
+  assert.equal(q.wanted, true)
+  assert.notEqual(q.generation, generation)
+  assert.deepEqual(sent, [false])                    // nothing overtakes the held write
+  q.listener = result => results.push(result)
+  held[0].reject(new Error('503'))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(sent, [false, true])              // only the newest queued choice goes next
+  server = true
+  held[1].resolve(true)
+  await first
+  assert.deepEqual(results.map(r => ({ ...r })), [
+    { confirmed: true, error: 'Could not save. Try again.', last: false },  // confirms only; the view ignores it
+    { confirmed: true, error: '', last: true },                              // the newest write clears the error
+  ])
+  assert.equal(q.busy, false)
+  assert.equal(q.wanted, null)
+
+  // A failed newest write shows its error and the server value read after it.
+  const q2 = new a.StaleRuleQueue(), seen = []
+  q2.listener = result => seen.push({ ...result })
+  await q2.set(false, async () => { throw new Error('503') }, async () => true, () => 'Could not save. Try again.')
+  assert.deepEqual(seen, [{ confirmed: true, error: 'Could not save. Try again.', last: true }])
+  // A failed read keeps what the switch shows when nothing was confirmed yet.
+  assert.deepEqual({ ...a.confirmStaleRule({ confirmed: null, shown: true }, null, true) }, { confirmed: null, shown: true })
+}
+testStaleRuleQueue().then(() => console.log('ok attention later'), error => { console.error(error); process.exitCode = 1 })
