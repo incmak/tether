@@ -19,7 +19,7 @@ const pane = (id, extra = {}) => ({ id, tmux_session: '$1', label: id, agent: 'c
 const ids = list => Array.from(list, item => item.pane.id)
 
 // 1. An ask in Later leaves the queue, the deck and Catch up. It does not expire.
-const later = pane('%2', { ask: ask({ id: 'bbbbbbbbbbbb', later: { at: now - 60, by: 'rule' } }) })
+const later = pane('%2', { ask: ask({ id: 'bbbbbbbbbbbb', later: { at: now - 60, by: 'rule', entry: 'rule-move' } }) })
 const older = pane('%3', { ask: ask({ id: 'cccccccccccc', later: { at: now - 7200, by: 'you' } }) })
 const open = pane('%1', { ask: ask() })
 assert.deepEqual(ids(a.waitingAsks([later, open, older], now)), ['%1'])
@@ -35,11 +35,28 @@ assert.deepEqual(ids(a.laterAsks([older, open, later, pane('%4', { agent: 'shell
 const calls = []
 const api = (path, body) => { calls.push([path, JSON.parse(JSON.stringify(body))]); return Promise.resolve({ ask: null, waiting: 0 }) }
 a.askAction(api, later, 'back', later.ask)
+a.askAction(api, older, 'back', older.ask)
+a.askAction(api, later, 'handled', later.ask)
+a.askAction(api, open, 'opened', open.ask)
 a.askAction(api, open, 'later', ask({ id: undefined }))
 a.askAction(api, open, 'handled')
 assert.deepEqual(calls, [
-  ['attention/back', { session: '%2', thread: 't-%2', ask: 'bbbbbbbbbbbb' }],
+  ['attention/back', { session: '%2', thread: 't-%2', ask: 'bbbbbbbbbbbb', entry: 'rule-move' }],
+  ['attention/back', { session: '%3', thread: 't-%3', ask: 'cccccccccccc' }],
+  ['attention/handled', { session: '%2', thread: 't-%2', ask: 'bbbbbbbbbbbb' }],
+  ['attention/opened', { session: '%1', thread: 't-%1', ask: 'a1b2c3d4e5f6' }],
   ['attention/later', { session: '%1', thread: 't-%1' }],
   ['attention/handled', { session: '%1', thread: 't-%1' }],
 ])
+
+// 4. Today starts at the server's midnight, including rows at that exact second.
+const rows = [{ id: 'new', at: now + 60 }, { id: 'midnight', at: now }, { id: 'old', at: now - 1 }]
+for (const [start, today, older] of [
+  [now, ['new', 'midnight'], ['old']],
+  [now + 1, ['new'], ['midnight', 'old']],
+]) {
+  const split = a.splitToday(rows, start)
+  assert.deepEqual(Array.from(split.today, row => row.id), today)
+  assert.deepEqual(Array.from(split.older, row => row.id), older)
+}
 console.log('ok attention later')

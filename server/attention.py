@@ -29,6 +29,8 @@ PREFIX = '/mobile/api/attention'
 ACTIONS = ('handled', 'snooze', 'opened', 'later', 'back')
 SNOOZE = 24 * 3600
 STALE = 24 * 3600
+STALE_RETRY = 600
+AUTOMATION_HISTORY = 7 * 86400
 RETENTION = 30 * 86400
 TURN_REFRESH_INTERVAL = 86400
 TURN_HISTORY_LIMIT = 50
@@ -45,6 +47,10 @@ URGENT = re.compile(r'^(?:[-•>]\s*)?\**Urgent:\**\s*(.+)$', re.I)
 
 class AttentionError(Exception):
     pass
+
+
+def _local_midnight(now):
+    return datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0, fold=0).timestamp()
 
 
 def _clip(text):
@@ -93,8 +99,7 @@ class Attention:
         self.path, self.clock = Path(path or paths.ATTENTION), clock
         self.on_urgent, self.log = on_urgent, log
         self.lock = threading.Lock()
-        self._undo_lock = threading.Lock()
-        self._failed_moves = set()
+        self._failed_moves = {}
         self.checked, self.quiet = {}, {}
         self._legacy_needs_save = False
         data = self._load()
@@ -164,28 +169,33 @@ class Attention:
         return changed
 
     def _save(self, now):
-        """Write to a temporary file in the same folder, then rename it over the old one."""
+        """Write atomically and report whether the state reached disk."""
         self._prune(now)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp = tempfile.mkstemp(prefix='.attention-', dir=self.path.parent)
+        temp = None
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temp = tempfile.mkstemp(prefix='.attention-', dir=self.path.parent)
             with os.fdopen(fd, 'w') as stream:
                 json.dump({'version': 1, 'asks': self.asks, 'seen': self.seen, 'digest': self.digest,
                            'turns': self.turns, 'parked': self.parked, 'legacy': self.legacy, 'rules': self.rules}, stream)
             os.replace(temp, self.path)
             self._legacy_needs_save = False
         except OSError:
-            try:
-                os.unlink(temp)
-            except OSError:
-                pass
+            if temp is not None:
+                try:
+                    os.unlink(temp)
+                except OSError:
+                    pass
+            return False
+        return True
 
     @staticmethod
     def public(ask):
         later = ask.get('later')
         return dict({key: ask.get(key) for key in ('id', 'asked_at', 'pane', 'thread', 'since', 'next', 'kind',
                                                   'opened', 'snoozed_until')},
-                    urgent=ask.get('urgent', False), later={'at': later['at'], 'by': later['by']} if later else None)
+                    urgent=ask.get('urgent', False),
+                    later={key: later.get(key) for key in ('at', 'by', 'entry')} if later else None)
 
     def ask(self, pane, thread=None):
         """The pane's ask for the session list, or None. Snoozed asks are included; snoozed_until says until when."""
@@ -240,6 +250,7 @@ class Attention:
         """
         now = self.clock()
         live = {}
+        moved = False
         for entry in entries:
             pane = entry['id']
             if entry.get('agent') in AGENTS and PANE.fullmatch(pane) and not entry.get('ambiguous'):
@@ -290,10 +301,11 @@ class Attention:
                     self.asks[pane] = ask
                     changed = True
                 if summary:
+                    replaces_reply = ask and ask['kind'] == 'reply' and ask.get('later')
                     if ask and ask['kind'] != 'reply' and (ask['next'] != summary['text'] or ask['kind'] != summary['kind']):
                         ask.update(kind=summary['kind'], next=summary['text'])
                         changed = True
-                    elif not ask and seen.get('dismissed') != summary['text'] and self.quiet.get(pane, 0) <= now:
+                    elif replaces_reply or (not ask and seen.get('dismissed') != summary['text'] and self.quiet.get(pane, 0) <= now):
                         self._start(pane, thread, summary['kind'], summary['text'], now)
                         changed = True
                     continue
@@ -309,15 +321,15 @@ class Attention:
                 if reply:
                     live_turn_ended = checked and checked[0] == thread and finished is not None and finished != checked[1]
                     if turn_id is not None or live_turn_ended:
-                        changed = self.note_reply(pane, thread, reply, turn_id, now) or changed
+                        changed = self.note_reply(pane, thread, reply, turn_id, now, finished=finished) or changed
                     with self.lock:
                         self.checked[pane] = marker
-            changed = self._stale(pane, entry, marker, now) or changed
+            moved = self._stale(pane, entry, marker, now) or moved
         if changed:
             with self.lock:
                 self._save(now)
         self.due_pings(now)
-        return changed
+        return changed or moved
 
     def _stale_candidate(self, pane, marker, now):
         """Return the eligible ask with the state lock held."""
@@ -340,28 +352,43 @@ class Attention:
             if not ask:
                 return False
             ask_id, asked_at = ask['id'], ask['asked_at']
-        day = datetime.fromtimestamp(asked_at)
-        name = entry.get('pane_name') or entry.get('label') or entry.get('tmux_session') or pane
-        move = self.log.record('auto.stale_ask', f'Moved an ask from {day.day} {day:%b} to Later',
-                               actor={'source': 'server'}, pane=pane, thread=marker[0] or '', ask=ask_id,
-                               tab=name, rule='Stale ask')
-        with self.lock:
-            if move is None:
-                if ask_id not in self._failed_moves:
-                    self._failed_moves.add(ask_id)
-                    print(f'Attention: could not log the move to Later for ask {ask_id}.', file=sys.stderr)
+            retry_at = self._failed_moves.get(ask_id)
+            if retry_at is not None and now < retry_at:
                 return False
-            ask = self._stale_candidate(pane, marker, now)
-            if not ask or ask['id'] != ask_id:
-                return False
-            ask['later'] = {'at': now, 'by': 'rule', 'entry': move['id']}
-            return True
+            # Audit never takes the Attention lock. Keep the check, audit and state save together.
+            since = now - AUTOMATION_HISTORY
+            if ask.get('back_at') is not None:
+                # A move from before this snooze ended belongs to a previous time in Later.
+                since = max(since, ask['back_at'])
+            try:
+                page = self._query_log(text=ask_id, kinds=['auto.stale_ask'], since=since, limit=200)
+                move = next((row for row in page['entries'] if row.get('detail', {}).get('ask') == ask_id), None)
+                if move is None:
+                    day = datetime.fromtimestamp(asked_at)
+                    name = entry.get('pane_name') or entry.get('label') or entry.get('tmux_session') or pane
+                    move = self.log.record('auto.stale_ask', f'Moved an ask from {day.day} {day:%b} to Later',
+                                           actor={'source': 'server'}, pane=pane, thread=marker[0] or '', ask=ask_id,
+                                           tab=name, rule='Stale ask')
+            except OSError:
+                move = None
+            if move is not None:
+                before = ask.copy()
+                ask['later'] = {'at': now, 'by': 'rule', 'entry': move['id']}
+                if self._save(now):
+                    return True
+                self.asks[pane] = before
+            if retry_at is None:
+                operation = 'log' if move is None else 'save'
+                print(f'Attention: could not {operation} the move to Later for ask {ask_id}.', file=sys.stderr)
+            self._failed_moves[ask_id] = now + STALE_RETRY
+            return False
 
-    def note_reply(self, pane, thread, reply, turn_id, now=None):
+    def note_reply(self, pane, thread, reply, turn_id, now=None, *, finished=None):
         """Apply a finished turn once per conversation, even if its pane changes."""
         if not reply:
             return False
         now = self.clock() if now is None else now
+        occurrence = turn_id if turn_id is not None else finished
         with self.lock:
             ask = self.asks.get(pane)
             if thread and turn_id is not None:
@@ -373,20 +400,21 @@ class Attention:
                 legacy = self.legacy.pop(thread, None)
                 if previous is None and legacy and legacy['reply'] == _digest(reply):
                     if ask and ask['kind'] == 'reply' and ask.get('thread') == thread:
-                        ask['turn'] = turn_id
+                        ask.update(turn=turn_id, occ=occurrence)
                     return True
                 if ask and ask.get('turn') == turn_id:
                     return True  # An open ask can outlast the stored turn's retention period.
             status, text = reply_ask(reply)
             if status == 'yes':
                 urgent = urgent_text(reply)
-                is_new_urgent = urgent and (turn_id is None or not ask or not ask.get('urgent') or ask.get('turn') != turn_id)
+                new_occurrence = not ask or ask.get('occ', ask.get('turn')) != occurrence
+                is_new_urgent = urgent and (new_occurrence or not ask.get('urgent'))
                 if not ask:
                     self._start(pane, thread, 'reply', urgent or text, now)
                     ask = self.asks[pane]
-                elif ask.get('turn') != turn_id:
+                elif new_occurrence:
                     ask.update(id=secrets.token_hex(6), asked_at=now, later=None, stay=False, back_at=None)
-                ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id)
+                ask.update(kind='reply', next=urgent or text, urgent=bool(urgent), opened=False, turn=turn_id, occ=occurrence)
                 if is_new_urgent:
                     ask.update(ping_due=now + URGENT_GRACE, pinged=False)
                 elif not urgent:
@@ -439,15 +467,8 @@ class Attention:
             self.seen.setdefault(pane, {'thread': ask.get('thread')})['dismissed'] = ask['next']
         del self.asks[pane]
 
-    def act(self, pane, thread, action, ask_id=None):
+    def act(self, pane, thread, action, ask_id=None, entry_id=None):
         """Return the updated ask, False for a stale target, or None if there is no ask and no id was given."""
-        if action == 'back':
-            # Serialize Undo requests for the same move without holding the state lock during logging.
-            with self._undo_lock:
-                return self._act(pane, thread, action, ask_id)
-        return self._act(pane, thread, action, ask_id)
-
-    def _act(self, pane, thread, action, ask_id):
         now = self.clock()
         with self.lock:
             ask = self.asks.get(pane)
@@ -468,27 +489,26 @@ class Attention:
                 ask.update(later={'at': now, 'by': 'you', 'entry': None}, snoozed_until=None)
             elif action == 'back':
                 if not later:
-                    return self.public(ask)
-                if later['by'] == 'you':
-                    ask.update(stay=True, later=None)
+                    return False if entry_id is not None else self.public(ask)
+                if later['by'] == 'rule':
+                    if entry_id is None or entry_id != later.get('entry'):
+                        return False
+                    # Audit never takes the Attention lock, so Snooze and Later can wait until Undo saves.
+                    undo = self.log.record('auto.undo', 'Put an ask back in the queue', actor=None, pane=pane,
+                                           thread=thread or '', ask=ask['id'], entry=entry_id, rule='Stale ask')
+                    if undo is None:
+                        raise AttentionError('Could not write the automation log. Try again.')
+                elif entry_id is not None:
+                    return False  # A log row cannot put a manual move back in the queue.
+                before = ask.copy()
+                ask.update(stay=True, later=None)
+                if not self._save(now):
+                    self.asks[pane] = before
+                    raise AttentionError('Could not save. Try again.')
+                return self.public(ask)
             else:
                 raise ValueError('Unknown action.')
-            if action != 'back' or later['by'] == 'you':
-                self._save(now)
-                return self.public(ask)
-            undo_ask_id = ask['id']
-
-        undo = self.log.record('auto.undo', 'Put an ask back in the queue', actor=None, pane=pane, thread=thread or '',
-                               ask=undo_ask_id, entry=later['entry'], rule='Stale ask')
-        if undo is None:
-            raise AttentionError('Could not write the automation log. Try again.')
-        with self.lock:
-            ask = self.asks.get(pane)
-            if not ask or ask['id'] != undo_ask_id:
-                return False
-            if ask.get('later') is later:
-                ask.update(stay=True, later=None)
-                self._save(now)
+            self._save(now)
             return self.public(ask)
 
     def set_rules(self, stale):
@@ -503,10 +523,15 @@ class Attention:
             self.log.record('setting.automation', 'Changed the stale ask rule', old=old, new=stale)
         return {'stale': stale}
 
-    def _automation_today(self, now, page=None):
-        midnight = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0, fold=0).timestamp()
+    def _query_log(self, **filters):
+        page = self.log.query(**filters)
+        if 'error' in page:
+            raise OSError(page['error'])
+        return page
+
+    def _automation_today(self, midnight, page=None):
         if page is None:
-            page = self.log.query(kinds=['automation'], since=midnight, limit=100)
+            page = self._query_log(kinds=['automation'], since=midnight, limit=100)
         moves, undone = set(), set()
         while True:
             entries = page['entries']
@@ -517,26 +542,31 @@ class Attention:
                     moves.add(row['id'])
             before = page['next']
             if not before or entries[-1]['at'] < midnight:
-                return len(moves - undone), undone
-            page = self.log.query(kinds=['automation'], since=midnight, limit=100, before=before)
+                break
+            page = self._query_log(kinds=['automation'], since=midnight, limit=100, before=before)
+        with self.lock:
+            targets = {ask['id']: {'session': pane, 'thread': ask.get('thread'), 'ask': ask['id'],
+                                   'entry': ask['later']['entry']}
+                       for pane, ask in self.asks.items() if (ask.get('later') or {}).get('by') == 'rule'}
+        # An Undo audit line can survive a failed save. The active rule moves in state take precedence.
+        undone.difference_update(target['entry'] for target in targets.values())
+        return len(moves - undone), undone, targets
 
     def handled_today(self):
-        return self._automation_today(self.clock())[0]
+        return self._automation_today(_local_midnight(self.clock()))[0]
 
     def automation_log(self):
         now = self.clock()
-        page = self.log.query(kinds=['automation'], since=now - 7 * 86400, limit=100)
-        handled_today, undone = self._automation_today(now, page)
-        with self.lock:
-            targets = {ask['id']: (ask['later']['entry'], {'session': pane, 'thread': ask.get('thread'), 'ask': ask['id']})
-                       for pane, ask in self.asks.items() if (ask.get('later') or {}).get('by') == 'rule'}
+        today_start = _local_midnight(now)
+        page = self._query_log(kinds=['automation'], since=now - AUTOMATION_HISTORY, limit=100)
+        handled_today, undone, targets = self._automation_today(today_start, page)
         entries = []
         for row in page['entries']:
             if row['kind'] == 'auto.stale_ask':
                 target = targets.get(row.get('detail', {}).get('ask'))
-                row = dict(row, undone=row['id'] in undone, undo=target[1] if target and target[0] == row['id'] else None)
+                row = dict(row, undone=row['id'] in undone, undo=target if target and target['entry'] == row['id'] else None)
             entries.append(row)
-        return {'entries': entries, 'handled_today': handled_today}
+        return {'entries': entries, 'handled_today': handled_today, 'today_start': today_start}
 
     def set_digest(self, enabled, hour):
         if not isinstance(enabled, bool) or not isinstance(hour, int) or isinstance(hour, bool) or not 0 <= hour <= 23:
@@ -596,7 +626,11 @@ def get(handler):
     try:
         if path == PREFIX:
             payload = {'asks': STORE.waiting(), 'snoozed': STORE.snoozed(), 'digest': STORE.digest_settings(),
-                       'later': STORE.later_asks(), 'handled_today': STORE.handled_today(), 'rules': dict(STORE.rules)}
+                       'later': STORE.later_asks(), 'rules': dict(STORE.rules)}
+            try:
+                payload['handled_today'] = STORE.handled_today()
+            except OSError:
+                payload.update(handled_today=None, log_error=True)
         elif path == f'{PREFIX}/log':
             payload = STORE.automation_log()
         else:
@@ -627,11 +661,12 @@ def serve(handler, body, choose, store=None):
     if action not in ACTIONS:
         handler.respond(404, {'error': 'Not found'})
         return
-    pane, thread, ask_id = body.get('session'), body.get('thread'), body.get('ask')
+    pane, thread, ask_id, entry_id = body.get('session'), body.get('thread'), body.get('ask'), body.get('entry')
     if not isinstance(pane, str) or not PANE.match(pane) or not (thread is None or isinstance(thread, str)):
         handler.respond(400, {'error': 'Select a tab first.'})
         return
-    if ask_id is not None and not isinstance(ask_id, str):
+    if ((ask_id is not None and not isinstance(ask_id, str))
+            or (entry_id is not None and not isinstance(entry_id, str))):
         handler.respond(400, {'error': 'Use an ask id.'})
         return
     try:
@@ -643,12 +678,12 @@ def serve(handler, body, choose, store=None):
         handler.respond(409, {'error': 'This tab changed conversations. Reload it and try again.'})
         return
     try:
-        result = store.act(pane, thread, action, ask_id=ask_id)
+        result = store.act(pane, thread, action, ask_id=ask_id, entry_id=entry_id)
     except AttentionError as exc:
         handler.respond(503, {'error': str(exc)})
         return
     if result is False:
-        message = ('This ask changed. Reload and try again.' if ask_id is not None
+        message = ('This ask changed. Reload and try again.' if ask_id is not None or action == 'back'
                    else 'This tab changed conversations. Reload it and try again.')
         handler.respond(409, {'error': message})
         return

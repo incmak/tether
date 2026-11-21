@@ -32,7 +32,11 @@ export const visibleAsk = (pane: Pane, now: number) => waitingAsks([pane], now)[
 
 /** ask: the occurrence id the page saw. The server refuses the write (409) when the ask changed since. */
 export const askAction = (api: Api, pane: Pane, action: AskAction, ask?: Ask | null) =>
-  api<AskResult>(`attention/${action}`, { session: pane.id, thread: pane.thread ?? null, ...(ask?.id ? { ask: ask.id } : {}) })
+  api<AskResult>(`attention/${action}`, {
+    session: pane.id, thread: pane.thread ?? null,
+    ...(ask?.id ? { ask: ask.id } : {}),
+    ...(action === 'back' && ask?.later?.entry ? { entry: ask.later.entry } : {}),
+  })
 
 /** The tabs whose ask is in Later, newest move first. */
 export const laterAsks = (panes: Pane[]): Waiting[] =>
@@ -44,10 +48,19 @@ export interface AutoEntry {
   id: string; kind: string; summary: string; at: number
   detail?: Record<string, string | number | boolean | null>
   undone?: boolean
-  undo?: { session: string; thread: string | null; ask: string } | null
+  undo?: { session: string; thread: string | null; ask: string; entry: string } | null
 }
-export interface AutoLog { entries: AutoEntry[]; handled_today: number }
-export interface AttentionState { later: Ask[]; handled_today: number; rules: { stale: boolean }; digest: Digest }
+export interface AutoLog { entries: AutoEntry[]; handled_today: number; today_start: number }
+export interface AttentionState { later: Ask[]; handled_today: number | null; log_error?: boolean; rules: { stale: boolean }; digest: Digest }
+
+export function splitToday(entries: AutoEntry[], todayStart: number) {
+  const today: AutoEntry[] = [], older: AutoEntry[] = []
+  for (const entry of entries) {
+    if (entry.at >= todayStart) today.push(entry)
+    else older.push(entry)
+  }
+  return { today, older }
+}
 
 export const stillWait = (count: number) => count ? `${count} still wait${count === 1 ? 's' : ''}.` : 'Nothing else waits on you.'
 

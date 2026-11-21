@@ -41,9 +41,10 @@ class FakeLog:
         self.entries.append(row)
         return row
 
-    def _query(self, *, kinds, since, limit, before=None):
-        rows = [row for row in self.entries if attention.audit.KINDS[row['kind']] in kinds
-                and row['at'] >= since and (before is None or row['id'] < before)]
+    def _query(self, *, kinds, since, limit, before=None, text=None):
+        rows = [row for row in self.entries if (row['kind'] in kinds or attention.audit.KINDS[row['kind']] in kinds)
+                and row['at'] >= since and (before is None or row['id'] < before)
+                and (text is None or text in json.dumps(row))]
         rows.sort(key=lambda row: (row['at'], row['id']), reverse=True)
         return {'entries': rows[:limit], 'next': rows[limit - 1]['id'] if len(rows) > limit else None}
 
@@ -774,7 +775,7 @@ class StaleAskTest(unittest.TestCase):
             pane='%1', thread='t1', ask=ask['id'], tab='A named tab', rule='Stale ask')
         self.assertEqual(self.store.waiting(), [])
         moved = self.store.ask('%1', 't1')
-        self.assertEqual(moved['later'], {'at': self.clock.now, 'by': 'rule'})
+        self.assertEqual(moved['later'], {'at': self.clock.now, 'by': 'rule', 'entry': self.log.entries[0]['id']})
         self.assertEqual(self.store.later_asks(), [moved])
         self.world.observe()
         self.clock.now += attention.RETENTION + 1
@@ -782,7 +783,8 @@ class StaleAskTest(unittest.TestCase):
         self.world.turn('%8', 'Next: Choose?\nNeeds you: yes', 10, turn_id='%1:10')
         self.world.observe(entry('%8'))
         self.assertEqual(self.store.later_asks(), [dict(moved, pane='%8')])
-        self.assertEqual(self.store.automation_log(), {'entries': [], 'handled_today': 0})
+        self.assertEqual(self.store.automation_log()['entries'], [])
+        self.assertEqual(self.store.handled_today(), 0)
 
     def test_stale_rule_requires_every_eligibility_condition(self):
         for case in ('too young', 'working', 'prompt', 'urgent', 'snoozed', 'stay', 'rule off', 'newer turn'):
@@ -848,7 +850,7 @@ class StaleAskTest(unittest.TestCase):
         self.world.observe(self.pane)
         move = self.log.entries[0]
         self.assertIs(self.store.act('%1', 't1', 'back', 'old'), False)
-        self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id)['later'])
+        self.assertIsNone(self.store.act('%1', 't1', 'back', ask_id, move['id'])['later'])
         self.log.record.assert_called_with(
             'auto.undo', 'Put an ask back in the queue', actor=None, pane='%1', thread='t1', ask=ask_id,
             entry=move['id'], rule='Stale ask')
@@ -866,7 +868,7 @@ class StaleAskTest(unittest.TestCase):
         before = self.path.read_text()
         self.log.fail.add('auto.undo')
         with self.assertRaisesRegex(attention.AttentionError, 'Could not write the automation log'):
-            self.store.act('%1', 't1', 'back', ask_id)
+            self.store.act('%1', 't1', 'back', ask_id, self.log.entries[0]['id'])
         self.assertEqual(self.path.read_text(), before)
         self.assertEqual(self.store.later_asks()[0]['id'], ask_id)
         self.assertFalse(self.store.asks['%1']['stay'])
@@ -891,6 +893,50 @@ class StaleAskTest(unittest.TestCase):
         self.world.observe(self.pane)
         self.assertIsNone(self.store.ask('%1', 't1'))
 
+    def test_new_finish_replaces_later_reply_without_turn_id(self):
+        self.world.turn('%1', 'Previous reply', 10, turn_id=None)
+        self.world.observe(self.pane)
+        for finished, via_rule in ((20, True), (30, False)):
+            with self.subTest(finished=finished):
+                self.world.turn('%1', 'Next: Choose?\nNeeds you: yes', finished, turn_id=None)
+                self.world.observe(self.pane)
+                original = self.store.ask('%1', 't1')
+                if via_rule:
+                    self.clock.now += 25 * 3600
+                    self.world.observe(self.pane)
+                else:
+                    self.store.act('%1', 't1', 'later', original['id'])
+                self.assertEqual(self.store.later_asks()[0]['id'], original['id'])
+
+                self.clock.now += 60
+                self.world.turn('%1', 'Next: Choose?\nNeeds you: yes', finished + 1, turn_id=None)
+                self.world.observe(self.pane)
+                current = self.store.ask('%1', 't1')
+                self.assertNotEqual(current['id'], original['id'])
+                self.assertEqual(current['asked_at'], self.clock.now)
+                self.assertEqual(self.store.asks['%1']['occ'], finished + 1)
+                self.assertEqual(self.store.waiting(), [current])
+                self.assertEqual(self.store.later_asks(), [])
+
+    def test_live_prompt_replaces_a_later_reply(self):
+        for by in ('rule', 'you'):
+            with self.subTest(by=by):
+                original = self.start_reply(at=self.clock.now)
+                if by == 'rule':
+                    self.clock.now += 25 * 3600
+                    self.world.observe(self.pane)
+                else:
+                    self.store.act('%1', 't1', 'later', original['id'])
+                self.assertEqual(self.store.later_asks()[0]['later']['by'], by)
+                self.world.status['%1'] = APPROVAL
+                self.world.observe(self.pane)
+                prompt, = self.store.waiting()
+                self.assertEqual(prompt['kind'], 'approval')
+                self.assertNotEqual(prompt['id'], original['id'])
+                self.assertEqual(self.store.later_asks(), [])
+        move, = self.store.automation_log()['entries']
+        self.assertIsNone(move['undo'])
+
     def test_prompt_changes_keep_the_same_occurrence(self):
         self.world.status['%1'] = APPROVAL
         self.world.observe(self.pane)
@@ -902,33 +948,60 @@ class StaleAskTest(unittest.TestCase):
         self.assertNotEqual(first['next'], current['next'])
         self.assertEqual((current['id'], current['asked_at']), (first['id'], first['asked_at']))
 
-    def test_move_failure_warns_once_per_ask_and_retries_on_the_next_tick(self):
+    def test_failed_record_uses_ten_minute_backoff_and_warns_once(self):
         ask_id = self.start_reply()['id']
         self.clock.now += 25 * 3600
         self.log.fail.add('auto.stale_ask')
+        start = self.clock.now
         with mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
-            self.world.observe(self.pane)
-            self.world.observe(self.pane)
-        self.assertEqual(self.log.record.call_count, 2)
+            for offset, calls in ((0, 1), (60, 1), (599, 1), (600, 2)):
+                self.clock.now = start + offset
+                self.world.observe(self.pane)
+                self.assertEqual(self.log.record.call_count, calls, offset)
         lines = stderr.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn(ask_id, lines[0])
         self.assertEqual(self.store.waiting()[0]['id'], ask_id)
         self.log.fail.clear()
+        self.clock.now += 600
         self.world.observe(self.pane)
         self.assertEqual(self.store.later_asks()[0]['id'], ask_id)
 
-    def test_move_rechecks_the_occurrence_after_audit_releases_control(self):
+    def test_move_holds_the_state_lock_through_audit_and_save(self):
         original = self.start_reply()
         self.clock.now += 25 * 3600
         def record(*args, **kwargs):
-            self.assertFalse(self.store.lock.locked())
-            self.store.note_reply('%1', 't1', 'Next: New ask.\nNeeds you: yes', 'new')
+            self.assertTrue(self.store.lock.locked())
+            self.assertIsNone(self.store.asks['%1'].get('later'))
             return self.log._record(*args, **kwargs)
         self.log.record.side_effect = record
-        self.world.observe(self.pane)
-        self.assertNotEqual(self.store.waiting()[0]['id'], original['id'])
-        self.assertIsNone(self.store.automation_log()['entries'][0]['undo'])
+        save = self.store._save
+        def save_locked(now):
+            self.assertTrue(self.store.lock.locked())
+            self.assertEqual(self.store.asks['%1']['later']['entry'], self.log.entries[0]['id'])
+            return save(now)
+        with mock.patch.object(self.store, '_save', side_effect=save_locked):
+            self.world.observe(self.pane)
+        self.assertEqual(self.store.later_asks()[0]['id'], original['id'])
+
+    def test_failed_move_save_rolls_back_and_reuses_audit_after_reload(self):
+        original = self.start_reply()
+        self.clock.now += 25 * 3600
+        with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')), mock.patch('sys.stderr', new_callable=io.StringIO):
+            self.world.observe(self.pane)
+        first, = self.log.entries
+        with self.subTest('memory and backoff'):
+            self.assertEqual(self.store.ask('%1', 't1'), original)
+            self.log.query.reset_mock()
+            self.clock.now += 599
+            self.world.observe(self.pane)
+            self.log.query.assert_not_called()
+            self.assertEqual(self.store.ask('%1', 't1'), original)
+        with self.subTest('reload'):
+            self.store = self.world.store = attention.Attention(self.path, self.clock, log=self.log)
+            self.world.observe(self.pane)
+            self.assertEqual(self.log.entries, [first])
+            self.assertEqual(self.store.later_asks()[0]['later']['entry'], first['id'])
 
     def test_legacy_live_and_parked_ids_are_repaired_and_saved(self):
         live = self.start_reply()
@@ -952,7 +1025,7 @@ class StaleAskTest(unittest.TestCase):
         ask_id = self.start_reply('Urgent: Choose?')['id']
         self.store.act('%1', 't1', 'snooze', ask_id)
         moved = self.store.act('%1', 't1', 'later', ask_id)
-        self.assertEqual(moved['later'], {'by': 'you', 'at': self.clock.now})
+        self.assertEqual(moved['later'], {'by': 'you', 'at': self.clock.now, 'entry': None})
         self.assertIsNone(moved['snoozed_until'])
         self.assertIsNone(self.store.asks['%1']['later']['entry'])
         self.clock.now += attention.URGENT_GRACE
@@ -1115,8 +1188,11 @@ class RouteTest(unittest.TestCase):
         self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: ('Next: a.\nNeeds you: yes', 'first'))
         self.log.fail.add('auto.undo')
         self.assertEqual(self.post('back', dict(body, ask=123))[0], 400)
+        self.assertEqual(self.post('back', dict(body, entry=123))[0], 400)
         self.assertEqual(self.post('back', dict(body, ask='stale')),
                          (409, {'error': 'This ask changed. Reload and try again.'}))
+        self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
+        body['entry'] = self.log.entries[0]['id']
         self.assertEqual(self.post('back', body),
                          (503, {'error': 'Could not write the automation log. Try again.'}))
         self.assertEqual(self.store.later_asks()[0]['id'], body['ask'])
@@ -1124,6 +1200,76 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(self.post('back', body)[0], 200)
         self.store.clear('%1', 't1')
         self.assertEqual(self.post('back', body), (409, {'error': 'This ask changed. Reload and try again.'}))
+
+    def move_reply(self):
+        self.store.observe([entry()], lambda e: {'state': 'Idle'}, lambda e: ('Next: a.\nNeeds you: yes', 'first'))
+
+    def test_back_rejects_a_previous_move_of_the_same_ask(self):
+        body = {'session': '%1', 'thread': 't1', 'ask': self.store.ask('%1', 't1')['id']}
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        first, = self.log.entries
+        self.assertEqual(self.post('snooze', body)[0], 200)
+        snoozed = self.store.ask('%1', 't1')
+        self.assertEqual(self.post('back', dict(body, entry=first['id'])),
+                         (409, {'error': 'This ask changed. Reload and try again.'}))
+        self.assertEqual(self.store.ask('%1', 't1'), snoozed)
+        self.clock.now += attention.SNOOZE
+        self.move_reply()
+        self.clock.now += attention.STALE
+        self.move_reply()
+        _, second = self.log.entries
+        self.assertEqual(second['detail']['ask'], body['ask'])
+        before = self.store.ask('%1', 't1')
+        for stale_entry in (first['id'], 'other-move'):
+            with self.subTest(entry=stale_entry):
+                self.assertEqual(self.post('back', dict(body, entry=stale_entry)),
+                                 (409, {'error': 'This ask changed. Reload and try again.'}))
+                self.assertEqual(self.store.ask('%1', 't1'), before)
+        self.assertEqual(self.log.entries, [first, second])
+        self.assertEqual(self.post('back', dict(body, entry=second['id']))[0], 200)
+
+    def test_back_holds_the_state_lock_through_audit_and_save(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        def record(*args, **kwargs):
+            self.assertTrue(self.store.lock.locked())  # Snooze and Later take this same lock.
+            self.assertEqual(self.store.asks['%1']['later']['entry'], move['id'])
+            return self.log._record(*args, **kwargs)
+        self.log.record.side_effect = record
+        save = self.store._save
+        def save_locked(now):
+            self.assertTrue(self.store.lock.locked())
+            self.assertTrue(self.store.asks['%1']['stay'])
+            return save(now)
+        with mock.patch.object(self.store, '_save', side_effect=save_locked):
+            self.assertEqual(self.post('back', {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'],
+                                                'entry': move['id']})[0], 200)
+        self.assertTrue(self.store.asks['%1']['stay'])
+
+    def test_failed_undo_save_keeps_later_and_the_log_row_undoable(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        before = self.store.asks['%1'].copy()
+        with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')):
+            status, body = self.post('back', target)
+        with self.subTest('route and state'):
+            self.assertEqual((status, body), (503, {'error': 'Could not save. Try again.'}))
+            self.assertEqual(self.store.asks['%1'], before)
+            self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).asks['%1'], before)
+        with self.subTest('audit and count'):
+            self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
+            _, log = self.get('/log')
+            row = next(row for row in log['entries'] if row['id'] == move['id'])
+            self.assertFalse(row['undone'])
+            self.assertEqual(row['undo'], target)
+            self.assertEqual(log['handled_today'], 1)
+            self.assertEqual(self.get()[1]['handled_today'], 1)
+        self.assertEqual(self.post('back', target)[0], 200)
+        self.assertEqual(self.get()[1]['handled_today'], 0)
 
     def test_get_log_adds_undo_targets_and_counts_moves_since_local_midnight(self):
         today = self.clock.now
@@ -1146,7 +1292,7 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.log.query.assert_called_once_with(kinds=['automation'], since=self.clock.now - 7 * 86400, limit=100)
         self.assertEqual(log['handled_today'], 2)
-        self.assertEqual(log['entries'][0]['undo'], {'session': '%1', 'thread': 't1', 'ask': ask['id']})
+        self.assertEqual(log['entries'][0]['undo'], {'session': '%1', 'thread': 't1', 'ask': ask['id'], 'entry': current['id']})
         self.assertFalse(log['entries'][0]['undone'])
         self.assertNotIn('undo', current)
         rows = {row['id']: row for row in log['entries']}
@@ -1168,9 +1314,27 @@ class RouteTest(unittest.TestCase):
         self.assertEqual((len(log['entries']), log['handled_today']), (100, 100))
         self.assertEqual(self.get()[1]['handled_today'], 100)
 
-    def test_get_log_returns_500_when_audit_query_fails(self):
-        self.log.query.side_effect = OSError('unreadable')
-        self.assertEqual(self.get('/log'), (500, {'error': 'Tether could not read the audit log.'}))
+    def test_log_read_failure_keeps_queue_and_settings_available(self):
+        for failure in (OSError('unreadable'), {'error': 'unreadable'}):
+            with self.subTest(failure=failure):
+                self.log.query.side_effect = lambda **kw: failure
+                if isinstance(failure, OSError):
+                    self.log.query.side_effect = failure
+                self.assertEqual(self.get('/log'), (500, {'error': 'Tether could not read the audit log.'}))
+                self.assertEqual(self.get(), (200, {
+                    'asks': self.store.waiting(), 'snoozed': 0, 'later': self.store.later_asks(),
+                    'digest': self.store.digest_settings(), 'rules': dict(self.store.rules),
+                    'handled_today': None, 'log_error': True,
+                }))
+                self.assertEqual(self.post('rules', {'stale': False}), (200, {'rules': {'stale': False}}))
+
+    def test_log_today_start_is_server_local_midnight(self):
+        for day, hour in ((21, 23), (22, 0)):
+            with self.subTest(day=day, hour=hour):
+                self.clock.now = datetime(2026, 11, day, hour, 15).timestamp()
+                status, log = self.get('/log')
+                self.assertEqual(status, 200)
+                self.assertEqual(log['today_start'], datetime(2026, 11, day).timestamp())
 
 
 class AnswerEndpointTest(unittest.TestCase):

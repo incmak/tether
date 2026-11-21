@@ -137,7 +137,7 @@ export interface Ask { pane: string; thread: string | null; since: number; next:
   /** The occurrence: a new turn that asks again gets a new id. Writes name it, so a stale page gets 409. */
   id?: string; asked_at?: number
   /** In Later: out of the queue until you put it back. by 'rule': the stale ask rule moved it (B335). */
-  later?: { at: number; by: 'rule' | 'you' } | null }
+  later?: { at: number; by: 'rule' | 'you'; entry?: string | null } | null }
 // images: how many images the tool result holds (Claude's Read of a screenshot). GET tool-image serves them.
 // artifact: a page Claude published with its Artifact tool. url: the claude.ai link; path: the local HTML file it came from.
 export interface ToolArtifact { url: string; path: string; title: string }
