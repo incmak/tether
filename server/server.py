@@ -2574,6 +2574,7 @@ class Handler(BaseHTTPRequestHandler):
             elif codex_level.handles(path):
                 codex_level.get(self)
             elif audit.handles(path):
+                backlog.observe()
                 audit.get(self)
             elif commit_gate.handles(path):
                 commit_gate.get(self)
@@ -3797,6 +3798,7 @@ if __name__ == '__main__':
     groups.HOLD = auto_resume.restoring  # no auto stack dissolves while saved tabs come back
     threading.Thread(target=auto_stacks.watch, kwargs={'restoring': auto_resume.restoring}, daemon=True).start()  # empty and root-only auto stacks go
     threading.Thread(target=window_size.watch, daemon=True).start()
+    threading.Thread(target=backlog.watch, daemon=True).start()
     threading.Thread(target=teams_replies.watch, args=(urgent_ping._config, teams_answer), daemon=True).start()
     backgrounds.upgrade_soon()  # small copies for photos saved before they existed
     office_addon.start_listener()

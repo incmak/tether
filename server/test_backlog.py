@@ -249,8 +249,9 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual(len(list((backlog.folder() / 'versions').glob('*.md'))), 3)
 
     def test_a_failed_copy_does_not_stop_a_save(self):
-        with mock.patch.object(backlog, '_write', side_effect=[None, None]), mock.patch.object(Path, 'glob', side_effect=OSError('full')):
+        with mock.patch.object(Path, 'glob', side_effect=OSError('full')):
             backlog.save('- [ ] One\n', backlog.read()['version'])
+        self.assertEqual(self.text(), '- [ ] One #B1\n')
 
     def test_nothing_is_lost_with_many_processes_writing(self):
         context = multiprocessing.get_context('fork')

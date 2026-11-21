@@ -8,6 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import audit
+import backlog
+import paths
 import server
 import terminal_input
 
@@ -15,7 +17,8 @@ import terminal_input
 class AuditRouteTests(unittest.TestCase):
     def setUp(self):
         self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(patch.object(audit.paths, 'CONFIG', self.folder))
+        self.enterContext(patch.object(paths, 'CONFIG', self.folder / 'config'))
+        self.enterContext(patch.object(paths, 'TETHER', self.folder / 'tether'))
 
     def handler(self, method, path, body=None):
         handler = object.__new__(server.Handler)
@@ -62,6 +65,17 @@ class AuditRouteTests(unittest.TestCase):
             query.assert_not_called()
             query.side_effect = OSError('internal path')
             self.assertEqual(self.get(''), (500, {'error': 'Tether could not read the audit log.'}))
+
+    def test_get_observes_backlog_before_returning_entries(self):
+        self.assertEqual(self.get('')[0], 200)  # Seed the snapshot before the first item.
+        (backlog.folder() / 'BACKLOG.md').write_text('- [ ] Added by hand #B1\n')
+
+        status, body = self.get('?kind=backlog')
+
+        self.assertEqual(status, 200)
+        entry, = body['entries']
+        self.assertEqual(entry['kind'], 'backlog.add')
+        self.assertEqual(entry['detail'], {'observed': True})
 
     def test_permission_decisions_use_verified_option_and_store_no_prompt_data(self):
         config = {'id': '%12', 'thread': 'chat', 'agent': 'codex', 'pane_name': 'Audit Log', 'writable': True}
