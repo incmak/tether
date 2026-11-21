@@ -2898,7 +2898,7 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                    {'role': 'user', 'content': 'No, what does it want?'}]  # not bare: the model runs
         for reply in (['Denied.'], ['Okay, I have ', 'denied it.'], ['Denied. Anything else?'],
                       ['I rejected the request.'], ['Denied. I did not send anything.'],
-                      ['Denied because it was not safe.'], ['I asked if it was approved, and it was approved.']):
+                      ['Denied because it was not safe.'], ['It asked if I would. Denied.']):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [(reply, 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [])
@@ -2907,7 +2907,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         # Review 5: an answer that describes the request is not a claim and is kept.
         for reply in ('Okay, I will leave it waiting.', 'It wants the installation approved before it can continue.',
                       'It asks whether the request was approved.',
-                      'It asks whether or not the request was approved.'):
+                      'It asks whether or not the request was approved.',
+                      # Review 8: the exemption covers the whole sentence.
+                      'It asks whether the installation is complete and the request was approved.',
+                      'It asks whether, to your knowledge, the request was approved.'):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [([reply], 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])
