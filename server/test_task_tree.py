@@ -692,6 +692,48 @@ class Routes(unittest.TestCase):
                 self.assertEqual(closer.timers, {})
                 self.assertEqual(self.run.writes, [])
 
+    def test_auto_close_waits_while_a_prompt_after_done_has_unknown_provenance(self):
+        copied = 'Please revisit this\n\n[Tether id 0123456789abcdef]'
+        for agent in ('claude', 'codex'):
+            for when, closes in (('2026-11-21T00:02:00Z', False), ('2026-11-21T00:00:30Z', True)):
+                with self.subTest(agent=agent, after_done=not closes), \
+                        patch.object(task_tree, 'done_items', return_value=set()):
+                    self.mark_for_unreadable_prompt(agent)
+                    append_prompt(self.root, copied, when)
+                    clock = [0]
+                    closer = task_tree_close.Closer(now=lambda: clock[0])
+
+                    def sweep():
+                        tree = self.tree()
+                        task_tree_close.clear_obsolete_marks(tree, self.lock, server.task_user_prompt_at)
+                        return closer.observe(tree, self.tree, enabled=lambda: True, lock=self.lock,
+                                              activity=lambda _: 1, viewed=lambda _: (False, None),
+                                              draft=lambda _: False, changed=Mock(),
+                                              user_prompt_at=server.task_user_prompt_at)
+
+                    sweep()
+                    # An unknown prompt after Done neither keeps the task Done nor clears its mark.
+                    self.assertEqual('%1' in closer.timers, closes)
+                    if not closes:
+                        clock[0] = task_tree.CLOSE_AFTER
+                        self.assertEqual(sweep(), [])
+                        self.assertEqual(self.run.writes, [])
+                        self.assertEqual(self.run.rows['%1'][task_tree.DONE], self.root['thread'])
+
+    def test_unknown_prompt_before_done_keeps_mark_and_known_prompt_after_done_ends_it(self):
+        copied = 'Relay\n\n[Tether id 0123456789abcdef]'
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.mark_for_unreadable_prompt(agent)
+                append_prompt(self.root, copied, '2026-11-21T00:00:30Z')
+                options = self.tree().options['%1']
+                self.assertTrue(task_tree.manual_mark(self.root, options, server.task_user_prompt_at))
+                append_prompt(self.root, copied, '2026-11-21T00:02:00Z')
+                with self.assertRaises(injected_prompts.ReceiptsUnreadable):
+                    task_tree.manual_mark(self.root, options, server.task_user_prompt_at)
+                append_prompt(self.root, 'A real reply', '2026-11-21T00:03:00Z')
+                self.assertFalse(task_tree.manual_mark(self.root, options, server.task_user_prompt_at))
+
     def test_auto_close_refuses_unreadable_helper_at_final_validation(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent), patch.object(task_tree, 'done_items', return_value={'B446'}), \
@@ -803,7 +845,10 @@ class DoneRuleTests(unittest.TestCase):
                         with self.subTest(error=type(error).__name__), patch.object(server, 'open', side_effect=[error], create=True), \
                                 self.assertRaises(injected_prompts.ReceiptsUnreadable):
                             server.task_user_prompt_at(root)
-                    self.assertEqual(server.task_user_prompt_at(root), 1795219320)
+                    # Readable, but the copied delivery's sender is unknown: never skipped as "not the user".
+                    with self.assertRaises(injected_prompts.ProvenanceUnknown) as caught:
+                        server.task_user_prompt_at(root)
+                    self.assertEqual((caught.exception.at, caught.exception.user_at), (1795219380, 0))
 
     def test_is_done_does_not_fall_back_to_backlog_on_unreadable_manual_mark(self):
         with tempfile.TemporaryDirectory() as folder:

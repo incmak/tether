@@ -68,6 +68,8 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
                 if require_receipts:
                     raise
                 return result(injected_prompts.UNKNOWN_RECEIPT, record)
+        if source == injected_prompts.UNKNOWN_RECEIPT and latest_user and require_receipts:
+            raise injected_prompts.ProvenanceUnknown(_timestamp(record))  # never skip a prompt that may be the person's
         if source == injected_prompts.UNKNOWN_RECEIPT and not require_receipts:
             source = 'background'
         source = source or 'user'

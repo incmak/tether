@@ -29,6 +29,14 @@ class ReceiptsUnreadable(Exception):
     """The available data cannot establish who sent a prompt."""
 
 
+class ProvenanceUnknown(ReceiptsUnreadable):
+    """A readable prompt whose sender is unknown (an unbound delivery id). at: its time; user_at: a proven later user time."""
+
+    def __init__(self, at, user_at=0):
+        super().__init__('Prompt source unknown')
+        self.at, self.user_at = at, user_at
+
+
 class ReceiptNotSaved(RuntimeError):
     """The prompt was refused before it reached the terminal."""
 

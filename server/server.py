@@ -1474,11 +1474,16 @@ def task_user_prompt_at(entry):
             if any(saved == digest and start <= timestamp <= end for saved, start, end in recent):
                 return 'tether'
 
-    _, at, _ = notification_priority.turn_source(
-        entry.get('agent'), notification_records(entry, with_offset=True, require_read=True), identify=source,
-        distinguish_missing=True, with_time=True, latest_user=True, require_receipts=True)
     user_thread, sent = TASK_USER_AT.get(pane, (None, 0))
-    return max(at or 0, sent if user_thread == thread else 0)
+    sent = sent if user_thread == thread else 0
+    try:
+        _, at, _ = notification_priority.turn_source(
+            entry.get('agent'), notification_records(entry, with_offset=True, require_read=True), identify=source,
+            distinguish_missing=True, with_time=True, latest_user=True, require_receipts=True)
+    except injected_prompts.ProvenanceUnknown as exc:
+        exc.user_at = max(exc.user_at, sent)
+        raise
+    return max(at or 0, sent)
 
 
 def notification_context(entry):

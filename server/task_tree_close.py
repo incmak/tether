@@ -35,6 +35,9 @@ class Closer:
             version = activity(entry)
             try:
                 prompt_at = user_prompt_at(entry)
+            except injected_prompts.ProvenanceUnknown as exc:
+                # is_done already refused an unknown prompt after the root's Done mark. Elsewhere it only marks change.
+                prompt_at = ('unknown', exc.at, exc.user_at)
             except injected_prompts.ReceiptsUnreadable:
                 return None
             viewing, last_view = viewed(member)
