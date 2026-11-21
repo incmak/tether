@@ -96,6 +96,20 @@ class InjectedPromptTests(unittest.TestCase):
     def sources(self, entry=None):
         return [m.get('source') for m in self.messages(entry)]
 
+    def fail_next_receipt_read(self, entry):
+        target = injected_prompts._file(entry['transcript'])
+        read_text = Path.read_text
+        failed = False
+
+        def read_once(path, *args, **kwargs):
+            nonlocal failed
+            if path == target and not failed:
+                failed = True
+                raise OSError('receipt unavailable')
+            return read_text(path, *args, **kwargs)
+
+        return patch.object(Path, 'read_text', read_once)
+
     def test_paste_before_send_at_same_timestamp(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
@@ -480,7 +494,7 @@ class InjectedPromptTests(unittest.TestCase):
         with patch.object(Path, 'open', open_path):
             with self.assertRaises(injected_prompts.ReceiptsUnreadable):
                 injected_prompts.bindings(self.chat)
-            self.assertIsNone(injected_prompts.mark(self.chat, raw)[0].get('source'))
+            self.assertEqual(injected_prompts.mark(self.chat, raw)[0].get('source'), injected_prompts.UNKNOWN_RECEIPT)
             self.send(self.chat, 'Another delivery')
             receipt = injected_prompts._file(self.chat['transcript'])
             before = receipt.read_bytes()
@@ -488,7 +502,44 @@ class InjectedPromptTests(unittest.TestCase):
             self.assertEqual(receipt.read_bytes(), before)
         self.assertEqual(self.sources(), ['tether', 'tether'])
 
-    def test_unreadable_receipts_allow_chat_and_previews_to_recover(self):
+    def test_unreadable_receipts_keep_chat_prompts_unattributed(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.send(entry, 'Relay started this chat')
+                self.append(entry, 'Actual user request')
+                raw = self.raw(entry)
+                with patch.object(server, 'snapshot', return_value={'messages': raw}), self.fail_next_receipt_read(entry):
+                    messages = server.marked_snapshot(entry)['messages']
+                for message in messages:
+                    self.assertEqual((message.get('source'), message.get('kind')),
+                                     (injected_prompts.UNKNOWN_RECEIPT, 'notice'))
+                    self.assertNotIn('_record_id', message)
+                self.assertEqual([message['text'] for message in messages], [message['text'] for message in raw])
+                self.assertEqual(self.sources(entry), ['tether', None])
+
+    def test_unreadable_receipts_keep_unknown_prompts_out_of_derived_context(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                entry = self.entry(agent)
+                self.send(entry, 'Relay started this chat')
+                self.append(entry, 'Actual user request')
+                self.append(entry, 'Agent reply', assistant=True)
+                raw = self.raw(entry)
+                with self.fail_next_receipt_read(entry):
+                    brief_messages = server.brief_messages(entry)
+                with self.fail_next_receipt_read(entry):
+                    messages = injected_prompts.mark(entry, raw)
+                with self.subTest(consumer='tab brief'):
+                    self.assertEqual(tab_brief.turns(brief_messages), ([], 0))
+                with self.subTest(consumer='continuation'):
+                    self.assertNotIn('Relay started this chat', continuations.brief(entry, messages))
+                with self.subTest(consumer='delegation'):
+                    self.assertEqual(delegate.brief(messages), 'Agent: Agent reply')
+                with self.subTest(consumer='search'):
+                    self.assertEqual(server.find_messages(messages, 'Relay started')['total'], 0)
+
+    def test_unreadable_receipts_keep_unverified_prompt_out_of_history_preview(self):
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent):
                 entry = self.entry(agent)
@@ -499,19 +550,16 @@ class InjectedPromptTests(unittest.TestCase):
                     with sqlite3.connect(self.folder / 'state_1.sqlite') as db:
                         db.execute('CREATE TABLE threads (id TEXT, rollout_path TEXT, first_user_message TEXT)')
                         db.execute('INSERT INTO threads VALUES (?, ?, ?)', (CHAT_ID, str(path), 'Relay started this chat'))
-                receipt = injected_prompts._file(path)
-                saved = receipt.read_bytes()
-                receipt.write_text('{')
                 with patch.object(history.paths, 'CODEX', self.folder):
                     def preview():
                         return (history.preview(path, path.stat()) if agent == 'claude'
                                 else history.find_chat(CHAT_ID, 'codex'))
 
-                    self.assertEqual(self.sources(entry), [None, None])
-                    self.assertTrue(preview()['text'].startswith('Relay started this chat'))
+                    with self.fail_next_receipt_read(entry):
+                        shown = preview()
+                    self.assertEqual(shown['text'], '')
+                    self.assertEqual(shown['title'], path.stem if agent == 'claude' else CHAT_ID)
                     self.assertNotIn(path, history._previews)
-                    receipt.write_bytes(saved)
-                    self.assertEqual(self.sources(entry), ['tether', None])
                     self.assertEqual(preview()['text'], 'Actual user request')
 
     def test_binding_does_not_use_the_native_timestamp(self):

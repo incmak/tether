@@ -187,7 +187,7 @@ def preview(path, info):
         bound = injected_prompts.bindings({'transcript': path, 'agent': 'claude'})
         signature = (info.st_mtime_ns, info.st_size, frozenset(bound))
     except injected_prompts.ReceiptsUnreadable:
-        bound, signature = {}, None
+        bound, signature = None, None
     with _preview_lock:
         cached = _previews.get(path)
         if signature is not None and cached and cached[0] == signature:
@@ -218,9 +218,11 @@ def preview(path, info):
                 title = ' '.join(value.split())
                 if kind == 'custom-title':
                     custom_title = title
-            if not first_user:
+            if bound is not None and not first_user:
                 first_user = user_title(entry, limit=300, bound=bound)
-        if bound:
+        if bound is None:
+            title = custom_title
+        elif bound:
             # The bounded preview may skip the first real user message if a relay started the chat.
             starts_with_relay = False
             for _, entry in _head_records(path):
@@ -294,6 +296,7 @@ def _codex_chats():
                 text = row.get('first_user_message')
                 rollout = row.get('rollout_path')
                 changed = None
+                unreadable = False
                 if isinstance(rollout, str) and rollout:
                     try:
                         bound = injected_prompts.bindings({'transcript': rollout, 'agent': 'codex'})
@@ -302,10 +305,14 @@ def _codex_chats():
                             info = path.stat()
                             changed = _codex_relay_title(path, (info.st_ino, info.st_size, info.st_mtime_ns), frozenset(bound))
                     except (OSError, injected_prompts.ReceiptsUnreadable):
-                        pass
-                if changed is not None:
+                        unreadable = True
+                if unreadable:
+                    text, titles = '', (row.get('name'), identifier)
+                elif changed is not None:
                     text = changed
-                titles = (row.get('name'), row.get('title'), text) if changed is None else (row.get('name'), text, identifier)
+                    titles = (row.get('name'), text, identifier)
+                else:
+                    titles = (row.get('name'), row.get('title'), text)
                 title = next((' '.join(value.split()) for value in titles if isinstance(value, str) and value.strip()), None)
                 if title is None:
                     # An empty thread. has_user_event cannot tell: Codex stores 0 on every row.

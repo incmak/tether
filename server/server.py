@@ -548,11 +548,17 @@ def task_close_sweep(entries):
         with WATCHING_LOCK:
             for pane in TASK_VIEW_AT.keys() - tree.options.keys():
                 TASK_VIEW_AT.pop(pane, None)
-        task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+        unreadable = task_tree_close.clear_obsolete_marks(tree, SEND_LOCK, task_user_prompt_at)
+
+        def read_prompt(entry):
+            if entry['id'] in unreadable:
+                raise injected_prompts.ReceiptsUnreadable('Task prompt source unavailable this tick')
+            return task_user_prompt_at(entry)
+
         TASK_CLOSER.observe(tree, live_task_tree, enabled=lambda: prefs_sync.load()['prefs'].get('task_auto_close') is True,
                             lock=SEND_LOCK, activity=task_activity, viewed=task_view,
                             draft=lambda entry: _web_draft(entry['id']).strip() or any(prompt_draft(entry, subprocess.run)),
-                            changed=forget_sessions, user_prompt_at=task_user_prompt_at)
+                            changed=forget_sessions, user_prompt_at=read_prompt)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         TASK_CLOSER.reset()
         print(f'task close sweep failed: {exc}', file=sys.stderr)
@@ -1447,7 +1453,7 @@ def _transcript_tail_records(entry, tail_bytes, *, whole=False, with_offset=Fals
                     records.append(record)
                 offset += len(line)
         except (OSError, KeyError, ValueError) as exc:
-            if require_read and isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+            if require_read and isinstance(exc, OSError):
                 raise injected_prompts.ReceiptsUnreadable(str(exc)) from exc
             records, start = [], None
     return (records, start == 0) if whole else records
@@ -1459,7 +1465,7 @@ def task_user_prompt_at(entry):
     recent = TASK_AUTOMATED.get((pane, thread), ())
 
     def source(record, text):
-        # Receipts first: the same provenance as chat. An unbound delivery id or unreadable receipt is never the user.
+        # An unbound delivery id has unknown provenance. A read error defers the whole check.
         if review := review_links.prompt_source(entry, record, text):
             return review
         timestamp = notification_priority._timestamp(record)
@@ -1469,14 +1475,14 @@ def task_user_prompt_at(entry):
                 return 'tether'
 
     _, at, _ = notification_priority.turn_source(
-        entry.get('agent'), notification_records(entry, with_offset=True), identify=source,
-        distinguish_missing=True, with_time=True, latest_user=True)
+        entry.get('agent'), notification_records(entry, with_offset=True, require_read=True), identify=source,
+        distinguish_missing=True, with_time=True, latest_user=True, require_receipts=True)
     user_thread, sent = TASK_USER_AT.get(pane, (None, 0))
     return max(at or 0, sent if user_thread == thread else 0)
 
 
 def notification_context(entry):
-    records = notification_records(entry, with_offset=True)
+    records = notification_records(entry, with_offset=True, require_read=True)
     return notification_reply(entry, records), records
 
 
@@ -1897,6 +1903,8 @@ def find_messages(messages, query, limit=60):
     found = []
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
+        if message.get('source') == injected_prompts.UNKNOWN_RECEIPT:
+            continue  # Search labels results by speaker.
         text = str(message.get('text') or '')
         lower = text.lower()
         if all(word in lower for word in words):

@@ -46,7 +46,7 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
     reply yet, so the prompt before that record belongs to an earlier turn.
     With latest_user, scan past automated turns and return the latest prompt that identify leaves to the user.
     identify(record, text) gets the native record, so it can read the prompt's receipt and timestamp.
-    Notifications use the background fallback for unbound delivery ids and unreadable receipts.
+    An unreadable receipt stops the scan. A strict caller gets the read error instead of an unknown source.
     """
     finished_at = None
 
@@ -59,13 +59,15 @@ def turn_source(agent, records, *, identify=None, distinguish_missing=False, wit
             try:
                 if identify is not None:
                     source = identify(record, text)
-                elif entry is not None and injected_prompts.has_delivery_id(text):
-                    if injected_prompts.bound_receipt(entry, record) is None:
+                elif entry is not None:
+                    if injected_prompts.bound_receipt(entry, record) is not None:
+                        source = 'tether'
+                    elif injected_prompts.has_delivery_id(text):
                         source = injected_prompts.UNKNOWN_RECEIPT
             except injected_prompts.ReceiptsUnreadable:
                 if require_receipts:
                     raise
-                source = 'background'
+                return result(injected_prompts.UNKNOWN_RECEIPT, record)
         if source == injected_prompts.UNKNOWN_RECEIPT and not require_receipts:
             source = 'background'
         source = source or 'user'
@@ -219,13 +221,21 @@ def status_line(reply):
     return status, lines
 
 
-def classify(kind, agent, records, reply, *, entry=None):
-    """Return (priority, preview text). Only a final status line overrides text guesses."""
+def classify(kind, agent, records, reply, *, entry=None, source_unknown=False):
+    """Return (priority, preview text). Only a final status line overrides text guesses.
+
+    source_unknown: the prompt source could not be read. It counts as background, never as the person's turn.
+    """
     status, lines = status_line(reply)
     preview = '\n'.join(lines).rstrip()
     if kind in ('approval', 'input') or status == 'yes':
         return 'urgent', preview
-    level = 'low' if turn_source(agent, records, entry=entry) == 'background' else 'important'
+    try:
+        source = injected_prompts.UNKNOWN_RECEIPT if source_unknown else turn_source(
+            agent, records, entry=entry, require_receipts=True)
+    except injected_prompts.ReceiptsUnreadable:
+        source = injected_prompts.UNKNOWN_RECEIPT
+    level = 'low' if source in ('background', injected_prompts.UNKNOWN_RECEIPT) else 'important'
     if status is None:
         plain = re.sub(r'[*`]', '', preview).strip()
         if plain.endswith('?'):

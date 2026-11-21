@@ -2,6 +2,7 @@
 import re
 
 import helper_tabs
+import injected_prompts
 import paths
 
 BACKLOG_ID = re.compile(r'\bB\d{1,5}\b')
@@ -102,8 +103,11 @@ def is_done(entry, row, children, options, backlog_done, user_prompt_at=None):
     thread = helper_tabs.verified_thread(entry)
     if not thread or any(state(member) != 'idle' for member in (row, *children)):
         return False
-    if manual_mark(entry, options, user_prompt_at):
-        return True
+    try:
+        if manual_mark(entry, options, user_prompt_at):
+            return True
+    except injected_prompts.ReceiptsUnreadable:
+        return False
     if options is not None and options.reopened == thread:
         return False
     ids = BACKLOG_ID.findall(helper_tabs.visible_name(entry) or '')
@@ -135,7 +139,11 @@ def annotate_done(rows, entries, options, user_prompt_at=None):
             continue
         marks = options.get(pane)
         entry = entries[pane]
-        prompt = user_prompt_at(entry) if marks and marks.done_at and marks.done else None
+        try:
+            prompt = (user_prompt_at(entry) if user_prompt_at is not None and marks and marks.done_at
+                      and marks.done and marks.done == helper_tabs.verified_thread(entry) else None)
+        except injected_prompts.ReceiptsUnreadable:
+            continue
         read_prompt = (lambda _: prompt) if prompt is not None else None
         if manual_mark(entry, marks, read_prompt):
             row['done_mark'] = True

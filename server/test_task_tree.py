@@ -14,6 +14,7 @@ import agent_tabs
 import backlog
 import helper_close
 import helper_tabs
+import injected_prompts
 import paths
 import server
 import task_tree
@@ -31,6 +32,30 @@ def chat(number, **changes):
 
 def owner(entry, **changes):
     return dict({'owner_pane': entry['id'], 'owner_thread': entry['thread'], 'sent_at': 1}, **changes)
+
+
+def append_prompt(entry, text='Please revisit this', timestamp='2026-11-21T00:02:00Z'):
+    if entry['agent'] == 'claude':
+        record = {'type': 'user', 'uuid': entry['thread'], 'message': {'role': 'user', 'content': text}}
+    else:
+        record = {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}}
+    with entry['transcript'].open('a') as stream:
+        stream.write(json.dumps(dict(record, timestamp=timestamp)) + '\n')
+
+
+def fail_next_receipt_read(entry):
+    read = injected_prompts._read
+    target = injected_prompts._file(entry['transcript'])
+    failed = False
+
+    def read_once(path):
+        nonlocal failed
+        if path == target and not failed:
+            failed = True
+            raise OSError('receipt unavailable')
+        return read(path)
+
+    return patch.object(injected_prompts, '_read', side_effect=read_once)
 
 
 class FakeTmux:
@@ -638,8 +663,160 @@ class Routes(unittest.TestCase):
             self.assertEqual(sweep(4 * day + 1), ['%3', '%2', '%1'])
         self.assertEqual([write[-1] for write in self.run.writes], ['%3', '%2', '%1'])
 
+    def mark_for_unreadable_prompt(self, agent):
+        self.root.update(agent=agent, registry='verified', transcript=self.folder / f'{agent}.jsonl')
+        self.root['transcript'].write_text('')
+        self.run.rows['%1'].update({task_tree.DONE: self.root['thread'], task_tree.DONE_AT: '1795219260'})
+        self.run.writes.clear()
+
+    def test_auto_close_drops_timer_when_later_prompt_receipt_is_unreadable(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.object(task_tree, 'done_items', return_value=set()):
+                self.mark_for_unreadable_prompt(agent)
+                clock = [0]
+                closer = task_tree_close.Closer(now=lambda: clock[0])
+
+                def sweep():
+                    return closer.observe(self.tree(), self.tree, enabled=lambda: True, lock=self.lock,
+                                          activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                          changed=Mock(), user_prompt_at=server.task_user_prompt_at)
+
+                self.assertEqual(sweep(), [])
+                self.assertIn('%1', closer.timers)
+                append_prompt(self.root)
+                clock[0] = task_tree.CLOSE_AFTER
+                with fail_next_receipt_read(self.root):
+                    self.assertEqual(sweep(), [])
+                self.assertEqual(closer.timers, {})
+                self.assertEqual(sweep(), [])
+                self.assertEqual(closer.timers, {})
+                self.assertEqual(self.run.writes, [])
+
+    def test_auto_close_refuses_unreadable_helper_at_final_validation(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), patch.object(task_tree, 'done_items', return_value={'B446'}), \
+                    patch.object(task_tree_api, 'prepare_close', side_effect=helper_tabs.Stale('Stop before capture')) as prepare:
+                self.worker.update(agent=agent, registry='verified', transcript=self.folder / f'{agent}.jsonl')
+                self.worker['transcript'].write_text('')
+                clock = [0]
+                closer = task_tree_close.Closer(now=lambda: clock[0])
+                pending = False
+
+                def open_once(path, *args, **kwargs):
+                    nonlocal pending
+                    if pending and path == self.worker['transcript']:
+                        pending = False
+                        raise OSError('helper transcript unavailable')
+                    return open(path, *args, **kwargs)
+
+                def fresh():
+                    nonlocal pending
+                    pending = True
+                    append_prompt(self.worker, 'Relay\n\n[Tether id 0123456789abcdef]')
+                    return self.tree()
+
+                def sweep():
+                    return closer.observe(self.tree(), fresh, enabled=lambda: True, lock=self.lock,
+                                          activity=lambda _: 1, viewed=lambda _: (False, None), draft=lambda _: False,
+                                          changed=Mock(), user_prompt_at=server.task_user_prompt_at)
+
+                with patch.object(server, 'open', open_once, create=True):
+                    self.assertEqual(sweep(), [])
+                    self.assertIn('%1', closer.timers)
+                    clock[0] = task_tree.CLOSE_AFTER
+                    self.assertEqual(sweep(), [])
+                prepare.assert_not_called()
+                self.assertEqual(closer.timers, {})
+                self.assertEqual(self.run.writes, [])
+
+    def test_clear_obsolete_marks_waits_for_readable_prompt(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.mark_for_unreadable_prompt(agent)
+                append_prompt(self.root)
+                self.run.rows['%1'][task_tree.REOPENED] = self.separate['thread']
+                before = self.tree().options['%1']
+                with fail_next_receipt_read(self.root), patch.object(task_tree, 'set_marks', wraps=task_tree.set_marks) as write:
+                    task_tree_close.clear_obsolete_marks(self.tree(), self.lock, server.task_user_prompt_at)
+                write.assert_not_called()
+                self.assertEqual(self.tree().options['%1'], before)
+                task_tree_close.clear_obsolete_marks(self.tree(), self.lock, server.task_user_prompt_at)
+                after = self.tree().options['%1']
+                self.assertFalse(after.done or after.done_at or after.reopened)
+
+    def test_task_close_sweep_defers_pane_after_cleanup_read_failure(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.mark_for_unreadable_prompt(agent)
+                append_prompt(self.root, timestamp='2026-11-21T00:00:00Z')
+                clock = [0]
+                closer = task_tree_close.Closer(now=lambda: clock[0])
+                with patch.multiple(server, TASK_CLOSER=closer, live_task_tree=lambda *_: self.tree(),
+                                    task_activity=lambda _: 1, task_view=lambda _: (False, None), SEND_LOCK=self.lock), \
+                        patch.object(server.prefs_sync, 'load', return_value={'prefs': {'task_auto_close': True}}), \
+                        patch.object(task_tree, 'done_items', return_value=set()):
+                    server.task_close_sweep(self.entries)
+                    self.assertIn('%1', closer.timers)
+                    clock[0] = task_tree.CLOSE_AFTER
+                    with fail_next_receipt_read(self.root), patch.object(server, 'prompt_draft', return_value=('', '')), \
+                            patch.object(task_tree_api, 'prepare_close', side_effect=helper_tabs.Stale('Stop before capture')) as prepare:
+                        server.task_close_sweep(self.entries)
+                    prepare.assert_not_called()
+                    self.assertEqual(closer.timers, {})
+                    self.assertEqual(self.run.rows['%1'][task_tree.DONE], self.root['thread'])
+                    server.task_close_sweep(self.entries)
+                    self.assertEqual(closer.timers['%1'][0], clock[0])
+
+    def test_sessions_listing_returns_row_without_done_when_receipts_are_unreadable(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent):
+                self.mark_for_unreadable_prompt(agent)
+                append_prompt(self.root)
+                handler = object.__new__(server.Handler)
+                handler.command, handler.path, handler.headers = 'GET', '/mobile/api/sessions', {}
+                handler.deny = Mock(return_value=False)
+                handler.respond = Mock()
+                with patch.multiple(server, sessions=lambda: self.entries, LISTING_CACHE={'generation': None},
+                                    session_rows=lambda entries: [dict(id=entry['id'], state='Idle') for entry in entries]), \
+                        patch.object(server.subprocess, 'run', self.run), \
+                        patch.object(task_tree, 'done_items', return_value={'B446'}), fail_next_receipt_read(self.root):
+                    handler.do_GET()
+                status, body = handler.respond.call_args.args
+                self.assertEqual(status, 200)
+                row = json.loads(body)['sessions'][0]
+                self.assertEqual(row['id'], '%1')
+                self.assertFalse(row.get('done') or row.get('done_mark'))
+
 
 class DoneRuleTests(unittest.TestCase):
+    def test_latest_task_user_prompt_propagates_receipt_and_transcript_read_errors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for agent in ('claude', 'codex'):
+                with self.subTest(agent=agent):
+                    root = chat(1, agent=agent, transcript=Path(folder) / f'{agent}.jsonl')
+                    append_prompt(root)
+                    append_prompt(root, 'Copied delivery\n\n[Tether id 0123456789abcdef]', '2026-11-21T00:03:00Z')
+                    with self.subTest(error='receipt'), fail_next_receipt_read(root), \
+                            self.assertRaises(injected_prompts.ReceiptsUnreadable):
+                        server.task_user_prompt_at(root)
+                    for error in (PermissionError('transcript unavailable'), FileNotFoundError('transcript missing')):
+                        with self.subTest(error=type(error).__name__), patch.object(server, 'open', side_effect=[error], create=True), \
+                                self.assertRaises(injected_prompts.ReceiptsUnreadable):
+                            server.task_user_prompt_at(root)
+                    self.assertEqual(server.task_user_prompt_at(root), 1795219320)
+
+    def test_is_done_does_not_fall_back_to_backlog_on_unreadable_manual_mark(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for agent in ('claude', 'codex'):
+                with self.subTest(agent=agent):
+                    root = chat(1, agent=agent, registry='verified', pane_name='B446 Task',
+                                transcript=Path(folder) / f'{agent}.jsonl')
+                    append_prompt(root)
+                    mark = helper_tabs.PaneOptions(None, done=root['thread'], done_at='1795219260')
+                    with fail_next_receipt_read(root):
+                        self.assertFalse(task_tree.is_done(root, {'state': 'Idle'}, [], mark, {'B446'},
+                                                           server.task_user_prompt_at))
+
     def test_archived_backlog_ids_and_non_idle_children(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(backlog, 'folder', return_value=Path(folder)):
             (Path(folder) / 'BACKLOG.md').write_text('## tether\n- [x] Done #B446\n- [ ] Open #B18\n')

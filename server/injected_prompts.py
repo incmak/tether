@@ -371,7 +371,10 @@ def bindings(entry):
     if path is None:
         return {}
     with _send_lock(path):
-        return _resolve(path, entry['agent'])
+        try:
+            return _resolve(path, entry['agent'])
+        except OSError as exc:
+            raise ReceiptsUnreadable(str(exc)) from exc
 
 
 def bound_receipt(entry, record):
@@ -385,12 +388,13 @@ def bound_receipt(entry, record):
 
 def mark(entry, messages):
     """Decorate user records without changing the cached transcript."""
+    unreadable = False
     try:
         bound = bindings(entry)
         cutover = cutover_ms()
     except ReceiptsUnreadable:
-        bound, cutover = {}, None  # The next view can reuse the raw chat and retry the receipt.
-    if not bound and cutover is None and not any('_record_id' in message for message in messages):
+        bound, cutover, unreadable = {}, None, True
+    if not unreadable and not bound and cutover is None and not any('_record_id' in message for message in messages):
         return messages
     result = []
     for message in messages:
@@ -401,7 +405,9 @@ def mark(entry, messages):
             match = bound.get(identifier)
             if is_legacy(message.get('time'), cutover):
                 message = dict(message, legacy=True)
-            if match:
+            if unreadable:
+                message = dict(message, role='assistant', kind='notice', title='Prompt source unknown', source=UNKNOWN_RECEIPT)
+            elif match:
                 text = _text(message['text'])
                 delivery_id = match.get('delivery_id')
                 if delivery_id is None:  # receipts already bound before the delivery ID cutover

@@ -29,14 +29,14 @@ ASSISTANT = claude('assistant', 'Done.')
 
 
 class ClassifierTests(unittest.TestCase):
-    def test_unreadable_prompt_provenance_uses_background_source(self):
+    def test_unreadable_prompt_provenance_stays_unknown(self):
         def unavailable(_record, _text):
             raise injected_prompts.ReceiptsUnreadable('receipt unavailable')
 
         for agent, records in [('claude', [claude('user', 'Relay'), ASSISTANT]),
                                ('codex', [codex('user', 'Relay'), codex('assistant', 'Done.')])]:
             with self.subTest(agent=agent):
-                self.assertEqual(turn_source(agent, records, identify=unavailable), 'background')
+                self.assertEqual(turn_source(agent, records, identify=unavailable), injected_prompts.UNKNOWN_RECEIPT)
 
     def test_rules_table(self):
         for agent, records in [
@@ -149,6 +149,33 @@ class ClassifierTests(unittest.TestCase):
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_finished_notification_with_unreadable_prompt_source_is_low_not_dropped(self):
+        for agent, native in (('claude', claude), ('codex', codex)):
+            for failure in ('receipt', 'plain receipt', 'transcript'):
+                with self.subTest(agent=agent, failure=failure), tempfile.TemporaryDirectory() as folder:
+                    transcript = Path(folder) / 'chat.jsonl'
+                    entry = {'id': '%7', 'agent': agent, 'transcript': str(transcript)}
+                    send = Mock()
+                    notifier = push.Notifier(send, settle=0, minimum_work=0, context=server.notification_context,
+                                             delivery=lambda: dict(push.DEFAULT_DELIVERY, low='silent'))
+                    with patch.object(injected_prompts, 'ROOT', Path(folder) / 'receipts'):
+                        with injected_prompts.track_send(entry, 'Status update', 'status', tabs=[]) as delivery:
+                            prompt = 'Plain prompt' if failure == 'plain receipt' else delivery
+                            records = [native('user', prompt, uuid=str(uuid4()), timestamp='2026-01-01T00:00:01Z'),
+                                       native('assistant', 'Done.', timestamp='2026-01-01T00:00:02Z')]
+                            transcript.write_text(''.join(json.dumps(record) + '\n' for record in records))
+                        patch_read = (patch.object(Path, 'read_text', side_effect=[OSError('receipt unavailable')])
+                                      if failure.endswith('receipt') else
+                                      patch.object(server, 'open', create=True,
+                                                   side_effect=[OSError('transcript unavailable')]))
+                        notifier.observe(entry, {'state': 'Working'})
+                        with patch_read:
+                            notifier.observe(entry, {'state': 'Idle'})
+                        send.assert_called_once()  # a lasting read error must not drop the notification
+                        self.assertEqual(send.call_args.args[0]['priority'], 'low')
+                        notifier.observe(entry, {'state': 'Idle'})
+                        send.assert_called_once()
+
     def test_all_pane_and_global_combinations(self):
         for priority in ('urgent', 'important', 'low'):
             for level in push.PANE_LEVELS:
@@ -254,7 +281,7 @@ class DeliveryTests(unittest.TestCase):
             original = server.notification_records
             with patch.object(server, 'notification_records', wraps=original) as read:
                 reply, records = server.notification_context(entry)
-            read.assert_called_once_with(entry, with_offset=True)
+            read.assert_called_once_with(entry, with_offset=True, require_read=True)
             self.assertEqual(classify('done', 'claude', records, reply), ('low', 'Done.'))
 
     def test_persistence_and_migration(self):

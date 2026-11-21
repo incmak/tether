@@ -101,7 +101,9 @@ class ReviewLinksTests(unittest.TestCase):
         self.enterContext(patch.object(review_links, '_last_sent', {}))
         self.enterContext(patch.object(review_links, '_feedback_in_flight', {}))
         self.clock = self.enterContext(own_time(review_links, monotonic=Mock(return_value=1000)))
-        self.worker = dict(id='%13', agent='codex', thread=WORKER_THREAD, transcript='/project/worker.jsonl')
+        transcript = Path(temporary.name) / 'worker.jsonl'
+        transcript.touch()
+        self.worker = dict(id='%13', agent='codex', thread=WORKER_THREAD, transcript=str(transcript))
         self.reviewer = dict(id='%12', agent='claude', thread=THREAD, writable=True)
         self.states = {'%13': 'Idle', '%12': 'Idle'}
         self.status = Mock(side_effect=lambda entry: {'state': self.states[entry['id']]})
@@ -966,14 +968,14 @@ class ReviewLinksTests(unittest.TestCase):
             'Review its work: check the changes and the claims, then list what is wrong or missing. '
             'Start your reply with APPROVED if nothing is. Tether sends your reply to that tab. '
             f'Review id: {request_id}. '
-            'Its last reply:\n\nI fixed it.\n\nTranscript: /project/worker.jsonl', 'Idle')
+            f'Its last reply:\n\nI fixed it.\n\nTranscript: {self.worker["transcript"]}', 'Idle')
         pattern = (r'^\[Tether review\] The (\S+) tab “([^”]*)” \((%\d+)\) finished a turn\.'
                    r'[\s\S]*?Its last reply:\s*([\s\S]*?)\s*Transcript: (\S*)'
                    r'( This is the last round: your reply stays here\.)?\s*$')
         match = re.match(pattern, self.send.call_args.args[1])
         self.assertIsNotNone(match)
         self.assertEqual(match.groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
         self.assertFalse(self.links()[0]['seen_working'])
         self.assertTrue(self.links()[0]['awaiting'])
         self.assertFalse(self.links()[0]['reviewer_seen_working'])
@@ -5100,7 +5102,7 @@ class ReviewLinksTests(unittest.TestCase):
 
     def test_unreadable_receipts_or_transcript_leave_paused_review_untouched(self):
         summary = review_links.PARENT_SUMMARY + '\n\nCheck the rows.\n\n' + review_links.PARENT_SUMMARY_END
-        for failure in ('receipts', 'invalid JSON', 'scanner', 'tail'):
+        for failure in ('receipts', 'invalid JSON', 'scanner', 'tail', 'missing tail'):
             with self.subTest(failure=failure):
                 self.stopped_review_prompt('claude', 3)
                 transcript = self.file.parent / f'{failure}.jsonl'
@@ -5122,9 +5124,17 @@ class ReviewLinksTests(unittest.TestCase):
                 if failure == 'invalid JSON':
                     receipt.write_text('{')
                     unavailable = nullcontext()
-                elif failure == 'tail':
-                    unavailable = patch.object(server, 'open', side_effect=PermissionError('tail unavailable'),
-                                                create=True)
+                elif failure in ('tail', 'missing tail'):
+                    error = (FileNotFoundError if failure == 'missing tail' else PermissionError)('tail unavailable')
+
+                    def open_tail(*args, **kwargs):
+                        nonlocal error
+                        if error is not None:
+                            raised, error = error, None
+                            raise raised
+                        return open(*args, **kwargs)
+
+                    unavailable = patch.object(server, 'open', open_tail, create=True)
                 else:
                     unavailable = patch.object(Path, 'open', open_path)
 
@@ -5930,7 +5940,7 @@ class ReviewLinksTests(unittest.TestCase):
         self.assertEqual(self.links()[0]['review_commit'], self.HASH)
         self.assertTrue(self.links()[0]['review_clean'])
         self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
 
     def test_request_lists_checklist_rows_and_still_matches_the_review_card(self):
         self.bind(checklist={'status': 'hit', 'rows': [
@@ -5946,7 +5956,7 @@ class ReviewLinksTests(unittest.TestCase):
                       'This diff changes the UI (1 file(s), for example ui/index.html). ', text)
         self.assertIn('check them against the claims.\nIts last reply:', text)
         self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                         ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
 
     def test_request_explains_unknown_ui_paths_and_omits_empty_or_missing_lists(self):
         sentence = ('Tether could not list the changed UI files. Check the diff for UI changes yourself; '
@@ -5978,7 +5988,7 @@ class ReviewLinksTests(unittest.TestCase):
                 self.assertIn(f'ui/src/App{replaced}.tsx', text)
                 self.assertTrue(all(character not in text for character in characters))
                 self.assertEqual(re.match(REVIEW_REQUEST, text).groups()[:5],
-                                 ('Codex', 'Fix the bug', '%13', 'I fixed it.', '/project/worker.jsonl'))
+                                 ('Codex', 'Fix the bug', '%13', 'I fixed it.', self.worker['transcript']))
                 run = Mock(side_effect=RuntimeError('Reached mocked tmux'))
                 with self.assertRaisesRegex(RuntimeError, 'Reached mocked tmux'):
                     terminal_input.submit(self.reviewer, text, run=run)
