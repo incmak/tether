@@ -492,7 +492,8 @@ def change(rid, action, body=None, now=None, *, by_id=False):
                     raise ReminderError('A linked reminder cannot repeat.')
                 record['repeat'] = repeat
             elif due_changed and rule:
-                rule['anchor'] = record['due']
+                # A new time is typed in the server zone, so the series moves to it, as with a new rule.
+                rule.update(anchor=record['due'], zone=ZONE.key)
                 rule.pop('origin', None)
                 _repeat_date(rule, rule.get('day') == -1)
         elif action == 'done':

@@ -1375,6 +1375,18 @@ class RepeatTests(Base):
         self.assertEqual(self.following(self.complete(edited, feb), feb)['due'],
                          datetime(2027, 4, 14, 15, tzinfo=zone).timestamp())
 
+    def test_due_edit_moves_the_series_to_the_server_zone(self):
+        # A new time is typed in the server zone (IST). Due-only and due-plus-rule edits store the same day and zone.
+        zone = ZoneInfo('America/New_York')
+        feb = datetime(2027, 2, 14, 15, tzinfo=zone).timestamp()
+        mar15 = datetime(2027, 3, 15, 1, 30, tzinfo=reminders.ZONE).timestamp()  # still 14 Mar in New York
+        for body in ({'due': mar15}, {'due': mar15, 'repeat': {'every': 'month', 'interval': 2}}):
+            with self.subTest(body=body):
+                with mock.patch.object(reminders, 'ZONE', zone):
+                    item = self.add(due=feb, repeat='month')
+                edited = reminders.change(item['id'], 'edit', body, now=feb - 60)
+                self.assertEqual((edited['repeat']['zone'], edited['repeat']['day']), (reminders.ZONE.key, 15))
+
     def test_wall_clock_survives_a_skipped_hour(self):
         zone = ZoneInfo('America/New_York')
         at = lambda day, hour=2: datetime(2026, 3, day, hour, 30, tzinfo=zone).timestamp()
