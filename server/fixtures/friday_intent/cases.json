@@ -2682,6 +2682,312 @@
      "prompt": "(?i)read|reply|response|cut|trunc"
     }
    }
+  },
+  {
+   "id": "topic-keep-together",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "Keep the quiet hours from ten at night to seven in the morning."
+    },
+    {
+     "role": "assistant",
+     "content": "Okay."
+    }
+   ],
+   "user": "keep this for urgent call spec, we'll send them together",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)urgent call spec",
+     "notes": "(?i)quiet hours"
+    }
+   }
+  },
+  {
+   "id": "topic-remember-chat",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "remember this for the api-server chat: use port 8080",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)api.server",
+     "notes": "(?i)use port 8080"
+    }
+   }
+  },
+  {
+   "id": "topic-timed-reminder",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "remind me tomorrow to rotate keys",
+   "expect": {
+    "tool": "reminder_add",
+    "args": {
+     "reminders": "(?i)rotate.*keys"
+    }
+   }
+  },
+  {
+   "id": "topic-drop",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "drop the urgent call spec notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
+    "args": {
+     "topic": "(?i)urgent call spec"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "topic-list",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "what notes do I have?",
+   "expect": {
+    "tool": null,
+    "any_tool": [
+     "read_notes"
+    ],
+    "reply": "(?i)urgent call spec"
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ],
+   "tool_results": {
+    "read_notes": {
+     "count": 1,
+     "topics": [
+      "Urgent Call Spec (1 note)"
+     ]
+    }
+   }
+  },
+  {
+   "id": "h-topic-keep-together",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [
+    {
+     "role": "user",
+     "content": "My answer is that the owner decides what is urgent."
+    },
+    {
+     "role": "assistant",
+     "content": "I heard your answer."
+    }
+   ],
+   "user": "hold on to that answer for urgent call spec, don't send it yet",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)urgent call spec",
+     "notes": "(?i)owner"
+    }
+   }
+  },
+  {
+   "id": "h-topic-remember-chat",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "for the api server chat, remember this: the port is 8080",
+   "expect": {
+    "tool": "hold_note",
+    "args": {
+     "topic": "(?i)api.server",
+     "notes": "8080"
+    }
+   }
+  },
+  {
+   "id": "h-topic-timed-reminder",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "remember to remind me to rotate my keys tomorrow morning",
+   "expect": {
+    "tool": "reminder_add",
+    "args": {
+     "reminders": "(?i)rotate.*keys"
+    }
+   }
+  },
+  {
+   "id": "h-topic-drop",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "clear the saved notes for urgent call spec",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
+    "args": {
+     "topic": "(?i)urgent call spec"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-list",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "which topics have I saved notes for?",
+   "expect": {
+    "tool": null,
+    "any_tool": [
+     "read_notes"
+    ],
+    "reply": "(?i)urgent call spec"
+   },
+   "topic_notes": [
+    {
+     "topic": "Urgent Call Spec",
+     "notes": [
+      "Keep the quiet hours."
+     ]
+    }
+   ],
+   "tool_results": {
+    "read_notes": {
+     "count": 1,
+     "topics": [
+      "Urgent Call Spec (1 note)"
+     ]
+    }
+   }
+  },
+  {
+   "id": "topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "topic-drop-negated",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-negated",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
   }
  ]
 }

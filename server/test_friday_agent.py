@@ -3,6 +3,7 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import copy
 import asyncio
 from contextlib import redirect_stderr
+from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
 import inspect
@@ -28,8 +29,10 @@ FRIDAY_MODEL_FIXTURES = Path(
 
 try:
     from . import friday_agent as friday
+    from . import push
 except ImportError:
     import friday_agent as friday
+    import push
 
 
 class ParakeetHotwordTests(unittest.TestCase):
@@ -508,6 +511,16 @@ class FridayRulesTests(unittest.TestCase):
                          'Queued B12 for Docs. It is busy.')
         self.assertEqual(ack('backlog_send', {}, {'ok': True, 'chat': 'Docs', 'item': 'B12'}), 'Sent B12 to Docs.')
 
+    def test_topic_note_acknowledgements_use_confirmed_results(self):
+        for name, result, expected in (
+                ('hold_note', {'topic': 'Urgent Call Spec', 'added': 1}, 'Noted for Urgent Call Spec.'),
+                ('hold_note', {'topic': 'API Server', 'added': 3}, 'Noted 3 for API Server.'),
+                ('drop_notes', {'topic': 'API Server', 'dropped': 'note'}, 'Dropped the note.'),
+                ('drop_notes', {'topic': 'API Server', 'dropped': 'topic'}, 'Dropped API Server.')):
+            with self.subTest(name=name, result=result):
+                self.assertEqual(friday.action_ack(name, {}, dict(result, ok=True)), expected)
+                self.assertIsNone(friday.action_ack(name, {}, dict(result, error='Try again.')))
+
     def test_action_ack_requires_confirmed_success(self):
         for name in ('send_to_chat', 'show_chat', 'show_session'):
             for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
@@ -576,6 +589,123 @@ class FridayRulesTests(unittest.TestCase):
                                                'Remind me to check usage', set()))
         self.assertIsNone(friday.check_tool('backlog_add', {'text': 'Check usage'}, 'speech',
                                             'Add this to the backlog', set()))
+
+    def test_topic_note_guard_requires_speech_and_limits_each_write(self):
+        for name, args, words in (
+                ('hold_note', {'topic': 'Urgent Call Spec', 'notes': ['Use the first answer.']},
+                 "Keep this for the urgent call spec, we'll send them together."),
+                ('drop_notes', {'topic': 'API Server', 'note': 2}, 'Remove note two for the API server.')):
+            with self.subTest(tool=name):
+                for source in ('event', 'tool'):
+                    self.assertIsNotNone(friday.check_tool(name, args, source, words, set()))
+                self.assertEqual(friday.check_tool(name, args, 'speech', words, set()),
+                                 friday.READBACK_REQUIRED if name == 'drop_notes' else None)
+                self.assertIsNotNone(friday.check_tool(name, args, 'speech', words, {name}))
+        self.assertIsNone(friday.check_tool('read_notes', {}, 'tool', '', set()))
+
+    def test_topic_note_guard_refuses_bad_holds_and_deletion_without_a_delete_word(self):
+        topic = 'Urgent Call Spec'
+        for args in ({}, {'topic': ' ', 'notes': ['note']}, {'topic': 5, 'notes': ['note']},
+                     {'topic': topic, 'notes': 'note'}, {'topic': topic, 'notes': []},
+                     {'topic': topic, 'notes': ['note'] * 6}, {'topic': topic, 'notes': [' ']},
+                     {'topic': topic, 'notes': ['note', None]}):
+            with self.subTest(args=args):
+                self.assertIsNotNone(friday.check_tool('hold_note', args, 'speech', 'Keep this.', set()))
+        for words in ('Read the urgent call notes.', 'Open the notes about a dropdown.'):
+            self.assertEqual(friday.check_tool('drop_notes', {'topic': topic}, 'speech', words, set()),
+                             'The user did not ask to delete notes.')
+
+    def test_topic_note_guard_refuses_a_negated_delete(self):
+        args = {'topic': 'Auth'}
+        for words in ("Don't delete the auth notes.", "Don't... drop the auth notes.",
+                      'Never mind, do not clear them.', 'No, never drop those.',
+                      'I can\u2019t remove them yet.', 'Dont forget the auth notes.',
+                      # Review of ce70816: these deleted a whole topic before the read-back path.
+                      'I cant remove them yet', 'Wont delete those', 'Delete nothing', 'Drop none of them'):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
+                                 'The user did not clearly ask to delete notes. Ask which notes to drop.')
+        for words in ('Drop the auth notes.', 'Clear note 2 from auth.', 'Delete the topic now.',
+                      'Never mind, drop them.', 'Nevermind, drop them.',
+                      # A negation the regex misses still only gets a read-back; no first call deletes.
+                      'Hold off, delete them after the call.', 'Delete them later, after the call.'):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
+                                 friday.READBACK_REQUIRED)
+
+    def test_drop_requires_the_exact_heard_target_and_a_yes_without_send(self):
+        args = {'topic': 'auth', 'note': 2}
+        proposal = friday.SendProposal('drop_notes', 'Auth', 'Rotate the key!', 1, heard=True,
+                                       target=('T8', 2, 'Rotate the key!'))
+        readback = friday.send_readback(proposal)
+        confirmed = friday.confirmed_args('drop_notes', args, 'yes', readback, proposal, 2)
+        self.assertEqual(confirmed, dict(args, id='T8', text='Rotate the key!'))
+        for changed in (dict(confirmed, id='T9'), dict(confirmed, text='Edited'), dict(confirmed, note=1),
+                        dict(confirmed, note=2.0), {'topic': 'auth', 'id': 'T8'}):
+            with self.subTest(changed=changed):
+                self.assertEqual(friday.check_tool('drop_notes', changed, 'speech', 'yes', set(), readback,
+                                                   proposal, 2), friday.READBACK_REQUIRED)
+        self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', 'Drop note 2 from auth', set()),
+                         friday.READBACK_REQUIRED)
+        self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', set()),
+                         'The user did not ask to delete notes.')
+        for words in ('send', 'yes send it'):
+            self.assertEqual(friday.confirmed_args('drop_notes', args, words, readback, proposal, 2), args)
+            self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', words, set(), readback,
+                                               proposal, 2), friday.READBACK_REQUIRED)
+        self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', {'send_to_chat'},
+                                           readback, proposal, 2))
+        for previous in (readback, 'I found the note. ' + readback):
+            self.assertIsNotNone(friday.check_tool('answer_approval', {'decision': 'approve'}, 'speech', 'yes',
+                                                  set(), previous))
+
+    def test_drop_yes_is_a_short_closed_yes(self):
+        proposal = friday.SendProposal('drop_notes', 'Auth', 'Rotate the key', 1, heard=True,
+                                       target=('T8', 2, 'Rotate the key'))
+        readback = friday.send_readback(proposal)
+        args = {'topic': 'auth', 'note': 2}
+        for words in ('yes', 'Yes, delete it.', 'okay, drop it', 'yeah go ahead', 'Correct.', 'yes please, thank you'):
+            with self.subTest(words=words):
+                self.assertTrue(friday.drop_yes(words))
+                confirmed = friday.confirmed_args('drop_notes', args, words, readback, proposal, 2)
+                self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', words, set(), readback,
+                                                    proposal, 2))
+        # B496: "Correct yes to okay" corrects a word; it must not delete. Nor may any yes with other words.
+        for words in ('Correct yes to okay', 'yes, send it', 'yes, delete note 3', 'yes, but not that one',
+                      'yes?', 'sure, in the auth chat', 'okay delete the other topic'):
+            with self.subTest(words=words):
+                self.assertFalse(friday.drop_yes(words))
+                self.assertEqual(friday.confirmed_args('drop_notes', args, words, readback, proposal, 2), args)
+                forged = dict(args, id='T8', text='Rotate the key')
+                self.assertIsNotNone(friday.check_tool('drop_notes', forged, 'speech', words, set(), readback,
+                                                       proposal, 2))
+
+    def test_drop_readback_names_the_topic_and_note_count_or_the_first_40_words(self):
+        for count, words in ((1, 'its note'), (2, 'all 2 of its notes')):
+            texts = ('Rotate the key', 'Keep the old key for a day')[:count]
+            proposal = friday.SendProposal('drop_notes', 'Auth', f'{count} notes', 1,
+                                           target=('T8', None, count, texts))
+            readback = friday.send_readback(proposal)
+            self.assertEqual(readback, f'Not deleted yet. Should I delete Auth and {words}? Yes or no?')
+            heard = replace(proposal, heard=True)
+            confirmed = friday.confirmed_args('drop_notes', {'topic': 'auth', 'text': 'forged'}, 'yes',
+                                              readback, heard, 2)
+            self.assertEqual(confirmed, {'topic': 'auth', 'id': 'T8', 'count': count, 'texts': list(texts)})
+            self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', set(), readback, heard, 2))
+            # The count binds the topic drop: a note added after the read-back is never deleted unheard.
+            # The texts bind it too: one note removed and one added keeps the count but not the texts.
+            for changed in (dict(confirmed, count=count + 1), {'topic': 'auth', 'id': 'T8'},
+                            dict(confirmed, text=''), dict(confirmed, texts=['Unheard note', *texts[1:]]),
+                            {key: value for key, value in confirmed.items() if key != 'texts'}):
+                with self.subTest(changed=changed):
+                    self.assertEqual(friday.check_tool('drop_notes', changed, 'speech', 'yes', set(), readback,
+                                                       heard, 2), friday.READBACK_REQUIRED)
+        excerpt = ' '.join(['first part'] * 19 + ['last word.'])
+        for text, spoken in (('x' * 299 + '!', 'x' * 299),
+                             (excerpt + ' skip this part' * 10, excerpt + ' and the rest of that note')):
+            proposal = friday.SendProposal('drop_notes', 'Auth', text, 1, target=('T8', 2, text))
+            self.assertEqual(friday.send_readback(proposal),
+                             f'Not deleted yet. Should I delete note 2 from Auth: {spoken}? Yes or no?')
 
     def test_one_action_per_speech_turn(self):
         for name, args, utterance in [
@@ -1567,6 +1697,8 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(zone=zone), patch.object(friday.reminders, 'ZONE', ZoneInfo(zone)), \
                     own_time(friday, time=lambda: now):
                 result = friday.with_state_time(messages)
+                self.assertEqual(friday.with_state_time(messages, None), result)
+                self.assertEqual(friday.with_state_time(messages, {}), result)
                 state = json.loads(result[-2]['content'][len(friday.STATE_PREFIX):])
                 self.assertEqual(state, {'now': expected, 'state': {'target': 'Docs'}, 'notes': ['Note']})
                 self.assertIs(result[-1], user)
@@ -1636,7 +1768,15 @@ class FridayRulesTests(unittest.TestCase):
         tools = {t['function']['name']: t['function']['parameters'] for t in schemas}
         self.assertEqual(set(tools), {'list_chats', 'send_to_chat', 'answer_approval', 'read_last_reply', 'new_chat', 'switch_chat', 'open_panel',
                                       'show_chat', 'show_session', 'backlog_list', 'backlog_add', 'backlog_send',
-                                      'reminder_add', 'reminder_list'})
+                                      'reminder_add', 'reminder_list', 'hold_note', 'read_notes', 'drop_notes'})
+        self.assertEqual(list(tools)[-4:], ['reminder_list', 'hold_note', 'read_notes', 'drop_notes'])
+        self.assertEqual(tools['hold_note']['required'], ['topic', 'notes'])
+        notes = tools['hold_note']['properties']['notes']
+        self.assertEqual((notes['type'], notes['minItems'], notes['maxItems'], notes['items']['type']),
+                         ('array', 1, 5, 'string'))
+        self.assertEqual(tools['read_notes']['required'], [])
+        self.assertEqual(tools['drop_notes']['required'], ['topic'])
+        self.assertEqual(tools['drop_notes']['properties']['note']['minimum'], 1)
         self.assertEqual(tools['show_chat']['required'], ['chat'])
         self.assertEqual(tools['show_chat']['properties'], {'chat': {'type': 'string'}})
         self.assertEqual(tools['show_session']['required'], ['session'])
@@ -1901,6 +2041,49 @@ class ShortenOldReadsTests(unittest.TestCase):
         trim.assert_called_once_with(['short'])
 
 
+class HeldNewsTests(unittest.TestCase):
+    @staticmethod
+    def topic(title, count=1, *, updated=100, state='open'):
+        return {'title': title, 'state': state, 'updated': updated, 'notes': [{'text': 'Keep this.'}] * count}
+
+    def test_no_news_for_old_sent_or_empty_topics(self):
+        topics = [self.topic('Old', updated=99), self.topic('Sent', state='sent'), self.topic('Empty', 0)]
+        self.assertIsNone(friday.held_news(topics, 100))
+        self.assertIsNone(friday.held_news([], 100))
+
+    def test_one_topic_uses_the_note_count_and_includes_the_start_time(self):
+        for count, body in ((1, '1 held note for Urgent Call Spec not sent'),
+                            (2, '2 held notes for Urgent Call Spec not sent')):
+            with self.subTest(count=count):
+                self.assertEqual(friday.held_news([self.topic('Urgent Call Spec', count)], 100),
+                                 {'title': 'Friday', 'body': body, 'tag': 'friday-notes', 'url': '/chat/'})
+
+    def test_multiple_topics_count_all_notes_and_show_at_most_three_titles(self):
+        topics = [self.topic('Docs', 2, updated=101), self.topic('Old', updated=99),
+                  self.topic('API'), self.topic('Sent', 3, state='sent'),
+                  self.topic('UI'), self.topic('Release', 2)]
+        self.assertEqual(friday.held_news(topics[:4], 100)['body'], '2 topics hold 3 notes not sent: Docs, API')
+        self.assertEqual(friday.held_news(topics, 100)['body'], '4 topics hold 6 notes not sent: Docs, API, UI, …')
+
+    def test_notify_held_sends_once_only_when_notes_qualify(self):
+        topics = [self.topic('Docs')]
+        with patch.object(friday.friday_notes, 'listing', return_value={'topics': topics}), \
+                patch.object(push, 'send_all') as send:
+            friday.notify_held(101)
+            send.assert_not_called()
+            friday.notify_held(100)
+        send.assert_called_once_with({'title': 'Friday', 'body': '1 held note for Docs not sent',
+                                      'tag': 'friday-notes', 'url': '/chat/'})
+
+    def test_notify_held_logs_a_send_failure_and_returns(self):
+        stderr = io.StringIO()
+        with patch.object(friday.friday_notes, 'listing', return_value={'topics': [self.topic('Docs')]}), \
+                patch.object(push, 'send_all', side_effect=OSError('private details')) as send, redirect_stderr(stderr):
+            self.assertIsNone(friday.notify_held(100))
+        send.assert_called_once()
+        self.assertEqual(stderr.getvalue(), 'Friday held-notes news failed: OSError\n')
+
+
 class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
     async def test_interrupt_logs_state_and_preserves_broadcast_condition(self):
         session = friday.Session.__new__(friday.Session)
@@ -1985,12 +2168,18 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
         session.loop_task = None
         session.close_task = None
         session.on_closed = Mock()
+        session.started = 100
         close_step = friday.close_step
 
         async def fast_close(awaitable, step):
             await close_step(awaitable, step, timeout=0.02)
 
         with patch.object(friday, 'close_step', side_effect=fast_close), patch('sys.stderr') as stderr:
+            with patch.object(friday.threading, 'Thread') as thread:
+                session.end()
+                session.end()
+            thread.assert_called_once_with(target=friday.notify_held, args=(100,), daemon=True)
+            thread.return_value.start.assert_called_once_with()
             await asyncio.wait_for(session.close(), timeout=1)
             await asyncio.gather(session.run_task, session.queue_task, return_exceptions=True)
         session.on_closed.assert_called_once_with(session)
@@ -2065,6 +2254,9 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('pipecat'), 'Pipecat is only installed in the Friday venv')
 class FridayAPITests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.object(friday, 'notify_held'))
+
     @classmethod
     def setUpClass(cls):
         cls.rt = friday.runtime_types()
@@ -2356,7 +2548,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 models.tts.sample_rate = 24000
                 rt = Mock(wraps=self.rt)
                 rt.SharedVAD.return_value = None
-                session = friday.Session(rt, models, connection)
+                with own_time(friday, time=lambda: 100):
+                    session = friday.Session(rt, models, connection)
+                self.assertEqual(session.started, 100)
                 starts = session.aggregators.user()._user_turn_controller.user_turn_strategies.start
                 self.assertEqual(len(starts), 1)
                 self.assertIsInstance(starts[0], self.rt.FridayUserTurnStartStrategy)
@@ -2856,6 +3050,85 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.pending_proposal,
                          friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 1, marker_id='0-0'))
         self.assertEqual(session.llm_calls, 1)
+
+    async def test_drop_readback_uses_saved_text_and_requires_heard_consent(self):
+        notes = friday.friday_notes
+        with TemporaryDirectory() as root, patch.object(notes.paths, 'friday_notes', return_value=Path(root)), \
+                patch('sys.stderr'):
+            saved = notes.hold('Auth', ['Keep the route.', 'Rotate the key!'])
+            args = {'topic': 'auth', 'note': 2, 'id': 'T99', 'text': 'Forged text.'}
+            call = ('drop_notes', args, {'dropped': 'note', 'topic': 'Auth', 'left': 1})
+            for words in ("Don't delete the auth notes", "Don't... drop the auth notes"):
+                session, frames = await self.tool_flow(words, [('', 1, [call])])
+                result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertIn('did not clearly ask to delete', result.result['error'])
+                self.assertIsNone(session.pending_proposal)
+                self.assertNotIn(('dispatch', 'drop_notes'), frames)
+
+            for words in ('Drop note 2 from auth', 'Never mind, drop them'):
+                session, frames = await self.tool_flow(words, [('', 1, [call])])
+                result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                speech, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+                self.assertEqual(result.result, {'error': 'Not deleted yet. Friday asked the user to confirm.'})
+                self.assertIs(result.properties.run_llm, False)
+                self.assertEqual(speech.text,
+                                 'Not deleted yet. Should I delete note 2 from Auth: Rotate the key? Yes or no?')
+                self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                self.assertEqual(session.pending_proposal.target, (saved['id'], 2, 'Rotate the key!'))
+
+            unheard = replace(session.pending_proposal, turn=0)
+            session.llm.mark_readback_heard(session.pending_proposal)
+            heard = replace(session.pending_proposal, turn=0)
+            self.assertFalse(unheard.heard)
+            self.assertTrue(heard.heard)
+            readback = {'role': 'assistant', 'content': speech.text}
+            for answer, pending, between, error in (
+                    ('yes', unheard, None, None),
+                    ('send', heard, None, 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('yes send it', heard, None, 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('yes', heard, 'Want me to read the rest?', 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('no', heard, None, 'The user declined the delete.'),
+                    ('stop', heard, None, 'The user declined the delete.'),
+                    ('don’t', heard, None, 'The user declined the delete.')):
+                with self.subTest(answer=answer, heard=pending.heard, between=between):
+                    messages = [readback] + ([{'role': 'assistant', 'content': between}] if between else [])
+                    messages.append({'role': 'user', 'content': answer})
+                    declined, frames = await self.tool_flow(messages, [('', 1, [call])], pending)
+                    self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                    if error is None:  # An unheard read-back replays before the model gets a tool call.
+                        self.assertEqual(declined.llm_calls, 0)
+                    else:
+                        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                        self.assertEqual(result.result, {'error': error})
+
+            confirmed, frames = await self.tool_flow([readback, {'role': 'user', 'content': 'yes'}],
+                                                    [('', 1, [call, call])], heard)
+            self.assertEqual(frames.count(('dispatch', 'drop_notes')), 1)
+            self.assertEqual(confirmed.last_dispatch, dict(args, id=saved['id'], text='Rotate the key!'))
+            self.assertIsNone(confirmed.pending_proposal)
+            results = [f.result for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+            self.assertIn({'error': 'Only one drop_notes is allowed per spoken turn.'}, results)
+
+    async def test_drop_readback_refuses_missing_ambiguous_invalid_or_unreadable_targets(self):
+        notes = friday.friday_notes
+        with TemporaryDirectory() as root, patch.object(notes.paths, 'friday_notes', return_value=Path(root)), \
+                patch('sys.stderr'):
+            notes.hold('Auth Server', ['Keep the route.'])
+            notes.hold('Auth Client', ['Rotate the key.'])
+            for args, error in (({'topic': 'Other'}, 'No topic matches Other.'),
+                                ({'topic': 'Auth'}, 'Several topics match:'),
+                                ({'topic': 'Auth Server', 'note': 2}, 'Choose one of the note numbers'),
+                                ({'topic': 'Auth Client', 'note': True}, 'Choose one of the note numbers'),
+                                ({'topic': 'Auth Server'}, 'Saved topic notes could not be read.')):
+                with self.subTest(args=args):
+                    if error.startswith('Saved'):
+                        (Path(root) / 'notes.json').write_text('{')
+                    session, frames = await self.tool_flow('Drop the notes', [('', 1, [('drop_notes', args, {})])])
+                    result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                    self.assertTrue(result.result['error'].startswith(error), result.result)
+                    self.assertIsNone(session.pending_proposal)
+                    self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                    self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
     async def test_copied_reply_with_send_word_speaks_confirmation_instead_of_sending(self):
         chat = 'Automation tether . Can we have…'
@@ -3744,6 +4017,67 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('Friday reordered reply before newer messages', log)
                 self.assertNotIn('Friday skipped request ending with assistant', log)
                 self.assertEqual(source, expected_source)
+
+    async def test_topic_notes_are_loaded_after_each_trim_and_in_a_fresh_session(self):
+        def session():
+            item = friday.Session.__new__(friday.Session)
+            item.state, item.notes, item.last_sent = {'target': 'Docs'}, [], None
+            return item
+
+        def turns(count, start=0):
+            return [{'role': role, 'content': f'{prefix} {i}.'}
+                    for i in range(start, start + count)
+                    for role, prefix in (('user', 'Request'), ('assistant', 'Reply'))]
+
+        def outgoing_notes(service, history):
+            original = copy.deepcopy(history)
+            request = service.build_chat_completion_params({'messages': history})
+            state = [json.loads(m['content'][len(friday.STATE_PREFIX):]) for m in request['messages']
+                     if m.get('content', '').startswith(friday.STATE_PREFIX)]
+            self.assertTrue(state)
+            self.assertIn('now', state[-1])
+            self.assertEqual(history, original)
+            self.assertTrue(all('topic_notes' not in json.loads(m['content'][len(friday.STATE_PREFIX):])
+                                for m in history if m['content'].startswith(friday.STATE_PREFIX)))
+            return state[-1].get('topic_notes')
+
+        folder = self.enterContext(TemporaryDirectory())
+        self.enterContext(patch.dict(os.environ, {'TETHER_FRIDAY_NOTES': folder}))
+        topic = 'Urgent Call Spec'
+        wanted = [{'topic': topic, 'chat': 'Spec Chat', 'notes': ['Keep the first answer.']}]
+        friday.friday_notes.hold(topic, wanted[0]['notes'], chat='Spec Chat')
+        active = session()
+        history = friday.llm_prefix()['messages']
+        question = {'role': 'user', 'content': 'What notes did I save?'}
+        service = self.rt.FridayLLM(active, friday.brain_config({}))
+        try:
+            for offset in (0, 34):
+                incoming = history + turns(34, offset) + [question]
+                self.assertGreaterEqual(len(incoming), 70)
+                history = active.prepare_messages(incoming)
+                self.assertLessEqual(len(history), 24)
+                self.assertIs(history[-1], question)
+                self.assertEqual(outgoing_notes(service, history), wanted)
+                self.assertEqual(active.notes, [])
+        finally:
+            await service._client.close()
+
+        fresh = session()
+        service = self.rt.FridayLLM(fresh, friday.brain_config({}))
+        try:
+            prefix = friday.llm_prefix()['messages']
+            self.assertEqual(outgoing_notes(service, prefix), wanted)
+            history = fresh.prepare_messages(prefix + [question])
+            friday.friday_notes.hold('API Server', ['Use port 8080.'])
+            self.assertEqual(outgoing_notes(service, history),
+                             [{'topic': 'API Server', 'notes': ['Use port 8080.']}, *wanted])
+            error_output = io.StringIO()
+            with patch.object(friday.friday_notes, 'pinned', side_effect=PermissionError('private path')), \
+                    redirect_stderr(error_output):
+                self.assertIsNone(outgoing_notes(service, history))
+            self.assertEqual(error_output.getvalue(), 'Friday topic notes unreadable: PermissionError\n')
+        finally:
+            await service._client.close()
 
     async def test_gemini_stream_signatures_survive_followup_without_context_mutation(self):
         from pipecat.processors.aggregators.llm_context import LLMContext

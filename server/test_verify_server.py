@@ -232,6 +232,9 @@ BLOCKED_REQUESTS = [
     ('POST', '/mobile/api/start', {}),
     ('POST', '/mobile/api/login/start', {}),
     ('POST', '/mobile/api/reminders/add', {}),
+    ('GET', '/mobile/api/friday-notes?topic=Spec', {}),
+    ('POST', '/mobile/api/friday-notes/hold', {}),
+    ('POST', '/mobile/api/friday-notes/drop', {}),
     ('POST', '/mobile/api/tmux-sessions', {}),
 ]
 
@@ -306,12 +309,17 @@ COMPUTED_ROUTES = {
     ('Backlog.tsx', 'POST', 'api', 'PATH'): ('projects/backlog',),
     ('CommandMenu.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
     ('Factory.tsx', 'GET', 'usePoll', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('HeldNotes.tsx', 'POST', 'api', '`${PATH}/drop`'): ('friday-notes/drop',),
     ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
     ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-add`'): ('projects/backlog-add',),
     ('Live.tsx', 'POST', 'api', '`${BACKLOG_PATH}-start`'): ('projects/backlog-start',),
     ('MacPairing.tsx', 'GET', 'reach', 'EXTENSION_ZIP'): ('browser/extension/download',),
     ('Share.tsx', 'GET', 'fetch', 'rawUrl(file.id)'): ('share/raw/{}',),
     ('backlogNews.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
+    ('fridayNotes.ts', 'GET', 'api', 'PATH'): ('friday-notes',),
+    ('fridayNotes.ts', 'GET', 'api', 'path'): ('friday-notes',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/hold`'): ('friday-notes/hold',),
+    ('fridayNotes.ts', 'POST', 'api', '`${PATH}/drop`'): ('friday-notes/drop',),
     ('fridayReminders.ts', 'GET', 'api', 'PATH'): ('reminders',),
     ('fridayReminders.ts', 'POST', 'api', '`${PATH}/add`'): ('reminders/add',),
     ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): ('projects/backlog',),
@@ -352,6 +360,7 @@ REPEATED_COMPUTED = {
     ('Live.tsx', 'GET', 'api', 'BACKLOG_PATH'): 2,
     ('api.ts', 'GET', 'reach', '`/mobile/api/${path}`'): 2,
     ('approval.ts', 'POST', 'api', 'path'): 2,
+    ('fridayNotes.ts', 'GET', 'api', 'PATH'): 2,
     ('quickBacklog.ts', 'GET', 'api', 'BACKLOG_PATH'): 3,
 }
 

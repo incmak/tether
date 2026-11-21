@@ -246,3 +246,42 @@
   .live-bubble[data-asking="true"]::after { animation: none; opacity: 0; }
   .live, .live-window, .live-bubble, .live .live-icon { transition: none; }
 }
+
+/* Held notes: a quiet chip under the status; tap for a solid sheet that reads and clears them. */
+.live-held { position: relative; z-index: 5; display: flex; justify-content: center; max-width: 100%; }
+.live .live-held-chip { display: inline-flex; align-items: center; gap: 6px; max-width: min(100%, 22em); min-height: 32px; padding: 0 6px 0 12px; border-radius: 99px; border: 1px solid var(--live-hair); background: var(--live-well); color: var(--text); font-size: 13px; cursor: pointer; transition: transform .16s ease-out; }
+.live-held-chip svg { flex: none; color: var(--muted); }
+.live-held-lead { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-held-chip b { flex: none; min-width: 22px; padding: 1px 7px; border-radius: 99px; background: var(--live-hair); font-weight: 600; font-variant-numeric: tabular-nums; }
+@media (hover: hover) { .live .live-held-chip:hover { background: var(--live-hair); } }
+.live-held-chip:active { transform: scale(.97); }
+.live-held-chip:focus-visible, .live-held-sheet button:focus-visible { outline: 2px solid var(--live-you); outline-offset: 2px; }
+@media (pointer: coarse) { .live .live-held-chip { min-height: 40px; } }
+.live-center:has(.live-held-sheet), .live-held:has(.live-held-sheet) { position: static; z-index: auto; }
+.live-held-sheet { position: absolute; z-index: 25; left: 12px; right: 12px; bottom: 12px; max-width: 30em; max-height: calc(100% - 72px); margin-inline: auto; display: flex; flex-direction: column; overflow: hidden; padding: 0; border-radius: 18px; border: 1px solid var(--line); background: var(--surface); color: var(--text); text-align: left;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .12), 0 16px 32px -12px rgb(0 0 0 / .45); animation: live-in .18s var(--motion-out) both; }
+.live-held-sheet:focus { outline: none; }
+.live-held-sheet header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.live-held-sheet h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.live .live-held-x { display: grid; place-items: center; width: 36px; height: 36px; margin-right: -8px; border-radius: 50%; color: var(--muted); }
+@media (hover: hover) { .live .live-held-x:hover { background: var(--hover); color: var(--text); } }
+.live-held-hint { margin: 2px 0 6px; font-size: 13px; line-height: 1.35; color: var(--muted); }
+.live-held-sheet section { padding-top: 10px; border-top: 1px solid var(--line); margin-top: 8px; }
+.live-held-sheet h4 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.live-held-sheet h4 small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.live-held-sheet ol { margin: 0; padding: 0; list-style: none; counter-reset: held; }
+.live-held-sheet li { display: grid; grid-template-columns: 1.5em minmax(0, 1fr) auto; align-items: start; gap: 2px 4px; padding: 3px 0; font-size: 14px; line-height: 1.4; counter-increment: held; }
+.live-held-sheet li::before { content: counter(held) "."; color: var(--muted); font-variant-numeric: tabular-nums; }
+.live-held-sheet li > span { overflow-wrap: anywhere; }
+.live .live-held-remove { display: inline-grid; place-items: center; min-width: 32px; height: 28px; margin: -3px -6px 0 0; padding: 0 6px; border-radius: 99px; color: var(--muted); font-size: 13px; }
+@media (hover: hover) { .live .live-held-remove:hover { background: var(--hover); color: var(--text); } }
+.live .live-held-remove[data-armed="true"] { background: var(--error); color: var(--surface); font-weight: 500; }
+.live .live-held-clear { min-height: 36px; margin-top: 8px; padding: 0 14px; border-radius: 99px; border: 1px solid var(--line); font-size: 13px; color: var(--text); }
+.live .live-held-clear[data-armed="true"] { border-color: var(--error); background: var(--error); color: var(--surface); font-weight: 500; }
+@media (hover: hover) { .live .live-held-clear:not([data-armed="true"]):hover { background: var(--hover); } }
+.live-held-sheet button:disabled { opacity: .6; cursor: progress; }
+.live-held-top { flex: none; padding: 12px 14px 2px; }
+/* The scroll padding keeps the focus ring (2px + 2px offset) of an edge button inside the visible area. */
+.live-held-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 8px; padding: 0 14px 14px; }
+.live-held-problem { margin: 0 0 6px; font-size: 13px; line-height: 1.35; color: var(--error); }
+@media (pointer: coarse) { .live .live-held-remove { min-width: 40px; height: 36px; } .live .live-held-clear { min-height: 44px; } }

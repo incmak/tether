@@ -80,7 +80,7 @@ REFUSED = {
         # These inspect host services, credentials, processes, or live account data.
         'accounts', 'browser/extension/devices', 'browser/extension/download',
         'browser/live', 'browser/snapshot', 'browser/stream', 'browser/tabs',
-        'dev-preview', 'foundry-spend', 'host-stats', 'live/agent', 'live/brief',
+        'dev-preview', 'foundry-spend', 'friday-notes', 'host-stats', 'live/agent', 'live/brief',
         'login/state', 'passkeys', 'upkeep/ops', 'upkeep/ops/note', 'upkeep/prune', 'usage?live=1',
         # These browse or expose files outside the fixture chat transcript.
         'file', 'files', 'files/list', 'files/places', 'files/preview', 'files/raw',
@@ -133,7 +133,8 @@ REFUSED = {
         # These change state outside the small set of fixture writes in ALLOWED.
         'activity', 'activity/publish', 'auto-merge', 'autonomy', 'autonomy/decisions', 'autonomy/lessons',
         'autonomy/review', 'autonomy/setup', 'claude-advisor', 'codex-level', 'codex-provider',
-        'codex-trust', 'commit-gate', 'feedback', 'groups/arrange', 'groups/create', 'groups/move',
+        'codex-trust', 'commit-gate', 'feedback', 'friday-notes/hold', 'friday-notes/drop',
+        'groups/arrange', 'groups/create', 'groups/move',
         'groups/remove', 'groups/rename', 'groups/reorder', 'groups/ungroup', 'history/hide', 'passkeys',
         'projects/backlog-add', 'projects/budget', 'projects/instructions', 'projects/note',
         'projects/note-delete', 'projects/pin', 'projects/seen', 'projects/unpin',
