@@ -310,6 +310,13 @@ class Cli(Base):
                                          r'-> A: Use the tested option\. \(claude fable\)\n$')
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
 
+    def test_audit_ask_goal_over_forty_characters_ends_with_an_ellipsis(self):
+        self.enterContext(patch.object(audit, '_TABS', {}))
+        projects.bundle(PID).mkdir(parents=True)
+        self.assertEqual(self.invoke(['ask', '--stack', 'Internationalization accessibility review', 'Which?'])[0], 0)
+        summary = audit.query()['entries'][0]['summary']
+        self.assertEqual(summary, 'Asked advisor: Internationalization accessibility…')
+
     def test_audit_ask_records_one_preview_for_both_advisors(self):
         self.enterContext(patch.object(audit, '_TABS', {}))
         projects.bundle(PID).mkdir(parents=True)
@@ -324,7 +331,7 @@ class Cli(Base):
         self.assertEqual(entry['actor'], {'source': 'agent-cli', 'pane': '%1', 'tab': 'Build', 'agent': 'codex'})
         self.assertEqual(entry['project'], 'Example')
         # Only the goal: a cut excerpt of the question could still hold a token (B56 review).
-        self.assertEqual(entry['summary'], 'Asked advisor: Audit log review')
+        self.assertEqual(entry['summary'], 'Asked advisor: Audit log review…')  # B316: a cut shows
         self.assertNotIn('sk-test', json.dumps(entry))
         self.assertNotIn('private suffix', json.dumps(entry))
 

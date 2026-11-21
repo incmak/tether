@@ -91,6 +91,18 @@ class BacklogObservedTests(unittest.TestCase):
             self.assertEqual(agent_audit_cli.main(['list', '--json']), 0)
         self.assertEqual(json.loads(out.getvalue())['entries'], [entry])
 
+    def test_observed_long_title_keeps_its_ellipsis_before_the_marker(self):
+        # B316: the title is cut at a word with "…"; the observation marker follows the cut title.
+        backlog.observe()
+        title = 'Keep the reviewer tab after a restart and show the verdict to the worker before reporting the result'
+        with self.sandbox():
+            self.cli_add(title)
+        backlog.observe()
+        entry, = self.entries()
+        short = audit.clip(title, 80)
+        self.assertEqual(short, 'Keep the reviewer tab after a restart and show the verdict to the worker…')
+        self.assert_observed(entry, 'backlog.add', f'B14 added: {short}', AGENT)
+
     def test_start_then_done_before_observe_coalesces_to_done(self):
         backlog.observe()
         with self.sandbox():
