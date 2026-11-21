@@ -373,7 +373,13 @@ def bar_candidates(config):
     """Read agent names before any listing filters, including agents carried across /clear."""
     # Claude Code 2.1.330 jbe -> sg -> Ndo reads the process's tasks. IQs keeps
     # eligible tasks across /clear, and n1e links local agents to the owner's tasks folder.
-    files, _ = _agent_files(config, _tasks_dir(config), metadata=True)
+    tasks_dir = _tasks_dir(config)
+    files, _ = _agent_files(config, tasks_dir, metadata=True)
+    # Claude keeps an agent in memory when its metadata write fails. A known
+    # transcript without metadata could have any name, so the pool is unknown.
+    transcripts, _ = _agent_files(config, tasks_dir, metadata=False)
+    if set(transcripts) - set(files):
+        raise ValueError(_UNAVAILABLE)
     records = []
     for identifier, group in files.items():
         names = set()

@@ -892,6 +892,19 @@ class ProcessTasksTests(unittest.TestCase):
             {'id': 'new', 'type': 'Explore', 'description': 'Current chat'},
         ])
 
+    def test_bar_candidates_refuse_a_known_agent_without_metadata(self):
+        for identifier in ('target', 'other'):
+            (self.folder / f'agent-{identifier}.jsonl').write_text('')
+            (self.tasks / f'{identifier}.output').symlink_to(self.folder / f'agent-{identifier}.jsonl')
+        (self.folder / 'agent-target.meta.json').write_text(json.dumps({
+            'description': 'Same name', 'agentType': 'general-purpose', 'finished': True}))
+        with self.assertRaises(ValueError):
+            subagents.bar_candidates(self.config)
+        (self.folder / 'agent-other.meta.json').write_text(json.dumps({
+            'description': 'Same name', 'agentType': 'general-purpose', 'finished': True}))
+        self.assertCountEqual([record['id'] for record in subagents.bar_candidates(self.config)],
+                              ['target', 'other'])
+
     def test_monitor_in_old_running_agent_has_parent_and_kind(self):
         old = self.old_agent()
         with old.open('a') as stream:
