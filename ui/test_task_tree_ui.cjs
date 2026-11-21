@@ -23,7 +23,7 @@ function fixture(id = '%1', thread = 'root-thread') {
   return {
     sessions: [
       make(id, taskName, { thread, state: 'Working' }),
-      make('%81', separateName, { helper: true, owner: id, from: { pane: id, name: 'B446', live: true } }),
+      make('%81', separateName, { helper: true, owner: id, from: { pane: id, name: taskName, live: true } }),
       make('%82', workerName, { ...child, group: 'bugs', task_role: 'Worker', state: 'Working' }),
       make('%83', 'B446 advisor', { ...child, task_role: 'Advisor' }),
       make('%84', 'B446 second advisor', { ...child, task_role: 'Second advisor' }),
@@ -168,7 +168,12 @@ async function main() {
     const parent = tasks().getByRole('tab', { name: /B446 Task tree, Task, needs you, 5 helpers/ })
     assert.equal(await parent.getAttribute('aria-selected'), 'true')
     assert.equal(await parent.getAttribute('aria-controls'), await panel.getByRole('tabpanel').getAttribute('id'))
-    assert.equal(await tasks().getByRole('tab', { name: /B447 Settings, from B446/ }).count(), 1, 'Legacy helper flag does not hide a separate task')
+    assert.equal(await tasks().getByRole('tab', { name: /B447 Settings, from B446 Task tree/ }).count(), 1, 'Legacy helper flag does not hide a separate task')
+    // B474: the visible label is the source's backlog id; the full name stays in the tooltip and the accessible name.
+    for (const from of [tasks().getByRole('tab', { name: /B447 Settings/ }).locator('.task-from'), side().locator('.task-row', { hasText: separateName }).locator('.task-from')]) {
+      assert.equal((await from.innerText()).trim(), 'from B446')
+      assert.equal(await from.getAttribute('title'), `Started by ${taskName}`)
+    }
     assert.equal(await tasks().locator('[tabindex="0"]').count(), 1)
     await parent.focus()
     await parent.press('ArrowRight')
@@ -306,8 +311,8 @@ async function main() {
     await Promise.all([waitWrite('task-tree/move'), dialog.getByRole('button', { name: 'Move out of task' }).click()])
     assert.deepEqual(write('task-tree/move'), { pane: '%86', thread: 'thread-%86', into: null, into_thread: null })
     await dialog.waitFor({ state: 'hidden' })
-    const rootRow = side().getByRole('button', { name: /B446 Task tree, Task/ })
-    await Promise.all([waitWrite('task-tree/move'), side().getByRole('button', { name: /B447 Settings, from B446, Task/ }).dragTo(rootRow)])
+    const rootRow = side().getByRole('button', { name: /^B446 Task tree, Task/ })
+    await Promise.all([waitWrite('task-tree/move'), side().getByRole('button', { name: /B447 Settings, from B446 Task tree, Task/ }).dragTo(rootRow)])
     assert.deepEqual(write('task-tree/move'), { pane: '%81', thread: 'thread-%81', into: '%1', into_thread: 'root-thread' })
 
     await openActions(taskName)
@@ -404,6 +409,30 @@ async function main() {
     await page.keyboard.press('Escape')
     await stackMenu.waitFor({ state: 'hidden' })
     assert.equal(writes.some(item => item.endpoint === 'groups/close'), false, 'Cancel closes nothing')
+
+    // B474 touch: ••• shows on the open row and on stack headings. Another row opens its menu by a long press.
+    const touch = await context.newCDPSession(page)
+    await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+    assert(await page.evaluate(() => matchMedia('(hover: none)').matches), 'Touch emulation turns hover off')
+    if (!await drawer.isVisible()) await page.getByRole('button', { name: /^Open sessions/ }).click()
+    await page.evaluate(() => document.activeElement?.blur())
+    const touchActions = name => drawer.locator(`button[aria-label="Actions for ${name}"]`)
+    assert(await touchActions(reviewName).isVisible(), 'Touch: the open row shows its •••')
+    assert.equal(await touchActions(separateName).isVisible(), false, 'Touch: another row hides its •••')
+    assert(await drawer.getByRole('button', { name: 'Actions for stack Task tree', exact: true }).isVisible(), 'Touch: the stack heading keeps its •••')
+    const heldRow = touchActions(separateName).locator('xpath=..').locator('.task-row-main')
+    await heldRow.scrollIntoViewIfNeeded()
+    const held = await heldRow.boundingBox()
+    const point = { x: held.x + held.width / 3, y: held.y + held.height / 2 }
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] })
+    await page.locator('.touch-ghost').waitFor()
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    const heldMenu = page.locator('dialog[open].sheet').last()
+    await heldMenu.getByRole('button', { name: 'Move into task…' }).waitFor()
+    await page.keyboard.press('Escape')
+    await heldMenu.waitFor({ state: 'hidden' })
+    await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    await touch.detach()
 
     const reviewPane = listing.sessions.find(pane => pane.id === '%86')
     reviewPane.state = 'Idle'

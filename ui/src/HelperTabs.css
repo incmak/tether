@@ -70,17 +70,19 @@
 .task-done { margin-left: 20px; }
 .pane-children .task-done .task-done-toggle { padding: 0 6px; gap: 6px; font-size: 12px; color: var(--muted); }
 .task-done-toggle .group-count { font-variant-numeric: tabular-nums; }
-/* Row actions show on hover, on keyboard focus and on the open row. On touch, tap opens a row and shows its •••;
-   a long press opens the same menu. */
+/* Row actions show on hover, on keyboard focus and on the open row or stack (B474, concept D).
+   Touch: a tap opens a row and shows its •••; a long press on a row opens its menu. Stack headings have no
+   long press, so their ••• stays on touch screens. */
 @media (hover: hover) {
   .pane-children .task-row:not(:hover, :focus-within, :has(> .task-row-main.selected)) > .task-row-actions,
-  .pane-children .pane-stack-row:not(:hover, :focus-within) > .pane-stack-actions,
+  .pane-children .pane-stack-row:not(:hover, :focus-within, :has(> .pane-stack-head.current)) > .pane-stack-actions,
   .session-row:not(:hover, :focus-within, .selected) > .task-row-actions { display: none; }
 }
 @media (hover: none) {
-  .pane-children .task-row:not(:has(> .task-row-main.selected)) > .task-row-actions,
-  .pane-children .pane-stack-row:not(:has(> .pane-stack-head.current)) > .pane-stack-actions { display: none; }
+  .pane-children .task-row:not(:focus-within, :has(> .task-row-main.selected)) > .task-row-actions,
+  .session-row:not(:focus-within, .selected) > .task-row-actions { display: none; }
 }
+
 .task-done .task-branch .task-kids { margin-left: 18px; }
 
 .task-answers { display: grid; gap: 8px; overflow: auto; max-height: 36dvh;
