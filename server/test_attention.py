@@ -1322,7 +1322,9 @@ class RouteTest(unittest.TestCase):
         move, = self.log.entries
         def record(*args, **kwargs):
             self.assertTrue(self.store.lock.locked())  # Snooze and Later take this same lock.
-            self.assertEqual(self.store.asks['%1']['later']['entry'], move['id'])
+            # The Undo line follows the saved Undo.
+            self.assertIsNone(self.store.asks['%1']['later'])
+            self.assertTrue(attention.Attention(self.path, self.clock, log=self.log).asks['%1']['stay'])
             return self.log._record(*args, **kwargs)
         self.log.record.side_effect = record
         save = self.store._save
@@ -1348,7 +1350,7 @@ class RouteTest(unittest.TestCase):
             self.assertEqual(self.store.asks['%1'], before)
             self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).asks['%1'], before)
         with self.subTest('audit and count'):
-            self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask', 'auto.undo'])
+            self.assertEqual([row['kind'] for row in self.log.entries], ['auto.stale_ask'])  # no Undo line
             _, log = self.get('/log')
             row = next(row for row in log['entries'] if row['id'] == move['id'])
             self.assertFalse(row['undone'])
@@ -1357,6 +1359,53 @@ class RouteTest(unittest.TestCase):
             self.assertEqual(self.get()[1]['handled_today'], 1)
         self.assertEqual(self.post('back', target)[0], 200)
         self.assertEqual(self.get()[1]['handled_today'], 0)
+
+    def test_failed_undo_then_snooze_or_later_keeps_the_move_counted(self):
+        for action in ('snooze', 'later'):
+            with self.subTest(action=action):
+                self.tearDown(); self.setUp()
+                self.clock.now += 25 * 3600
+                self.move_reply()
+                move, = self.log.entries
+                target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+                with mock.patch.object(attention.os, 'replace', side_effect=OSError('denied')):
+                    self.assertEqual(self.post('back', target)[0], 503)
+                body = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask']}
+                self.assertEqual(self.post(action, body)[0], 200)
+                _, log = self.get('/log')
+                row = next(row for row in log['entries'] if row['id'] == move['id'])
+                self.assertFalse(row['undone'])
+                self.assertEqual(log['handled_today'], 1)
+                self.assertEqual(self.get()[1]['handled_today'], 1)
+
+    def test_undo_log_failure_restores_the_saved_state(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        before = self.store.asks['%1'].copy()
+        with mock.patch.object(self.log, 'record', return_value=None):
+            self.assertEqual(self.post('back', target),
+                             (503, {'error': 'Could not write the automation log. Try again.'}))
+        self.assertEqual(self.store.asks['%1'], before)
+        self.assertEqual(attention.Attention(self.path, self.clock, log=self.log).asks['%1'], before)
+
+    def test_undo_keeps_the_saved_undo_when_the_log_and_the_rollback_fail(self):
+        self.clock.now += 25 * 3600
+        self.move_reply()
+        move, = self.log.entries
+        target = {'session': '%1', 'thread': 't1', 'ask': move['detail']['ask'], 'entry': move['id']}
+        save, calls = self.store._save, []
+        def first_save_only(now):
+            calls.append(now)
+            return save(now) if len(calls) == 1 else False
+        with mock.patch.object(self.log, 'record', return_value=None), \
+                mock.patch.object(self.store, '_save', side_effect=first_save_only), \
+                mock.patch('sys.stderr', new_callable=io.StringIO) as err:
+            self.assertEqual(self.post('back', target)[0], 200)
+        self.assertIn('without its automation log line', err.getvalue())
+        self.assertTrue(self.store.asks['%1']['stay'])
+        self.assertEqual(self.store.asks['%1'], attention.Attention(self.path, self.clock, log=self.log).asks['%1'])
 
     def test_failed_undo_save_keeps_parked_move_counted_until_tab_returns(self):
         self.clock.now += 25 * 3600

@@ -513,17 +513,31 @@ class Attention:
             elif action == 'back':
                 if not later:
                     return False if entry_id is not None else self.public(ask)
-                if later['by'] == 'rule':
-                    if entry_id is None or entry_id != later.get('entry'):
-                        return False
-                    # Audit never takes the Attention lock, so Snooze and Later can wait until Undo saves.
+                rule = later['by'] == 'rule'
+                if rule and (entry_id is None or entry_id != later.get('entry')):
+                    return False
+                if not rule and entry_id is not None:
+                    return False  # A log row cannot put a manual move back in the queue.
+                ask.update(stay=True, later=None)
+                try:
+                    self._save_user(now)
+                except AttentionError:
+                    self.asks[pane] = before
+                    raise
+                if rule:
+                    # The Undo line follows the saved state, so an Undo line always means a saved Undo.
+                    # Audit never takes the Attention lock, so Snooze and Later wait until this returns.
                     undo = self.log.record('auto.undo', 'Put an ask back in the queue', actor=None, pane=pane,
                                            thread=thread or '', ask=ask['id'], entry=entry_id, rule='Stale ask')
                     if undo is None:
-                        raise AttentionError('Could not write the automation log. Try again.')
-                elif entry_id is not None:
-                    return False  # A log row cannot put a manual move back in the queue.
-                ask.update(stay=True, later=None)
+                        self.asks[pane] = before
+                        if self._save(now):
+                            raise AttentionError('Could not write the automation log. Try again.')
+                        # The state file already holds the Undo. Keep memory equal to it; only the log line is missing.
+                        self.asks[pane] = ask
+                        print(f'Attention: ask {ask["id"]} is back in the queue without its automation log line.',
+                              file=sys.stderr)
+                return self.public(ask)
             else:
                 raise ValueError('Unknown action.')
             try:

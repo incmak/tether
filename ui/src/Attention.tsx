@@ -355,22 +355,34 @@ export function StaleRuleSetting({ api }: { api: Api }) {
     }).catch(reason => { if (id === latest.current) setError(errorText(reason)) })
     return () => { ++latest.current; controller.abort() }
   }, [api])
+  // One write at a time: the server applies writes in the order sent, so the last answer is the server's value.
+  // A change made while a write runs waits and goes next, with the newest value only.
+  const queued = useRef<boolean | null>(null)
+  const writing = useRef(false)
   const save = async (next: boolean) => {
-    const id = ++latest.current
+    ++latest.current  // the first load must not overwrite a change
+    queued.current = next
     setStale(current => ({ ...current, shown: next })); setError('')
+    if (writing.current) return
+    writing.current = true
     try {
-      const result = await api<{ rules: { stale: boolean } }>('attention/rules', { stale: next })
-      const show = id === latest.current
-      setStale(current => confirmStaleRule(current, result.rules.stale, show))
-    } catch (reason) {
-      if (id !== latest.current) return
-      setError(errorText(reason))
-      let confirmed: boolean | null = null
-      try {
-        const state = await api<AttentionState>('attention')
-        confirmed = state.rules.stale
-      } catch { /* Keep the write error and fall back to the last confirmation. */ }
-      if (id === latest.current) setStale(current => confirmStaleRule(current, confirmed, true))
+      while (queued.current !== null) {
+        const value = queued.current
+        queued.current = null
+        try {
+          const result = await api<{ rules: { stale: boolean } }>('attention/rules', { stale: value })
+          setStale(current => confirmStaleRule(current, result.rules.stale, queued.current === null))
+        } catch (reason) {
+          setError(errorText(reason))
+          let confirmed: boolean | null = null
+          try {
+            confirmed = (await api<AttentionState>('attention')).rules.stale
+          } catch { /* Keep the write error and fall back to the last confirmation. */ }
+          setStale(current => confirmStaleRule(current, confirmed, queued.current === null))
+        }
+      }
+    } finally {
+      writing.current = false
     }
   }
   return <div className="preferences-field attention-digest">
