@@ -2048,31 +2048,38 @@ class CrossWorktree(Base):
         self.assertEqual(self.origin_main(), before)
 
     def test_an_approval_that_changes_during_the_remote_check_stops_the_push(self):
-        self.enforce()
-        head = self.change()
-        before = self.origin_main()
-        live = {'commit': head, 'at': None, 'folder': str(self.work)}
-        job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
-        live['at'] = job['approved_at']
-        real = auto_merge._object_git
-        pushes = []
+        # The approval moves during the look at the remote main, or during the credential lookup after it.
+        for moment in ('ls-remote', 'credentials'):
+            with self.subTest(moment=moment):
+                self.enforce()
+                head = self.change(text=f'{moment}\n')
+                before = self.origin_main()
+                live = {'commit': head, 'at': None, 'folder': str(self.work)}
+                job = {**self.job(head), 'tab': str(self.repo), 'current': lambda: {'%1': {'%2': dict(live)}}}
+                live['at'] = job['approved_at']
+                real, real_helpers = auto_merge._object_git, auto_merge._credential_helpers
+                steps = []
 
-        def object_git(scratch, *args, **kwargs):
-            result = real(scratch, *args, **kwargs)
-            if args[0] == 'commit-tree':
-                pushes.append('made')
-            if args[0] == 'ls-remote' and pushes == ['made']:
-                live['folder'] = str(self.repo)  # the approval moves during the look right before the push
-            if args[0] == 'push':
-                pushes.append(args)
-            return result
+                def object_git(scratch, *args, **kwargs):
+                    result = real(scratch, *args, **kwargs)
+                    steps.append(args[0])
+                    if moment == 'ls-remote' and args[0] == 'ls-remote' and 'commit-tree' in steps:
+                        live['folder'] = str(self.repo)
+                    return result
 
-        with mock.patch.object(auto_merge, '_object_git', side_effect=object_git):
-            decision = auto_merge.process(job)
-        self.assertEqual(decision['outcome'], 'failed')
-        self.assertIn('approval changed', decision['error'])
-        self.assertEqual(pushes, ['made'])
-        self.assertEqual(self.origin_main(), before)
+                def helpers(root):
+                    if moment == 'credentials' and steps.count('ls-remote') == 2:
+                        live.clear()
+                    return real_helpers(root)
+
+                with mock.patch.object(auto_merge, '_object_git', side_effect=object_git), \
+                        mock.patch.object(auto_merge, '_credential_helpers', side_effect=helpers):
+                    decision = auto_merge.process(job)
+                self.assertEqual(decision['outcome'], 'failed')
+                self.assertIn('approval changed', decision['error'])
+                self.assertIn('commit-tree', steps)
+                self.assertNotIn('push', steps)
+                self.assertEqual(self.origin_main(), before)
 
 
 class Watcher(Base):

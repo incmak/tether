@@ -258,9 +258,7 @@ def _run_git(prefix, *args, network=False, check=True, env=None, binary=False):
     return result
 
 
-def _object_git(scratch, *args, network=None, check=True, identity=None, binary=False):
-    """Run git in the scratch repository. `network` is the user's repository for a command that uses the remote:
-    its credential settings apply."""
+def _object_env(network=None, identity=None):
     env = _git_env(_credential_helpers(network) if network else ())
     for key in ('GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_SHALLOW_FILE'):
         env.pop(key, None)
@@ -268,6 +266,13 @@ def _object_git(scratch, *args, network=None, check=True, identity=None, binary=
     env.update(GIT_ATTR_SOURCE=EMPTY_TREE, GIT_NO_LAZY_FETCH='1',
                GIT_ALLOW_PROTOCOL='file:git:http:https:ssh')
     env.update(identity or {})
+    return env
+
+
+def _object_git(scratch, *args, network=None, check=True, identity=None, binary=False, env=None):
+    """Run git in the scratch repository. `network` is the user's repository for a command that uses the remote:
+    its credential settings apply. `env`: an environment from _object_env, prepared before a last check."""
+    env = _object_env(network, identity) if env is None else env
     return _git(scratch, *args, network=bool(network), check=check, env=env, binary=binary)
 
 
@@ -1285,10 +1290,11 @@ def _fast_forward_push(root, scratch, url, checked, made, confirm=None):
     seen = _object_git(scratch, 'ls-remote', url, TARGET_REF, network=root).stdout
     if seen != f'{checked}\t{TARGET_REF}\n':
         raise MainMoved(f'{REMOTE}/{TARGET} moved after the checks. Tether pushed nothing.')
+    push_env = _object_env(root)  # the credential lookup runs git too: do it before the last check
     if confirm is not None:
         confirm()
     try:
-        _object_git(scratch, *_push_argv(url, made), network=root)
+        _object_git(scratch, *_push_argv(url, made), network=root, env=push_env)
     except GitError as exc:
         raise MainMoved(f'{REMOTE}/{TARGET} did not accept a plain push, so it moved or refused it. Nothing is forced: {exc}') from exc
 
