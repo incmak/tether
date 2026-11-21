@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { History, Redo2, Undo2, X } from 'lucide-react'
 import { UNDO_EVENT, errorText } from './api'
-import type { Api, RestartOffer, UndoStep } from './api'
+import type { Api, RestartOffer, SessionsData, UndoStep } from './api'
 import { useModal } from './hooks'
 import { IS_MAC } from './keys'
 import { PREFS_PULL_EVENT } from './prefs'
@@ -15,6 +15,9 @@ import { UNDO_RUN_EVENT, setUndoNext } from './undoState'
 type Direction = 'undo' | 'redo'
 interface Done { status: 'done'; id: string; label: string; direction: Direction; warnings?: string[] }
 interface Ask { status: 'confirm'; id: string; label: string; direction: Direction; effects: string[]; token: string; changed?: boolean }
+// A real chat id (server/terminal_input.py UUID); a new chat has none until its first message.
+const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export interface UndoEntry {
   id: string; at: number; who: { by: 'user' | 'tether' | 'agent'; tab?: string }; label: string
   state: 'done' | 'undone'; redo: boolean; undone_at: number | null; why?: string | null
@@ -149,16 +152,30 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
 
   const retry = useRef<(offer: RestartOffer) => Promise<void>>(async () => {})
   const restart = useCallback(async (offer: RestartOffer) => {
-    if (running.current || !offer.thread) return
+    if (running.current) return
     running.current = true
     setBusy(true)
+    const again = { label: 'Restart', run: () => void retry.current(offer) }
     try {
-      const result = await latest.current.api<Restarted>('restart-tab', { pane: offer.pane, thread: offer.thread }, undefined, undefined, 20000)
+      // A new chat gets its id with its first message, after the move: read the tab's chat now. Until then
+      // the session list holds a "pending-…" placeholder, which is not a chat id.
+      let thread = offer.thread
+      if (!thread || !CHAT_ID.test(thread)) {
+        const tab = (await latest.current.api<SessionsData>('sessions')).sessions.find(item => item.id === offer.pane)
+        if (!tab) { setToast({ text: 'That tab has closed.', at: Date.now() }); return }
+        thread = tab.thread
+      }
+      if (!thread || !CHAT_ID.test(thread)) {
+        setToast({ text: `Send this tab's first message, then restart it to load project ${offer.name}.`, at: Date.now(), action: again, restart: true })
+        return
+      }
+      const result = await latest.current.api<Restarted>('restart-tab', { pane: offer.pane, thread, project: offer.project, session: offer.session },
+        undefined, undefined, 20000)
       setToast({ text: result.started ? `Restarted. The tab now loads project ${offer.name}.` : result.warning || 'The tab restarted. Open it to check.', at: Date.now() })
       latest.current.onChanged()
     } catch (error) {
       // A refusal (busy agent, unsent draft) keeps the offer, so the person can try again once the tab is ready.
-      setToast({ text: errorText(error), at: Date.now(), action: { label: 'Restart', run: () => void retry.current(offer) }, restart: true })
+      setToast({ text: errorText(error), at: Date.now(), action: again, restart: true })
     } finally {
       running.current = false
       setBusy(false)
@@ -173,10 +190,7 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
       const undo = step.id ? { label: 'Undo', run: () => void run('undo', step.id) } : undefined
       const offer = step.restart
       if (offer) {
-        // Without the chat id (a new chat before its first message) the server cannot bind a restart: say what to do.
-        const action = offer.thread ? { label: 'Restart', run: () => void restart(offer) } : undo
-        setToast({ text: offer.thread ? restartText(offer) : `${restartText(offer)} Send its first message, then restart it.`,
-          at: Date.now(), action, second: offer.thread ? undo : undefined, restart: true })
+        setToast({ text: restartText(offer), at: Date.now(), action: { label: 'Restart', run: () => void restart(offer) }, second: undo, restart: true })
       } else if (undo) setToast({ text: step.label, at: Date.now(), action: undo })
       setVersion(value => value + 1)
     }

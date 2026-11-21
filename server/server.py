@@ -3197,8 +3197,9 @@ class Handler(BaseHTTPRequestHandler):
                     moved = tmux_merge.merge(body.get('kind'), body.get('source'), body.get('target'), keep=body.get('keep'))
                     noted(moved)
                     if moved.get('restart'):  # B326: what the toast's Restart button sends to restart-tab
+                        forget_sessions()
                         entry = next((item for item in sessions() if item['id'] == moved['pane']), None)
-                        moved['restart'].update(pane=moved['pane'], session=moved['name'],
+                        moved['restart'].update(pane=moved['pane'],
                                                 thread=entry.get('thread') if entry and not entry.get('pending_conversation') else None)
                 self.respond(200, moved)
                 return

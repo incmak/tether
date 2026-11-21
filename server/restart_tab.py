@@ -10,6 +10,7 @@ import codex_provider
 import delegate
 import paths
 import procinfo
+import projects
 import terminal_input
 import tmux_merge
 
@@ -30,8 +31,8 @@ def _tmux_literal(value):
     return value[:-1] + r'\;' if value.endswith(';') else value
 
 
-def _started(run, pane, commands, sleep):
-    deadline = monotonic() + 10
+def _started(run, pane, commands, sleep, *, timeout=10):
+    deadline = monotonic() + timeout
     while (remaining := deadline - monotonic()) > 0:
         try:
             result = run([paths.TMUX, 'display-message', '-p', '-t', pane, '#{pane_current_command}'],
@@ -52,6 +53,11 @@ def restart(body, *, sessions, forget_sessions, run=subprocess.run, sleep=time.s
         raise ValueError('Choose a pane.')
     if not isinstance(thread, str) or not terminal_input.UUID.fullmatch(thread):
         raise ValueError('Choose a valid chat id.')
+    project, session = body.get('project'), body.get('session')
+    # An empty project is the offer for a session that gets its project on the agent's next start.
+    if (not isinstance(project, str) or (project and not projects.ID.fullmatch(project))
+            or not isinstance(session, str) or not 0 < len(session) <= 200):
+        raise ValueError('Choose a valid tab.')
     forget_sessions()
     entry = next((item for item in sessions() if item['id'] == pane), None)
     if entry is None:
@@ -61,8 +67,11 @@ def restart(body, *, sessions, forget_sessions, run=subprocess.run, sleep=time.s
         raise Refused(409, 'Only Claude and Codex tabs can restart.')
     if entry.get('thread') != thread or entry.get('pending_conversation'):
         raise Refused(409, 'That tab now holds another chat. Reload and try again.')
-    if tmux_merge.restart_info(run, pane, entry['tmux_session']) is None:
+    info = tmux_merge.restart_info(run, pane, entry['tmux_session'])
+    if info is None:
         raise Refused(409, "This tab already uses its session's project.")
+    if info['project'] != project or info['session'] != session:
+        raise Refused(409, 'This tab moved again. Reload and try again.')
     try:
         terminal_input.verify(entry, run)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
@@ -96,26 +105,23 @@ def restart(body, *, sessions, forget_sessions, run=subprocess.run, sleep=time.s
         saved = auto_resume.saved_tab(pane) or {}
         profile = saved['profile'] if 'profile' in saved else codex_provider.launch_profile()
     command = terminal_input.resume_command(thread, agent=agent, profile=profile)
-    # With no argument, tmux reruns the pane's old command. Match new-window
-    # by starting the session's default command or its default login shell.
-    default_command = _pane_format(run, pane, '#{default-command}')
-    if default_command:
-        shell_command = [_tmux_literal(default_command)]
-    else:
-        shell = _pane_format(run, pane, '#{default-shell}')
-        if not shell:
-            raise RuntimeError('Tether could not find the default shell.')
-        shell_command = [_tmux_literal(shell), '-l']
+    shell = _pane_format(run, pane, '#{default-shell}')
+    if not shell:
+        raise RuntimeError('Tether could not find the default shell.')
 
     audit.record('tab.restart', f'Restarted tab {delegate.source_title(entry, fallback=pane)}', pane=pane)
     # tmux expands formats in -c. A process working directory is literal.
-    run([paths.TMUX, 'respawn-pane', '-k', '-t', pane, '-c', _tmux_literal(folder.replace('#', '##')), *shell_command],
+    run([paths.TMUX, 'respawn-pane', '-k', '-t', pane, '-c', _tmux_literal(folder.replace('#', '##')),
+         _tmux_literal(shell), '-l'],
         check=True, capture_output=True, timeout=5)
+    reply = {'pane': pane, 'thread': thread, 'agent': agent, 'started': False}
+    if not _started(run, pane, (os.path.basename(shell),), sleep, timeout=5):
+        reply['warning'] = 'The tab restarted, but its shell did not start. Open the tab to check.'
+        return reply
     run([paths.TMUX, 'send-keys', '-t', pane, '-l', command], check=True, capture_output=True, timeout=5)
     run([paths.TMUX, 'send-keys', '-t', pane, 'Enter'], check=True, capture_output=True, timeout=5)
-    started = _started(run, pane, ('claude',) if agent == 'claude' else ('node', 'codex'), sleep)
-    reply = {'pane': pane, 'thread': thread, 'agent': agent, 'started': started}
-    if not started:
+    reply['started'] = _started(run, pane, ('claude',) if agent == 'claude' else ('node', 'codex'), sleep)
+    if not reply['started']:
         name = 'Claude' if agent == 'claude' else 'Codex'
         reply['warning'] = f'The tab restarted, but {name} did not start yet. Open the tab to check.'
     return reply

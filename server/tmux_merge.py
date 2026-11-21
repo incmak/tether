@@ -331,7 +331,7 @@ def move_pane(pane, target, run=subprocess.run):
 
 
 def restart_info(run, pane, session_id):
-    """{'project', 'name'} when the pane's agent started in another project than the session it is in now, else None.
+    """The target project id and name, plus the session name, when the pane's agent started in another project.
     The agent keeps its start project's folder access until it restarts (project_launch.py, B326). Read only: a
     session with no @project yet gets one at the agent's next start, so any started project differs. A pane with no
     @project_rev did not start through Tether. Any tmux failure gives None: the move itself is done."""
@@ -347,7 +347,7 @@ def restart_info(run, pane, session_id):
         name = projects.meta(pid)['name'] if pid else ''
     except OSError:
         name = ''
-    return {'project': pid, 'name': name or fields[3]}
+    return {'project': pid, 'name': name or fields[3], 'session': fields[3]}
 
 
 def _ungroup(run, pane):

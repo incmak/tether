@@ -690,6 +690,7 @@ class TmuxMergeTests(unittest.TestCase):
         result = tmux_merge.merge('pane', pane, self.b, run=self.run_tmux)
         self.assertEqual(result['restart']['project'], beta)
         self.assertEqual(result['restart']['name'], 'Beta work')
+        self.assertEqual(result['restart']['session'], 'beta')
         # Moving back home: the agent's project is right again.
         self.assertNotIn('restart', tmux_merge.merge('pane', pane, self.a, run=self.run_tmux))
         # A grouped start mark ("pid:rev+gpid:grev") counts by its session part.
@@ -706,7 +707,7 @@ class TmuxMergeTests(unittest.TestCase):
         pane = self.panes(self.a)[0]
         self.tmux('set-option', '-p', '-t', pane, '@project_rev', f'{alpha}:0')
         result = tmux_merge.merge('break', pane, None, run=self.run_tmux)
-        self.assertEqual(result['restart'], {'project': '', 'name': result['name']})
+        self.assertEqual(result['restart'], {'project': '', 'name': result['name'], 'session': result['name']})
         self.assertEqual(self.project(result['session']), '')  # read only: the agent's next start makes it
 
     def test_move_pane_keeps_its_id(self):

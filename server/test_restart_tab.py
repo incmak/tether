@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import paths
 import restart_tab
@@ -17,8 +17,11 @@ from test_tmux_isolation import private_tmux
 
 
 THREAD = '12345678-1234-1234-1234-123456789abc'
-REQUEST = {'pane': '%7', 'thread': THREAD}
+PROJECT = '222222222222'
+REQUEST = {'pane': '%7', 'thread': THREAD, 'project': PROJECT, 'session': 'Beta'}
+REPLY = {'pane': '%7', 'thread': THREAD}
 ROUTE = '/mobile/api/restart-tab'
+FIXTURES = Path(__file__).with_name('fixtures')
 
 
 class RestartTests(unittest.TestCase):
@@ -34,7 +37,7 @@ class RestartTests(unittest.TestCase):
         self.status = {'state': 'Idle', 'approval': None}
         self.probes = ['sh', 'claude']
         self.default_command = ''
-        self.project_mark = '$3\t111111111111:0\t\tNew project\n'
+        self.project_mark = f'$3\t111111111111:0\t{PROJECT}\tBeta\n'
         self.fallback = self.folder / 'pane folder'
         self.fallback.mkdir()
         self.events.cwd.return_value = str(self.folder)
@@ -48,7 +51,7 @@ class RestartTests(unittest.TestCase):
         self.enterContext(patch.object(terminal_input, 'live_status', self.events.live_status))
         self.events.live_status.return_value = self.status
         self.prompt = self.enterContext(patch.object(terminal_input, 'empty_prompt', wraps=terminal_input.empty_prompt))
-        self.screen = '❯\n────────────────\n'
+        self.screen = '────────────────\n❯\n────────────────\n'
         self.clock = 0
         self.enterContext(patch.object(restart_tab, 'monotonic', side_effect=lambda: self.clock))
 
@@ -87,9 +90,9 @@ class RestartTests(unittest.TestCase):
         return [call.args[0] for call in self.events.run.call_args_list
                 if call.args[0][1] not in ('capture-pane', 'display-message')]
 
-    def assert_refused(self, message, status=409):
+    def assert_refused(self, message, status=409, body=REQUEST):
         with self.assertRaises(restart_tab.Refused) as raised:
-            self.restart()
+            self.restart(body)
         self.assertEqual((raised.exception.status, str(raised.exception)), (status, message))
         self.assertEqual(self.writes(), [])
         self.events.audit.assert_not_called()
@@ -118,6 +121,21 @@ class RestartTests(unittest.TestCase):
         self.assert_refused("This tab already uses its session's project.")
         self.events.verify.assert_not_called()
 
+    def test_offer_is_refused_if_the_project_or_session_changed(self):
+        for project, session in [('333333333333', 'Beta'), (PROJECT, 'Gamma')]:
+            with self.subTest(project=project, session=session):
+                self.project_mark = f'$3\t111111111111:0\t{project}\t{session}\n'
+                self.assert_refused('This tab moved again. Reload and try again.')
+        self.events.verify.assert_not_called()
+
+    def test_offer_binds_the_session_name_even_with_a_different_project_name(self):
+        with patch.object(restart_tab.projects, 'meta', return_value={'name': 'Beta site'}):
+            self.assertTrue(self.restart()['started'])
+
+    def test_breakout_offer_can_name_a_session_without_a_project(self):
+        self.project_mark = '$3\t111111111111:0\t\tBeta\n'
+        self.assertTrue(self.restart(dict(REQUEST, project=''))['started'])
+
     def test_lost_process_or_conversation_binding(self):
         for error in (terminal_input.ConversationChanged('The agent restarted.'), FileNotFoundError('Registry gone.')):
             with self.subTest(error=error):
@@ -137,8 +155,69 @@ class RestartTests(unittest.TestCase):
         self.prompt.assert_not_called()
 
     def test_draft_is_preserved(self):
-        self.screen = '❯ unsent text\n────────────────\n'
-        self.assert_refused('There is an unsent draft in the agent input. Clear it, then send again.')
+        for agent, screen in [('claude', '────────────────\n❯ unsent text\n────────────────\n'),
+                              ('codex', '› Ask Codex to do anything\n\n  ? for shortcuts\n')]:
+            with self.subTest(agent=agent), patch.dict(self.entry, agent=agent):
+                self.screen = screen
+                self.assert_refused('There is an unsent draft in the agent input. Clear it, then send again.')
+
+    def test_styled_idle_captures_prove_the_input_is_empty(self):
+        # Claude's narrow capture is a real 50-column screen from the agent-bar fixtures (Tether keeps live windows wide).
+        for agent, capture in [('claude', 'claude_2.1.330_restart/idle.ansi'), ('claude', 'claude_2.1.330_agent_bar/narrow_after_escape.txt'),
+                               ('codex', 'codex_0.170.0_restart/idle.ansi'), ('codex', 'codex_0.170.0_restart/idle_narrow.ansi')]:
+            with self.subTest(capture=capture), patch.dict(self.entry, agent=agent):
+                self.screen = (FIXTURES / capture).read_text()
+                terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+                self.assertEqual(self.events.run.call_args.args[0],
+                                 [paths.TMUX, 'capture-pane', '-e', '-p', '-t', '%7'])
+        self.assertEqual(self.writes(), [])
+
+    def test_styled_update_prompt_refuses_as_a_menu(self):
+        self.entry['agent'] = 'codex'
+        self.screen = (FIXTURES / 'codex_0.170.0_restart' / 'update_prompt.ansi').read_text()
+        self.assert_refused('Codex is asking you to pick an option. Answer it above, then send again.')
+        self.assertIn('-e', self.events.run.call_args.args[0])
+
+    def test_unverified_empty_markers_refuse_only_in_read_only_mode(self):
+        Path(self.entry['transcript']).write_text('{"type":"session_meta","payload":{"cli_version":"0.170.0"}}\n')
+        for agent, screen, name, changed in [
+            ('claude', 'some line\n❯\n', 'Claude', 'Claude 2.1.330'),
+            ('codex', '›\n\n', 'Codex', 'Codex 0.170.0'),
+            ('antigravity', '>\n', 'Antigravity', 'An Antigravity update'),
+        ]:
+            fields = {'agent': agent, 'agent_version': '2.1.330' if agent == 'claude' else None}
+            with self.subTest(agent=agent), patch.dict(self.entry, fields):
+                self.screen = screen
+                with self.assertRaises(RuntimeError) as raised:
+                    terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+                self.assertEqual(str(raised.exception),
+                                 f'Tether cannot verify the {name} input box, so it did not restart the tab. '
+                                 f'Open the tab to check. {changed} may have changed its screen.')
+                self.assertNotIsInstance(raised.exception, terminal_input.DraftError)
+                self.assertFalse(any(terminal_input.prompt_draft(self.entry, self.events.run)))
+        self.assertEqual(self.writes(), [])
+
+    def test_codex_dim_text_needs_the_codex_input_layout(self):
+        # Dim text after the marker is not enough: an unknown screen must refuse before any write (R8).
+        self.entry['agent'] = 'codex'
+        dim = '\x1b[1m›\x1b[0m \x1b[2mSome dim content\x1b[0m\n'
+        for screen in [dim, dim + '\n  other text\n',
+                       dim + '\n' + '  line\n' * 7 + '  ? for shortcuts\n']:
+            with self.subTest(screen=screen):
+                self.screen = screen
+                self.assert_refused('Tether cannot verify the Codex input box, so it did not restart the tab. '
+                                    'Open the tab to check. A Codex update may have changed its screen.')
+        self.screen = dim + '\n  \x1b[2m? for shortcuts\x1b[0m\n'
+        terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+        self.assertEqual(self.writes(), [])
+
+    def test_antigravity_requires_a_styled_placeholder_for_empty_input(self):
+        self.entry['agent'] = 'antigravity'
+        self.screen = '> \x1b[2mType a message\x1b[0m\n'
+        terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
+        self.screen = '> Type a message\n'
+        with self.assertRaises(terminal_input.DraftError):
+            terminal_input.empty_prompt(self.entry, self.events.run, read_only=True)
 
     def test_hidden_prompt_does_not_resize_or_dismiss_panels(self):
         self.screen = '/usage\n'
@@ -156,13 +235,17 @@ class RestartTests(unittest.TestCase):
         self.events.cwd.assert_not_called()
 
     def test_claude_restarts_in_process_folder_then_confirms_start(self):
-        self.assertEqual(self.restart(), dict(REQUEST, agent='claude', started=True))
+        self.probes = ['cat', 'sh', 'claude']
+        self.assertEqual(self.restart(), dict(REPLY, agent='claude', started=True))
         self.assertEqual(self.writes(), [[paths.TMUX, 'respawn-pane', '-k', '-t', '%7', '-c', str(self.folder), '/bin/sh', '-l'],
                                         [paths.TMUX, 'send-keys', '-t', '%7', '-l', 'claude --resume ' + THREAD],
                                         [paths.TMUX, 'send-keys', '-t', '%7', 'Enter']])
         self.events.audit.assert_called_once_with('tab.restart', 'Restarted tab Review', pane='%7')
         audit_index = next(i for i, call in enumerate(self.events.mock_calls) if call[0] == 'audit')
-        self.assertEqual(self.events.mock_calls[audit_index + 1].args[0], self.writes()[0])
+        poll = [paths.TMUX, 'display-message', '-p', '-t', '%7', '#{pane_current_command}']
+        respawn, command, enter = self.writes()
+        self.assertEqual([item.args[0] for item in self.events.mock_calls[audit_index + 1:]],
+                         [respawn, poll, poll, command, enter, poll])
         self.assertEqual(self.clock, .1)
         self.events.saved_tab.assert_not_called()
 
@@ -172,25 +255,32 @@ class RestartTests(unittest.TestCase):
             with self.subTest(saved=saved):
                 self.events.reset_mock()
                 self.entry['agent'] = 'codex'
-                self.screen = '›\n\n'
-                self.probes = [agent_command]
+                self.screen = (FIXTURES / 'codex_0.170.0_restart' / 'idle.ansi').read_text()
+                self.probes = ['sh', agent_command]
                 self.events.cwd.side_effect = FileNotFoundError
                 self.events.saved_tab.return_value = saved
                 self.events.launch_profile.return_value = 'foundry'
-                self.assertEqual(self.restart(), dict(REQUEST, agent='codex', started=True))
+                self.assertEqual(self.restart(), dict(REPLY, agent='codex', started=True))
                 self.assertEqual(self.writes()[0][6], str(self.fallback))
                 command = 'codex' + (' -p ' + profile if profile else '') + ' resume ' + THREAD
                 self.assertEqual(self.writes()[1][-1], command)
                 self.assertEqual(self.events.launch_profile.call_count, int(saved is None))
 
-    def test_respawn_uses_the_configured_default_command(self):
-        self.default_command = 'exec /bin/sh -i;'
+    def test_respawn_ignores_the_configured_default_command(self):
+        self.default_command = 'cat'
         self.assertTrue(self.restart()['started'])
-        self.assertEqual(self.writes()[0][7:], [r'exec /bin/sh -i\;'])
+        self.assertEqual(self.writes()[0][7:], ['/bin/sh', '-l'])
+
+    def test_shell_timeout_sends_no_keys(self):
+        self.probes = ['cat'] * 51
+        self.assertEqual(self.restart(), dict(REPLY, agent='claude', started=False, warning=
+                         'The tab restarted, but its shell did not start. Open the tab to check.'))
+        self.assertEqual(self.clock, 5)
+        self.assertEqual([argv[1] for argv in self.writes()], ['respawn-pane'])
 
     def test_startup_timeout_does_not_retry_or_kill_the_pane(self):
         self.probes = ['sh', 'node']  # A Codex process name does not confirm Claude startup.
-        self.assertEqual(self.restart(), dict(REQUEST, agent='claude', started=False, warning=
+        self.assertEqual(self.restart(), dict(REPLY, agent='claude', started=False, warning=
                          'The tab restarted, but Claude did not start yet. Open the tab to check.'))
         self.assertEqual(self.clock, 10)
         self.assertEqual([argv[1] for argv in self.writes()], ['respawn-pane', 'send-keys', 'send-keys'])
@@ -225,11 +315,17 @@ class RestartRouteTests(unittest.TestCase):
     def test_route_reports_validation_and_refusals(self):
         self.assertEqual(self.post(self.headers, dict(REQUEST, thread='wrong')), (400, {'error': 'Choose a valid chat id.'}))
         with patch.object(server, 'discover', return_value=[]) as discover:
+            for invalid in (REPLY, dict(REQUEST, project=None), dict(REQUEST, session=3),
+                            dict(REQUEST, project='x' * 201), dict(REQUEST, session='x' * 201),
+                            dict(REQUEST, project='not-a-project')):
+                with self.subTest(invalid=invalid):
+                    self.assertEqual(self.post(self.headers, invalid), (400, {'error': 'Choose a valid tab.'}))
+            discover.assert_not_called()
             self.assertEqual(self.post(self.headers), (404, {'error': 'That tab has closed.'}))
             self.assertEqual(discover.call_args.kwargs, {'repair_zoom': False})
 
     def test_route_restarts_under_send_lock(self):
-        reply = dict(REQUEST, agent='claude', started=True)
+        reply = dict(REPLY, agent='claude', started=True)
 
         def restart(body, **kwargs):
             self.assertTrue(server.SEND_LOCK.locked())
@@ -241,17 +337,22 @@ class RestartRouteTests(unittest.TestCase):
         self.assertIn(ROUTE, server.TMUX_WRITES)
 
     def test_move_reply_binds_the_restart_offer_to_the_tab_chat(self):
-        # The toast's Restart sends pane and thread back to restart-tab; a chat before its first message has no thread.
-        moved = lambda: {'session': '$2', 'name': 'Beta', 'pane': '%7', 'restart': {'project': 'beta', 'name': 'Beta site'}}
+        # A chat before its first message has no thread to bind to the restart offer.
+        moved = lambda: {'session': '$2', 'name': 'Beta', 'pane': '%7',
+                         'restart': {'project': PROJECT, 'name': 'Beta site', 'session': 'Beta'}}
         body = {'kind': 'pane', 'source': '%7', 'target': '$2'}
         for entry, thread in [({'id': '%7', 'thread': REQUEST['thread']}, REQUEST['thread']),
                               ({'id': '%7', 'thread': REQUEST['thread'], 'pending_conversation': True}, None), (None, None)]:
+            cache = Mock()
+            cache.sessions.return_value = [entry] if entry else []
             with self.subTest(entry=entry), patch.object(server.undo, 'record_merge', return_value=lambda result: None), \
                     patch.object(server.tmux_merge, 'merge', side_effect=lambda *a, **k: moved()), \
-                    patch.object(server, 'sessions', return_value=[entry] if entry else []):
+                    patch.object(server, 'forget_sessions', cache.forget), patch.object(server, 'sessions', cache.sessions):
                 status, reply = self.post(self.headers, body, '/mobile/api/merge')[:2]
                 self.assertEqual(status, 200)
-                self.assertEqual(reply['restart'], {'project': 'beta', 'name': 'Beta site', 'pane': '%7', 'session': 'Beta', 'thread': thread})
+                self.assertEqual(reply['restart'],
+                                 {'project': PROJECT, 'name': 'Beta site', 'pane': '%7', 'session': 'Beta', 'thread': thread})
+                self.assertEqual(cache.mock_calls, [call.forget(), call.sessions()])
         with patch.object(server.undo, 'record_merge', return_value=lambda result: None), \
                 patch.object(server.tmux_merge, 'merge', return_value={'session': '$2', 'name': 'Beta', 'pane': '%7'}), \
                 patch.object(server, 'sessions') as listed:
@@ -269,6 +370,7 @@ class RealTmuxRestartTests(unittest.TestCase):
         created.check_returncode()
         pane = created.stdout.strip()
         tmux.tmux('set-option', '-t', 'work', 'default-shell', '/bin/sh').check_returncode()
+        tmux.tmux('set-option', '-t', 'work', 'default-command', 'cat').check_returncode()
         session = tmux.tmux('display-message', '-p', '-t', pane, '#{session_id}').stdout.strip()
         options = {'@chat_name': 'Review', '@project_rev': '111111111111:0', '@group': 'g12345678'}
         for key, value in options.items():
@@ -279,7 +381,9 @@ class RealTmuxRestartTests(unittest.TestCase):
         entry = {'id': pane, 'thread': THREAD, 'tmux_session': session, 'agent': 'claude',
                  'transcript': str(transcript), 'owner_pid': 123, 'pane_name': 'Review'}
 
-        def started(run, pane, commands, sleep):
+        def started(run, pane, commands, sleep, *, timeout=10):
+            if commands == ('sh',):
+                return True  # The mock tests exercise startup polling with an injected clock.
             tmux.run([paths.TMUX, 'wait-for', 'restart-ready'], check=True, capture_output=True, timeout=5)
             return True
 
@@ -288,7 +392,7 @@ class RealTmuxRestartTests(unittest.TestCase):
                 patch.object(terminal_input, 'live_status', return_value={'state': 'Idle'}), \
                 patch.object(terminal_input, 'empty_prompt'), patch.object(restart_tab, '_started', side_effect=started), \
                 patch.object(terminal_input, 'resume_command', return_value='pwd > restart.cwd; tmux wait-for -S restart-ready'):
-            reply = restart_tab.restart(dict(REQUEST, pane=pane), sessions=lambda: [entry],
+            reply = restart_tab.restart(dict(REQUEST, pane=pane, project='', session='work'), sessions=lambda: [entry],
                                         forget_sessions=lambda: None, run=tmux.run)
         self.assertTrue(reply['started'])
         self.assertEqual((folder / 'restart.cwd').read_text().strip(), str(folder))
