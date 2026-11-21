@@ -3,7 +3,7 @@ import { ApiError, request } from './api'
 import type { GroupBy, SessionGroup, SortBy } from './Organize'
 import { DEFAULT_LOOK } from './layouts'
 import type { Look, SavedLook } from './layouts'
-import { DEFAULT_ZONE, setTetherZone } from './zone'
+import { pickZone, setTetherZone } from './zone'
 
 // seen: when you last looked at each pane (seconds), so a turn that ended later shows as Done.
 // SYNCED choices are shared by every device through the server (/mobile/api/prefs). The rest stay in this browser:
@@ -173,7 +173,7 @@ export function rejectedKeep(changes: Record<string, unknown>, error: unknown): 
 export function usePrefs({ syncZone = true } = {}) {
   const [prefs, setPrefs] = useState<Prefs>(load)
   const [serverZone, setServerZone] = useState<string>()
-  const effectiveZone = prefs.timeZone || serverZone || DEFAULT_ZONE
+  const effectiveZone = pickZone(prefs.timeZone, serverZone)
   useLayoutEffect(() => { if (syncZone) setTetherZone(effectiveZone) }, [effectiveZone, syncZone])
   const latest = useRef(prefs)
   const version = useRef(-1)  // the server copy this device has; -1 = not read yet

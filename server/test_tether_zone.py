@@ -92,6 +92,15 @@ class TetherZoneTests(unittest.TestCase):
         prefs_sync.save({'timeZone': 'Pacific/Auckland'})
         self.assertEqual(tether_zone.parse(shown), datetime(2026, 3, 7, 21, tzinfo=timezone.utc).timestamp())
 
+    def test_repeated_hour_stamp_reads_as_the_first_occurrence(self):
+        prefs_sync.save({'timeZone': 'America/New_York'})
+        at = datetime(2026, 11, 1, 6, 30, tzinfo=timezone.utc).timestamp()
+        first = datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc).timestamp()
+        shown = tether_zone.stamp(at)
+        self.assertEqual(shown, '2026-11-01 01:30')
+        self.assertEqual(tether_zone.stamp(first), shown)
+        self.assertEqual(tether_zone.parse(shown), first)
+
     def test_offset_less_backlog_advisor_and_triage_stamps_round_trip(self):
         at = datetime(2026, 11, 19, 1, 42, 38, tzinfo=timezone.utc).timestamp()
         minute = at - 38

@@ -16,6 +16,18 @@ const items = load('src/backlogItems.ts')
 const zone = load('src/zone.ts')
 const m = load('src/factoryModel.ts', { './paneState': paneState, './zone': zone })
 
+test('a date-only deploy line keeps its written day in New York', () => {
+  const dateOnly = { day: '2026-11-21', at: Date.parse('2026-11-20T18:30Z') / 1000, timed: false }
+  zone.setTetherZone('America/New_York')
+  try {
+    assert.equal(zone.dayKey(dateOnly.at * 1000), '2026-11-20')
+    const writtenDay = new Intl.DateTimeFormat(undefined, { timeZone: 'UTC' }).format(Date.UTC(2026, 10, 21))
+    assert.equal(zone.fmtDay(dateOnly.day), writtenDay)
+  } finally {
+    zone.setTetherZone('Asia/Kolkata')
+  }
+})
+
 zone.setTetherZone('Asia/Kolkata')
 const NOW = Date.parse('2026-11-17T06:30:00Z')
 const iso = minutesAgo => new Date(NOW - minutesAgo * 60000).toISOString()

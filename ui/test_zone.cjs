@@ -9,7 +9,7 @@ mod._compile(ts.transpileModule(readFileSync('src/zone.ts', 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText, 'src/zone.ts')
 const {
-  DEFAULT_ZONE, dayKey, fmtDate, fmtDateTime, fmtTime, offsetLabel,
+  DEFAULT_ZONE, dayKey, fmtDate, fmtDateTime, fmtTime, offsetLabel, pickZone,
   sameDay, setTetherZone, startOfDay, tetherZone, zonedTime, zoneList, zoneParts,
 } = mod.exports
 
@@ -77,4 +77,21 @@ test('invalid settings leave the active zone in place and the list includes UTC'
   setTetherZone('Not/AZone')
   assert.equal(tetherZone(), 'America/New_York')
   assert.ok(zoneList().includes('UTC'))
+})
+
+test('zone selection skips invalid preferences and preserves renamed zones', () => {
+  assert.equal(pickZone('../etc', 'Pacific/Auckland'), 'Pacific/Auckland')
+  assert.equal(pickZone('Not/AZone', 'Bad/Too'), DEFAULT_ZONE)
+  assert.equal(pickZone('Asia/Calcutta', 'Pacific/Auckland'), 'Asia/Kolkata')
+  assert.equal(pickZone('America/New_York', 'UTC'), 'America/New_York')
+})
+
+test('a bad timestamp gives NaN parts and "Invalid Date", not a thrown RangeError', () => {
+  setTetherZone('America/New_York')
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    const parts = zoneParts(bad)
+    assert.ok(Number.isNaN(parts.year) && Number.isNaN(parts.hour) && parts.weekday === -1)
+    assert.equal(dayKey(bad).includes('NaN'), true)
+    assert.equal(fmtDate(bad), 'Invalid Date')
+  }
 })

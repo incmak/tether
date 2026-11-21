@@ -5,7 +5,7 @@ import { parse as parseDate } from 'chrono-node'
 import type { Api } from './api'
 import type { MenuOption } from './SelectMenu'
 import { usePolling } from './hooks'
-import { offsetMinutes, tetherZone, zoneLabel, zoneParts, zonedTime } from './zone'
+import { offsetMinutes, tetherZone, zoneLabel, zoneParts, zonedTime, zonedTimes } from './zone'
 
 export type ReminderState = 'scheduled' | 'due' | 'done'
 export type Repeat = 'day' | 'weekday' | 'week' | 'month' | 'year'
@@ -219,8 +219,16 @@ export function parseWhen(text: string, now: number): number | null {
   if (!time.isCertain('hour') && !PART_OF_DAY.test(typed) && !/\bin\s+\d/i.test(typed)) return zoneTime(year, month, date, 9)
   // Explicit offsets and elapsed times already identify an instant.
   if (time.isCertain('timezoneOffset')) return Math.floor(found.date().getTime() / 1000)
+  const hour = time.get('hour')!, minute = time.get('minute') ?? 0, second = time.get('second') ?? 0
+  if (time.isCertain('hour') && !time.isCertain('day') && !time.isCertain('weekday') && !time.isCertain('month')) {
+    // Chrono's reference offset cannot resolve a bare clock time across an offset change.
+    const today = parts(now)
+    const upcoming = zonedTimes(today.year, today.month, today.date, hour, minute)
+      .map(at => at / 1000 + second).find(at => at > now)
+    return upcoming ?? (zoneTime(today.year, today.month, today.date + 1, hour, minute) + second)
+  }
   // Re-read wall times in the zone at the target date, where its offset may differ.
-  return zoneTime(year, month, date, time.get('hour')!, time.get('minute') ?? 0) + (time.get('second') ?? 0)
+  return zoneTime(year, month, date, hour, minute) + second
 }
 
 export interface Groups { due: Reminder[]; upcoming: Reminder[]; done: Reminder[] }

@@ -251,7 +251,7 @@ function CronList({ crons, scheduled }: { crons: FooterCron[]; scheduled?: Recor
     const last = scheduled?.[job.id]
     return <li key={job.id}>
       <p className="live-task-title"><CalendarClock size={15} /><strong>{job.label}</strong></p>
-      <p className="live-meta">{job.every}{job.every !== job.schedule && <> · <code>{job.schedule}</code></>}{job.recurring ? '' : ' · runs once'}</p>
+      <p className="live-meta">{job.every}{!job.every.startsWith(job.schedule) && <> · <code>{job.schedule}</code></>}{job.recurring ? '' : ' · runs once'}</p>
       <p className="live-meta">{job.next != null ? `Next run about ${cronTime(job.next)}` : 'Next run: unknown for this schedule'}</p>
       <p className="live-label">Last run</p>
       {last ? <><p className="live-meta">{runTime(last.at)}</p>{last.result ? <p className="live-reason">{last.result}</p> : <p className="live-meta">No reply in that run yet.</p>}</> : <p className="live-meta">Not run yet in the loaded conversation.</p>}

@@ -1,5 +1,7 @@
 """Use the synced time zone, then the legacy TETHER_REMINDER_ZONE, then Asia/Kolkata. Offset-less stamps are
 read in the current zone; after a zone change an old stamp shifts by the zone difference.
+A stamp in a repeated hour (DST end) reads back as the first occurrence, so it can be one hour early, which was also
+a limit of the old host-time parse and only affects day-scale archive cut-offs and sort order where readers use it.
 """
 from datetime import datetime
 from functools import lru_cache

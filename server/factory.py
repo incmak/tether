@@ -64,7 +64,7 @@ def refs(text):
 
 
 def parse_deployed_line(line):
-    """One DEPLOYED.md line: {at, timed, commit, text, refs}, or None for a line with no date. The log has no single
+    """One DEPLOYED.md line: {at, day, timed, commit, text, refs}, or None for a line with no date. The log has no single
     format: "- 2026-11-17 08:35 IST · 5d59421 ...", "2026-11-17 00:21 IST: b8636f0 ...", "- 09 Nov 2026 11:35 a315cf8 ...".
     at: Unix seconds in the server's local time; a line with only a date is taken at the start of that day (timed False)."""
     text = line.strip().lstrip('-*').strip()
@@ -89,7 +89,8 @@ def parse_deployed_line(line):
         at = when.timestamp()
     rest = LEAD.sub('', rest[zone.end():] if zone else rest).strip()
     commit = COMMIT.search(rest)
-    return {'at': int(at), 'timed': timed, 'commit': commit[1] if commit else None, 'text': rest[:400], 'refs': refs(rest)}
+    return {'at': int(at), 'day': when.date().isoformat(), 'timed': timed, 'commit': commit[1] if commit else None,
+            'text': rest[:400], 'refs': refs(rest)}
 
 
 def deployed(now=None, file=None):

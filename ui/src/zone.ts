@@ -17,8 +17,7 @@ function formatter(zone: string, options: Intl.DateTimeFormatOptions, locale?: s
 
 export const tetherZone = () => current
 export function setTetherZone(name: string) {
-  if (!name || name === current) return
-  try { formatter(name, {}) } catch { return }
+  if (!name || name === current || !acceptsZone(name)) return
   current = name
   for (const listener of listeners) listener()
 }
@@ -39,6 +38,20 @@ const RENAMED: Record<string, string> = {
   'Pacific/Truk': 'Pacific/Chuuk', 'Pacific/Ponape': 'Pacific/Pohnpei', 'Asia/Ulan_Bator': 'Asia/Ulaanbaatar',
 }
 
+function acceptsZone(name: string) {
+  try { formatter(name, {}, 'en'); return true } catch { return false }
+}
+
+export function pickZone(...names: (string | undefined)[]) {
+  for (const name of names) {
+    if (!name) continue
+    const renamed = RENAMED[name]
+    if (renamed && acceptsZone(renamed)) return renamed
+    if (acceptsZone(name)) return name
+  }
+  return DEFAULT_ZONE
+}
+
 export function deviceZone() {
   try { const name = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; return RENAMED[name] ?? name } catch { return '' }
 }
@@ -54,14 +67,19 @@ const DATE: Intl.DateTimeFormatOptions = { year: 'numeric', month: 'numeric', da
 const TIME: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: 'numeric', second: 'numeric' }
 const DATE_TIME = { ...DATE, ...TIME }
 
-function format(at: Date | number, options: Intl.DateTimeFormatOptions) {
+function format(at: Date | number, options: Intl.DateTimeFormatOptions, zone = current) {
   const ms = typeof at === 'number' ? at : at.getTime()
-  return Number.isFinite(ms) ? formatter(current, options).format(ms) : 'Invalid Date'
+  return Number.isFinite(ms) ? formatter(zone, options).format(ms) : 'Invalid Date'
 }
 
 export const fmtTime = (at: Date | number, options = TIME) => format(at, options)
 export const fmtDate = (at: Date | number, options = DATE) => format(at, options)
 export const fmtDateTime = (at: Date | number, options = DATE_TIME) => format(at, options)
+
+export function fmtDay(day: string, options = DATE) {
+  const [year, month, date] = day.split('-').map(Number)
+  return format(utcTime(year, month - 1, date, 0, 0), options, 'UTC')
+}
 
 function zoneName(zone: string, at: number, timeZoneName: 'short' | 'shortOffset') {
   return formatter(zone, { timeZoneName }, 'en-US').formatToParts(at).find(part => part.type === 'timeZoneName')?.value ?? zone
@@ -75,7 +93,9 @@ const PARTS: Intl.DateTimeFormatOptions = {
 }
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-function fieldsAt(ms: number, zone: string) {
+function fieldsAt(ms: number, zone: string): Record<string, string> {
+  // A bad timestamp gives NaN parts, as Date math did, instead of a RangeError that stops the whole page.
+  if (!Number.isFinite(ms)) return {}
   return Object.fromEntries(formatter(zone, PARTS, 'en-US').formatToParts(ms).map(({ type, value }) => [type, value]))
 }
 
@@ -111,7 +131,8 @@ function offsetMs(zone: string, at: number) {
 
 export const offsetMinutes = (zone: string, at = Date.now()) => offsetMs(zone, at) / 60000
 
-export function zonedTime(year: number, month: number, date: number, hour: number, minute: number, zone = current) {
+/** The instants for a wall time, earliest first. In a gap, return the time shifted forward. */
+export function zonedTimes(year: number, month: number, date: number, hour: number, minute: number, zone = current) {
   const wall = utcTime(year, month, date, hour, minute)
   const day = 86400000
   // Include both sides of a nearby offset transition. Iteration alone can miss one side of a fold.
@@ -122,16 +143,20 @@ export function zonedTime(year: number, month: number, date: number, hour: numbe
     offsets.add(offset)
     instant = wall - offset
   }
-  let first = Infinity
+  const matches: number[] = []
   let after = Infinity
   let gap = Infinity
   for (const offset of offsets) {
     const candidate = wall - offset
     const shift = offsetMs(zone, candidate) - offset
-    if (shift === 0) first = Math.min(first, candidate)
+    if (shift === 0) matches.push(candidate)
     if (shift > 0 && shift < gap) { gap = shift; after = candidate }
   }
-  return first < Infinity ? first : after
+  return matches.length ? matches.sort((a, b) => a - b) : [after]
+}
+
+export function zonedTime(year: number, month: number, date: number, hour: number, minute: number, zone = current) {
+  return zonedTimes(year, month, date, hour, minute, zone)[0]
 }
 
 export function startOfDay(ms: number, zone = current) {

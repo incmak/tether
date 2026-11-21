@@ -8,11 +8,13 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import agents
 import claude_hooks
 import paths
 import session_crons
+import tether_zone
 
 
 def local(*parts):
@@ -65,6 +67,26 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(session_crons.describe('0 */2 * * *'), 'Every 2 hours at :00')
         self.assertEqual(session_crons.describe('0 9 1 * *'), '0 9 1 * *')
 
+    def test_schedule_says_server_time_when_offsets_differ(self):
+        self.enterContext(patch.dict(os.environ, TZ='Asia/Kolkata'))
+        time.tzset()
+        # setUp restores TZ and resets the system time zone after this test.
+        self.enterContext(patch.object(tether_zone, 'zone', return_value=ZoneInfo('America/New_York')))
+        now = local(2026, 11, 21, 8, 0)
+        [row] = session_crons.summary([{'id': 'c1', 'schedule': '0 9 * * *'}], now)
+        self.assertEqual(row['every'], 'Every day at 09:00 (server time, IST)')
+        self.assertEqual(row['next'], local(2026, 11, 21, 9, 0))
+
+    def test_schedule_compares_offsets_at_the_next_run(self):
+        self.enterContext(patch.dict(os.environ, TZ='America/Panama'))
+        time.tzset()
+        self.enterContext(patch.object(tether_zone, 'zone', return_value=ZoneInfo('America/New_York')))
+        # New York has a different offset when we check and the same offset at the next run.
+        now = local(2026, 10, 31, 12, 0)
+        [row] = session_crons.summary([{'id': 'c1', 'schedule': '0 9 * * *'}], now)
+        self.assertEqual(row['every'], 'Every day at 09:00')
+        self.assertEqual(row['next'], local(2026, 11, 1, 9, 0))
+
     def test_label_is_the_start_of_the_prompt(self):
         self.assertEqual(session_crons.label('Compliance Internal watcher v2 (post only as BriskBot). Keep'), 'Compliance Internal watcher v2')
         self.assertEqual(session_crons.label('Morning summary.\nThen more'), 'Morning summary')
@@ -91,6 +113,8 @@ class HookCronTests(unittest.TestCase):
 
     def test_overlay_and_tab_list_show_jobs_long_after_the_stop(self):
         stop = local(2026, 11, 17, 12, 0)
+        host_zone = datetime.datetime.fromtimestamp(stop).astimezone().tzinfo
+        self.enterContext(patch.object(tether_zone, 'zone', return_value=host_zone))
         self.feed('Stop', stop, session_crons=[self.job])
         later = stop + 3 * 3600 + 60  # far past the 30 minute task window: a job is still scheduled
         expected = {'id': 'c1', 'label': 'Check the build', 'schedule': '*/5 * * * *', 'every': 'Every 5 minutes',

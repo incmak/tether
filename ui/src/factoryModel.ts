@@ -23,7 +23,7 @@ export type Phase = typeof PHASES[number]
 export const PHASE_NAMES: Record<Phase, string> = { inbox: 'Inbox', spec: 'Spec', build: 'Build', review: 'Review', verify: 'Verify', deploy: 'Deploy', done: 'Done' }
 
 export interface FactoryTool { name: string; title: string; at?: string | number | null; error?: boolean; done?: boolean }
-export interface Deploy { at: number; timed: boolean; commit: string | null; text: string; refs: string[] }
+export interface Deploy { at: number; day: string; timed: boolean; commit: string | null; text: string; refs: string[] }
 export interface Commit { hash: string; at: number; subject: string; refs: string[]; repo: string }
 /** One finding of the 30-minute worktree sweep (server/sweep.py): the tab's branch is behind main, its checks fail, or the tab is idle. */
 export type SweepKind = 'behind' | 'checks' | 'idle'

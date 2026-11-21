@@ -5,6 +5,9 @@ machine. It moves each run a few minutes from the scheduled time (jitter, seen e
 """
 import datetime
 import re
+import time
+
+import tether_zone
 
 FIELDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))  # minute, hour, day of month, month, day of week (0 and 7 = Sunday)
 DAYS = ('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')
@@ -131,5 +134,8 @@ def summary(crons, now):
         upcoming = next_run(schedule, now)
         if upcoming is not None:
             row['next'] = upcoming
+            host = time.localtime(upcoming)
+            if datetime.timedelta(seconds=host.tm_gmtoff) != tether_zone.now(upcoming).utcoffset():
+                row['every'] += f" (server time, {time.strftime('%Z', host)})"
         rows.append(row)
     return rows

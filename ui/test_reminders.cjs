@@ -80,11 +80,26 @@ test('parseWhen resolves wall times at the target offset and keeps elapsed times
   const spring = seconds('2026-03-07T07:30:00Z'), fall = seconds('2026-10-31T15:00:00Z')
   assert.equal(parseWhen('tomorrow 10:00', spring), seconds('2026-03-08T14:00:00Z'))
   assert.equal(parseWhen('tomorrow 10:00', fall), seconds('2026-11-01T15:00:00Z'))
-  assert.equal(parseWhen('tomorrow 02:30', spring), seconds('2026-03-08T07:30:00Z'))
-  assert.equal(parseWhen('tomorrow 01:30', fall), seconds('2026-11-01T05:30:00Z'))
   assert.equal(parseWhen('in 25 hours', spring), spring + 25 * 3600)
   assert.equal(parseWhen('2026-03-08T10:00:45Z', spring), seconds('2026-03-08T10:00:45Z'))
   assert.equal(zoneTime(2026, 2, 8, 10), seconds('2026-03-08T14:00:00Z'))
+})
+
+test('parseWhen matches server wall times through offset transitions', () => {
+  const newYork = loadReminders('America/New_York').parseWhen
+  const lordHowe = loadReminders('Australia/Lord_Howe').parseWhen
+  // Expected instants for the HH:MM inputs come from server/reminders.py parse_when with each zone and now below.
+  for (const [parseWhen, text, now, expected] of [
+    [newYork, '01:30', '2026-11-01T06:10Z', '2026-11-01T06:30Z'],
+    [newYork, '02:30', '2026-03-08T07:05Z', '2026-03-08T07:30Z'],
+    [lordHowe, '01:45', '2026-04-04T15:05Z', '2026-04-04T15:15Z'],
+    [newYork, 'tomorrow 02:30', '2026-03-07T07:30Z', '2026-03-08T07:30Z'],
+    [newYork, 'tomorrow 01:30', '2026-10-31T15:00Z', '2026-11-01T05:30Z'],
+    [newYork, '01:30', '2026-11-01T04:55Z', '2026-11-01T05:30Z'],
+    [newYork, '10am', '2026-11-01T06:10Z', '2026-11-01T15:00Z'],
+    [newYork, '6pm', '2026-11-01T06:10Z', '2026-11-01T23:00Z'],
+    [newYork, '18:00', '2026-11-01T23:00Z', '2026-11-02T23:00Z'],
+  ]) assert.equal(parseWhen(text, seconds(now)), seconds(expected), `${text} at ${now}`)
 })
 
 test('labels use the IST day and include the year only when needed', () => {
