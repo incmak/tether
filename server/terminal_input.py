@@ -981,8 +981,9 @@ def attention(entry, screen, working, now=None, login_screen=None, styled_screen
         # Claude's Settings dialog (/usage, /status ...) that claude_dialog could not read: show its text from the tab row.
         reason, tail = 'panel', lines[tabs:]
     elif (menu_open(entry['agent'], lines)
-          or entry['agent'] == 'claude' and any(re.fullmatch(r'❯    (?:Submit|Next)', line) for line in tail)
-          and (current := choice_state.ask_current(styled_screen or screen)) and current['control']):
+          # Claude's own question, read whole by the strict parser. menu_open misses it with the cursor on the
+          # Submit or Next row, and in a narrow pane whose key hint wraps to a row that starts with "· ".
+          or entry['agent'] == 'claude' and (current := choice_state.ask_current(styled_screen or screen))):
         reason = 'menu'
     elif ((entry['agent'] == 'claude' and (picker := claude_picker(screen, styled_screen)))
           or (entry['agent'] == 'codex' and (picker := choice_state.cursor_picker(styled_screen or screen, 'codex')))):

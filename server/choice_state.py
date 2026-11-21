@@ -308,7 +308,9 @@ def ask_current(frame):
     hint = ' '.join(hints)
     legacy = hint == 'Enter to select ↑/↓ to navigate Esc to cancel'
     if not legacy and hint not in ('Enter to select ↑/↓ to navigate ctrl+g to edit in Vim Esc to cancel',
-                                   'Enter to select Tab/Arrow keys to navigate Esc to cancel'):
+                                   'Enter to select Tab/Arrow keys to navigate Esc to cancel',
+                                   # Claude 2.1.330, an ask of several questions, cursor on the free or Next row.
+                                   'Enter to select Tab/Arrow keys to navigate ctrl+g to edit in Vim Esc to cancel'):
         return None
     pattern = r'\s*←\s+(.+?)\s+✔ Submit\s+→\s*'
     chips = [(i, re.fullmatch(pattern, text) or

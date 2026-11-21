@@ -326,6 +326,71 @@ class HelperAnswerTests(unittest.TestCase):
                         self.assertIn('Open the terminal to check', response['error'])
                     self.assertEqual(run.writes, [key for key, _ in steps])
 
+    def live2(self, name):
+        return (Path(__file__).parent / 'fixtures/claude_2.1.330_ask_multi2' / f'm2-{name}.ansi').read_text()
+
+    def two_question_ask(self):
+        ask = self.tool_ask('two')
+        ask['message']['content'][0]['input']['questions'] = [
+            dict(header=header, question=question, multiSelect=True,
+                 options=[dict(label=label, description=detail) for label, detail in rows])
+            for header, question, rows in (
+                ('Features', 'Which features do you want?', [('Search', 'Find things'), ('Export', 'Save things'),
+                                                             ('Sync', 'Share things')]),
+                ('Formats', 'Which formats do you want?', [('PNG', 'Raster'), ('SVG', 'Vector'), ('PDF', 'Print')]),
+            )
+        ]
+        self.transcript_records(ask)
+
+    def live_done(self, prefix, start, last, after, heading):
+        """Replay a live Done: Down from frame START to frame LAST, Enter, then AFTER (key, frame) steps."""
+        frames = [self.live2(f'{prefix}-{n:02d}') for n in range(start, last + 1)]
+        revision = menu_row(frames[0], self.entry)['attention']['menu_verified']
+        self.assertTrue(revision)
+        steps = [('Down', frame) for frame in frames[1:]] + after
+        run = ScriptedTerminal(frames[0], steps)
+        with patch.object(terminal_input, 'verify'):
+            result = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading)
+        return result, run.writes
+
+    def test_live_two_question_done_goes_next_then_submits_at_120_and_44(self):
+        """Claude 2.1.330, live: Next on question 1, Submit and the two-question review on question 2."""
+        self.two_question_ask()
+        q1, q2 = 'Which features do you want?', 'Which formats do you want?'
+        for prefix, start, last, after, heading, keys in (
+            ('120-q1', 0, 4, [('Enter', self.live2('120-q1-05'))], q1, ['Down'] * 4 + ['Enter']),
+            ('44-q1', 3, 6, [('Enter', self.live2('44-q1-07'))], q1, ['Down'] * 3 + ['Enter']),
+            ('120-q2', 4, 6, [('Enter', self.live2('120-q2-07')), ('Enter', '')], q2, ['Down'] * 2 + ['Enter'] * 2),
+            ('44-q2', 2, 5, [('Enter', self.live2('44-q2-06')), ('Enter', '')], q2, ['Down'] * 3 + ['Enter'] * 2),
+        ):
+            with self.subTest(prefix=prefix):
+                (status, _), writes = self.live_done(prefix, start, last, after, heading)
+                self.assertEqual(status, 200)
+                self.assertEqual(writes, keys)
+
+    def test_live_done_with_nothing_ticked_goes_back_from_the_unanswered_review(self):
+        """Claude 2.1.330, live: no ticks on the last question gives a review with a warning and no block for it."""
+        self.two_question_ask()
+        (status, response), writes = self.live_done(
+            '44-q2-none', 0, 4, [('Enter', self.live2('44-q2-none-05')), ('Left', self.live2('44-q2-none-00'))],
+            'Which formats do you want?')
+        self.assertEqual(status, 409)
+        self.assertIn('Open the terminal to check', response['error'])
+        self.assertEqual(writes, ['Down'] * 4 + ['Enter', 'Left'])
+
+    def test_live_truncated_question_tabs_give_no_revision(self):
+        """At 22 columns Claude 2.1.330 shortens the tabs to '☐ … ☐ F…': the question is not verified."""
+        self.two_question_ask()
+        self.assertFalse(menu_row(self.live2('22-q1-00'), self.entry)['attention'].get('menu_verified'))
+        self.assertTrue(menu_row(self.live2('44-q1-00'), self.entry)['attention']['menu_verified'])
+
+    def test_a_wrapped_key_hint_row_keeps_a_single_choice_question_verified(self):
+        """A narrow pane wraps the key hint to a row that starts with '· '. It is not a chat line."""
+        wrapped = SCREEN.replace('to navigate · Esc to cancel', 'to navigate\n· Esc to cancel')
+        self.assertNotEqual(wrapped, SCREEN)
+        self.assertEqual(menu_row(wrapped, self.entry)['attention']['menu_verified'],
+                         menu_row(SCREEN, self.entry)['attention']['menu_verified'])
+
     def test_multi_pick_refuses_missing_stale_answered_or_mismatched_menu(self):
         screen = self.multi_frame()
         revision = menu_row(screen, self.entry)['attention']['menu_verified']

@@ -1,0 +1,40 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.330[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus 5.5 with medium effort · Claude Ultra[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/fixture
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mThis is a throwaway test tab. Do no other work. Call the AskUserQuestion tool once with exactly two questions. [39m
+  [38;5;231mQuestion 1: header 'Features', question 'Which features do you want?', multiSelect true, options 'Search' [39m
+  [38;5;231m(description 'Find things'), 'Export' (description 'Save things'), 'Sync' (description 'Share things'). Question 2: [39m
+  [38;5;231mheader 'Formats', question 'Which formats do you want?', multiSelect true, options 'PNG' (description 'Raster'), [39m
+  [38;5;231m'SVG' (description 'Vector'), 'PDF' (description 'Print'). After I answer, call AskUserQuestion again with the exact [39m
+  [38;5;231msame two questions. Repeat until I have answered three times, then reply 'done' and stop.[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m←  ☒ Features [38;5;16m[48;5;153m ☒ Formats [39m[49m ✔ Submit  →
+
+[1m[38;5;231mWhich formats do you want?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;114m[✔][39m [38;5;153mPNG[39m
+         [38;5;246mRaster[39m
+  [38;5;246m2.[39m [ ] SVG
+         [38;5;246mVector[39m
+  [38;5;246m3.[39m [ ] PDF
+         [38;5;246mPrint[39m
+  [38;5;246m4. [39m[ ] [38;5;246mType something[39m
+     [1mSubmit[0m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  5. Chat about this
+
+[38;5;246mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
