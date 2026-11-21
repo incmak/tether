@@ -76,6 +76,29 @@ class IntentEvalTests(unittest.TestCase):
                 result, _ = self.run_script(example, reminder, data=data)
                 self.assertEqual(result['passed'], 1, result['fails'])
 
+    def test_topic_drop_cases_require_a_readback_and_refuse_negated_deletes(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        drop = assistant(tool_calls=[call('drop_notes', topic='auth')])
+        for prefix in ('', 'h-'):
+            example = next(item for item in data['cases'] if item['id'] == prefix + 'topic-drop-never-mind')
+            result, _ = self.run_script(example, drop, data=data)
+            self.assertEqual(result['passed'], 1, result['fails'])
+            sample, = result['samples']
+            self.assertEqual(sample['reply'], 'Not deleted yet. Should I delete Auth and its note? Yes or no?')
+            self.assertEqual(sample['actions'], [])
+            missing = assistant(tool_calls=[call('drop_notes', topic='missing')])
+            result, _ = self.run_script(example, missing, assistant('I could not find that topic.'), data=data)
+            self.assertIsNone(result['samples'][0]['proposal'])
+            blocked, = result['samples'][0]['blocked']
+            self.assertEqual(blocked['blocked'], 'No topic matches missing. Open topics: Auth.')
+            example = next(item for item in data['cases'] if item['id'] == prefix + 'topic-drop-negated')
+            reply = assistant('Okay, I will keep those notes.')
+            result, _ = self.run_script(example, reply, data=data)
+            self.assertEqual(result['passed'], 1, result['fails'])
+            result, _ = self.run_script(example, drop, reply, data=data)
+            self.assertEqual(result['fails'], {'blocked': 1})
+            self.assertIsNone(result['samples'][0]['proposal'])
+
     def test_lookup_uses_case_result_and_scores_extra_action(self):
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
                        tool_results={'list_chats': {'chats': ['Friday test']}})

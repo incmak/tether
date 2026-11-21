@@ -16,7 +16,7 @@ function load(file, imports = {}) {
   return exports
 }
 
-const { chipLabel } = load('fridayNotes.ts')
+const { chipLabel, dropNotes } = load('fridayNotes.ts', { './api': { errorText: error => error.message } })
 const docs = { id: 'T1', title: 'Docs', chat: '', state: 'open', notes: [{ text: 'Keep this.', at: 100 }] }
 const api = {
   id: 'T2', title: 'API', chat: '', state: 'open',
@@ -33,4 +33,26 @@ test('two topics show the topic count and the sum of their notes', () => {
   const { lead, count } = chipLabel([docs, api])
   assert.equal(lead, 'Held: 2 topics')
   assert.equal(count, '3')
+})
+
+test('Friday needs a confirmed topic ID before it can call the drop API', async () => {
+  const request = () => assert.fail('The drop API must not be called without an ID')
+  for (const args of [{ topic: 'API' }, { topic: 'API', id: 2, note: 1 }]) {
+    const result = await dropNotes(request, args)
+    assert.equal(result.error, 'Not deleted. Friday must read it back and hear yes first.')
+  }
+})
+
+test('Friday sends the confirmed ID and uses the exact text for a note drop', async () => {
+  const calls = []
+  const request = (path, body) => {
+    calls.push([path, { ...body }])
+    return { dropped: body.note === undefined ? 'topic' : 'note', topic: 'API', left: 0 }
+  }
+  assert.equal((await dropNotes(request, { topic: 'unused', id: 'T2', note: 1, text: 'Keep the route.' })).ok, true)
+  assert.equal((await dropNotes(request, { id: 'T2', count: 2 })).ok, true)
+  assert.deepEqual(calls, [
+    ['friday-notes/drop', { id: 'T2', note: 1, text: 'Keep the route.' }],
+    ['friday-notes/drop', { id: 'T2', count: 2 }],
+  ])
 })

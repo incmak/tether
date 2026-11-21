@@ -44,9 +44,11 @@ export async function readNotes(api: Api, { topic }: Record<string, unknown>) {
   }
 }
 
-export async function dropNotes(api: Api, { topic, note }: Record<string, unknown>) {
+export async function dropNotes(api: Api, { id, note, text, count }: Record<string, unknown>) {
+  if (typeof id !== 'string') return { error: 'Not deleted. Friday must read it back and hear yes first.' }
   try {
-    const result = await api<{ dropped: 'topic' | 'note'; topic: string; left: number }>(`${PATH}/drop`, { topic, note })
+    const result = await api<{ dropped: 'topic' | 'note'; topic: string; left: number }>(
+      `${PATH}/drop`, note === undefined ? { id, count } : { id, note, text })
     return { ok: true, ...result }
   } catch (error) {
     return { error: errorText(error) }

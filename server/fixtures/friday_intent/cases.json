@@ -2745,6 +2745,9 @@
    "user": "drop the urgent call spec notes",
    "expect": {
     "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
     "args": {
      "topic": "(?i)urgent call spec"
     }
@@ -2851,6 +2854,9 @@
    "user": "clear the saved notes for urgent call spec",
    "expect": {
     "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Urgent Call Spec",
     "args": {
      "topic": "(?i)urgent call spec"
     }
@@ -2894,6 +2900,94 @@
      ]
     }
    }
+  },
+  {
+   "id": "topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "topic-drop-negated",
+   "group": "topic_notes",
+   "split": "dev",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-never-mind",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "never mind, drop the auth notes",
+   "expect": {
+    "tool": "drop_notes",
+    "readback_ok": true,
+    "readback_tool": "drop_notes",
+    "readback_chat": "Auth",
+    "args": {
+     "topic": "(?i)auth"
+    }
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
+  },
+  {
+   "id": "h-topic-drop-negated",
+   "group": "topic_notes",
+   "split": "holdout",
+   "source": "hand",
+   "history": [],
+   "user": "don't delete the auth notes",
+   "expect": {
+    "tool": null
+   },
+   "topic_notes": [
+    {
+     "topic": "Auth",
+     "notes": [
+      "Keep the token check."
+     ]
+    }
+   ]
   }
  ]
 }

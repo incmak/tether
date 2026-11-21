@@ -394,6 +394,7 @@ case("log-ask-friday-test-new-tab", "send_direct", "dev",
 
 # ---- B340 topic notes ----
 PINNED_NOTES = [{"topic": "Urgent Call Spec", "notes": ["Keep the quiet hours."]}]
+AUTH_NOTES = [{"topic": "Auth", "notes": ["Keep the token check."]}]
 NOTE_LIST = {"read_notes": {"count": 1, "topics": ["Urgent Call Spec (1 note)"]}}
 case("topic-keep-together", "topic_notes", D, "keep this for urgent call spec, we'll send them together",
      {"tool": "hold_note", "args": {"topic": "(?i)urgent call spec", "notes": "(?i)quiet hours"}},
@@ -403,7 +404,8 @@ case("topic-remember-chat", "topic_notes", D, "remember this for the api-server 
 case("topic-timed-reminder", "topic_notes", D, "remind me tomorrow to rotate keys",
      {"tool": "reminder_add", "args": {"reminders": "(?i)rotate.*keys"}})
 case("topic-drop", "topic_notes", D, "drop the urgent call spec notes",
-     {"tool": "drop_notes", "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
+     {"tool": "drop_notes", "readback_ok": True, "readback_tool": "drop_notes", "readback_chat": "Urgent Call Spec",
+      "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
 case("topic-list", "topic_notes", D, "what notes do I have?",
      {"tool": None, "any_tool": ["read_notes"], "reply": "(?i)urgent call spec"},
      topic_notes=PINNED_NOTES, tool_results=NOTE_LIST)
@@ -415,10 +417,17 @@ case("h-topic-remember-chat", "topic_notes", H, "for the api server chat, rememb
 case("h-topic-timed-reminder", "topic_notes", H, "remember to remind me to rotate my keys tomorrow morning",
      {"tool": "reminder_add", "args": {"reminders": "(?i)rotate.*keys"}})
 case("h-topic-drop", "topic_notes", H, "clear the saved notes for urgent call spec",
-     {"tool": "drop_notes", "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
+     {"tool": "drop_notes", "readback_ok": True, "readback_tool": "drop_notes", "readback_chat": "Urgent Call Spec",
+      "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
 case("h-topic-list", "topic_notes", H, "which topics have I saved notes for?",
      {"tool": None, "any_tool": ["read_notes"], "reply": "(?i)urgent call spec"},
      topic_notes=PINNED_NOTES, tool_results=NOTE_LIST)
+for prefix, split in (("", D), ("h-", H)):
+    case(prefix + "topic-drop-never-mind", "topic_notes", split, "never mind, drop the auth notes",
+         {"tool": "drop_notes", "readback_ok": True, "readback_tool": "drop_notes", "readback_chat": "Auth",
+          "args": {"topic": "(?i)auth"}}, topic_notes=AUTH_NOTES)
+    case(prefix + "topic-drop-negated", "topic_notes", split, "don't delete the auth notes",
+         {"tool": None}, topic_notes=AUTH_NOTES)
 
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:

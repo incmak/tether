@@ -41,7 +41,7 @@ export function HeldNotes({ api, topics, refresh }: { api: Api; topics: HeldTopi
     if (!isArmed(topic.id, note)) { setArmed({ topic: topic.id, note }); setProblem(''); return }
     setBusy(true)
     try {
-      await api(`${PATH}/drop`, note === undefined ? { id: topic.id } : { id: topic.id, note: note + 1, text: topic.notes[note].text })
+      await api(`${PATH}/drop`, note === undefined ? { id: topic.id, count: topic.notes.length } : { id: topic.id, note: note + 1, text: topic.notes[note].text })
       setArmed(null); setProblem('')
       const last = topics.length === 1 && (note === undefined || topic.notes.length === 1)
       if (last) close(false)

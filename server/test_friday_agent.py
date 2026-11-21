@@ -3,6 +3,7 @@ import unittest_isolated  # noqa: F401  (B290: isolate before fixtures)
 import copy
 import asyncio
 from contextlib import redirect_stderr
+from dataclasses import replace
 from datetime import datetime, timezone
 import importlib.util
 import inspect
@@ -597,7 +598,8 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(tool=name):
                 for source in ('event', 'tool'):
                     self.assertIsNotNone(friday.check_tool(name, args, source, words, set()))
-                self.assertIsNone(friday.check_tool(name, args, 'speech', words, set()))
+                self.assertEqual(friday.check_tool(name, args, 'speech', words, set()),
+                                 friday.READBACK_REQUIRED if name == 'drop_notes' else None)
                 self.assertIsNotNone(friday.check_tool(name, args, 'speech', words, {name}))
         self.assertIsNone(friday.check_tool('read_notes', {}, 'tool', '', set()))
 
@@ -612,6 +614,90 @@ class FridayRulesTests(unittest.TestCase):
         for words in ('Read the urgent call notes.', 'Open the notes about a dropdown.'):
             self.assertEqual(friday.check_tool('drop_notes', {'topic': topic}, 'speech', words, set()),
                              'The user did not ask to delete notes.')
+
+    def test_topic_note_guard_refuses_a_negated_delete(self):
+        args = {'topic': 'Auth'}
+        for words in ("Don't delete the auth notes.", "Don't... drop the auth notes.",
+                      'Never mind, do not clear them.', 'No, never drop those.',
+                      'I can\u2019t remove them yet.', 'Dont forget the auth notes.'):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
+                                 'The user did not clearly ask to delete notes. Ask which notes to drop.')
+        for words in ('Drop the auth notes.', 'Clear note 2 from auth.', 'Delete the topic now.',
+                      'Never mind, drop them.', 'Nevermind, drop them.'):
+            with self.subTest(words=words):
+                self.assertEqual(friday.check_tool('drop_notes', args, 'speech', words, set()),
+                                 friday.READBACK_REQUIRED)
+
+    def test_drop_requires_the_exact_heard_target_and_a_yes_without_send(self):
+        args = {'topic': 'auth', 'note': 2}
+        proposal = friday.SendProposal('drop_notes', 'Auth', 'Rotate the key!', 1, heard=True,
+                                       target=('T8', 2, 'Rotate the key!'))
+        readback = friday.send_readback(proposal)
+        confirmed = friday.confirmed_args('drop_notes', args, 'yes', readback, proposal, 2)
+        self.assertEqual(confirmed, dict(args, id='T8', text='Rotate the key!'))
+        for changed in (dict(confirmed, id='T9'), dict(confirmed, text='Edited'), dict(confirmed, note=1),
+                        dict(confirmed, note=2.0), {'topic': 'auth', 'id': 'T8'}):
+            with self.subTest(changed=changed):
+                self.assertEqual(friday.check_tool('drop_notes', changed, 'speech', 'yes', set(), readback,
+                                                   proposal, 2), friday.READBACK_REQUIRED)
+        self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', 'Drop note 2 from auth', set()),
+                         friday.READBACK_REQUIRED)
+        self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', set()),
+                         'The user did not ask to delete notes.')
+        for words in ('send', 'yes send it'):
+            self.assertEqual(friday.confirmed_args('drop_notes', args, words, readback, proposal, 2), args)
+            self.assertEqual(friday.check_tool('drop_notes', confirmed, 'speech', words, set(), readback,
+                                               proposal, 2), friday.READBACK_REQUIRED)
+        self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', {'send_to_chat'},
+                                           readback, proposal, 2))
+        for previous in (readback, 'I found the note. ' + readback):
+            self.assertIsNotNone(friday.check_tool('answer_approval', {'decision': 'approve'}, 'speech', 'yes',
+                                                  set(), previous))
+
+    def test_drop_yes_is_a_short_closed_yes(self):
+        proposal = friday.SendProposal('drop_notes', 'Auth', 'Rotate the key', 1, heard=True,
+                                       target=('T8', 2, 'Rotate the key'))
+        readback = friday.send_readback(proposal)
+        args = {'topic': 'auth', 'note': 2}
+        for words in ('yes', 'Yes, delete it.', 'okay, drop it', 'yeah go ahead', 'Correct.', 'yes please, thank you'):
+            with self.subTest(words=words):
+                self.assertTrue(friday.drop_yes(words))
+                confirmed = friday.confirmed_args('drop_notes', args, words, readback, proposal, 2)
+                self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', words, set(), readback,
+                                                    proposal, 2))
+        # B496: "Correct yes to okay" corrects a word; it must not delete. Nor may any yes with other words.
+        for words in ('Correct yes to okay', 'yes, send it', 'yes, delete note 3', 'yes, but not that one',
+                      'yes?', 'sure, in the auth chat', 'okay delete the other topic'):
+            with self.subTest(words=words):
+                self.assertFalse(friday.drop_yes(words))
+                self.assertEqual(friday.confirmed_args('drop_notes', args, words, readback, proposal, 2), args)
+                forged = dict(args, id='T8', text='Rotate the key')
+                self.assertIsNotNone(friday.check_tool('drop_notes', forged, 'speech', words, set(), readback,
+                                                       proposal, 2))
+
+    def test_drop_readback_names_the_topic_and_note_count_or_the_first_40_words(self):
+        for count, words in ((1, 'its note'), (2, 'all 2 of its notes')):
+            proposal = friday.SendProposal('drop_notes', 'Auth', f'{count} notes', 1, target=('T8', None, count))
+            readback = friday.send_readback(proposal)
+            self.assertEqual(readback, f'Not deleted yet. Should I delete Auth and {words}? Yes or no?')
+            heard = replace(proposal, heard=True)
+            confirmed = friday.confirmed_args('drop_notes', {'topic': 'auth', 'text': 'forged'}, 'yes',
+                                              readback, heard, 2)
+            self.assertEqual(confirmed, {'topic': 'auth', 'id': 'T8', 'count': count})
+            self.assertIsNone(friday.check_tool('drop_notes', confirmed, 'speech', 'yes', set(), readback, heard, 2))
+            # The count binds the topic drop: a note added after the read-back is never deleted unheard.
+            for changed in (dict(confirmed, count=count + 1), {'topic': 'auth', 'id': 'T8'},
+                            dict(confirmed, text='')):
+                with self.subTest(changed=changed):
+                    self.assertEqual(friday.check_tool('drop_notes', changed, 'speech', 'yes', set(), readback,
+                                                       heard, 2), friday.READBACK_REQUIRED)
+        excerpt = ' '.join(['first part'] * 19 + ['last word.'])
+        for text, spoken in (('x' * 299 + '!', 'x' * 299),
+                             (excerpt + ' skip this part' * 10, excerpt + ' and the rest of that note')):
+            proposal = friday.SendProposal('drop_notes', 'Auth', text, 1, target=('T8', 2, text))
+            self.assertEqual(friday.send_readback(proposal),
+                             f'Not deleted yet. Should I delete note 2 from Auth: {spoken}? Yes or no?')
 
     def test_one_action_per_speech_turn(self):
         for name, args, utterance in [
@@ -2956,6 +3042,85 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.pending_proposal,
                          friday.SendProposal('send_to_chat', args['chat'], args['prompt'], 1, marker_id='0-0'))
         self.assertEqual(session.llm_calls, 1)
+
+    async def test_drop_readback_uses_saved_text_and_requires_heard_consent(self):
+        notes = friday.friday_notes
+        with TemporaryDirectory() as root, patch.object(notes.paths, 'friday_notes', return_value=Path(root)), \
+                patch('sys.stderr'):
+            saved = notes.hold('Auth', ['Keep the route.', 'Rotate the key!'])
+            args = {'topic': 'auth', 'note': 2, 'id': 'T99', 'text': 'Forged text.'}
+            call = ('drop_notes', args, {'dropped': 'note', 'topic': 'Auth', 'left': 1})
+            for words in ("Don't delete the auth notes", "Don't... drop the auth notes"):
+                session, frames = await self.tool_flow(words, [('', 1, [call])])
+                result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                self.assertIn('did not clearly ask to delete', result.result['error'])
+                self.assertIsNone(session.pending_proposal)
+                self.assertNotIn(('dispatch', 'drop_notes'), frames)
+
+            for words in ('Drop note 2 from auth', 'Never mind, drop them'):
+                session, frames = await self.tool_flow(words, [('', 1, [call])])
+                result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                speech, = [f for f in frames if isinstance(f, self.rt.TTSSpeakFrame)]
+                self.assertEqual(result.result, {'error': 'Not deleted yet. Friday asked the user to confirm.'})
+                self.assertIs(result.properties.run_llm, False)
+                self.assertEqual(speech.text,
+                                 'Not deleted yet. Should I delete note 2 from Auth: Rotate the key? Yes or no?')
+                self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                self.assertEqual(session.pending_proposal.target, (saved['id'], 2, 'Rotate the key!'))
+
+            unheard = replace(session.pending_proposal, turn=0)
+            session.llm.mark_readback_heard(session.pending_proposal)
+            heard = replace(session.pending_proposal, turn=0)
+            self.assertFalse(unheard.heard)
+            self.assertTrue(heard.heard)
+            readback = {'role': 'assistant', 'content': speech.text}
+            for answer, pending, between, error in (
+                    ('yes', unheard, None, None),
+                    ('send', heard, None, 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('yes send it', heard, None, 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('yes', heard, 'Want me to read the rest?', 'Not deleted yet. Friday asked the user to confirm.'),
+                    ('no', heard, None, 'The user declined the delete.'),
+                    ('stop', heard, None, 'The user declined the delete.'),
+                    ('don’t', heard, None, 'The user declined the delete.')):
+                with self.subTest(answer=answer, heard=pending.heard, between=between):
+                    messages = [readback] + ([{'role': 'assistant', 'content': between}] if between else [])
+                    messages.append({'role': 'user', 'content': answer})
+                    declined, frames = await self.tool_flow(messages, [('', 1, [call])], pending)
+                    self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                    if error is None:  # An unheard read-back replays before the model gets a tool call.
+                        self.assertEqual(declined.llm_calls, 0)
+                    else:
+                        result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                        self.assertEqual(result.result, {'error': error})
+
+            confirmed, frames = await self.tool_flow([readback, {'role': 'user', 'content': 'yes'}],
+                                                    [('', 1, [call, call])], heard)
+            self.assertEqual(frames.count(('dispatch', 'drop_notes')), 1)
+            self.assertEqual(confirmed.last_dispatch, dict(args, id=saved['id'], text='Rotate the key!'))
+            self.assertIsNone(confirmed.pending_proposal)
+            results = [f.result for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+            self.assertIn({'error': 'Only one drop_notes is allowed per spoken turn.'}, results)
+
+    async def test_drop_readback_refuses_missing_ambiguous_invalid_or_unreadable_targets(self):
+        notes = friday.friday_notes
+        with TemporaryDirectory() as root, patch.object(notes.paths, 'friday_notes', return_value=Path(root)), \
+                patch('sys.stderr'):
+            notes.hold('Auth Server', ['Keep the route.'])
+            notes.hold('Auth Client', ['Rotate the key.'])
+            for args, error in (({'topic': 'Other'}, 'No topic matches Other.'),
+                                ({'topic': 'Auth'}, 'Several topics match:'),
+                                ({'topic': 'Auth Server', 'note': 2}, 'Choose one of the note numbers'),
+                                ({'topic': 'Auth Client', 'note': True}, 'Choose one of the note numbers'),
+                                ({'topic': 'Auth Server'}, 'Saved topic notes could not be read.')):
+                with self.subTest(args=args):
+                    if error.startswith('Saved'):
+                        (Path(root) / 'notes.json').write_text('{')
+                    session, frames = await self.tool_flow('Drop the notes', [('', 1, [('drop_notes', args, {})])])
+                    result, = [f for f in frames if isinstance(f, self.rt.FunctionCallResultFrame)]
+                    self.assertTrue(result.result['error'].startswith(error), result.result)
+                    self.assertIsNone(session.pending_proposal)
+                    self.assertNotIn(('dispatch', 'drop_notes'), frames)
+                    self.assertFalse(any(isinstance(f, self.rt.TTSSpeakFrame) for f in frames))
 
     async def test_copied_reply_with_send_word_speaks_confirmation_instead_of_sending(self):
         chat = 'Automation tether . Can we have…'

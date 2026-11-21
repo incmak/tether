@@ -66,13 +66,13 @@ def _valid(topic):
             and (topic['sent_to'] is None or isinstance(topic['sent_to'], str)) and topic['draft'] is None)
 
 
-def _load(folder, now, *, writing=False):
+def _load(folder, now, *, strict=False):
     try:
         data = json.loads((folder / 'notes.json').read_text(encoding='utf-8'))
     except FileNotFoundError:
         data = {}
     except (ValueError, RecursionError) as exc:
-        if writing:
+        if strict:
             raise NotesError('Saved topic notes could not be read.', 503) from exc
         data = {}
     if not isinstance(data, dict):
@@ -138,15 +138,15 @@ def _order(topic):
     return topic['state'] != 'open', -topic['updated']
 
 
-def _missing(topics, name):
+def missing(topics, name):
     titles = [topic['title'] for topic in sorted(topics, key=_order) if topic['state'] == 'open'][:5]
     available = f"Open topics: {', '.join(titles)}." if titles else 'There are no open topics.'
     return NotesError(f'No topic matches {name}. {available}', 404)
 
 
-def listing(now=None):
+def listing(now=None, *, strict=False):
     now = time.time() if now is None else now
-    topics = _load(paths.friday_notes(), now)['topics']
+    topics = _load(paths.friday_notes(), now, strict=strict)['topics']
     return {'topics': [public(topic) for topic in sorted(topics, key=_order)]}
 
 
@@ -163,7 +163,7 @@ def hold(topic, notes, chat=None, now=None):
     now = time.time() if now is None else float(now)
     folder = paths.friday_notes()
     with _locked(folder):
-        data = _load(folder, now, writing=True)
+        data = _load(folder, now, strict=True)
         topics = data['topics']
         saved = find(topics, title)
         if saved is None:
@@ -183,7 +183,7 @@ def hold(topic, notes, chat=None, now=None):
         return public(saved)
 
 
-def drop(topic, note=None, now=None, *, topic_id=None, text=None):
+def drop(topic, note=None, now=None, *, topic_id=None, text=None, count=None):
     """topic_id and text (from the screen) make the drop exact: a list that changed since it showed gets 409."""
     title = _title(topic)
     if not title and topic_id is None:
@@ -191,7 +191,7 @@ def drop(topic, note=None, now=None, *, topic_id=None, text=None):
     now = time.time() if now is None else float(now)
     folder = paths.friday_notes()
     with _locked(folder):
-        data = _load(folder, now, writing=True)
+        data = _load(folder, now, strict=True)
         topics = data['topics']
         if topic_id is not None:
             saved = next((item for item in topics if item['id'] == topic_id and item['state'] == 'open'), None)
@@ -200,8 +200,10 @@ def drop(topic, note=None, now=None, *, topic_id=None, text=None):
         else:
             saved = find(topics, title)
             if saved is None:
-                raise _missing(topics, title)
+                raise missing(topics, title)
         if note is None:
+            if count is not None and count != len(saved['notes']):
+                raise NotesError('Those notes changed. Look at the list again.', 409)
             topics.remove(saved)
             result = {'dropped': 'topic', 'topic': saved['title'], 'left': 0}
         else:
@@ -262,7 +264,7 @@ def get(handler):
             topics = result['topics']
             topic = find(topics, name, open_only=False)
             if topic is None:
-                raise _missing(topics, name)
+                raise missing(topics, name)
             result = {'topics': [topic]}
         handler.respond(200, result)
     except NotesError as exc:
@@ -279,7 +281,10 @@ def serve(handler, body):
         elif action == 'drop':
             if any(key in body and not isinstance(body[key], str) for key in ('id', 'text')):
                 raise NotesError('Use text for the topic id and note.')
-            result = drop(body.get('topic'), body.get('note'), topic_id=body.get('id'), text=body.get('text'))
+            if 'count' in body and type(body['count']) is not int:
+                raise NotesError('Use a whole number for the note count.')
+            result = drop(body.get('topic'), body.get('note'), topic_id=body.get('id'), text=body.get('text'),
+                          count=body.get('count'))
         else:
             raise NotesError('Not found', 404)
         handler.respond(200, result)

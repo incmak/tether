@@ -126,7 +126,14 @@ class FridayNotesTests(unittest.TestCase):
                     notes.drop(None, now=NOW, topic_id=topic_id)
                 self.assertEqual(exc.exception.status, 409)
                 self.assertEqual(self.path.read_bytes(), before)
-        self.assertEqual(notes.drop(None, now=NOW, topic_id=opened['id']),
+        before = self.path.read_bytes()
+        for count in (0, 2):  # The topic holds one note: a count from an older read-back refuses the drop.
+            with self.subTest(count=count):
+                with self.assertRaises(notes.NotesError) as exc:
+                    notes.drop(None, now=NOW, topic_id=opened['id'], count=count)
+                self.assertEqual(exc.exception.status, 409)
+                self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(notes.drop(None, now=NOW, topic_id=opened['id'], count=1),
                          {'dropped': 'topic', 'topic': 'Open', 'left': 0})
         self.assertEqual([topic['id'] for topic in notes.listing(NOW)['topics']], [sent['id']])
 
@@ -252,9 +259,17 @@ class FridayNotesTests(unittest.TestCase):
         exact = {'id': 'T1', 'note': 1, 'text': batch['notes'][0]}
         before = self.path.read_bytes()
         for body in ({**exact, 'id': 1}, {**exact, 'text': ['Keep my answer.']},
-                     {**exact, 'id': None, 'topic': batch['topic']}, {**exact, 'text': None}):
+                     {**exact, 'id': None, 'topic': batch['topic']}, {**exact, 'text': None},
+                     {'id': 'T1', 'count': '1'}, {'id': 'T1', 'count': True}, {'id': 'T1', 'count': None}):
             with self.subTest(body=body):
                 self.assertEqual(request('POST', '/drop', body)[0], 400)
                 self.assertEqual(self.path.read_bytes(), before)
+        data = json.loads(before)
+        data['topics'][0]['notes'][0]['text'] = 'Edited answer.'
+        self.path.write_text(json.dumps(data))
+        self.assertEqual(request('POST', '/drop', exact),
+                         (409, {'error': 'Those notes changed. Look at the list again.'}))
+        self.assertEqual(request('GET')[1]['topics'][0]['notes'][0]['text'], 'Edited answer.')
+        exact['text'] = 'Edited answer.'
         self.assertEqual(request('POST', '/drop', exact),
                          (200, {'dropped': 'note', 'topic': 'Urgent Call Spec', 'left': 0}))
