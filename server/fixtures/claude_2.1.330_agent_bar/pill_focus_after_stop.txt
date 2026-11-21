@@ -1,0 +1,40 @@
+  run_in_background true and timeout 600000. Wait for that shell to finish before you reply. Then reply done.". Use
+  that quoted text verbatim as the Agent prompt. The subagent must not start any other tools. Use Bash with command
+  "sleep 600", run_in_background true and timeout 600000. Use Monitor with description "Stop canary monitor", command
+  "sleep 599" and timeout_ms 600000. Do not substitute tools or commands. After starting the three tasks, reply without
+  waiting.
+
+● Agent(Stop canary agent)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Ran 1 shell command
+
+● Monitor(Stop canary monitor)
+  ⎿  Monitor started · task bhkbuvo5f · timeout 10m
+
+● I started the three background tasks for the Stop test:
+
+  - Agent "Stop canary agent" (general-purpose, haiku, background). It was given your exact prompt, so it will run sleep
+    601 in a background shell and then reply "done."
+  - Bash sleep 600 in the background, with timeout 600000.
+  - Monitor "Stop canary monitor" running sleep 599 with timeout_ms 600000.
+
+  I didn't wait for them. I'll get a notification as each one finishes.
+
+✻ Waiting for 1 background agent to finish
+
+● Agent "Stop canary agent" is waiting on its own background work · 3s
+
+● The Stop canary agent has stopped with its background sleep 601 still running, so its "done" reply is pending. It may
+  resume and report again when that shell exits. The sleep 600 Bash task and the sleep 599 Monitor are still running,
+  and I'll get notifications as they finish.
+
+✻ Crunched for 8s · done 9:38 AM · 1 shell, 1 monitor still running
+  You've used 84% of your weekly limit · resets Nov 23, 6:30pm (Asia/Kolkata) · /usage-credits to keep using Claude C…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ don't ask on · 1 shell, 1 monitor · enter to view tasks
+
+  ● main
+  ◯ general-purpose  Stop canary agent                                                   stopped · 8s · ↓ 11.3k tokens

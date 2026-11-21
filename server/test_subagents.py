@@ -736,6 +736,53 @@ class ProcessTasksTests(unittest.TestCase):
         self.assertEqual(tasks['shell02']['state'], 'failed')
         self.assertEqual(tasks['shell02']['summary'], 'Notification failure')
 
+    def test_finished_agent_waits_until_its_running_children_finish(self):
+        self.agent(meta={'finished': True, 'requestShape': 'background'}, records=[
+            self.record('user', 'Wait for the children', seconds=-125),
+            *self.task_start('shell01'),
+            *self.task_start('shell02'),
+            *self.task_start('monitor1', name='Monitor', command='sleep 599'),
+            self.record('assistant', 'Waiting on my own work', seconds=-90),
+        ])
+        for identifier in ('shell01', 'shell02', 'monitor1'):
+            self.output(identifier)
+        self.write(self.main, [self.record('user', self.notification(
+            'abc', 'completed', 'Agent is waiting on its own background work'))])
+
+        for listing in (subagents.listing, lambda cfg: subagents._listing(cfg, include_finished=True)):
+            with self.subTest(listing=listing):
+                agent, = listing(self.config)['agents']
+                self.assertEqual(agent['state'], 'running')
+                self.assertIsNone(agent['ended'])
+                self.assertEqual(agent['seconds'], 125)
+                self.assertEqual(agent['waiting'], {'shell': 2, 'monitor': 1})
+        self.assertIsNone(subagents.detail(self.config, 'abc')['report'])
+
+        for identifier in ('shell01', 'shell02'):
+            self.output(identifier, '[exited with code 0]')
+        agent, = subagents.listing(self.config)['agents']
+        self.assertEqual(agent['waiting'], {'shell': 0, 'monitor': 1})
+        self.output('monitor1', '[exited with code 0]')
+        agent, = subagents.listing(self.config)['agents']
+        self.assertEqual(agent['state'], 'finished')
+        self.assertNotIn('waiting', agent)
+        self.assertEqual(subagents.detail(self.config, 'abc')['report'], 'Waiting on my own work')
+
+    def test_running_child_only_reopens_its_finished_parent(self):
+        self.agent('stopping', meta={'finished': True, 'stoppedByUser': True},
+                   records=self.task_start('shell01'))
+        self.agent('failed', records=self.task_start('shell02'))
+        self.agent('other', meta={'finished': True})
+        self.output('shell01')
+        self.output('shell02')
+        self.write(self.main, [self.record('user', self.notification('failed', 'failed'))])
+        listed = subagents.listing(self.config)
+        self.assertEqual({task['parent'] for task in listed['tasks'] if task['state'] == 'running'},
+                         {'stopping', 'failed'})
+        self.assertEqual({agent['id']: agent['state'] for agent in listed['agents']},
+                         {'stopping': 'stopped', 'failed': 'failed', 'other': 'finished'})
+        self.assertTrue(all('waiting' not in agent for agent in listed['agents']))
+
     def test_monitor_in_old_running_agent_has_parent_and_kind(self):
         old = self.old_agent()
         with old.open('a') as stream:

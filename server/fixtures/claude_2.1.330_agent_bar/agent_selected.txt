@@ -1,0 +1,38 @@
+● Agent(Stop canary agent)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+  Ran 1 shell command
+
+● Monitor(Stop canary monitor)
+  ⎿  Monitor started · task bvhmibzbn · timeout 10m
+
+● Started the three background tasks for the Stop test:
+
+  - Agent "Stop canary agent" (general-purpose, haiku, background). It was told to run sleep 601 in the background and
+    reply "done" once that finishes.
+  - Bash sleep 600 (background, timeout 600000).
+  - Monitor "Stop canary monitor" with command sleep 599 and timeout_ms 600000.
+
+  I haven't waited on any of them. Completion notifications will arrive as each one finishes.
+
+✻ Waiting for 1 background agent to finish
+
+● Agent "Stop canary agent" is waiting on its own background work · 7s
+
+● The "Stop canary agent" has reported back, but it isn't finished. It returned early with its own sleep 601 shell still
+  running, and it says it set up a monitor for that shell. Its tool use count is 2, so that monitor is likely a second
+  tool call. Your instructions said the agent must not start any tools besides the Bash sleep, so that's a deviation. I
+  haven't read its transcript, since that file is the full subagent log.
+
+  The agent may send another "done" notification when its sleep exits. The Bash sleep 600 and the Monitor sleep 599 are
+  still running, and I haven't checked on either.
+
+✻ Worked for 13s · done 8:55 AM · 2 shells, 2 monitors still running
+  You've used 83% of your weekly limit · resets Nov 23, 6:30pm (Asia/Kolkata) · /usage-credits to keep using Claude C…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter to view · x to stop
+
+  ● main
+❯ ◯ general-purpose  waiting on 1 shell, 1 monitor · Stop canary agent · since 8:54 AM

@@ -236,7 +236,7 @@ class TmuxClaude:
         return subagents.listing(entry)
 
 
-def expected_tasks(listed):
+def expected_tasks(listed, *, waiting_agent=False):
     matches = {
         'agent': [item for item in listed['agents'] if item['background'] and item['description'] == AGENT_NAME],
         'shell': [item for item in listed['tasks'] if item['kind'] == 'shell' and item['command'] == SHELL_COMMAND],
@@ -244,7 +244,8 @@ def expected_tasks(listed):
                     item['description'] == MONITOR_NAME and item['command'] == MONITOR_COMMAND],
     }
     if all(len(matches[kind]) == 1 and matches[kind][0]['state'] == 'running' for kind in KINDS):
-        return {kind: matches[kind][0] for kind in KINDS}
+        if not waiting_agent or 'waiting' in matches['agent'][0]:
+            return {kind: matches[kind][0] for kind in KINDS}
     return None
 
 
@@ -341,6 +342,8 @@ def capture_details(entry, tasks, trace, sleep, clock, save, report):
     terminal_input.verify(entry, run)
     verified = {}
     for kind, item in tasks.items():
+        if kind == 'agent' and 'waiting' in item:
+            continue  # The Stop driver captures the agent bar while verifying the waiting agent.
         if terminal_input.live_status(entry, run)['state'] not in ('Idle', 'Working'):
             raise CanaryError('Claude needs input before the canary can open /tasks.')
         if any(terminal_input.prompt_draft(entry, run)):
@@ -356,10 +359,10 @@ def capture_details(entry, tasks, trace, sleep, clock, save, report):
     return verified
 
 
-def fixture_diff(fixtures, captures):
+def fixture_diff(fixtures, captures, surface='tasks'):
     versions = []
-    for folder in fixtures.glob('claude_*_tasks'):
-        match = re.fullmatch(rf'claude_({VERSION})_tasks', folder.name)
+    for folder in fixtures.glob(f'claude_*_{surface}'):
+        match = re.fullmatch(rf'claude_({VERSION})_{surface}', folder.name)
         if match and folder.is_dir():
             version = match[1]
             numeric = re.match(r'\d+\.\d+\.\d+', version)[0]
@@ -397,19 +400,39 @@ def write_atomic(path, content, *, expected=None):
 
 
 def exercise(adapter, entry, report, save, trace, sleep, clock):
-    while (tasks := expected_tasks(adapter.listing(entry))) is None:
+    version = tuple(map(int, re.match(r'\d+\.\d+\.\d+', report['version'])[0].split('.')))
+    # A live 2.1.330 agent briefly appears in /tasks before it waits on its child shell.
+    while (tasks := expected_tasks(adapter.listing(entry), waiting_agent=version >= (2, 1, 330))) is None:
         sleep(0.5)
     registry = json.loads(Path(entry['registry']).read_text())
     if registry.get('version') != report['version']:
         raise CanaryError('The Claude Code version changed between the probe and the launch.')
     verified = capture_details(entry, tasks, trace, sleep, clock, save, report)
     report['screens_parsed'] = len(verified) == len(tasks)
-    for kind, verify_list in verified.items():
+    bar_screens = set()
+
+    def observe_bar(screen, bar):
+        if bar['focus'] == 'prompt':
+            name = 'after_escape' if 'agent_stopped' in bar_screens else 'prompt_waiting_shell'
+        elif bar['focus'] == 'pill':
+            name = 'pill_focus'
+        else:
+            name = {'stop': 'agent_selected', 'clear': 'agent_stopped', None: 'main_selected'}[bar['action']]
+        save(f'agent_bar/{name}.txt', screen, first=True)
+        bar_screens.add(name)
+        if name == 'after_escape':
+            report['screens_parsed'] = len(verified) + 1 == len(tasks)
+
+    waiting = 'waiting' in tasks['agent']
+    for kind in tasks:
+        use_bar = kind == 'agent' and waiting
+        if not use_bar and kind not in verified:
+            continue
         trace.step = f'stop-{kind}'
         result = report['tasks'][kind]
         try:
             reply = stop.stop(entry, tasks[kind]['id'], trace.run, sleep, clock, allow_process_fallback=False,
-                              observe_list=verify_list)
+                              observe_list=verified.get(kind), observe_bar=observe_bar if use_bar else None)
             result['state'] = reply['state']
             result['passed'] = reply['ok'] and reply['state'] == 'stopped'
             if not result['passed']:
@@ -438,12 +461,20 @@ def write_report(path, report, screens):
 
 def record(args, report, fixtures, captures, screens):
     try:
-        report['baseline'], report['diffs'] = fixture_diff(fixtures, captures)
+        tasks = {name: screen for name, screen in captures.items() if '/' not in name}
+        report['baseline'], report['diffs'] = fixture_diff(fixtures, tasks)
+        bar = {name.split('/', 1)[1]: screen for name, screen in captures.items() if name.startswith('agent_bar/')}
+        if bar:
+            report['agent_bar_baseline'], changes = fixture_diff(fixtures, bar, 'agent_bar')
+            report['diffs'].update({f'agent_bar/{name}': diff for name, diff in changes.items()})
         if args.save_fixtures and report['screens_parsed']:
-            directory = fixtures / f'claude_{report["version"]}_tasks'
-            directory.mkdir(exist_ok=True)
-            for name, screen in captures.items():
-                write_atomic(directory / name, screen)
+            for surface, files in (('tasks', tasks), ('agent_bar', bar)):
+                if not files:
+                    continue
+                directory = fixtures / f'claude_{report["version"]}_{surface}'
+                directory.mkdir(exist_ok=True)
+                for name, screen in files.items():
+                    write_atomic(directory / name, screen)
     except OSError:
         report['error'] = 'Could not read or save the fixtures.'
     for result in report['tasks'].values():

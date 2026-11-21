@@ -782,6 +782,7 @@ class RealScreenTests(unittest.TestCase):
     """Real /tasks screens captured from Claude Code. Add a folder for each new version whose screens change."""
     FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.325_tasks'
     FOLDER_327 = FOLDER.parent / 'claude_2.1.327_tasks'
+    FOLDER_330 = FOLDER.parent / 'claude_2.1.330_tasks'
 
     def screen(self, name):
         return (self.FOLDER / f'{name}.txt').read_text()
@@ -803,6 +804,43 @@ class RealScreenTests(unittest.TestCase):
                 target = {'task': is_task}
                 self.assertEqual([row['label'] for row in rows if stop.in_section(target, row['section'])
                                   and stop.matches(label, row['label'])], [label])
+
+    def test_2_1_330_lists_identify_main_tasks_and_refuse_child_tasks(self):
+        cases = (
+            ('list', 'Stop canary agent', ['sleep 601']),
+            ('list_no_sections', 'Stop canary monitor', ['sleep 601']),
+            ('list_subagent_shell', 'Wait for background sleep 601 to finish',
+             ['Wait for background sleep 601 to finish', 'sleep 601']),
+        )
+        for name, selected, children in cases:
+            with self.subTest(name=name):
+                screen = (self.FOLDER_330 / f'{name}.txt').read_text()
+                self.assertTrue(stop.dialog_open(screen))
+                rows = stop.rows(screen)
+                self.assertEqual([row['label'] for row in rows if row['selected']], [selected])
+                self.assertEqual([row['label'] for row in rows if row.get('unverified_task')], children)
+                for label in ('sleep 600', 'Stop canary monitor'):
+                    target = {'task': True, 'labels': [label]}
+                    self.assertEqual([row['label'] for row in rows if stop.is_target(target, row)], [label])
+                for label in children:
+                    target = {'task': True, 'labels': [label]}
+                    self.assertFalse(any(stop.is_target(target, row) for row in rows))
+
+    def test_2_1_330_single_kind_summary_parses_selected_task(self):
+        for summary, section in (('1 shell', 'Shells'), ('3 shells', 'Shells'), ('1 monitor', 'Monitors')):
+            with self.subTest(summary=summary):
+                screen = (self.FOLDER_330 / 'list_no_sections.txt').read_text().replace('2 shells, 1 monitor', summary)
+                self.assertTrue(any(row['selected'] and row['section'] == section for row in stop.rows(screen)))
+
+    def test_2_1_330_agent_detail_matches_prompt_and_runtime(self):
+        screen = (self.FOLDER_330 / 'detail_agent.txt').read_text()
+        body = ('Run Bash `sleep 601` with run_in_background true and timeout 600000. '
+                'Wait for that shell to finish before you reply. Then reply done.')
+        target = {'task': False, 'labels': ['Stop canary agent'], 'kind': 'general-purpose',
+                  'started': 1000, 'body': body}
+        self.assertTrue(stop.detail_open(screen))
+        self.assertEqual(stop.detail_facts(screen, target), (True, '2s', body))
+        self.assertTrue(stop.fits(screen, target, 1002))
 
     def test_detail_footer_distinguishes_both_versions_from_the_list(self):
         detail = (self.FOLDER_327 / 'detail_agent.txt').read_text()
@@ -886,6 +924,18 @@ class RealScreenTests(unittest.TestCase):
         self.assertEqual(stop.detail_facts(self.screen('monitor_detail'), target), (True, '2m 41s', 'sleep 402'))
         self.assertTrue(stop.fits(self.screen('monitor_detail'), target, 1161))
 
+    def test_detail_views_on_2_1_330(self):
+        for name, label, body, runtime, started in (
+                ('shell_detail', 'Background sleep 600 for Stop test', 'sleep 600', '4s', 1000.0),
+                ('monitor_detail', 'Stop canary monitor', 'sleep 599', '6s', 1000.0)):
+            with self.subTest(name=name):
+                screen = (self.FOLDER_330 / f'{name}.txt').read_text()
+                target = {'task': True, 'labels': [label, body], 'kind': name.split('_')[0], 'started': started,
+                          'body': body}
+                self.assertEqual(stop.detail_facts(screen, target), (True, runtime, body))
+                other = dict(target, labels=['sleep 1'], body='sleep 1')
+                self.assertFalse(stop.detail_facts(screen, other)[0])
+
     def test_agent_detail(self):
         target = {'task': False, 'labels': ['Fixture wait 2'], 'kind': 'general-purpose', 'started': 1000.0,
                   'body': 'Run this Bash command in the foreground with timeout 400000: '
@@ -921,6 +971,216 @@ class RealScreenTests(unittest.TestCase):
                 self.assertTrue(stop.fits(screen, target, 1000 + runtime))
                 self.assertFalse(stop.fits(screen, target, 1000 + runtime + 30))
                 self.assertFalse(stop.fits(screen, dict(target, labels=['sleep 601'], body='sleep 601'), 1000 + runtime))
+
+
+class AgentBarTests(unittest.TestCase):
+    FOLDER = Path(__file__).parent / 'fixtures' / 'claude_2.1.330_agent_bar'
+    NAME = 'Stop canary agent'
+    ROW = '  ◯ general-purpose  waiting on 1 shell, 1 monitor · Stop canary agent · since 8:54 AM'
+
+    def screen(self, name):
+        return (self.FOLDER / f'{name}.txt').read_text()
+
+    def setUp(self):
+        self.agent = {'id': 'alpha', 'description': self.NAME, 'type': 'general-purpose',
+                      'state': 'running', 'waiting': {'shell': 1, 'monitor': 1}}
+        self.siblings = []
+        self.keys = []
+        self.reads = []
+        self.verify = self.enterContext(patch.object(terminal, 'verify'))
+        self.status = self.enterContext(patch.object(terminal, 'live_status', return_value={'state': 'Working'}))
+        self.enterContext(patch.object(stop, 'claude_version', return_value='2.1.330'))
+        # Refusals name the running version when it differs from the last version checked live.
+        self.enterContext(patch.object(stop, 'CHECKED_TASKS_UI', '2.1.325'))
+
+    def test_all_captured_focus_states(self):
+        cases = {
+            'prompt_waiting_shell_monitor': ('prompt', None, None),
+            'prompt_waiting_working': ('prompt', None, None),
+            'pill_focus': ('pill', None, None),
+            'main_selected': ('row', 0, None),
+            'agent_selected': ('row', 1, 'stop'),
+            'agent_stopped': ('row', 1, 'clear'),
+            'after_escape': ('prompt', None, None),
+            'narrow_prompt_waiting': ('prompt', None, None),
+            'narrow_pill_focus': ('pill', None, None),
+            'narrow_main_selected': ('row', 0, None),
+            'narrow_agent_selected': ('row', 1, 'stop'),
+            'narrow_agent_stopped': ('row', 1, 'clear'),
+            'narrow_after_escape': ('prompt', None, None),
+            'after_stop_resume_footer': ('prompt', None, None),
+            'pill_focus_after_stop': ('pill', None, None),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name):
+                screen = self.screen(name)
+                bar = stop.agent_bar(screen)
+                self.assertIsNotNone(bar)
+                self.assertEqual((bar['focus'], bar['selected'], bar['action']), expected)
+                self.assertFalse(bar['draft'])
+                self.assertEqual(bar['rows'][0]['kind'], 'main')
+                self.assertEqual(stop.agent_bar('❯ ● main\n' + self.ROW + '\n' + screen), bar)
+        for name in ('agent_view_open', 'background_session_dialog'):
+            with self.subTest(name=name):
+                self.assertIsNone(stop.agent_bar(self.screen(name)))
+
+    def test_waiting_identity_requires_supported_counts_and_complete_name(self):
+        screen = self.screen('agent_selected')
+        self.assertEqual(stop.agent_bar(screen)['rows'][1], {
+            'kind': 'general-purpose', 'name': self.NAME, 'waiting': self.agent['waiting'],
+        })
+        for text in (screen.replace('1 monitor', '1 worker'), screen.replace('1 monitor', '2 shells'),
+                     screen.replace(' · since 8:54 AM', '')):
+            self.assertIsNone(stop.agent_bar(text)['rows'][1]['waiting'])
+        narrow = self.screen('narrow_agent_selected')
+        self.assertEqual(stop.agent_bar(narrow)['rows'][1], {
+            'kind': 'general-purpose', 'name': 'Prob…', 'waiting': {'shell': 1, 'monitor': 0},
+        })
+
+    def drive(self, frames, fresh=None):
+        """Each step is (visible frame, allowed key). An empty key allows only reads."""
+        position = 0
+        self.keys.clear()
+        self.reads.clear()
+
+        def run(args, **kwargs):
+            nonlocal position
+            screen, key = frames[position]
+            if args[1] == 'capture-pane':
+                self.reads.append(position)
+                return subprocess.CompletedProcess(args, 0, screen, '')
+            self.assertEqual(args[1], 'send-keys')
+            self.assertEqual(args[4:], [key])
+            self.assertTrue(self.reads and self.reads[-1] == position)
+            self.keys.append(key)
+            position += 1
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        def listing(entry):
+            state = 'stopped' if 'x' in self.keys else self.agent['state']
+            if fresh is not None and self.keys and state == 'running':
+                fresh()
+            return {'agents': [dict(self.agent, state=state), *self.siblings], 'tasks': []}
+
+        entry = {'id': '%fake-bar', 'agent': 'claude'}
+        with patch.object(subagents, 'listing', side_effect=listing):
+            return stop.stop(entry, 'alpha', run=run, sleep=lambda _: None)
+
+    def wide_frames(self):
+        return [(self.screen(name), key) for name, key in (
+            ('prompt_waiting_shell_monitor', 'Down'), ('pill_focus', 'Down'), ('main_selected', 'Down'),
+            ('agent_selected', 'x'), ('agent_stopped', 'Escape'), ('after_escape', None),
+        )]
+
+    def narrow_frames(self):
+        self.agent.update(description='Probe agent', waiting={'shell': 1, 'monitor': 0})
+        return [(self.screen('narrow_' + name), key) for name, key in (
+            ('prompt_waiting', 'Down'), ('pill_focus', 'Down'), ('main_selected', 'Down'),
+            ('agent_selected', 'x'), ('agent_stopped', 'Escape'), ('after_escape', None),
+        )]
+
+    def test_driver_writes_only_verified_keys(self):
+        for frames in (self.wide_frames, self.narrow_frames):
+            with self.subTest(frames=frames.__name__):
+                self.assertEqual(self.drive(frames()), {'ok': True, 'state': 'stopped'})
+                self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+                self.assertEqual(self.reads.count(3), 2)  # Fresh screen before x.
+
+    def test_cleanup_accepts_the_resume_footer_after_a_stop(self):
+        # Live 2.1.330: after x and Escape the prompt footer says "↓ to resume subagent".
+        frames = self.wide_frames()
+        frames[-1] = (self.screen('after_stop_resume_footer'), None)
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_closes_a_recognized_tasks_panel_before_navigating_the_bar(self):
+        tasks = RealScreenTests.FOLDER_330 / 'list_subagent_shell.txt'
+        frames = [(tasks.read_text(), 'Escape'), *self.wide_frames()]
+        self.assertEqual(self.drive(frames), {'ok': True, 'state': 'stopped'})
+        self.assertEqual(self.keys, ['Escape', 'Down', 'Down', 'Down', 'x', 'Escape'])
+
+    def test_refusals_at_prompt_press_no_keys(self):
+        prompt = self.screen('prompt_waiting_shell_monitor')
+        cases = (
+            (prompt + self.ROW + '\n', 'share this name'),
+            (prompt.replace('waiting on 1 shell, 1 monitor', 'waiting on 2 shells'), 'Could not identify'),
+            (self.screen('agent_view_open'), 'Could not read'),
+            (self.screen('background_session_dialog'), 'Could not read'),
+            (prompt.replace('\n❯\n', '\n❯ unsent text\nmore text\n'), 'unsent draft'),
+            (prompt.replace('↓ to manage', '↓ to manage the terminal'), 'Could not read'),
+            (prompt.replace('↓ to manage', '↓ t…'), 'Could not read'),
+        )
+        for screen, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(stop.StopError, message):
+                    self.drive([(screen, None)])
+                self.assertEqual(self.keys, [])
+
+    def test_truncated_name_refuses_a_second_row(self):
+        frames = self.narrow_frames()
+        prompt, _ = frames[0]
+        with self.assertRaisesRegex(stop.StopError, 'share this name'):
+            self.drive([(prompt + '  ◯ general-purpose  waiting on 1 shell · Pro…\n', None)])
+        self.assertEqual(self.keys, [])
+
+    def test_truncated_name_refuses_a_second_running_listed_agent(self):
+        frames = self.narrow_frames()
+        self.siblings = [dict(self.agent, id='beta', description='Probe two')]
+        frames[3:] = [(frames[3][0], 'Escape'), (frames[0][0], None)]
+        with self.assertRaisesRegex(stop.StopError, 'share this name.*Claude Code 2.1.330'):
+            self.drive(frames)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_refusals_during_navigation_close_recognized_focus(self):
+        frames = self.wide_frames()
+        selected, _ = frames[3]
+        other = '❯ ◯ general-purpose  waiting on 1 shell · A different agent · since 8:54 AM'
+        stopped, _ = frames[4]
+        cases = (
+            (selected.replace('❯ ◯ general-purpose', '  ◯ general-purpose') + other + '\n', 'Could not reach'),
+            (selected.replace('❯ ◯ general-purpose  waiting on 1 shell, 1 monitor · ' + self.NAME
+                              + ' · since 8:54 AM', other), 'Could not identify'),
+            (stopped.replace('  ● main\n', '  ● main\n' + self.ROW + '\n'), 'Could not reach'),
+            (selected.replace('\n❯\n', '\n❯ New draft\n'), 'unsent draft'),
+        )
+        for changed, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(stop.StopError, message):
+                self.drive([*frames[:3], (changed, 'Escape'), frames[-1]])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_unknown_selection_does_not_send_escape_or_x(self):
+        frames = self.wide_frames()
+        for action in ('x to stop all', 'x to stop · Esc to cancel'):
+            unknown = frames[3][0].replace('x to stop', action)
+            with self.subTest(action=action), self.assertRaisesRegex(
+                    stop.StopError, 'agent bar did not close.*Claude Code 2.1.330'):
+                self.drive([*frames[:3], (unknown, None)])
+            self.assertEqual(self.keys, ['Down', 'Down', 'Down'])
+
+    def test_changed_snapshot_immediately_before_x_refuses(self):
+        frames = self.wide_frames()
+        frames[3:] = [(frames[3][0], 'Escape'), frames[-1]]
+
+        def redraw():
+            frames[3] = (frames[3][0].replace('\n❯\n', '\n❯ New draft\n'), 'Escape')
+
+        with self.assertRaisesRegex(stop.StopError, 'unsent draft'):
+            self.drive(frames, fresh=redraw)
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'Escape'])
+
+    def test_navigation_stops_after_eight_down_keys(self):
+        prompt = self.screen('prompt_waiting_shell_monitor')
+        with self.assertRaisesRegex(stop.StopError, 'Could not reach that agent'):
+            self.drive([(prompt, 'Down')] * 8 + [(prompt, None)])
+        self.assertEqual(self.keys, ['Down'] * 8)
+
+    def test_cleanup_stops_after_three_escape_keys(self):
+        frames = self.wide_frames()
+        stopped = frames[4][0]
+        with self.assertRaisesRegex(stop.StopError, 'agent bar did not close'):
+            self.drive([*frames[:4], (stopped, 'Escape'), (stopped, 'Escape'),
+                        (stopped, 'Escape'), (stopped, None)])
+        self.assertEqual(self.keys, ['Down', 'Down', 'Down', 'x', 'Escape', 'Escape', 'Escape'])
 
 
 if __name__ == '__main__':

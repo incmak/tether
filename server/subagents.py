@@ -694,6 +694,15 @@ def _listing(config, *, limit=True, include_finished=False):
     shown = {item['id'] for item in result['agents']}
     sources = {identifier: group for identifier, group in files.items() if identifier in current or identifier in shown}
     result['tasks'] = _tasks(config, tasks_dir, sources, shown, now, since, include_finished=include_finished)
+    waiting = defaultdict(lambda: {'shell': 0, 'monitor': 0})
+    for task in result['tasks']:
+        if task['parent'] is not None and task['state'] == 'running':
+            waiting[task['parent']][task['kind']] += 1
+    for entry in result['agents']:
+        if entry['state'] == 'finished' and entry['id'] in waiting:
+            start = _stamp(entry['started'])
+            entry.update(state='running', ended=None, seconds=int(now - start) if start is not None else None,
+                         waiting=waiting[entry['id']])
     return result
 
 
