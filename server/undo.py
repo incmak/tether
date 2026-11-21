@@ -588,6 +588,10 @@ def record_tab_start(pane, run=subprocess.run):
     undo_store.record('tab.start', label, pane=pane, session=fields[0])
 
 
+def _root_stacks(session_id, pane, run):
+    return [stack['id'] for stack in groups.read(session_id, run) if stack.get('root') == pane]
+
+
 def record_merge(kind, source, target, run=subprocess.run):
     """Before tmux_merge.merge: returns a function to call with its result, which records the step."""
     if kind not in ('pane', 'break', 'session') or not undo_store.recording():
@@ -606,6 +610,8 @@ def record_merge(kind, source, target, run=subprocess.run):
         # The stack it leaves, as it is now: the move or a later sweep can dissolve it (groups.drop_if_alone), and
         # undo brings it back.
         stack, index = _group_place(session_id, label, run) if label else (None, 0)
+        root_stacks = _root_stacks(session_id, source, run)
+        role = tmux_merge.coordinator_to_clear(run, source, target) if kind == 'pane' else ''
     except Exception as error:  # noqa: BLE001 - recording undo is optional; the move goes on
         _unrecorded(f'the move of tab {source}', error)
         return lambda moved: None
@@ -620,7 +626,8 @@ def record_merge(kind, source, target, run=subprocess.run):
         else:
             text = f'Moved {_q(name)} to a session of its own'
         undo_store.record('merge.' + kind, text, pane=source, frm=session_id, frm_name=session_name, frm_group=label,
-                          frm_by=by, to=to, frm_stack=stack, frm_stack_index=index,
+                          frm_by=by, to=to, frm_stack=stack, frm_stack_index=index, frm_role=role,
+                          frm_root_stacks=root_stacks,
                           to_name=moved.get('name', '') if kind == 'pane' else '')
     return done
 
@@ -1899,22 +1906,54 @@ class MergePane:
     @staticmethod
     def apply(a, d, env):
         run = env.run
+        pane = a['pane']
         if d == 'redo':
-            moved = (tmux_merge.move_pane(a['pane'], a['to'], run) if a['kind'] == 'merge.pane'
-                     else tmux_merge.break_out(a['pane'], run))
+            root_stacks = _root_stacks(a['frm'], pane, run)
+            if a['kind'] == 'merge.pane':
+                role = tmux_merge.coordinator_to_clear(run, pane, a['to'])
+                moved = tmux_merge.move_pane(pane, a['to'], run)
+                a['frm_role'] = role
+            else:
+                moved = tmux_merge.break_out(pane, run)
+            a['frm_root_stacks'] = root_stacks
             a['to'] = moved['session']
             return moved.get('warning')
         if _session_alive(a['frm'], run) is None:  # closed between the check and now
             raise Refused(f'Session {_q(a["frm_name"])} closed after this move, so the tab cannot go back.')
+        source, stack = a['frm'], a.get('frm_stack')
         restack = MergePane._stack_gone(a, run)
-        tmux_merge.move_pane(a['pane'], a['frm'], run)
+        was_root = stack and stack.get('root') == pane
+        # Older entries recorded only the pane's own stack.
+        root_stacks = set(a.get('frm_root_stacks', [stack['id']] if was_root else []))
+        tmux_merge.move_pane(pane, source, run)
         if restack:
-            _readd(a['frm'], a['frm_stack'], a.get('frm_stack_index', 0), run)
+            saved = dict(stack)
+            if was_root or saved['id'] in root_stacks:
+                saved.pop('root', None)  # Restore it after the pane rejoins the stack.
+            _readd(source, saved, a.get('frm_stack_index', 0), run)
             for root, label, by in MergePane._root(a, run):
                 if not label and by != 'user':
-                    groups._label(root, a['frm_stack']['id'], run)
-        if a.get('frm_group') and any(g['id'] == a['frm_group'] for g in _groups(a['frm'], run)):
-            _set_label(a['pane'], a['frm_group'], a.get('frm_by') == 'user', run)
+                    groups._label(root, stack['id'], run)
+        if group_id := a.get('frm_group'):
+            if any(group['id'] == group_id for group in _groups(source, run)):
+                _set_label(pane, group_id, a.get('frm_by') == 'user', run)
+        if root_stacks:
+            with groups.LOCK():
+                found = _groups(source, run)
+                restore = [group for group in found if group['id'] in root_stacks
+                           and group.get('auto') and not group.get('root')]
+                if restore:
+                    for group in restore:
+                        group['root'] = pane
+                    groups.write(source, found, run)
+        role = a.get('frm_role')
+        if (role in helper_tabs.COORDINATOR_MARKS and not tmux_merge.pane_role(run, pane)
+                and not (tmux_merge.coordinator_panes(run, source) - {pane})):
+            try:
+                coordinator._check_outside_task(pane, run)
+            except ValueError:
+                return  # A placement made after the move takes precedence.
+            coordinator._set(run, pane, 'all' if role == 'coordinator' else role.removeprefix('coordinator-'))
 
     @staticmethod
     def effects(a, d, env):

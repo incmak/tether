@@ -744,6 +744,44 @@ class CloseAndStartTests(TmuxBase):
 
 
 class MergeTests(TmuxBase):
+    def move_stack_root_and_coordinator(self):
+        run = self.run_tmux
+        stack = groups.create(self.a, 'Stack', run, pane=self.a2, auto=True, root=self.a2)
+        groups.move(self.a, self.a1, stack['id'], run)
+        self.tmux('set-option', '-p', '-t', self.a2, '@tether_role', 'coordinator-needs')
+        self.tmux('set-option', '-p', '-t', self.b1, '@tether_role', 'coordinator-off')
+        noted = undo.record_merge('pane', self.a2, self.b, run)
+        noted(tmux_merge.move_pane(self.a2, self.b, run))
+        return stack
+
+    def test_undo_and_redo_restore_and_clear_the_coordinator_and_stack_root(self):
+        stack = self.move_stack_root_and_coordinator()
+        run = self.run_tmux
+
+        self.assertEqual(self.show(self.a2, '#{@tether_role}'), '')
+        self.assertNotIn('root', groups.read(self.a, run)[0])
+        self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+        self.assertEqual(self.show(self.a2, '#{session_id}|#{@group}|#{@tether_role}'),
+                         f'{self.a}|{stack["id"]}|coordinator-needs')
+        self.assertEqual(groups.read(self.a, run), [stack])
+
+        self.assertEqual(self.redo(confirmed=True)['status'], 'done')
+        self.assertEqual(self.show(self.a2, '#{session_id}|#{@group}|#{@tether_role}'), f'{self.b}||')
+        self.assertNotIn('root', groups.read(self.a, run)[0])
+        self.assertEqual(self.show(self.b1, '#{@tether_role}'), 'coordinator-off')
+
+    def test_undo_preserves_a_new_coordinator_and_stack_root(self):
+        stack = self.move_stack_root_and_coordinator()
+        self.tmux('set-option', '-p', '-t', self.a1, '@tether_role', 'coordinator')
+        new_stack = dict(stack, root=self.a1)
+        with groups.LOCK():
+            groups.write(self.a, [new_stack], self.run_tmux)
+
+        self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+        self.assertEqual(self.show(self.a2, '#{session_id}|#{@group}|#{@tether_role}'), f'{self.a}|{stack["id"]}|')
+        self.assertEqual(self.show(self.a1, '#{@tether_role}'), 'coordinator')
+        self.assertEqual(groups.read(self.a, self.run_tmux), [new_stack])
+
     def test_moved_tab_goes_back_after_a_yes(self):
         import tmux_merge
         run = self.run_tmux
@@ -768,6 +806,33 @@ class MergeTests(TmuxBase):
         self.assertNotEqual(self.show(self.a2, '#{session_id}'), self.a)
         self.undo(confirmed=True)
         self.assertEqual(self.show(self.a2, '#{session_id}'), self.a)
+
+    def test_undo_restores_roots_of_an_unstacked_tab_and_redo_refreshes_them(self):
+        run = self.run_tmux
+        for kind, count in (('break', 1), ('break', 2), ('pane', 2)):
+            with self.subTest(kind=kind, stacks=count):
+                source = self.new(f'{kind}-{count}')
+                self.tmux('new-window', '-t', source + ':', '-c', self.folder)
+                _, pane = self.panes(source)
+                target = self.b if kind == 'pane' else None
+                stacks = [groups.create(source, f'Stack {i}', run, auto=True, root=pane) for i in range(count)]
+                self.assertEqual(self.label(pane), '')
+                noted = undo.record_merge(kind, pane, target, run)
+                noted(tmux_merge.merge(kind, pane, target, run))
+                self.assertNotEqual(self.show(pane, '#{session_id}'), source)
+                self.assertEqual([stack.get('root') for stack in groups.read(source, run)], [None] * count)
+                self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+                self.assertEqual(self.show(pane, '#{session_id}|#{@group}'), f'{source}|')
+                self.assertEqual(groups.read(source, run), stacks)
+
+                with groups.LOCK():
+                    stacks[0].pop('root')
+                    groups.write(source, stacks, run)
+                stacks.append(groups.create(source, 'New stack', run, auto=True, root=pane))
+                self.assertEqual(self.redo(confirmed=True)['status'], 'done')
+                self.assertEqual([stack.get('root') for stack in groups.read(source, run)], [None] * len(stacks))
+                self.assertEqual(self.undo(confirmed=True)['status'], 'done')
+                self.assertEqual(groups.read(source, run), stacks)
 
     def test_redo_of_breakout_returns_its_warning(self):
         run = self.run_tmux
