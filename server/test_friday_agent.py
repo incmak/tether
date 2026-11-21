@@ -2910,7 +2910,10 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                       'It asks whether or not the request was approved.',
                       # Review 8: the exemption covers the whole sentence.
                       'It asks whether the installation is complete and the request was approved.',
-                      'It asks whether, to your knowledge, the request was approved.'):
+                      'It asks whether, to your knowledge, the request was approved.',
+                      # Review 9: every question word, not only whether/if.
+                      'It asks why the request was denied.', 'It asks when the request was approved.',
+                      'It wants to know who approved it.'):
             with self.subTest(reply=reply), patch('sys.stderr'):
                 _, frames = await self.tool_flow(history, [([reply], 1, [])], proposal)
                 self.assertEqual([f.text for f in frames if isinstance(f, self.rt.LLMTextFrame)], [reply])

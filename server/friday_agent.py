@@ -566,11 +566,11 @@ def declined_claim(text):
     # A claim has a claim shape: a sentence that opens with the decision ("Denied because it was not
     # safe.", "Okay, denied.") or a subject that did it ("I have denied it", "It's rejected").
     # "It wants the installation approved" describes the request and is kept.
-    # "It asks whether, to your knowledge, the request was approved" reports a question, not a decision:
-    # "whether" or "if" earlier in the same sentence exempts the claim. Dropping a real answer costs more
+    # "It asks whether (why, when ...) the request was approved" reports a question, not a decision:
+    # any question word earlier in the same sentence exempts the claim. Dropping a real answer costs more
     # than a rare claim hidden behind an "if" in one sentence.
     text = text.replace('\u2019', "'")
-    return any(not re.search(r'\b(?:whether|if)\b', re.split(r'[.!?;]', text[:match.end()])[-1], re.I)
+    return any(not re.search(r'\b(?:whether|if|why|when|how|what|who|whom|whose|which|where)\b', re.split(r'[.!?;]', text[:match.end()])[-1], re.I)
                for match in DECISION_CLAIM.finditer(text))
 
 
