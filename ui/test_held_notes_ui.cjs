@@ -1,6 +1,6 @@
 // The held-notes sheet (src/HeldNotes.tsx with src/Live.css) in a real browser, on a fixture page with no app or
 // server: an armed button disarms when the list changes (after a 409 and after a refresh), "Clear topic" posts
-// {id, count}, focus never hides under the sheet's top row (WCAG 2.4.11), and an emptied list closes the sheet so a
+// {id, count, texts}, focus never hides under the sheet's top row (WCAG 2.4.11), and an emptied list closes the sheet so a
 // later note shows the chip, not an open sheet. No terminal and no real note is touched.
 // Run: cd ui && node test_held_notes_ui.cjs
 const fs = require('node:fs')
@@ -77,6 +77,7 @@ async function main() {
     await page.getByRole('button', { name: 'Remove note 1' }).first().click()
     check('a first tap arms the note', await armedKeys() === 1)
     await setListing([two[0], topic('T2', 'Blog ideas', [...two[1].notes, note('Second blog note.', 4)])])
+    await page.locator('.live-held-sheet li').nth(3).waitFor()  // React has drawn the new list.
     check('a list change after a refresh disarms', await armedKeys() === 0)
     await page.getByRole('button', { name: 'Remove note 1' }).first().click()
     check('one tap after a refresh posts nothing', (await calls()).length === 0, JSON.stringify(await calls()))

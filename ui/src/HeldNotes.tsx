@@ -35,7 +35,7 @@ export function HeldNotes({ api, topics, refresh, onEmpty }: Props) {
   // Any change to the list disarms: a second tap must confirm what the user saw armed.
   const armed = arming.shape === shape ? arming.key : ''
   // An empty list closes the sheet, so a later note shows the chip, not an open sheet.
-  if (open && !topics.length) setOpen(false)
+  if (open && !topics.length) { setOpen(false); setProblem('') }
 
   useLayoutEffect(() => {
     if (busy) return
