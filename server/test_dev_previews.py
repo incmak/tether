@@ -1173,7 +1173,8 @@ class ProxyTests(unittest.TestCase):
             os.listdir('/proc/%d/fd' % stranger)
         self.assertEqual(dev_previews._stat(stranger)[1], dev_previews._stat(os.getpid())[1])
         inode = os.fstat(self.upstream.socket.fileno()).st_ino
-        self.assertEqual(dev_previews.socket_holders([inode], os.getuid()), ({}, True))  # the trap this test avoids
+        trap = dev_previews.socket_holders([inode], os.getuid(), only=(fixture_tree() | {stranger}).__contains__)
+        self.assertEqual(trap, ({}, True))  # the trap this test avoids: the stranger hides the test server's socket
         self.sign_in()
         self.assertEqual(self.request('GET', '/')[0].status, 200)
 
