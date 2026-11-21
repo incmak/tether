@@ -34,6 +34,12 @@ def menu_row(screen, entry):
     return {'state': 'Input needed', 'attention': prompt}
 
 
+def seen(frame, entry):
+    """The ticked rows the Dock shows for this frame: Done sends them as its labels."""
+    menu = terminal_input.verified_numbered_menu(entry, frame)
+    return [terminal_input.picker_row_key(item) for item in menu['options'] if item['kind'] == 'option' and item.get('checked')]
+
+
 class FakeTerminal:
     def __init__(self, screen):
         self.screen = screen
@@ -218,9 +224,11 @@ class HelperAnswerTests(unittest.TestCase):
         ask['message']['content'][0]['input']['questions'] = [question]
         self.transcript_records(ask)
 
-    def done(self, run, revision):
+    def done(self, run, revision, labels=None):
+        labels = seen(run.screen, self.entry) if labels is None else labels
         with patch.object(terminal_input, 'verify'):
-            return self.request_choice('pick', run, then='Enter', revision=revision, heading='Which features do you want?')
+            return self.request_choice('pick', run, then='Enter', revision=revision, labels=labels,
+                                       heading='Which features do you want?')
 
     def test_done_reaches_submit_and_confirms_at_each_width(self):
         self.submit_ask()
@@ -255,16 +263,24 @@ class HelperAnswerTests(unittest.TestCase):
                 self.assertEqual(self.done(run, revision)[0], 200)
                 self.assertEqual(run.writes, move + ['Enter', 'Enter'])
 
-    def test_done_refuses_a_different_review_answer_and_goes_back(self):
+    def test_done_sends_nothing_more_after_a_review_that_does_not_verify(self):
         self.submit_ask()
         submit = self.submit_fixture('on-submit-22')
         revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
         review = self.submit_fixture('review-22').replace('→ Search', '→ Export')
-        run = ScriptedTerminal(submit, [('Enter', review), ('Left', self.submit_fixture('back-22'))])
-        status, response = self.done(run, revision)
-        self.assertEqual(status, 409)
-        self.assertIn('Open the terminal to check', response['error'])
-        self.assertEqual(run.writes, ['Enter', 'Left'])
+        wide = self.submit_fixture('after-submit')
+        review_question = wide.replace('● Which features do you want?', '● Which fonts do you want?')
+        unreadable = wide.replace('→ Search', '→')
+        self.assertNotIn(review_question, (wide,))
+        self.assertNotEqual(unreadable, wide)
+        for name, start, frame in (('answer', submit, review), ('question', self.submit_fixture('on-submit'), review_question),
+                                   ('unreadable', self.submit_fixture('on-submit'), unreadable)):
+            with self.subTest(name=name):
+                run = ScriptedTerminal(start, [('Enter', frame)])
+                status, response = self.done(run, revision)
+                self.assertEqual(status, 409)
+                self.assertIn('Open the terminal to check', response['error'])
+                self.assertEqual(run.writes, ['Enter'])
 
     def test_done_refuses_a_missing_or_unfamiliar_review(self):
         self.submit_ask()
@@ -284,11 +300,27 @@ class HelperAnswerTests(unittest.TestCase):
         submit = self.submit_fixture('on-submit').replace('[ ] Sync', '[✔] Sync')
         review = self.submit_fixture('after-submit')
         revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
-        for answer, status, key in (('Sync, Search', 200, 'Enter'), ('Sync, Search, Search', 409, 'Left')):
+        for answer, status, keys in (('Sync, Search', 200, ['Enter', 'Enter']), ('Sync, Search, Search', 409, ['Enter'])):
             with self.subTest(answer=answer):
-                run = ScriptedTerminal(submit, [('Enter', review.replace('→ Search', '→ ' + answer)), (key, '')])
+                run = ScriptedTerminal(submit, [('Enter', review.replace('→ Search', '→ ' + answer)), ('Enter', '')])
                 self.assertEqual(self.done(run, revision)[0], status)
-                self.assertEqual(run.writes, ['Enter', key])
+                self.assertEqual(run.writes, keys)
+
+    def test_done_refuses_when_the_ticks_changed_after_the_user_looked(self):
+        self.submit_ask()
+        submit = self.submit_fixture('on-submit')
+        revision = menu_row(self.submit_fixture('ticked'), self.entry)['attention']['menu_verified']
+        moved = submit.replace('[✔] Search', '[ ] Search').replace('[ ] Export', '[✔] Export')
+        self.assertEqual(menu_row(moved, self.entry)['attention']['menu_verified'], revision)
+        for labels in (['Search\nFind things'], [], None):
+            with self.subTest(labels=labels):
+                run = ScriptedTerminal(moved)
+                with patch.object(terminal_input, 'verify'):
+                    body = {} if labels is None else {'labels': labels}
+                    status, response = self.request_choice('pick', run, then='Enter', revision=revision,
+                                                           heading='Which features do you want?', **body)
+                self.assertEqual(status, 409)
+                self.assertEqual(run.writes, [])
 
     def test_done_refuses_missing_control_and_space_refuses_control(self):
         self.submit_ask()
@@ -320,7 +352,8 @@ class HelperAnswerTests(unittest.TestCase):
                 with self.subTest(start=start, status=status), patch.object(terminal_input, 'verify'):
                     steps = [(key, focus_multi(screen, row)) for key, row in directions] + [('Enter', frame)]
                     run = ScriptedTerminal(focus_multi(screen, start), steps)
-                    code, response = self.request_choice('pick', run, then='Enter', revision=revision, heading='Which features?')
+                    code, response = self.request_choice('pick', run, then='Enter', revision=revision, heading='Which features?',
+                                                         labels=seen(screen, self.entry))
                     self.assertEqual(code, status)
                     if code == 409:
                         self.assertIn('Open the terminal to check', response['error'])
@@ -350,7 +383,8 @@ class HelperAnswerTests(unittest.TestCase):
         steps = [('Down', frame) for frame in frames[1:]] + after
         run = ScriptedTerminal(frames[0], steps)
         with patch.object(terminal_input, 'verify'):
-            result = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading)
+            result = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading,
+                                         labels=seen(frames[0], self.entry))
         return result, run.writes
 
     def test_live_two_question_done_goes_next_then_submits_at_120_and_44(self):
@@ -377,22 +411,23 @@ class HelperAnswerTests(unittest.TestCase):
                 revision = menu_row(frame, self.entry)['attention']['menu_verified']
                 run = ScriptedTerminal(frame)
                 with patch.object(terminal_input, 'verify'):
-                    status, response = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading)
+                    status, response = self.request_choice('pick', run, then='Enter', revision=revision, heading=heading,
+                                                           labels=[])
                 self.assertEqual((status, response), (409, {'error': terminal_input.NO_TICKS}))
                 self.assertEqual(run.writes, [])
 
-    def test_live_unanswered_review_goes_back(self):
-        """Ticks on this question but a review that warns "Some questions are unanswered": no Submit, one Left."""
+    def test_live_unanswered_review_sends_nothing_more(self):
+        """Ticks on this question but a review that warns "Some questions are unanswered": no further key."""
         self.two_question_ask()
         question = self.live2('44-q2-05')
         revision = menu_row(question, self.entry)['attention']['menu_verified']
-        run = ScriptedTerminal(question, [('Enter', self.live2('44-q2-none-05')), ('Left', self.live2('44-q2-02'))])
+        run = ScriptedTerminal(question, [('Enter', self.live2('44-q2-none-05'))])
         with patch.object(terminal_input, 'verify'):
-            status, response = self.request_choice('pick', run, then='Enter', revision=revision,
+            status, response = self.request_choice('pick', run, then='Enter', revision=revision, labels=['SVG\nVector'],
                                                    heading='Which formats do you want?')
         self.assertEqual(status, 409)
         self.assertIn('Open the terminal to check', response['error'])
-        self.assertEqual(run.writes, ['Enter', 'Left'])
+        self.assertEqual(run.writes, ['Enter'])
 
     def test_live_truncated_question_tabs_give_no_revision(self):
         """At 22 columns Claude 2.1.330 shortens the tabs to '☐ … ☐ F…': the question is not verified."""

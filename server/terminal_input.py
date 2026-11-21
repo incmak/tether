@@ -768,7 +768,7 @@ def _finish_claude_multi(entry, menu, press, run, sleep):
                 and all(answer for _, answer in blocks) and _review_ticks_match(blocks[index][1], ticks)):
             press('Enter')
             return
-        press('Left')
+    # The screen after Enter did not verify: send nothing more. The user checks it in the terminal.
     raise MenuChanged(menu_refusal(entry, check=True))
 
 
@@ -784,6 +784,9 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
     """Move the cursor of a picker to one row, then press `then`: Enter chooses the row, Space ticks it in a
     multi-select list, and Up on the first row or Down on the last row shows the rows past the screen.
 
+    Done (`then` Enter, no row) submits the ticked boxes of a numbered multi-select question. Its `labels` are the
+    ticked rows the user saw; the boxes on screen must be the same.
+
     `labels` is the whole list the user saw (picker_row_key of each row) and `heading` the name of that list. The list
     on screen must match both before the first key and after each move, so the row index names one entry, never a
     look-alike, and never a row of another list. Numbered multi-select writes also bind the outstanding ask by
@@ -793,6 +796,8 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
         raise ValueError('Invalid key.')
     submit = then == 'Enter' and row is None
     if then == 'Enter' and submit != (revision is not None):
+        raise MenuChanged(menu_refusal(entry))
+    if submit and (not isinstance(labels, list) or not all(isinstance(label, str) for label in labels)):
         raise MenuChanged(menu_refusal(entry))
     if not submit and (not isinstance(labels, list) or not labels or not all(isinstance(label, str) for label in labels)
                        or not isinstance(row, int) or isinstance(row, bool) or not 0 <= row < len(labels)
@@ -821,9 +826,13 @@ def picker_choose(entry, row, labels, then='Enter', run=subprocess.run, sleep=ti
             if submit:
                 if not control:
                     raise MenuChanged(menu_refusal(entry))
-                if not any(item['kind'] == 'option' and item.get('checked') for item in items):
+                ticked = [picker_row_key(item) for item in items if item['kind'] == 'option' and item.get('checked')]
+                if not ticked:
                     # Claude would go on, or show a review with "Some questions are unanswered".
                     raise MenuChanged(NO_TICKS)
+                if sorted(ticked) != sorted(labels):
+                    # The ticks changed in the terminal after the user looked: the revision names the question only.
+                    raise MenuChanged(menu_refusal(entry))
                 target = len(items) - 1  # the unnumbered control sits between the free and chat rows
             elif (menu['question'] != heading or [picker_row_key(item) for item in items] != labels
                   or items[row]['kind'] != 'option'):

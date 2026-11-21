@@ -82,7 +82,7 @@ export function ChoiceDock({ approval, attention, plan, agent, disabled, onChoos
   const options = (approval ? (approval.actionable ? approval.options : undefined) : attention?.options) ?? []
   const done = async () => {
     if (numberedMulti) {
-      if (pickRevision) await onPick?.(undefined, undefined, 'Enter', pickRevision)
+      if (pickRevision) await onPick?.(undefined, options.filter(option => checkedById.get(option.id)).map(pickRowKey), 'Enter', pickRevision)
       return
     }
     const rows = picker?.items ?? []

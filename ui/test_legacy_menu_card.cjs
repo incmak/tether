@@ -1,6 +1,6 @@
 // Run from ui/: node test_legacy_menu_card.cjs. The legacy chat (/mobile/chat/, server/index.html + server/app.js).
 // A card answer names the question it answers: it posts /menu with the verified revision, never a bare /key digit.
-// An unverified question, or a multi-select question, shows no card, only the raw keys.
+// An unverified question, or a multi-select question, shows no card and no raw keys: only Open terminal.
 const { strict: assert } = require('node:assert')
 const fs = require('node:fs/promises')
 const path = require('node:path')
@@ -71,13 +71,21 @@ async function main() {
           assert.equal(new URL(request.url()).pathname, '/mobile/api/menu')
           assert.deepEqual(request.postDataJSON(), { session: pane.id, thread: pane.thread, choice: 2, label: 'WebP', revision })
         } else {
-          assert(await page.locator('#attention-keys button[data-key="1"]').isVisible(), `${current.name}: raw keys stay`)
+          // No raw key on a question nobody verified: the interactive terminal instead.
+          assert.equal(await page.locator('#attention-keys button:visible').count(), 0, `${current.name}: no raw keys`)
+          assert.equal(await page.locator('#attention-type').isVisible(), false, `${current.name}: no typing`)
+          const open = page.getByRole('button', { name: 'Open terminal', exact: true })
+          await open.click()
+          const frame = page.locator('#model-frame')
+          await page.waitForFunction(() => document.querySelector('#model-frame')?.getAttribute('src')?.includes('/terminal/live/'))
+          assert.equal(new URL(await frame.getAttribute('src'), origin).searchParams.get('arg'), pane.tmux_session)
+          await page.locator('#close-model').click()
         }
-        assert.equal(writes.filter(({ endpoint }) => endpoint === 'key').length, 0)
+        assert.equal(writes.filter(({ endpoint }) => ['key', 'type'].includes(endpoint)).length, 0)
       }
     }
     assert.deepEqual(errors, [])
-    console.log('Legacy card: verified one-choice answers post /menu with the revision; unverified and multi-select show raw keys only, at 320 px and 1280 px.')
+    console.log('Legacy card: verified one-choice answers post /menu with the revision; unverified and multi-select offer only the terminal, at 320 px and 1280 px.')
   } finally { await browser.close() }
 }
 

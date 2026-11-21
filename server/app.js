@@ -157,6 +157,14 @@ function updateAttention(value) {
   const choices = !info && !value.ask_current?.multi && typeof value.menu_verified === 'string' && answers.length > 1;
   panel.classList.toggle('as-card', choices);
   card.hidden = !choices;
+  // A question the server did not verify, or a multi-select one: a raw key would land on a row nobody checked.
+  // Offer the interactive terminal instead, where the user sees the rows.
+  const terminalOnly = !info && value.reason === 'menu' && !choices;
+  document.querySelector('#attention-terminal').hidden = !terminalOnly;
+  if (terminalOnly) {
+    document.querySelector('#attention-keys').style.display = 'none';
+    document.querySelector('#attention-type').style.display = 'none';
+  }
   // Show only the keys that mean something for this screen: a card's options replace the arrows and numbers.
   const numbers = new Set([...value.text.matchAll(/^\s*[>❯›]?\s*(\d)[.)]\s/gm)].map(match => match[1]));
   const yesNo = /\(y\/n\)|\[y\/n\]|\(yes\/no\)|\by\/n\b/i.test(value.text);
@@ -195,6 +203,9 @@ async function sendTerminalInput(path, payload) {
     setTimeout(refresh, 400);
   } catch (failure) { error.textContent = failure.message; }
 }
+document.querySelector('#attention-terminal').addEventListener('click', () => {
+  openModelPicker(chatTabs().find(tab => tab.dataset.session === selected)?.dataset.tmuxSession, selected, thread);
+});
 for (const button of document.querySelectorAll('#attention-keys button'))
   button.addEventListener('click', () => sendTerminalInput('/mobile/api/key', {key: button.dataset.key}));
 document.querySelector('#attention-type').addEventListener('submit', event => {
