@@ -47,6 +47,18 @@ console.log('Bad entries drop out, and Live still finds the last reply')
 
 const valid = [ask, reply]
 const data = { messages: valid, state: 'Idle' }
+const tabs = [{ pane: '%7', session: '$1', thread: 'chat' }, { pane: '%8', session: '$1', thread: null }]
+const trusted = { ...ask, source: 'tether', prompt: 'status', tabs }
+const cleanStatus = item => chatMessages({ messages: [item] })[0]
+assert.equal(cleanStatus(trusted), trusted)
+const legacy = { ...ask, legacy: true }
+assert.equal(cleanStatus(legacy), legacy)
+same(cleanStatus({ ...ask, legacy: 'true' }), ask, 'only a server boolean enables legacy display')
+for (const malformed of [null, {}, [null], [tabs[0], { ...tabs[1], pane: 8 }], [{ pane: '%7', session: '$1' }], [{ ...tabs[0], session: null }]]) {
+  const { tabs: omitted, ...rest } = cleanStatus({ ...trusted, tabs: malformed })
+  assert.equal(omitted, undefined)
+  same(rest, { ...ask, source: 'tether', prompt: 'status' }, 'only malformed tabs are dropped')
+}
 assert.equal(chatMessages(data), valid, 'A valid list comes back as the same array')
 assert.equal(cleanChat(data), data, 'Valid data comes back as the same object')
 console.log('Valid chat data keeps its identity, so memos and cache checks still match')

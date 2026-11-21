@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { History, Redo2, Undo2, X } from 'lucide-react'
 import { UNDO_EVENT, errorText } from './api'
-import type { Api, UndoStep } from './api'
+import type { Api, RestartOffer, SessionsData, UndoStep } from './api'
 import { useModal } from './hooks'
 import { IS_MAC } from './keys'
 import { PREFS_PULL_EVENT } from './prefs'
@@ -15,12 +15,23 @@ import { UNDO_RUN_EVENT, setUndoNext } from './undoState'
 type Direction = 'undo' | 'redo'
 interface Done { status: 'done'; id: string; label: string; direction: Direction; warnings?: string[] }
 interface Ask { status: 'confirm'; id: string; label: string; direction: Direction; effects: string[]; token: string; changed?: boolean }
+// A real chat id (server/terminal_input.py UUID); a new chat has none until its first message.
+const CHAT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export interface UndoEntry {
   id: string; at: number; who: { by: 'user' | 'tether' | 'agent'; tab?: string }; label: string
   state: 'done' | 'undone'; redo: boolean; undone_at: number | null; why?: string | null
 }
 interface HistoryData { entries: UndoEntry[]; next_undo: string | null; next_redo: string | null; next_undo_label: string | null; next_redo_label: string | null }
-interface Toast { text: string; action?: { label: string; run: () => void }; at: number }
+interface Action { label: string; run: () => void }
+/** restart: the toast asks for a tab restart. It stays until the person acts or dismisses it, and lays out on two rows. */
+interface Toast { text: string; action?: Action; second?: Action; at: number; restart?: boolean }
+interface Restarted { started: boolean; warning?: string }
+
+/** The toast text after a move to a session with another project (spec-move-chats §5). */
+function restartText(offer: RestartOffer) {
+  return `Moved to ${offer.session}. Restart this tab to load project ${offer.name}.`
+}
 
 /** The direction for a key press, or null when the key belongs to text, the terminal or a sheet. */
 export function undoKey(event: KeyboardEvent): Direction | null {
@@ -139,16 +150,53 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
   }, [])
   useEffect(() => { again.current = run }, [run])
 
+  const retry = useRef<(offer: RestartOffer) => Promise<void>>(async () => {})
+  const restart = useCallback(async (offer: RestartOffer) => {
+    if (running.current) return
+    running.current = true
+    setBusy(true)
+    const again = { label: 'Restart', run: () => void retry.current(offer) }
+    try {
+      // A new chat gets its id with its first message, after the move: read the tab's chat now. Until then
+      // the session list holds a "pending-…" placeholder, which is not a chat id.
+      let thread = offer.thread
+      if (!thread || !CHAT_ID.test(thread)) {
+        const tab = (await latest.current.api<SessionsData>('sessions')).sessions.find(item => item.id === offer.pane)
+        if (!tab) { setToast({ text: 'That tab has closed.', at: Date.now() }); return }
+        thread = tab.thread
+      }
+      if (!thread || !CHAT_ID.test(thread)) {
+        setToast({ text: `Send this tab's first message, then restart it to load project ${offer.name}.`, at: Date.now(), action: again, restart: true })
+        return
+      }
+      const result = await latest.current.api<Restarted>('restart-tab', { pane: offer.pane, thread, project: offer.project, session: offer.session },
+        undefined, undefined, 20000)
+      setToast({ text: result.started ? `Restarted. The tab now loads project ${offer.name}.` : result.warning || 'The tab restarted. Open it to check.', at: Date.now() })
+      latest.current.onChanged()
+    } catch (error) {
+      // A refusal (busy agent, unsent draft) keeps the offer, so the person can try again once the tab is ready.
+      setToast({ text: errorText(error), at: Date.now(), action: again, restart: true })
+    } finally {
+      running.current = false
+      setBusy(false)
+    }
+  }, [])
+  useEffect(() => { retry.current = restart }, [restart])
+
   // A step this page (or a request it made) recorded: offer Undo for it.
   useEffect(() => {
     const onStep = (event: Event) => {
       const step = (event as CustomEvent<UndoStep>).detail
-      setToast({ text: step.label, at: Date.now(), action: { label: 'Undo', run: () => void run('undo', step.id) } })
+      const undo = step.id ? { label: 'Undo', run: () => void run('undo', step.id) } : undefined
+      const offer = step.restart
+      if (offer) {
+        setToast({ text: restartText(offer), at: Date.now(), action: { label: 'Restart', run: () => void restart(offer) }, second: undo, restart: true })
+      } else if (undo) setToast({ text: step.label, at: Date.now(), action: undo })
       setVersion(value => value + 1)
     }
     window.addEventListener(UNDO_EVENT, onStep)
     return () => window.removeEventListener(UNDO_EVENT, onStep)
-  }, [run])
+  }, [run, restart])
 
   // The Undo and Redo buttons (Rail, the chat header's ⋯ menu) and the command menu send their press here.
   useEffect(() => {
@@ -189,17 +237,18 @@ export function UndoCenter({ api, onChanged, history, onHistory }: { api: Api; o
   // The toast stays while the pointer or focus is on it (WCAG 2.2.1: enough time to reach its button).
   const [held, setHeld] = useState(false)
   useEffect(() => {
-    if (!toast || held) return
+    if (!toast || held || toast.restart) return
     const timer = setTimeout(() => setToast(null), TOAST_MS)
     return () => clearTimeout(timer)
   }, [toast, held])
 
   return <>
     <div className="undo-toast-region" role="status" aria-live="polite" aria-atomic="true">
-      {toast && <div key={toast.at} className="toast undo-toast" onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}
+      {toast && <div key={toast.at} className={toast.restart ? 'toast undo-toast undo-toast-restart' : 'toast undo-toast'} onPointerEnter={() => setHeld(true)} onPointerLeave={() => setHeld(false)}
         onFocus={() => setHeld(true)} onBlur={() => setHeld(false)}>
         <span className="undo-toast-text">{toast.text}</span>
-        {toast.action && <button type="button" className="undo-toast-action" disabled={busy} onClick={() => { const action = toast.action!; setHeld(false); action.run() }}>{toast.action.label}</button>}
+        {toast.action && <button type="button" className="undo-toast-action" disabled={busy} onClick={() => { const action = toast.action!; setHeld(false); action.run() }}>{busy && toast.action.label === 'Restart' ? 'Restarting…' : toast.action.label}</button>}
+        {toast.second && <button type="button" className="undo-toast-action" disabled={busy} onClick={() => { const action = toast.second!; setHeld(false); action.run() }}>{toast.second.label}</button>}
         <button type="button" className="undo-toast-more" aria-label="Undo history" title="Undo history" onClick={() => { setHeld(false); setToast(null); onHistory(true) }}><History size={16} aria-hidden="true" /></button>
         <button type="button" className="icon-button undo-toast-close" aria-label="Dismiss" onClick={() => { setHeld(false); setToast(null) }}><X size={16} aria-hidden="true" /></button>
       </div>}

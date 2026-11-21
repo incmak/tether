@@ -696,6 +696,20 @@ def launch(agent, args):
     os.execv(real, [agent, *final])
 
 
+MOVED_NOTE = ('This tab moved here from another project. Until it restarts, it may not have file access to this '
+              'project folder.')
+
+
+def live_project(pid):
+    """The project of the session the pane is in now, else pid (outside tmux, or any failure). The hook command holds
+    the project the tab started in; a pane moved to another session (tmux_merge.py) must get the new project's notes
+    at its next start, clear or compact (B326)."""
+    try:
+        return current_project() or pid
+    except Exception:  # noqa: BLE001 - a tmux failure keeps the project the tab started with
+        return pid
+
+
 def hook(pid):
     try:
         sys.stdin.read()
@@ -705,9 +719,14 @@ def hook(pid):
         sys.path.insert(0, str(HERE))
         import backlog
         import projects
+        live = live_project(pid)
         group = current_group()
-        text = projects.render(pid, 'claude', group=group, backlog_project=backlog.project_name())
-        record_revision(pid, group)
+        text = projects.render(live, 'claude', group=group, backlog_project=backlog.project_name())
+        if live == pid:
+            record_revision(pid, group)
+        elif text:
+            # The stale mark stays (projects.marks): file access still holds the old project folder until a restart.
+            text += '\n\n' + MOVED_NOTE
     except Exception:  # noqa: BLE001 - a hook must never stop a session
         return
     if text:

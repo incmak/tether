@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+import injected_prompts
 import paths
 from notification_priority import classify
 
@@ -364,7 +365,7 @@ class Notifier:
             record['worked'] = None
         if self.watching(entry['id']) or entry['id'] in self.muted():
             return
-        reply, records = '', []
+        reply, records, unknown = '', [], False
         attention = status.get('attention') if isinstance(status.get('attention'), dict) else {}
         if kind == 'done' or (kind == 'input' and not (attention.get('question') or attention.get('text'))):
             try:
@@ -372,9 +373,11 @@ class Notifier:
                     reply, records = self.context(entry)
                 else:
                     reply = self.reply(entry)
+            except injected_prompts.ReceiptsUnreadable:
+                unknown = True  # An unreadable prompt source counts as background. The notification is still sent.
             except Exception:  # A broken transcript must not prevent delivery.
                 pass
-        priority, preview = classify(kind, entry.get('agent'), records, reply)
+        priority, preview = classify(kind, entry.get('agent'), records, reply, entry=entry, source_unknown=unknown)
         if kind == 'done' and priority == 'important' and self.finished_low(entry):
             priority = 'low'
         if priority != 'urgent' and self.quiet(entry):

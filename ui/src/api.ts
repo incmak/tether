@@ -140,10 +140,15 @@ export interface ToolArtifact { url: string; path: string; title: string }
 export interface ToolSummary { id: string; name: string; title: string; is_error: boolean; status: 'pending' | 'complete'; images?: number; description?: string; started?: string; ended?: string; artifact?: ToolArtifact }
 export interface ToolDetail extends ToolSummary { detail: string; format: 'text' | 'diff'; truncated: boolean }
 export interface AdvisorCall { id: string; model?: string; status: 'pending' | 'answered' | 'error' | 'unknown'; error?: string; result_type?: string; started?: string; ended?: string }
+export type StatusTab = { pane: string; session: string; thread: string | null }
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  source?: 'tether'
+  legacy?: true
+  prompt?: 'status' | 'rules' | 'review'
+  tabs?: StatusTab[]
   kind?: 'actions' | 'advisor' | 'terminal' | 'notice' | 'peer' | 'watch' | 'side'
   quiet?: string
   watch?: string
@@ -210,6 +215,13 @@ const cleanAdvisor = (item: unknown) => {
   return rest
 }
 const isStringList = (item: unknown) => Array.isArray(item) && item.every(entry => typeof entry === 'string')
+function isStatusTabs(item: unknown): item is StatusTab[] {
+  if (!Array.isArray(item)) return false
+  for (const tab of item) {
+    if (!isObject(tab) || !hasStrings(tab, ['pane', 'session']) || (tab.thread !== null && typeof tab.thread !== 'string')) return false
+  }
+  return true
+}
 /** The message itself when every field it has is the right type; a copy without the wrong fields when it has a role and
  *  text; else null. Bad tools drop out of the tool list, and bad members out of the member list. */
 const cleanMessage = (item: unknown): ChatMessage | null => {
@@ -217,6 +229,10 @@ const cleanMessage = (item: unknown): ChatMessage | null => {
   let copy: Record<string, unknown> | null = null
   const set = (key: string, value: unknown) => { copy ??= { ...item }; if (value === undefined) delete copy[key]; else copy[key] = value }
   for (const [key, type] of Object.entries(MESSAGE_FIELDS)) if (item[key] !== undefined && typeof item[key] !== type) set(key, undefined)
+  if (item.source !== undefined && item.source !== 'tether') set('source', undefined)
+  if (item.legacy !== undefined && item.legacy !== true) set('legacy', undefined)
+  if (item.prompt !== undefined && item.prompt !== 'status' && item.prompt !== 'rules' && item.prompt !== 'review') set('prompt', undefined)
+  if (item.tabs !== undefined && !isStatusTabs(item.tabs)) set('tabs', undefined)
   const advisor = cleanAdvisor(item.advisor)
   if (advisor !== item.advisor) set('advisor', advisor)
   if (item.tools !== undefined) {
@@ -369,20 +385,32 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
     if (response.ok && path.split('?')[0] === 'footer') throw error
     return {}
   })
-  if (init.method !== 'GET') announceUndo(response)
+  if (init.method !== 'GET') announceUndo(response, data)
   if (!response.ok) throw new ApiError(response.status, data.error || `Request failed (${response.status}). Please try again.`, data.draft === true, data.approval === 'required')
   return data as T
 }
 
-/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx). */
-export interface UndoStep { id: string; label: string }
+/** A moved tab whose agent still runs with the project it started in (server tmux_merge.restart_info, B326). The page
+ *  offers Restart in the same toast; restart-tab starts the agent again in place so it loads the session's project. */
+export interface RestartOffer { pane: string; thread: string | null; project: string; name: string; session: string }
+/** A step the server recorded in the undo history (undo_api.headers): the page offers Undo in a toast (Undo.tsx).
+ *  id is '' when a move needs a restart but the server recorded no undo step. */
+export interface UndoStep { id: string; label: string; restart?: RestartOffer }
 export const UNDO_EVENT = 'tether-undo-step'
-function announceUndo(response: Response) {
-  const id = response.headers.get('X-Tether-Undo')
-  if (!id || typeof window === 'undefined') return
+function restartOffer(data: unknown): RestartOffer | undefined {
+  const offer = (data as { restart?: Partial<RestartOffer> } | null)?.restart
+  if (!offer || typeof offer.pane !== 'string' || typeof offer.name !== 'string' || typeof offer.session !== 'string') return undefined
+  return { pane: offer.pane, thread: typeof offer.thread === 'string' && offer.thread ? offer.thread : null,
+    project: typeof offer.project === 'string' ? offer.project : '', name: offer.name, session: offer.session }
+}
+function announceUndo(response: Response, data: unknown) {
+  if (typeof window === 'undefined') return
+  const id = response.headers.get('X-Tether-Undo') ?? ''
+  const restart = response.ok ? restartOffer(data) : undefined
+  if (!id && !restart) return
   let label = ''
   try { label = decodeURIComponent(response.headers.get('X-Tether-Undo-Label') ?? '') } catch { /* a bad label: use the plain one */ }
-  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step' } }))
+  window.dispatchEvent(new CustomEvent<UndoStep>(UNDO_EVENT, { detail: { id, label: label || 'Last step', ...(restart && { restart }) } }))
 }
 /** A GET that the server can answer with 304 Not Modified. It sends the ETag of the last answer and returns the last
  *  data again when nothing changed, so a poll of an unchanged list moves no body bytes. `last` holds the state per caller. */

@@ -5,6 +5,7 @@ import time
 
 import groups
 import helper_tabs
+import injected_prompts
 import task_tree
 import task_tree_api
 
@@ -32,7 +33,13 @@ class Closer:
             entry, options = tree.entries[member], tree.options.get(member)
             thread = helper_tabs.verified_thread(entry)
             version = activity(entry)
-            prompt_at = user_prompt_at(entry)
+            try:
+                prompt_at = user_prompt_at(entry)
+            except injected_prompts.ProvenanceUnknown as exc:
+                # is_done already refused an unknown prompt after the root's Done mark. Elsewhere it only marks change.
+                prompt_at = ('unknown', exc.at, exc.user_at)
+            except injected_prompts.ReceiptsUnreadable:
+                return None
             viewing, last_view = viewed(member)
             if (viewing or not thread or options is None or options.session != entry.get('tmux_session')
                     or entry.get('agent') not in ('claude', 'codex') or version is None):
@@ -103,7 +110,8 @@ class Closer:
 
 
 def clear_obsolete_marks(tree, lock, user_prompt_at):
-    """Forget marks once discovery proves a new conversation or a later user prompt."""
+    """Forget proven obsolete marks and return the panes whose prompt reads failed."""
+    unreadable = set()
     for pane, options in tree.options.items():
         if not (options.done or options.reopened):
             continue
@@ -112,8 +120,12 @@ def clear_obsolete_marks(tree, lock, user_prompt_at):
         if not thread:
             continue
         values = {}
-        if options.done and (options.done != thread or not task_tree.manual_mark(entry, options, user_prompt_at)):
-            values.update(done=None, done_at=None)
+        try:
+            if options.done and not task_tree.manual_mark(entry, options, user_prompt_at):
+                values.update(done=None, done_at=None)
+        except injected_prompts.ReceiptsUnreadable:
+            unreadable.add(pane)
+            continue
         if options.reopened and options.reopened != thread:
             values['reopened'] = None
         if values and lock.acquire(timeout=2):
@@ -123,3 +135,4 @@ def clear_obsolete_marks(tree, lock, user_prompt_at):
                     task_tree.set_marks(pane, tree.run, **values)
             finally:
                 lock.release()
+    return unreadable
