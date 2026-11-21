@@ -76,6 +76,7 @@ import friday_proxy
 import live_mode
 import attention
 import friday_notes
+import friday_drafts
 import reminders
 import task_sources
 import suggest_groups
@@ -1632,7 +1633,7 @@ def _end_review_turn(state, text=''):
     state['draft'] = ''
 
 
-def _review_record(state, index, record, agent):
+def _review_record(state, index, record, agent, *, request_key=None, clean=display_text):
     """Read prompts and final text from native records. Chat rows also contain activity and compact summaries."""
     messages = []
     if agent == 'claude':
@@ -1652,7 +1653,7 @@ def _review_record(state, index, record, agent):
                 return
         elif not agents.person_prompt(record):
             return
-        claude_consume(messages, index, record, display_text)
+        claude_consume(messages, index, record, clean)
     else:
         payload = record.get('payload') or {}
         kind = payload.get('type')
@@ -1676,9 +1677,14 @@ def _review_record(state, index, record, agent):
         text = message['text']
         if message['role'] == 'user':
             _end_review_turn(state)
-            if request := review_links.REQUEST_PATTERN.search(text):
+            if request_key is None:
+                match = review_links.REQUEST_PATTERN.search(text)
+                request = match[1] if match else None
+            else:
+                request = request_key(text)
+            if request is not None:
                 # A queued request may occur twice. The last delivery with the same id owns the reply.
-                current = state['current'] = request[1]
+                current = state['current'] = request
                 replies = state['replies']
                 replies.pop(current, None)
                 replies[current] = review_links.REPLY_PENDING
@@ -1702,6 +1708,45 @@ def review_reply(entry, request_id):
     return None
 
 
+def draft_reply_reader(entry, prompt):
+    """Read the reply of the exact prompt sent after this transcript position."""
+    path = entry['transcript']
+    try:
+        initial = os.stat(path)
+    except FileNotFoundError:
+        initial = None
+
+    def new_state():
+        return {'replies': {}, 'draft': ''}
+
+    def request_key(text):
+        return 'draft' if text == prompt else None
+
+    cached = (dict(inode=initial.st_ino, offset=initial.st_size, index=0, state=new_state())
+              if initial else None)
+    consume = partial(_review_record, agent='claude', request_key=request_key, clean=lambda text: text)
+
+    def read():
+        nonlocal cached
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            return None
+        if cached and (cached['inode'] != info.st_ino or cached['offset'] > info.st_size):
+            raise RuntimeError('The draft transcript changed.')
+        cached = history.advance(path, cached, new_state, consume, trim=False, info=info)
+        reply = cached['state']['replies'].get('draft')
+        return None if reply is review_links.REPLY_PENDING else reply
+
+    return read
+
+
+def friday_draft_runtime():
+    return friday_drafts.Runtime(entries=fresh_sessions, folder=tab_folder, status=fresh_status,
+                                 send=partial(send_text, held=True, exact=True), reply_reader=draft_reply_reader,
+                                 lock=SEND_LOCK, invalidate=forget_sessions, run=subprocess.run)
+
+
 def submit(message, config=None, *, user=False):
     config = config or settings()
     with SEND_LOCK:
@@ -1713,10 +1758,10 @@ def _require_writable(config):
         raise RuntimeError('Messaging is unavailable for this session. Use Termius.')
 
 
-def submit_locked(message, config, *, user=False):
+def submit_locked(message, config, *, user=False, exact=False):
     """submit for a caller that holds SEND_LOCK already."""
     _require_writable(config)
-    wrapped, marker = continuations.prepare(config, message)
+    wrapped, marker = (message, None) if exact else continuations.prepare(config, message)
     if marker:
         continuations.stage(config, wrapped, marker)
     started = time.time()
@@ -1750,20 +1795,27 @@ def task_user_delivery(entry):
         pass  # The recorded user send still invalidates the mark.
 
 
-def send_text(config, message, state=None, *, held=False, user=False):
+def send_text(config, message, state=None, *, held=False, user=False, exact=False):
     """The chat composer's guarded send to one pane. Returns 'queued' when the agent was working (it takes typed input
-    while busy; Tether keeps no queue of its own), else 'submitted'. held: the caller already holds SEND_LOCK."""
+    while busy; Tether keeps no queue of its own), else 'submitted'. held: the caller already holds SEND_LOCK.
+    exact: deliver an approved text without the composer's normalization or added context."""
     state = state or live_status(config)['state']
-    if config['agent'] == 'codex' and re.match(r'/ls(\s|$)', message.strip()):
+    if not exact and config['agent'] == 'codex' and re.match(r'/ls(\s|$)', message.strip()):
         message = '!' + message.strip()[1:]   # Codex has no /ls; "!ls" runs it in the shell
-    wants_reply = (config['agent'] == 'codex' and state != 'Working'  # while it works, new lines are its answer, not the command's
+    # Exact drafts read the transcript. A busy pane is still showing the current turn's output.
+    wants_reply = (not exact and config['agent'] == 'codex' and state != 'Working'
                    and re.match(r'^/[a-z][a-z0-9_-]*(?:\s|$)', message.strip(), re.I) and message.strip() != '/model')
     before = capture(config) if wants_reply else ''
-    note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
-    if held:
-        submit_locked(note + message.strip(), config, user=user)
+    if not exact:
+        note = '' if message.strip().startswith(('/', '!')) else shell_log.folder_note(config['id'], agent_folder(config))
+        message = note + message.strip()
+    if exact:
+        with nullcontext() if held else SEND_LOCK:
+            submit_locked(message, config, user=user, exact=True)
+    elif held:
+        submit_locked(message, config, user=user)
     else:
-        submit(note + message.strip(), config, user=user)
+        submit(message, config, user=user)
     if wants_reply:  # Codex answers its slash commands on the terminal only
         threading.Thread(target=terminal_replies.record, args=(config, before, capture), daemon=True).start()
     return 'queued' if state == 'Working' else 'submitted'
@@ -2829,7 +2881,7 @@ class Handler(BaseHTTPRequestHandler):
             elif reminders.handles(path):
                 reminders.get(self)
             elif friday_notes.handles(path):
-                friday_notes.get(self)
+                friday_notes.get(self, draft_runtime=friday_draft_runtime())
             elif path == task_sources.PREFIX:
                 task_sources.get(self)
             elif path == '/mobile/api/stream':
@@ -3146,7 +3198,7 @@ class Handler(BaseHTTPRequestHandler):
                 reminders.serve(self, body)
                 return
             if friday_notes.handles(self.path):
-                friday_notes.serve(self, body)
+                friday_notes.serve(self, body, draft_runtime=friday_draft_runtime())
                 return
             if task_sources.handles(self.path):
                 task_sources.serve(self, body)
