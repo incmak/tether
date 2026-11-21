@@ -392,6 +392,34 @@ case("log-ask-friday-test-new-tab", "send_direct", "dev",
      history=say("The chat already has the first question. Why are you not able to see it?",
                  "The last reply cut off, so I do not have the question in my view. Shall I ask it to show the question?"))
 
+# ---- B340 topic notes ----
+PINNED_NOTES = [{"topic": "Urgent Call Spec", "notes": ["Keep the quiet hours."]}]
+NOTE_LIST = {"read_notes": {"count": 1, "topics": ["Urgent Call Spec (1 note)"]}}
+case("topic-keep-together", "topic_notes", D, "keep this for urgent call spec, we'll send them together",
+     {"tool": "hold_note", "args": {"topic": "(?i)urgent call spec", "notes": "(?i)quiet hours"}},
+     history=say("Keep the quiet hours from ten at night to seven in the morning.", "Okay."))
+case("topic-remember-chat", "topic_notes", D, "remember this for the api-server chat: use port 8080",
+     {"tool": "hold_note", "args": {"topic": "(?i)api.server", "notes": "(?i)use port 8080"}})
+case("topic-timed-reminder", "topic_notes", D, "remind me tomorrow to rotate keys",
+     {"tool": "reminder_add", "args": {"reminders": "(?i)rotate.*keys"}})
+case("topic-drop", "topic_notes", D, "drop the urgent call spec notes",
+     {"tool": "drop_notes", "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
+case("topic-list", "topic_notes", D, "what notes do I have?",
+     {"tool": None, "any_tool": ["read_notes"], "reply": "(?i)urgent call spec"},
+     topic_notes=PINNED_NOTES, tool_results=NOTE_LIST)
+case("h-topic-keep-together", "topic_notes", H, "hold on to that answer for urgent call spec, don't send it yet",
+     {"tool": "hold_note", "args": {"topic": "(?i)urgent call spec", "notes": "(?i)owner"}},
+     history=say("My answer is that the owner decides what is urgent.", "I heard your answer."))
+case("h-topic-remember-chat", "topic_notes", H, "for the api server chat, remember this: the port is 8080",
+     {"tool": "hold_note", "args": {"topic": "(?i)api.server", "notes": "8080"}})
+case("h-topic-timed-reminder", "topic_notes", H, "remember to remind me to rotate my keys tomorrow morning",
+     {"tool": "reminder_add", "args": {"reminders": "(?i)rotate.*keys"}})
+case("h-topic-drop", "topic_notes", H, "clear the saved notes for urgent call spec",
+     {"tool": "drop_notes", "args": {"topic": "(?i)urgent call spec"}}, topic_notes=PINNED_NOTES)
+case("h-topic-list", "topic_notes", H, "which topics have I saved notes for?",
+     {"tool": None, "any_tool": ["read_notes"], "reply": "(?i)urgent call spec"},
+     topic_notes=PINNED_NOTES, tool_results=NOTE_LIST)
+
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("cases.json")
 with output.open("w", encoding="utf-8") as stream:
     json.dump({"version": 1, "state": STATE, "tool_results": RESULTS, "cases": cases}, stream, indent=1)

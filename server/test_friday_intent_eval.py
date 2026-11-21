@@ -51,6 +51,31 @@ class IntentEvalTests(unittest.TestCase):
                 self.assertEqual(result['passed'], 0)
                 self.assertEqual(result['fails'], {'claimed_action': 1})
 
+    def test_topic_note_cases_allow_reading_from_outgoing_state_or_the_tool(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        for example in (item for item in data['cases'] if item['id'] in ('topic-list', 'h-topic-list')):
+            with self.subTest(id=example['id']):
+                answer = assistant('You have notes for Urgent Call Spec.')
+                lookup = assistant(tool_calls=[call('read_notes')])
+                for responses in ((answer,), (lookup, answer)):
+                    result, payloads = self.run_script(example, *responses, data=data)
+                    self.assertEqual(result['passed'], 1, result['fails'])
+                    state, = [json.loads(message['content'][len(friday.STATE_PREFIX):])
+                              for message in payloads[-1]['messages']
+                              if (message.get('content') or '').startswith(friday.STATE_PREFIX)]
+                    self.assertEqual(state['topic_notes'], example['topic_notes'])
+
+    def test_timed_reminder_cases_reject_topic_note_writes(self):
+        data = evaluation.load_fixture(evaluation.DEFAULT_CASES)
+        for example in (item for item in data['cases'] if item['id'] in ('topic-timed-reminder', 'h-topic-timed-reminder')):
+            with self.subTest(id=example['id']):
+                hold = assistant(tool_calls=[call('hold_note', topic='Keys', notes=['Rotate keys.'])])
+                reminder = assistant(tool_calls=[call('reminder_add', reminders=[{'text': 'Rotate keys', 'when': 'tomorrow 10:00'}])])
+                result, _ = self.run_script(example, hold, data=data)
+                self.assertEqual(result['fails'], {'wrong_tool': 1, 'wrong_args': 1})
+                result, _ = self.run_script(example, reminder, data=data)
+                self.assertEqual(result['passed'], 1, result['fails'])
+
     def test_lookup_uses_case_result_and_scores_extra_action(self):
         example = case(expect={'tool': 'send_to_chat', 'args': {'chat': '(?i)friday test'}},
                        tool_results={'list_chats': {'chats': ['Friday test']}})

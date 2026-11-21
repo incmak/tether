@@ -85,6 +85,11 @@ def reminders():
     return Path(os.environ.get('TETHER_REMINDERS') or TETHER / 'reminders')
 
 
+def friday_notes():
+    """Topic notes shared by the server and the Friday worker."""
+    return Path(os.environ.get('TETHER_FRIDAY_NOTES') or TETHER / 'friday-notes')
+
+
 def task_sources():
     """Settings and last complete Microsoft task snapshots (task_sources.py)."""
     return Path(os.environ.get('TETHER_TASK_SOURCES') or TETHER / 'task-sources')

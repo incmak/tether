@@ -28,8 +28,10 @@ FRIDAY_MODEL_FIXTURES = Path(
 
 try:
     from . import friday_agent as friday
+    from . import push
 except ImportError:
     import friday_agent as friday
+    import push
 
 
 class ParakeetHotwordTests(unittest.TestCase):
@@ -508,6 +510,16 @@ class FridayRulesTests(unittest.TestCase):
                          'Queued B12 for Docs. It is busy.')
         self.assertEqual(ack('backlog_send', {}, {'ok': True, 'chat': 'Docs', 'item': 'B12'}), 'Sent B12 to Docs.')
 
+    def test_topic_note_acknowledgements_use_confirmed_results(self):
+        for name, result, expected in (
+                ('hold_note', {'topic': 'Urgent Call Spec', 'added': 1}, 'Noted for Urgent Call Spec.'),
+                ('hold_note', {'topic': 'API Server', 'added': 3}, 'Noted 3 for API Server.'),
+                ('drop_notes', {'topic': 'API Server', 'dropped': 'note'}, 'Dropped the note.'),
+                ('drop_notes', {'topic': 'API Server', 'dropped': 'topic'}, 'Dropped API Server.')):
+            with self.subTest(name=name, result=result):
+                self.assertEqual(friday.action_ack(name, {}, dict(result, ok=True)), expected)
+                self.assertIsNone(friday.action_ack(name, {}, dict(result, error='Try again.')))
+
     def test_action_ack_requires_confirmed_success(self):
         for name in ('send_to_chat', 'show_chat', 'show_session'):
             for result in ({'error': 'missing chat'}, {'ok': True, 'error': 'failed'},
@@ -576,6 +588,30 @@ class FridayRulesTests(unittest.TestCase):
                                                'Remind me to check usage', set()))
         self.assertIsNone(friday.check_tool('backlog_add', {'text': 'Check usage'}, 'speech',
                                             'Add this to the backlog', set()))
+
+    def test_topic_note_guard_requires_speech_and_limits_each_write(self):
+        for name, args, words in (
+                ('hold_note', {'topic': 'Urgent Call Spec', 'notes': ['Use the first answer.']},
+                 "Keep this for the urgent call spec, we'll send them together."),
+                ('drop_notes', {'topic': 'API Server', 'note': 2}, 'Remove note two for the API server.')):
+            with self.subTest(tool=name):
+                for source in ('event', 'tool'):
+                    self.assertIsNotNone(friday.check_tool(name, args, source, words, set()))
+                self.assertIsNone(friday.check_tool(name, args, 'speech', words, set()))
+                self.assertIsNotNone(friday.check_tool(name, args, 'speech', words, {name}))
+        self.assertIsNone(friday.check_tool('read_notes', {}, 'tool', '', set()))
+
+    def test_topic_note_guard_refuses_bad_holds_and_deletion_without_a_delete_word(self):
+        topic = 'Urgent Call Spec'
+        for args in ({}, {'topic': ' ', 'notes': ['note']}, {'topic': 5, 'notes': ['note']},
+                     {'topic': topic, 'notes': 'note'}, {'topic': topic, 'notes': []},
+                     {'topic': topic, 'notes': ['note'] * 6}, {'topic': topic, 'notes': [' ']},
+                     {'topic': topic, 'notes': ['note', None]}):
+            with self.subTest(args=args):
+                self.assertIsNotNone(friday.check_tool('hold_note', args, 'speech', 'Keep this.', set()))
+        for words in ('Read the urgent call notes.', 'Open the notes about a dropdown.'):
+            self.assertEqual(friday.check_tool('drop_notes', {'topic': topic}, 'speech', words, set()),
+                             'The user did not ask to delete notes.')
 
     def test_one_action_per_speech_turn(self):
         for name, args, utterance in [
@@ -1567,6 +1603,8 @@ class FridayRulesTests(unittest.TestCase):
             with self.subTest(zone=zone), patch.object(friday.reminders, 'ZONE', ZoneInfo(zone)), \
                     own_time(friday, time=lambda: now):
                 result = friday.with_state_time(messages)
+                self.assertEqual(friday.with_state_time(messages, None), result)
+                self.assertEqual(friday.with_state_time(messages, {}), result)
                 state = json.loads(result[-2]['content'][len(friday.STATE_PREFIX):])
                 self.assertEqual(state, {'now': expected, 'state': {'target': 'Docs'}, 'notes': ['Note']})
                 self.assertIs(result[-1], user)
@@ -1636,7 +1674,15 @@ class FridayRulesTests(unittest.TestCase):
         tools = {t['function']['name']: t['function']['parameters'] for t in schemas}
         self.assertEqual(set(tools), {'list_chats', 'send_to_chat', 'answer_approval', 'read_last_reply', 'new_chat', 'switch_chat', 'open_panel',
                                       'show_chat', 'show_session', 'backlog_list', 'backlog_add', 'backlog_send',
-                                      'reminder_add', 'reminder_list'})
+                                      'reminder_add', 'reminder_list', 'hold_note', 'read_notes', 'drop_notes'})
+        self.assertEqual(list(tools)[-4:], ['reminder_list', 'hold_note', 'read_notes', 'drop_notes'])
+        self.assertEqual(tools['hold_note']['required'], ['topic', 'notes'])
+        notes = tools['hold_note']['properties']['notes']
+        self.assertEqual((notes['type'], notes['minItems'], notes['maxItems'], notes['items']['type']),
+                         ('array', 1, 5, 'string'))
+        self.assertEqual(tools['read_notes']['required'], [])
+        self.assertEqual(tools['drop_notes']['required'], ['topic'])
+        self.assertEqual(tools['drop_notes']['properties']['note']['minimum'], 1)
         self.assertEqual(tools['show_chat']['required'], ['chat'])
         self.assertEqual(tools['show_chat']['properties'], {'chat': {'type': 'string'}})
         self.assertEqual(tools['show_session']['required'], ['session'])
@@ -1901,6 +1947,49 @@ class ShortenOldReadsTests(unittest.TestCase):
         trim.assert_called_once_with(['short'])
 
 
+class HeldNewsTests(unittest.TestCase):
+    @staticmethod
+    def topic(title, count=1, *, updated=100, state='open'):
+        return {'title': title, 'state': state, 'updated': updated, 'notes': [{'text': 'Keep this.'}] * count}
+
+    def test_no_news_for_old_sent_or_empty_topics(self):
+        topics = [self.topic('Old', updated=99), self.topic('Sent', state='sent'), self.topic('Empty', 0)]
+        self.assertIsNone(friday.held_news(topics, 100))
+        self.assertIsNone(friday.held_news([], 100))
+
+    def test_one_topic_uses_the_note_count_and_includes_the_start_time(self):
+        for count, body in ((1, '1 held note for Urgent Call Spec not sent'),
+                            (2, '2 held notes for Urgent Call Spec not sent')):
+            with self.subTest(count=count):
+                self.assertEqual(friday.held_news([self.topic('Urgent Call Spec', count)], 100),
+                                 {'title': 'Friday', 'body': body, 'tag': 'friday-notes', 'url': '/chat/'})
+
+    def test_multiple_topics_count_all_notes_and_show_at_most_three_titles(self):
+        topics = [self.topic('Docs', 2, updated=101), self.topic('Old', updated=99),
+                  self.topic('API'), self.topic('Sent', 3, state='sent'),
+                  self.topic('UI'), self.topic('Release', 2)]
+        self.assertEqual(friday.held_news(topics[:4], 100)['body'], '2 topics hold 3 notes not sent: Docs, API')
+        self.assertEqual(friday.held_news(topics, 100)['body'], '4 topics hold 6 notes not sent: Docs, API, UI, …')
+
+    def test_notify_held_sends_once_only_when_notes_qualify(self):
+        topics = [self.topic('Docs')]
+        with patch.object(friday.friday_notes, 'listing', return_value={'topics': topics}), \
+                patch.object(push, 'send_all') as send:
+            friday.notify_held(101)
+            send.assert_not_called()
+            friday.notify_held(100)
+        send.assert_called_once_with({'title': 'Friday', 'body': '1 held note for Docs not sent',
+                                      'tag': 'friday-notes', 'url': '/chat/'})
+
+    def test_notify_held_logs_a_send_failure_and_returns(self):
+        stderr = io.StringIO()
+        with patch.object(friday.friday_notes, 'listing', return_value={'topics': [self.topic('Docs')]}), \
+                patch.object(push, 'send_all', side_effect=OSError('private details')) as send, redirect_stderr(stderr):
+            self.assertIsNone(friday.notify_held(100))
+        send.assert_called_once()
+        self.assertEqual(stderr.getvalue(), 'Friday held-notes news failed: OSError\n')
+
+
 class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
     async def test_interrupt_logs_state_and_preserves_broadcast_condition(self):
         session = friday.Session.__new__(friday.Session)
@@ -1985,12 +2074,18 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
         session.loop_task = None
         session.close_task = None
         session.on_closed = Mock()
+        session.started = 100
         close_step = friday.close_step
 
         async def fast_close(awaitable, step):
             await close_step(awaitable, step, timeout=0.02)
 
         with patch.object(friday, 'close_step', side_effect=fast_close), patch('sys.stderr') as stderr:
+            with patch.object(friday.threading, 'Thread') as thread:
+                session.end()
+                session.end()
+            thread.assert_called_once_with(target=friday.notify_held, args=(100,), daemon=True)
+            thread.return_value.start.assert_called_once_with()
             await asyncio.wait_for(session.close(), timeout=1)
             await asyncio.gather(session.run_task, session.queue_task, return_exceptions=True)
         session.on_closed.assert_called_once_with(session)
@@ -2065,6 +2160,9 @@ class FridayNoteTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(importlib.util.find_spec('pipecat'), 'Pipecat is only installed in the Friday venv')
 class FridayAPITests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.enterContext(patch.object(friday, 'notify_held'))
+
     @classmethod
     def setUpClass(cls):
         cls.rt = friday.runtime_types()
@@ -2356,7 +2454,9 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 models.tts.sample_rate = 24000
                 rt = Mock(wraps=self.rt)
                 rt.SharedVAD.return_value = None
-                session = friday.Session(rt, models, connection)
+                with own_time(friday, time=lambda: 100):
+                    session = friday.Session(rt, models, connection)
+                self.assertEqual(session.started, 100)
                 starts = session.aggregators.user()._user_turn_controller.user_turn_strategies.start
                 self.assertEqual(len(starts), 1)
                 self.assertIsInstance(starts[0], self.rt.FridayUserTurnStartStrategy)
@@ -3744,6 +3844,67 @@ class FridayAPITests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('Friday reordered reply before newer messages', log)
                 self.assertNotIn('Friday skipped request ending with assistant', log)
                 self.assertEqual(source, expected_source)
+
+    async def test_topic_notes_are_loaded_after_each_trim_and_in_a_fresh_session(self):
+        def session():
+            item = friday.Session.__new__(friday.Session)
+            item.state, item.notes, item.last_sent = {'target': 'Docs'}, [], None
+            return item
+
+        def turns(count, start=0):
+            return [{'role': role, 'content': f'{prefix} {i}.'}
+                    for i in range(start, start + count)
+                    for role, prefix in (('user', 'Request'), ('assistant', 'Reply'))]
+
+        def outgoing_notes(service, history):
+            original = copy.deepcopy(history)
+            request = service.build_chat_completion_params({'messages': history})
+            state = [json.loads(m['content'][len(friday.STATE_PREFIX):]) for m in request['messages']
+                     if m.get('content', '').startswith(friday.STATE_PREFIX)]
+            self.assertTrue(state)
+            self.assertIn('now', state[-1])
+            self.assertEqual(history, original)
+            self.assertTrue(all('topic_notes' not in json.loads(m['content'][len(friday.STATE_PREFIX):])
+                                for m in history if m['content'].startswith(friday.STATE_PREFIX)))
+            return state[-1].get('topic_notes')
+
+        folder = self.enterContext(TemporaryDirectory())
+        self.enterContext(patch.dict(os.environ, {'TETHER_FRIDAY_NOTES': folder}))
+        topic = 'Urgent Call Spec'
+        wanted = [{'topic': topic, 'chat': 'Spec Chat', 'notes': ['Keep the first answer.']}]
+        friday.friday_notes.hold(topic, wanted[0]['notes'], chat='Spec Chat')
+        active = session()
+        history = friday.llm_prefix()['messages']
+        question = {'role': 'user', 'content': 'What notes did I save?'}
+        service = self.rt.FridayLLM(active, friday.brain_config({}))
+        try:
+            for offset in (0, 34):
+                incoming = history + turns(34, offset) + [question]
+                self.assertGreaterEqual(len(incoming), 70)
+                history = active.prepare_messages(incoming)
+                self.assertLessEqual(len(history), 24)
+                self.assertIs(history[-1], question)
+                self.assertEqual(outgoing_notes(service, history), wanted)
+                self.assertEqual(active.notes, [])
+        finally:
+            await service._client.close()
+
+        fresh = session()
+        service = self.rt.FridayLLM(fresh, friday.brain_config({}))
+        try:
+            prefix = friday.llm_prefix()['messages']
+            self.assertEqual(outgoing_notes(service, prefix), wanted)
+            history = fresh.prepare_messages(prefix + [question])
+            friday.friday_notes.hold('API Server', ['Use port 8080.'])
+            self.assertEqual(outgoing_notes(service, history),
+                             [{'topic': 'API Server', 'notes': ['Use port 8080.']}, *wanted])
+            error_output = io.StringIO()
+            with patch.object(friday.friday_notes, 'pinned', side_effect=PermissionError('private path')), \
+                    redirect_stderr(error_output):
+                self.assertIsNone(outgoing_notes(service, history))
+            self.assertEqual(error_output.getvalue(), 'Friday topic notes unreadable: PermissionError\n')
+        finally:
+            await service._client.close()
 
     async def test_gemini_stream_signatures_survive_followup_without_context_mutation(self):
         from pipecat.processors.aggregators.llm_context import LLMContext

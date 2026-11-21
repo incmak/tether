@@ -22,7 +22,7 @@ else:
 DEFAULT_CASES = Path(__file__).with_name('fixtures') / 'friday_intent' / 'cases.json'
 GROUPS = frozenset('approval backlog_add backlog_list backlog_send cant_do confirm deny event '
                    'list_chats misheard new_chat no_tool outside panel read_reply readback reminder '
-                   'send_direct show split_turn status switch'.split())
+                   'send_direct show split_turn status switch topic_notes'.split())
 LOOKUPS = {'list_chats', 'backlog_list', 'read_last_reply'}
 CLAIM = re.compile(r"(?i)\bI(?:'ve| have)?\s+(?:just\s+)?"
                    r"(?:sent|switched|opened|created|started|approved|denied|added|moved|closed)\b")
@@ -145,6 +145,7 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
         declined, pending = pending, None  # The guards still check the decline in this run.
     used = set()
     results = {**fixture.get('tool_results', {}), **case.get('tool_results', {})}
+    topic_notes = case.get('topic_notes')
 
     if declined and source == 'speech' and friday.bare_decline(declined, last_user_text):
         trace['reply'] = friday.APPROVAL_DECLINED_REPLY  # the runtime does not run the model
@@ -152,7 +153,8 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
     for _ in range(4):
         suggestions = friday.suggested_replies(messages) if source == 'speech' else ()
         trace['steps'] += 1
-        payload = {'model': brain.model, 'messages': signed(messages), 'tools': prefix['tools'],
+        outgoing = friday.with_state_time(messages, {'topic_notes': topic_notes}) if topic_notes else messages
+        payload = {'model': brain.model, 'messages': signed(outgoing), 'tools': prefix['tools'],
                    'max_tokens': brain.max_tokens, **brain.extra}
         message = dict(complete(payload))
         usage = message.pop('_usage', None) or {}
@@ -281,6 +283,8 @@ def load_fixture(path):
 def _validate_context(data, label, names):
     if not isinstance(data.get('state', {}), dict) or not isinstance(data.get('tool_results', {}), dict):
         raise ValueError(f'{label}: state and tool_results must be objects')
+    if not isinstance(data.get('topic_notes', []), list):
+        raise ValueError(f'{label}: topic_notes must be a list')
     for name in data.get('tool_results', {}):
         if name not in names:
             raise ValueError(f'{label}: unknown tool {name!r}')
