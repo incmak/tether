@@ -4,7 +4,7 @@ import { chatMessages, errorText, SESSION_NAME, type Api, type Approval, type Ch
 import type { Command } from './CommandMenu'
 import { agentNames, groupSessions, paneTitle, type Session } from './Sidebar'
 import { agentReady, FridayAgent, type AgentChats, type AgentEvent, type ToolHandler } from './fridayAgent'
-import { findPane, findSession, sessionChoice, spokenForm, spokenName } from './fridayNames'
+import { findPane, findSession, fridayHomePane, sessionChoice, sessionPanes, spokenForm, spokenName } from './fridayNames'
 import { fridayChatList } from './fridaySessions'
 import { fridayChatFolder } from './fridayFolders'
 import { findLastReply, isReply, replyPage } from './fridayReply'
@@ -83,7 +83,7 @@ export function approvalTarget(agents: Pane[], chat: string): Pane | { error: st
   return { error: 'No chat is waiting for approval.' }
 }
 const chatState = (pane: Pane) => approvalOf(pane) ? 'needs approval' : pane.needs ? `needs ${pane.needs.kind}` : pane.state.toLowerCase()
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 interface LiveProps {
   api: Api
@@ -391,21 +391,8 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       const { api } = live.current
       const clean = wanted.replace(/[^A-Za-z0-9 _-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40).replace(/[ ]+$/, '') || `${kind} ${new Date().toTimeString().slice(0, 5).replace(':', '')}`
       if (!SESSION_NAME.test(clean)) throw new Error('Use letters, numbers, spaces or hyphens for the chat name.')
-      // Friday's chats live together in one tmux session, one tab each. Other sessions stay as they are.
-      const home = (await api<SessionsData>('sessions')).sessions.find(item => item.tmux_session === FRIDAY_SESSION)
-      let id: string
-      if (home) id = (await api<{ pane: string }>('split', { session: home.id, direction: 'right', cwd: folder.dir })).pane
-      else {
-        const made = await api<{ session: string; name: string }>('tmux-sessions', { name: FRIDAY_SESSION, cwd: folder.dir })
-        let first: Pane | undefined
-        for (let tries = 0; tries < 20 && !first; tries++) {
-          first = (await api<SessionsData>('sessions')).sessions.find(item => item.label === made.name)
-          if (!first) await wait(300)
-        }
-        if (!first) throw new Error(`The session ${made.name} started, but its pane is not visible yet.`)
-        id = first.id
-      }
-      await api('pane-name', { pane: id, name: clean })
+      const { pane: id } = await fridayHomePane(api, FRIDAY_SESSION, folder.dir, wait)
+      await api('pane-name', { pane: id, name: clean, keep_session: true })
       await api('start', { session: id, thread: null, agent: kind })
       const made = { name: clean }
       if (prompt.trim()) void (async () => {
@@ -481,13 +468,11 @@ export function Live({ api, panes, selected, commands, acts, onShowPane, onShowS
       const { acts, agents, panes } = live.current
       if (!acts) return { error: ACTS_OFF }
       const wanted = String(chat ?? '')
-      const sessions = groupSessions(panes)
-      const session = sessions.find(item => spokenForm(item.name) === spokenForm(wanted))
-        ?? sessions.find(item => spokenForm(item.name) === spokenName(wanted))
-      // The chat resolver expects a spoken session name. A pane stores the tmux ID.
-      const named = session ? agents.map(pane => pane.tmux_session === session.id ? { ...pane, tmux_session: spokenName(wanted) } : pane) : agents
-      if (sessionChoice(named, wanted) && session) return showSessionPane(session)
-      return showChatPane(findPane(named, wanted), wanted)
+      const pane = findPane(agents, wanted)
+      if (pane) return showChatPane(pane, wanted)
+      const [match] = sessionPanes(agents, wanted)
+      const session = match && groupSessions(panes).find(item => item.id === match.tmux_session)
+      return session ? showSessionPane(session) : showChatPane(undefined, wanted)
     },
     show_session: async ({ session }) => {
       const { acts, agents, panes } = live.current

@@ -955,9 +955,10 @@ def name_in_tmux(pane, name):
     subprocess.run([paths.TMUX, *command], capture_output=True, timeout=5)
 
 
-def name_together(pane, name, from_session):
+def name_together(pane, name, from_session, keep_session=False):
     """Keep one name per pane: the agent gets `/rename NAME`, and in a tmux session with only this pane the session
-    and the pane share the name too. from_session: the user renamed the session (else the pane). Returns a note or ''."""
+    and the pane share the name too unless keep_session is set. from_session: the user renamed the session
+    (else the pane). Returns a note or ''."""
     entries = sessions()
     entry = next((e for e in entries if e['id'] == pane), None)
     if not entry or not name:
@@ -966,7 +967,7 @@ def name_together(pane, name, from_session):
     if alone and from_session:
         subprocess.run([paths.TMUX, 'set-option', '-p', '-t', pane, '@chat_name', name, ';', 'set-option', '-p', '-t', pane,
                         '@chat_name_at', str(int(time.time() * 1000))], capture_output=True, timeout=5)
-    elif alone and valid_name(name) and name != entry.get('label'):
+    elif alone and not keep_session and valid_name(name) and name != entry.get('label'):
         subprocess.run([paths.TMUX, 'rename-session', '-t', pane, name], capture_output=True, timeout=5)  # a taken name keeps the old one
     if from_session and not alone:
         return ''
@@ -3192,10 +3193,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == '/mobile/api/pane-name':
                 pane, name = body.get('pane'), body.get('name')
+                keep_session = body.get('keep_session', False)
                 if not isinstance(pane, str) or not re.fullmatch(r'%[0-9]+', pane):
                     raise ValueError('Select a pane.')
                 if not isinstance(name, str) or len(name.strip()) > 40 or any(ord(c) < 32 or ord(c) == 127 for c in name):
                     raise ValueError('Use up to 40 characters for the pane name.')
+                if not isinstance(keep_session, bool):
+                    raise ValueError('keep_session must be a boolean.')
                 name = name.strip()
                 # The time lets the newest name win against a later /rename in Claude or Codex (agents.list_panes).
                 # @chat_name_by: 'user' marks the user's own name: Tether never renames that tab, and it names the stack
@@ -3212,7 +3216,7 @@ class Handler(BaseHTTPRequestHandler):
                     if result.returncode:
                         raise RuntimeError('Could not rename the pane. It may have closed.')
                     name_in_tmux(pane, name)
-                    note = name_together(pane, name, from_session=False)
+                    note = name_together(pane, name, from_session=False, keep_session=keep_session)
                     undo.record_pane_name(pane, name_was, name)
                     session_now = undo.session_of(pane)
                     if session_was and session_now and session_now[1] != session_was[1]:

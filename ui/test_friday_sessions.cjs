@@ -39,7 +39,10 @@ assert.deepEqual(list(chats.slice(0, 1), [{ id: '$9', name: '' }], ''), {
   target: '', chats: ['Review, Claude, idle, in $9'], sessions: ['$9: 1 chats, 0 busy'],
 })
 assert.deepEqual(list(chats.slice(0, 1), [], '', '$9'), {
-  session: '$9', chats: ['Review, Claude, idle, in $9'],
+  error: 'No session called $9. Sessions: ',
+})
+assert.deepEqual(list(chats.slice(0, 1), [{ id: '$9', name: '' }], '', '9'), {
+  error: 'No session called 9. Sessions: ',
 })
 // Prefixes outrank substrings, then edit distance picks the closest candidate.
 assert.equal(list([], [{ id: 'a', name: 'Preflight' }, { id: 'b', name: 'Flight' }], '', 'Flig').session, 'Flight')
@@ -117,5 +120,5 @@ assertFallback([...fallbackChats, triageReport], 'weekly triage', triageReport, 
 assert.deepEqual(list(fallbackChats, fallbackSessions, '', 'weekly triage'), {
   session: 'Triage', chats: ['Review, Codex, idle, in Triage'],
 })
-console.log('Friday sessions: names, counts, case-insensitive filtering, normalized and closest matches, threshold, errors and ID fallback pass')
+console.log('Friday sessions: names, counts, case-insensitive filtering, normalized and closest matches, errors and ID exclusion pass')
 console.log('Friday chat fallback: spoken names, prefix and substring matches, edit and phonetic matches, ties, and session priority pass')
