@@ -66,7 +66,7 @@ export function DoneTasks({ count, children, openForSelection }: { count: number
   return <li className="task-done">
     <button type="button" className="task-done-toggle" aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)}>
       <ChevronRight size={14} className="chevron" aria-hidden="true" /><Check size={14} className="task-check" aria-hidden="true" />
-      Done <span className="task-count">{count}</span>
+      Done <span className="group-count">{count}</span>
     </button>
     <div id={id} className={`task-fold${open ? ' open' : ''}`} inert={!open}><div><ul className="task-list">{children}</ul></div></div>
   </li>

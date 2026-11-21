@@ -46,13 +46,21 @@ def _asks_send_to(reply, chat):
     return bool(re.search(ASK + re.escape(chat) + r'(?: chat)?(?: now)?\?', reply))
 
 
+def proposal_args(proposal):
+    """The send a read-back proposes, including a call transcript attachment."""
+    args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
+    if proposal.get('attach'):
+        args['attach_call'] = True
+    return args
+
+
 def _score(trace, expect, expected_tools):
     action, reply, proposal = trace['action'], trace['reply'], trace['proposal']
     name, args = (action['name'], action['args']) if action else (None, {})
     readback_chat = expect.get('readback_chat')
     if expect.get('readback_ok') and proposal is not None and action is None:
         # A read-back of the expected send also passes: the guard sends only text the user heard.
-        name, args = proposal['name'], {'chat': proposal['chat'], 'prompt': proposal['payload']}
+        name, args = proposal['name'], proposal_args(proposal)
     readback_instead = (proposal is not None and action is None and None not in expected_tools
                         and not expect.get('readback_ok'))
     if trace['blocked']:
@@ -64,7 +72,7 @@ def _score(trace, expect, expected_tools):
     elif name not in expected_tools:
         yield 'wrong_tool'
     if proposal and readback_chat is not None:
-        args = {'chat': proposal['chat'], 'prompt': proposal['payload']}
+        args = proposal_args(proposal)
     # A key such as "chat|session" passes when any of its names matches: show_chat and show_session
     # name the same target with different argument names.
     wrong_args = not all(any(name in args and re.search(pattern, str(args[name])) for name in key.split('|'))
@@ -158,8 +166,11 @@ def _run_once(case, fixture, complete, brain, expected_tools, trace):
                 if trace['proposal'] is None:
                     key = 'prompt' if name == 'send_to_chat' else 'item'
                     proposal = friday.SendProposal(name, str(args.get('chat') or ''), str(args.get(key) or ''),
-                                                   user_turn)
+                                                   user_turn, attach=name == 'send_to_chat'
+                                                   and bool(args.get('attach_call')))
                     trace['proposal'] = {'name': name, 'chat': proposal.chat, 'payload': proposal.payload}
+                    if proposal.attach:
+                        trace['proposal']['attach'] = True
                     pending = None
                     trace['reply'] = friday.send_readback(proposal)
                 result = {'error': 'Not sent yet. Friday asked the user to confirm.'}

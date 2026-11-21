@@ -774,7 +774,7 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
             onMouseEnter={clipTitle} onTouchStart={event => onHold(event, { session: session.id, pane: pane.id }, name, () => onPaneActions(pane))}
             onClick={event => pickOr(event, pane.id, () => onOpen(pane))}
             onContextMenu={event => { event.preventDefault(); actions(event) }}>
-            <TaskDot state={state} /><span className="pane-child-name">{name}</span><TaskFrom pane={pane} />
+            <TaskDot state={state} /><span className="task-row-text"><span className="pane-child-name">{name}</span><TaskFrom pane={pane} /></span>
             {pane.task && <span className="task-role">{taskRole(pane)}</span>}{pane.coordinator && <Network size={13} className="side-coordinator" aria-hidden="true" />}
             <WorkMark mark={workMarks?.[pane.id]} /><CronMark pane={pane} />{tagDot(prefs.colors?.[pane.id])}{slotKey(pane.id)}
           </button>
@@ -903,8 +903,8 @@ function SessionList({ now, activeOnly, matches, workMarks, items, reorder, sele
                   <button type="button" className={`pane-stack-head${containsSelected ? ' current' : ''}`}
                     aria-label={`Stack ${place.name}, ${place.panes.length} ${place.panes.length === 1 ? 'tab' : 'tabs'}${placeWaits ? `, ${placeWaits} need you` : ''}. Open it`}
                     onClick={() => { const pane = tabFor(session.id, place); if (pane) onOpen(pane) }}>
-                    <span className={`state-dot ${STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
-                    <span className="pane-child-name">{place.name}</span>{placeWaits > 0 && <span className="rollup" aria-hidden="true">{placeWaits}</span>}<span className="group-count" aria-hidden="true">{place.panes.length}</span>
+                    <span className={`state-dot ${placeWaits ? STACK_DOT.needs : STACK_DOT[topState(place.panes, prefs.seen, selected)]}`} aria-hidden="true" />
+                    <span className="pane-child-name">{place.name}</span><span className="group-count" aria-hidden="true">{place.panes.length}</span>
                   </button>
                   <button type="button" className="pane-stack-fold" aria-expanded={stackOpen} aria-controls={tabsId}
                     aria-disabled={containsSelected || undefined} aria-label={foldLabel} title={foldLabel}

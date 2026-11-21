@@ -7,3 +7,6 @@ export function needsMak(pane: Pane): boolean {
 
 /** "3 helpers" for a count. */
 export const helperCount = (count: number) => `${count} ${count === 1 ? 'helper' : 'helpers'}`
+
+/** The short 'from' label: the backlog id when the name starts with one (B12), else the name. */
+export const fromLabel = (name: string) => /^\s*(B\d+)(?![\w])/.exec(name)?.[1] ?? name.trim()

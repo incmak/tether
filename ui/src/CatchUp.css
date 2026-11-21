@@ -17,8 +17,6 @@
 .group-toggle .rollup { margin-left: 4px; }
 .sidebar-inner .sidebar-search button.search-key { min-height: 24px; }
 .session-main .rollup { margin-left: auto; }
-.pane-children .pane-stack-head .rollup + .group-count { margin-left: 6px; }
-.pane-children .pane-stack-head .rollup { margin-left: auto; }
 .quiet-more { display: block; min-height: 28px; margin: 0 0 2px; padding: 0 10px 0 36px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .pane-children .quiet-more { min-height: 28px; padding-left: 38px; font-size: 12px; }
 .quiet-more:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
@@ -61,3 +59,5 @@
 .catchup-toggle[aria-expanded='true'] .chevron { transform: rotate(90deg); }
 .catchup .visually-hidden, .side-modes .visually-hidden, .session-groups .rollup .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (pointer: coarse) { .catchup-row { min-height: 48px; } .catchup-more, .catchup-toggle { min-height: 44px; } }
+/* One plain count per sidebar row: the waiting count is attention-colored text, not a tinted pill. */
+.session-main .rollup { padding: 0; background: none; }
