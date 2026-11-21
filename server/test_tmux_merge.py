@@ -83,7 +83,8 @@ class FakeTmux:
             pane = target if target in panes else next(iter(panes), '')
             return self.format(args[-1], session, window, pane) + '\n'
         if command == 'list-panes':
-            return ''.join(self.format(args[-1], session, pane=pane) + '\n' for pane in self.panes(session))
+            return ''.join(self.format(args[-1], session, window, pane) + '\n'
+                           for window, panes in self.sessions[session].items() for pane in panes)
         if command == 'list-windows':
             return ''.join(window + '\n' for window in self.sessions[session])
         if command == 'kill-pane':
@@ -774,6 +775,43 @@ class TmuxMergeTests(unittest.TestCase):
         names = tmux_merge._names(self.run_tmux, self.b)
         self.assertEqual([names[pane] for pane in moving], ['alpha', 'alpha 2'])
         self.assertEqual(tmux_merge._names(self.run_tmux, self.a), {staying: ''})
+
+    def test_failed_merge_keeps_the_root_of_a_linked_window_that_never_moved(self):
+        first, second = self.tmux('list-windows', '-t', self.a + ':', '-F', '#{window_id}').stdout.split()
+        linked, = self.tmux('list-panes', '-t', second, '-F', '#{pane_id}').stdout.split()
+        self.assertEqual(self.tmux('link-window', '-s', second, '-t', self.b + ':').returncode, 0)
+        stack = groups.create(self.a, 'Linked', self.run_tmux, auto=True, root=linked)
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window' and argv[argv.index('-s') + 1] == first:
+                return subprocess.CompletedProcess(argv, 1, '', 'Could not move the first window.')
+            return self.run_tmux(argv, **kwargs)
+
+        with self.assertRaisesRegex(RuntimeError, 'Could not move the first window'):
+            tmux_merge.merge_session(self.a, self.b, run)
+        roots = {g['id']: g.get('root') for g in groups.read(self.a, self.run_tmux)}
+        self.assertEqual(roots[stack['id']], linked)
+
+    def test_merge_cleans_up_when_a_later_target_listing_fails(self):
+        pane = self.panes(self.a)[0]
+        resident, = self.panes(self.b)
+        for tab in (pane, resident):
+            self.tmux('set-option', '-p', '-t', tab, '@tether_role', 'coordinator')
+        moves = []
+
+        def run(argv, **kwargs):
+            if argv[1] == 'move-window':
+                moves.append(argv)
+            elif moves and argv[1] == 'list-panes' and self.b + ':' in argv:
+                raise subprocess.TimeoutExpired(argv, 5)
+            return self.run_tmux(argv, **kwargs)
+
+        try:
+            tmux_merge.merge_session(self.a, self.b, run)
+        except RuntimeError:
+            pass  # the final listing may fail the reply; the confirmed moves still get their cleanup
+        self.assertEqual(self.roles(self.b)[resident], 'coordinator')
+        self.assertEqual(self.roles(self.b)[pane], '')
 
     def test_move_pane_finishes_other_cleanup_when_coordinator_unset_fails(self):
         pane = self.panes(self.a)[0]

@@ -207,11 +207,19 @@ def _apply_project(run, target, kept, dropped):
             print(f'merge: project {dropped} not archived: {exc}', file=sys.stderr, flush=True)
 
 
-def _merge_cleanup(run, source, target, source_panes, coordinators, plan):
-    try:
-        moved = source_panes.keys() & _names(run, target).keys()
-    except OSError as exc:
-        raise RuntimeError('Could not confirm the moved panes.') from exc
+def _window_panes(run, session_id):
+    """{window id: {pane ids}} of a session, read before a merge moves its windows."""
+    result = _tmux(run, 'list-panes', '-s', '-t', session_id + ':', '-F', '#{window_id}\t#{pane_id}')
+    _check(result, GONE)
+    out = {}
+    for line in result.stdout.splitlines():
+        window, _, pane = line.partition('\t')
+        out.setdefault(window, set()).add(pane)
+    return out
+
+
+def _merge_cleanup(run, source, moved, coordinators, plan):
+    """moved: the panes of the windows whose move the merge confirmed. A later tmux read cannot change it."""
     if moved:
         _cleanup(
             run,
@@ -235,9 +243,11 @@ def merge_session(source, target, run=subprocess.run, keep=None):
     windows = _tmux(run, 'list-windows', '-t', source + ':', '-F', '#{window_id}')
     _check(windows, GONE)
     source_panes = _names(run, source)
+    window_panes = _window_panes(run, source)
     plan = _name_plan(run, source, target, source_panes)
     coordinators = source_coordinators - target_coordinators if target_coordinators else set()
     groups.merge_into(source, target, run)  # before the move, so no moved pane points to a missing group
+    confirmed = set()  # panes of the windows whose move is confirmed
     try:
         for moved_count, window in enumerate(windows.stdout.split()):
             moved = _try_tmux(run, 'move-window', '-d', '-s', window, '-t', target + ':')
@@ -245,19 +255,19 @@ def merge_session(source, target, run=subprocess.run, keep=None):
                 current = _target_session(run, window, gone='')
                 if current is None:
                     raise RuntimeError('Could not confirm the move. Refresh the list.')
-                if current == target:
-                    continue
-                if moved_count:
-                    raise RuntimeError('Only part of the session moved. Check both sessions.')
-                _check(moved, 'Could not move the window.')
+                if current != target:
+                    if moved_count:
+                        raise RuntimeError('Only part of the session moved. Check both sessions.')
+                    _check(moved, 'Could not move the window.')
+            confirmed |= window_panes.get(window, set())
     except CLEANUP_ERRORS as exc:
         try:
-            _merge_cleanup(run, source, target, source_panes, coordinators, plan)
+            _merge_cleanup(run, source, confirmed, coordinators, plan)
         except CLEANUP_ERRORS as cleanup_error:
             raise exc from cleanup_error
         raise
     try:
-        _merge_cleanup(run, source, target, source_panes, coordinators, plan)
+        _merge_cleanup(run, source, confirmed, coordinators, plan)
         _apply_project(run, target, kept, dropped)
         return _moved(run, target, None)
     except (subprocess.TimeoutExpired, RuntimeError, ValueError) as exc:
